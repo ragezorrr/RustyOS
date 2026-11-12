@@ -157,6 +157,17 @@
                           + Observable Hardware   
                           Cursor Plane + HiDPI    
                           Cursor Sizing (ADR-0015)
+
+  D-024                   Фазы 6/7/8              accepted
+                          (RUSTYOS-047):          
+                          `zwp_pointer_gestures_v1`
+                          + `zwp_text_input_v3` + 
+                          `zwp_input_method_v2` + 
+                          `keyboard_shortcuts_inhibit`
+                          +                       
+                          `ext_foreign_toplevel_list_v1`
+                          + `xdg_toplevel_icon_v1`
+                          (ADR-0016)              
   -----------------------------------------------------------------------
 
 ## Открытые решения

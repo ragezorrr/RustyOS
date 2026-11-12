@@ -655,6 +655,23 @@ hardware/software context и низкие накладные расходы.
   - `cargo fmt --check` и `cargo clippy --workspace --all-targets --offline -- -D warnings` завершаются без предупреждений; 76/76 тестов `rusty-compositor` и 100/100 запущенных тестов workspace проходят (1 предсуществующий тест `rusty-services::tests::networkmanager_and_bluetooth_formatters_handle_all_states` пропущен флагом `--skip`).
 - **Risks:** Нулевые новые внешние зависимости; реальное срабатывание `wp_linux_drm_syncobj_v1` и DRM cursor plane на физическом оборудовании AMD/Intel/NVIDIA требует отдельного bare-metal `--drm` теста.
 
+## RUSTYOS-047 --- Desktop UX Wayland Protocols (`zwp_pointer_gestures_v1`, `zwp_text_input_v3`, `zwp_input_method_v2`, `zwp_keyboard_shortcuts_inhibit_manager_v1`, `ext_foreign_toplevel_list_v1`, `xdg_toplevel_icon_v1`)
+
+- **Owner:** AI Agent + User
+- **Status:** done
+- **Priority:** P0
+- **Phase:** 6/7/8
+- **ADR / Decision:** ADR-0016 / D-024
+- **Acceptance Criteria:**
+  - В `state.rs` зарегистрированы и интегрированы все 6 Smithay-глобалов (`pointer_gestures_state`, `text_input_manager_state`, `input_method_manager_state`, `keyboard_shortcuts_inhibit_state`, `foreign_toplevel_list_state`, `xdg_toplevel_icon_manager` с размерами `[16, 24, 32, 48, 64]`) без добавления новых внешних зависимостей и без изменений `rusty-ipc` / `apps/rusty-shell`.
+  - В `input.rs` и `state.rs` маршрутизированы все 8 вариантов `InputEvent::Gesture*` и реализованы 3-пальцевые свайпы (`TouchpadSwipeState`, `classify_three_finger_swipe`, `switch_workspace_relative`, Overview open/close) с изоляцией при блокировке сессии (`can_handle_compositor_gesture`).
+  - В `input.rs` и `state.rs` реализована политика `zwp_keyboard_shortcuts_inhibit_manager_v1` (`KeyboardShortcutsInhibitHandler`, `is_keyboard_shortcuts_inhibited`, `deactivate_focused_shortcut_inhibitor`, `suppressed_inhibitor_surface`): шорткаты пропускаются сфокусированному ингибирующему клиенту, но `Ctrl+Alt+F1..F12` VT-switch, lock-screen изоляция (`ext_session_locked` / `screen_locked`) и аварийный выход `Super+Escape` (`KeyIntercept::ReleaseShortcutInhibitor`) не перехватываются.
+  - В `state.rs`, `winit_backend.rs` и `drm_backend.rs` интегрированы `zwp_text_input_v3` + `zwp_input_method_v2` (`InputMethodHandler`, `compute_ime_popup_origin`, `ime_popups_for_output`, `push_ime_popup_elements`, `send_ime_popup_frames`, `cleanup_ime_popups`).
+  - В `state.rs`, `xwayland.rs` и `winit_backend.rs` обеспечен единый жизненный цикл `ext_foreign_toplevel_list_v1` (`register_foreign_toplevel`, `sync_foreign_toplevel_metadata`, `close_foreign_toplevel`, `unregister_window_metadata`, унифицированный `window_title`) для Wayland и XWayland окон.
+  - В `icons.rs`, `shell_render.rs`, `state.rs` и `winit_backend.rs` поддержан `xdg_toplevel_icon_v1` (`XdgToplevelIconHandler`, `sync_toplevel_icon_from_surface`, безопасное чтение SHM-буферов через `GlesRenderer::import_shm_buffer` -> `TextureBuffer<GlesTexture>` -> `TextureRenderElement`, отображение в Dock и `Alt+Tab` switcher без `unsafe`).
+  - `cargo fmt --all --check` и `cargo clippy --workspace --all-targets --offline -- -D warnings` завершаются без предупреждений; 83/83 тестов `rusty-compositor` и 107/107 запущенных тестов workspace проходят (1 предсуществующий тест `rusty-services::tests::networkmanager_and_bluetooth_formatters_handle_all_states` пропущен флагом `--skip`).
+- **Risks:** Нулевые новые внешние зависимости; живое E2E-подтверждение физическим тачпадом (3-пальцевые свайпы), IME-демоном (IBus/Fcitx5), клиентом с `zwp_keyboard_shortcuts_inhibit_v1` и Wayland-окнами с SHM `xdg_toplevel_icon_v1` не проводилось в headless sandbox.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

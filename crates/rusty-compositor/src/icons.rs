@@ -14,7 +14,11 @@ use smithay::backend::renderer::element::Kind;
 use smithay::backend::renderer::element::memory::{
     MemoryRenderBuffer, MemoryRenderBufferRenderElement,
 };
-use smithay::backend::renderer::gles::GlesRenderer;
+use smithay::backend::renderer::element::texture::{TextureBuffer, TextureRenderElement};
+use smithay::backend::renderer::gles::{GlesRenderer, GlesTexture};
+use smithay::backend::renderer::{ImportMemWl, buffer_dimensions};
+use smithay::reexports::wayland_server::Resource as _;
+use smithay::reexports::wayland_server::protocol::wl_buffer::WlBuffer;
 use smithay::utils::{Logical, Point, Rectangle, Size, Transform};
 
 const PNG_SIGNATURE: [u8; 8] = [137, 80, 78, 71, 13, 10, 26, 10];
@@ -65,6 +69,32 @@ impl TrayPixmap {
     }
 }
 
+/// Cached `xdg_toplevel_icon_v1` metadata and SHM buffers for a managed window (`RUSTYOS-047`).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ShmToplevelIcon {
+    /// Monotonic revision bumped whenever `xdg_toplevel_icon_v1` updates for the window.
+    pub revision: u64,
+    /// Optional XDG icon theme name from `xdg_toplevel_icon.set_name`.
+    pub icon_name: Option<String>,
+    /// Client-provided SHM `(wl_buffer, scale)` candidates from `xdg_toplevel_icon.add_buffer`.
+    pub buffers: Vec<(WlBuffer, i32)>,
+}
+
+/// Resolved window icon render element emitted by [`IconCache::window_icon_element`] (`RUSTYOS-047`).
+#[derive(Debug)]
+pub enum ResolvedIconElement {
+    /// CPU-decoded PNG or SNI pixmap icon element.
+    Memory(Box<MemoryRenderBufferRenderElement<GlesRenderer>>),
+    /// Client-provided Wayland SHM texture icon element (`xdg_toplevel_icon_v1`).
+    Texture(TextureRenderElement<GlesTexture>),
+}
+
+#[derive(Debug)]
+struct CachedShmTexture {
+    buffer: TextureBuffer<GlesTexture>,
+    src_size: Size<i32, smithay::utils::Buffer>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct IconCacheKey {
     source_key: String,
@@ -72,12 +102,13 @@ struct IconCacheKey {
     fingerprint: u64,
 }
 
-/// CPU-decoded, GPU-cached application & tray icon store (`RUSTYOS-033`).
+/// CPU-decoded & Wayland SHM GPU-cached application & tray icon store (`RUSTYOS-033`, `RUSTYOS-047`).
 #[derive(Debug, Default)]
 pub struct IconCache {
     search_roots: Option<Vec<PathBuf>>,
     resolved_paths: HashMap<String, Option<PathBuf>>,
     buffers: HashMap<IconCacheKey, Option<MemoryRenderBuffer>>,
+    shm_textures: HashMap<IconCacheKey, Option<CachedShmTexture>>,
 }
 
 impl IconCache {
@@ -85,6 +116,147 @@ impl IconCache {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Returns `true` if any window icon source (`xdg_toplevel_icon_v1` SHM/name or XDG fallback)
+    /// resolves for `window_key` at `size_px`.
+    pub fn has_window_icon(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        window_key: &str,
+        toplevel_icon: Option<&ShmToplevelIcon>,
+        fallback_icon_name: Option<&str>,
+        size_px: i32,
+    ) -> bool {
+        let Ok(size_u16) = u16::try_from(size_px) else {
+            return false;
+        };
+        if size_px <= 0 {
+            return false;
+        }
+        if let Some(icon) = toplevel_icon {
+            if self
+                .ensure_shm_texture(renderer, window_key, icon, size_u16)
+                .is_some()
+            {
+                return true;
+            }
+            if icon
+                .icon_name
+                .as_deref()
+                .is_some_and(|name| self.has_named_icon(name, size_px))
+            {
+                return true;
+            }
+        }
+        fallback_icon_name.is_some_and(|name| self.has_named_icon(name, size_px))
+    }
+
+    /// Resolves a window icon element from `xdg_toplevel_icon_v1` SHM/name or XDG fallback.
+    pub fn window_icon_element(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        window_key: &str,
+        toplevel_icon: Option<&ShmToplevelIcon>,
+        fallback_icon_name: Option<&str>,
+        size_px: i32,
+        loc: Point<i32, Logical>,
+    ) -> Option<ResolvedIconElement> {
+        if let Some(icon) = toplevel_icon {
+            if let Some(tex_el) =
+                self.icon_element_from_shm(renderer, window_key, icon, size_px, loc)
+            {
+                return Some(ResolvedIconElement::Texture(tex_el));
+            }
+            if let Some(name) = icon.icon_name.as_deref()
+                && let Some(mem_el) = self.icon_element_by_name(renderer, name, size_px, loc)
+            {
+                return Some(ResolvedIconElement::Memory(Box::new(mem_el)));
+            }
+        }
+        fallback_icon_name
+            .and_then(|name| self.icon_element_by_name(renderer, name, size_px, loc))
+            .map(|el| ResolvedIconElement::Memory(Box::new(el)))
+    }
+
+    /// Renders a GPU-cached `xdg_toplevel_icon_v1` SHM icon fitted into `size_px x size_px`.
+    pub fn icon_element_from_shm(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        window_key: &str,
+        shm_icon: &ShmToplevelIcon,
+        size_px: i32,
+        loc: Point<i32, Logical>,
+    ) -> Option<TextureRenderElement<GlesTexture>> {
+        let size_u16 = u16::try_from(size_px).ok()?;
+        if size_px <= 0 {
+            return None;
+        }
+        let cached = self.ensure_shm_texture(renderer, window_key, shm_icon, size_u16)?;
+        let (fitted_loc, fitted_size) =
+            fit_icon_rect(loc, size_px, cached.src_size.w, cached.src_size.h);
+        Some(TextureRenderElement::from_texture_buffer(
+            fitted_loc.to_f64().to_physical(1.0),
+            &cached.buffer,
+            None,
+            None,
+            Some(fitted_size),
+            Kind::Unspecified,
+        ))
+    }
+
+    fn ensure_shm_texture(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        window_key: &str,
+        shm_icon: &ShmToplevelIcon,
+        size_u16: u16,
+    ) -> Option<&CachedShmTexture> {
+        if shm_icon.buffers.is_empty() {
+            return None;
+        }
+        let source_key = format!("shm_icon:{window_key}");
+        let key = IconCacheKey {
+            source_key: source_key.clone(),
+            size_px: size_u16,
+            fingerprint: shm_icon.revision,
+        };
+        if !self.shm_textures.contains_key(&key) {
+            self.shm_textures
+                .retain(|k, _| k.source_key != source_key || k.fingerprint == shm_icon.revision);
+            let target_logical = i32::from(size_u16);
+            let candidate_dims: Vec<(i32, i32, i32)> = shm_icon
+                .buffers
+                .iter()
+                .map(|(buf, scale)| {
+                    if buf.is_alive()
+                        && let Some(dim) = buffer_dimensions(buf)
+                    {
+                        (dim.w, dim.h, *scale)
+                    } else {
+                        (0, 0, *scale)
+                    }
+                })
+                .collect();
+            let imported =
+                select_best_shm_icon_index(&candidate_dims, target_logical).and_then(|idx| {
+                    let (buf, scale) = &shm_icon.buffers[idx];
+                    let (w, h, _) = candidate_dims[idx];
+                    let src_size = Size::from((w, h));
+                    let damage = [Rectangle::from_size(src_size)];
+                    let tex = renderer.import_shm_buffer(buf, None, &damage).ok()?;
+                    let buffer = TextureBuffer::from_texture(
+                        renderer,
+                        tex,
+                        (*scale).max(1),
+                        Transform::Normal,
+                        None,
+                    );
+                    Some(CachedShmTexture { buffer, src_size })
+                });
+            self.shm_textures.insert(key.clone(), imported);
+        }
+        self.shm_textures.get(&key).and_then(Option::as_ref)
     }
 
     /// Returns `true` if `icon_name` resolves to a decodable PNG icon cached/loadable at `size_px`.
@@ -182,6 +354,58 @@ impl IconCache {
         self.resolved_paths
             .insert(normalized.to_owned(), found.clone());
         found
+    }
+}
+
+/// Selects the best matching `(width, height, scale)` icon buffer index for `target_logical_size`.
+#[must_use]
+pub(crate) fn select_best_shm_icon_index(
+    dims: &[(i32, i32, i32)],
+    target_logical_size: i32,
+) -> Option<usize> {
+    let target = target_logical_size.max(1);
+    dims.iter()
+        .enumerate()
+        .filter(|&(_, &(w, h, _))| w > 0 && h > 0)
+        .min_by_key(|&(_, &(w, h, raw_scale))| {
+            let scale = raw_scale.max(1);
+            let logical_extent = (w.max(h) / scale).max(1);
+            let undersized_penalty = i32::from(logical_extent < target);
+            let delta = (logical_extent - target).abs();
+            // Prefer buffers >= target size, closest to target, then higher HiDPI scale density.
+            (undersized_penalty, delta, -scale)
+        })
+        .map(|(idx, _)| idx)
+}
+
+/// Fits a `src_w x src_h` icon cleanly into a square `size_px x size_px` cell at `loc`.
+#[must_use]
+pub(crate) fn fit_icon_rect(
+    loc: Point<i32, Logical>,
+    size_px: i32,
+    src_w: i32,
+    src_h: i32,
+) -> (Point<i32, Logical>, Size<i32, Logical>) {
+    let box_size = size_px.max(1);
+    if src_w <= 0 || src_h <= 0 || src_w == src_h {
+        return (loc, Size::from((box_size, box_size)));
+    }
+    if src_w > src_h {
+        let h = i32::try_from((i64::from(box_size) * i64::from(src_h)) / i64::from(src_w))
+            .unwrap_or(box_size)
+            .clamp(1, box_size);
+        (
+            Point::from((loc.x, loc.y + (box_size - h) / 2)),
+            Size::from((box_size, h)),
+        )
+    } else {
+        let w = i32::try_from((i64::from(box_size) * i64::from(src_w)) / i64::from(src_h))
+            .unwrap_or(box_size)
+            .clamp(1, box_size);
+        (
+            Point::from((loc.x + (box_size - w) / 2, loc.y)),
+            Size::from((w, box_size)),
+        )
     }
 }
 
@@ -1135,5 +1359,51 @@ mod tests {
         assert_eq!(bgra.len(), 16);
         assert_eq!(&bgra[0..4], &[255, 0, 0, 255]);
         Ok(())
+    }
+
+    #[test]
+    fn select_best_shm_icon_index_prefers_exact_or_larger_hidpi_candidates() {
+        let dims = [(16, 16, 1), (48, 48, 2), (48, 48, 1), (0, 0, 1)];
+        // Target 24px -> (48, 48, 2) has logical extent 24 with scale=2.
+        assert_eq!(select_best_shm_icon_index(&dims, 24), Some(1));
+        // Target 48px -> (48, 48, 1) has logical extent 48.
+        assert_eq!(select_best_shm_icon_index(&dims, 48), Some(2));
+        // Target 64px -> none >= 64, picks closest (48, 48, 1) or higher-scale.
+        assert_eq!(select_best_shm_icon_index(&dims, 64), Some(2));
+        // All invalid/dead entries return None.
+        assert_eq!(
+            select_best_shm_icon_index(&[(0, 0, 1), (-4, 32, 1)], 48),
+            None
+        );
+        assert_eq!(select_best_shm_icon_index(&[], 48), None);
+    }
+
+    #[test]
+    fn fit_icon_rect_preserves_aspect_and_centers_non_square_icons() {
+        let loc = Point::from((10, 20));
+        assert_eq!(
+            fit_icon_rect(loc, 48, 64, 64),
+            (Point::from((10, 20)), Size::from((48, 48)))
+        );
+        assert_eq!(
+            fit_icon_rect(loc, 48, 64, 32),
+            (Point::from((10, 32)), Size::from((48, 24)))
+        );
+        assert_eq!(
+            fit_icon_rect(loc, 48, 32, 64),
+            (Point::from((22, 20)), Size::from((24, 48)))
+        );
+        assert_eq!(
+            fit_icon_rect(loc, 48, 0, -5),
+            (Point::from((10, 20)), Size::from((48, 48)))
+        );
+        assert_eq!(
+            ShmToplevelIcon::default(),
+            ShmToplevelIcon {
+                revision: 0,
+                icon_name: None,
+                buffers: Vec::new(),
+            }
+        );
     }
 }

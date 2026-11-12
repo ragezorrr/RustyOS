@@ -6,12 +6,24 @@ use rusty_services::MediaAction;
 use rusty_wm::{SnapTarget, WmAction, WorkspaceId};
 use smithay::{
     backend::input::{
-        AbsolutePositionEvent, Axis, AxisSource, ButtonState, Event, InputBackend, InputEvent,
-        KeyState, KeyboardKeyEvent, PointerAxisEvent, PointerButtonEvent, PointerMotionEvent,
+        AbsolutePositionEvent, Axis, AxisSource, ButtonState, Event, GestureBeginEvent,
+        GestureEndEvent, GesturePinchUpdateEvent, GestureSwipeUpdateEvent, InputBackend,
+        InputEvent, KeyState, KeyboardKeyEvent, PointerAxisEvent, PointerButtonEvent,
+        PointerMotionEvent,
     },
     input::{
         keyboard::{FilterResult, Keysym, ModifiersState},
-        pointer::{AxisFrame, ButtonEvent, MotionEvent, RelativeMotionEvent},
+        pointer::{
+            AxisFrame, ButtonEvent, GestureHoldBeginEvent as PointerGestureHoldBeginEvent,
+            GestureHoldEndEvent as PointerGestureHoldEndEvent,
+            GesturePinchBeginEvent as PointerGesturePinchBeginEvent,
+            GesturePinchEndEvent as PointerGesturePinchEndEvent,
+            GesturePinchUpdateEvent as PointerGesturePinchUpdateEvent,
+            GestureSwipeBeginEvent as PointerGestureSwipeBeginEvent,
+            GestureSwipeEndEvent as PointerGestureSwipeEndEvent,
+            GestureSwipeUpdateEvent as PointerGestureSwipeUpdateEvent, MotionEvent,
+            RelativeMotionEvent,
+        },
     },
     utils::{Logical, Point, Rectangle, SERIAL_COUNTER, Size},
     wayland::pointer_constraints::{PointerConstraint, with_pointer_constraint},
@@ -48,6 +60,7 @@ enum KeyIntercept {
     SwitcherConsume,
     DismissPopups,
     SwitchVt(i32),
+    ReleaseShortcutInhibitor,
     VolumeStep(i8),
     VolumeMute,
     BrightnessStep(i8),
@@ -74,6 +87,18 @@ impl RustyCompositorState {
             }
             InputEvent::PointerButton { event } => self.handle_pointer_button::<B>(&event),
             InputEvent::PointerAxis { event } => self.handle_pointer_axis::<B>(&event),
+            InputEvent::GestureSwipeBegin { event } => self.handle_gesture_swipe_begin::<B>(&event),
+            InputEvent::GestureSwipeUpdate { event } => {
+                self.handle_gesture_swipe_update::<B>(&event);
+            }
+            InputEvent::GestureSwipeEnd { event } => self.handle_gesture_swipe_end::<B>(&event),
+            InputEvent::GesturePinchBegin { event } => self.handle_gesture_pinch_begin::<B>(&event),
+            InputEvent::GesturePinchUpdate { event } => {
+                self.handle_gesture_pinch_update::<B>(&event);
+            }
+            InputEvent::GesturePinchEnd { event } => self.handle_gesture_pinch_end::<B>(&event),
+            InputEvent::GestureHoldBegin { event } => self.handle_gesture_hold_begin::<B>(&event),
+            InputEvent::GestureHoldEnd { event } => self.handle_gesture_hold_end::<B>(&event),
             _ => {}
         }
         if self.has_blocking_shell_overlay() {
@@ -118,63 +143,15 @@ impl RustyCompositorState {
             time,
             |state, modifiers, handle| {
                 let sym = handle.modified_sym();
-                if key_state == KeyState::Pressed
-                    && let Some(vt) = match_vt_switch_key(*modifiers, sym)
-                {
-                    return FilterResult::Intercept(KeyIntercept::SwitchVt(vt));
-                }
-                if state.ext_session_locked {
-                    return FilterResult::Forward;
-                }
-                if state.screen_locked {
-                    if key_state != KeyState::Pressed {
-                        return FilterResult::Intercept(KeyIntercept::LockScreenConsume);
-                    }
-                    return FilterResult::Intercept(match_lock_screen_key(sym));
-                }
-                if key_state == KeyState::Pressed
-                    && let Some(hw) = match_hardware_shortcut(*modifiers, sym)
-                {
-                    return FilterResult::Intercept(hw);
-                }
-                if key_state != KeyState::Pressed {
-                    return if state.window_switcher.is_some() {
-                        if modifiers.alt {
-                            FilterResult::Intercept(KeyIntercept::SwitcherConsume)
-                        } else {
-                            FilterResult::Intercept(KeyIntercept::CommitSwitcher)
-                        }
-                    } else if state.launcher_active {
-                        FilterResult::Intercept(KeyIntercept::LauncherConsume)
-                    } else {
-                        FilterResult::Forward
-                    };
-                }
-                if state.window_switcher.is_some() {
-                    return FilterResult::Intercept(match_switcher_key(*modifiers, sym));
-                }
-                if state.launcher_active {
-                    let utf8 = sym.key_char().map(|ch| ch.to_string());
-                    return FilterResult::Intercept(match_launcher_key(
-                        *modifiers,
-                        sym,
-                        utf8.as_deref(),
-                    ));
-                }
-                if state.quick_settings_active && sym.raw() == Keysym::Escape.raw() {
-                    return FilterResult::Intercept(KeyIntercept::QuickSettingsClose);
-                }
-                if state.overview_active && sym.raw() == Keysym::Escape.raw() {
-                    return FilterResult::Intercept(KeyIntercept::OverviewClose);
-                }
-                if !state.active_popup_grabs.is_empty() && sym.raw() == Keysym::Escape.raw() {
-                    return FilterResult::Intercept(KeyIntercept::DismissPopups);
-                }
-                if let Some(action) = match_shortcut(*modifiers, sym) {
-                    FilterResult::Intercept(action)
-                } else {
-                    FilterResult::Forward
-                }
+                let utf8 = sym.key_char().map(|ch| ch.to_string());
+                classify_keyboard_input(
+                    state,
+                    state.is_keyboard_shortcuts_inhibited(),
+                    *modifiers,
+                    sym,
+                    key_state,
+                    utf8.as_deref(),
+                )
             },
         );
 
@@ -293,6 +270,10 @@ impl RustyCompositorState {
             }
             KeyIntercept::SwitchVt(vt) => {
                 self.pending_vt_switch = Some(vt);
+            }
+            KeyIntercept::ReleaseShortcutInhibitor => {
+                self.deactivate_focused_shortcut_inhibitor();
+                info!("Released active keyboard shortcut inhibitor via Super+Escape");
             }
             KeyIntercept::VolumeStep(delta) => {
                 let (pct, muted) = self.telemetry.step_volume_with_osd(delta);
@@ -1043,6 +1024,209 @@ impl RustyCompositorState {
         pointer.axis(self, frame);
         pointer.frame(self);
     }
+
+    fn handle_gesture_swipe_begin<B: InputBackend>(&mut self, event: &B::GestureSwipeBeginEvent) {
+        if self.screen_locked {
+            self.touchpad_swipe = crate::state::TouchpadSwipeState::default();
+            return;
+        }
+        let fingers = GestureBeginEvent::fingers(event);
+        if self.begin_touchpad_swipe(fingers) {
+            return;
+        }
+        let pointer = self.pointer.clone();
+        pointer.gesture_swipe_begin(
+            self,
+            &PointerGestureSwipeBeginEvent {
+                serial: SERIAL_COUNTER.next_serial(),
+                time: Event::time_msec(event),
+                fingers,
+            },
+        );
+    }
+
+    fn handle_gesture_swipe_update<B: InputBackend>(&mut self, event: &B::GestureSwipeUpdateEvent) {
+        if self.screen_locked {
+            return;
+        }
+        let delta = GestureSwipeUpdateEvent::delta(event);
+        if self.update_touchpad_swipe(delta) {
+            return;
+        }
+        let pointer = self.pointer.clone();
+        pointer.gesture_swipe_update(
+            self,
+            &PointerGestureSwipeUpdateEvent {
+                time: Event::time_msec(event),
+                delta,
+            },
+        );
+    }
+
+    fn handle_gesture_swipe_end<B: InputBackend>(&mut self, event: &B::GestureSwipeEndEvent) {
+        if self.screen_locked {
+            self.touchpad_swipe = crate::state::TouchpadSwipeState::default();
+            return;
+        }
+        let cancelled = GestureEndEvent::cancelled(event);
+        let serial = SERIAL_COUNTER.next_serial();
+        if self.end_touchpad_swipe(cancelled, serial) {
+            return;
+        }
+        let pointer = self.pointer.clone();
+        pointer.gesture_swipe_end(
+            self,
+            &PointerGestureSwipeEndEvent {
+                serial,
+                time: Event::time_msec(event),
+                cancelled,
+            },
+        );
+    }
+
+    fn handle_gesture_pinch_begin<B: InputBackend>(&mut self, event: &B::GesturePinchBeginEvent) {
+        if self.screen_locked {
+            return;
+        }
+        let pointer = self.pointer.clone();
+        pointer.gesture_pinch_begin(
+            self,
+            &PointerGesturePinchBeginEvent {
+                serial: SERIAL_COUNTER.next_serial(),
+                time: Event::time_msec(event),
+                fingers: GestureBeginEvent::fingers(event),
+            },
+        );
+    }
+
+    fn handle_gesture_pinch_update<B: InputBackend>(&mut self, event: &B::GesturePinchUpdateEvent) {
+        if self.screen_locked {
+            return;
+        }
+        let pointer = self.pointer.clone();
+        pointer.gesture_pinch_update(
+            self,
+            &PointerGesturePinchUpdateEvent {
+                time: Event::time_msec(event),
+                delta: GesturePinchUpdateEvent::delta(event),
+                scale: GesturePinchUpdateEvent::scale(event),
+                rotation: GesturePinchUpdateEvent::rotation(event),
+            },
+        );
+    }
+
+    fn handle_gesture_pinch_end<B: InputBackend>(&mut self, event: &B::GesturePinchEndEvent) {
+        if self.screen_locked {
+            return;
+        }
+        let pointer = self.pointer.clone();
+        pointer.gesture_pinch_end(
+            self,
+            &PointerGesturePinchEndEvent {
+                serial: SERIAL_COUNTER.next_serial(),
+                time: Event::time_msec(event),
+                cancelled: GestureEndEvent::cancelled(event),
+            },
+        );
+    }
+
+    fn handle_gesture_hold_begin<B: InputBackend>(&mut self, event: &B::GestureHoldBeginEvent) {
+        if self.screen_locked {
+            return;
+        }
+        let pointer = self.pointer.clone();
+        pointer.gesture_hold_begin(
+            self,
+            &PointerGestureHoldBeginEvent {
+                serial: SERIAL_COUNTER.next_serial(),
+                time: Event::time_msec(event),
+                fingers: GestureBeginEvent::fingers(event),
+            },
+        );
+    }
+
+    fn handle_gesture_hold_end<B: InputBackend>(&mut self, event: &B::GestureHoldEndEvent) {
+        if self.screen_locked {
+            return;
+        }
+        let pointer = self.pointer.clone();
+        pointer.gesture_hold_end(
+            self,
+            &PointerGestureHoldEndEvent {
+                serial: SERIAL_COUNTER.next_serial(),
+                time: Event::time_msec(event),
+                cancelled: GestureEndEvent::cancelled(event),
+            },
+        );
+    }
+}
+
+fn classify_keyboard_input(
+    state: &RustyCompositorState,
+    shortcuts_inhibited: bool,
+    modifiers: ModifiersState,
+    sym: Keysym,
+    key_state: KeyState,
+    utf8: Option<&str>,
+) -> FilterResult<KeyIntercept> {
+    if key_state == KeyState::Pressed
+        && let Some(vt) = match_vt_switch_key(modifiers, sym)
+    {
+        return FilterResult::Intercept(KeyIntercept::SwitchVt(vt));
+    }
+    if state.ext_session_locked {
+        return FilterResult::Forward;
+    }
+    if state.screen_locked {
+        if key_state != KeyState::Pressed {
+            return FilterResult::Intercept(KeyIntercept::LockScreenConsume);
+        }
+        return FilterResult::Intercept(match_lock_screen_key(sym));
+    }
+    if shortcuts_inhibited && !state.has_blocking_shell_overlay() {
+        if key_state == KeyState::Pressed && modifiers.logo && sym.raw() == Keysym::Escape.raw() {
+            return FilterResult::Intercept(KeyIntercept::ReleaseShortcutInhibitor);
+        }
+        return FilterResult::Forward;
+    }
+    if key_state == KeyState::Pressed
+        && let Some(hw) = match_hardware_shortcut(modifiers, sym)
+    {
+        return FilterResult::Intercept(hw);
+    }
+    if key_state != KeyState::Pressed {
+        return if state.window_switcher.is_some() {
+            if modifiers.alt {
+                FilterResult::Intercept(KeyIntercept::SwitcherConsume)
+            } else {
+                FilterResult::Intercept(KeyIntercept::CommitSwitcher)
+            }
+        } else if state.launcher_active {
+            FilterResult::Intercept(KeyIntercept::LauncherConsume)
+        } else {
+            FilterResult::Forward
+        };
+    }
+    if state.window_switcher.is_some() {
+        return FilterResult::Intercept(match_switcher_key(modifiers, sym));
+    }
+    if state.launcher_active {
+        return FilterResult::Intercept(match_launcher_key(modifiers, sym, utf8));
+    }
+    if state.quick_settings_active && sym.raw() == Keysym::Escape.raw() {
+        return FilterResult::Intercept(KeyIntercept::QuickSettingsClose);
+    }
+    if state.overview_active && sym.raw() == Keysym::Escape.raw() {
+        return FilterResult::Intercept(KeyIntercept::OverviewClose);
+    }
+    if !state.active_popup_grabs.is_empty() && sym.raw() == Keysym::Escape.raw() {
+        return FilterResult::Intercept(KeyIntercept::DismissPopups);
+    }
+    if let Some(action) = match_shortcut(modifiers, sym) {
+        FilterResult::Intercept(action)
+    } else {
+        FilterResult::Forward
+    }
 }
 
 fn match_switcher_key(modifiers: ModifiersState, sym: Keysym) -> KeyIntercept {
@@ -1719,5 +1903,435 @@ mod tests {
         let clamp_br =
             confine_pointer_to_rect((890.0, 640.0).into(), (100.0, 100.0).into(), surface_rect);
         assert_eq!(clamp_br, (899.0, 649.0).into());
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    struct MockTouchpadDevice;
+
+    impl smithay::backend::input::Device for MockTouchpadDevice {
+        fn id(&self) -> String {
+            "mock-touchpad".to_owned()
+        }
+
+        fn name(&self) -> String {
+            "Mock Touchpad".to_owned()
+        }
+
+        fn has_capability(&self, capability: smithay::backend::input::DeviceCapability) -> bool {
+            capability == smithay::backend::input::DeviceCapability::Gesture
+        }
+
+        fn usb_id(&self) -> Option<(u32, u32)> {
+            None
+        }
+
+        fn syspath(&self) -> Option<std::path::PathBuf> {
+            None
+        }
+    }
+
+    struct MockGestureBegin {
+        time: u64,
+        fingers: u32,
+    }
+
+    struct MockGestureSwipeUpdate {
+        time: u64,
+        dx: f64,
+        dy: f64,
+    }
+
+    struct MockGesturePinchUpdate {
+        time: u64,
+        dx: f64,
+        dy: f64,
+        scale: f64,
+        rotation: f64,
+    }
+
+    struct MockGestureEnd {
+        time: u64,
+        cancelled: bool,
+    }
+
+    struct MockGestureBackend;
+
+    impl InputBackend for MockGestureBackend {
+        type Device = MockTouchpadDevice;
+        type KeyboardKeyEvent = smithay::backend::input::UnusedEvent;
+        type PointerAxisEvent = smithay::backend::input::UnusedEvent;
+        type PointerButtonEvent = smithay::backend::input::UnusedEvent;
+        type PointerMotionEvent = smithay::backend::input::UnusedEvent;
+        type PointerMotionAbsoluteEvent = smithay::backend::input::UnusedEvent;
+        type GestureSwipeBeginEvent = MockGestureBegin;
+        type GestureSwipeUpdateEvent = MockGestureSwipeUpdate;
+        type GestureSwipeEndEvent = MockGestureEnd;
+        type GesturePinchBeginEvent = MockGestureBegin;
+        type GesturePinchUpdateEvent = MockGesturePinchUpdate;
+        type GesturePinchEndEvent = MockGestureEnd;
+        type GestureHoldBeginEvent = MockGestureBegin;
+        type GestureHoldEndEvent = MockGestureEnd;
+        type TouchDownEvent = smithay::backend::input::UnusedEvent;
+        type TouchUpEvent = smithay::backend::input::UnusedEvent;
+        type TouchMotionEvent = smithay::backend::input::UnusedEvent;
+        type TouchCancelEvent = smithay::backend::input::UnusedEvent;
+        type TouchFrameEvent = smithay::backend::input::UnusedEvent;
+        type TabletToolAxisEvent = smithay::backend::input::UnusedEvent;
+        type TabletToolProximityEvent = smithay::backend::input::UnusedEvent;
+        type TabletToolTipEvent = smithay::backend::input::UnusedEvent;
+        type TabletToolButtonEvent = smithay::backend::input::UnusedEvent;
+        type SwitchToggleEvent = smithay::backend::input::UnusedEvent;
+        type SpecialEvent = std::convert::Infallible;
+    }
+
+    impl Event<MockGestureBackend> for MockGestureBegin {
+        fn time(&self) -> u64 {
+            self.time
+        }
+        fn device(&self) -> MockTouchpadDevice {
+            MockTouchpadDevice
+        }
+    }
+    impl GestureBeginEvent<MockGestureBackend> for MockGestureBegin {
+        fn fingers(&self) -> u32 {
+            self.fingers
+        }
+    }
+    impl smithay::backend::input::GestureSwipeBeginEvent<MockGestureBackend> for MockGestureBegin {}
+    impl smithay::backend::input::GesturePinchBeginEvent<MockGestureBackend> for MockGestureBegin {}
+    impl smithay::backend::input::GestureHoldBeginEvent<MockGestureBackend> for MockGestureBegin {}
+
+    impl Event<MockGestureBackend> for MockGestureSwipeUpdate {
+        fn time(&self) -> u64 {
+            self.time
+        }
+        fn device(&self) -> MockTouchpadDevice {
+            MockTouchpadDevice
+        }
+    }
+    impl GestureSwipeUpdateEvent<MockGestureBackend> for MockGestureSwipeUpdate {
+        fn delta_x(&self) -> f64 {
+            self.dx
+        }
+        fn delta_y(&self) -> f64 {
+            self.dy
+        }
+    }
+
+    impl Event<MockGestureBackend> for MockGesturePinchUpdate {
+        fn time(&self) -> u64 {
+            self.time
+        }
+        fn device(&self) -> MockTouchpadDevice {
+            MockTouchpadDevice
+        }
+    }
+    impl GesturePinchUpdateEvent<MockGestureBackend> for MockGesturePinchUpdate {
+        fn delta_x(&self) -> f64 {
+            self.dx
+        }
+        fn delta_y(&self) -> f64 {
+            self.dy
+        }
+        fn scale(&self) -> f64 {
+            self.scale
+        }
+        fn rotation(&self) -> f64 {
+            self.rotation
+        }
+    }
+
+    impl Event<MockGestureBackend> for MockGestureEnd {
+        fn time(&self) -> u64 {
+            self.time
+        }
+        fn device(&self) -> MockTouchpadDevice {
+            MockTouchpadDevice
+        }
+    }
+    impl GestureEndEvent<MockGestureBackend> for MockGestureEnd {
+        fn cancelled(&self) -> bool {
+            self.cancelled
+        }
+    }
+    impl smithay::backend::input::GestureSwipeEndEvent<MockGestureBackend> for MockGestureEnd {}
+    impl smithay::backend::input::GesturePinchEndEvent<MockGestureBackend> for MockGestureEnd {}
+    impl smithay::backend::input::GestureHoldEndEvent<MockGestureBackend> for MockGestureEnd {}
+
+    type TestCompositorSetup = (
+        smithay::reexports::wayland_server::Display<RustyCompositorState>,
+        smithay::reexports::calloop::EventLoop<'static, RustyCompositorState>,
+        RustyCompositorState,
+    );
+
+    fn test_compositor_state(
+        socket_name: &str,
+    ) -> Result<TestCompositorSetup, Box<dyn std::error::Error>> {
+        let display = smithay::reexports::wayland_server::Display::new()?;
+        let event_loop = smithay::reexports::calloop::EventLoop::try_new()?;
+        let compositor = RustyCompositorState::new(
+            &display,
+            socket_name.to_owned(),
+            event_loop.get_signal(),
+            event_loop.handle(),
+            (1920, 1080).into(),
+        )?;
+        Ok((display, event_loop, compositor))
+    }
+
+    fn send_three_finger_swipe(
+        compositor: &mut RustyCompositorState,
+        dx: f64,
+        dy: f64,
+        base_time: u64,
+    ) {
+        compositor.process_input_event(InputEvent::<MockGestureBackend>::GestureSwipeBegin {
+            event: MockGestureBegin {
+                time: base_time,
+                fingers: 3,
+            },
+        });
+        compositor.process_input_event(InputEvent::<MockGestureBackend>::GestureSwipeUpdate {
+            event: MockGestureSwipeUpdate {
+                time: base_time + 10_000,
+                dx,
+                dy,
+            },
+        });
+        compositor.process_input_event(InputEvent::<MockGestureBackend>::GestureSwipeEnd {
+            event: MockGestureEnd {
+                time: base_time + 20_000,
+                cancelled: false,
+            },
+        });
+    }
+
+    #[test]
+    fn process_input_event_routes_all_gesture_events_and_three_finger_swipes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (_display, _event_loop, mut compositor) = test_compositor_state("rusty-test-gestures")?;
+        assert_eq!(compositor.wm.active_workspace_id(), WorkspaceId(1));
+
+        // 3-finger swipe left -> next workspace (Workspace 2)
+        send_three_finger_swipe(&mut compositor, -120.0, 10.0, 10_000);
+        assert_eq!(compositor.wm.active_workspace_id(), WorkspaceId(2));
+
+        // 3-finger swipe up -> opens Overview; 3-finger swipe down -> closes Overview
+        send_three_finger_swipe(&mut compositor, 4.0, -110.0, 40_000);
+        assert!(compositor.overview_active);
+        send_three_finger_swipe(&mut compositor, 0.0, 100.0, 70_000);
+        assert!(!compositor.overview_active);
+
+        // Lock-screen isolation: 3-finger swipe must NOT alter workspace/Overview while locked
+        compositor.ext_session_locked = true;
+        send_three_finger_swipe(&mut compositor, 140.0, -140.0, 100_000);
+        assert_eq!(compositor.wm.active_workspace_id(), WorkspaceId(2));
+        assert!(!compositor.overview_active);
+        compositor.ext_session_locked = false;
+
+        // Route 4-finger swipe, 2-finger pinch, and 3-finger hold cleanly to PointerHandle
+        for ev in [
+            InputEvent::<MockGestureBackend>::GestureSwipeBegin {
+                event: MockGestureBegin {
+                    time: 130_000,
+                    fingers: 4,
+                },
+            },
+            InputEvent::GestureSwipeUpdate {
+                event: MockGestureSwipeUpdate {
+                    time: 140_000,
+                    dx: -200.0,
+                    dy: 0.0,
+                },
+            },
+            InputEvent::GestureSwipeEnd {
+                event: MockGestureEnd {
+                    time: 150_000,
+                    cancelled: false,
+                },
+            },
+            InputEvent::GesturePinchBegin {
+                event: MockGestureBegin {
+                    time: 160_000,
+                    fingers: 2,
+                },
+            },
+            InputEvent::GesturePinchUpdate {
+                event: MockGesturePinchUpdate {
+                    time: 170_000,
+                    dx: 1.0,
+                    dy: -2.0,
+                    scale: 1.25,
+                    rotation: 12.0,
+                },
+            },
+            InputEvent::GesturePinchEnd {
+                event: MockGestureEnd {
+                    time: 180_000,
+                    cancelled: false,
+                },
+            },
+            InputEvent::GestureHoldBegin {
+                event: MockGestureBegin {
+                    time: 190_000,
+                    fingers: 3,
+                },
+            },
+            InputEvent::GestureHoldEnd {
+                event: MockGestureEnd {
+                    time: 200_000,
+                    cancelled: true,
+                },
+            },
+        ] {
+            compositor.process_input_event(ev);
+        }
+        assert_eq!(compositor.wm.active_workspace_id(), WorkspaceId(2));
+        Ok(())
+    }
+
+    #[test]
+    fn keyboard_shortcuts_inhibit_respects_lock_isolation() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let (_display, _event_loop, mut compositor) =
+            test_compositor_state("rusty-test-inhibit-lock")?;
+        let logo = ModifiersState {
+            logo: true,
+            ..ModifiersState::default()
+        };
+        let ctrl_alt = ModifiersState {
+            ctrl: true,
+            alt: true,
+            ..ModifiersState::default()
+        };
+
+        // VT switching is never bypassed by lock states or shortcut inhibitors.
+        compositor.screen_locked = true;
+        assert!(matches!(
+            classify_keyboard_input(
+                &compositor,
+                true,
+                ctrl_alt,
+                Keysym::F2,
+                KeyState::Pressed,
+                None
+            ),
+            FilterResult::Intercept(KeyIntercept::SwitchVt(2))
+        ));
+        assert!(matches!(
+            classify_keyboard_input(
+                &compositor,
+                true,
+                logo,
+                Keysym::Escape,
+                KeyState::Pressed,
+                None
+            ),
+            FilterResult::Intercept(KeyIntercept::UnlockScreen)
+        ));
+
+        compositor.screen_locked = false;
+        compositor.ext_session_locked = true;
+        assert!(matches!(
+            classify_keyboard_input(
+                &compositor,
+                true,
+                ctrl_alt,
+                Keysym::F3,
+                KeyState::Pressed,
+                None
+            ),
+            FilterResult::Intercept(KeyIntercept::SwitchVt(3))
+        ));
+        assert!(matches!(
+            classify_keyboard_input(
+                &compositor,
+                true,
+                logo,
+                Keysym::Tab,
+                KeyState::Pressed,
+                None
+            ),
+            FilterResult::Forward
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn keyboard_shortcuts_inhibit_preserves_vt_switch_and_super_escape()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (_display, _event_loop, compositor) = test_compositor_state("rusty-test-inhibit-keys")?;
+        let logo = ModifiersState {
+            logo: true,
+            ..ModifiersState::default()
+        };
+        let ctrl_alt = ModifiersState {
+            ctrl: true,
+            alt: true,
+            ..ModifiersState::default()
+        };
+
+        // When inhibited, compositor shortcuts (Super+Space, bare Escape) forward to client,
+        // while Ctrl+Alt+F4 VT switch and Super+Escape emergency release stay non-inhibitable.
+        assert!(matches!(
+            classify_keyboard_input(
+                &compositor,
+                true,
+                logo,
+                Keysym::space,
+                KeyState::Pressed,
+                None
+            ),
+            FilterResult::Forward
+        ));
+        assert!(matches!(
+            classify_keyboard_input(
+                &compositor,
+                true,
+                ModifiersState::default(),
+                Keysym::Escape,
+                KeyState::Pressed,
+                None,
+            ),
+            FilterResult::Forward
+        ));
+        assert!(matches!(
+            classify_keyboard_input(
+                &compositor,
+                true,
+                logo,
+                Keysym::Escape,
+                KeyState::Pressed,
+                None
+            ),
+            FilterResult::Intercept(KeyIntercept::ReleaseShortcutInhibitor)
+        ));
+        assert!(matches!(
+            classify_keyboard_input(
+                &compositor,
+                true,
+                ctrl_alt,
+                Keysym::F4,
+                KeyState::Pressed,
+                None
+            ),
+            FilterResult::Intercept(KeyIntercept::SwitchVt(4))
+        ));
+
+        // Normal compositor shortcuts are intercepted when inhibitor is inactive.
+        assert!(matches!(
+            classify_keyboard_input(
+                &compositor,
+                false,
+                logo,
+                Keysym::space,
+                KeyState::Pressed,
+                None
+            ),
+            FilterResult::Intercept(KeyIntercept::ToggleLauncher)
+        ));
+        assert!(!compositor.is_keyboard_shortcuts_inhibited());
+
+        Ok(())
     }
 }

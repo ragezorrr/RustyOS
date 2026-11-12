@@ -235,6 +235,7 @@ pub(crate) fn dispatch_and_refresh_clients(
     app_state.launcher.reap_children();
     app_state.space.refresh();
     app_state.popups.cleanup();
+    app_state.cleanup_ime_popups();
     if let Err(err) = display.flush_clients() {
         warn!(error = %err, "Failed to flush Wayland clients");
     }
@@ -325,7 +326,57 @@ fn push_layer_elements(
     has_layers
 }
 
-/// Scales logical shell/SSD elements (`Solid`, `Memory`) into physical `HiDPI` coordinates for `scale`.
+fn push_ime_popup_elements(
+    render_list: &mut Vec<CompositorRenderElement>,
+    output: &smithay::output::Output,
+    renderer: &mut GlesRenderer,
+    state: &RustyCompositorState,
+    output_scale: f64,
+) {
+    let scale = smithay::utils::Scale::from(output_scale);
+    for (popup, local_loc) in state.ime_popups_for_output(output) {
+        let phys_loc = local_loc.to_physical_precise_round(output_scale);
+        let elements = render_elements_from_surface_tree::<
+            GlesRenderer,
+            WaylandSurfaceRenderElement<GlesRenderer>,
+        >(
+            renderer,
+            popup.wl_surface(),
+            phys_loc,
+            scale,
+            1.0,
+            Kind::Unspecified,
+        );
+        render_list.extend(elements.into_iter().map(CompositorRenderElement::Surface));
+    }
+}
+
+fn relocate_hi_dpi_element<E>(
+    element: E,
+    scale: f64,
+    wrap_scaled: impl FnOnce(RelocateRenderElement<E>) -> CompositorRenderElement,
+    wrap_plain: impl FnOnce(E) -> CompositorRenderElement,
+) -> CompositorRenderElement
+where
+    E: Element,
+{
+    let logical_loc = element.geometry(smithay::utils::Scale::from(1.0)).loc;
+    let target_loc: Point<i32, smithay::utils::Physical> =
+        Point::<i32, Logical>::from((logical_loc.x, logical_loc.y))
+            .to_physical_precise_round(scale);
+    let delta = Point::from((target_loc.x - logical_loc.x, target_loc.y - logical_loc.y));
+    if delta == Point::from((0, 0)) {
+        wrap_plain(element)
+    } else {
+        wrap_scaled(RelocateRenderElement::from_element(
+            element,
+            delta,
+            Relocate::Relative,
+        ))
+    }
+}
+
+/// Scales logical shell/SSD elements (`Solid`, `Memory`, `Texture`) into physical `HiDPI` coordinates for `scale`.
 pub(crate) fn scale_render_elements_for_output(
     elements: Vec<CompositorRenderElement>,
     scale: f64,
@@ -340,49 +391,21 @@ pub(crate) fn scale_render_elements_for_output(
             CompositorRenderElement::Solid(solid) => CompositorRenderElement::ScaledSolid(
                 RescaleRenderElement::from_element(solid, Point::from((0, 0)), clamped),
             ),
-            CompositorRenderElement::Memory(mem) => {
-                let logical_loc = mem.geometry(smithay::utils::Scale::from(1.0)).loc;
-                let target_loc: Point<i32, smithay::utils::Physical> =
-                    Point::<i32, Logical>::from((logical_loc.x, logical_loc.y))
-                        .to_physical_precise_round(clamped);
-                let delta =
-                    Point::from((target_loc.x - logical_loc.x, target_loc.y - logical_loc.y));
-                if delta == Point::from((0, 0)) {
-                    CompositorRenderElement::Memory(mem)
-                } else {
-                    CompositorRenderElement::ScaledMemory(RelocateRenderElement::from_element(
-                        mem,
-                        delta,
-                        Relocate::Relative,
-                    ))
-                }
-            }
+            CompositorRenderElement::Memory(mem) => relocate_hi_dpi_element(
+                mem,
+                clamped,
+                CompositorRenderElement::ScaledMemory,
+                CompositorRenderElement::Memory,
+            ),
+            CompositorRenderElement::Texture(tex) => relocate_hi_dpi_element(
+                tex,
+                clamped,
+                CompositorRenderElement::ScaledTexture,
+                CompositorRenderElement::Texture,
+            ),
             other => other,
         })
         .collect()
-}
-
-fn window_title(window: &smithay::desktop::Window, id: rusty_wm::WindowId) -> String {
-    if let Some(toplevel) = window.toplevel() {
-        let title = smithay::wayland::compositor::with_states(toplevel.wl_surface(), |states| {
-            states
-                .data_map
-                .get::<smithay::wayland::shell::xdg::XdgToplevelSurfaceData>()
-                .and_then(|data| data.lock().ok())
-                .and_then(|guard| guard.title.clone().or_else(|| guard.app_id.clone()))
-        });
-        if let Some(t) = title
-            && !t.trim().is_empty()
-        {
-            return t;
-        }
-    } else if let Some(x11) = window.x11_surface() {
-        let title = x11.title();
-        if !title.trim().is_empty() {
-            return title;
-        }
-    }
-    format!("Window #{}", id.0)
 }
 
 /// Returns output-local pointer coordinates if `pointer` falls within (or near) `output_geo` (`RUSTYOS-042`).
@@ -667,6 +690,14 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
         ));
     }
 
+    push_ime_popup_elements(
+        &mut render_list,
+        &smithay_output,
+        renderer,
+        state,
+        output_scale,
+    );
+
     if is_primary
         && !state.screen_locked
         && let Some(osd) = state.osd.as_ref()
@@ -742,18 +773,17 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
             .iter()
             .map(|&(win_id, rect)| {
                 let minimized = state.is_window_minimized(win_id);
-                let title = state.smithay_window_for_id(win_id).map_or_else(
-                    || format!("Window #{}", win_id.0),
-                    |win| window_title(&win, win_id),
-                );
+                let title = state.window_title(win_id);
                 let badge = crate::shell_render::make_window_badge(&title);
                 let app_id = state.window_app_id(win_id);
                 let icon_name = state.launcher.icon_for_app_hints(app_id.as_deref(), &title);
+                let toplevel_icon = state.window_toplevel_icons.get(&win_id).cloned();
                 crate::shell_render::DockWindowEntry {
                     id: win_id,
                     title,
                     badge,
                     icon_name,
+                    toplevel_icon,
                     dimensions: format!("{}x{}", rect.width, rect.height),
                     focused: !minimized && focused_win == Some(win_id),
                     minimized,
@@ -800,7 +830,9 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
                             .map(|entry| crate::shell_render::WindowSwitcherCard {
                                 title: &entry.title,
                                 badge: &entry.badge,
+                                window_id: entry.id,
                                 icon_name: entry.icon_name.as_deref(),
+                                toplevel_icon: entry.toplevel_icon.as_ref(),
                                 minimized: entry.minimized,
                             })
                     })
@@ -945,10 +977,7 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
             });
 
         if has_ssd && !has_open_popup {
-            let title_text = smithay_win.as_ref().map_or_else(
-                || format!("Window #{}", win_id.0),
-                |win| window_title(win, win_id),
-            );
+            let title_text = state.window_title(win_id);
             render_list.extend(crate::shell_render::generate_window_ssd_composite_elements(
                 text_cache,
                 shape_cache,
@@ -982,10 +1011,7 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
         }
 
         if has_ssd && has_open_popup {
-            let title_text = smithay_win.as_ref().map_or_else(
-                || format!("Window #{}", win_id.0),
-                |win| window_title(win, win_id),
-            );
+            let title_text = state.window_title(win_id);
             render_list.extend(crate::shell_render::generate_window_ssd_composite_elements(
                 text_cache,
                 shape_cache,
@@ -1184,10 +1210,12 @@ fn render_winit_frame(
                 Some(state.output.clone())
             });
         }
+        state.send_ime_popup_frames(&state.output, elapsed);
     }
 
     state.space.refresh();
     state.popups.cleanup();
+    state.cleanup_ime_popups();
 
     let submit_slice = tracked_damage.as_deref();
     backend

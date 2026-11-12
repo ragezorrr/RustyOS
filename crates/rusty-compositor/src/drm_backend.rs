@@ -760,9 +760,11 @@ impl DrmRuntime {
                     Some(target_output.clone())
                 });
             }
+            state.send_ime_popup_frames(&target_output, elapsed);
         }
         state.space.refresh();
         state.popups.cleanup();
+        state.cleanup_ime_popups();
         let _ = state.display_handle.flush_clients();
 
         self.rendered_frames = self.rendered_frames.saturating_add(1);

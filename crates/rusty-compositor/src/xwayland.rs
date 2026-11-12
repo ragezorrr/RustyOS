@@ -183,6 +183,7 @@ impl XwmHandler for RustyCompositorState {
         let title = window.title();
         self.window_bindings
             .push((win_id, Window::new_x11_window(window)));
+        self.register_foreign_toplevel(win_id);
 
         let serial = SERIAL_COUNTER.next_serial();
         self.sync_space_with_wm(serial);
@@ -270,14 +271,19 @@ impl XwmHandler for RustyCompositorState {
     }
 
     fn property_notify(&mut self, _xwm: XwmId, window: X11Surface, property: WmWindowProperty) {
-        if matches!(
-            property,
-            WmWindowProperty::MotifHints | WmWindowProperty::NormalHints
-        ) && let Some(win_id) = find_bound_window_id(self, window.window_id())
-        {
-            self.ensure_floating_min_size(win_id);
-            let serial = SERIAL_COUNTER.next_serial();
-            self.sync_space_with_wm(serial);
+        let Some(win_id) = find_bound_window_id(self, window.window_id()) else {
+            return;
+        };
+        match property {
+            WmWindowProperty::MotifHints | WmWindowProperty::NormalHints => {
+                self.ensure_floating_min_size(win_id);
+                let serial = SERIAL_COUNTER.next_serial();
+                self.sync_space_with_wm(serial);
+            }
+            WmWindowProperty::Title | WmWindowProperty::Class => {
+                self.sync_foreign_toplevel_metadata(win_id);
+            }
+            _ => {}
         }
     }
 
@@ -460,7 +466,7 @@ fn remove_x11_window(state: &mut RustyCompositorState, x11_id: X11Window, reason
             state.space.unmap_elem(&sw_clone);
         }
         state.window_bindings.retain(|(id, _)| *id != win_id);
-        state.unregister_window_decoration(win_id);
+        state.unregister_window_metadata(win_id);
         state.minimized_window_ids.remove(&win_id);
         state.remove_from_switcher(win_id);
         state.wm.unmap_window(win_id);

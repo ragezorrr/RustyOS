@@ -7,9 +7,10 @@ use smithay::backend::renderer::Color32F;
 use smithay::backend::renderer::element::memory::MemoryRenderBufferRenderElement;
 use smithay::backend::renderer::element::solid::SolidColorRenderElement;
 use smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement;
+use smithay::backend::renderer::element::texture::TextureRenderElement;
 use smithay::backend::renderer::element::utils::{RelocateRenderElement, RescaleRenderElement};
 use smithay::backend::renderer::element::{Id, Kind};
-use smithay::backend::renderer::gles::GlesRenderer;
+use smithay::backend::renderer::gles::{GlesRenderer, GlesTexture};
 use smithay::backend::renderer::utils::CommitCounter;
 use smithay::utils::{Point, Rectangle, Size};
 
@@ -26,6 +27,17 @@ smithay::backend::renderer::element::render_elements! {
     Memory = MemoryRenderBufferRenderElement<GlesRenderer>,
     /// Relocated memory buffer aligned to HiDPI physical output coordinates.
     ScaledMemory = RelocateRenderElement<MemoryRenderBufferRenderElement<GlesRenderer>>,
+    /// Client-supplied Wayland texture element (e.g. `xdg_toplevel_icon_v1` SHM icon).
+    Texture = TextureRenderElement<GlesTexture>,
+    /// Relocated Wayland texture element aligned to HiDPI physical output coordinates.
+    ScaledTexture = RelocateRenderElement<TextureRenderElement<GlesTexture>>,
+}
+
+fn resolved_icon_to_element(icon: crate::icons::ResolvedIconElement) -> CompositorRenderElement {
+    match icon {
+        crate::icons::ResolvedIconElement::Memory(el) => CompositorRenderElement::Memory(*el),
+        crate::icons::ResolvedIconElement::Texture(el) => CompositorRenderElement::Texture(el),
+    }
 }
 
 /// Resize grab border thickness in logical pixels (`RUSTYOS-022`).
@@ -254,6 +266,8 @@ pub struct DockWindowEntry {
     pub badge: String,
     /// Optional resolved XDG icon name or PNG path (`RUSTYOS-033`).
     pub icon_name: Option<String>,
+    /// Optional client-provided `xdg_toplevel_icon_v1` icon (`RUSTYOS-047`).
+    pub toplevel_icon: Option<crate::icons::ShmToplevelIcon>,
     /// Dimensions label (e.g. `"800x600"`).
     pub dimensions: String,
     /// Whether this window is currently focused.
@@ -400,8 +414,12 @@ pub struct WindowSwitcherCard<'a> {
     pub title: &'a str,
     /// Fallback 1-2 char monogram if no PNG icon resolves.
     pub badge: &'a str,
+    /// Managed window identifier used as the GPU SHM icon cache key (`RUSTYOS-047`).
+    pub window_id: rusty_wm::WindowId,
     /// Optional resolved XDG icon name / PNG path.
     pub icon_name: Option<&'a str>,
+    /// Optional client-provided `xdg_toplevel_icon_v1` icon (`RUSTYOS-047`).
+    pub toplevel_icon: Option<&'a crate::icons::ShmToplevelIcon>,
     /// True if minimized to the Dock.
     pub minimized: bool,
 }
@@ -2273,16 +2291,24 @@ pub fn generate_shell_text_elements(
         let Some(bounds) = dock_slot_rect(width, height, dock_view.windows.len(), idx) else {
             continue;
         };
-        let slot_icon = match idx {
-            0 => dock_view.pinned_icons[0],
-            1 => dock_view.pinned_icons[1],
-            n if n >= 3 => dock_view
-                .windows
-                .get(n - 3)
-                .and_then(|entry| entry.icon_name.as_deref()),
-            _ => None,
+        let has_dock_icon = match idx {
+            0 => dock_view.pinned_icons[0]
+                .is_some_and(|name| shape_cache.icons.has_named_icon(name, DOCK_ICON_SIZE)),
+            1 => dock_view.pinned_icons[1]
+                .is_some_and(|name| shape_cache.icons.has_named_icon(name, DOCK_ICON_SIZE)),
+            n if n >= 3 => dock_view.windows.get(n - 3).is_some_and(|entry| {
+                let key = format!("win-{}", entry.id.0);
+                shape_cache.icons.has_window_icon(
+                    renderer,
+                    &key,
+                    entry.toplevel_icon.as_ref(),
+                    entry.icon_name.as_deref(),
+                    DOCK_ICON_SIZE,
+                )
+            }),
+            _ => false,
         };
-        if slot_icon.is_some_and(|name| shape_cache.icons.has_named_icon(name, 28)) {
+        if has_dock_icon {
             continue;
         }
         let (label, color) = match idx {
@@ -2329,9 +2355,14 @@ fn render_switcher_text(
     let (_panel, cards) = switcher_layout(screen_size, sw.cards.len());
     for (idx, (card, rect)) in sw.cards.iter().zip(cards).enumerate() {
         let is_sel = idx == sw.selected;
-        let has_icon = card
-            .icon_name
-            .is_some_and(|name| shape_cache.icons.has_named_icon(name, 36));
+        let sw_key = format!("win-{}", card.window_id.0);
+        let has_icon = shape_cache.icons.has_window_icon(
+            renderer,
+            &sw_key,
+            card.toplevel_icon,
+            card.icon_name,
+            36,
+        );
         if !has_icon {
             let icon_box = Rectangle::new(
                 Point::from((rect.loc.x + (rect.size.w - 44) / 2, rect.loc.y + 14)),
@@ -3450,12 +3481,16 @@ pub fn generate_shell_composite_elements(
             for (idx, (card_view, card)) in sw.cards.iter().zip(cards).enumerate() {
                 let is_sel = idx == sw.selected;
                 let icon_loc = Point::from((card.loc.x + (card.size.w - 36) / 2, card.loc.y + 18));
-                if let Some(icon_name) = card_view.icon_name
-                    && let Some(icon_el) = shape_cache
-                        .icons
-                        .icon_element_by_name(renderer, icon_name, 36, icon_loc)
-                {
-                    out.push(CompositorRenderElement::Memory(icon_el));
+                let sw_key = format!("win-{}", card_view.window_id.0);
+                if let Some(icon_el) = shape_cache.icons.window_icon_element(
+                    renderer,
+                    &sw_key,
+                    card_view.toplevel_icon,
+                    card_view.icon_name,
+                    36,
+                    icon_loc,
+                ) {
+                    out.push(resolved_icon_to_element(icon_el));
                 } else {
                     let well_rect = Rectangle::new(
                         Point::from((card.loc.x + (card.size.w - 44) / 2, card.loc.y + 14)),
@@ -3746,22 +3781,35 @@ pub fn generate_shell_composite_elements(
 
         let inner_size = DOCK_ICON_SIZE;
         let inner_offset = (item_size - inner_size) / 2;
-        let slot_icon_name = match i {
-            0 => dock_view.pinned_icons[0],
-            1 => dock_view.pinned_icons[1],
-            n if n >= 3 => win_entry.and_then(|w| w.icon_name.as_deref()),
+        let icon_loc = Point::from((item_x + inner_offset, item_y + inner_offset - 2));
+        let slot_icon_el = match i {
+            0 => dock_view.pinned_icons[0].and_then(|name| {
+                shape_cache
+                    .icons
+                    .icon_element_by_name(renderer, name, inner_size, icon_loc)
+                    .map(|el| crate::icons::ResolvedIconElement::Memory(Box::new(el)))
+            }),
+            1 => dock_view.pinned_icons[1].and_then(|name| {
+                shape_cache
+                    .icons
+                    .icon_element_by_name(renderer, name, inner_size, icon_loc)
+                    .map(|el| crate::icons::ResolvedIconElement::Memory(Box::new(el)))
+            }),
+            n if n >= 3 => win_entry.and_then(|w| {
+                let key = format!("win-{}", w.id.0);
+                shape_cache.icons.window_icon_element(
+                    renderer,
+                    &key,
+                    w.toplevel_icon.as_ref(),
+                    w.icon_name.as_deref(),
+                    inner_size,
+                    icon_loc,
+                )
+            }),
             _ => None,
         };
-        let slot_icon_el = slot_icon_name.and_then(|name| {
-            shape_cache.icons.icon_element_by_name(
-                renderer,
-                name,
-                inner_size,
-                Point::from((item_x + inner_offset, item_y + inner_offset - 2)),
-            )
-        });
         if let Some(el) = slot_icon_el {
-            out.push(CompositorRenderElement::Memory(el));
+            out.push(resolved_icon_to_element(el));
         } else {
             let inner_rgba = match i {
                 0 => RGBA_ACCENT,

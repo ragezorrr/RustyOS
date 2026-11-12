@@ -1,6 +1,6 @@
 //! Core Wayland compositor state and protocol handler implementations.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::os::unix::io::OwnedFd;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -18,17 +18,21 @@ use smithay::{
         renderer::{element::RenderElementStates, sync::Fence, utils::on_commit_buffer_handler},
     },
     delegate_compositor, delegate_cursor_shape, delegate_data_control, delegate_data_device,
-    delegate_dmabuf, delegate_drm_syncobj, delegate_fractional_scale, delegate_idle_inhibit,
-    delegate_idle_notify, delegate_layer_shell, delegate_output, delegate_pointer_constraints,
+    delegate_dmabuf, delegate_drm_syncobj, delegate_foreign_toplevel_list,
+    delegate_fractional_scale, delegate_idle_inhibit, delegate_idle_notify,
+    delegate_input_method_manager, delegate_keyboard_shortcuts_inhibit, delegate_layer_shell,
+    delegate_output, delegate_pointer_constraints, delegate_pointer_gestures,
     delegate_presentation, delegate_primary_selection, delegate_relative_pointer, delegate_seat,
-    delegate_session_lock, delegate_shm, delegate_viewporter, delegate_xdg_activation,
-    delegate_xdg_decoration, delegate_xdg_shell,
+    delegate_session_lock, delegate_shm, delegate_text_input_manager, delegate_viewporter,
+    delegate_xdg_activation, delegate_xdg_decoration, delegate_xdg_shell,
+    delegate_xdg_toplevel_icon,
     desktop::{
         LayerSurface as DesktopLayerSurface, PopupKind, PopupManager, Space, Window,
         WindowSurfaceType, find_popup_root_surface, get_popup_toplevel_coords,
         layer_map_for_output,
         utils::{
-            OutputPresentationFeedback, surface_presentation_feedback_flags_from_states,
+            OutputPresentationFeedback, bbox_from_surface_tree, send_frames_surface_tree,
+            surface_presentation_feedback_flags_from_states,
             take_presentation_feedback_surface_tree,
         },
     },
@@ -62,14 +66,25 @@ use smithay::{
         drm_syncobj::{
             DrmSyncobjCachedState, DrmSyncobjHandler, DrmSyncobjState, supports_syncobj_eventfd,
         },
+        foreign_toplevel_list::{
+            ForeignToplevelHandle, ForeignToplevelListHandler, ForeignToplevelListState,
+        },
         fractional_scale::{self, FractionalScaleHandler, FractionalScaleManagerState},
         idle_inhibit::{IdleInhibitHandler, IdleInhibitManagerState},
         idle_notify::{IdleNotifierHandler, IdleNotifierState},
+        input_method::{
+            InputMethodHandler, InputMethodManagerState, PopupSurface as ImePopupSurface,
+        },
+        keyboard_shortcuts_inhibit::{
+            KeyboardShortcutsInhibitHandler, KeyboardShortcutsInhibitState,
+            KeyboardShortcutsInhibitor, KeyboardShortcutsInhibitorSeat as _,
+        },
         output::{OutputHandler, OutputManagerState},
         pointer_constraints::{
             PointerConstraint, PointerConstraintsHandler, PointerConstraintsState,
             with_pointer_constraint,
         },
+        pointer_gestures::PointerGesturesState,
         presentation::PresentationState,
         relative_pointer::RelativePointerManagerState,
         seat::WaylandFocus,
@@ -98,9 +113,13 @@ use smithay::{
         },
         shm::{ShmHandler, ShmState},
         tablet_manager::TabletSeatHandler,
+        text_input::TextInputManagerState,
         viewporter::ViewporterState,
         xdg_activation::{
             XdgActivationHandler, XdgActivationState, XdgActivationToken, XdgActivationTokenData,
+        },
+        xdg_toplevel_icon::{
+            ToplevelIconCachedState, XdgToplevelIconHandler, XdgToplevelIconManager,
         },
         xwayland_shell::XWaylandShellState,
     },
@@ -157,6 +176,34 @@ pub struct WindowSwitcherState {
     pub window_ids: Vec<WindowId>,
     /// Currently highlighted entry index inside `window_ids`.
     pub selected: usize,
+}
+
+/// Compositor-level action recognized from a completed 3-finger touchpad swipe (`RUSTYOS-047`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThreeFingerSwipeAction {
+    /// Switch to the previous workspace (`WorkspaceId - 1`).
+    PreviousWorkspace,
+    /// Switch to the next workspace (`WorkspaceId + 1`).
+    NextWorkspace,
+    /// Open Workspace Overview if closed.
+    OpenOverview,
+    /// Close Workspace Overview if open.
+    CloseOverview,
+}
+
+/// Active multi-finger touchpad swipe accumulator for compositor gestures (`RUSTYOS-047`).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TouchpadSwipeState {
+    /// Whether a touchpad swipe sequence is currently active.
+    pub active: bool,
+    /// Finger count reported by `GestureSwipeBegin`.
+    pub fingers: u32,
+    /// Accumulated horizontal swipe delta in logical units.
+    pub dx: f64,
+    /// Accumulated vertical swipe delta in logical units.
+    pub dy: f64,
+    /// True when the compositor claimed this 3-finger gesture exclusively.
+    pub claimed_by_compositor: bool,
 }
 
 /// Primary state container for `rusty-compositor`.
@@ -327,6 +374,31 @@ pub struct RustyCompositorState {
     pub window_switcher: Option<WindowSwitcherState>,
     /// Active client Drag-and-Drop icon surface attached during `wl_data_device.start_drag` (`RUSTYOS-033`).
     pub dnd_icon: Option<WlSurface>,
+    /// `zwp_pointer_gestures_v1` swipe/pinch/hold gesture global state (`RUSTYOS-047`).
+    pub pointer_gestures_state: PointerGesturesState,
+    /// `zwp_text_input_manager_v3` global state for client IME text input (`RUSTYOS-047`).
+    pub text_input_manager_state: TextInputManagerState,
+    /// `zwp_input_method_manager_v2` global state for external IME engines (`RUSTYOS-047`).
+    pub input_method_manager_state: InputMethodManagerState,
+    /// Active IME popup surfaces (`zwp_input_popup_surface_v2`) awaiting draw (`RUSTYOS-047`).
+    pub ime_popups: Vec<ImePopupSurface>,
+    /// `zwp_keyboard_shortcuts_inhibit_manager_v1` global state (`RUSTYOS-047`).
+    pub keyboard_shortcuts_inhibit_state: KeyboardShortcutsInhibitState,
+    /// Currently activated shortcut inhibitor for the focused client surface (`RUSTYOS-047`).
+    pub active_shortcut_inhibitor: Option<KeyboardShortcutsInhibitor>,
+    /// Surface whose shortcut inhibitor was explicitly released via `Super+Escape` until focus leaves (`RUSTYOS-047`).
+    pub suppressed_inhibitor_surface: Option<WlSurface>,
+    /// `ext_foreign_toplevel_list_v1` global state exposing mapped toplevels (`RUSTYOS-047`).
+    pub foreign_toplevel_list_state: ForeignToplevelListState,
+    /// Active `ext_foreign_toplevel_handle_v1` handles keyed by WM [`WindowId`] (`RUSTYOS-047`).
+    pub foreign_toplevel_handles: HashMap<WindowId, ForeignToplevelHandle>,
+    /// `xdg_toplevel_icon_v1` manager state advertising preferred icon sizes (`RUSTYOS-047`).
+    pub xdg_toplevel_icon_manager: XdgToplevelIconManager,
+    /// Committed `xdg_toplevel_icon_v1` icon metadata & SHM buffers per [`WindowId`] (`RUSTYOS-047`).
+    pub window_toplevel_icons: HashMap<WindowId, crate::icons::ShmToplevelIcon>,
+    /// Active 3-finger touchpad gesture accumulator (`RUSTYOS-047`).
+    pub touchpad_swipe: TouchpadSwipeState,
+    next_toplevel_icon_rev: u64,
     next_notification_id: u64,
 }
 
@@ -399,6 +471,17 @@ impl RustyCompositorState {
             IdleNotifierState::<Self>::new(&display_handle, loop_handle.clone());
         let idle_inhibit_state = IdleInhibitManagerState::new::<Self>(&display_handle);
         let session_lock_state = SessionLockManagerState::new::<Self, _>(&display_handle, |_| true);
+        let pointer_gestures_state = PointerGesturesState::new::<Self>(&display_handle);
+        let text_input_manager_state = TextInputManagerState::new::<Self>(&display_handle);
+        let input_method_manager_state =
+            InputMethodManagerState::new::<Self, _>(&display_handle, |_| true);
+        let keyboard_shortcuts_inhibit_state =
+            KeyboardShortcutsInhibitState::new::<Self>(&display_handle);
+        let foreign_toplevel_list_state = ForeignToplevelListState::new::<Self>(&display_handle);
+        let mut xdg_toplevel_icon_manager = XdgToplevelIconManager::new::<Self>(&display_handle);
+        for size in [16, 24, 32, 48, 64] {
+            xdg_toplevel_icon_manager.add_icon_size(size);
+        }
         let dmabuf_state = DmabufState::new();
         let output_manager_state = OutputManagerState::new_with_xdg_output::<Self>(&display_handle);
         let data_device_state = DataDeviceState::new::<Self>(&display_handle);
@@ -527,6 +610,19 @@ impl RustyCompositorState {
             pending_vt_switch: None,
             window_switcher: None,
             dnd_icon: None,
+            pointer_gestures_state,
+            text_input_manager_state,
+            input_method_manager_state,
+            ime_popups: Vec::new(),
+            keyboard_shortcuts_inhibit_state,
+            active_shortcut_inhibitor: None,
+            suppressed_inhibitor_surface: None,
+            foreign_toplevel_list_state,
+            foreign_toplevel_handles: HashMap::new(),
+            xdg_toplevel_icon_manager,
+            window_toplevel_icons: HashMap::new(),
+            touchpad_swipe: TouchpadSwipeState::default(),
+            next_toplevel_icon_rev: 0,
             next_notification_id: 0,
         };
         state
@@ -787,6 +883,123 @@ impl RustyCompositorState {
             || self.window_switcher.is_some()
             || self.active_window_drag.is_some()
             || self.active_window_resize.is_some()
+    }
+
+    /// Returns `true` when the currently focused client has an activated
+    /// `zwp_keyboard_shortcuts_inhibit_v1` inhibitor and no compositor lock/overlay overrides it (`RUSTYOS-047`).
+    #[must_use]
+    pub fn is_keyboard_shortcuts_inhibited(&self) -> bool {
+        if self.is_session_locked() || self.has_blocking_shell_overlay() {
+            return false;
+        }
+        self.keyboard
+            .current_focus()
+            .and_then(|surface| self.seat.keyboard_shortcuts_inhibitor_for_surface(&surface))
+            .is_some_and(|inhibitor| inhibitor.is_active())
+    }
+
+    /// Deactivates any active keyboard shortcuts inhibitor and suppresses auto-reactivation until
+    /// keyboard focus leaves that surface (`Super+Escape` & session lock isolation) (`RUSTYOS-047`).
+    pub fn deactivate_focused_shortcut_inhibitor(&mut self) {
+        let mut released_surface = None;
+        if let Some(inhibitor) = self.active_shortcut_inhibitor.take() {
+            released_surface = Some(inhibitor.wl_surface().clone());
+            inhibitor.inactivate();
+        }
+        if let Some(focused) = self.keyboard.current_focus() {
+            if let Some(inhibitor) = self.seat.keyboard_shortcuts_inhibitor_for_surface(&focused) {
+                inhibitor.inactivate();
+            }
+            released_surface.get_or_insert(focused);
+        }
+        self.suppressed_inhibitor_surface = released_surface;
+    }
+
+    /// Returns `true` when multi-finger compositor touchpad gestures are permitted (`RUSTYOS-047`).
+    #[must_use]
+    pub fn can_handle_compositor_gesture(&self) -> bool {
+        !self.is_session_locked()
+            && !self.launcher_active
+            && !self.quick_settings_active
+            && self.window_switcher.is_none()
+            && self.active_window_drag.is_none()
+            && self.active_window_resize.is_none()
+            && self.active_popup_grabs.is_empty()
+    }
+
+    /// Starts tracking a touchpad swipe; returns `true` when the compositor claims a 3-finger swipe (`RUSTYOS-047`).
+    pub fn begin_touchpad_swipe(&mut self, fingers: u32) -> bool {
+        if fingers == 3 && self.can_handle_compositor_gesture() {
+            self.touchpad_swipe = TouchpadSwipeState {
+                active: true,
+                fingers,
+                dx: 0.0,
+                dy: 0.0,
+                claimed_by_compositor: true,
+            };
+            true
+        } else {
+            self.touchpad_swipe = TouchpadSwipeState::default();
+            false
+        }
+    }
+
+    /// Accumulates touchpad swipe delta; returns `true` if the swipe is handled by the compositor (`RUSTYOS-047`).
+    pub fn update_touchpad_swipe(&mut self, delta: Point<f64, Logical>) -> bool {
+        if self.touchpad_swipe.active && self.touchpad_swipe.claimed_by_compositor {
+            if !self.can_handle_compositor_gesture() {
+                self.touchpad_swipe = TouchpadSwipeState::default();
+                return true;
+            }
+            self.touchpad_swipe.dx += delta.x;
+            self.touchpad_swipe.dy += delta.y;
+            return true;
+        }
+        false
+    }
+
+    /// Completes a tracked touchpad swipe; returns `true` if handled by the compositor (`RUSTYOS-047`).
+    pub fn end_touchpad_swipe(&mut self, cancelled: bool, serial: Serial) -> bool {
+        if self.touchpad_swipe.active && self.touchpad_swipe.claimed_by_compositor {
+            let swipe = std::mem::take(&mut self.touchpad_swipe);
+            if !cancelled
+                && self.can_handle_compositor_gesture()
+                && let Some(action) = classify_three_finger_swipe(swipe.dx, swipe.dy)
+            {
+                match action {
+                    ThreeFingerSwipeAction::PreviousWorkspace => {
+                        self.switch_workspace_relative(-1, serial);
+                    }
+                    ThreeFingerSwipeAction::NextWorkspace => {
+                        self.switch_workspace_relative(1, serial);
+                    }
+                    ThreeFingerSwipeAction::OpenOverview => {
+                        if !self.overview_active {
+                            self.toggle_overview();
+                        }
+                    }
+                    ThreeFingerSwipeAction::CloseOverview => {
+                        if self.overview_active {
+                            self.close_overview();
+                        }
+                    }
+                }
+            }
+            return true;
+        }
+        self.touchpad_swipe = TouchpadSwipeState::default();
+        false
+    }
+
+    /// Steps the active workspace by `delta` clamped cleanly within `WorkspaceId::MIN..=WorkspaceId::MAX`.
+    pub fn switch_workspace_relative(&mut self, delta: i8, serial: Serial) {
+        let current = self.wm.active_workspace_id();
+        let next_idx = (i16::from(current.0) + i16::from(delta))
+            .clamp(i16::from(WorkspaceId::MIN), i16::from(WorkspaceId::MAX));
+        let target = WorkspaceId::new_clamped(u8::try_from(next_idx).unwrap_or(WorkspaceId::MIN));
+        if target != current {
+            self.apply_wm_action(WmAction::SwitchWorkspace(target), serial);
+        }
     }
 
     /// Notifies `ext_idle_notify_v1` subscribers of seat user activity while honoring live
@@ -1337,9 +1550,12 @@ impl RustyCompositorState {
             self.active_window_drag = None;
             self.active_window_resize = None;
             self.dock_hover_slot = None;
+            self.touchpad_swipe = TouchpadSwipeState::default();
+            self.deactivate_focused_shortcut_inhibitor();
             let keyboard = self.keyboard.clone();
             keyboard.set_focus(self, None, serial);
         } else {
+            self.suppressed_inhibitor_surface = None;
             self.sync_space_with_wm(serial);
         }
         let now = self.elapsed();
@@ -2121,10 +2337,222 @@ impl RustyCompositorState {
         })
     }
 
+    /// Looks up the [`WindowId`] matching the raw `xdg_toplevel` protocol resource (`RUSTYOS-047`).
+    #[must_use]
+    pub fn window_id_for_xdg_toplevel_proto(
+        &self,
+        xdg_tl: &xdg_toplevel::XdgToplevel,
+    ) -> Option<WindowId> {
+        self.window_bindings.iter().find_map(|(win_id, sw)| {
+            sw.toplevel()
+                .is_some_and(|tl| tl.xdg_toplevel() == xdg_tl)
+                .then_some(*win_id)
+        })
+    }
+
     /// Clears decoration-negotiation tracking for a closed or unmapped window (`RUSTYOS-030`).
     pub fn unregister_window_decoration(&mut self, win_id: WindowId) {
         self.xdg_decoration_requested.remove(&win_id);
         self.csd_window_ids.remove(&win_id);
+    }
+
+    /// Releases decoration state, `ext_foreign_toplevel_list_v1` handle, and `xdg_toplevel_icon_v1`
+    /// metadata for a closed or pruned window (`RUSTYOS-030` / `RUSTYOS-047`).
+    pub fn unregister_window_metadata(&mut self, win_id: WindowId) {
+        self.unregister_window_decoration(win_id);
+        self.close_foreign_toplevel(win_id);
+        self.window_toplevel_icons.remove(&win_id);
+    }
+
+    /// Resolves the live UI title for `win_id` (falling back to `app_id`, then `Window #N`) (`RUSTYOS-047`).
+    #[must_use]
+    pub fn window_title(&self, win_id: WindowId) -> String {
+        let Some(window) = self.smithay_window_for_id(win_id) else {
+            return format!("Window #{}", win_id.0);
+        };
+        if let Some(toplevel) = window.toplevel() {
+            let title = compositor::with_states(toplevel.wl_surface(), |states| {
+                states
+                    .data_map
+                    .get::<XdgToplevelSurfaceData>()
+                    .and_then(|data| data.lock().ok())
+                    .and_then(|attrs| attrs.title.clone().or_else(|| attrs.app_id.clone()))
+            });
+            if let Some(t) = title
+                && !t.trim().is_empty()
+            {
+                return t;
+            }
+        } else if let Some(x11) = window.x11_surface() {
+            let title = x11.title();
+            if !title.trim().is_empty() {
+                return title;
+            }
+        }
+        format!("Window #{}", win_id.0)
+    }
+
+    fn window_protocol_title(&self, win_id: WindowId) -> String {
+        let Some(window) = self.smithay_window_for_id(win_id) else {
+            return String::new();
+        };
+        if let Some(toplevel) = window.toplevel() {
+            return compositor::with_states(toplevel.wl_surface(), |states| {
+                states
+                    .data_map
+                    .get::<XdgToplevelSurfaceData>()
+                    .and_then(|data| data.lock().ok())
+                    .and_then(|attrs| attrs.title.clone())
+            })
+            .unwrap_or_default();
+        }
+        if let Some(x11) = window.x11_surface() {
+            return x11.title();
+        }
+        String::new()
+    }
+
+    /// Creates and announces an `ext_foreign_toplevel_handle_v1` for a newly mapped window (`RUSTYOS-047`).
+    pub fn register_foreign_toplevel(&mut self, win_id: WindowId) {
+        if self.foreign_toplevel_handles.contains_key(&win_id) {
+            self.sync_foreign_toplevel_metadata(win_id);
+            return;
+        }
+        let title = self.window_protocol_title(win_id);
+        let app_id = self.window_app_id(win_id).unwrap_or_default();
+        let handle = self
+            .foreign_toplevel_list_state
+            .new_toplevel::<Self>(title, app_id);
+        self.foreign_toplevel_handles.insert(win_id, handle);
+    }
+
+    /// Emits updated `title`/`app_id` + `done` on `win_id`'s `ext_foreign_toplevel_handle_v1` (`RUSTYOS-047`).
+    pub fn sync_foreign_toplevel_metadata(&self, win_id: WindowId) {
+        let Some(handle) = self.foreign_toplevel_handles.get(&win_id) else {
+            return;
+        };
+        let title = self.window_protocol_title(win_id);
+        let app_id = self.window_app_id(win_id).unwrap_or_default();
+        let mut changed = false;
+        if handle.title() != title {
+            handle.send_title(&title);
+            changed = true;
+        }
+        if handle.app_id() != app_id {
+            handle.send_app_id(&app_id);
+            changed = true;
+        }
+        if changed {
+            handle.send_done();
+        }
+    }
+
+    /// Sends `closed` and retires the `ext_foreign_toplevel_handle_v1` owned by `win_id` (`RUSTYOS-047`).
+    pub fn close_foreign_toplevel(&mut self, win_id: WindowId) {
+        if let Some(handle) = self.foreign_toplevel_handles.remove(&win_id) {
+            self.foreign_toplevel_list_state.remove_toplevel(&handle);
+        }
+    }
+
+    /// Syncs committed `xdg_toplevel_icon_v1` `ToplevelIconCachedState` for `win_id` (`RUSTYOS-047`).
+    pub fn sync_toplevel_icon_from_surface(&mut self, win_id: WindowId, surface: &WlSurface) {
+        let (icon_name, buffers) = compositor::with_states(surface, |states| {
+            let mut guard = states.cached_state.get::<ToplevelIconCachedState>();
+            let cur = guard.current();
+            (cur.icon_name().map(str::to_owned), cur.buffers().to_vec())
+        });
+        if icon_name.is_none() && buffers.is_empty() {
+            self.window_toplevel_icons.remove(&win_id);
+            return;
+        }
+        if self
+            .window_toplevel_icons
+            .get(&win_id)
+            .is_some_and(|existing| existing.icon_name == icon_name && existing.buffers == buffers)
+        {
+            return;
+        }
+        self.next_toplevel_icon_rev = self.next_toplevel_icon_rev.saturating_add(1);
+        self.window_toplevel_icons.insert(
+            win_id,
+            crate::icons::ShmToplevelIcon {
+                revision: self.next_toplevel_icon_rev,
+                icon_name,
+                buffers,
+            },
+        );
+    }
+
+    /// Removes dead IME popup surfaces (`RUSTYOS-047`).
+    pub fn cleanup_ime_popups(&mut self) {
+        self.ime_popups.retain(ImePopupSurface::alive);
+    }
+
+    /// Computes output-local physical render positions for alive IME `PopupSurface` instances belonging
+    /// to `target_output` (returns nothing while the session is locked) (`RUSTYOS-047`).
+    #[must_use]
+    pub fn ime_popups_for_output(
+        &self,
+        target_output: &Output,
+    ) -> Vec<(ImePopupSurface, Point<i32, Logical>)> {
+        if self.is_session_locked() {
+            return Vec::new();
+        }
+        let target_geo = self
+            .output_map
+            .find_by_output(target_output)
+            .map(crate::outputs::OutputEntry::logical_geometry)
+            .or_else(|| self.space.output_geometry(target_output))
+            .unwrap_or_else(|| self.output_map.primary().logical_geometry());
+
+        let mut out = Vec::new();
+        for popup in &self.ime_popups {
+            if !popup.alive() {
+                continue;
+            }
+            let parent_geo = popup
+                .get_parent()
+                .map_or_else(|| target_geo, |p| self.parent_geometry(&p.surface));
+            let cursor_rect = popup.text_input_rectangle();
+            let anchor = Point::from((
+                f64::from(parent_geo.loc.x + cursor_rect.loc.x),
+                f64::from(parent_geo.loc.y + cursor_rect.loc.y),
+            ));
+            let owner_id = self
+                .output_map
+                .output_under(anchor)
+                .unwrap_or(self.output_map.primary().id);
+            let target_id = self
+                .output_map
+                .find_by_output(target_output)
+                .map_or(self.output_map.primary().id, |e| e.id);
+            if owner_id != target_id {
+                continue;
+            }
+
+            let popup_size = bbox_from_surface_tree(popup.wl_surface(), (0, 0)).size;
+            let global_loc =
+                compute_ime_popup_origin(parent_geo, cursor_rect, popup_size, target_geo);
+            popup.set_location(global_loc - parent_geo.loc);
+            out.push((popup.clone(), global_loc - target_geo.loc));
+        }
+        out
+    }
+
+    /// Emits Wayland frame callbacks for alive IME popups visible on `output` (`RUSTYOS-047`).
+    pub fn send_ime_popup_frames(&self, output: &Output, elapsed: Duration) {
+        if self.is_session_locked() {
+            return;
+        }
+        for (popup, _) in self.ime_popups_for_output(output) {
+            send_frames_surface_tree(
+                popup.wl_surface(),
+                output,
+                elapsed,
+                Some(Duration::ZERO),
+                |_, _| Some(output.clone()),
+            );
+        }
     }
 
     /// Returns `true` if the window uses client-side decorations (CSD) and should not
@@ -2354,7 +2782,7 @@ impl RustyCompositorState {
                 self.active_window_resize = None;
             }
             self.window_bindings.retain(|(wid, _)| *wid != id);
-            self.unregister_window_decoration(id);
+            self.unregister_window_metadata(id);
             self.minimized_window_ids.remove(&id);
             self.remove_from_switcher(id);
             self.wm.unmap_window(id);
@@ -2794,6 +3222,8 @@ impl CompositorHandler for RustyCompositorState {
         }) {
             window.on_commit();
             if let Some(win_id) = self.window_id_for_smithay(&window) {
+                self.sync_toplevel_icon_from_surface(win_id, surface);
+                self.sync_foreign_toplevel_metadata(win_id);
                 if self.ensure_floating_min_size(win_id) {
                     let serial = smithay::utils::SERIAL_COUNTER.next_serial();
                     self.sync_space_with_wm(serial);
@@ -2842,8 +3272,13 @@ impl CompositorHandler for RustyCompositorState {
             }
         }
         self.popups.commit(surface);
+        self.cleanup_ime_popups();
+        self.commit_layer_surface(surface);
+    }
+}
 
-        // Handle zwlr_layer_surface_v1 commits and arrange
+impl RustyCompositorState {
+    fn commit_layer_surface(&mut self, surface: &WlSurface) {
         let layer_work_area = {
             let mut layer_map = layer_map_for_output(&self.output);
             if let Some(layer) = layer_map
@@ -2909,6 +3344,24 @@ impl SeatHandler for RustyCompositorState {
     }
 
     fn focus_changed(&mut self, seat: &Seat<Self>, focused: Option<&WlSurface>) {
+        if let Some(prev) = self.active_shortcut_inhibitor.as_ref()
+            && focused.is_none_or(|surf| prev.wl_surface() != surf)
+        {
+            prev.inactivate();
+            self.active_shortcut_inhibitor = None;
+        }
+        if self.suppressed_inhibitor_surface.as_ref() != focused {
+            self.suppressed_inhibitor_surface = None;
+        }
+        if !self.is_session_locked()
+            && !self.has_blocking_shell_overlay()
+            && self.suppressed_inhibitor_surface.as_ref() != focused
+            && let Some(surf) = focused
+            && let Some(inhibitor) = seat.keyboard_shortcuts_inhibitor_for_surface(surf)
+        {
+            inhibitor.activate();
+            self.active_shortcut_inhibitor = Some(inhibitor);
+        }
         let client = focused.and_then(|s| self.display_handle.get_client(s.id()).ok());
         set_data_device_focus(&self.display_handle, seat, client.clone());
         set_primary_focus(&self.display_handle, seat, client);
@@ -3022,6 +3475,7 @@ impl XdgShellHandler for RustyCompositorState {
 
         let window = Window::new_wayland_window(surface);
         self.window_bindings.push((win_id, window));
+        self.register_foreign_toplevel(win_id);
 
         let serial = smithay::utils::SERIAL_COUNTER.next_serial();
         self.sync_space_with_wm(serial);
@@ -3167,6 +3621,18 @@ impl XdgShellHandler for RustyCompositorState {
             .retain(|existing| existing.wl_surface() != surface.wl_surface() && existing.alive());
     }
 
+    fn title_changed(&mut self, surface: ToplevelSurface) {
+        if let Some(win_id) = self.window_id_for_toplevel(&surface) {
+            self.sync_foreign_toplevel_metadata(win_id);
+        }
+    }
+
+    fn app_id_changed(&mut self, surface: ToplevelSurface) {
+        if let Some(win_id) = self.window_id_for_toplevel(&surface) {
+            self.sync_foreign_toplevel_metadata(win_id);
+        }
+    }
+
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
         if let Some(win_id) = self.window_id_for_toplevel(&surface) {
             if self
@@ -3186,7 +3652,7 @@ impl XdgShellHandler for RustyCompositorState {
                 self.space.unmap_elem(&sw_clone);
             }
             self.window_bindings.retain(|(wid, _)| *wid != win_id);
-            self.unregister_window_decoration(win_id);
+            self.unregister_window_metadata(win_id);
             self.minimized_window_ids.remove(&win_id);
             self.remove_from_switcher(win_id);
             self.wm.unmap_window(win_id);
@@ -3453,6 +3919,8 @@ impl SessionLockHandler for RustyCompositorState {
         self.active_window_drag = None;
         self.active_window_resize = None;
         self.dock_hover_slot = None;
+        self.touchpad_swipe = TouchpadSwipeState::default();
+        self.deactivate_focused_shortcut_inhibitor();
         self.deactivate_active_pointer_constraint();
 
         let serial = smithay::utils::SERIAL_COUNTER.next_serial();
@@ -3475,6 +3943,7 @@ impl SessionLockHandler for RustyCompositorState {
     fn unlock(&mut self) {
         self.ext_session_locked = false;
         self.pending_session_locker = None;
+        self.suppressed_inhibitor_surface = None;
         self.ext_lock_surfaces.clear();
         let serial = smithay::utils::SERIAL_COUNTER.next_serial();
         self.sync_space_with_wm(serial);
@@ -3515,12 +3984,185 @@ impl DrmSyncobjHandler for RustyCompositorState {
     }
 }
 
+/// Minimum accumulated logical pointer delta required to trigger a 3-finger compositor swipe (`RUSTYOS-047`).
+pub const THREE_FINGER_SWIPE_THRESHOLD: f64 = 80.0;
+
+/// Classifies a completed 3-finger swipe `(dx, dy)` delta into a workspace or Overview action (`RUSTYOS-047`).
+#[must_use]
+pub fn classify_three_finger_swipe(dx: f64, dy: f64) -> Option<ThreeFingerSwipeAction> {
+    if !dx.is_finite() || !dy.is_finite() {
+        return None;
+    }
+    if dx.abs() >= dy.abs() {
+        if dx.abs() >= THREE_FINGER_SWIPE_THRESHOLD {
+            Some(if dx < 0.0 {
+                ThreeFingerSwipeAction::NextWorkspace
+            } else {
+                ThreeFingerSwipeAction::PreviousWorkspace
+            })
+        } else {
+            None
+        }
+    } else if dy.abs() >= THREE_FINGER_SWIPE_THRESHOLD {
+        Some(if dy < 0.0 {
+            ThreeFingerSwipeAction::OpenOverview
+        } else {
+            ThreeFingerSwipeAction::CloseOverview
+        })
+    } else {
+        None
+    }
+}
+
+/// Computes the clamped global logical origin `(x, y)` for an IME `PopupSurface` relative to its
+/// parent surface geometry and client `text_input_rectangle` (`RUSTYOS-047`).
+#[must_use]
+pub fn compute_ime_popup_origin(
+    parent_geo: Rectangle<i32, Logical>,
+    cursor_rect: Rectangle<i32, Logical>,
+    popup_size: Size<i32, Logical>,
+    output_geo: Rectangle<i32, Logical>,
+) -> Point<i32, Logical> {
+    let cursor_global_x = parent_geo.loc.x + cursor_rect.loc.x;
+    let cursor_global_y = parent_geo.loc.y + cursor_rect.loc.y;
+    let cursor_h = cursor_rect.size.h.max(0);
+
+    let out_left = output_geo.loc.x;
+    let out_top = output_geo.loc.y;
+    let out_w = output_geo.size.w.max(1);
+    let out_h = output_geo.size.h.max(1);
+    let pop_w = popup_size.w.max(0);
+    let pop_h = popup_size.h.max(0);
+
+    let below_y = cursor_global_y + cursor_h;
+    let y = if pop_h > 0 && below_y + pop_h > out_top + out_h && cursor_global_y - pop_h >= out_top
+    {
+        cursor_global_y - pop_h
+    } else {
+        below_y.clamp(out_top, (out_top + out_h - pop_h).max(out_top))
+    };
+    let x = cursor_global_x.clamp(out_left, (out_left + out_w - pop_w).max(out_left));
+    Point::from((x, y))
+}
+
+impl ForeignToplevelListHandler for RustyCompositorState {
+    fn foreign_toplevel_list_state(&mut self) -> &mut ForeignToplevelListState {
+        &mut self.foreign_toplevel_list_state
+    }
+}
+
+impl InputMethodHandler for RustyCompositorState {
+    fn new_popup(&mut self, surface: ImePopupSurface) {
+        self.ime_popups.retain(ImePopupSurface::alive);
+        if !self
+            .ime_popups
+            .iter()
+            .any(|existing| existing.wl_surface() == surface.wl_surface())
+        {
+            self.ime_popups.push(surface);
+        }
+    }
+
+    fn dismiss_popup(&mut self, surface: ImePopupSurface) {
+        self.ime_popups
+            .retain(|existing| existing.wl_surface() != surface.wl_surface() && existing.alive());
+    }
+
+    fn popup_repositioned(&mut self, surface: ImePopupSurface) {
+        self.ime_popups.retain(ImePopupSurface::alive);
+        if !self
+            .ime_popups
+            .iter()
+            .any(|existing| existing.wl_surface() == surface.wl_surface())
+            && surface.alive()
+        {
+            self.ime_popups.push(surface);
+        }
+    }
+
+    fn parent_geometry(&self, parent: &WlSurface) -> Rectangle<i32, Logical> {
+        for (_, win) in &self.window_bindings {
+            if win
+                .wl_surface()
+                .is_some_and(|root| Self::surface_in_tree(&root, parent))
+                && let Some(loc) = self.space.element_location(win)
+            {
+                return Rectangle::new(loc + win.geometry().loc, win.geometry().size);
+            }
+        }
+        for entry in self.output_map.entries() {
+            let map = layer_map_for_output(&entry.output);
+            for layer in map.layers() {
+                if Self::surface_in_tree(layer.wl_surface(), parent)
+                    && let Some(geo) = map.layer_geometry(layer)
+                {
+                    return Rectangle::new(entry.logical_geometry().loc + geo.loc, geo.size);
+                }
+            }
+        }
+        self.output_map.primary().logical_geometry()
+    }
+}
+
+impl KeyboardShortcutsInhibitHandler for RustyCompositorState {
+    fn keyboard_shortcuts_inhibit_state(&mut self) -> &mut KeyboardShortcutsInhibitState {
+        &mut self.keyboard_shortcuts_inhibit_state
+    }
+
+    fn new_inhibitor(&mut self, inhibitor: KeyboardShortcutsInhibitor) {
+        if self
+            .suppressed_inhibitor_surface
+            .as_ref()
+            .is_some_and(|surf| surf == inhibitor.wl_surface())
+        {
+            self.suppressed_inhibitor_surface = None;
+        }
+        if !self.is_session_locked()
+            && !self.has_blocking_shell_overlay()
+            && self
+                .keyboard
+                .current_focus()
+                .as_ref()
+                .is_some_and(|focused| focused == inhibitor.wl_surface())
+        {
+            inhibitor.activate();
+            self.active_shortcut_inhibitor = Some(inhibitor);
+        }
+    }
+
+    fn inhibitor_destroyed(&mut self, inhibitor: KeyboardShortcutsInhibitor) {
+        if self
+            .suppressed_inhibitor_surface
+            .as_ref()
+            .is_some_and(|surf| surf == inhibitor.wl_surface())
+        {
+            self.suppressed_inhibitor_surface = None;
+        }
+        if self
+            .active_shortcut_inhibitor
+            .as_ref()
+            .is_some_and(|cur| cur.wl_surface() == inhibitor.wl_surface())
+        {
+            self.active_shortcut_inhibitor = None;
+        }
+    }
+}
+
+impl XdgToplevelIconHandler for RustyCompositorState {
+    fn set_icon(&mut self, toplevel: xdg_toplevel::XdgToplevel, wl_surface: WlSurface) {
+        if let Some(win_id) = self.window_id_for_xdg_toplevel_proto(&toplevel) {
+            self.sync_toplevel_icon_from_surface(win_id, &wl_surface);
+        }
+    }
+}
+
 delegate_compositor!(RustyCompositorState);
 delegate_shm!(RustyCompositorState);
 delegate_viewporter!(RustyCompositorState);
 delegate_fractional_scale!(RustyCompositorState);
 delegate_relative_pointer!(RustyCompositorState);
 delegate_pointer_constraints!(RustyCompositorState);
+delegate_pointer_gestures!(RustyCompositorState);
 delegate_presentation!(RustyCompositorState);
 delegate_cursor_shape!(RustyCompositorState);
 delegate_xdg_activation!(RustyCompositorState);
@@ -3536,4 +4178,9 @@ delegate_primary_selection!(RustyCompositorState);
 delegate_data_control!(RustyCompositorState);
 delegate_xdg_shell!(RustyCompositorState);
 delegate_xdg_decoration!(RustyCompositorState);
+delegate_xdg_toplevel_icon!(RustyCompositorState);
 delegate_layer_shell!(RustyCompositorState);
+delegate_text_input_manager!(RustyCompositorState);
+delegate_input_method_manager!(RustyCompositorState);
+delegate_keyboard_shortcuts_inhibit!(RustyCompositorState);
+delegate_foreign_toplevel_list!(RustyCompositorState);

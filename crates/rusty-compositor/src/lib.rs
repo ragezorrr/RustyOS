@@ -1182,4 +1182,154 @@ mod tests {
 
         Ok(())
     }
+
+    #[test]
+    fn desktop_ux_protocols_globals_and_foreign_toplevel_lifecycle() -> Result<(), Box<dyn Error>> {
+        use smithay::wayland::foreign_toplevel_list::ForeignToplevelListHandler;
+        use smithay::wayland::keyboard_shortcuts_inhibit::KeyboardShortcutsInhibitHandler;
+
+        let display: Display<RustyCompositorState> = Display::new()?;
+        let event_loop: EventLoop<RustyCompositorState> = EventLoop::try_new()?;
+        let mut compositor = RustyCompositorState::new(
+            &display,
+            "rusty-test-desktop-ux-globals".to_owned(),
+            event_loop.get_signal(),
+            event_loop.handle(),
+            (1920, 1080).into(),
+        )?;
+
+        // 1. All 6 RUSTYOS-047 Wayland protocol globals are registered.
+        let _pg = compositor.pointer_gestures_state.global();
+        let _ti = compositor.text_input_manager_state.global();
+        let _im = compositor.input_method_manager_state.global();
+        let _ksi = compositor.keyboard_shortcuts_inhibit_state().global();
+        let _ftl = compositor.foreign_toplevel_list_state().global();
+        let _xti = compositor.xdg_toplevel_icon_manager.global();
+
+        // 2. Foreign toplevel lifecycle creates, updates, and closes handles cleanly.
+        let w1 = compositor.wm.next_window_id();
+        let _ = compositor.wm.map_window(w1, None);
+        compositor.register_foreign_toplevel(w1);
+        assert!(compositor.foreign_toplevel_handles.contains_key(&w1));
+        let handle = compositor
+            .foreign_toplevel_handles
+            .get(&w1)
+            .cloned()
+            .ok_or("Missing foreign toplevel handle")?;
+        assert!(!handle.is_closed());
+        handle.send_title("Terminal");
+        handle.send_app_id("org.rustyos.Terminal");
+        handle.send_done();
+        assert_eq!(handle.title(), "Terminal");
+        assert_eq!(handle.app_id(), "org.rustyos.Terminal");
+
+        compositor.unregister_window_metadata(w1);
+        assert!(!compositor.foreign_toplevel_handles.contains_key(&w1));
+        assert!(handle.is_closed());
+        let _ = compositor.keyboard.current_focus();
+        Ok(())
+    }
+
+    #[test]
+    fn desktop_ux_protocols_ime_placement_swipes_and_icon_metadata() -> Result<(), Box<dyn Error>> {
+        let display: Display<RustyCompositorState> = Display::new()?;
+        let event_loop: EventLoop<RustyCompositorState> = EventLoop::try_new()?;
+        let mut compositor = RustyCompositorState::new(
+            &display,
+            "rusty-test-desktop-ux-ime".to_owned(),
+            event_loop.get_signal(),
+            event_loop.handle(),
+            (1920, 1080).into(),
+        )?;
+
+        // 1. IME popup placement positions below cursor and flips/clamps at screen edges.
+        let output_geo = smithay::utils::Rectangle::new((0, 0).into(), (1920, 1080).into());
+        let parent_geo = smithay::utils::Rectangle::new((100, 100).into(), (800, 600).into());
+        let cursor_rect = smithay::utils::Rectangle::new((40, 60).into(), (2, 20).into());
+        let popup_size = smithay::utils::Size::from((240, 160));
+        assert_eq!(
+            state::compute_ime_popup_origin(parent_geo, cursor_rect, popup_size, output_geo),
+            smithay::utils::Point::from((140, 180))
+        );
+
+        let bottom_cursor = smithay::utils::Rectangle::new((1750, 900).into(), (2, 20).into());
+        assert_eq!(
+            state::compute_ime_popup_origin(parent_geo, bottom_cursor, popup_size, output_geo),
+            smithay::utils::Point::from((1680, 840))
+        );
+
+        let secondary_output = smithay::utils::Rectangle::new((1920, 0).into(), (1280, 720).into());
+        let secondary_parent = smithay::utils::Rectangle::new((1980, 40).into(), (700, 500).into());
+        assert_eq!(
+            state::compute_ime_popup_origin(
+                secondary_parent,
+                cursor_rect,
+                popup_size,
+                secondary_output
+            ),
+            smithay::utils::Point::from((2020, 120))
+        );
+
+        // 2. Touchpad 3-finger swipe helpers classify and gate properly under lock/cancel/threshold.
+        assert_eq!(
+            state::classify_three_finger_swipe(-30.0, 10.0),
+            None // below threshold
+        );
+        assert_eq!(
+            state::classify_three_finger_swipe(-120.0, 15.0),
+            Some(state::ThreeFingerSwipeAction::NextWorkspace)
+        );
+        assert_eq!(
+            state::classify_three_finger_swipe(120.0, -20.0),
+            Some(state::ThreeFingerSwipeAction::PreviousWorkspace)
+        );
+        assert_eq!(
+            state::classify_three_finger_swipe(10.0, -100.0),
+            Some(state::ThreeFingerSwipeAction::OpenOverview)
+        );
+        assert_eq!(
+            state::classify_three_finger_swipe(5.0, 95.0),
+            Some(state::ThreeFingerSwipeAction::CloseOverview)
+        );
+
+        let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+        compositor.screen_locked = true;
+        assert!(!compositor.begin_touchpad_swipe(3));
+        compositor.screen_locked = false;
+        assert!(compositor.begin_touchpad_swipe(3));
+        assert!(compositor.update_touchpad_swipe((-150.0, 0.0).into()));
+        assert!(compositor.end_touchpad_swipe(true, serial)); // cancelled
+        assert_eq!(
+            compositor.wm.active_workspace_id(),
+            rusty_wm::WorkspaceId(1)
+        );
+
+        // 3. DockWindowEntry & WindowSwitcherCard carry xdg_toplevel_icon_v1 metadata cleanly.
+        let w1 = compositor.wm.next_window_id();
+        let sample_icon = icons::ShmToplevelIcon {
+            revision: 7,
+            icon_name: Some("utilities-terminal".to_owned()),
+            buffers: Vec::new(),
+        };
+        let dock_entry = shell_render::DockWindowEntry {
+            id: w1,
+            title: "Term".to_owned(),
+            badge: "Te".to_owned(),
+            icon_name: Some("utilities-terminal".to_owned()),
+            toplevel_icon: Some(sample_icon),
+            dimensions: "800x600".to_owned(),
+            focused: true,
+            minimized: false,
+        };
+        let switcher_card = shell_render::WindowSwitcherCard {
+            title: &dock_entry.title,
+            badge: &dock_entry.badge,
+            window_id: dock_entry.id,
+            icon_name: dock_entry.icon_name.as_deref(),
+            toplevel_icon: dock_entry.toplevel_icon.as_ref(),
+            minimized: dock_entry.minimized,
+        };
+        assert_eq!(switcher_card.toplevel_icon.map(|i| i.revision), Some(7));
+        Ok(())
+    }
 }
