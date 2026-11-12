@@ -6,10 +6,25 @@
 use smithay::backend::renderer::Color32F;
 use smithay::backend::renderer::element::memory::MemoryRenderBufferRenderElement;
 use smithay::backend::renderer::element::solid::SolidColorRenderElement;
+use smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement;
 use smithay::backend::renderer::element::{Id, Kind};
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::renderer::utils::CommitCounter;
 use smithay::utils::{Point, Rectangle, Size};
+
+smithay::backend::renderer::element::render_elements! {
+    /// Unified render element type emitted across shell, SSD frames, text, and Wayland surfaces.
+    pub CompositorRenderElement<=GlesRenderer>;
+    /// Client Wayland surface element.
+    Surface = WaylandSurfaceRenderElement<GlesRenderer>,
+    /// Solid or translucent colored rectangle.
+    Solid = SolidColorRenderElement,
+    /// CPU-rasterized, GPU-cached buffer (text glyphs, rounded SDF corners, circles, shadows).
+    Memory = MemoryRenderBufferRenderElement<GlesRenderer>,
+}
+
+/// Resize grab border thickness in logical pixels (`RUSTYOS-022`).
+pub const RESIZE_GRAB_BORDER: f64 = 6.0;
 
 /// `TopBar` height in logical pixels.
 pub const TOP_BAR_HEIGHT: i32 = 32;
@@ -879,7 +894,29 @@ pub fn check_top_bar_workspace_click(x: f64, y: f64) -> Option<u8> {
     }
 }
 
-/// Interactive hit zone on a window's Server-Side Decoration titlebar (`RUSTYOS-019`).
+/// Active edges targeted by an interactive window resize (`RUSTYOS-022`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct ResizeEdges {
+    /// Resize top edge.
+    pub top: bool,
+    /// Resize bottom edge.
+    pub bottom: bool,
+    /// Resize left edge.
+    pub left: bool,
+    /// Resize right edge.
+    pub right: bool,
+}
+
+impl ResizeEdges {
+    /// Returns `true` if at least one edge is active.
+    #[must_use]
+    pub const fn any(self) -> bool {
+        self.top || self.bottom || self.left || self.right
+    }
+}
+
+/// Interactive hit zone on a window's Server-Side Decoration frame (`RUSTYOS-019`/`022`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SsdHit {
     /// Red close button ("traffic light").
@@ -890,38 +927,63 @@ pub enum SsdHit {
     Maximize(rusty_wm::WindowId),
     /// Remaining titlebar surface initiating window drag.
     TitlebarDrag(rusty_wm::WindowId),
+    /// Outer border/corner band initiating window resize (`RUSTYOS-022`).
+    Resize(rusty_wm::WindowId, ResizeEdges),
 }
 
-/// Hit-tests `(x, y)` against visible window titlebars in reverse (top-to-bottom) stacking order.
+/// Hit-tests `(x, y)` against visible window frames in reverse (top-to-bottom) stacking order.
 #[must_use]
 pub fn check_window_ssd_hit(
     windows_bottom_to_top: &[(rusty_wm::WindowId, rusty_wm::Rect)],
     x: f64,
     y: f64,
 ) -> Option<SsdHit> {
+    let pad = RESIZE_GRAB_BORDER;
     for &(win_id, rect) in windows_bottom_to_top.iter().rev() {
         let rx = f64::from(rect.x);
         let ry = f64::from(rect.y);
         let rw = f64::from(rect.width);
+        let rh = f64::from(rect.height);
         let th = f64::from(TITLEBAR_HEIGHT);
 
-        if x >= rx && x < rx + rw && y >= ry && y < ry + th {
-            // Traffic-light hitboxes on the left of titlebar
-            let rel_x = x - rx;
-            let rel_y = y - ry;
-            if (6.0..=22.0).contains(&rel_y) {
-                if (10.0..=26.0).contains(&rel_x) {
-                    return Some(SsdHit::Close(win_id));
-                }
-                if (28.0..=44.0).contains(&rel_x) {
-                    return Some(SsdHit::Minimize(win_id));
-                }
-                if (46.0..=62.0).contains(&rel_x) {
-                    return Some(SsdHit::Maximize(win_id));
-                }
+        if x < rx - pad || x >= rx + rw + pad || y < ry - pad || y >= ry + rh + pad {
+            continue;
+        }
+
+        let rel_x = x - rx;
+        let rel_y = y - ry;
+
+        // 1. Traffic-light buttons take priority inside titlebar
+        if (6.0..=22.0).contains(&rel_y) {
+            if (10.0..=26.0).contains(&rel_x) {
+                return Some(SsdHit::Close(win_id));
             }
+            if (28.0..=44.0).contains(&rel_x) {
+                return Some(SsdHit::Minimize(win_id));
+            }
+            if (46.0..=62.0).contains(&rel_x) {
+                return Some(SsdHit::Maximize(win_id));
+            }
+        }
+
+        // 2. Outer frame edges & corners trigger interactive resize
+        let edges = ResizeEdges {
+            left: rel_x < pad,
+            right: rel_x >= rw - pad,
+            top: rel_y < pad - 1.0,
+            bottom: rel_y >= rh - pad,
+        };
+        if edges.any() {
+            return Some(SsdHit::Resize(win_id, edges));
+        }
+
+        // 3. Remaining titlebar interior triggers move drag
+        if rel_x >= 0.0 && rel_x < rw && rel_y >= 0.0 && rel_y < th {
             return Some(SsdHit::TitlebarDrag(win_id));
         }
+
+        // Click landed inside this foreground window's client surface; stop checking windows underneath.
+        return None;
     }
     None
 }
@@ -1448,6 +1510,893 @@ pub fn generate_ssd_title_element(
     text_cache.render_label_centered(renderer, title, 12.0, color, bounds)
 }
 
+const RGBA_SURFACE: [u8; 4] = [22, 16, 35, 255]; // #161023
+const RGBA_SURFACE_ELEVATED: [u8; 4] = [32, 24, 46, 245]; // #20182E @ 0.96
+const RGBA_SURFACE_OVERLAY: [u8; 4] = [41, 32, 55, 250]; // #292037 @ 0.98
+const RGBA_ACCENT: [u8; 4] = [165, 110, 255, 255]; // #A56EFF
+const RGBA_ACCENT_HOVER: [u8; 4] = [185, 138, 255, 255]; // #B98AFF
+const RGBA_ACCENT_MUTED: [u8; 4] = [118, 80, 181, 255]; // #7650B5
+const RGBA_SUBTLE: [u8; 4] = [118, 107, 133, 255]; // #766B85
+const RGBA_MUTED: [u8; 4] = [166, 155, 181, 255]; // #A69BB5
+const RGBA_BORDER: [u8; 4] = [255, 255, 255, 31];
+const RGBA_BORDER_HIGHLIGHT: [u8; 4] = [255, 255, 255, 56];
+const RGBA_DANGER: [u8; 4] = [229, 107, 117, 255];
+const RGBA_WARNING: [u8; 4] = [232, 196, 119, 255];
+const RGBA_SUCCESS: [u8; 4] = [131, 214, 160, 255];
+
+fn rgba_to_premul_color32f(rgba: [u8; 4]) -> Color32F {
+    let a = f32::from(rgba[3]) / 255.0;
+    let r = f32::from(rgba[0]) / 255.0;
+    let g = f32::from(rgba[1]) / 255.0;
+    let b = f32::from(rgba[2]) / 255.0;
+    Color32F::new(r * a, g * a, b * a, a)
+}
+
+fn blend_border_over_fill_color(border: [u8; 4], fill: [u8; 4]) -> Color32F {
+    let fa = f32::from(border[3]) / 255.0;
+    let ba = f32::from(fill[3]) / 255.0;
+    let out_a = fa + ba * (1.0 - fa);
+    let inv = 1.0 - fa;
+    let r = (f32::from(border[0]) * fa + f32::from(fill[0]) * ba * inv) / 255.0;
+    let g = (f32::from(border[1]) * fa + f32::from(fill[1]) * ba * inv) / 255.0;
+    let b = (f32::from(border[2]) * fa + f32::from(fill[2]) * ba * inv) / 255.0;
+    Color32F::new(r, g, b, out_a)
+}
+
+/// Pushes a zero-overdraw rounded glass box (4 SDF corners + 4 1px borders + 3 fill bands).
+#[allow(clippy::too_many_arguments, clippy::many_single_char_names)]
+fn push_rounded_glass_box(
+    out: &mut Vec<CompositorRenderElement>,
+    shape_cache: &mut crate::surfaces::UiShapeCache,
+    renderer: &mut GlesRenderer,
+    rect: Rectangle<i32, smithay::utils::Physical>,
+    radius: i32,
+    fill_rgba: [u8; 4],
+    border_rgba: Option<[u8; 4]>,
+) {
+    use crate::surfaces::CornerQuadrant;
+
+    let x = rect.loc.x;
+    let y = rect.loc.y;
+    let w = rect.size.w;
+    let h = rect.size.h;
+    let r = radius.min(w / 2).min(h / 2).max(0);
+    let fill_col = rgba_to_premul_color32f(fill_rgba);
+
+    if r <= 1 {
+        out.push(CompositorRenderElement::Solid(make_solid_element(
+            rect, fill_col,
+        )));
+        return;
+    }
+
+    // 4 cached SDF rounded corners
+    let corners = [
+        (CornerQuadrant::TopLeft, Point::from((x, y))),
+        (CornerQuadrant::TopRight, Point::from((x + w - r, y))),
+        (CornerQuadrant::BottomLeft, Point::from((x, y + h - r))),
+        (
+            CornerQuadrant::BottomRight,
+            Point::from((x + w - r, y + h - r)),
+        ),
+    ];
+    for (quad, loc) in corners {
+        if let Some(el) = shape_cache.corner_element(renderer, r, quad, fill_rgba, border_rgba, loc)
+        {
+            out.push(CompositorRenderElement::Memory(el));
+        }
+    }
+
+    // Straight 1px border strips matching composite_over(border, fill)
+    if let Some(b_rgba) = border_rgba {
+        let rim_col = blend_border_over_fill_color(b_rgba, fill_rgba);
+        if w > 2 * r {
+            out.push(CompositorRenderElement::Solid(make_solid_element(
+                Rectangle::new(Point::from((x + r, y)), Size::from((w - 2 * r, 1))),
+                rim_col,
+            )));
+            out.push(CompositorRenderElement::Solid(make_solid_element(
+                Rectangle::new(Point::from((x + r, y + h - 1)), Size::from((w - 2 * r, 1))),
+                rim_col,
+            )));
+        }
+        if h > 2 * r {
+            out.push(CompositorRenderElement::Solid(make_solid_element(
+                Rectangle::new(Point::from((x, y + r)), Size::from((1, h - 2 * r))),
+                rim_col,
+            )));
+            out.push(CompositorRenderElement::Solid(make_solid_element(
+                Rectangle::new(Point::from((x + w - 1, y + r)), Size::from((1, h - 2 * r))),
+                rim_col,
+            )));
+        }
+    }
+
+    let b_inset = i32::from(border_rgba.is_some());
+    if w > 2 * r && r > b_inset {
+        out.push(CompositorRenderElement::Solid(make_solid_element(
+            Rectangle::new(
+                Point::from((x + r, y + b_inset)),
+                Size::from((w - 2 * r, r - b_inset)),
+            ),
+            fill_col,
+        )));
+        out.push(CompositorRenderElement::Solid(make_solid_element(
+            Rectangle::new(
+                Point::from((x + r, y + h - r)),
+                Size::from((w - 2 * r, r - b_inset)),
+            ),
+            fill_col,
+        )));
+    }
+    if h > 2 * r && w > 2 * b_inset {
+        out.push(CompositorRenderElement::Solid(make_solid_element(
+            Rectangle::new(
+                Point::from((x + b_inset, y + r)),
+                Size::from((w - 2 * b_inset, h - 2 * r)),
+            ),
+            fill_col,
+        )));
+    }
+}
+
+/// Pushes a zero-overdraw soft drop shadow halo around `rect` (`RUSTYOS-022`).
+#[allow(
+    clippy::too_many_arguments,
+    clippy::cast_precision_loss,
+    clippy::many_single_char_names
+)]
+fn push_soft_shadow(
+    out: &mut Vec<CompositorRenderElement>,
+    shape_cache: &mut crate::surfaces::UiShapeCache,
+    renderer: &mut GlesRenderer,
+    rect: Rectangle<i32, smithay::utils::Physical>,
+    inner_radius: i32,
+    spread: i32,
+    max_alpha: u8,
+) {
+    use crate::surfaces::CornerQuadrant;
+
+    let x = rect.loc.x;
+    let y = rect.loc.y;
+    let w = rect.size.w;
+    let h = rect.size.h;
+    let r = inner_radius.min(w / 2).min(h / 2).max(0);
+    if spread <= 0 {
+        return;
+    }
+
+    let shadow_rgb = [5, 2, 12];
+    let corner_locs = [
+        (
+            CornerQuadrant::TopLeft,
+            Point::from((x - spread, y - spread)),
+        ),
+        (
+            CornerQuadrant::TopRight,
+            Point::from((x + w - r, y - spread)),
+        ),
+        (
+            CornerQuadrant::BottomLeft,
+            Point::from((x - spread, y + h - r)),
+        ),
+        (
+            CornerQuadrant::BottomRight,
+            Point::from((x + w - r, y + h - r)),
+        ),
+    ];
+    for (quad, loc) in corner_locs {
+        if let Some(el) =
+            shape_cache.shadow_corner_element(renderer, r, spread, quad, shadow_rgb, max_alpha, loc)
+        {
+            out.push(CompositorRenderElement::Memory(el));
+        }
+    }
+
+    // Stepped non-overlapping perimeter gradient bands matching quadratic SDF falloff
+    let band_count = 5;
+    let step = (spread / band_count).max(1);
+    let max_a = f32::from(max_alpha) / 255.0;
+    for band in 0..band_count {
+        let d0 = band * step;
+        let d1 = if band + 1 == band_count {
+            spread
+        } else {
+            ((band + 1) * step).min(spread)
+        };
+        let thick = d1 - d0;
+        if thick <= 0 {
+            continue;
+        }
+        let d_mid = (d0 + d1) as f32 * 0.5;
+        let t = (d_mid / spread as f32).clamp(0.0, 1.0);
+        let alpha = max_a * (1.0 - t) * (1.0 - t);
+        let col = premul(5.0 / 255.0, 2.0 / 255.0, 12.0 / 255.0, alpha);
+
+        if w > 2 * r {
+            out.push(CompositorRenderElement::Solid(make_solid_element(
+                Rectangle::new(Point::from((x + r, y - d1)), Size::from((w - 2 * r, thick))),
+                col,
+            )));
+            out.push(CompositorRenderElement::Solid(make_solid_element(
+                Rectangle::new(
+                    Point::from((x + r, y + h + d0)),
+                    Size::from((w - 2 * r, thick)),
+                ),
+                col,
+            )));
+        }
+        if h > 2 * r {
+            out.push(CompositorRenderElement::Solid(make_solid_element(
+                Rectangle::new(Point::from((x - d1, y + r)), Size::from((thick, h - 2 * r))),
+                col,
+            )));
+            out.push(CompositorRenderElement::Solid(make_solid_element(
+                Rectangle::new(
+                    Point::from((x + w + d0, y + r)),
+                    Size::from((thick, h - 2 * r)),
+                ),
+                col,
+            )));
+        }
+    }
+}
+
+/// Generates unified front-to-back shell elements with rounded corners, circular status dots,
+/// soft shadows, and GPU-cached typography (`RUSTYOS-022`).
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+pub fn generate_shell_composite_elements(
+    text_cache: &mut crate::text::TextCache,
+    shape_cache: &mut crate::surfaces::UiShapeCache,
+    renderer: &mut GlesRenderer,
+    screen_size: Size<i32, smithay::utils::Physical>,
+    active_workspace: u8,
+    layout_mode: &str,
+    window_count: usize,
+    has_focused_window: bool,
+    top_telemetry: &TopBarTelemetry<'_>,
+    overlay: ShellOverlayView<'_>,
+) -> Vec<CompositorRenderElement> {
+    let mut out = Vec::new();
+    let width = screen_size.w;
+    let height = screen_size.h;
+    let has_text = text_cache.has_font();
+
+    // 1. All shell text labels on the topmost plane
+    let all_text = generate_shell_text_elements(
+        text_cache,
+        renderer,
+        screen_size,
+        active_workspace,
+        layout_mode,
+        window_count,
+        top_telemetry,
+        overlay,
+    );
+    for el in all_text {
+        out.push(CompositorRenderElement::Memory(el));
+    }
+
+    // 2. Active Overlay (Spotlight or QuickSettings) with rounded corners & soft shadow
+    match overlay {
+        ShellOverlayView::None => {}
+        ShellOverlayView::Spotlight(spot) => {
+            let (mx, my, mw, mh) = spotlight_modal_rect(width, height);
+
+            // Search cursor + rounded search bar + rounded result rows (above modal base)
+            let cursor_x = (mx + 64 + spot.cursor_offset_x).min(mx + mw - 28);
+            out.push(CompositorRenderElement::Solid(make_solid_element(
+                Rectangle::new(Point::from((cursor_x, my + 26)), Size::from((2, 24))),
+                COLOR_TEXT,
+            )));
+            if !has_text {
+                out.push(CompositorRenderElement::Solid(make_solid_element(
+                    Rectangle::new(Point::from((mx + 70, my + 34)), Size::from((140, 8))),
+                    COLOR_MUTED,
+                )));
+            }
+            push_rounded_glass_box(
+                &mut out,
+                shape_cache,
+                renderer,
+                Rectangle::new(Point::from((mx + 28, my + 26)), Size::from((24, 24))),
+                6,
+                RGBA_ACCENT,
+                None,
+            );
+            push_rounded_glass_box(
+                &mut out,
+                shape_cache,
+                renderer,
+                Rectangle::new(Point::from((mx + 16, my + 16)), Size::from((mw - 32, 44))),
+                8,
+                RGBA_SURFACE_OVERLAY,
+                Some(RGBA_BORDER),
+            );
+            out.push(CompositorRenderElement::Solid(make_solid_element(
+                Rectangle::new(Point::from((mx + 16, my + 70)), Size::from((mw - 32, 1))),
+                COLOR_BORDER,
+            )));
+
+            let row_h = 44;
+            let start_row_y = my + 80;
+            for idx in 0..spot.items.len().min(3) {
+                let i = i32::try_from(idx).unwrap_or(0);
+                let row_y = start_row_y + i * (row_h + 4);
+                let is_sel = idx == spot.selected_in_window;
+
+                if is_sel {
+                    out.push(CompositorRenderElement::Solid(make_solid_element(
+                        Rectangle::new(
+                            Point::from((mx + 16, row_y + 6)),
+                            Size::from((3, row_h - 12)),
+                        ),
+                        COLOR_ACCENT,
+                    )));
+                }
+                let icon_rgba = if is_sel {
+                    RGBA_ACCENT
+                } else if idx == 1 {
+                    RGBA_ACCENT_MUTED
+                } else {
+                    RGBA_SUBTLE
+                };
+                push_rounded_glass_box(
+                    &mut out,
+                    shape_cache,
+                    renderer,
+                    Rectangle::new(Point::from((mx + 28, row_y + 10)), Size::from((24, 24))),
+                    6,
+                    icon_rgba,
+                    None,
+                );
+                if !has_text {
+                    out.push(CompositorRenderElement::Solid(make_solid_element(
+                        Rectangle::new(
+                            Point::from((mx + 62, row_y + 12)),
+                            Size::from((120 + i * 20, 8)),
+                        ),
+                        COLOR_TEXT,
+                    )));
+                }
+                let row_rgba = if is_sel {
+                    RGBA_SURFACE_OVERLAY
+                } else {
+                    RGBA_SURFACE
+                };
+                push_rounded_glass_box(
+                    &mut out,
+                    shape_cache,
+                    renderer,
+                    Rectangle::new(Point::from((mx + 16, row_y)), Size::from((mw - 32, row_h))),
+                    8,
+                    row_rgba,
+                    None,
+                );
+            }
+
+            let modal_rect = Rectangle::new(Point::from((mx, my)), Size::from((mw, mh)));
+            push_rounded_glass_box(
+                &mut out,
+                shape_cache,
+                renderer,
+                modal_rect,
+                12,
+                RGBA_SURFACE_ELEVATED,
+                Some(RGBA_BORDER_HIGHLIGHT),
+            );
+            push_soft_shadow(&mut out, shape_cache, renderer, modal_rect, 12, 16, 105);
+        }
+        ShellOverlayView::QuickSettings(qs) => {
+            let (px, py, pw, ph) = quick_settings_rect(width, height);
+            let pad = 14;
+            let inner_w = pw - pad * 2;
+            let half_w = (inner_w - 8) / 2;
+            let left_x = px + pad;
+            let right_x = px + pad + half_w + 8;
+
+            // Circular network & power dots
+            if let Some(el) = shape_cache.circle_element(
+                renderer,
+                8,
+                if qs.net_connected {
+                    RGBA_SUCCESS
+                } else {
+                    RGBA_DANGER
+                },
+                None,
+                Point::from((left_x + 10, py + 72)),
+            ) {
+                out.push(CompositorRenderElement::Memory(el));
+            }
+            if let Some(el) = shape_cache.circle_element(
+                renderer,
+                8,
+                if qs.ac_online || qs.battery_percent > 20 {
+                    RGBA_SUCCESS
+                } else {
+                    RGBA_WARNING
+                },
+                None,
+                Point::from((right_x + 10, py + 72)),
+            ) {
+                out.push(CompositorRenderElement::Memory(el));
+            }
+
+            // Rounded Network & Power cards
+            push_rounded_glass_box(
+                &mut out,
+                shape_cache,
+                renderer,
+                Rectangle::new(Point::from((left_x, py + 62)), Size::from((half_w, 56))),
+                8,
+                RGBA_SURFACE_OVERLAY,
+                Some(RGBA_BORDER),
+            );
+            push_rounded_glass_box(
+                &mut out,
+                shape_cache,
+                renderer,
+                Rectangle::new(Point::from((right_x, py + 62)), Size::from((half_w, 56))),
+                8,
+                RGBA_SURFACE_OVERLAY,
+                Some(RGBA_BORDER),
+            );
+
+            // Audio slider buttons & progress track
+            let btn_y = py + 136;
+            let mute_x = px + pw - pad - 116;
+            let minus_x = px + pw - pad - 62;
+            let plus_x = px + pw - pad - 30;
+            push_rounded_glass_box(
+                &mut out,
+                shape_cache,
+                renderer,
+                Rectangle::new(Point::from((mute_x, btn_y)), Size::from((48, 22))),
+                6,
+                if qs.audio_muted {
+                    RGBA_DANGER
+                } else {
+                    RGBA_SURFACE
+                },
+                None,
+            );
+            push_rounded_glass_box(
+                &mut out,
+                shape_cache,
+                renderer,
+                Rectangle::new(Point::from((minus_x, btn_y)), Size::from((28, 22))),
+                6,
+                RGBA_SURFACE,
+                None,
+            );
+            push_rounded_glass_box(
+                &mut out,
+                shape_cache,
+                renderer,
+                Rectangle::new(Point::from((plus_x, btn_y)), Size::from((28, 22))),
+                6,
+                RGBA_SURFACE,
+                None,
+            );
+
+            let track_w = inner_w - 24;
+            let track_x = left_x + 12;
+            let track_y = py + 170;
+            let fill_w = (track_w * i32::from(qs.volume_percent.min(100))) / 100;
+            if fill_w > 0 {
+                out.push(CompositorRenderElement::Solid(make_solid_element(
+                    Rectangle::new(Point::from((track_x, track_y)), Size::from((fill_w, 8))),
+                    if qs.audio_muted {
+                        COLOR_SUBTLE
+                    } else {
+                        COLOR_ACCENT
+                    },
+                )));
+            }
+            out.push(CompositorRenderElement::Solid(make_solid_element(
+                Rectangle::new(Point::from((track_x, track_y)), Size::from((track_w, 8))),
+                COLOR_SURFACE,
+            )));
+            push_rounded_glass_box(
+                &mut out,
+                shape_cache,
+                renderer,
+                Rectangle::new(Point::from((left_x, py + 128)), Size::from((inner_w, 64))),
+                8,
+                RGBA_SURFACE_OVERLAY,
+                Some(RGBA_BORDER),
+            );
+
+            // 2x2 rounded toggle buttons
+            let is_tile = qs.layout_mode == "master-stack";
+            push_rounded_glass_box(
+                &mut out,
+                shape_cache,
+                renderer,
+                Rectangle::new(Point::from((left_x, py + 202)), Size::from((half_w, 32))),
+                8,
+                if is_tile {
+                    RGBA_ACCENT_MUTED
+                } else {
+                    RGBA_SURFACE_OVERLAY
+                },
+                Some(RGBA_BORDER),
+            );
+            push_rounded_glass_box(
+                &mut out,
+                shape_cache,
+                renderer,
+                Rectangle::new(Point::from((right_x, py + 202)), Size::from((half_w, 32))),
+                8,
+                if qs.reduced_motion {
+                    RGBA_ACCENT_MUTED
+                } else {
+                    RGBA_SURFACE_OVERLAY
+                },
+                Some(RGBA_BORDER),
+            );
+            push_rounded_glass_box(
+                &mut out,
+                shape_cache,
+                renderer,
+                Rectangle::new(Point::from((left_x, py + 242)), Size::from((half_w, 32))),
+                8,
+                RGBA_SURFACE_OVERLAY,
+                Some(RGBA_BORDER),
+            );
+            push_rounded_glass_box(
+                &mut out,
+                shape_cache,
+                renderer,
+                Rectangle::new(Point::from((right_x, py + 242)), Size::from((half_w, 32))),
+                8,
+                RGBA_SURFACE_OVERLAY,
+                Some(RGBA_BORDER),
+            );
+
+            out.push(CompositorRenderElement::Solid(make_solid_element(
+                Rectangle::new(Point::from((left_x, py + 52)), Size::from((inner_w, 1))),
+                COLOR_BORDER,
+            )));
+
+            let qs_rect = Rectangle::new(Point::from((px, py)), Size::from((pw, ph)));
+            push_rounded_glass_box(
+                &mut out,
+                shape_cache,
+                renderer,
+                qs_rect,
+                12,
+                RGBA_SURFACE_ELEVATED,
+                Some(RGBA_BORDER_HIGHLIGHT),
+            );
+            push_soft_shadow(&mut out, shape_cache, renderer, qs_rect, 12, 16, 105);
+        }
+    }
+
+    // 3. TopBar circular dot, rounded pills & background bar
+    let (status_x, status_y, status_w, status_h) = status_pill_rect(width);
+    if let Some(el) = shape_cache.circle_element(
+        renderer,
+        8,
+        if top_telemetry.net_connected {
+            RGBA_SUCCESS
+        } else {
+            RGBA_WARNING
+        },
+        None,
+        Point::from((status_x + 8, status_y + 6)),
+    ) {
+        out.push(CompositorRenderElement::Memory(el));
+    }
+    push_rounded_glass_box(
+        &mut out,
+        shape_cache,
+        renderer,
+        Rectangle::new(
+            Point::from((status_x, status_y)),
+            Size::from((status_w, status_h)),
+        ),
+        6,
+        if top_telemetry.quick_settings_open {
+            RGBA_ACCENT_MUTED
+        } else {
+            RGBA_SURFACE_OVERLAY
+        },
+        Some(RGBA_BORDER),
+    );
+
+    let ws_y = 6;
+    let ws_h = 20;
+    let mut start_x = WS_START_X;
+    for ws in 1..=9 {
+        let ws_rect = Rectangle::new(
+            Point::from((start_x, ws_y)),
+            Size::from((WS_BTN_WIDTH, ws_h)),
+        );
+        if ws == active_workspace {
+            out.push(CompositorRenderElement::Solid(make_solid_element(
+                Rectangle::new(
+                    Point::from((start_x + (WS_BTN_WIDTH - 8) / 2, ws_y + ws_h - 2)),
+                    Size::from((8, 2)),
+                ),
+                COLOR_TEXT,
+            )));
+            push_rounded_glass_box(
+                &mut out,
+                shape_cache,
+                renderer,
+                ws_rect,
+                6,
+                RGBA_ACCENT,
+                None,
+            );
+        } else {
+            push_rounded_glass_box(
+                &mut out,
+                shape_cache,
+                renderer,
+                ws_rect,
+                6,
+                RGBA_SURFACE_OVERLAY,
+                None,
+            );
+        }
+        start_x += WS_BTN_STRIDE;
+    }
+
+    push_rounded_glass_box(
+        &mut out,
+        shape_cache,
+        renderer,
+        Rectangle::new(Point::from((start_x + 8, ws_y)), Size::from((56, ws_h))),
+        6,
+        RGBA_SURFACE_OVERLAY,
+        Some(if layout_mode == "master-stack" {
+            RGBA_ACCENT
+        } else {
+            RGBA_BORDER
+        }),
+    );
+
+    out.push(CompositorRenderElement::Solid(make_solid_element(
+        Rectangle::new(Point::from((0, TOP_BAR_HEIGHT - 1)), Size::from((width, 1))),
+        COLOR_BORDER,
+    )));
+    out.push(CompositorRenderElement::Solid(make_solid_element(
+        Rectangle::new(Point::from((0, 0)), Size::from((width, TOP_BAR_HEIGHT))),
+        COLOR_SURFACE_ELEVATED,
+    )));
+
+    // 4. Dock rounded app tiles, rounded glass pill, and soft drop shadow
+    let dock_items_count = (3 + window_count).max(3);
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let dock_width = ((dock_items_count as i32) * 52 + 16).min(width - 48);
+    let dock_x = (width - dock_width) / 2;
+    let dock_y = height - DOCK_HEIGHT - DOCK_MARGIN_BOTTOM;
+    let mut item_x = dock_x + 8;
+    let item_y = dock_y + 8;
+    let item_size = 40;
+
+    for i in 0..dock_items_count {
+        let is_running_window = i >= 3;
+        let is_focused = is_running_window && has_focused_window;
+        if is_running_window || i == 0 {
+            out.push(CompositorRenderElement::Solid(make_solid_element(
+                Rectangle::new(
+                    Point::from((item_x + (item_size - 8) / 2, dock_y + DOCK_HEIGHT - 5)),
+                    Size::from((8, 2)),
+                ),
+                COLOR_ACCENT,
+            )));
+        }
+        let inner_size = 28;
+        let inner_offset = (item_size - inner_size) / 2;
+        let inner_rgba = match i {
+            0 => RGBA_ACCENT,
+            1 => RGBA_ACCENT_MUTED,
+            2 => RGBA_SUBTLE,
+            _ if is_focused => RGBA_ACCENT_HOVER,
+            _ => RGBA_MUTED,
+        };
+        push_rounded_glass_box(
+            &mut out,
+            shape_cache,
+            renderer,
+            Rectangle::new(
+                Point::from((item_x + inner_offset, item_y + inner_offset)),
+                Size::from((inner_size, inner_size)),
+            ),
+            6,
+            inner_rgba,
+            None,
+        );
+        push_rounded_glass_box(
+            &mut out,
+            shape_cache,
+            renderer,
+            Rectangle::new(
+                Point::from((item_x, item_y)),
+                Size::from((item_size, item_size)),
+            ),
+            8,
+            RGBA_SURFACE_OVERLAY,
+            None,
+        );
+        item_x += item_size + 12;
+    }
+
+    let dock_rect = Rectangle::new(
+        Point::from((dock_x, dock_y)),
+        Size::from((dock_width, DOCK_HEIGHT)),
+    );
+    push_rounded_glass_box(
+        &mut out,
+        shape_cache,
+        renderer,
+        dock_rect,
+        12,
+        RGBA_SURFACE_ELEVATED,
+        Some(RGBA_BORDER_HIGHLIGHT),
+    );
+    push_soft_shadow(&mut out, shape_cache, renderer, dock_rect, 12, 14, 96);
+
+    out
+}
+
+/// Generates rounded SSD titlebar, circular macOS traffic lights, and 1px frame rim (`RUSTYOS-022`).
+#[allow(clippy::many_single_char_names, clippy::too_many_lines)]
+pub fn generate_window_ssd_composite_elements(
+    text_cache: &mut crate::text::TextCache,
+    shape_cache: &mut crate::surfaces::UiShapeCache,
+    renderer: &mut GlesRenderer,
+    rect: rusty_wm::Rect,
+    title: &str,
+    is_focused: bool,
+) -> Vec<CompositorRenderElement> {
+    use crate::surfaces::CornerQuadrant;
+
+    let mut out = Vec::new();
+    let x = rect.x;
+    let y = rect.y;
+    let w = rect.width.max(64);
+    let h = rect.height.max(TITLEBAR_HEIGHT + 32);
+
+    if let Some(title_el) =
+        generate_ssd_title_element(text_cache, renderer, rect, title, is_focused)
+    {
+        out.push(CompositorRenderElement::Memory(title_el));
+    }
+
+    // Circular anti-aliased macOS traffic-light buttons
+    let btn_y = y + 8;
+    let btn_d = 12;
+    let close_rgba = if is_focused { RGBA_DANGER } else { RGBA_SUBTLE };
+    let min_rgba = if is_focused {
+        RGBA_WARNING
+    } else {
+        RGBA_SUBTLE
+    };
+    let max_rgba = if is_focused {
+        RGBA_SUCCESS
+    } else {
+        RGBA_SUBTLE
+    };
+    let rim_opt = is_focused.then_some([255, 255, 255, 45]);
+
+    for (bx, rgba) in [(x + 12, close_rgba), (x + 30, min_rgba), (x + 48, max_rgba)] {
+        if let Some(el) =
+            shape_cache.circle_element(renderer, btn_d, rgba, rim_opt, Point::from((bx, btn_y)))
+        {
+            out.push(CompositorRenderElement::Memory(el));
+        }
+    }
+
+    // Rounded top corners (8px radius) + seamless 1px glass border around window frame
+    let r = 8;
+    let titlebar_rgba = if is_focused {
+        RGBA_SURFACE_OVERLAY
+    } else {
+        RGBA_SURFACE_ELEVATED
+    };
+    let border_rgba = if is_focused {
+        RGBA_BORDER_HIGHLIGHT
+    } else {
+        RGBA_BORDER
+    };
+    let titlebar_fill = rgba_to_premul_color32f(titlebar_rgba);
+    let top_rim_col = blend_border_over_fill_color(border_rgba, titlebar_rgba);
+    let edge_border_col = rgba_to_premul_color32f(border_rgba);
+
+    if let Some(el) = shape_cache.corner_element(
+        renderer,
+        r,
+        CornerQuadrant::TopLeft,
+        titlebar_rgba,
+        Some(border_rgba),
+        Point::from((x, y)),
+    ) {
+        out.push(CompositorRenderElement::Memory(el));
+    }
+    if let Some(el) = shape_cache.corner_element(
+        renderer,
+        r,
+        CornerQuadrant::TopRight,
+        titlebar_rgba,
+        Some(border_rgba),
+        Point::from((x + w - r, y)),
+    ) {
+        out.push(CompositorRenderElement::Memory(el));
+    }
+
+    // Top border between rounded corners & side/bottom 1px frame rim
+    if w > 2 * r {
+        out.push(CompositorRenderElement::Solid(make_solid_element(
+            Rectangle::new(Point::from((x + r, y)), Size::from((w - 2 * r, 1))),
+            top_rim_col,
+        )));
+        out.push(CompositorRenderElement::Solid(make_solid_element(
+            Rectangle::new(Point::from((x + r, y + 1)), Size::from((w - 2 * r, r - 1))),
+            titlebar_fill,
+        )));
+    }
+    if h > TITLEBAR_HEIGHT {
+        out.push(CompositorRenderElement::Solid(make_solid_element(
+            Rectangle::new(
+                Point::from((x + 1, y + r)),
+                Size::from((w - 2, TITLEBAR_HEIGHT - r - 1)),
+            ),
+            titlebar_fill,
+        )));
+    }
+    // Titlebar bottom divider + side & bottom 1px rim
+    out.push(CompositorRenderElement::Solid(make_solid_element(
+        Rectangle::new(
+            Point::from((x + 1, y + TITLEBAR_HEIGHT - 1)),
+            Size::from((w - 2, 1)),
+        ),
+        COLOR_BORDER,
+    )));
+    out.push(CompositorRenderElement::Solid(make_solid_element(
+        Rectangle::new(Point::from((x, y + r)), Size::from((1, h - r))),
+        edge_border_col,
+    )));
+    out.push(CompositorRenderElement::Solid(make_solid_element(
+        Rectangle::new(Point::from((x + w - 1, y + r)), Size::from((1, h - r))),
+        edge_border_col,
+    )));
+    out.push(CompositorRenderElement::Solid(make_solid_element(
+        Rectangle::new(Point::from((x, y + h)), Size::from((w, 1))),
+        edge_border_col,
+    )));
+
+    out
+}
+
+/// Generates soft radial drop shadow elements strictly outside a managed window rectangle (`RUSTYOS-022`).
+pub fn generate_window_shadow_elements(
+    shape_cache: &mut crate::surfaces::UiShapeCache,
+    renderer: &mut GlesRenderer,
+    rect: rusty_wm::Rect,
+    is_focused: bool,
+) -> Vec<CompositorRenderElement> {
+    let mut out = Vec::new();
+    let w = rect.width.max(64);
+    let h = rect.height.max(TITLEBAR_HEIGHT + 32);
+    let spread = if is_focused { 14 } else { 10 };
+    let max_alpha = if is_focused { 96 } else { 58 };
+    push_soft_shadow(
+        &mut out,
+        shape_cache,
+        renderer,
+        Rectangle::new(Point::from((rect.x, rect.y)), Size::from((w, h))),
+        8,
+        spread,
+        max_alpha,
+    );
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1641,10 +2590,48 @@ mod tests {
             check_window_ssd_hit(&windows, 300.0, 114.0),
             Some(SsdHit::TitlebarDrag(win2))
         );
-        // Click below titlebar inside client area returns None
+        // Click below titlebar inside client area returns None (must not hit resize edges)
         assert_eq!(
             check_window_ssd_hit(&windows, 300.0, f64::from(100 + TITLEBAR_HEIGHT + 20)),
             None
+        );
+
+        // Edge and corner resize hits (`RUSTYOS-022`)
+        assert_eq!(
+            check_window_ssd_hit(&windows, 300.0, 101.0),
+            Some(SsdHit::Resize(
+                win2,
+                ResizeEdges {
+                    top: true,
+                    bottom: false,
+                    left: false,
+                    right: false,
+                }
+            ))
+        );
+        assert_eq!(
+            check_window_ssd_hit(&windows, 101.0, 300.0),
+            Some(SsdHit::Resize(
+                win2,
+                ResizeEdges {
+                    top: false,
+                    bottom: false,
+                    left: true,
+                    right: false,
+                }
+            ))
+        );
+        assert_eq!(
+            check_window_ssd_hit(&windows, 599.0, 499.0),
+            Some(SsdHit::Resize(
+                win2,
+                ResizeEdges {
+                    top: false,
+                    bottom: true,
+                    left: false,
+                    right: true,
+                }
+            ))
         );
     }
 

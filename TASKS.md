@@ -261,6 +261,19 @@ hardware/software context и низкие накладные расходы.
 - **Acceptance criteria:** Клик по правой пилюле TopBar или `Alt+S` открывает Quick Settings; громкость/mute, раскладка и `reduced_motion` работают без блокировки event loop; 43 теста и clippy проходят без предупреждений.
 - **Risks:** Минимальные (без PipeWire/PulseAudio UI обновляется оптимистично и не роняет композитор).
 
+## RUSTYOS-022 --- Rounded Glass Aesthetics, Soft Shadows & Interactive Mouse Resize
+
+**Статус:** done **Фаза:** 19 (Visual Polish & Ergonomics)
+
+- **Цель:** Добавить скруглённые углы панелей, оверлеев и SSD-заголовков (`Purple Glass`), мягкие внешние тени, круглые кнопки traffic lights в стиле macOS и интерактивный ресайз окон мышью за края и углы.
+- **Scope:**
+  - `crates/rusty-compositor/src/surfaces.rs`: кэшируемый на GPU `UiShapeCache` с антиалиасированными SDF-патчами (`circle_element`, `corner_element`, `shadow_corner_element`) в формате premultiplied `Argb8888`.
+  - `crates/rusty-compositor/src/shell_render.rs` и `winit_backend.rs`: единый `CompositorRenderElement`, 9-slice рендеринг скруглённого стекла без наложения пикселей (`push_rounded_glass_box`), внешние тени (`push_soft_shadow`, `generate_window_shadow_elements`), круглые traffic lights (`generate_window_ssd_composite_elements`), композитный UI-слой (`generate_shell_composite_elements`) и детекция границ/углов окна (`ResizeEdges`, `SsdHit::Resize`).
+  - `crates/rusty-wm/src/lib.rs`, `crates/rusty-compositor/src/state.rs` и `input.rs`: `WindowManager::resize_window`, `WindowResizeState`, `compute_resized_rect` с минимальными габаритами `240x160` и защитой `TOP_BAR_HEIGHT`.
+- **Dependencies:** `RUSTYOS-019`, `RUSTYOS-020`, `RUSTYOS-021`.
+- **Acceptance criteria:** Все скругления, тени и круглые traffic lights кэшируются на GPU; ресайз за любой край/угол работает без перекрытия TopBar; 46 тестов и `clippy -D warnings` проходят без предупреждений.
+- **Risks:** Минимальные (CPU-растеризация выполняется однократно на уникальный размер/радиус/цвет с кэшированием `MemoryRenderBuffer`).
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

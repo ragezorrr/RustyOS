@@ -9,9 +9,7 @@ use smithay::{
     backend::{
         renderer::{
             Color32F, damage::OutputDamageTracker, element::AsRenderElements,
-            element::memory::MemoryRenderBufferRenderElement,
-            element::solid::SolidColorRenderElement, element::surface::WaylandSurfaceRenderElement,
-            gles::GlesRenderer,
+            element::surface::WaylandSurfaceRenderElement, gles::GlesRenderer,
         },
         winit::{self, WinitEvent, WinitGraphicsBackend},
     },
@@ -31,19 +29,13 @@ use tracing::{error, info, warn};
 
 use crate::{
     BackendMode, BootstrapReport, CompositorConfig, CompositorError,
+    shell_render::CompositorRenderElement,
     state::{PRIMARY_OUTPUT_ID, RustyCompositorState},
 };
 
 /// Clear color for the nested compositor background (dark slate inspired by macOS dark desktop).
 /// Background clear color matching `background = "#0F0A19"` from `DESIGN.md` (Version 2.0).
 const BACKGROUND_COLOR: Color32F = Color32F::new(0.059, 0.039, 0.098, 1.0);
-
-smithay::backend::renderer::element::render_elements! {
-    CompositorRenderElement<=GlesRenderer>;
-    Surface = WaylandSurfaceRenderElement<GlesRenderer>,
-    Solid = SolidColorRenderElement,
-    Memory = MemoryRenderBufferRenderElement<GlesRenderer>,
-}
 
 /// Runs the nested Smithay + Winit compositor event loop.
 ///
@@ -79,6 +71,7 @@ pub fn run_nested_winit(config: &CompositorConfig) -> Result<BootstrapReport, Co
     state.telemetry = crate::telemetry::SystemMetricsHandle::start_background();
     let mut damage_tracker = OutputDamageTracker::from_output(&state.output);
     let mut text_cache = crate::text::TextCache::new();
+    let mut shape_cache = crate::surfaces::UiShapeCache::new();
     let loop_handle = event_loop.handle();
 
     // 1. Register Wayland client connection listener.
@@ -120,6 +113,7 @@ pub fn run_nested_winit(config: &CompositorConfig) -> Result<BootstrapReport, Co
                     &mut backend,
                     &mut damage_tracker,
                     &mut text_cache,
+                    &mut shape_cache,
                     app_state,
                     force_full_damage,
                 ) {
@@ -329,6 +323,7 @@ fn render_winit_frame(
     backend: &mut WinitGraphicsBackend<GlesRenderer>,
     damage_tracker: &mut OutputDamageTracker,
     text_cache: &mut crate::text::TextCache,
+    shape_cache: &mut crate::surfaces::UiShapeCache,
     state: &mut RustyCompositorState,
     force_full_damage: bool,
 ) -> Result<(), String> {
@@ -372,8 +367,6 @@ fn render_winit_frame(
             renderer,
             &[Layer::Overlay, Layer::Top],
         );
-
-        let has_text = text_cache.has_font();
 
         if !layer_surfaces_present {
             let tel = state.telemetry.snapshot();
@@ -432,23 +425,10 @@ fn render_winit_frame(
                 crate::shell_render::ShellOverlayView::None
             };
 
-            let text_elements = crate::shell_render::generate_shell_text_elements(
+            render_list.extend(crate::shell_render::generate_shell_composite_elements(
                 text_cache,
+                shape_cache,
                 renderer,
-                size,
-                active_ws,
-                layout_str,
-                window_count,
-                &top_telemetry,
-                overlay,
-            );
-            render_list.extend(
-                text_elements
-                    .into_iter()
-                    .map(CompositorRenderElement::Memory),
-            );
-
-            let shell_elements = crate::shell_render::generate_shell_render_elements(
                 size,
                 active_ws,
                 layout_str,
@@ -456,13 +436,7 @@ fn render_winit_frame(
                 has_focused,
                 &top_telemetry,
                 overlay,
-                has_text,
-            );
-            render_list.extend(
-                shell_elements
-                    .into_iter()
-                    .map(CompositorRenderElement::Solid),
-            );
+            ));
         }
 
         // Render managed windows and their SSD titlebars in top-to-bottom stacking order
@@ -474,9 +448,22 @@ fn render_winit_frame(
             let frame_rect = rusty_wm::Rect::new(origin.0, origin.1, rect.width, rect.height);
             let is_focused = focused_win == Some(win_id);
 
-            let mut title_text = format!("Window #{}", win_id.0);
-            if let Some(smithay_win) = state.smithay_window_for_id(win_id) {
-                title_text = window_title(&smithay_win, win_id);
+            let smithay_win = state.smithay_window_for_id(win_id);
+            let title_text = smithay_win.as_ref().map_or_else(
+                || format!("Window #{}", win_id.0),
+                |win| window_title(win, win_id),
+            );
+
+            render_list.extend(crate::shell_render::generate_window_ssd_composite_elements(
+                text_cache,
+                shape_cache,
+                renderer,
+                frame_rect,
+                &title_text,
+                is_focused,
+            ));
+
+            if let Some(smithay_win) = smithay_win {
                 let client_loc = Point::<i32, Logical>::from((
                     origin.0,
                     origin.1 + crate::shell_render::TITLEBAR_HEIGHT,
@@ -497,19 +484,12 @@ fn render_winit_frame(
                 );
             }
 
-            if let Some(title_el) = crate::shell_render::generate_ssd_title_element(
-                text_cache,
+            render_list.extend(crate::shell_render::generate_window_shadow_elements(
+                shape_cache,
                 renderer,
                 frame_rect,
-                &title_text,
                 is_focused,
-            ) {
-                render_list.push(CompositorRenderElement::Memory(title_el));
-            }
-
-            let ssd_elements =
-                crate::shell_render::generate_window_ssd_elements(frame_rect, is_focused, has_text);
-            render_list.extend(ssd_elements.into_iter().map(CompositorRenderElement::Solid));
+            ));
         }
 
         if layer_surfaces_present {

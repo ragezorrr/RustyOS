@@ -609,6 +609,19 @@ impl WindowManager {
         true
     }
 
+    /// Resizes and repositions a window to `rect` in logical space (`RUSTYOS-022`),
+    /// enforcing minimum interactive bounds and clearing any maximized flag.
+    pub fn resize_window(&mut self, id: WindowId, rect: Rect) -> bool {
+        let Some(win) = self.windows.iter_mut().find(|w| w.id == id) else {
+            return false;
+        };
+        let sanitized = Rect::new(rect.x, rect.y, rect.width.max(240), rect.height.max(160));
+        win.maximized = false;
+        win.geometry = sanitized;
+        win.saved_floating_geometry = sanitized;
+        true
+    }
+
     /// Applies a [`WmAction`] to the state machine.
     ///
     /// If the action requests closing a window (`WmAction::CloseFocused`), returns `Some(WindowId)`
@@ -879,5 +892,26 @@ mod tests {
         assert_eq!(wm.window(w1).map(|w| w.workspace), Some(WorkspaceId(2)));
         let geom = wm.window(w1).map(|w| w.geometry).unwrap_or_default();
         assert!(geom.x >= 1920);
+    }
+
+    #[test]
+    fn resize_window_enforces_minimum_bounds_and_clears_maximized() {
+        let mut wm = WindowManager::new(Rect::new(0, 32, 1280, 700));
+        let w1 = wm.next_window_id();
+        wm.map_window(w1, None);
+        wm.apply_action(WmAction::ToggleMaximizeFocused);
+        assert!(wm.window(w1).is_some_and(|w| w.maximized));
+
+        assert!(wm.resize_window(w1, Rect::new(150, 90, 120, 80)));
+        let resized = wm.window(w1).cloned();
+        assert!(resized.as_ref().is_some_and(|w| !w.maximized));
+        assert_eq!(
+            resized.as_ref().map(|w| w.geometry),
+            Some(Rect::new(150, 90, 240, 160))
+        );
+        assert_eq!(
+            resized.as_ref().map(|w| w.saved_floating_geometry),
+            Some(Rect::new(150, 90, 240, 160))
+        );
     }
 }

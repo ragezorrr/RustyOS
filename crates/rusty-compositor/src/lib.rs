@@ -10,6 +10,7 @@ pub mod input;
 pub mod launcher;
 pub mod shell_render;
 pub mod state;
+pub mod surfaces;
 pub mod telemetry;
 pub mod text;
 pub mod winit_backend;

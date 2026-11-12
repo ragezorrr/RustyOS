@@ -202,6 +202,32 @@ impl RustyCompositorState {
             return;
         }
 
+        if let Some(resize) = self.active_window_resize {
+            #[allow(clippy::cast_possible_truncation)]
+            let dx = (pos.x - resize.start_pointer.x).round() as i32;
+            #[allow(clippy::cast_possible_truncation)]
+            let dy = (pos.y - resize.start_pointer.y).round() as i32;
+            let target_rect = compute_resized_rect(
+                resize.start_rect,
+                resize.edges,
+                dx,
+                dy,
+                crate::shell_render::TOP_BAR_HEIGHT,
+            );
+            if self.wm.resize_window(resize.window_id, target_rect)
+                && let Some(win) = self.wm.window(resize.window_id)
+            {
+                let rect = win.geometry;
+                self.animations.snap_window_immediate(
+                    resize.window_id.0,
+                    rusty_animation::LogicalRect::new(rect.x, rect.y, rect.width, rect.height),
+                );
+                let serial = SERIAL_COUNTER.next_serial();
+                self.sync_space_with_wm(serial);
+            }
+            return;
+        }
+
         let serial = SERIAL_COUNTER.next_serial();
         let time = Event::time_msec(event);
         let under = self
@@ -289,6 +315,7 @@ impl RustyCompositorState {
 
         if button_state == ButtonState::Released {
             self.active_window_drag = None;
+            self.active_window_resize = None;
         }
 
         if button_state == ButtonState::Pressed {
@@ -368,6 +395,18 @@ impl RustyCompositorState {
                                     window_id: win_id,
                                     start_pointer: self.pointer_location,
                                     start_origin: (win.geometry.x, win.geometry.y),
+                                });
+                            }
+                        }
+                        crate::shell_render::SsdHit::Resize(win_id, edges) => {
+                            self.wm.focus_and_raise(win_id);
+                            self.sync_space_with_wm(serial);
+                            if let Some(win) = self.wm.window(win_id) {
+                                self.active_window_resize = Some(crate::state::WindowResizeState {
+                                    window_id: win_id,
+                                    edges,
+                                    start_pointer: self.pointer_location,
+                                    start_rect: win.geometry,
                                 });
                             }
                         }
@@ -575,6 +614,43 @@ const fn keysym_to_workspace_index(sym: Keysym) -> Option<u8> {
     }
 }
 
+fn compute_resized_rect(
+    start: rusty_wm::Rect,
+    edges: crate::shell_render::ResizeEdges,
+    dx: i32,
+    dy: i32,
+    min_top: i32,
+) -> rusty_wm::Rect {
+    const MIN_W: i32 = 240;
+    const MIN_H: i32 = 160;
+
+    let mut x = start.x;
+    let mut y = start.y;
+    let mut w = start.width;
+    let mut h = start.height;
+
+    if edges.right {
+        w = (start.width + dx).max(MIN_W);
+    } else if edges.left {
+        let right_edge = start.x + start.width;
+        let max_left = right_edge - MIN_W;
+        x = (start.x + dx).min(max_left);
+        w = right_edge - x;
+    }
+
+    if edges.bottom {
+        h = (start.height + dy).max(MIN_H);
+    } else if edges.top {
+        let bottom_edge = start.y + start.height;
+        let max_top = bottom_edge - MIN_H;
+        let bounded_min_top = min_top.min(max_top);
+        y = (start.y + dy).clamp(bounded_min_top, max_top);
+        h = (bottom_edge - y).max(MIN_H);
+    }
+
+    rusty_wm::Rect::new(x, y, w, h)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -685,5 +761,39 @@ mod tests {
             match_launcher_key(ctrl, Keysym::a, Some("\x01")),
             KeyIntercept::LauncherConsume
         );
+    }
+
+    #[test]
+    fn compute_resized_rect_clamps_minimum_bounds_and_top_bar() {
+        let start = rusty_wm::Rect::new(200, 100, 400, 300);
+
+        let bottom_right = compute_resized_rect(
+            start,
+            crate::shell_render::ResizeEdges {
+                right: true,
+                bottom: true,
+                ..Default::default()
+            },
+            -250,
+            -200,
+            32,
+        );
+        assert_eq!(bottom_right, rusty_wm::Rect::new(200, 100, 240, 160));
+
+        let top_left = compute_resized_rect(
+            start,
+            crate::shell_render::ResizeEdges {
+                left: true,
+                top: true,
+                ..Default::default()
+            },
+            300,
+            -120,
+            32,
+        );
+        assert_eq!(top_left.x, 200 + 400 - 240);
+        assert_eq!(top_left.width, 240);
+        assert_eq!(top_left.y, 32);
+        assert_eq!(top_left.height, (100 + 300) - 32);
     }
 }

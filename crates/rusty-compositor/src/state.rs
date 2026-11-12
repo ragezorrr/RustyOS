@@ -86,6 +86,15 @@ pub struct WindowDragState {
     pub start_origin: (i32, i32),
 }
 
+/// Active mouse-driven window resize state via SSD borders/corners (`RUSTYOS-022`).
+#[derive(Debug, Clone, Copy)]
+pub struct WindowResizeState {
+    pub window_id: WindowId,
+    pub edges: crate::shell_render::ResizeEdges,
+    pub start_pointer: Point<f64, Logical>,
+    pub start_rect: Rect,
+}
+
 /// Primary state container for `rusty-compositor`.
 #[derive(Debug)]
 #[allow(clippy::struct_excessive_bools)]
@@ -134,6 +143,8 @@ pub struct RustyCompositorState {
     pub pointer_location: Point<f64, Logical>,
     /// Active interactive window drag via SSD titlebar (`RUSTYOS-019`).
     pub active_window_drag: Option<WindowDragState>,
+    /// Active interactive window resize via SSD borders/corners (`RUSTYOS-022`).
+    pub active_window_resize: Option<WindowResizeState>,
     /// Low-overhead frame timing and pacing collector (`RUSTYOS-003`).
     pub frame_timing: FrameTimingCollector,
     /// Refresh-rate independent animation engine (`RUSTYOS-008`, ADR-0004).
@@ -236,6 +247,7 @@ impl RustyCompositorState {
             pointer,
             pointer_location: (0.0, 0.0).into(),
             active_window_drag: None,
+            active_window_resize: None,
             frame_timing: FrameTimingCollector::new(DEFAULT_SAMPLE_CAPACITY, 60_000),
             animations: AnimationEngine::default(),
             overview_active: false,
@@ -404,6 +416,12 @@ impl RustyCompositorState {
                 .is_some_and(|drag| drag.window_id == id)
             {
                 self.active_window_drag = None;
+            }
+            if self
+                .active_window_resize
+                .is_some_and(|resize| resize.window_id == id)
+            {
+                self.active_window_resize = None;
             }
             self.window_bindings.retain(|(wid, _)| *wid != id);
             self.wm.unmap_window(id);
