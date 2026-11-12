@@ -27,7 +27,13 @@ smithay::backend::renderer::element::render_elements! {
 pub const RESIZE_GRAB_BORDER: f64 = 6.0;
 
 /// `TopBar` height in logical pixels.
-pub const TOP_BAR_HEIGHT: i32 = 32;
+pub const TOP_BAR_HEIGHT: i32 = 26;
+
+/// Vertical offset of `TopBar` pills/labels inside the bar (`RUSTYOS-036`).
+pub const TOP_BAR_ITEM_Y: i32 = 3;
+
+/// Height of `TopBar` pills/labels (`RUSTYOS-036`).
+pub const TOP_BAR_ITEM_H: i32 = 20;
 
 /// Server-Side Decoration (SSD) titlebar height in logical pixels (`RUSTYOS-019`).
 pub const TITLEBAR_HEIGHT: i32 = 28;
@@ -445,16 +451,16 @@ pub fn check_lock_screen_unlock_click(
 }
 
 fn status_pill_rect(screen_width: i32) -> (i32, i32, i32, i32) {
-    let status_pill_width = 200.min((screen_width - 370).max(120));
+    let status_pill_width = 168.min((screen_width - 340).max(120));
     let status_x = screen_width - status_pill_width - 12;
-    (status_x, 6, status_pill_width, 20)
+    (status_x, TOP_BAR_ITEM_Y, status_pill_width, TOP_BAR_ITEM_H)
 }
 
 fn notification_badge_rect(screen_width: i32) -> (i32, i32, i32, i32) {
     let (status_x, _, _, _) = status_pill_rect(screen_width);
     let badge_w = 42;
     let badge_x = status_x - badge_w - 8;
-    (badge_x, 6, badge_w, 20)
+    (badge_x, TOP_BAR_ITEM_Y, badge_w, TOP_BAR_ITEM_H)
 }
 
 fn kbd_badge_rect(screen_width: i32, notification_count: u32) -> (i32, i32, i32, i32) {
@@ -465,8 +471,11 @@ fn kbd_badge_rect(screen_width: i32, notification_count: u32) -> (i32, i32, i32,
     };
     let badge_w = 32;
     let badge_x = right_anchor - badge_w - 8;
-    (badge_x, 6, badge_w, 20)
+    (badge_x, TOP_BAR_ITEM_Y, badge_w, TOP_BAR_ITEM_H)
 }
+
+/// Width reserved for status glyphs (signal, volume, battery) left of the clock (`RUSTYOS-036`).
+pub const TOP_BAR_GLYPH_CLUSTER_W: i32 = 92;
 
 /// Maximum number of system tray applets displayed simultaneously in `TopBar` (`RUSTYOS-032`).
 pub const MAX_TOP_BAR_TRAY_ITEMS: usize = 6;
@@ -499,7 +508,12 @@ pub fn tray_slot_rects(
     (0..count)
         .map(|idx| {
             let idx_i32 = i32::try_from(idx).unwrap_or(0);
-            (first_x + idx_i32 * stride, 6, slot_w, 20)
+            (
+                first_x + idx_i32 * stride,
+                TOP_BAR_ITEM_Y,
+                slot_w,
+                TOP_BAR_ITEM_H,
+            )
         })
         .collect()
 }
@@ -936,20 +950,6 @@ pub fn check_quick_settings_click(
     QuickSettingsHit::InsidePopover
 }
 
-fn format_status_pill_label(t: &TopBarTelemetry<'_>) -> String {
-    let vol_part = if t.audio_muted {
-        "Mute".to_owned()
-    } else {
-        format!("Vol {}%", t.volume_percent)
-    };
-    if t.has_battery {
-        format!("{vol_part} • {}% • {}", t.battery_percent, t.clock_hhmm)
-    } else {
-        let net_part = if t.net_connected { "Online" } else { "Offline" };
-        format!("{net_part} • {vol_part} • {}", t.clock_hhmm)
-    }
-}
-
 fn truncate_ascii(text: &str, max_chars: usize) -> String {
     let count = text.chars().count();
     if count <= max_chars {
@@ -979,8 +979,8 @@ fn render_top_bar(
     elements.push(make_solid_element(top_bar_border, COLOR_BORDER));
 
     // 2. Workspaces indicators in TopBar (1..=9)
-    let ws_btn_height = 20;
-    let ws_y = 6;
+    let ws_btn_height = TOP_BAR_ITEM_H;
+    let ws_y = TOP_BAR_ITEM_Y;
     let mut start_x = WS_START_X;
 
     for ws in 1..=9 {
@@ -1921,8 +1921,8 @@ pub fn generate_shell_text_elements(
     }
 
     // 2. TopBar workspace digits (1..=9)
-    let ws_btn_height = 20;
-    let ws_y = 6;
+    let ws_btn_height = TOP_BAR_ITEM_H;
+    let ws_y = TOP_BAR_ITEM_Y;
     let mut start_x = WS_START_X;
     for ws in 1..=9 {
         let color = if ws == active_workspace {
@@ -1960,10 +1960,13 @@ pub fn generate_shell_text_elements(
 
     // 4. Right status pill live telemetry text
     let (status_x, _status_y, status_pill_width, _status_h) = status_pill_rect(width);
-    let status_text = format_status_pill_label(top_telemetry);
+    let status_text = top_telemetry.clock_hhmm.to_owned();
     let status_bounds = Rectangle::new(
-        Point::from((status_x + 18, ws_y)),
-        Size::from((status_pill_width - 22, ws_btn_height)),
+        Point::from((status_x + TOP_BAR_GLYPH_CLUSTER_W, ws_y)),
+        Size::from((
+            status_pill_width - TOP_BAR_GLYPH_CLUSTER_W - 6,
+            ws_btn_height,
+        )),
     );
     if let Some(el) =
         text_cache.render_label_centered(renderer, &status_text, 10.5, text_bright, status_bounds)
@@ -2736,6 +2739,81 @@ fn push_soft_shadow(
     }
 }
 
+/// Draws monochrome status glyphs (signal, volume, battery) left of the clock (`RUSTYOS-036`).
+fn push_status_glyphs(
+    out: &mut Vec<CompositorRenderElement>,
+    status_x: i32,
+    t: &TopBarTelemetry<'_>,
+) {
+    let on = rgba_to_premul_color32f([244, 240, 250, 255]);
+    let dim = rgba_to_premul_color32f([244, 240, 250, 90]);
+    let base_y = TOP_BAR_ITEM_Y + TOP_BAR_ITEM_H - 5;
+    let solid = |out: &mut Vec<CompositorRenderElement>, x: i32, y: i32, w: i32, h: i32, c| {
+        out.push(CompositorRenderElement::Solid(make_solid_element(
+            Rectangle::new(Point::from((x, y)), Size::from((w, h))),
+            c,
+        )));
+    };
+
+    // Signal bars (network).
+    for i in 0..4 {
+        let h = 3 + i * 3;
+        solid(
+            out,
+            status_x + 8 + i * 4,
+            base_y - h,
+            3,
+            h,
+            if t.net_connected || i == 0 { on } else { dim },
+        );
+    }
+
+    // Speaker + waves (volume).
+    let vx = status_x + 32;
+    solid(out, vx, base_y - 9, 4, 6, on);
+    solid(out, vx + 4, base_y - 11, 3, 10, on);
+    if t.audio_muted {
+        solid(
+            out,
+            vx + 9,
+            base_y - 6,
+            8,
+            2,
+            rgba_to_premul_color32f(RGBA_DANGER),
+        );
+    } else {
+        if t.volume_percent > 0 {
+            solid(out, vx + 9, base_y - 8, 2, 6, on);
+        }
+        if t.volume_percent > 40 {
+            solid(out, vx + 13, base_y - 11, 2, 10, on);
+        }
+    }
+
+    // Battery (only when hardware battery exists).
+    if t.has_battery {
+        let bx = status_x + 62;
+        let by = base_y - 11;
+        solid(out, bx + 22, by + 3, 2, 5, on);
+        let pct = i32::from(t.battery_percent.min(100));
+        let fill_w = (pct * 16 + 50) / 100;
+        let fill_color = if t.battery_percent <= 15 {
+            rgba_to_premul_color32f(RGBA_DANGER)
+        } else if t.battery_percent <= 30 {
+            rgba_to_premul_color32f(RGBA_WARNING)
+        } else {
+            on
+        };
+        if fill_w > 0 {
+            solid(out, bx + 3, by + 3, fill_w, 5, fill_color);
+        }
+        solid(out, bx, by, 22, 1, on);
+        solid(out, bx, by + 10, 22, 1, on);
+        solid(out, bx, by, 1, 11, on);
+        solid(out, bx + 21, by, 1, 11, on);
+    }
+}
+
 /// Generates unified front-to-back shell elements with rounded corners, circular status dots,
 /// soft shadows, interactive Dock badges, Overview cards, Notification HUD, and GPU-cached typography (`RUSTYOS-022`/`023`/`024`).
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -3267,34 +3345,20 @@ pub fn generate_shell_composite_elements(
         if let Some(el) = tray_icon_el {
             out.push(CompositorRenderElement::Memory(el));
         }
-        let border = if item.attention {
-            Some(RGBA_DANGER)
-        } else if item.passive {
-            Some(RGBA_BORDER)
-        } else {
-            Some(RGBA_BORDER_HIGHLIGHT)
-        };
-        push_rounded_glass_box(
-            &mut out,
-            shape_cache,
-            renderer,
-            Rectangle::new(Point::from((tx, ty)), Size::from((tw, th))),
-            6,
-            RGBA_SURFACE_OVERLAY,
-            border,
-        );
+        // macOS 27 menu bar: no resting plates; only attention items get an outline (`RUSTYOS-036`).
+        if item.attention {
+            push_rounded_glass_box(
+                &mut out,
+                shape_cache,
+                renderer,
+                Rectangle::new(Point::from((tx, ty)), Size::from((tw, th))),
+                10,
+                [229, 107, 117, 40],
+                Some(RGBA_DANGER),
+            );
+        }
     }
 
-    let (kx, ky, kw, kh) = kbd_badge_rect(width, top_telemetry.notification_count);
-    push_rounded_glass_box(
-        &mut out,
-        shape_cache,
-        renderer,
-        Rectangle::new(Point::from((kx, ky)), Size::from((kw, kh))),
-        6,
-        RGBA_SURFACE_OVERLAY,
-        Some(RGBA_BORDER),
-    );
     if top_telemetry.notification_count > 0 {
         let (bx, by, bw, bh) = notification_badge_rect(width);
         push_rounded_glass_box(
@@ -3302,44 +3366,31 @@ pub fn generate_shell_composite_elements(
             shape_cache,
             renderer,
             Rectangle::new(Point::from((bx, by)), Size::from((bw, bh))),
-            6,
+            10,
             RGBA_ACCENT_MUTED,
             Some(RGBA_ACCENT),
         );
     }
     let (status_x, status_y, status_w, status_h) = status_pill_rect(width);
-    if let Some(el) = shape_cache.circle_element(
-        renderer,
-        8,
-        if top_telemetry.net_connected {
-            RGBA_SUCCESS
-        } else {
-            RGBA_WARNING
-        },
-        None,
-        Point::from((status_x + 8, status_y + 6)),
-    ) {
-        out.push(CompositorRenderElement::Memory(el));
+    push_status_glyphs(&mut out, status_x, top_telemetry);
+    // Resting state is plate-less; the pill only highlights while Quick Settings is open (`RUSTYOS-036`).
+    if top_telemetry.quick_settings_open {
+        push_rounded_glass_box(
+            &mut out,
+            shape_cache,
+            renderer,
+            Rectangle::new(
+                Point::from((status_x, status_y)),
+                Size::from((status_w, status_h)),
+            ),
+            10,
+            [255, 255, 255, 46],
+            None,
+        );
     }
-    push_rounded_glass_box(
-        &mut out,
-        shape_cache,
-        renderer,
-        Rectangle::new(
-            Point::from((status_x, status_y)),
-            Size::from((status_w, status_h)),
-        ),
-        6,
-        if top_telemetry.quick_settings_open {
-            RGBA_ACCENT_MUTED
-        } else {
-            RGBA_SURFACE_OVERLAY
-        },
-        Some(RGBA_BORDER),
-    );
 
-    let ws_y = 6;
-    let ws_h = 20;
+    let ws_y = TOP_BAR_ITEM_Y;
+    let ws_h = TOP_BAR_ITEM_H;
     let mut start_x = WS_START_X;
     for ws in 1..=9 {
         let ws_rect = Rectangle::new(
@@ -3359,7 +3410,7 @@ pub fn generate_shell_composite_elements(
                 shape_cache,
                 renderer,
                 ws_rect,
-                6,
+                10,
                 RGBA_ACCENT,
                 None,
             );
@@ -3369,8 +3420,8 @@ pub fn generate_shell_composite_elements(
                 shape_cache,
                 renderer,
                 ws_rect,
-                6,
-                RGBA_SURFACE_OVERLAY,
+                10,
+                [255, 255, 255, 16],
                 None,
             );
         }
@@ -3382,23 +3433,18 @@ pub fn generate_shell_composite_elements(
         shape_cache,
         renderer,
         Rectangle::new(Point::from((start_x + 8, ws_y)), Size::from((56, ws_h))),
-        6,
-        RGBA_SURFACE_OVERLAY,
-        Some(if layout_mode == "master-stack" {
-            RGBA_ACCENT
-        } else {
-            RGBA_BORDER
-        }),
+        10,
+        [255, 255, 255, 16],
+        (layout_mode == "master-stack").then_some(RGBA_ACCENT),
     );
 
-    out.push(CompositorRenderElement::Solid(make_solid_element(
-        Rectangle::new(Point::from((0, TOP_BAR_HEIGHT - 1)), Size::from((width, 1))),
-        COLOR_BORDER,
-    )));
-    out.push(CompositorRenderElement::Solid(make_solid_element(
-        Rectangle::new(Point::from((0, 0)), Size::from((width, TOP_BAR_HEIGHT))),
-        COLOR_SURFACE_ELEVATED,
-    )));
+    // No solid bar: only a soft top scrim keeps text readable on any wallpaper (`RUSTYOS-036`).
+    for (offset, height, alpha) in [(0, 10, 120_u8), (10, 8, 78), (18, TOP_BAR_HEIGHT - 18, 38)] {
+        out.push(CompositorRenderElement::Solid(make_solid_element(
+            Rectangle::new(Point::from((0, offset)), Size::from((width, height))),
+            rgba_to_premul_color32f([15, 10, 25, alpha]),
+        )));
+    }
 
     // 4. Dock rounded app tiles, hover/active states, rounded glass pill, and soft drop shadow (`RUSTYOS-023`)
     let (dock_x, dock_y, dock_width, dock_items_count) =
