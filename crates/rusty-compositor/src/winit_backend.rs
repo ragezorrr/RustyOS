@@ -66,7 +66,9 @@ pub fn run_nested_winit(config: &CompositorConfig) -> Result<BootstrapReport, Co
         event_loop.get_signal(),
         initial_size,
     )?;
-    state.animations.set_reduced_motion(config.reduced_motion);
+    state
+        .animations
+        .set_reduced_motion(state.user_config.reduced_motion || config.reduced_motion);
     state.telemetry = crate::telemetry::SystemMetricsHandle::start_background();
     state.dbus_notifications =
         crate::dbus_notifications::DbusNotificationHandle::start_background();
@@ -154,7 +156,8 @@ pub fn run_nested_winit(config: &CompositorConfig) -> Result<BootstrapReport, Co
         "RustyOS nested Winit compositor listening"
     );
 
-    for cmd in &config.spawn_clients {
+    let autostart = state.user_config.autostart.clone();
+    for cmd in autostart.iter().chain(config.spawn_clients.iter()) {
         spawn_test_client(cmd, &socket_name, &ipc_socket_path);
     }
 
@@ -406,6 +409,7 @@ pub(crate) fn build_frame_render_list(
             audio_muted: tel.audio.muted,
             quick_settings_open: state.quick_settings_active,
             notification_count: state.notification_count,
+            kbd_layout: &state.active_kbd_layout,
         };
 
         let toast_views: Vec<crate::shell_render::NotificationToastView<'_>> = state

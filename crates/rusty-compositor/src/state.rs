@@ -25,7 +25,7 @@ use smithay::{
     },
     output::{Mode, Output, PhysicalProperties, Scale, Subpixel},
     reexports::{
-        calloop::LoopSignal,
+        calloop::{LoopHandle, LoopSignal},
         wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode as DecorationMode,
         wayland_protocols::xdg::shell::server::xdg_toplevel,
         wayland_server::{
@@ -41,7 +41,7 @@ use smithay::{
         output::{OutputHandler, OutputManagerState},
         seat::WaylandFocus,
         selection::{
-            SelectionHandler,
+            SelectionHandler, SelectionSource, SelectionTarget,
             data_device::{
                 ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler,
             },
@@ -141,8 +141,14 @@ pub struct RustyCompositorState {
     pub xwayland_shell_state: XWaylandShellState,
     /// Active `X11Wm` instance once `XWayland` has reported ready (`RUSTYOS-026`).
     pub xwm: Option<X11Wm>,
+    /// Event loop handle used for `X11Wm` clipboard transfers (`RUSTYOS-029`).
+    pub x11_loop_handle: Option<LoopHandle<'static, Self>>,
     /// Active `XWayland` display number (`:N`) if attached (`RUSTYOS-026`).
     pub xwayland_display: Option<u32>,
+    /// Persistent user configuration loaded from `~/.config/rustyos/config.toml` (`RUSTYOS-029`).
+    pub user_config: crate::config::UserConfig,
+    /// Short active XKB layout label (`"EN"`, `"RU"`, etc.) displayed in `TopBar` (`RUSTYOS-029`).
+    pub active_kbd_layout: String,
     /// `wl_shm` shared-memory buffer state.
     pub shm_state: ShmState,
     /// `wl_output` and `xdg_output` manager state.
@@ -243,12 +249,11 @@ impl RustyCompositorState {
         let output_manager_state = OutputManagerState::new_with_xdg_output::<Self>(&display_handle);
         let data_device_state = DataDeviceState::new::<Self>(&display_handle);
 
+        let user_config = crate::config::UserConfig::load_default();
         let mut seat_state = SeatState::new();
         let mut seat = seat_state.new_wl_seat(&display_handle, "rusty-seat-0");
 
-        let keyboard = seat
-            .add_keyboard(XkbConfig::default(), 200, 25)
-            .map_err(|err| CompositorError::SeatInitialization(err.to_string()))?;
+        let keyboard = Self::init_seat_keyboard(&mut seat, &user_config)?;
         let pointer = seat.add_pointer();
 
         let output = Output::new(
@@ -280,7 +285,7 @@ impl RustyCompositorState {
         let work_area = crate::shell_render::usable_work_area(initial_size);
         let wm = WindowManager::new(work_area);
 
-        Ok(Self {
+        let mut state = Self {
             start_time: Instant::now(),
             display_handle,
             socket_name,
@@ -297,7 +302,10 @@ impl RustyCompositorState {
             wlr_layer_shell_state,
             xwayland_shell_state,
             xwm: None,
+            x11_loop_handle: None,
             xwayland_display: None,
+            user_config,
+            active_kbd_layout: "EN".to_owned(),
             shm_state,
             output_manager_state,
             seat_state,
@@ -326,7 +334,63 @@ impl RustyCompositorState {
             dbus_notifications: crate::dbus_notifications::DbusNotificationHandle::default(),
             pending_vt_switch: None,
             next_notification_id: 0,
-        })
+        };
+        state
+            .animations
+            .set_reduced_motion(state.user_config.reduced_motion);
+        state.refresh_keyboard_layout_label();
+        Ok(state)
+    }
+
+    fn init_seat_keyboard(
+        seat: &mut Seat<Self>,
+        user_config: &crate::config::UserConfig,
+    ) -> Result<KeyboardHandle<Self>, CompositorError> {
+        match seat.add_keyboard(
+            user_config.xkb_config(),
+            user_config.repeat_delay,
+            user_config.repeat_rate,
+        ) {
+            Ok(kb) => Ok(kb),
+            Err(err) => {
+                warn!(
+                    layout = %user_config.keyboard_layout,
+                    error = %err,
+                    "Configured XKB keymap failed to compile; falling back to US default"
+                );
+                seat.add_keyboard(XkbConfig::default(), 200, 25)
+                    .map_err(|fallback_err| {
+                        CompositorError::SeatInitialization(fallback_err.to_string())
+                    })
+            }
+        }
+    }
+
+    /// Refreshes the compact `TopBar` keyboard layout badge (`"EN"`, `"RU"`, etc.) from XKB state.
+    pub fn refresh_keyboard_layout_label(&mut self) {
+        let keyboard = self.keyboard.clone();
+        let configured = self.user_config.keyboard_layout.clone();
+        let label = keyboard.with_xkb_state(self, |ctx| {
+            let Ok(xkb) = ctx.xkb().lock() else {
+                return "EN".to_owned();
+            };
+            let active = xkb.active_layout();
+            let name = xkb.layout_name(active).to_owned();
+            let layout_idx = usize::try_from(active.0).unwrap_or(0);
+            drop(xkb);
+            crate::config::layout_short_code(&name, layout_idx, &configured)
+        });
+        self.active_kbd_layout = label;
+    }
+
+    /// Cycles forward to the next configured XKB layout (`us` ↔ `ru`, etc.) and updates `TopBar`.
+    pub fn cycle_keyboard_layout(&mut self) {
+        let keyboard = self.keyboard.clone();
+        keyboard.with_xkb_state(self, |mut ctx| {
+            ctx.cycle_next_layout();
+        });
+        self.refresh_keyboard_layout_label();
+        info!(layout = %self.active_kbd_layout, "Switched active keyboard layout");
     }
 
     /// Requests a clean shutdown of the compositor event loop.
@@ -1292,6 +1356,34 @@ impl SeatHandler for RustyCompositorState {
 
 impl SelectionHandler for RustyCompositorState {
     type SelectionUserData = ();
+
+    fn new_selection(
+        &mut self,
+        ty: SelectionTarget,
+        source: Option<SelectionSource>,
+        _seat: Seat<Self>,
+    ) {
+        if let Some(xwm) = self.xwm.as_mut()
+            && let Err(err) = xwm.new_selection(ty, source.map(|s| s.mime_types()))
+        {
+            warn!(?ty, error = ?err, "Failed to mirror Wayland selection to XWayland");
+        }
+    }
+
+    fn send_selection(
+        &mut self,
+        ty: SelectionTarget,
+        mime_type: String,
+        fd: OwnedFd,
+        _seat: Seat<Self>,
+        _user_data: &Self::SelectionUserData,
+    ) {
+        if let (Some(xwm), Some(loop_handle)) = (self.xwm.as_mut(), self.x11_loop_handle.clone())
+            && let Err(err) = xwm.send_selection(ty, mime_type, fd, loop_handle)
+        {
+            warn!(?ty, error = ?err, "Failed to transfer XWayland selection to Wayland");
+        }
+    }
 }
 
 impl DataDeviceHandler for RustyCompositorState {

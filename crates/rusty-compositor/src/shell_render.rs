@@ -112,6 +112,8 @@ pub struct TopBarTelemetry<'a> {
     pub quick_settings_open: bool,
     /// Number of active/unread desktop notifications (`RUSTYOS-024`).
     pub notification_count: u32,
+    /// Active keyboard layout badge code (`"EN"`, `"RU"`, etc.) (`RUSTYOS-029`).
+    pub kbd_layout: &'a str,
 }
 
 impl Default for TopBarTelemetry<'static> {
@@ -125,6 +127,7 @@ impl Default for TopBarTelemetry<'static> {
             audio_muted: false,
             quick_settings_open: false,
             notification_count: 0,
+            kbd_layout: "EN",
         }
     }
 }
@@ -375,6 +378,17 @@ fn notification_badge_rect(screen_width: i32) -> (i32, i32, i32, i32) {
     (badge_x, 6, badge_w, 20)
 }
 
+fn kbd_badge_rect(screen_width: i32, notification_count: u32) -> (i32, i32, i32, i32) {
+    let right_anchor = if notification_count > 0 {
+        notification_badge_rect(screen_width).0
+    } else {
+        status_pill_rect(screen_width).0
+    };
+    let badge_w = 32;
+    let badge_x = right_anchor - badge_w - 8;
+    (badge_x, 6, badge_w, 20)
+}
+
 /// Maximum number of floating notification toasts shown simultaneously (`RUSTYOS-024`).
 pub const MAX_VISIBLE_NOTIFICATIONS: usize = 4;
 
@@ -440,6 +454,16 @@ pub fn check_top_bar_notification_click(
         return false;
     }
     let (bx, _by, bw, _bh) = notification_badge_rect(screen_width);
+    x >= f64::from(bx) && x < f64::from(bx + bw)
+}
+
+/// Checks if `(x, y)` clicked the `TopBar` keyboard layout pill (`"EN"` / `"RU"`) (`RUSTYOS-029`).
+#[must_use]
+pub fn check_top_bar_kbd_click(screen_width: i32, notification_count: u32, x: f64, y: f64) -> bool {
+    if y > f64::from(TOP_BAR_HEIGHT) {
+        return false;
+    }
+    let (bx, _by, bw, _bh) = kbd_badge_rect(screen_width, notification_count);
     x >= f64::from(bx) && x < f64::from(bx + bw)
 }
 
@@ -1687,7 +1711,19 @@ pub fn generate_shell_text_elements(
         elements.push(el);
     }
 
-    // 4a. Unread notification count badge in TopBar (`RUSTYOS-024`)
+    // 4a. Keyboard layout indicator & unread notification badge in TopBar (`RUSTYOS-024`/`029`)
+    let (kx, _ky, kw, _kh) = kbd_badge_rect(width, top_telemetry.notification_count);
+    let kbd_bounds = Rectangle::new(Point::from((kx, ws_y)), Size::from((kw, ws_btn_height)));
+    if let Some(el) = text_cache.render_label_centered(
+        renderer,
+        top_telemetry.kbd_layout,
+        10.5,
+        text_bright,
+        kbd_bounds,
+    ) {
+        elements.push(el);
+    }
+
     if top_telemetry.notification_count > 0 {
         let (bx, _by, bw, _bh) = notification_badge_rect(width);
         let badge_label = if top_telemetry.notification_count > 99 {
@@ -2757,6 +2793,16 @@ pub fn generate_shell_composite_elements(
     }
 
     // 3. TopBar circular dot, rounded pills & background bar
+    let (kx, ky, kw, kh) = kbd_badge_rect(width, top_telemetry.notification_count);
+    push_rounded_glass_box(
+        &mut out,
+        shape_cache,
+        renderer,
+        Rectangle::new(Point::from((kx, ky)), Size::from((kw, kh))),
+        6,
+        RGBA_SURFACE_OVERLAY,
+        Some(RGBA_BORDER),
+    );
     if top_telemetry.notification_count > 0 {
         let (bx, by, bw, bh) = notification_badge_rect(width);
         push_rounded_glass_box(
@@ -3615,6 +3661,23 @@ mod tests {
             0,
             f64::from(bx + bw / 2),
             f64::from(by + bh / 2)
+        ));
+
+        // TopBar keyboard layout pill (`EN`/`RU`) avoids notification badge when present
+        let (kbd_x, kbd_y, kbd_w, kbd_h) = kbd_badge_rect(size.w, 0);
+        assert!(check_top_bar_kbd_click(
+            size.w,
+            0,
+            f64::from(kbd_x + kbd_w / 2),
+            f64::from(kbd_y + kbd_h / 2)
+        ));
+        let (notif_kbd_x, notif_kbd_y, notif_kbd_w, notif_kbd_h) = kbd_badge_rect(size.w, 2);
+        assert!(notif_kbd_x + notif_kbd_w <= bx);
+        assert!(check_top_bar_kbd_click(
+            size.w,
+            2,
+            f64::from(notif_kbd_x + notif_kbd_w / 2),
+            f64::from(notif_kbd_y + notif_kbd_h / 2)
         ));
     }
 

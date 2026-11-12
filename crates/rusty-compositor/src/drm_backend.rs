@@ -549,7 +549,9 @@ fn try_run_native_drm_session(
         f64::from(setup.pixel_size.h) / 2.0,
     ));
 
-    state.animations.set_reduced_motion(config.reduced_motion);
+    state
+        .animations
+        .set_reduced_motion(state.user_config.reduced_motion || config.reduced_motion);
     state.telemetry = crate::telemetry::SystemMetricsHandle::start_background();
     state.dbus_notifications =
         crate::dbus_notifications::DbusNotificationHandle::start_background();
@@ -716,7 +718,8 @@ fn try_run_native_drm_session(
         "RustyOS Native DRM/KMS compositor active"
     );
 
-    for cmd in &config.spawn_clients {
+    let autostart = state.user_config.autostart.clone();
+    for cmd in autostart.iter().chain(config.spawn_clients.iter()) {
         crate::winit_backend::spawn_test_client(cmd, &socket_name, &ipc_socket_path);
     }
 

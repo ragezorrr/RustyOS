@@ -139,6 +139,7 @@ impl RustyCompositorState {
         if let Some(action) = intercepted {
             self.dispatch_key_intercept(action, serial);
         }
+        self.refresh_keyboard_layout_label();
     }
 
     fn dispatch_key_intercept(&mut self, action: KeyIntercept, serial: smithay::utils::Serial) {
@@ -489,6 +490,15 @@ impl RustyCompositorState {
                 self.pointer_location.y,
             ) {
                 self.clear_notifications();
+                return;
+            }
+            if crate::shell_render::check_top_bar_kbd_click(
+                output_width,
+                self.notification_count,
+                self.pointer_location.x,
+                self.pointer_location.y,
+            ) {
+                self.cycle_keyboard_layout();
                 return;
             }
 

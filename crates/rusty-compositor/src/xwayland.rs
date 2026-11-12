@@ -5,6 +5,7 @@
 //! native Wayland windows (with SSD titlebars, Dock slots, Overview, tiling/resize, and
 //! keyboard focus), and degrades gracefully if `Xwayland` is unavailable.
 
+use std::os::unix::io::OwnedFd;
 use std::process::Stdio;
 
 use rusty_wm::{Rect, WindowId};
@@ -13,6 +14,13 @@ use smithay::desktop::Window;
 use smithay::reexports::calloop::LoopHandle;
 use smithay::reexports::wayland_server::DisplayHandle;
 use smithay::utils::{Logical, Point, Rectangle, SERIAL_COUNTER, Size};
+use smithay::wayland::selection::{
+    SelectionTarget,
+    data_device::{
+        clear_data_device_selection, request_data_device_client_selection,
+        set_data_device_selection,
+    },
+};
 use smithay::wayland::xwayland_shell::{XWaylandShellHandler, XWaylandShellState};
 use smithay::xwayland::xwm::{Reorder, ResizeEdge, X11Window, XwmId};
 use smithay::xwayland::{X11Surface, X11Wm, XWayland, XWaylandEvent, XwmHandler};
@@ -69,6 +77,7 @@ pub fn spawn_xwayland_source(
             } => match X11Wm::start_wm(cb_loop.clone(), x11_socket, client.clone()) {
                 Ok(wm) => {
                     state.xwm = Some(wm);
+                    state.x11_loop_handle = Some(cb_loop.clone());
                     state.set_xwayland_display(Some(display_number));
                     info!(
                         display = %format!(":{display_number}"),
@@ -277,6 +286,37 @@ impl XwmHandler for RustyCompositorState {
                 start_pointer: self.pointer_location,
                 start_origin: (wm_win.geometry.x, wm_win.geometry.y),
             });
+        }
+    }
+
+    fn allow_selection_access(&mut self, _xwm: XwmId, selection: SelectionTarget) -> bool {
+        !self.screen_locked && selection == SelectionTarget::Clipboard
+    }
+
+    fn send_selection(
+        &mut self,
+        _xwm: XwmId,
+        selection: SelectionTarget,
+        mime_type: String,
+        fd: OwnedFd,
+    ) {
+        if selection != SelectionTarget::Clipboard {
+            return;
+        }
+        if let Err(err) = request_data_device_client_selection(&self.seat, mime_type, fd) {
+            warn!(error = ?err, "Failed to transfer Wayland clipboard to XWayland");
+        }
+    }
+
+    fn new_selection(&mut self, _xwm: XwmId, selection: SelectionTarget, mime_types: Vec<String>) {
+        if selection == SelectionTarget::Clipboard {
+            set_data_device_selection(&self.display_handle, &self.seat, mime_types, ());
+        }
+    }
+
+    fn cleared_selection(&mut self, _xwm: XwmId, selection: SelectionTarget) {
+        if selection == SelectionTarget::Clipboard {
+            clear_data_device_selection(&self.display_handle, &self.seat);
         }
     }
 }

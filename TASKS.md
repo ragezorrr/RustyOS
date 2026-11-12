@@ -353,8 +353,22 @@ hardware/software context и низкие накладные расходы.
   - `crates/rusty-compositor/src/winit_backend.rs`: выделен общий `build_frame_render_list` (с опциональным software-курсором `Purple Glass` для универсальной совместимости AMD/Intel/NVIDIA без зависимости от hardware cursor planes) и переиспользуемые `dispatch_and_refresh_clients`, `finalize_frame_timing`, `spawn_test_client`.
   - `crates/rusty-compositor/src/drm_backend.rs`: реализованы `select_preferred_drm_mode`, `mode_refresh_interval_us`, поиск активного коннектора/CRTC (`find_primary_connector_setup`), цикл `DrmCompositor` (`GbmAllocator`, `GbmFramebufferExporter`), `LibinputInputBackend` с мгновенной коалесценцией перерисовки, `DrmEvent::VBlank` pacing, `SessionEvent::PauseSession`/`ActivateSession` (`reset_buffers`), безопасный fallback на `probe_primary_drm_device` при занятом DRM Master и unit-тесты.
 - **Dependencies:** `RUSTYOS-006`, `RUSTYOS-019`, `RUSTYOS-025`, `RUSTYOS-026`.
-- **Acceptance criteria:** Из TTY (`Ctrl+Alt+F3`) `--drm` захватывает seat/DRM Master, поднимает Wayland/XWayland/IPC, рендерит оболочку с software-курсором на частоте монитора по `VBlank` и корректно переживает VT switch; внутри вложенной сессии безопасно падает на диагностику `probe_primary_drm_device`; 55 тестов и `clippy -D warnings` проходят без предупреждений.
+- **Acceptance criteria:** Из TTY (`Ctrl+Alt+F3`) `--drm` захватывает seat/DRM Master, поднимает Wayland/XWayland/IPC, рендерит оболочку с software-курсором на частоте монитора по `VBlank` и корректно переживает VT switch (включая рендер 24x24 стрелки курсора и восстановление DRM/libinput при возврате `Ctrl+Alt+F1` -> `Ctrl+Alt+F3`); внутри вложенной сессии безопасно падает на диагностику `probe_primary_drm_device`; 56 тестов и `clippy -D warnings` проходят без предупреждений.
 - **Risks:** Требуется живая проверка на реальном железе из TTY (`Ctrl+Alt+F3`); в nested-окружении выполняется только компиляция, юнит-тесты и fallback-диагностика.
+
+## RUSTYOS-029 --- Конфиг пользователя (`config.toml`), RU/EN раскладка и Clipboard Wayland↔XWayland
+
+**Статус:** done **Фаза:** 26 (Daily Usability: Config, XKB Layout & Clipboard)
+
+- **Цель:** Добавить пользовательский конфиг `~/.config/rustyos/config.toml` без внешних зависимостей, поддержку многораскладочной XKB-клавиатуры (`us,ru`) с живым кликабельным индикатором `EN`/`RU` в `TopBar`, а также двусторонний буфер обмена между Wayland-клиентами и `XWayland` (X11).
+- **Scope:**
+  - `crates/rusty-compositor/src/config.rs` и `lib.rs`: нулезависимый парсер подмножества TOML `UserConfig` (`[keyboard]` `layout`, `variant`, `options`, `repeat_delay`, `repeat_rate`; `[ui]` `reduced_motion`; `[autostart]` `commands`), поиск `$XDG_CONFIG_HOME/rustyos/config.toml` -> `~/.config/rustyos/config.toml` с безопасными дефолтами (`us,ru`, `grp:alt_shift_toggle`) и маппингом `layout_short_code`.
+  - `crates/rusty-compositor/src/state.rs`, `input.rs`, `shell_render.rs`: загрузка `UserConfig` при инициализации `Seat` (с fallback на US XKB при некорректном конфиге), синхронизация `active_kbd_layout` и кликабельный бейдж `EN`/`RU` в `TopBar` (сдвинутый левее бейджа уведомлений), а также реализация `SelectionHandler` для Wayland `wl_data_device` -> `X11Wm`.
+  - `crates/rusty-compositor/src/xwayland.rs`: сохранение `x11_loop_handle` из `XWaylandEvent::Ready` и полная реализация `XwmHandler::allow_selection_access`/`new_selection`/`send_selection`/`cleared_selection` (с защитой чтения при `screen_locked`), соединяющая X11 clipboard с `wl_data_device`.
+  - `crates/rusty-compositor/src/winit_backend.rs` и `drm_backend.rs`: применение `user_config.reduced_motion`, запуск команд `user_config.autostart` при старте бэкендов и передача `active_kbd_layout` в `TopBarTelemetry`.
+- **Dependencies:** `RUSTYOS-008`, `RUSTYOS-025`, `RUSTYOS-026`, `RUSTYOS-028`.
+- **Acceptance criteria:** Отсутствующий или частично заполненный `config.toml` не ломает запуск и применяет безопасные значения по умолчанию; `Alt+Shift` и клик по бейджу `EN`/`RU` в `TopBar` переключают раскладку с синхронным обновлением текста бейджа; копирование/вставка работает в обе стороны между Wayland и X11 (`XWayland`); `autostart` запускает команды без блокировки композитора; 60 тестов и `clippy -D warnings` проходят без предупреждений.
+- **Risks:** Для сложных многострочных структур за пределами поддерживаемого подмножества TOML (таблицы в одну строку и т. п.) рекомендуется использовать стандартный синтаксис секций `[section]` + `key = value` / `commands = [...]`.
 
 ## Правило добавления задач
 

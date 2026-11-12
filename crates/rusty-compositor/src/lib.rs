@@ -4,6 +4,7 @@
 //! (`wl_compositor`, `wl_shm`, `xdg_wm_base`, `wl_seat`, `wl_output`), and the Phase 1
 //! nested Smithay + Winit prototype (`RUSTYOS-002`).
 
+pub mod config;
 pub mod dbus_notifications;
 pub mod drm_backend;
 pub mod frame_timing;
@@ -458,6 +459,42 @@ mod tests {
         let _layer_global = compositor.wlr_layer_shell_state.shell_global();
         let layer_map = smithay::desktop::layer_map_for_output(&compositor.output);
         assert_eq!(layer_map.len(), 0);
+
+        Ok(())
+    }
+
+    #[test]
+    fn keyboard_layout_badge_cycles_configured_layouts() -> Result<(), Box<dyn Error>> {
+        let event_loop: EventLoop<'static, state::RustyCompositorState> = EventLoop::try_new()?;
+        let display: Display<state::RustyCompositorState> = Display::new()?;
+
+        let mut compositor = state::RustyCompositorState::new(
+            &display,
+            "wayland-kbd-test-0".to_owned(),
+            event_loop.get_signal(),
+            (1280, 800).into(),
+        )?;
+
+        let initial = compositor.active_kbd_layout.clone();
+        assert_ne!(initial, "");
+
+        let layout_count = compositor
+            .user_config
+            .keyboard_layout
+            .split(',')
+            .filter(|part| !part.trim().is_empty())
+            .count();
+        if layout_count >= 2 {
+            compositor.cycle_keyboard_layout();
+            if compositor.user_config.keyboard_layout == "us,ru" {
+                assert_eq!(initial, "EN");
+                assert_eq!(compositor.active_kbd_layout, "RU");
+            }
+            compositor.cycle_keyboard_layout();
+            if compositor.user_config.keyboard_layout == "us,ru" {
+                assert_eq!(compositor.active_kbd_layout, "EN");
+            }
+        }
 
         Ok(())
     }
