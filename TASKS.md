@@ -190,6 +190,21 @@ hardware/software context и низкие накладные расходы.
 - **Acceptance criteria:** `rusty-shell` успешно соединяется с Wayland сервером по протоколу `zwlr_layer_shell_v1`; выделяет и коммитит ARGB8888 буферы; корректно рисует TopBar и Dock с активными воркспейсами и иконками; clippy и все 31 юнит-тест проходят без ошибок.
 - **Risks:** Нулевые (клиент мягко деградирует в CLI/HUD режим, если Wayland-дисплей недоступен).
 
+## RUSTYOS-018 --- Spotlight Application Launcher Overlay
+
+**Статус:** done **Фаза:** 14 (Shell Components)
+
+- **Цель:** Реализовать модальный Spotlight-лаунчер приложений по центру экрана по горячим клавишам `Super + Space` и `Alt + Space`.
+- **Scope:** 
+  - Горячие клавиши перехвата в композиторе (`Super+Space` / `Alt+Space`) в `crates/rusty-compositor/src/input.rs`.
+  - Команда `ToggleLauncher` в `rusty-ipc`, поле `launcher_active: bool` в `DesktopStateSnapshot`.
+  - Модальное окно `Layer::Overlay` в `apps/rusty-shell/src/wayland.rs` с живым поиском приложений и отрисовкой по токенам Purple Glass.
+  - Фолбэк модального окна в GLES-пайплайне композитора `crates/rusty-compositor/src/shell_render.rs` для автономного режима без внешнего шелла.
+  - Юнит-тесты перехвата хоткеев, сериализации IPC и генерации пикселей лаунчера.
+- **Dependencies:** `RUSTYOS-016`, `RUSTYOS-017`.
+- **Acceptance criteria:** Хоткеи `Super+Space` / `Alt+Space` переключают `launcher_active`; IPC синхронизирует состояние с `rusty-shell`; лаунчер рендерит окно поиска и результаты; 32 теста и clippy проходят без ошибок.
+- **Risks:** Минимальные (гибридный подход обеспечивает работу как с внешним шеллом, так и в автономном композиторе).
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

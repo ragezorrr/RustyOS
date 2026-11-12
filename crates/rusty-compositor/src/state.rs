@@ -80,6 +80,7 @@ impl ClientData for ClientState {
 
 /// Primary state container for `rusty-compositor`.
 #[derive(Debug)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct RustyCompositorState {
     /// Monotonic start instant used for frame callback timestamps.
     pub start_time: Instant,
@@ -129,6 +130,8 @@ pub struct RustyCompositorState {
     pub animations: AnimationEngine,
     /// Whether the workspace overview mode is active (`RUSTYOS-009`/`010`).
     pub overview_active: bool,
+    /// Whether the Spotlight application launcher overlay is open (`RUSTYOS-018`).
+    pub launcher_active: bool,
     /// Whether the session lock screen is active (`RUSTYOS-009`/`010`).
     pub screen_locked: bool,
     /// Count of notifications received via shell IPC (`RUSTYOS-009`/`010`).
@@ -219,6 +222,7 @@ impl RustyCompositorState {
             frame_timing: FrameTimingCollector::new(DEFAULT_SAMPLE_CAPACITY, 60_000),
             animations: AnimationEngine::default(),
             overview_active: false,
+            launcher_active: false,
             screen_locked: false,
             notification_count: 0,
         })
@@ -498,6 +502,7 @@ impl RustyCompositorState {
             layout_mode: layout_str.to_owned(),
             reduced_motion: self.animations.reduced_motion(),
             overview_active: self.overview_active,
+            launcher_active: self.launcher_active,
             screen_locked: self.screen_locked,
             notification_count: self.notification_count,
             frame_interval_p50_us: timing.interval_p50_us,
@@ -542,6 +547,13 @@ impl RustyCompositorState {
                 info!(
                     overview_active = self.overview_active,
                     "Toggled workspace overview via IPC"
+                );
+            }
+            ShellRequest::ToggleLauncher => {
+                self.launcher_active = !self.launcher_active;
+                info!(
+                    launcher_active = self.launcher_active,
+                    "Toggled Spotlight application launcher via IPC"
                 );
             }
             ShellRequest::SetReducedMotion { enabled } => {

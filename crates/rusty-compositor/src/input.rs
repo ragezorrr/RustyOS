@@ -22,6 +22,7 @@ use crate::state::RustyCompositorState;
 enum KeyIntercept {
     ExitCompositor,
     ToggleReducedMotion,
+    ToggleLauncher,
     Wm(WmAction),
 }
 
@@ -98,6 +99,13 @@ impl RustyCompositorState {
                 info!(
                     reduced_motion = reduced,
                     "Toggled reduced-motion preference"
+                );
+            }
+            Some(KeyIntercept::ToggleLauncher) => {
+                self.launcher_active = !self.launcher_active;
+                info!(
+                    launcher_active = self.launcher_active,
+                    "Toggled Spotlight application launcher overlay"
                 );
             }
             Some(KeyIntercept::Wm(action)) => {
@@ -243,6 +251,11 @@ const fn match_shortcut(modifiers: ModifiersState, sym: Keysym) -> Option<KeyInt
         return Some(KeyIntercept::ExitCompositor);
     }
 
+    // Super + Space or Alt + Space activates macOS-style Spotlight application launcher
+    if (modifiers.logo || modifiers.alt) && sym.raw() == Keysym::space.raw() {
+        return Some(KeyIntercept::ToggleLauncher);
+    }
+
     if !modifiers.alt {
         return None;
     }
@@ -268,7 +281,7 @@ const fn match_shortcut(modifiers: ModifiersState, sym: Keysym) -> Option<KeyInt
         Keysym::w | Keysym::W | Keysym::q | Keysym::Q => {
             Some(KeyIntercept::Wm(WmAction::CloseFocused))
         }
-        Keysym::l | Keysym::L | Keysym::space => Some(KeyIntercept::Wm(WmAction::ToggleLayoutMode)),
+        Keysym::l | Keysym::L => Some(KeyIntercept::Wm(WmAction::ToggleLayoutMode)),
         Keysym::m | Keysym::M => Some(KeyIntercept::Wm(WmAction::ToggleMaximizeFocused)),
         Keysym::Left => Some(KeyIntercept::Wm(WmAction::SnapFocused(
             SnapTarget::LeftHalf,
@@ -341,6 +354,18 @@ mod tests {
             Some(KeyIntercept::Wm(WmAction::SnapFocused(
                 SnapTarget::LeftHalf
             )))
+        );
+        assert_eq!(
+            match_shortcut(alt, Keysym::space),
+            Some(KeyIntercept::ToggleLauncher)
+        );
+        let logo = ModifiersState {
+            logo: true,
+            ..ModifiersState::default()
+        };
+        assert_eq!(
+            match_shortcut(logo, Keysym::space),
+            Some(KeyIntercept::ToggleLauncher)
         );
         assert_eq!(
             match_shortcut(ModifiersState::default(), Keysym::Escape),

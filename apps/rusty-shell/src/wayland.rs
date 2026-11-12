@@ -121,8 +121,10 @@ pub struct ShellClientData {
 
     pub top_bar_surface: Option<LayerSurface>,
     pub dock_surface: Option<LayerSurface>,
+    pub launcher_surface: Option<LayerSurface>,
     pub top_bar_size: (u32, u32),
     pub dock_size: (u32, u32),
+    pub launcher_size: (u32, u32),
 
     pub shell_state: DesktopShell,
     pub running: bool,
@@ -366,6 +368,115 @@ pub fn render_dock_pixels(canvas: &mut [u8], width: u32, height: u32, dock: &[cr
     }
 }
 
+/// Renders Spotlight application launcher into an ARGB8888 buffer slice.
+#[allow(clippy::too_many_lines)]
+pub fn render_launcher_pixels(
+    canvas: &mut [u8],
+    width: u32,
+    height: u32,
+    launcher: &crate::AppLauncher,
+) {
+    let stride = (width * 4) as usize;
+    let w = width as usize;
+    let h = height as usize;
+
+    // Outer glass highlight rim
+    fill_rect(canvas, stride, 0, 0, w, h, colors::BORDER_HIGHLIGHT);
+
+    // Modal background body (elevated glass surface)
+    if w > 2 && h > 2 {
+        fill_rect(canvas, stride, 1, 1, w - 2, h - 2, colors::SURFACE_ELEVATED);
+    }
+
+    // Search bar container
+    let search_bar_h = 44;
+    fill_rect(
+        canvas,
+        stride,
+        16,
+        16,
+        w.saturating_sub(32),
+        search_bar_h,
+        colors::SURFACE_OVERLAY,
+    );
+    fill_rect(
+        canvas,
+        stride,
+        16,
+        16 + search_bar_h - 1,
+        w.saturating_sub(32),
+        1,
+        colors::BORDER_SUBTLE,
+    );
+
+    // Search accent icon
+    fill_rect(canvas, stride, 28, 26, 24, 24, colors::ACCENT_NEON);
+
+    // Cursor indicator
+    fill_rect(canvas, stride, 62, 26, 2, 24, colors::TEXT_BRIGHT);
+
+    // Divider line
+    fill_rect(
+        canvas,
+        stride,
+        16,
+        70,
+        w.saturating_sub(32),
+        1,
+        colors::BORDER_SUBTLE,
+    );
+
+    // Filtered entries
+    let entries = launcher.filtered_entries();
+    let row_h = 44;
+    let start_y = 80;
+    let max_rows = 3.min(entries.len());
+
+    for (i, entry) in entries.iter().take(max_rows).enumerate() {
+        let row_y = start_y + i * (row_h + 4);
+        let is_selected = i == 0;
+        let bg_color = if is_selected {
+            colors::SURFACE_OVERLAY
+        } else {
+            colors::SURFACE_ELEVATED
+        };
+        fill_rect(
+            canvas,
+            stride,
+            16,
+            row_y,
+            w.saturating_sub(32),
+            row_h,
+            bg_color,
+        );
+
+        if is_selected {
+            fill_rect(canvas, stride, 16, row_y, 3, row_h, colors::ACCENT_NEON);
+        }
+
+        // App icon badge
+        let icon_color = match i {
+            0 => colors::ACCENT_NEON,
+            1 => colors::ACCENT_MUTED,
+            _ => colors::TEXT_SUBTLE,
+        };
+        fill_rect(canvas, stride, 28, row_y + 10, 24, 24, icon_color);
+
+        // App title and subtitle indicators
+        let title_w = (entry.name.len() * 8).clamp(60, 180);
+        fill_rect(
+            canvas,
+            stride,
+            62,
+            row_y + 12,
+            title_w,
+            8,
+            colors::TEXT_BRIGHT,
+        );
+        fill_rect(canvas, stride, 62, row_y + 26, 90, 6, colors::TEXT_MUTED);
+    }
+}
+
 impl ShellClientData {
     /// Renders `TopBar` into an ARGB8888 buffer slice.
     pub fn render_top_bar_pixels(&self, canvas: &mut [u8], width: u32, height: u32) {
@@ -375,6 +486,11 @@ impl ShellClientData {
     /// Renders `Dock` into an ARGB8888 buffer slice.
     pub fn render_dock_pixels(&self, canvas: &mut [u8], width: u32, height: u32) {
         render_dock_pixels(canvas, width, height, &self.shell_state.dock);
+    }
+
+    /// Renders Spotlight application launcher into an ARGB8888 buffer slice.
+    pub fn render_launcher_pixels(&self, canvas: &mut [u8], width: u32, height: u32) {
+        render_launcher_pixels(canvas, width, height, &self.shell_state.launcher);
     }
 }
 
@@ -543,6 +659,18 @@ impl LayerShellHandler for ShellClientData {
             }
             self.dock_size = (width, height);
         }
+
+        if let Some(launcher) = &self.launcher_surface
+            && launcher == layer
+        {
+            if width == 0 {
+                width = 560;
+            }
+            if height == 0 {
+                height = 240;
+            }
+            self.launcher_size = (width, height);
+        }
     }
 }
 
@@ -589,8 +717,10 @@ impl ShellWaylandClient {
             pool,
             top_bar_surface: None,
             dock_surface: None,
+            launcher_surface: None,
             top_bar_size: (1280, 32),
             dock_size: (240, 56),
+            launcher_size: (560, 240),
             shell_state: initial_shell,
             running: true,
         };
@@ -627,6 +757,21 @@ impl ShellWaylandClient {
         dock_layer.set_keyboard_interactivity(KeyboardInteractivity::None);
         dock_layer.commit();
         data.dock_surface = Some(dock_layer);
+
+        // Create Spotlight Launcher layer surface (Layer::Overlay, centered)
+        let launcher_surface = data.compositor_state.create_surface(&qh);
+        let launcher_layer = data.layer_shell.create_layer_surface(
+            &qh,
+            launcher_surface,
+            Layer::Overlay,
+            Some("spotlight".to_owned()),
+            None,
+        );
+        launcher_layer.set_anchor(Anchor::empty());
+        launcher_layer.set_size(560, 240);
+        launcher_layer.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
+        launcher_layer.commit();
+        data.launcher_surface = Some(launcher_layer);
 
         Ok(Self { conn, queue, data })
     }
@@ -681,6 +826,29 @@ impl ShellWaylandClient {
             dock.commit();
         }
 
+        // Draw Spotlight Launcher
+        if let Some(launcher) = &self.data.launcher_surface {
+            if self.data.shell_state.launcher.open {
+                let (w, h) = self.data.launcher_size;
+                let stride = (w * 4) as i32;
+                let (buffer, canvas) = self
+                    .data
+                    .pool
+                    .create_buffer(w as i32, h as i32, stride, wl_shm::Format::Argb8888)
+                    .map_err(|e| WaylandClientError::ShmPool(format!("{e:?}")))?;
+
+                render_launcher_pixels(canvas, w, h, &self.data.shell_state.launcher);
+                launcher.wl_surface().attach(Some(buffer.wl_buffer()), 0, 0);
+                launcher
+                    .wl_surface()
+                    .damage_buffer(0, 0, w as i32, h as i32);
+                launcher.commit();
+            } else {
+                launcher.wl_surface().attach(None, 0, 0);
+                launcher.commit();
+            }
+        }
+
         self.conn.flush()?;
         Ok(())
     }
@@ -720,6 +888,24 @@ mod tests {
         let mut buffer = vec![0u8; (w * h * 4) as usize];
 
         render_dock_pixels(&mut buffer, w, h, &shell.dock);
+
+        // Verify top-left corner matches BORDER_HIGHLIGHT rim
+        assert_eq!(buffer[0..4], colors::BORDER_HIGHLIGHT);
+        // Verify interior pixel matches SURFACE_ELEVATED
+        let interior_px = (w * 4 * 2 + 8) as usize;
+        assert_eq!(
+            buffer[interior_px..interior_px + 4],
+            colors::SURFACE_ELEVATED
+        );
+    }
+
+    #[test]
+    fn render_launcher_pixels_generates_valid_modal_and_search_bar() {
+        let shell = DesktopShell::default();
+        let (w, h) = (560u32, 240u32);
+        let mut buffer = vec![0u8; (w * h * 4) as usize];
+
+        render_launcher_pixels(&mut buffer, w, h, &shell.launcher);
 
         // Verify top-left corner matches BORDER_HIGHLIGHT rim
         assert_eq!(buffer[0..4], colors::BORDER_HIGHLIGHT);

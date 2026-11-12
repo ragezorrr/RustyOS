@@ -301,6 +301,7 @@ fn render_winit_frame(
                 layout_str,
                 window_count,
                 has_focused,
+                state.launcher_active,
             )
         };
 

@@ -240,6 +240,114 @@ fn render_dock(
     }
 }
 
+fn render_spotlight_modal(elements: &mut Vec<SolidColorRenderElement>, width: i32, height: i32) {
+    let modal_width = 560.min(width - 40);
+    let modal_height = 240.min(height - 80);
+    let modal_x = (width - modal_width) / 2;
+    let modal_y = (height - modal_height) / 3;
+
+    // 7. Spotlight Glass Box - Outer glass highlight rim
+    let rim_geo = Rectangle::new(
+        Point::from((modal_x - 1, modal_y - 1)),
+        Size::from((modal_width + 2, modal_height + 2)),
+    );
+    elements.push(make_solid_element(rim_geo, COLOR_BORDER_HIGHLIGHT));
+
+    // 7a. Modal elevated body
+    let modal_geo = Rectangle::new(
+        Point::from((modal_x, modal_y)),
+        Size::from((modal_width, modal_height)),
+    );
+    elements.push(make_solid_element(modal_geo, COLOR_SURFACE_ELEVATED));
+
+    // 7b. Search input bar plate
+    let search_bar_h = 44;
+    let search_bar_geo = Rectangle::new(
+        Point::from((modal_x + 16, modal_y + 16)),
+        Size::from((modal_width - 32, search_bar_h)),
+    );
+    elements.push(make_solid_element(search_bar_geo, COLOR_SURFACE_OVERLAY));
+
+    // 7c. Search bar accent indicator
+    let search_icon_geo = Rectangle::new(
+        Point::from((modal_x + 28, modal_y + 26)),
+        Size::from((24, 24)),
+    );
+    elements.push(make_solid_element(search_icon_geo, COLOR_ACCENT));
+
+    // 7d. Text input cursor
+    let cursor_geo = Rectangle::new(
+        Point::from((modal_x + 62, modal_y + 26)),
+        Size::from((2, 24)),
+    );
+    elements.push(make_solid_element(cursor_geo, COLOR_TEXT));
+
+    // 7e. Placeholder text indicator
+    let placeholder_geo = Rectangle::new(
+        Point::from((modal_x + 70, modal_y + 34)),
+        Size::from((140, 8)),
+    );
+    elements.push(make_solid_element(placeholder_geo, COLOR_MUTED));
+
+    // 7f. Search divider
+    let divider_geo = Rectangle::new(
+        Point::from((modal_x + 16, modal_y + 70)),
+        Size::from((modal_width - 32, 1)),
+    );
+    elements.push(make_solid_element(divider_geo, COLOR_BORDER));
+
+    // 7g. Search results (top 3 suggested applications)
+    let row_h = 44;
+    let start_row_y = modal_y + 80;
+    for i in 0..3 {
+        let row_y = start_row_y + i * (row_h + 4);
+        let is_selected = i == 0;
+
+        let row_bg = Rectangle::new(
+            Point::from((modal_x + 16, row_y)),
+            Size::from((modal_width - 32, row_h)),
+        );
+        let bg_color = if is_selected {
+            COLOR_SURFACE_OVERLAY
+        } else {
+            COLOR_SURFACE
+        };
+        elements.push(make_solid_element(row_bg, bg_color));
+
+        if is_selected {
+            let select_indicator =
+                Rectangle::new(Point::from((modal_x + 16, row_y)), Size::from((3, row_h)));
+            elements.push(make_solid_element(select_indicator, COLOR_ACCENT));
+        }
+
+        // App icon badge
+        let app_icon = Rectangle::new(
+            Point::from((modal_x + 28, row_y + 10)),
+            Size::from((24, 24)),
+        );
+        let icon_color = match i {
+            0 => COLOR_ACCENT,
+            1 => COLOR_ACCENT_MUTED,
+            _ => COLOR_SUBTLE,
+        };
+        elements.push(make_solid_element(app_icon, icon_color));
+
+        // App title bar
+        let title_bar = Rectangle::new(
+            Point::from((modal_x + 62, row_y + 12)),
+            Size::from((120 + i * 20, 8)),
+        );
+        elements.push(make_solid_element(title_bar, COLOR_TEXT));
+
+        // App subtitle bar
+        let sub_bar = Rectangle::new(
+            Point::from((modal_x + 62, row_y + 26)),
+            Size::from((80 + i * 15, 6)),
+        );
+        elements.push(make_solid_element(sub_bar, COLOR_MUTED));
+    }
+}
+
 /// Generates custom GLES render elements for `TopBar` and `Dock`.
 #[must_use]
 pub fn generate_shell_render_elements(
@@ -248,6 +356,7 @@ pub fn generate_shell_render_elements(
     layout_mode: &str,
     window_count: usize,
     has_focused_window: bool,
+    launcher_active: bool,
 ) -> Vec<SolidColorRenderElement> {
     let mut elements = Vec::new();
     let width = screen_size.w;
@@ -261,6 +370,10 @@ pub fn generate_shell_render_elements(
         window_count,
         has_focused_window,
     );
+
+    if launcher_active {
+        render_spotlight_modal(&mut elements, width, height);
+    }
 
     elements
 }
@@ -305,8 +418,12 @@ mod tests {
     #[test]
     fn generate_shell_render_elements_produces_non_empty_layout() {
         let size = Size::from((1280, 800));
-        let elements = generate_shell_render_elements(size, 1, "master-stack", 2, true);
+        let elements = generate_shell_render_elements(size, 1, "master-stack", 2, true, false);
         assert!(!elements.is_empty());
+
+        let elements_with_launcher =
+            generate_shell_render_elements(size, 1, "master-stack", 2, true, true);
+        assert!(elements_with_launcher.len() > elements.len());
     }
 
     #[test]

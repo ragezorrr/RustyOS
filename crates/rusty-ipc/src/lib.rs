@@ -69,6 +69,7 @@ pub struct WindowSummary {
 
 /// Complete snapshot of compositor state sent to `rusty-shell` for `TopBar`, `Dock`, `Overview`, and `QuickSettings`.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct DesktopStateSnapshot {
     /// Active workspace index (`1..=9`).
     pub active_workspace: u8,
@@ -78,6 +79,8 @@ pub struct DesktopStateSnapshot {
     pub reduced_motion: bool,
     /// Whether workspace overview mode is active.
     pub overview_active: bool,
+    /// Whether the application launcher / Spotlight overlay is active (`RUSTYOS-018`).
+    pub launcher_active: bool,
     /// Whether the session lock screen is active.
     pub screen_locked: bool,
     /// Number of unread/active notifications held by the compositor/shell bridge.
@@ -97,6 +100,7 @@ impl Default for DesktopStateSnapshot {
             layout_mode: "floating".to_owned(),
             reduced_motion: false,
             overview_active: false,
+            launcher_active: false,
             screen_locked: false,
             notification_count: 0,
             frame_interval_p50_us: 16_667,
@@ -132,6 +136,8 @@ pub enum ShellRequest {
     ToggleLayoutMode,
     /// Toggles workspace overview mode.
     ToggleOverview,
+    /// Toggles the application launcher / Spotlight search overlay (`RUSTYOS-018`).
+    ToggleLauncher,
     /// Enables or disables `reduced_motion` mode.
     SetReducedMotion {
         /// New `reduced_motion` state.
@@ -240,6 +246,9 @@ impl ShellRequest {
             Self::ToggleOverview => {
                 let _ = writeln!(out, "TOGGLE_OVERVIEW");
             }
+            Self::ToggleLauncher => {
+                let _ = writeln!(out, "TOGGLE_LAUNCHER");
+            }
             Self::SetReducedMotion { enabled } => {
                 let flag = u8::from(*enabled);
                 let _ = writeln!(out, "SET_REDUCED_MOTION|{flag}");
@@ -271,6 +280,7 @@ impl ShellRequest {
     ///
     /// Returns [`IpcError`] if the frame exceeds [`MAX_IPC_MESSAGE_BYTES`], has an unsupported
     /// protocol version, or contains malformed arguments.
+    #[allow(clippy::too_many_lines)]
     pub fn decode_line(line: &str) -> Result<Self, IpcError> {
         if line.len() > MAX_IPC_MESSAGE_BYTES {
             return Err(IpcError::MessageTooLarge(line.len()));
@@ -345,6 +355,7 @@ impl ShellRequest {
             }
             "TOGGLE_LAYOUT" => Ok(Self::ToggleLayoutMode),
             "TOGGLE_OVERVIEW" => Ok(Self::ToggleOverview),
+            "TOGGLE_LAUNCHER" => Ok(Self::ToggleLauncher),
             "SET_REDUCED_MOTION" => {
                 let flag = parse_bool_flag(parts.next(), "SET_REDUCED_MOTION")?;
                 Ok(Self::SetReducedMotion { enabled: flag })
@@ -411,7 +422,7 @@ impl CompositorEvent {
                 }
                 let _ = writeln!(
                     out,
-                    "SNAPSHOT|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+                    "SNAPSHOT|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
                     snap.active_workspace,
                     sanitize_token(&snap.layout_mode),
                     u8::from(snap.reduced_motion),
@@ -420,7 +431,8 @@ impl CompositorEvent {
                     snap.notification_count,
                     snap.frame_interval_p50_us,
                     snap.input_latency_p95_us,
-                    wins_buf
+                    wins_buf,
+                    u8::from(snap.launcher_active),
                 );
             }
             Self::Error { code, message } => {
@@ -546,11 +558,14 @@ where
         }
     }
 
+    let launcher_active = parse_bool_flag(parts.next(), "launcher_active").unwrap_or(false);
+
     Ok(CompositorEvent::StateSnapshot(DesktopStateSnapshot {
         active_workspace,
         layout_mode,
         reduced_motion,
         overview_active,
+        launcher_active,
         screen_locked,
         notification_count,
         frame_interval_p50_us,
@@ -812,6 +827,7 @@ mod tests {
             layout_mode: "master-stack".to_owned(),
             reduced_motion: true,
             overview_active: true,
+            launcher_active: false,
             screen_locked: false,
             notification_count: 3,
             frame_interval_p50_us: 16_680,
