@@ -60,6 +60,12 @@ impl RustyCompositorState {
     /// Processes an input event from an [`InputBackend`] (such as Winit).
     pub fn process_input_event<B: InputBackend>(&mut self, event: InputEvent<B>) {
         self.frame_timing.mark_input_event(Instant::now());
+        if !matches!(
+            event,
+            InputEvent::DeviceAdded { .. } | InputEvent::DeviceRemoved { .. }
+        ) {
+            self.notify_user_activity();
+        }
         match event {
             InputEvent::Keyboard { event } => self.handle_keyboard_event::<B>(&event),
             InputEvent::PointerMotion { event } => self.handle_pointer_motion::<B>(&event),
@@ -116,6 +122,9 @@ impl RustyCompositorState {
                     && let Some(vt) = match_vt_switch_key(*modifiers, sym)
                 {
                     return FilterResult::Intercept(KeyIntercept::SwitchVt(vt));
+                }
+                if state.ext_session_locked {
+                    return FilterResult::Forward;
                 }
                 if state.screen_locked {
                     if key_state != KeyState::Pressed {
@@ -424,6 +433,24 @@ impl RustyCompositorState {
             self.wm.set_focused_output(out_id);
         }
 
+        if self.ext_session_locked {
+            self.dock_hover_slot = None;
+            let serial = SERIAL_COUNTER.next_serial();
+            let under = self.ext_lock_surface_under(pos);
+            let pointer = self.pointer.clone();
+            pointer.motion(
+                self,
+                under,
+                &MotionEvent {
+                    location: pos,
+                    serial,
+                    time,
+                },
+            );
+            pointer.frame(self);
+            return;
+        }
+
         if self.screen_locked {
             self.dock_hover_slot = None;
             let serial = SERIAL_COUNTER.next_serial();
@@ -609,6 +636,27 @@ impl RustyCompositorState {
         if button_state == ButtonState::Released {
             self.active_window_drag = None;
             self.active_window_resize = None;
+        }
+
+        if self.ext_session_locked {
+            if button_state == ButtonState::Pressed
+                && let Some((lock_surf, _)) = self.ext_lock_surface_under(self.pointer_location)
+            {
+                let keyboard = self.keyboard.clone();
+                keyboard.set_focus(self, Some(lock_surf), serial);
+            }
+            let pointer = self.pointer.clone();
+            pointer.button(
+                self,
+                &ButtonEvent {
+                    button,
+                    state: button_state,
+                    serial,
+                    time: Event::time_msec(event),
+                },
+            );
+            pointer.frame(self);
+            return;
         }
 
         if button_state == ButtonState::Pressed {

@@ -141,6 +141,15 @@
                           + `zwp_pointer_constraints_v1`
                           + `wp_presentation`     
                           (ADR-0013)              
+
+  D-022                   Фазы 6/7/8              accepted
+                          (RUSTYOS-045):          
+                          `wp_cursor_shape_v1` +  
+                          `xdg_activation_v1` +   
+                          `ext_idle_notify_v1` +  
+                          `idle_inhibit` +        
+                          `ext_session_lock_v1`   
+                          (ADR-0014)              
   -----------------------------------------------------------------------
 
 ## Открытые решения

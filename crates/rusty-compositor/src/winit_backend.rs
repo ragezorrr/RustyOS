@@ -12,13 +12,17 @@ use smithay::{
             damage::OutputDamageTracker,
             element::AsRenderElements,
             element::Element,
+            element::Id,
             element::Kind,
+            element::solid::SolidColorRenderElement,
             element::surface::{WaylandSurfaceRenderElement, render_elements_from_surface_tree},
             element::utils::{Relocate, RelocateRenderElement, RescaleRenderElement},
             gles::GlesRenderer,
+            utils::CommitCounter,
         },
         winit::{self, WinitEvent, WinitGraphicsBackend},
     },
+    desktop::utils::send_frames_surface_tree,
     input::pointer::{CursorIcon, CursorImageStatus, CursorImageSurfaceData},
     reexports::{
         calloop::{
@@ -72,6 +76,7 @@ pub fn run_nested_winit(config: &CompositorConfig) -> Result<BootstrapReport, Co
         &display,
         socket_name.clone(),
         event_loop.get_signal(),
+        event_loop.handle(),
         initial_size,
     )?;
     let dmabuf_formats = backend.renderer().dmabuf_formats();
@@ -418,6 +423,47 @@ pub(crate) fn build_frame_render_list(
     )
 }
 
+fn push_ext_session_lock_elements(
+    render_list: &mut Vec<CompositorRenderElement>,
+    state: &RustyCompositorState,
+    renderer: &mut GlesRenderer,
+    output: &smithay::output::Output,
+    logical_size: Size<i32, smithay::utils::Physical>,
+    output_scale: f64,
+) {
+    if let Some(lock_surf) = state.ext_lock_surface_for_output(output) {
+        render_list.extend(
+            render_elements_from_surface_tree::<
+                GlesRenderer,
+                WaylandSurfaceRenderElement<GlesRenderer>,
+            >(
+                renderer,
+                lock_surf.wl_surface(),
+                Point::from((0, 0)),
+                smithay::utils::Scale::from(output_scale),
+                1.0,
+                Kind::Unspecified,
+            )
+            .into_iter()
+            .map(CompositorRenderElement::Surface),
+        );
+    }
+    let backdrop = SolidColorRenderElement::new(
+        Id::new(),
+        Rectangle::new(
+            (0, 0).into(),
+            (logical_size.w.max(1), logical_size.h.max(1)).into(),
+        ),
+        CommitCounter::default(),
+        Color32F::BLACK,
+        Kind::Unspecified,
+    );
+    render_list.extend(scale_render_elements_for_output(
+        vec![CompositorRenderElement::Solid(backdrop)],
+        output_scale,
+    ));
+}
+
 /// Builds the front-to-back composite render element list scoped to a specific output (`RUSTYOS-042`).
 #[allow(clippy::too_many_lines)]
 pub(crate) fn build_frame_render_list_for_output(
@@ -500,6 +546,18 @@ pub(crate) fn build_frame_render_list_for_output(
                 }
             }
         }
+    }
+
+    if state.ext_session_locked {
+        push_ext_session_lock_elements(
+            &mut render_list,
+            state,
+            renderer,
+            &smithay_output,
+            logical_size,
+            output_scale,
+        );
+        return render_list;
     }
 
     if let Some(ref dnd_surface) = state.dnd_icon
@@ -1045,10 +1103,22 @@ fn render_winit_frame(
 
     let mut presentation_feedback = state.take_presentation_feedback(&state.output, &render_states);
     let elapsed = state.elapsed();
-    for window in state.space.elements() {
-        window.send_frame(&state.output, elapsed, Some(Duration::ZERO), |_, _| {
-            Some(state.output.clone())
-        });
+    if state.ext_session_locked {
+        if let Some(lock_surf) = state.ext_lock_surface_for_output(&state.output) {
+            send_frames_surface_tree(
+                lock_surf.wl_surface(),
+                &state.output,
+                elapsed,
+                Some(Duration::ZERO),
+                |_, _| Some(state.output.clone()),
+            );
+        }
+    } else {
+        for window in state.space.elements() {
+            window.send_frame(&state.output, elapsed, Some(Duration::ZERO), |_, _| {
+                Some(state.output.clone())
+            });
+        }
     }
 
     state.space.refresh();
@@ -1064,6 +1134,7 @@ fn render_winit_frame(
         frame_seq,
         wp_presentation_feedback::Kind::Vsync,
     );
+    state.confirm_pending_session_lock();
     let _ = state.display_handle.flush_clients();
 
     let present_done = Instant::now();

@@ -254,6 +254,7 @@ pub fn run_bootstrap(config: &CompositorConfig) -> Result<BootstrapReport, Compo
                 &display,
                 "wayland-check".to_owned(),
                 event_loop.get_signal(),
+                event_loop.handle(),
                 (1280, 800).into(),
             )?;
 
@@ -356,6 +357,7 @@ mod tests {
             &display,
             "wayland-test-0".to_owned(),
             event_loop.get_signal(),
+            event_loop.handle(),
             (1280, 800).into(),
         )?;
 
@@ -457,6 +459,7 @@ mod tests {
             &display,
             "wayland-layer-test-0".to_owned(),
             event_loop.get_signal(),
+            event_loop.handle(),
             (1920, 1080).into(),
         )?;
 
@@ -477,6 +480,7 @@ mod tests {
             &display,
             "wayland-kbd-test-0".to_owned(),
             event_loop.get_signal(),
+            event_loop.handle(),
             (1280, 800).into(),
         )?;
 
@@ -525,6 +529,7 @@ mod tests {
             &display,
             "wayland-sel-test-0".to_owned(),
             event_loop.get_signal(),
+            event_loop.handle(),
             (1280, 800).into(),
         )?;
 
@@ -564,6 +569,7 @@ mod tests {
             &display,
             "wayland-csd-test-0".to_owned(),
             event_loop.get_signal(),
+            event_loop.handle(),
             (1280, 800).into(),
         )?;
 
@@ -605,6 +611,7 @@ mod tests {
             &display,
             "wayland-min-test-0".to_owned(),
             event_loop.get_signal(),
+            event_loop.handle(),
             (1280, 800).into(),
         )?;
 
@@ -646,6 +653,7 @@ mod tests {
             &display,
             "wayland-switcher-test-0".to_owned(),
             event_loop.get_signal(),
+            event_loop.handle(),
             (1280, 800).into(),
         )?;
 
@@ -699,6 +707,7 @@ mod tests {
             &display,
             "rusty-test-multi-output".to_owned(),
             event_loop.get_signal(),
+            event_loop.handle(),
             (1920, 1080).into(),
         )?;
 
@@ -785,6 +794,7 @@ mod tests {
             &display,
             "rusty-test-dmabuf-fs".to_owned(),
             event_loop.get_signal(),
+            event_loop.handle(),
             (1920, 1080).into(),
         )?;
 
@@ -837,6 +847,7 @@ mod tests {
             &display,
             "rusty-test-mm-vrr".to_owned(),
             event_loop.get_signal(),
+            event_loop.handle(),
             (1920, 1080).into(),
         )?;
 
@@ -940,6 +951,7 @@ mod tests {
             &display,
             "rusty-test-hidpi".to_owned(),
             event_loop.get_signal(),
+            event_loop.handle(),
             (3840, 2160).into(),
         )?;
 
@@ -997,6 +1009,7 @@ mod tests {
             &display,
             "rusty-test-input-pres".to_owned(),
             event_loop.get_signal(),
+            event_loop.handle(),
             (1920, 1080).into(),
         )?;
 
@@ -1038,6 +1051,99 @@ mod tests {
             1,
             smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::Vsync,
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn cursor_shape_activation_idle_inhibit_and_ext_session_lock() -> Result<(), Box<dyn Error>> {
+        use smithay::input::SeatHandler;
+        use smithay::wayland::idle_notify::IdleNotifierHandler;
+        use smithay::wayland::session_lock::SessionLockHandler;
+        use smithay::wayland::xdg_activation::XdgActivationTokenData;
+
+        let display: Display<RustyCompositorState> = Display::new()?;
+        let event_loop: EventLoop<RustyCompositorState> = EventLoop::try_new()?;
+        let mut compositor = RustyCompositorState::new(
+            &display,
+            "rusty-test-client-ux".to_owned(),
+            event_loop.get_signal(),
+            event_loop.handle(),
+            (1920, 1080).into(),
+        )?;
+
+        // 1. Cursor shape global maps named icons cleanly via SeatHandler::cursor_image.
+        let seat = compositor.seat.clone();
+        compositor.cursor_image(
+            &seat,
+            smithay::input::pointer::CursorImageStatus::Named(
+                smithay::input::pointer::CursorIcon::Pointer,
+            ),
+        );
+        assert!(matches!(
+            compositor.cursor_status,
+            smithay::input::pointer::CursorImageStatus::Named(
+                smithay::input::pointer::CursorIcon::Pointer
+            )
+        ));
+
+        // 2. XDG Activation external token registration, lookup, and removal work cleanly.
+        let token = {
+            let (tok, data) = compositor.xdg_activation_state.create_external_token(Some(
+                XdgActivationTokenData {
+                    app_id: Some("org.rustyos.Terminal".to_owned()),
+                    ..Default::default()
+                },
+            ));
+            assert_eq!(data.app_id.as_deref(), Some("org.rustyos.Terminal"));
+            tok.clone()
+        };
+        assert!(
+            compositor
+                .xdg_activation_state
+                .data_for_token(&token)
+                .is_some()
+        );
+        assert!(compositor.xdg_activation_state.remove_token(&token));
+        assert!(
+            compositor
+                .xdg_activation_state
+                .data_for_token(&token)
+                .is_none()
+        );
+
+        // 3. Idle notifier activity and Inhibitor state integrate cleanly.
+        assert!(!compositor.idle_notifier_state().is_inhibited());
+        compositor.idle_notifier_state.set_is_inhibited(true);
+        assert!(compositor.idle_notifier_state().is_inhibited());
+        compositor.notify_user_activity();
+        assert!(!compositor.idle_notifier_state().is_inhibited());
+
+        // 4. ext_session_lock isolates fullscreen windows, overlays, and lock surfaces safely.
+        let w1 = compositor.wm.next_window_id();
+        let _ = compositor.wm.map_window(w1, None);
+        let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+        compositor.apply_wm_action(rusty_wm::WmAction::ToggleFullscreen, serial);
+        assert_eq!(compositor.active_unoccluded_fullscreen_window(), Some(w1));
+
+        compositor.ext_session_locked = true;
+        compositor.handle_ipc_request(rusty_ipc::ShellRequest::ToggleLauncher);
+        assert!(compositor.is_session_locked());
+        assert!(compositor.has_blocking_shell_overlay());
+        assert_eq!(compositor.active_unoccluded_fullscreen_window(), None);
+        assert_eq!(
+            compositor.ext_lock_surface_under((200.0, 200.0).into()),
+            None
+        );
+
+        compositor.unlock();
+        assert!(!compositor.is_session_locked());
+        assert_eq!(
+            compositor.active_unoccluded_fullscreen_window(),
+            None // Launcher was toggled above
+        );
+        compositor.handle_ipc_request(rusty_ipc::ShellRequest::ToggleLauncher);
+        assert_eq!(compositor.active_unoccluded_fullscreen_window(), Some(w1));
 
         Ok(())
     }

@@ -42,7 +42,7 @@ use smithay::{
         session::{Event as SessionEvent, Session, libseat::LibSeatSession},
         udev::{UdevBackend, UdevEvent},
     },
-    desktop::utils::OutputPresentationFeedback,
+    desktop::utils::{OutputPresentationFeedback, send_frames_surface_tree},
     output::{Mode as OutputMode, Scale},
     reexports::{
         calloop::{
@@ -561,6 +561,9 @@ impl DrmRuntime {
                 if result.is_empty {
                     out.needs_redraw = false;
                     out.last_frame_direct_scanout = false;
+                    if state.ext_session_locked {
+                        state.confirm_pending_session_lock();
+                    }
                 } else {
                     let direct_scanout =
                         matches!(result.primary_element, PrimaryPlaneElement::Element(_));
@@ -641,10 +644,23 @@ impl DrmRuntime {
             .map_or_else(|| state.output.clone(), |entry| entry.output.clone());
 
         let elapsed = state.elapsed();
-        for window in state.space.elements() {
-            window.send_frame(&target_output, elapsed, Some(Duration::ZERO), |_, _| {
-                Some(target_output.clone())
-            });
+        if state.ext_session_locked {
+            state.confirm_pending_session_lock();
+            if let Some(lock_surf) = state.ext_lock_surface_for_output(&target_output) {
+                send_frames_surface_tree(
+                    lock_surf.wl_surface(),
+                    &target_output,
+                    elapsed,
+                    Some(Duration::ZERO),
+                    |_, _| Some(target_output.clone()),
+                );
+            }
+        } else {
+            for window in state.space.elements() {
+                window.send_frame(&target_output, elapsed, Some(Duration::ZERO), |_, _| {
+                    Some(target_output.clone())
+                });
+            }
         }
         state.space.refresh();
         state.popups.cleanup();
@@ -999,6 +1015,7 @@ fn try_run_native_drm_session(
         &display,
         socket_name.clone(),
         event_loop.get_signal(),
+        event_loop.handle(),
         setup.pixel_size,
     )?;
 

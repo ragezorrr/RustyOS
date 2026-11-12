@@ -16,15 +16,20 @@ use smithay::{
         allocator::{Buffer as AllocatorBuffer, Format, dmabuf::Dmabuf},
         renderer::{element::RenderElementStates, utils::on_commit_buffer_handler},
     },
-    delegate_compositor, delegate_data_control, delegate_data_device, delegate_dmabuf,
-    delegate_fractional_scale, delegate_layer_shell, delegate_output, delegate_pointer_constraints,
-    delegate_presentation, delegate_primary_selection, delegate_relative_pointer, delegate_seat,
-    delegate_shm, delegate_viewporter, delegate_xdg_decoration, delegate_xdg_shell,
+    delegate_compositor, delegate_cursor_shape, delegate_data_control, delegate_data_device,
+    delegate_dmabuf, delegate_fractional_scale, delegate_idle_inhibit, delegate_idle_notify,
+    delegate_layer_shell, delegate_output, delegate_pointer_constraints, delegate_presentation,
+    delegate_primary_selection, delegate_relative_pointer, delegate_seat, delegate_session_lock,
+    delegate_shm, delegate_viewporter, delegate_xdg_activation, delegate_xdg_decoration,
+    delegate_xdg_shell,
     desktop::{
         LayerSurface as DesktopLayerSurface, PopupKind, PopupManager, Space, Window,
         WindowSurfaceType, find_popup_root_surface, get_popup_toplevel_coords,
         layer_map_for_output,
-        utils::{OutputPresentationFeedback, surface_presentation_feedback_flags_from_states},
+        utils::{
+            OutputPresentationFeedback, surface_presentation_feedback_flags_from_states,
+            take_presentation_feedback_surface_tree,
+        },
     },
     input::{
         Seat, SeatHandler, SeatState,
@@ -51,8 +56,11 @@ use smithay::{
         compositor::{
             self, CompositorClientState, CompositorHandler, CompositorState, TraversalAction,
         },
+        cursor_shape::CursorShapeManagerState,
         dmabuf::{DmabufFeedback, DmabufGlobal, DmabufHandler, DmabufState, ImportNotifier},
         fractional_scale::{self, FractionalScaleHandler, FractionalScaleManagerState},
+        idle_inhibit::{IdleInhibitHandler, IdleInhibitManagerState},
+        idle_notify::{IdleNotifierHandler, IdleNotifierState},
         output::{OutputHandler, OutputManagerState},
         pointer_constraints::{
             PointerConstraint, PointerConstraintsHandler, PointerConstraintsState,
@@ -72,6 +80,7 @@ use smithay::{
             },
             wlr_data_control::{DataControlHandler, DataControlState},
         },
+        session_lock::{LockSurface, SessionLockHandler, SessionLockManagerState, SessionLocker},
         shell::{
             wlr_layer::{
                 Layer, LayerSurface as WlrLayerSurface, LayerSurfaceData, WlrLayerShellHandler,
@@ -84,7 +93,11 @@ use smithay::{
             },
         },
         shm::{ShmHandler, ShmState},
+        tablet_manager::TabletSeatHandler,
         viewporter::ViewporterState,
+        xdg_activation::{
+            XdgActivationHandler, XdgActivationState, XdgActivationToken, XdgActivationTokenData,
+        },
         xwayland_shell::XWaylandShellState,
     },
     xwayland::{X11Surface, X11Wm, XWaylandClientData},
@@ -212,6 +225,24 @@ pub struct RustyCompositorState {
     pub pointer_constraints_state: PointerConstraintsState,
     /// `wp_presentation` frame presentation timing global (`RUSTYOS-044`).
     pub presentation_state: PresentationState,
+    /// `wp_cursor_shape_v1` server-side cursor icon global (`RUSTYOS-045`).
+    pub cursor_shape_state: CursorShapeManagerState,
+    /// `xdg_activation_v1` focus-transfer activation global (`RUSTYOS-045`).
+    pub xdg_activation_state: XdgActivationState,
+    /// `ext_idle_notify_v1` idle timeout notification global (`RUSTYOS-045`).
+    pub idle_notifier_state: IdleNotifierState<Self>,
+    /// `zwp_idle_inhibit_manager_v1` idle inhibitor global (`RUSTYOS-045`).
+    pub idle_inhibit_state: IdleInhibitManagerState,
+    /// Surfaces currently holding an active idle inhibitor (`RUSTYOS-045`).
+    pub idle_inhibitor_surfaces: Vec<WlSurface>,
+    /// `ext_session_lock_v1` external locker manager state (`RUSTYOS-045`).
+    pub session_lock_state: SessionLockManagerState,
+    /// `true` while an `ext_session_lock_v1` client holds an active session lock (`RUSTYOS-045`).
+    pub ext_session_locked: bool,
+    /// Pending lock confirmation awaiting a cleared/locked frame presentation (`RUSTYOS-045`).
+    pub pending_session_locker: Option<SessionLocker>,
+    /// Per-output surfaces submitted by the active `ext_session_lock_v1` client (`RUSTYOS-045`).
+    pub ext_lock_surfaces: Vec<(Output, LockSurface)>,
     /// `zwp_linux_dmabuf_v1` client DMA-BUF import state (`RUSTYOS-041`).
     pub dmabuf_state: DmabufState,
     /// Active `zwp_linux_dmabuf_v1` global handle registered by the GPU backend (`RUSTYOS-041`).
@@ -333,6 +364,7 @@ impl RustyCompositorState {
         display: &Display<Self>,
         socket_name: String,
         loop_signal: LoopSignal,
+        loop_handle: LoopHandle<'static, Self>,
         initial_size: Size<i32, smithay::utils::Physical>,
     ) -> Result<Self, CompositorError> {
         let display_handle = display.handle();
@@ -351,6 +383,11 @@ impl RustyCompositorState {
             RelativePointerManagerState::new::<Self>(&display_handle);
         let pointer_constraints_state = PointerConstraintsState::new::<Self>(&display_handle);
         let presentation_state = PresentationState::new::<Self>(&display_handle, 1);
+        let cursor_shape_state = CursorShapeManagerState::new::<Self>(&display_handle);
+        let xdg_activation_state = XdgActivationState::new::<Self>(&display_handle);
+        let idle_notifier_state = IdleNotifierState::<Self>::new(&display_handle, loop_handle);
+        let idle_inhibit_state = IdleInhibitManagerState::new::<Self>(&display_handle);
+        let session_lock_state = SessionLockManagerState::new::<Self, _>(&display_handle, |_| true);
         let dmabuf_state = DmabufState::new();
         let output_manager_state = OutputManagerState::new_with_xdg_output::<Self>(&display_handle);
         let data_device_state = DataDeviceState::new::<Self>(&display_handle);
@@ -430,6 +467,15 @@ impl RustyCompositorState {
             relative_pointer_manager_state,
             pointer_constraints_state,
             presentation_state,
+            cursor_shape_state,
+            xdg_activation_state,
+            idle_notifier_state,
+            idle_inhibit_state,
+            idle_inhibitor_surfaces: Vec::new(),
+            session_lock_state,
+            ext_session_locked: false,
+            pending_session_locker: None,
+            ext_lock_surfaces: Vec::new(),
             dmabuf_state,
             dmabuf_global: None,
             output_manager_state,
@@ -629,6 +675,7 @@ impl RustyCompositorState {
             layer_map_for_output(&entry.output).arrange();
         }
 
+        self.reconfigure_ext_lock_surfaces();
         let serial = smithay::utils::SERIAL_COUNTER.next_serial();
         self.sync_space_with_wm(serial);
         true
@@ -708,17 +755,117 @@ impl RustyCompositorState {
         );
     }
 
+    /// Returns `true` when either the built-in lock screen or an `ext_session_lock_v1`
+    /// client currently locks the session (`RUSTYOS-045`).
+    #[must_use]
+    pub fn is_session_locked(&self) -> bool {
+        self.screen_locked || self.ext_session_locked
+    }
+
     /// Returns `true` when an interactive compositor overlay or lock screen should bypass any
-    /// client pointer lock/confinement (`RUSTYOS-044`).
+    /// client pointer lock/confinement (`RUSTYOS-044` / `RUSTYOS-045`).
     #[must_use]
     pub fn has_blocking_shell_overlay(&self) -> bool {
-        self.screen_locked
+        self.is_session_locked()
             || self.launcher_active
             || self.overview_active
             || self.quick_settings_active
             || self.window_switcher.is_some()
             || self.active_window_drag.is_some()
             || self.active_window_resize.is_some()
+    }
+
+    /// Notifies `ext_idle_notify_v1` subscribers of seat user activity while honoring live
+    /// `zwp_idle_inhibit_manager_v1` surface inhibitors (`RUSTYOS-045`).
+    pub fn notify_user_activity(&mut self) {
+        self.idle_inhibitor_surfaces.retain(IsAlive::alive);
+        self.idle_notifier_state
+            .set_is_inhibited(!self.idle_inhibitor_surfaces.is_empty());
+        self.idle_notifier_state.notify_activity(&self.seat);
+    }
+
+    /// Confirms any pending `ext_session_lock_v1` lock request once outputs have cleared and
+    /// presented a locked frame (`RUSTYOS-045`).
+    pub fn confirm_pending_session_lock(&mut self) {
+        if let Some(locker) = self.pending_session_locker.take() {
+            locker.lock();
+        }
+    }
+
+    /// Returns the alive `ext_session_lock_v1` surface associated with `output`, if any (`RUSTYOS-045`).
+    #[must_use]
+    pub fn ext_lock_surface_for_output(&self, output: &Output) -> Option<LockSurface> {
+        self.ext_lock_surfaces
+            .iter()
+            .rev()
+            .find_map(|(out, surf)| (out == output && surf.alive()).then(|| surf.clone()))
+    }
+
+    /// Resolves the `ext_session_lock_v1` surface under `point` and its logical output origin (`RUSTYOS-045`).
+    #[must_use]
+    pub fn ext_lock_surface_under(
+        &self,
+        point: Point<f64, Logical>,
+    ) -> Option<(WlSurface, Point<f64, Logical>)> {
+        let entry = self
+            .output_map
+            .output_under(point)
+            .and_then(|id| self.output_map.get(id))
+            .unwrap_or_else(|| self.output_map.primary());
+        let lock_surf = self.ext_lock_surface_for_output(&entry.output)?;
+        Some((lock_surf.wl_surface().clone(), entry.location.to_f64()))
+    }
+
+    /// Reconfigures active `ext_session_lock_v1` surfaces to match updated output logical sizes (`RUSTYOS-045`).
+    pub fn reconfigure_ext_lock_surfaces(&mut self) {
+        self.ext_lock_surfaces.retain(|(_, surf)| surf.alive());
+        for (output, lock_surf) in &self.ext_lock_surfaces {
+            let size = self.logical_u32_size_for_output(output);
+            lock_surf.with_pending_state(|s| s.size = Some(size));
+            lock_surf.send_configure();
+        }
+    }
+
+    fn logical_u32_size_for_output(&self, output: &Output) -> Size<u32, Logical> {
+        let entry = self
+            .output_map
+            .entries()
+            .iter()
+            .find(|e| &e.output == output)
+            .unwrap_or_else(|| self.output_map.primary());
+        let geo = entry.logical_geometry();
+        Size::from((
+            u32::try_from(geo.size.w.max(1)).unwrap_or(1),
+            u32::try_from(geo.size.h.max(1)).unwrap_or(1),
+        ))
+    }
+
+    /// Focuses and raises the window owning `surface` (`xdg_activation_v1`, `RUSTYOS-045`).
+    pub fn activate_window_surface(&mut self, surface: &WlSurface, serial: Serial) -> bool {
+        if self.is_session_locked() {
+            return false;
+        }
+        let mut root = surface.clone();
+        while let Some(parent) = compositor::get_parent(&root) {
+            root = parent;
+        }
+        let Some(win_id) = self.window_bindings.iter().find_map(|(_, win)| {
+            WaylandFocus::wl_surface(win)
+                .is_some_and(|ws| *ws == root)
+                .then(|| self.window_id_for_smithay(win))
+                .flatten()
+        }) else {
+            return false;
+        };
+        self.minimized_window_ids.remove(&win_id);
+        if let Some(target_ws) = self.wm.window(win_id).map(|w| w.workspace)
+            && target_ws != self.wm.active_workspace_id()
+        {
+            self.wm.switch_workspace(target_ws);
+        }
+        let focused = self.wm.focus_and_raise(win_id);
+        self.sync_space_with_wm(serial);
+        focused
     }
 
     /// Computes global logical bounds for a mapped toplevel or layer `surface` (`RUSTYOS-044`).
@@ -799,6 +946,19 @@ impl RustyCompositorState {
         render_element_states: &RenderElementStates,
     ) -> OutputPresentationFeedback {
         let mut feedback = OutputPresentationFeedback::new(output);
+        if self.ext_session_locked {
+            if let Some(lock_surf) = self.ext_lock_surface_for_output(output) {
+                take_presentation_feedback_surface_tree(
+                    lock_surf.wl_surface(),
+                    &mut feedback,
+                    |_, _| Some(output.clone()),
+                    |surf, _| {
+                        surface_presentation_feedback_flags_from_states(surf, render_element_states)
+                    },
+                );
+            }
+            return feedback;
+        }
         for window in self.space.elements() {
             if self
                 .space
@@ -847,6 +1007,7 @@ impl RustyCompositorState {
             self.output = self.output_map.primary().output.clone();
         }
 
+        self.reconfigure_ext_lock_surfaces();
         let serial = smithay::utils::SERIAL_COUNTER.next_serial();
         self.sync_space_with_wm(serial);
         true
@@ -912,7 +1073,7 @@ impl RustyCompositorState {
     /// occludes that display (`RUSTYOS-042`).
     #[must_use]
     pub fn active_unoccluded_fullscreen_window_on(&self, output_id: OutputId) -> Option<WindowId> {
-        if self.screen_locked || self.lock_screen_anim.current() > 0.01 {
+        if self.is_session_locked() || self.lock_screen_anim.current() > 0.01 {
             return None;
         }
         if output_id == self.output_map.primary().id {
@@ -2253,10 +2414,21 @@ impl RustyCompositorState {
             }
         }
 
-        // 3. Update Wayland keyboard focus to match the WM's focused window (native or XWayland).
-        let focus_surface = focused_id
-            .and_then(|id| self.smithay_window_for_id(id))
-            .and_then(|w| WaylandFocus::wl_surface(&w).map(std::borrow::Cow::into_owned));
+        self.sync_keyboard_focus_with_wm(focused_id, serial);
+    }
+
+    fn sync_keyboard_focus_with_wm(&mut self, focused_id: Option<WindowId>, serial: Serial) {
+        let focus_surface = if self.ext_session_locked {
+            self.ext_lock_surfaces
+                .iter()
+                .rev()
+                .find(|(_, ls)| ls.alive())
+                .map(|(_, ls)| ls.wl_surface().clone())
+        } else {
+            focused_id
+                .and_then(|id| self.smithay_window_for_id(id))
+                .and_then(|w| WaylandFocus::wl_surface(&w).map(std::borrow::Cow::into_owned))
+        };
         let keyboard = self.keyboard.clone();
         keyboard.set_focus(self, focus_surface, serial);
     }
@@ -3083,6 +3255,128 @@ impl PointerConstraintsHandler for RustyCompositorState {
     }
 }
 
+impl TabletSeatHandler for RustyCompositorState {}
+
+impl XdgActivationHandler for RustyCompositorState {
+    fn activation_state(&mut self) -> &mut XdgActivationState {
+        &mut self.xdg_activation_state
+    }
+
+    fn request_activation(
+        &mut self,
+        token: XdgActivationToken,
+        token_data: XdgActivationTokenData,
+        surface: WlSurface,
+    ) {
+        let within_ttl = token_data.timestamp.elapsed() <= Duration::from_secs(10);
+        self.xdg_activation_state.remove_token(&token);
+        if !within_ttl || self.is_session_locked() {
+            return;
+        }
+        let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+        let _ = self.activate_window_surface(&surface, serial);
+    }
+}
+
+impl IdleNotifierHandler for RustyCompositorState {
+    fn idle_notifier_state(&mut self) -> &mut IdleNotifierState<Self> {
+        &mut self.idle_notifier_state
+    }
+}
+
+impl IdleInhibitHandler for RustyCompositorState {
+    fn inhibit(&mut self, surface: WlSurface) {
+        self.idle_inhibitor_surfaces.retain(IsAlive::alive);
+        if !self.idle_inhibitor_surfaces.iter().any(|s| s == &surface) {
+            self.idle_inhibitor_surfaces.push(surface);
+        }
+        self.idle_notifier_state
+            .set_is_inhibited(!self.idle_inhibitor_surfaces.is_empty());
+    }
+
+    fn uninhibit(&mut self, surface: WlSurface) {
+        self.idle_inhibitor_surfaces
+            .retain(|s| s.alive() && s != &surface);
+        self.idle_notifier_state
+            .set_is_inhibited(!self.idle_inhibitor_surfaces.is_empty());
+    }
+}
+
+impl SessionLockHandler for RustyCompositorState {
+    fn lock_state(&mut self) -> &mut SessionLockManagerState {
+        &mut self.session_lock_state
+    }
+
+    fn lock(&mut self, confirmation: SessionLocker) {
+        if self.ext_session_locked {
+            drop(confirmation);
+            return;
+        }
+        self.ext_session_locked = true;
+        self.window_switcher = None;
+        self.dnd_icon = None;
+        self.close_launcher();
+        self.close_quick_settings();
+        self.close_overview();
+        self.active_window_drag = None;
+        self.active_window_resize = None;
+        self.dock_hover_slot = None;
+        self.deactivate_active_pointer_constraint();
+
+        let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+        let keyboard = self.keyboard.clone();
+        keyboard.set_focus(self, None, serial);
+        let pointer = self.pointer.clone();
+        pointer.motion(
+            self,
+            None,
+            &smithay::input::pointer::MotionEvent {
+                location: self.pointer_location,
+                serial,
+                time: u32::try_from(self.elapsed().as_millis()).unwrap_or(0),
+            },
+        );
+        pointer.frame(self);
+        self.pending_session_locker = Some(confirmation);
+    }
+
+    fn unlock(&mut self) {
+        self.ext_session_locked = false;
+        self.pending_session_locker = None;
+        self.ext_lock_surfaces.clear();
+        let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+        self.sync_space_with_wm(serial);
+    }
+
+    fn new_surface(&mut self, surface: LockSurface, wl_output: WlOutput) {
+        self.ext_lock_surfaces.retain(|(_, s)| s.alive());
+        let resolved_output =
+            Output::from_resource(&wl_output).unwrap_or_else(|| self.output.clone());
+        self.ext_lock_surfaces
+            .retain(|(out, _)| out != &resolved_output);
+
+        let logical_size = self.logical_u32_size_for_output(&resolved_output);
+        let output_scale = self
+            .output_map
+            .entries()
+            .iter()
+            .find(|e| e.output == resolved_output)
+            .map_or(1.0, |e| e.scale);
+        Self::apply_surface_scale(surface.wl_surface(), output_scale);
+        surface.with_pending_state(|state| {
+            state.size = Some(logical_size);
+        });
+        let lock_wl = surface.wl_surface().clone();
+        self.ext_lock_surfaces.push((resolved_output, surface));
+
+        if self.ext_session_locked {
+            let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+            let keyboard = self.keyboard.clone();
+            keyboard.set_focus(self, Some(lock_wl), serial);
+        }
+    }
+}
+
 delegate_compositor!(RustyCompositorState);
 delegate_shm!(RustyCompositorState);
 delegate_viewporter!(RustyCompositorState);
@@ -3090,6 +3384,11 @@ delegate_fractional_scale!(RustyCompositorState);
 delegate_relative_pointer!(RustyCompositorState);
 delegate_pointer_constraints!(RustyCompositorState);
 delegate_presentation!(RustyCompositorState);
+delegate_cursor_shape!(RustyCompositorState);
+delegate_xdg_activation!(RustyCompositorState);
+delegate_idle_notify!(RustyCompositorState);
+delegate_idle_inhibit!(RustyCompositorState);
+delegate_session_lock!(RustyCompositorState);
 delegate_dmabuf!(RustyCompositorState);
 delegate_output!(RustyCompositorState);
 delegate_seat!(RustyCompositorState);

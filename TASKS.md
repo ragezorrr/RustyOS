@@ -627,6 +627,20 @@ hardware/software context и низкие накладные расходы.
   - `cargo fmt --check` и `cargo clippy --workspace --all-targets --offline -- -D warnings` завершаются без предупреждений; 72/72 тестов `rusty-compositor` и 96/96 запущенных тестов workspace проходят (1 предсуществующий тест `rusty-services::tests::networkmanager_and_bluetooth_formatters_handle_all_states` пропущен из-за зависания `BluetoothService::query_status`/`bluetoothctl` >60s в sandbox-среде без BlueZ/D-Bus).
 - **Risks:** Нулевые новые внешние зависимости; проверка `wp_presentation` (`ZeroCopy`/`VRR`) и `PointerConstraint` с реальными играми/XWayland-клиентами на bare-metal `--drm` не проводилась в headless-среде.
 
+## RUSTYOS-045 --- Wayland Client UX, Idle & Session Lock (`wp_cursor_shape_v1`, `xdg_activation_v1`, `ext_idle_notify_v1`, `zwp_idle_inhibit_manager_v1`, `ext_session_lock_v1`)
+
+- **Owner:** AI Agent + User
+- **Status:** done
+- **Priority:** P0
+- **Phase:** 6/7/8
+- **ADR / Decision:** ADR-0014 / D-022
+- **Acceptance Criteria:**
+  - В `state.rs` зарегистрированы `CursorShapeManagerState` (+ `TabletSeatHandler`), `XdgActivationState` / `XdgActivationHandler` (с проверкой TTL 10 с и `activate_window_surface`), `IdleNotifierState` / `IdleNotifierHandler`, `IdleInhibitManagerState` / `IdleInhibitHandler` и `SessionLockManagerState` / `SessionLockHandler`; `RustyCompositorState::new` обновлён для передачи `LoopHandle` (в `winit_backend.rs`, `drm_backend.rs` и тестах `lib.rs`).
+  - В `input.rs` и `xwayland.rs` подключены `notify_user_activity()` при вводе и полная изоляция ввода/clipboard/pointer constraints при `ext_session_locked`.
+  - В `winit_backend.rs` и `drm_backend.rs` обеспечен изолированный рендер per-output `LockSurface` с чёрным fallback и подтверждением `confirm_pending_session_lock()` после представления кадра.
+  - `cargo fmt --check` и `cargo clippy --workspace --all-targets --offline -- -D warnings` завершаются без предупреждений; 73/73 тестов `rusty-compositor` и 97/97 запущенных тестов workspace проходят (1 предсуществующий тест `rusty-services::tests::networkmanager_and_bluetooth_formatters_handle_all_states` пропущен флагом `--skip`).
+- **Risks:** Нулевые новые внешние зависимости; живая проверка со сторонними клиентами (`swaylock`, `swayidle`, GTK4/Firefox) на bare-metal `--drm` не проводилась в headless-среде.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

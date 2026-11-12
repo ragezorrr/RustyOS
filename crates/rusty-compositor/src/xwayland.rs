@@ -367,7 +367,7 @@ impl XwmHandler for RustyCompositorState {
     }
 
     fn allow_selection_access(&mut self, _xwm: XwmId, selection: SelectionTarget) -> bool {
-        !self.screen_locked
+        !self.is_session_locked()
             && matches!(
                 selection,
                 SelectionTarget::Clipboard | SelectionTarget::Primary
@@ -406,7 +406,7 @@ impl XwmHandler for RustyCompositorState {
     }
 
     fn new_selection(&mut self, _xwm: XwmId, selection: SelectionTarget, mime_types: Vec<String>) {
-        if self.screen_locked {
+        if self.is_session_locked() {
             return;
         }
         match selection {
