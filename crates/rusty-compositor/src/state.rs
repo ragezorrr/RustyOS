@@ -25,7 +25,6 @@ use smithay::{
     delegate_presentation, delegate_primary_selection, delegate_relative_pointer, delegate_seat,
     delegate_session_lock, delegate_shm, delegate_text_input_manager, delegate_viewporter,
     delegate_xdg_activation, delegate_xdg_decoration, delegate_xdg_shell,
-    delegate_xdg_toplevel_icon,
     desktop::{
         LayerSurface as DesktopLayerSurface, PopupKind, PopupManager, Space, Window,
         WindowSurfaceType, find_popup_root_surface, get_popup_toplevel_coords,
@@ -46,9 +45,14 @@ use smithay::{
         calloop::{LoopHandle, LoopSignal},
         wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode as DecorationMode,
         wayland_protocols::xdg::shell::server::xdg_toplevel,
+        wayland_protocols::xdg::toplevel_icon::v1::server::{
+            xdg_toplevel_icon_manager_v1::{self, XdgToplevelIconManagerV1},
+            xdg_toplevel_icon_v1::{self, XdgToplevelIconV1},
+        },
         wayland_server::{
-            Client, Display, DisplayHandle, Resource,
-            backend::{ClientData, ClientId, DisconnectReason},
+            Client, DataInit, Dispatch, Display, DisplayHandle, Resource,
+            backend::{ClientData, ClientId, DisconnectReason, ObjectId},
+            delegate_global_dispatch,
             protocol::{
                 wl_buffer, wl_data_source::WlDataSource, wl_output::WlOutput, wl_seat,
                 wl_surface::WlSurface,
@@ -111,7 +115,7 @@ use smithay::{
                 decoration::{XdgDecorationHandler, XdgDecorationState},
             },
         },
-        shm::{ShmHandler, ShmState},
+        shm::{BufferAccessError, ShmHandler, ShmState, with_buffer_contents},
         tablet_manager::TabletSeatHandler,
         text_input::TextInputManagerState,
         viewporter::ViewporterState,
@@ -119,7 +123,8 @@ use smithay::{
             XdgActivationHandler, XdgActivationState, XdgActivationToken, XdgActivationTokenData,
         },
         xdg_toplevel_icon::{
-            ToplevelIconCachedState, XdgToplevelIconHandler, XdgToplevelIconManager,
+            XdgToplevelIconHandler, XdgToplevelIconManager, XdgToplevelIconManagerUserData,
+            XdgToplevelIconUserData,
         },
         xwayland_shell::XWaylandShellState,
     },
@@ -149,6 +154,82 @@ impl ClientData for ClientState {
 
     fn disconnected(&self, client_id: ClientId, reason: DisconnectReason) {
         debug!(?client_id, ?reason, "Wayland client disconnected");
+    }
+}
+
+/// Double-buffered surface state for `xdg_toplevel_icon_v1`.
+///
+/// Snapshots icon metadata on `set_icon` so icon state survives `xdg_toplevel_icon_v1.destroy()`,
+/// and bypasses Smithay 0.7.0's `ShmBufferUserData::remove_destruction_hook` (`!=`) bug.
+#[derive(Debug, Clone, Default)]
+struct ToplevelIconSurfaceState {
+    icon_name: Option<String>,
+    buffers: Vec<(wl_buffer::WlBuffer, i32)>,
+}
+
+impl compositor::Cacheable for ToplevelIconSurfaceState {
+    fn commit(&mut self, _dh: &DisplayHandle) -> Self {
+        self.clone()
+    }
+
+    fn merge_into(self, into: &mut Self, _dh: &DisplayHandle) {
+        *into = self;
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ToplevelIconBufferEntry {
+    buffer: wl_buffer::WlBuffer,
+    width: i32,
+    height: i32,
+    scale: i32,
+}
+
+#[derive(Debug)]
+struct ToplevelIconEntry {
+    resource: XdgToplevelIconV1,
+    immutable: bool,
+    icon_name: Option<String>,
+    buffers: Vec<ToplevelIconBufferEntry>,
+}
+
+impl ToplevelIconEntry {
+    fn add_buffer_replacing_slot(
+        &mut self,
+        buffer: wl_buffer::WlBuffer,
+        width: i32,
+        height: i32,
+        scale: i32,
+    ) {
+        if let Some(existing) = self
+            .buffers
+            .iter_mut()
+            .find(|b| b.width == width && b.height == height && b.scale == scale)
+        {
+            existing.buffer = buffer;
+        } else {
+            self.buffers.push(ToplevelIconBufferEntry {
+                buffer,
+                width,
+                height,
+                scale,
+            });
+        }
+    }
+
+    fn snapshot_surface_state(&self) -> ToplevelIconSurfaceState {
+        ToplevelIconSurfaceState {
+            icon_name: self.icon_name.clone(),
+            buffers: self
+                .buffers
+                .iter()
+                .map(|b| (b.buffer.clone(), b.scale))
+                .collect(),
+        }
+    }
+
+    fn references_buffer(&self, buf_id: &ObjectId) -> bool {
+        self.buffers.iter().any(|b| b.buffer.id() == *buf_id)
     }
 }
 
@@ -336,6 +417,14 @@ pub struct RustyCompositorState {
     pub overview_anim: AnimatedValue,
     /// Currently hovered Dock slot index (`0..3 + windows.len()`) (`RUSTYOS-023`).
     pub dock_hover_slot: Option<usize>,
+    /// Animated Dock hover lift progress (`0.0` rest -> `1.0` lifted, 120 ms) (`RUSTYOS-048`).
+    pub dock_hover_anim: AnimatedValue,
+    /// Open `TopBar` left dropdown menu popover if any (`RUSTYOS-048`).
+    pub active_top_bar_menu: Option<crate::shell_render::TopBarMenuHit>,
+    /// Live shell glass opacity multiplier (`0.35..=1.0`, default `0.78`) (`RUSTYOS-048`).
+    pub glass_opacity: f32,
+    /// High-contrast opaque shell panels mode (`RUSTYOS-048`).
+    pub reduce_transparency: bool,
     /// Whether the Spotlight application launcher overlay is open (`RUSTYOS-018`).
     pub launcher_active: bool,
     /// Animated Spotlight transition progress (`0.0` closed -> `1.0` open) (`RUSTYOS-025`).
@@ -398,6 +487,7 @@ pub struct RustyCompositorState {
     pub window_toplevel_icons: HashMap<WindowId, crate::icons::ShmToplevelIcon>,
     /// Active 3-finger touchpad gesture accumulator (`RUSTYOS-047`).
     pub touchpad_swipe: TouchpadSwipeState,
+    toplevel_icons: HashMap<ObjectId, ToplevelIconEntry>,
     next_toplevel_icon_rev: u64,
     next_notification_id: u64,
 }
@@ -527,6 +617,9 @@ impl RustyCompositorState {
         primary_entry.global_id = Some(primary_global);
         let output_map = crate::outputs::OutputMap::new(primary_entry);
 
+        let initial_glass_opacity = user_config.glass_opacity;
+        let initial_reduce_transparency = user_config.reduce_transparency;
+
         let mut state = Self {
             start_time: Instant::now(),
             display_handle,
@@ -591,6 +684,10 @@ impl RustyCompositorState {
             overview_active: false,
             overview_anim: AnimatedValue::new_settled(0.0),
             dock_hover_slot: None,
+            dock_hover_anim: AnimatedValue::new_settled(0.0),
+            active_top_bar_menu: None,
+            glass_opacity: initial_glass_opacity,
+            reduce_transparency: initial_reduce_transparency,
             launcher_active: false,
             launcher_anim: AnimatedValue::new_settled(0.0),
             launcher: crate::launcher::LauncherState::new(),
@@ -622,6 +719,7 @@ impl RustyCompositorState {
             xdg_toplevel_icon_manager,
             window_toplevel_icons: HashMap::new(),
             touchpad_swipe: TouchpadSwipeState::default(),
+            toplevel_icons: HashMap::new(),
             next_toplevel_icon_rev: 0,
             next_notification_id: 0,
         };
@@ -1505,6 +1603,7 @@ impl RustyCompositorState {
     pub fn toggle_launcher(&mut self) {
         self.launcher_active = !self.launcher_active;
         if self.launcher_active {
+            self.active_top_bar_menu = None;
             self.window_switcher = None;
             self.close_quick_settings();
             self.close_overview();
@@ -1524,6 +1623,7 @@ impl RustyCompositorState {
     pub fn toggle_quick_settings(&mut self) {
         self.quick_settings_active = !self.quick_settings_active;
         if self.quick_settings_active {
+            self.active_top_bar_menu = None;
             self.window_switcher = None;
             self.close_launcher();
             self.close_overview();
@@ -1538,6 +1638,106 @@ impl RustyCompositorState {
         self.retarget_quick_settings_anim();
     }
 
+    /// Toggles a `TopBar` left menu dropdown popover (`RUSTYOS-048`).
+    pub fn toggle_top_bar_menu(&mut self, menu: crate::shell_render::TopBarMenuHit) {
+        if self.active_top_bar_menu == Some(menu) {
+            self.active_top_bar_menu = None;
+        } else {
+            self.close_quick_settings();
+            self.close_launcher();
+            self.active_top_bar_menu = Some(menu);
+        }
+    }
+
+    /// Closes any open `TopBar` menu dropdown popover (`RUSTYOS-048`).
+    pub fn close_top_bar_menu(&mut self) {
+        self.active_top_bar_menu = None;
+    }
+
+    /// Updates hovered Dock slot and triggers a 120 ms lift transition (`RUSTYOS-048`).
+    pub fn set_dock_hover_slot(&mut self, next: Option<usize>) {
+        if self.dock_hover_slot != next {
+            self.dock_hover_slot = next;
+            let now = self.elapsed();
+            self.dock_hover_anim.retarget(
+                if next.is_some() { 1.0 } else { 0.0 },
+                now,
+                Duration::from_millis(120),
+                Easing::EaseOutCubic,
+                self.animations.reduced_motion(),
+            );
+        }
+    }
+
+    /// Updates shell glass opacity clamped to `0.35..=1.0` (`RUSTYOS-048`).
+    pub fn set_glass_opacity(&mut self, opacity: f32) {
+        self.glass_opacity = crate::config::clamp_glass_opacity(opacity);
+    }
+
+    /// Toggles opaque high-contrast shell panels (`reduce_transparency`) (`RUSTYOS-048`).
+    pub fn toggle_reduce_transparency(&mut self) {
+        self.reduce_transparency = !self.reduce_transparency;
+    }
+
+    /// Executes an action chosen from an open `TopBar` menu dropdown (`RUSTYOS-048`).
+    pub fn dispatch_top_bar_menu_action(
+        &mut self,
+        action: crate::shell_render::TopBarMenuAction,
+        serial: Serial,
+    ) {
+        self.active_top_bar_menu = None;
+        match action {
+            crate::shell_render::TopBarMenuAction::AboutRustyOs => {
+                let _ = self.push_notification(
+                    Urgency::Low,
+                    "RustyOS Desktop".to_owned(),
+                    "Wayland compositor • Purple Glass UI".to_owned(),
+                );
+            }
+            crate::shell_render::TopBarMenuAction::OpenOverview => self.toggle_overview(),
+            crate::shell_render::TopBarMenuAction::OpenControlCenter => {
+                self.toggle_quick_settings();
+            }
+            crate::shell_render::TopBarMenuAction::OpenSpotlight => self.toggle_launcher(),
+            crate::shell_render::TopBarMenuAction::NewTerminal => {
+                self.handle_dock_hit(crate::shell_render::DockHit::PinnedTerminal, serial);
+            }
+            crate::shell_render::TopBarMenuAction::OpenFiles => {
+                self.handle_dock_hit(crate::shell_render::DockHit::PinnedFiles, serial);
+            }
+            crate::shell_render::TopBarMenuAction::ToggleLayout => {
+                self.apply_wm_action(WmAction::ToggleLayoutMode, serial);
+            }
+            crate::shell_render::TopBarMenuAction::ToggleReducedMotion => {
+                let next = !self.animations.reduced_motion();
+                self.set_reduced_motion_pref(next);
+            }
+            crate::shell_render::TopBarMenuAction::ToggleReduceTransparency => {
+                self.toggle_reduce_transparency();
+            }
+            crate::shell_render::TopBarMenuAction::RefreshMetrics => {
+                self.telemetry.request_refresh();
+            }
+            crate::shell_render::TopBarMenuAction::LockSession => {
+                self.set_screen_locked(true, serial);
+            }
+            crate::shell_render::TopBarMenuAction::FocusNextWindow => {
+                self.apply_wm_action(WmAction::FocusNext, serial);
+            }
+            crate::shell_render::TopBarMenuAction::ToggleMaximizeFocused => {
+                self.apply_wm_action(WmAction::ToggleMaximizeFocused, serial);
+            }
+            crate::shell_render::TopBarMenuAction::MinimizeFocused => {
+                if let Some(focused) = self.wm.focused_window() {
+                    self.minimize_window(focused, serial);
+                }
+            }
+            crate::shell_render::TopBarMenuAction::CloseFocused => {
+                self.apply_wm_action(WmAction::CloseFocused, serial);
+            }
+        }
+    }
+
     /// Engages or disengages the interactive session Lock Screen with smooth transition (`RUSTYOS-025`).
     pub fn set_screen_locked(&mut self, locked: bool, serial: Serial) {
         self.screen_locked = locked;
@@ -1546,10 +1746,11 @@ impl RustyCompositorState {
             self.dnd_icon = None;
             self.close_launcher();
             self.close_quick_settings();
+            self.close_top_bar_menu();
             self.close_overview();
             self.active_window_drag = None;
             self.active_window_resize = None;
-            self.dock_hover_slot = None;
+            self.set_dock_hover_slot(None);
             self.touchpad_swipe = TouchpadSwipeState::default();
             self.deactivate_focused_shortcut_inhibitor();
             let keyboard = self.keyboard.clone();
@@ -1577,6 +1778,7 @@ impl RustyCompositorState {
             self.launcher_anim.snap_to_target();
             self.quick_settings_anim.snap_to_target();
             self.lock_screen_anim.snap_to_target();
+            self.dock_hover_anim.snap_to_target();
         }
     }
 
@@ -2457,9 +2659,9 @@ impl RustyCompositorState {
     /// Syncs committed `xdg_toplevel_icon_v1` `ToplevelIconCachedState` for `win_id` (`RUSTYOS-047`).
     pub fn sync_toplevel_icon_from_surface(&mut self, win_id: WindowId, surface: &WlSurface) {
         let (icon_name, buffers) = compositor::with_states(surface, |states| {
-            let mut guard = states.cached_state.get::<ToplevelIconCachedState>();
+            let mut guard = states.cached_state.get::<ToplevelIconSurfaceState>();
             let cur = guard.current();
-            (cur.icon_name().map(str::to_owned), cur.buffers().to_vec())
+            (cur.icon_name.clone(), cur.buffers.clone())
         });
         if icon_name.is_none() && buffers.is_empty() {
             self.window_toplevel_icons.remove(&win_id);
@@ -2997,6 +3199,7 @@ impl RustyCompositorState {
         let _ = self.launcher_anim.tick(now);
         let _ = self.quick_settings_anim.tick(now);
         let _ = self.lock_screen_anim.tick(now);
+        let _ = self.dock_hover_anim.tick(now);
 
         if !self.animations.has_active_animations() {
             return;
@@ -3183,7 +3386,17 @@ impl RustyCompositorState {
 }
 
 impl BufferHandler for RustyCompositorState {
-    fn buffer_destroyed(&mut self, _buffer: &wl_buffer::WlBuffer) {}
+    fn buffer_destroyed(&mut self, buffer: &wl_buffer::WlBuffer) {
+        let buf_id = buffer.id();
+        for entry in self.toplevel_icons.values() {
+            if entry.references_buffer(&buf_id) && entry.resource.is_alive() {
+                entry.resource.post_error(
+                    xdg_toplevel_icon_v1::Error::NoBuffer,
+                    "The provided buffer has been destroyed before the toplevel icon",
+                );
+            }
+        }
+    }
 }
 
 impl CompositorHandler for RustyCompositorState {
@@ -4156,6 +4369,149 @@ impl XdgToplevelIconHandler for RustyCompositorState {
     }
 }
 
+delegate_global_dispatch!(
+    RustyCompositorState: [
+        XdgToplevelIconManagerV1: XdgToplevelIconManagerUserData
+    ] => XdgToplevelIconManager
+);
+
+impl Dispatch<XdgToplevelIconManagerV1, ()> for RustyCompositorState {
+    fn request(
+        state: &mut Self,
+        _client: &Client,
+        _resource: &XdgToplevelIconManagerV1,
+        request: xdg_toplevel_icon_manager_v1::Request,
+        _data: &(),
+        _dh: &DisplayHandle,
+        data_init: &mut DataInit<'_, Self>,
+    ) {
+        use xdg_toplevel_icon_manager_v1::Request;
+
+        match request {
+            Request::CreateIcon { id } => {
+                let resource = data_init.init(id, XdgToplevelIconUserData::default());
+                state.toplevel_icons.insert(
+                    resource.id(),
+                    ToplevelIconEntry {
+                        resource,
+                        immutable: false,
+                        icon_name: None,
+                        buffers: Vec::new(),
+                    },
+                );
+            }
+            Request::SetIcon { toplevel, icon } => {
+                let Some(wl_surface) = state
+                    .xdg_shell_state
+                    .toplevel_surfaces()
+                    .iter()
+                    .find(|tl| tl.xdg_toplevel() == &toplevel)
+                    .map(|tl| tl.wl_surface().clone())
+                else {
+                    return;
+                };
+                let snapshot = icon
+                    .and_then(|icon_res| {
+                        let entry = state.toplevel_icons.get_mut(&icon_res.id())?;
+                        entry.immutable = true;
+                        Some(entry.snapshot_surface_state())
+                    })
+                    .unwrap_or_default();
+                compositor::with_states(&wl_surface, |states| {
+                    let mut cached = states.cached_state.get::<ToplevelIconSurfaceState>();
+                    *cached.pending() = snapshot;
+                });
+                state.set_icon(toplevel, wl_surface);
+            }
+            Request::Destroy | _ => {}
+        }
+    }
+}
+
+impl Dispatch<XdgToplevelIconV1, XdgToplevelIconUserData> for RustyCompositorState {
+    fn request(
+        state: &mut Self,
+        _client: &Client,
+        icon: &XdgToplevelIconV1,
+        request: xdg_toplevel_icon_v1::Request,
+        _data: &XdgToplevelIconUserData,
+        dh: &DisplayHandle,
+        _data_init: &mut DataInit<'_, Self>,
+    ) {
+        use xdg_toplevel_icon_v1::Request;
+
+        match request {
+            Request::SetName { icon_name } => {
+                let Some(entry) = state.toplevel_icons.get_mut(&icon.id()) else {
+                    return;
+                };
+                if entry.immutable {
+                    dh.post_error(
+                        icon,
+                        xdg_toplevel_icon_v1::Error::Immutable as u32,
+                        "Request made after the icon has been assigned to a toplevel via 'set_icon'"
+                            .to_owned(),
+                    );
+                    return;
+                }
+                entry.icon_name = Some(icon_name);
+            }
+            Request::AddBuffer { buffer, scale } => {
+                let is_immutable = state
+                    .toplevel_icons
+                    .get(&icon.id())
+                    .is_some_and(|entry| entry.immutable);
+                if is_immutable {
+                    dh.post_error(
+                        icon,
+                        xdg_toplevel_icon_v1::Error::Immutable as u32,
+                        "Request made after the icon has been assigned to a toplevel via 'set_icon'"
+                            .to_owned(),
+                    );
+                    return;
+                }
+                let (width, height) =
+                    match with_buffer_contents(&buffer, |_, _, buf| (buf.width, buf.height)) {
+                        Ok(dims) => dims,
+                        Err(BufferAccessError::NotManaged) => {
+                            dh.post_error(
+                                icon,
+                                xdg_toplevel_icon_v1::Error::InvalidBuffer as u32,
+                                "The wl_buffer must be backed by wl_shm".to_owned(),
+                            );
+                            return;
+                        }
+                        Err(_) => return,
+                    };
+                if width <= 0 || width != height {
+                    dh.post_error(
+                        icon,
+                        xdg_toplevel_icon_v1::Error::InvalidBuffer as u32,
+                        "The wl_buffer must be a square".to_owned(),
+                    );
+                    return;
+                }
+                if let Some(entry) = state.toplevel_icons.get_mut(&icon.id()) {
+                    entry.add_buffer_replacing_slot(buffer, width, height, scale);
+                }
+            }
+            Request::Destroy => {
+                state.toplevel_icons.remove(&icon.id());
+            }
+            _ => {}
+        }
+    }
+
+    fn destroyed(
+        state: &mut Self,
+        _client: ClientId,
+        resource: &XdgToplevelIconV1,
+        _data: &XdgToplevelIconUserData,
+    ) {
+        state.toplevel_icons.remove(&resource.id());
+    }
+}
+
 delegate_compositor!(RustyCompositorState);
 delegate_shm!(RustyCompositorState);
 delegate_viewporter!(RustyCompositorState);
@@ -4178,9 +4534,174 @@ delegate_primary_selection!(RustyCompositorState);
 delegate_data_control!(RustyCompositorState);
 delegate_xdg_shell!(RustyCompositorState);
 delegate_xdg_decoration!(RustyCompositorState);
-delegate_xdg_toplevel_icon!(RustyCompositorState);
 delegate_layer_shell!(RustyCompositorState);
 delegate_text_input_manager!(RustyCompositorState);
 delegate_input_method_manager!(RustyCompositorState);
 delegate_keyboard_shortcuts_inhibit!(RustyCompositorState);
 delegate_foreign_toplevel_list!(RustyCompositorState);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use smithay::reexports::{
+        calloop::EventLoop,
+        wayland_server::backend::{Handle, ObjectData, protocol::Message},
+    };
+    use smithay::wayland::compositor::Cacheable;
+    use std::error::Error;
+    use std::io::Read;
+    use std::os::unix::net::UnixStream;
+
+    #[derive(Debug)]
+    struct TestDummyObjectData;
+
+    impl ObjectData<RustyCompositorState> for TestDummyObjectData {
+        fn request(
+            self: Arc<Self>,
+            _handle: &Handle,
+            _data: &mut RustyCompositorState,
+            _client_id: ClientId,
+            _msg: Message<ObjectId, OwnedFd>,
+        ) -> Option<Arc<dyn ObjectData<RustyCompositorState>>> {
+            None
+        }
+
+        fn destroyed(
+            self: Arc<Self>,
+            _handle: &Handle,
+            _data: &mut RustyCompositorState,
+            _client_id: ClientId,
+            _object_id: ObjectId,
+        ) {
+        }
+    }
+
+    #[test]
+    fn xdg_toplevel_icon_destroy_before_buffer_destroy_and_slot_override_avoid_false_no_buffer()
+    -> Result<(), Box<dyn Error>> {
+        let mut display: Display<RustyCompositorState> = Display::new()?;
+        let event_loop: EventLoop<RustyCompositorState> = EventLoop::try_new()?;
+        let mut dh = display.handle();
+        let mut compositor = RustyCompositorState::new(
+            &display,
+            "rusty-test-toplevel-icon-cleanup".to_owned(),
+            event_loop.get_signal(),
+            event_loop.handle(),
+            (1280, 800).into(),
+        )?;
+
+        let (server_stream, mut client_stream) = UnixStream::pair()?;
+        client_stream.set_nonblocking(true)?;
+        let client = dh.insert_client(server_stream, Arc::new(ClientState::default()))?;
+
+        let buf_old = client
+            .create_resource_from_objdata::<wl_buffer::WlBuffer, RustyCompositorState>(
+                &dh,
+                1,
+                Arc::new(TestDummyObjectData),
+            )?;
+        let buf_new = client
+            .create_resource_from_objdata::<wl_buffer::WlBuffer, RustyCompositorState>(
+                &dh,
+                1,
+                Arc::new(TestDummyObjectData),
+            )?;
+        let icon = client
+            .create_resource::<XdgToplevelIconV1, XdgToplevelIconUserData, RustyCompositorState>(
+                &dh,
+                1,
+                XdgToplevelIconUserData::default(),
+            )?;
+
+        let mut entry = ToplevelIconEntry {
+            resource: icon.clone(),
+            immutable: true,
+            icon_name: Some("utilities-terminal".to_owned()),
+            buffers: Vec::new(),
+        };
+        entry.add_buffer_replacing_slot(buf_old.clone(), 16, 16, 1);
+        entry.add_buffer_replacing_slot(buf_new.clone(), 16, 16, 1);
+        let snapshot = entry.snapshot_surface_state();
+        compositor.toplevel_icons.insert(icon.id(), entry);
+
+        // Destroying superseded slot buffer while icon is alive must not raise no_buffer.
+        compositor.buffer_destroyed(&buf_old);
+        display.flush_clients()?;
+        let mut wire_buf = [0_u8; 256];
+        assert!(matches!(
+            client_stream.read(&mut wire_buf),
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock
+        ));
+
+        // Simulate xdg_toplevel_icon_v1.destroy() prior to wl_buffer.destroy() (Qt6 sequence).
+        compositor.toplevel_icons.remove(&icon.id());
+        compositor.buffer_destroyed(&buf_new);
+        display.flush_clients()?;
+        assert!(matches!(
+            client_stream.read(&mut wire_buf),
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock
+        ));
+
+        // Snapshot committed to double-buffered ToplevelIconSurfaceState preserves icon_name.
+        let mut committed = ToplevelIconSurfaceState::default();
+        let mut pending = snapshot;
+        let next = pending.commit(&dh);
+        next.merge_into(&mut committed, &dh);
+        assert_eq!(committed.icon_name.as_deref(), Some("utilities-terminal"));
+        assert_eq!(committed.buffers.len(), 1);
+
+        Ok(())
+    }
+
+    #[test]
+    fn xdg_toplevel_icon_buffer_destroyed_while_icon_alive_raises_no_buffer()
+    -> Result<(), Box<dyn Error>> {
+        let mut display: Display<RustyCompositorState> = Display::new()?;
+        let event_loop: EventLoop<RustyCompositorState> = EventLoop::try_new()?;
+        let mut dh = display.handle();
+        let mut compositor = RustyCompositorState::new(
+            &display,
+            "rusty-test-toplevel-icon-error".to_owned(),
+            event_loop.get_signal(),
+            event_loop.handle(),
+            (1280, 800).into(),
+        )?;
+
+        let (server_stream, mut client_stream) = UnixStream::pair()?;
+        client_stream.set_nonblocking(true)?;
+        let client = dh.insert_client(server_stream, Arc::new(ClientState::default()))?;
+
+        let buf = client
+            .create_resource_from_objdata::<wl_buffer::WlBuffer, RustyCompositorState>(
+                &dh,
+                1,
+                Arc::new(TestDummyObjectData),
+            )?;
+        let icon = client
+            .create_resource::<XdgToplevelIconV1, XdgToplevelIconUserData, RustyCompositorState>(
+                &dh,
+                1,
+                XdgToplevelIconUserData::default(),
+            )?;
+
+        let mut entry = ToplevelIconEntry {
+            resource: icon.clone(),
+            immutable: false,
+            icon_name: None,
+            buffers: Vec::new(),
+        };
+        entry.add_buffer_replacing_slot(buf.clone(), 32, 32, 1);
+        compositor.toplevel_icons.insert(icon.id(), entry);
+
+        compositor.buffer_destroyed(&buf);
+        display.flush_clients()?;
+
+        let mut wire_buf = [0_u8; 512];
+        let bytes = client_stream.read(&mut wire_buf)?;
+        assert!(bytes > 0);
+        let text = String::from_utf8_lossy(&wire_buf[..bytes]);
+        assert!(text.contains("destroyed before the toplevel icon"));
+
+        Ok(())
+    }
+}

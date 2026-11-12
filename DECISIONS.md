@@ -168,6 +168,14 @@
                           `ext_foreign_toplevel_list_v1`
                           + `xdg_toplevel_icon_v1`
                           (ADR-0016)              
+
+  D-025                   Фаза 7/UX               accepted
+                          (RUSTYOS-048):          
+                          macOS 27 Frontend       
+                          Visual Alignment, SDF   
+                          Vector Chrome & Glass   
+                          Surface Controls        
+                          (ADR-0017)              
   -----------------------------------------------------------------------
 
 ## Открытые решения

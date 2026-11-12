@@ -102,6 +102,24 @@ struct IconCacheKey {
     fingerprint: u64,
 }
 
+/// Procedural macOS 27 squircle app icons for Dock pinned slots and unthemed windows (`RUSTYOS-048`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BuiltinAppIcon {
+    /// Obsidian-violet Terminal squircle with `>_` prompt motif.
+    Terminal,
+    /// Sky-blue Finder/Files folder squircle.
+    Files,
+    /// Violet-indigo Mission Control / Overview glass cards squircle.
+    Overview,
+    /// Frosted jewel-tone window card squircle for windows lacking an XDG PNG or SHM icon.
+    WindowFallback {
+        /// Deterministic color bucket derived from the application ID.
+        hue_seed: u8,
+        /// Highlight tint when the window/group is active.
+        active: bool,
+    },
+}
+
 /// CPU-decoded & Wayland SHM GPU-cached application & tray icon store (`RUSTYOS-033`, `RUSTYOS-047`).
 #[derive(Debug, Default)]
 pub struct IconCache {
@@ -109,6 +127,7 @@ pub struct IconCache {
     resolved_paths: HashMap<String, Option<PathBuf>>,
     buffers: HashMap<IconCacheKey, Option<MemoryRenderBuffer>>,
     shm_textures: HashMap<IconCacheKey, Option<CachedShmTexture>>,
+    builtin_squircles: HashMap<(BuiltinAppIcon, u16), MemoryRenderBuffer>,
 }
 
 impl IconCache {
@@ -350,10 +369,29 @@ impl IconCache {
         let roots = self
             .search_roots
             .get_or_insert_with(discover_icon_search_roots);
-        let found = find_icon_png_in_roots(normalized, roots);
+        let resolved = find_icon_png_in_roots(normalized, roots);
         self.resolved_paths
-            .insert(normalized.to_owned(), found.clone());
-        found
+            .insert(normalized.to_owned(), resolved.clone());
+        resolved
+    }
+
+    /// Renders a GPU-cached procedural macOS 27 squircle icon at `size_px x size_px` (`RUSTYOS-048`).
+    pub fn builtin_squircle_icon_element(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        icon: BuiltinAppIcon,
+        size_px: i32,
+        loc: Point<i32, Logical>,
+    ) -> Option<MemoryRenderBufferRenderElement<GlesRenderer>> {
+        let size_u16 = u16::try_from(size_px).ok()?;
+        if size_px <= 0 {
+            return None;
+        }
+        let buf = self
+            .builtin_squircles
+            .entry((icon, size_u16))
+            .or_insert_with(|| rasterize_builtin_squircle_buffer(icon, size_px));
+        element_from_icon_buffer(renderer, buf, size_px, loc)
     }
 }
 
@@ -487,11 +525,33 @@ fn find_icon_png_in_roots(icon_name: &str, roots: &[PathBuf]) -> Option<PathBuf>
     let file_name = format!("{stem}.png");
     let lower_file_name = format!("{}.png", stem.to_ascii_lowercase());
 
-    let themes = ["hicolor", "Papirus", "Adwaita", "breeze", "Yaru", "Numix"];
-    let size_dirs = [
-        "48x48", "64x64", "32x32", "128x128", "24x24", "256x256", "16x16",
+    let themes = [
+        "hicolor",
+        "Papirus",
+        "Papirus-Dark",
+        "Adwaita",
+        "AdwaitaLegacy",
+        "Qogir",
+        "Qogir-Dark",
+        "breeze",
+        "breeze-dark",
+        "Yaru",
+        "Numix",
     ];
-    let cats = ["apps", "status", "categories", "devices", "actions"];
+    let size_dirs = [
+        "48x48", "64x64", "32x32", "128x128", "24x24", "256x256", "96x96", "16x16", "48", "64",
+        "32", "128",
+    ];
+    let cats = [
+        "apps",
+        "status",
+        "categories",
+        "devices",
+        "actions",
+        "places",
+        "mimetypes",
+        "legacy",
+    ];
 
     for root in roots {
         if !root.is_dir() {
@@ -1282,6 +1342,219 @@ fn zlib_decompress(data: &[u8], expected_hint: usize, max_inflate_bytes: usize) 
     Some(out)
 }
 
+fn squircle_sd(u: f32, v: f32, cx: f32, cy: f32, hw: f32, hh: f32) -> f32 {
+    let dx = ((u - cx).abs() / hw.max(0.01)).powf(3.8);
+    let dy = ((v - cy).abs() / hh.max(0.01)).powf(3.8);
+    ((dx + dy).powf(1.0 / 3.8) - 1.0) * hw.min(hh)
+}
+
+fn sq_sd_rounded_box(u: f32, v: f32, cx: f32, cy: f32, hw: f32, hh: f32, r: f32) -> f32 {
+    let qx = (u - cx).abs() - (hw - r);
+    let qy = (v - cy).abs() - (hh - r);
+    qx.max(0.0).hypot(qy.max(0.0)) + qx.max(qy).min(0.0) - r
+}
+
+fn sq_sd_segment(u: f32, v: f32, ax: f32, ay: f32, bx: f32, by: f32, r: f32) -> f32 {
+    let pax = u - ax;
+    let pay = v - ay;
+    let bax = bx - ax;
+    let bay = by - ay;
+    let denom = bax * bax + bay * bay;
+    let h = if denom > 1e-6 {
+        ((pax * bax + pay * bay) / denom).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    (pax - bax * h).hypot(pay - bay * h) - r
+}
+
+fn sq_cov(sd: f32, edge: f32) -> f32 {
+    (0.5 - sd / edge.max(0.005)).clamp(0.0, 1.0)
+}
+
+fn blend_rgba(dst: [f32; 4], src: [f32; 4]) -> [f32; 4] {
+    let sa = src[3].clamp(0.0, 1.0);
+    let inv = 1.0 - sa;
+    [
+        src[0] * sa + dst[0] * inv,
+        src[1] * sa + dst[1] * inv,
+        src[2] * sa + dst[2] * inv,
+        (sa + dst[3] * inv).clamp(0.0, 1.0),
+    ]
+}
+
+fn lerp_rgb(top: [f32; 3], bot: [f32; 3], t: f32) -> [f32; 3] {
+    let c = t.clamp(0.0, 1.0);
+    [
+        top[0] * (1.0 - c) + bot[0] * c,
+        top[1] * (1.0 - c) + bot[1] * c,
+        top[2] * (1.0 - c) + bot[2] * c,
+    ]
+}
+
+fn sample_squircle_uv(u: f32, v: f32, edge: f32, icon: BuiltinAppIcon) -> [f32; 4] {
+    let shell_sd = squircle_sd(u, v, 0.50, 0.50, 0.45, 0.45);
+    let shell_cov = sq_cov(shell_sd, edge);
+    if shell_cov <= 0.001 {
+        return [0.0; 4];
+    }
+    let grad_t = (v * 1.1 - 0.05).clamp(0.0, 1.0);
+    let (top_rgb, bot_rgb) = match icon {
+        BuiltinAppIcon::Terminal => ([34.0, 26.0, 56.0], [16.0, 12.0, 28.0]),
+        BuiltinAppIcon::Files => ([56.0, 189.0, 248.0], [29.0, 78.0, 216.0]),
+        BuiltinAppIcon::Overview => ([168.0, 85.0, 247.0], [79.0, 70.0, 229.0]),
+        BuiltinAppIcon::WindowFallback { hue_seed, active } => {
+            let palettes: [([f32; 3], [f32; 3]); 4] = [
+                ([139.0, 92.0, 246.0], [76.0, 29.0, 149.0]),
+                ([45.0, 212.0, 191.0], [15.0, 118.0, 110.0]),
+                ([244.0, 114.0, 182.0], [157.0, 23.0, 77.0]),
+                ([96.0, 165.0, 250.0], [30.0, 64.0, 175.0]),
+            ];
+            let base = palettes[usize::from(hue_seed) % palettes.len()];
+            if active {
+                base
+            } else {
+                (
+                    [base.0[0] * 0.85, base.0[1] * 0.85, base.0[2] * 0.85],
+                    [base.1[0] * 0.85, base.1[1] * 0.85, base.1[2] * 0.85],
+                )
+            }
+        }
+    };
+    let base_rgb = lerp_rgb(top_rgb, bot_rgb, grad_t);
+    let mut col = [base_rgb[0], base_rgb[1], base_rgb[2], 1.0];
+
+    col = paint_squircle_glyph(u, v, edge, icon, col);
+
+    // Subtle macOS glass specular rim highlight brightest along the top inner lip
+    let rim_mask = if shell_sd > -0.028 { 1.0 } else { 0.0 };
+    if rim_mask > 0.0 {
+        let rim_alpha = (0.36 * (1.15 - v).clamp(0.15, 1.0)) * rim_mask;
+        col = blend_rgba(col, [244.0, 240.0, 255.0, rim_alpha]);
+    }
+    [col[0], col[1], col[2], col[3] * shell_cov]
+}
+
+fn paint_squircle_glyph(
+    u: f32,
+    v: f32,
+    edge: f32,
+    icon: BuiltinAppIcon,
+    mut col: [f32; 4],
+) -> [f32; 4] {
+    match icon {
+        BuiltinAppIcon::Terminal => {
+            let leg_top = sq_sd_segment(u, v, 0.25, 0.34, 0.43, 0.48, 0.036);
+            let leg_bot = sq_sd_segment(u, v, 0.43, 0.48, 0.25, 0.62, 0.036);
+            let chevron_cov = sq_cov(leg_top.min(leg_bot), edge);
+            if chevron_cov > 0.0 {
+                col = blend_rgba(col, [238.0, 232.0, 255.0, chevron_cov]);
+            }
+            let bar = sq_sd_segment(u, v, 0.50, 0.62, 0.72, 0.62, 0.034);
+            let bar_cov = sq_cov(bar, edge);
+            if bar_cov > 0.0 {
+                col = blend_rgba(col, [52.0, 211.0, 153.0, bar_cov]);
+            }
+        }
+        BuiltinAppIcon::Files => {
+            let tab = sq_sd_rounded_box(u, v, 0.34, 0.33, 0.14, 0.06, 0.03);
+            let back = sq_sd_rounded_box(u, v, 0.50, 0.46, 0.30, 0.14, 0.05);
+            let flap_cov = sq_cov(tab.min(back), edge);
+            if flap_cov > 0.0 {
+                col = blend_rgba(col, [30.0, 64.0, 175.0, flap_cov * 0.55]);
+            }
+            let paper = sq_sd_rounded_box(u, v, 0.50, 0.42, 0.25, 0.08, 0.025);
+            let paper_cov = sq_cov(paper, edge);
+            if paper_cov > 0.0 {
+                col = blend_rgba(col, [241.0, 245.0, 249.0, paper_cov * 0.94]);
+            }
+            let front = sq_sd_rounded_box(u, v, 0.50, 0.57, 0.30, 0.16, 0.055);
+            let front_cov = sq_cov(front, edge);
+            if front_cov > 0.0 {
+                let f_rgb = lerp_rgb([125.0, 211.0, 252.0], [37.0, 99.0, 235.0], (v - 0.41) * 3.0);
+                col = blend_rgba(col, [f_rgb[0], f_rgb[1], f_rgb[2], front_cov]);
+            }
+        }
+        BuiltinAppIcon::Overview => {
+            let c1 = sq_sd_rounded_box(u, v, 0.35, 0.35, 0.135, 0.105, 0.035);
+            let c2 = sq_sd_rounded_box(u, v, 0.66, 0.38, 0.12, 0.095, 0.035);
+            let c3 = sq_sd_rounded_box(u, v, 0.50, 0.65, 0.21, 0.11, 0.038);
+            let cards_cov = sq_cov(c1.min(c2).min(c3), edge);
+            if cards_cov > 0.0 {
+                col = blend_rgba(col, [246.0, 243.0, 255.0, cards_cov * 0.90]);
+            }
+        }
+        BuiltinAppIcon::WindowFallback { .. } => {
+            let win = sq_sd_rounded_box(u, v, 0.50, 0.51, 0.27, 0.22, 0.05);
+            let win_cov = sq_cov(win, edge);
+            if win_cov > 0.0 {
+                col = blend_rgba(col, [246.0, 244.0, 255.0, win_cov * 0.88]);
+                if v < 0.39 {
+                    col = blend_rgba(col, [215.0, 205.0, 245.0, win_cov * 0.55]);
+                }
+            }
+            for (cx, dot_rgb) in [
+                (0.32, [255.0, 95.0, 87.0]),
+                (0.39, [254.0, 188.0, 46.0]),
+                (0.46, [40.0, 200.0, 64.0]),
+            ] {
+                let d_cov = sq_cov((u - cx).hypot(v - 0.345) - 0.022, edge);
+                if d_cov > 0.0 {
+                    col = blend_rgba(col, [dot_rgb[0], dot_rgb[1], dot_rgb[2], d_cov]);
+                }
+            }
+        }
+    }
+    col
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn sample_builtin_squircle_pixel(px: i32, py: i32, size_px: i32, icon: BuiltinAppIcon) -> [u8; 4] {
+    let dim = size_px.max(1) as f32;
+    let edge = 1.25 / dim;
+    let mut sum = [0.0_f32; 4];
+    for sy in [0.25_f32, 0.75] {
+        for sx in [0.25_f32, 0.75] {
+            let u = (px as f32 + sx) / dim;
+            let v = (py as f32 + sy) / dim;
+            let s = sample_squircle_uv(u, v, edge, icon);
+            let a = s[3].clamp(0.0, 1.0);
+            sum[0] += s[0] * a;
+            sum[1] += s[1] * a;
+            sum[2] += s[2] * a;
+            sum[3] += a;
+        }
+    }
+    let avg_a = (sum[3] * 0.25).clamp(0.0, 1.0);
+    if avg_a <= 0.001 {
+        return [0, 0, 0, 0];
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    [
+        (sum[2] * 0.25).clamp(0.0, 255.0).round() as u8,
+        (sum[1] * 0.25).clamp(0.0, 255.0).round() as u8,
+        (sum[0] * 0.25).clamp(0.0, 255.0).round() as u8,
+        (avg_a * 255.0).clamp(0.0, 255.0).round() as u8,
+    ]
+}
+
+fn rasterize_builtin_squircle_buffer(icon: BuiltinAppIcon, size_px: i32) -> MemoryRenderBuffer {
+    let dim = usize::try_from(size_px).unwrap_or(1).max(1);
+    let mut bgra = vec![0_u8; dim * dim * 4];
+    for py in 0..size_px {
+        for px in 0..size_px {
+            let row = usize::try_from(py).unwrap_or(0);
+            let col = usize::try_from(px).unwrap_or(0);
+            let idx = (row * dim + col) * 4;
+            if idx + 4 <= bgra.len() {
+                let p = sample_builtin_squircle_pixel(px, py, size_px, icon);
+                bgra[idx..idx + 4].copy_from_slice(&p);
+            }
+        }
+    }
+    upload_bgra_buffer(size_px, &bgra)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1405,5 +1678,44 @@ mod tests {
                 buffers: Vec::new(),
             }
         );
+    }
+
+    #[test]
+    fn resolves_adwaita_legacy_places_and_generates_distinct_squircle_icons() -> Result<(), String>
+    {
+        let base =
+            std::env::temp_dir().join(format!("rustyos-icons-legacy-test-{}", std::process::id()));
+        let legacy_dir = base.join("AdwaitaLegacy/48x48/places");
+        fs::create_dir_all(&legacy_dir).map_err(|e| e.to_string())?;
+        let icon_file = legacy_dir.join("system-file-manager.png");
+        let png = crate::screenshot::encode_png_rgba(1, 1, &[56, 189, 248, 255])?;
+        fs::write(&icon_file, png).map_err(|e| e.to_string())?;
+
+        let resolved = find_icon_png_in_roots("system-file-manager", std::slice::from_ref(&base));
+        assert_eq!(resolved, Some(icon_file));
+        let _ = fs::remove_dir_all(&base);
+
+        // Verify procedural macOS 27 squircles have clean transparent corners & distinct centers
+        let term_center = sample_builtin_squircle_pixel(24, 24, 48, BuiltinAppIcon::Terminal);
+        let files_center = sample_builtin_squircle_pixel(24, 30, 48, BuiltinAppIcon::Files);
+        let overview_center = sample_builtin_squircle_pixel(24, 24, 48, BuiltinAppIcon::Overview);
+        let fallback_center = sample_builtin_squircle_pixel(
+            24,
+            24,
+            48,
+            BuiltinAppIcon::WindowFallback {
+                hue_seed: 1,
+                active: true,
+            },
+        );
+        for px in [term_center, files_center, overview_center, fallback_center] {
+            assert_eq!(px[3], 255);
+        }
+        assert_ne!(term_center, files_center);
+        assert_ne!(files_center, overview_center);
+
+        let corner = sample_builtin_squircle_pixel(0, 0, 48, BuiltinAppIcon::Files);
+        assert_eq!(corner[3], 0);
+        Ok(())
     }
 }

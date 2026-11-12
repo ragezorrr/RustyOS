@@ -672,6 +672,22 @@ hardware/software context и низкие накладные расходы.
   - `cargo fmt --all --check` и `cargo clippy --workspace --all-targets --offline -- -D warnings` завершаются без предупреждений; 83/83 тестов `rusty-compositor` и 107/107 запущенных тестов workspace проходят (1 предсуществующий тест `rusty-services::tests::networkmanager_and_bluetooth_formatters_handle_all_states` пропущен флагом `--skip`).
 - **Risks:** Нулевые новые внешние зависимости; живое E2E-подтверждение физическим тачпадом (3-пальцевые свайпы), IME-демоном (IBus/Fcitx5), клиентом с `zwp_keyboard_shortcuts_inhibit_v1` и Wayland-окнами с SHM `xdg_toplevel_icon_v1` не проводилось в headless sandbox.
 
+## RUSTYOS-048 --- macOS 27 Frontend Visual Alignment, SDF Vector Chrome & Glass Surface Controls
+
+- **Owner:** AI Agent + User
+- **Status:** done
+- **Priority:** P0
+- **Phase:** 7 / UX
+- **ADR / Decision:** ADR-0017 / D-025
+- **Acceptance Criteria:**
+  - В `surfaces.rs` добавлены 2×2-суперсэмплированные SDF-глифы `UiGlyphKind` (`RustyLogo`, `Wifi`, `Volume`, `Battery`, `Search`, `ControlCenter`) и `UiShapeCache::ui_glyph_element`, устранившие `.notdef` прямоугольник логотипа и грубые прямоугольные иконки статуса, а fallback-обои Purple Glass повышены до 640×360 с 4×4 Bayer дитерингом против бандинга.
+  - В `icons.rs` расширен XDG-поиск PNG (`AdwaitaLegacy`, `Qogir`, `Qogir-Dark`, `breeze-dark`, `Papirus-Dark`, категории `places`/`mimetypes`/`legacy`) и добавлены процедурные цветные squircle-иконки `BuiltinAppIcon` (`Terminal`, `Files`, `Overview`, `WindowFallback`) через `IconCache::builtin_squircle_icon_element`.
+  - В `config.rs` добавлены настройки `[ui]` `glass_opacity` (`0.35..=1.0`, по умолчанию `0.78`) и `reduce_transparency`, подключённые в `state.rs`, `shell_render.rs` (`scale_glass_rgba`) и интерактивную карточку Glass Surface + ползунки громкости/прозрачности в Quick Settings (`telemetry::SystemMetricsHandle::set_volume_percent`, `QuickSettingsHit::{SetVolumePercent, ToggleReduceTransparency, SetGlassOpacityPercent}`).
+  - В `rusty-services/src/lib.rs`, `telemetry.rs`, `shell_render.rs`, `state.rs`, `input.rs` и `winit_backend.rs`: добавлен формат даты+времени `clock_date_hhmm` (`local_clock_short_datetime`), убрана пустая дыра при `!has_battery` (`compute_top_bar_right_layout`), сделаны кликабельные выпадающие меню `TopBar` (`TopBarMenuAction` / `compute_top_bar_left_layout`), обновлена капсула Dock (`DOCK_RADIUS = 36`, `DOCK_DIVIDER_GAP = 12`, `dock_hover_anim`), поднят радиус окон (`WINDOW_RADIUS = 20`), убран 1px выступ нижней рамки SSD и исправлен Floating `frame_rect` overshoot в `winit_backend.rs`.
+  - Синхронизирован визуальный рендер `apps/rusty-shell/src/wayland.rs` (`fill_rounded_rect`, `fill_capsule_with_rim`, скруглённые Spaces, Dock stadium-капсула с разделителем и squircle-плитками).
+  - `cargo fmt --all --check` и `cargo clippy --workspace --all-targets --offline -- -D warnings` завершаются без предупреждений; 90/90 тестов `rusty-compositor`, 5/5 тестов `rusty-shell` и 114/114 запущенных тестов workspace проходят (1 предсуществующий тест `rusty-services::tests::networkmanager_and_bluetooth_formatters_handle_all_states` пропущен флагом `--skip`).
+- **Risks:** Нулевые новые внешние зависимости; реальный FBO blur-behind для полупрозрачного стекла остаётся отдельной задачей будущего этапа; живая визуальная сверка скриншота в дисплейной сессии (`cargo run -p rusty-compositor`) в headless sandbox не запускалась.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

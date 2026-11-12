@@ -36,6 +36,21 @@ impl VrrMode {
     }
 }
 
+/// Default frosted glass opacity factor across macOS 27 shell surfaces (`RUSTYOS-048`).
+pub const DEFAULT_GLASS_OPACITY: f32 = 0.78;
+/// Minimum allowed glass opacity factor (`0.35..=1.0`).
+pub const MIN_GLASS_OPACITY: f32 = 0.35;
+
+/// Clamps configured or runtime shell glass opacity into `0.35..=1.0` (`DEFAULT_GLASS_OPACITY` if NaN/inf).
+#[must_use]
+pub fn clamp_glass_opacity(raw: f32) -> f32 {
+    if raw.is_finite() {
+        raw.clamp(MIN_GLASS_OPACITY, 1.0)
+    } else {
+        DEFAULT_GLASS_OPACITY
+    }
+}
+
 /// Clamps a configured or detected display scale factor into a safe range (`0.5..=4.0`).
 #[must_use]
 pub fn clamp_display_scale(scale: f64) -> f64 {
@@ -61,6 +76,10 @@ pub struct UserConfig {
     pub repeat_rate: i32,
     /// Prefer instant transitions (`reduced_motion`).
     pub reduced_motion: bool,
+    /// Shell frosted glass opacity scalar (`0.35..=1.0`, default `0.78`) (`RUSTYOS-048`).
+    pub glass_opacity: f32,
+    /// Render nearly opaque shell panels for legibility/accessibility (`RUSTYOS-048`).
+    pub reduce_transparency: bool,
     /// Prefer the highest supported refresh rate (60/120/144/240 Hz) at the display's native
     /// resolution on DRM/KMS outputs (`RUSTYOS-042`).
     pub prefer_max_refresh: bool,
@@ -87,6 +106,8 @@ impl Default for UserConfig {
             repeat_delay: 200,
             repeat_rate: 25,
             reduced_motion: false,
+            glass_opacity: DEFAULT_GLASS_OPACITY,
+            reduce_transparency: false,
             prefer_max_refresh: true,
             vrr_mode: VrrMode::Fullscreen,
             display_scale: 1.0,
@@ -221,6 +242,16 @@ impl UserConfig {
             ("ui", "reduced_motion") => {
                 if let Ok(b) = val.parse::<bool>() {
                     self.reduced_motion = b;
+                }
+            }
+            ("ui", "glass_opacity") => {
+                if let Ok(v) = val.parse::<f32>() {
+                    self.glass_opacity = clamp_glass_opacity(v);
+                }
+            }
+            ("ui", "reduce_transparency") => {
+                if let Ok(b) = val.parse::<bool>() {
+                    self.reduce_transparency = b;
                 }
             }
             ("display", "prefer_max_refresh") => {
@@ -603,5 +634,29 @@ mod tests {
         assert!((cfg.scale_for_output("DP-9") - 1.25).abs() < 1e-6);
         assert!(cfg.has_explicit_output_scale("eDP-1"));
         assert!(!cfg.has_explicit_output_scale("DP-9"));
+    }
+
+    #[test]
+    fn parses_ui_glass_opacity_and_reduce_transparency() {
+        let defaults = UserConfig::default();
+        assert!((defaults.glass_opacity - DEFAULT_GLASS_OPACITY).abs() < 1e-6);
+        assert!(!defaults.reduce_transparency);
+
+        let cfg = UserConfig::parse_toml(
+            r"
+            [ui]
+            glass_opacity = 0.62
+            reduce_transparency = true
+            ",
+        );
+        assert!((cfg.glass_opacity - 0.62).abs() < 1e-6);
+        assert!(cfg.reduce_transparency);
+
+        let clamped_low = UserConfig::parse_toml("[ui]\nglass_opacity = 0.05\n");
+        assert!((clamped_low.glass_opacity - MIN_GLASS_OPACITY).abs() < 1e-6);
+
+        let clamped_high = UserConfig::parse_toml("[ui]\nglass_opacity = 4.5\n");
+        assert!((clamped_high.glass_opacity - 1.0).abs() < 1e-6);
+        assert!((clamp_glass_opacity(f32::NAN) - DEFAULT_GLASS_OPACITY).abs() < 1e-6);
     }
 }

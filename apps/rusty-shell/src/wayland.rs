@@ -165,6 +165,83 @@ fn fill_rect(
     }
 }
 
+fn inside_rounded_box(px: usize, py: usize, w: usize, h: usize, radius: usize) -> bool {
+    if px >= w || py >= h {
+        return false;
+    }
+    let r = radius.min(w / 2).min(h / 2);
+    if r == 0 {
+        return true;
+    }
+    let dx = if px < r {
+        r - 1 - px
+    } else {
+        px.saturating_sub(w - r)
+    };
+    let dy = if py < r {
+        r - 1 - py
+    } else {
+        py.saturating_sub(h - r)
+    };
+    if dx == 0 || dy == 0 {
+        return true;
+    }
+    dx * dx + dy * dy <= r * r
+}
+
+#[allow(clippy::too_many_arguments)]
+fn fill_rounded_rect(
+    canvas: &mut [u8],
+    stride: usize,
+    x: usize,
+    y: usize,
+    w: usize,
+    h: usize,
+    radius: usize,
+    color: [u8; 4],
+) {
+    for ly in 0..h {
+        let row_offset = (y + ly) * stride;
+        for lx in 0..w {
+            if inside_rounded_box(lx, ly, w, h, radius) {
+                let px = row_offset + (x + lx) * 4;
+                if px + 4 <= canvas.len() {
+                    canvas[px..px + 4].copy_from_slice(&color);
+                }
+            }
+        }
+    }
+}
+
+fn fill_capsule_with_rim(
+    canvas: &mut [u8],
+    stride: usize,
+    w: usize,
+    h: usize,
+    fill: [u8; 4],
+    rim: [u8; 4],
+) {
+    let radius = (h / 2).max(1);
+    for py in 0..h {
+        let row_offset = py * stride;
+        for px in 0..w {
+            if !inside_rounded_box(px, py, w, h, radius) {
+                continue;
+            }
+            let is_interior = px > 0
+                && py > 0
+                && w > 2
+                && h > 2
+                && inside_rounded_box(px - 1, py - 1, w - 2, h - 2, radius.saturating_sub(1));
+            let col = if is_interior { fill } else { rim };
+            let off = row_offset + px * 4;
+            if off + 4 <= canvas.len() {
+                canvas[off..off + 4].copy_from_slice(&col);
+            }
+        }
+    }
+}
+
 fn system_font() -> Option<&'static Font> {
     static FONT: OnceLock<Option<Font>> = OnceLock::new();
     FONT.get_or_init(|| {
@@ -316,46 +393,26 @@ pub fn render_top_bar_pixels(
 
     for ws in 1..=9 {
         if ws == active_ws {
-            fill_rect(
+            fill_rounded_rect(
                 canvas,
                 stride,
                 x,
                 pill_y,
                 pill_w,
                 pill_h,
+                6,
                 colors::ACCENT_NEON,
             );
-            // Active pip
+        } else if !has_font {
             fill_rect(
                 canvas,
                 stride,
-                x + (pill_w - 8) / 2,
-                pill_y + pill_h - 2,
-                8,
+                x + (pill_w - 6) / 2,
+                pill_y + (pill_h - 2) / 2,
+                6,
                 2,
-                colors::TEXT_BRIGHT,
+                colors::TEXT_SUBTLE,
             );
-        } else {
-            fill_rect(
-                canvas,
-                stride,
-                x,
-                pill_y,
-                pill_w,
-                pill_h,
-                colors::SURFACE_OVERLAY,
-            );
-            if !has_font {
-                fill_rect(
-                    canvas,
-                    stride,
-                    x + (pill_w - 6) / 2,
-                    pill_y + (pill_h - 2) / 2,
-                    6,
-                    2,
-                    colors::TEXT_SUBTLE,
-                );
-            }
         }
         let text_rgba = if ws == active_ws {
             [244, 240, 250, 255]
@@ -379,13 +436,14 @@ pub fn render_top_bar_pixels(
     }
 
     // Layout indicator pill
-    fill_rect(
+    fill_rounded_rect(
         canvas,
         stride,
         x + 8,
         pill_y,
         56,
         pill_h,
+        6,
         colors::SURFACE_OVERLAY,
     );
     let layout_accent = if top_bar.layout_mode == "master-stack" {
@@ -461,32 +519,25 @@ pub fn render_top_bar_pixels(
     if w > 150 {
         let status_w = 130;
         let status_x = w - status_w - 12;
-        fill_rect(
+        fill_rounded_rect(
             canvas,
             stride,
             status_x,
             pill_y,
             status_w,
             pill_h,
+            8,
             colors::SURFACE_OVERLAY,
         );
-        fill_rect(
-            canvas,
-            stride,
-            status_x,
-            pill_y,
-            status_w,
-            1,
-            colors::BORDER_SUBTLE,
-        );
-        // Green status dot
-        fill_rect(
+        // Green rounded status dot
+        fill_rounded_rect(
             canvas,
             stride,
             status_x + 8,
             pill_y + 6,
             8,
             8,
+            4,
             colors::SUCCESS_GREEN,
         );
         if has_font {
@@ -528,68 +579,91 @@ pub fn render_top_bar_pixels(
     }
 }
 
-/// Renders `Dock` into an ARGB8888 buffer slice according to `DockItem` entries.
+/// Renders `Dock` into an ARGB8888 stadium capsule buffer according to `DockItem` entries (`RUSTYOS-048`).
 pub fn render_dock_pixels(canvas: &mut [u8], width: u32, height: u32, dock: &[crate::DockItem]) {
     let stride = (width * 4) as usize;
     let w = width as usize;
     let h = height as usize;
 
-    // Outer glass highlight rim
-    fill_rect(canvas, stride, 0, 0, w, h, colors::BORDER_HIGHLIGHT);
+    canvas.fill(0);
 
-    // Dock background body
-    if w > 2 && h > 2 {
-        fill_rect(canvas, stride, 1, 1, w - 2, h - 2, colors::SURFACE_ELEVATED);
-    }
+    // Outer stadium capsule glass rim & dark purple frosted fill
+    fill_capsule_with_rim(
+        canvas,
+        stride,
+        w,
+        h,
+        colors::SURFACE_ELEVATED,
+        colors::BORDER_HIGHLIGHT,
+    );
 
-    // Dock item tiles
-    let item_size = 40;
-    let item_y = 8;
-    let items_count = (3 + dock.len()).min((w.saturating_sub(16)) / 52);
-    let mut item_x = 8;
+    // Dock item rounded squircles (`RUSTYOS-048`)
+    let item_size: usize = 40;
+    let item_y: usize = 7;
+    let divider_w = if dock.is_empty() { 0 } else { 8 };
+    let items_count = (3 + dock.len()).min((w.saturating_sub(16 + divider_w)) / 52);
+    let mut item_x = 10;
 
     for i in 0..items_count {
-        fill_rect(
+        if i == 3 {
+            fill_rect(
+                canvas,
+                stride,
+                item_x - 2,
+                item_y + 4,
+                1,
+                item_size.saturating_sub(8),
+                colors::BORDER_HIGHLIGHT,
+            );
+            item_x += divider_w;
+        }
+
+        // Subtle glass backing slot + macOS 27 colorful rounded squircle plate
+        fill_rounded_rect(
             canvas,
             stride,
             item_x,
             item_y,
             item_size,
             item_size,
+            10,
             colors::SURFACE_OVERLAY,
         );
 
-        // Inner icon plate
-        let inner_size = 28;
+        let inner_size = 30;
         let inner_offset = (item_size - inner_size) / 2;
-        let icon_color = match i {
-            0 => colors::ACCENT_NEON,
-            1 => colors::ACCENT_MUTED,
-            2 => colors::TEXT_SUBTLE,
-            _ => colors::TEXT_MUTED,
+        let icon_color: [u8; 4] = match i {
+            0 => [0x48, 0x2A, 0x26, 0xFF], // macOS Terminal dark slate-indigo
+            1 => [0xF8, 0x94, 0x2E, 0xFF], // Finder/Files sky blue [B,G,R,A]
+            2 => colors::ACCENT_NEON,      // Overview neon violet
+            _ => colors::ACCENT_MUTED,     // Running app squircle
         };
-        fill_rect(
+        fill_rounded_rect(
             canvas,
             stride,
             item_x + inner_offset,
             item_y + inner_offset,
             inner_size,
             inner_size,
+            8,
             icon_color,
         );
 
-        // Active indicator pip
-        fill_rect(
-            canvas,
-            stride,
-            item_x + (item_size - 8) / 2,
-            h.saturating_sub(5),
-            8,
-            2,
-            colors::ACCENT_NEON,
-        );
+        // Minimal 4x4 circular active indicator dot under running/pinned tiles
+        if i >= 3 || dock.is_empty() {
+            fill_rounded_rect(
+                canvas,
+                stride,
+                item_x + (item_size - 4) / 2,
+                h.saturating_sub(6),
+                4,
+                4,
+                2,
+                colors::ACCENT_NEON,
+            );
+        }
 
-        item_x += item_size + 12;
+        item_x += item_size + 10;
     }
 }
 
@@ -1169,10 +1243,13 @@ mod tests {
 
         render_dock_pixels(&mut buffer, w, h, &shell.dock);
 
-        // Verify top-left corner matches BORDER_HIGHLIGHT rim
-        assert_eq!(buffer[0..4], colors::BORDER_HIGHLIGHT);
-        // Verify interior pixel matches SURFACE_ELEVATED
-        let interior_px = (w * 4 * 2 + 8) as usize;
+        // Stadium corners outside capsule radius remain transparent
+        assert_eq!(buffer[0..4], [0, 0, 0, 0]);
+        // Top-center edge matches BORDER_HIGHLIGHT glass rim
+        let top_rim_px = ((w / 2) * 4) as usize;
+        assert_eq!(buffer[top_rim_px..top_rim_px + 4], colors::BORDER_HIGHLIGHT);
+        // Interior glass body pixel above tiles matches SURFACE_ELEVATED
+        let interior_px = ((w * 4) * 2 + (w / 2) * 4) as usize;
         assert_eq!(
             buffer[interior_px..interior_px + 4],
             colors::SURFACE_ELEVATED

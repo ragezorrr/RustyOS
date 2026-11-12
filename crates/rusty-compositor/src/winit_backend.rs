@@ -744,7 +744,7 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
             })
             .collect();
         let top_telemetry = crate::shell_render::TopBarTelemetry {
-            clock_hhmm: &tel.clock_hhmm,
+            clock_hhmm: &tel.clock_date_hhmm,
             battery_percent: tel.power.percentage,
             has_battery: tel.power.has_battery,
             net_connected: tel.network.connected,
@@ -754,6 +754,9 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
             notification_count: state.notification_count,
             kbd_layout: &state.active_kbd_layout,
             tray_items: &tray_views,
+            active_menu: state.active_top_bar_menu,
+            glass_opacity: state.glass_opacity,
+            reduce_transparency: state.reduce_transparency,
         };
 
         let toast_views: Vec<crate::shell_render::NotificationToastView<'_>> = state
@@ -814,6 +817,8 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
             pinned_icons: [Some(terminal_icon), Some(files_icon)],
             windows: &dock_windows,
             hover_slot: state.dock_hover_slot,
+            hover_progress: state.dock_hover_anim.current(),
+            reduced_motion: state.animations.reduced_motion(),
             overview_active: state.overview_active,
         };
 
@@ -884,6 +889,8 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
             frame_p50_us: timing.interval_p50_us,
             window_count,
             progress: qs_progress,
+            glass_opacity: state.glass_opacity,
+            reduce_transparency: state.reduce_transparency,
         });
 
         let ov_progress = state.overview_anim.current();
@@ -957,12 +964,7 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
             (rusty_wm::LayoutMode::Floating, Some(sz))
                 if !actively_resizing && sz.w >= 64 && sz.h >= 64 =>
             {
-                rusty_wm::Rect::new(
-                    origin.0,
-                    origin.1,
-                    rect.width.max(sz.w),
-                    rect.height.max(sz.h + titlebar_h),
-                )
+                rusty_wm::Rect::new(origin.0, origin.1, sz.w, sz.h + titlebar_h)
             }
             _ => rusty_wm::Rect::new(origin.0, origin.1, rect.width, rect.height),
         };

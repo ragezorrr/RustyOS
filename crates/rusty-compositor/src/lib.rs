@@ -1332,4 +1332,59 @@ mod tests {
         assert_eq!(switcher_card.toplevel_icon.map(|i| i.revision), Some(7));
         Ok(())
     }
+
+    #[test]
+    fn macos27_frontend_state_controls_glass_menus_and_dock_hover() -> Result<(), Box<dyn Error>> {
+        let display: Display<RustyCompositorState> = Display::new()?;
+        let event_loop: EventLoop<RustyCompositorState> = EventLoop::try_new()?;
+        let mut compositor = RustyCompositorState::new(
+            &display,
+            "rusty-test-macos27-frontend".to_owned(),
+            event_loop.get_signal(),
+            event_loop.handle(),
+            (1280, 800).into(),
+        )?;
+
+        assert!((compositor.glass_opacity - config::DEFAULT_GLASS_OPACITY).abs() < 0.001);
+        assert!(!compositor.reduce_transparency);
+
+        compositor.set_glass_opacity(0.10);
+        assert!((compositor.glass_opacity - config::MIN_GLASS_OPACITY).abs() < 0.001);
+        compositor.set_glass_opacity(0.62);
+        assert!((compositor.glass_opacity - 0.62).abs() < 0.001);
+
+        compositor.toggle_reduce_transparency();
+        assert!(compositor.reduce_transparency);
+        compositor.toggle_reduce_transparency();
+        assert!(!compositor.reduce_transparency);
+
+        compositor.toggle_top_bar_menu(shell_render::TopBarMenuHit::File);
+        assert_eq!(
+            compositor.active_top_bar_menu,
+            Some(shell_render::TopBarMenuHit::File)
+        );
+        compositor.toggle_top_bar_menu(shell_render::TopBarMenuHit::Edit);
+        assert_eq!(
+            compositor.active_top_bar_menu,
+            Some(shell_render::TopBarMenuHit::Edit)
+        );
+        let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+        compositor.dispatch_top_bar_menu_action(
+            shell_render::TopBarMenuAction::OpenControlCenter,
+            serial,
+        );
+        assert_eq!(compositor.active_top_bar_menu, None);
+        assert!(compositor.quick_settings_active);
+
+        compositor.set_dock_hover_slot(Some(1));
+        assert_eq!(compositor.dock_hover_slot, Some(1));
+        assert!((compositor.dock_hover_anim.target() - 1.0).abs() < f64::EPSILON);
+
+        compositor.set_reduced_motion_pref(true);
+        compositor.set_dock_hover_slot(None);
+        assert_eq!(compositor.dock_hover_slot, None);
+        assert!((compositor.dock_hover_anim.current() - 0.0).abs() < f64::EPSILON);
+
+        Ok(())
+    }
 }

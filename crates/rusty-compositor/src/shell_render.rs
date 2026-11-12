@@ -70,14 +70,17 @@ pub const DOCK_ITEM_GAP: i32 = 8;
 /// Dock capsule inner padding in logical pixels (`RUSTYOS-035`).
 pub const DOCK_PADDING: i32 = 8;
 
-/// Dock capsule corner radius in logical pixels (`RUSTYOS-035`).
-pub const DOCK_RADIUS: i32 = 24;
+/// Dock capsule corner radius in logical pixels (`DESIGN.md` §12: `DOCK_HEIGHT / 2 = 36`).
+pub const DOCK_RADIUS: i32 = 36;
+
+/// Extra horizontal spacing allocated for the vertical divider between pinned apps and running windows (`RUSTYOS-048`).
+pub const DOCK_DIVIDER_GAP: i32 = 12;
 
 /// App icon edge length inside a Dock tile (`RUSTYOS-035`).
 pub const DOCK_ICON_SIZE: i32 = 48;
 
-/// SSD window frame corner radius in logical pixels (`RUSTYOS-035`).
-pub const WINDOW_RADIUS: i32 = 12;
+/// SSD window frame & glass popover corner radius in logical pixels (`DESIGN.md` §12.3).
+pub const WINDOW_RADIUS: i32 = 20;
 
 /// `TopBar` Left Menu metrics (macOS 27 Active App & Global Menus) (`RUSTYOS-038`).
 pub const TOP_BAR_LOGO_X: i32 = 12;
@@ -163,11 +166,11 @@ pub struct TopBarTrayItem<'a> {
     pub passive: bool,
 }
 
-/// Live hardware/session telemetry displayed inside `TopBar` (`RUSTYOS-021`).
+/// Live hardware/session telemetry displayed inside `TopBar` (`RUSTYOS-021`, `RUSTYOS-048`).
 #[derive(Debug, Clone)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct TopBarTelemetry<'a> {
-    /// Local wall-clock time (`HH:MM`).
+    /// Local wall-clock date/time label shown in `TopBar` (`HH:MM` or `"Thu 12 Nov  14:32"`).
     pub clock_hhmm: &'a str,
     /// Battery percentage (`0..=100`).
     pub battery_percent: u8,
@@ -187,6 +190,12 @@ pub struct TopBarTelemetry<'a> {
     pub kbd_layout: &'a str,
     /// Registered `StatusNotifierItem` tray badges rendered left of the keyboard indicator (`RUSTYOS-032`).
     pub tray_items: &'a [TopBarTrayItem<'a>],
+    /// Currently open `TopBar` left menu dropdown if any (`RUSTYOS-048`).
+    pub active_menu: Option<TopBarMenuHit>,
+    /// Global shell glass opacity multiplier (`0.35..=1.0`, default `0.78`) (`RUSTYOS-048`).
+    pub glass_opacity: f32,
+    /// High-contrast opaque shell panels mode (`RUSTYOS-048`).
+    pub reduce_transparency: bool,
 }
 
 impl Default for TopBarTelemetry<'static> {
@@ -202,6 +211,9 @@ impl Default for TopBarTelemetry<'static> {
             notification_count: 0,
             kbd_layout: "EN",
             tray_items: &[],
+            active_menu: None,
+            glass_opacity: crate::config::DEFAULT_GLASS_OPACITY,
+            reduce_transparency: false,
         }
     }
 }
@@ -253,6 +265,10 @@ pub struct QuickSettingsRenderState<'a> {
     pub window_count: usize,
     /// Animated reveal progress (`0.0` closed -> `1.0` open) (`RUSTYOS-025`).
     pub progress: f64,
+    /// Global shell glass opacity scalar (`0.35..=1.0`) (`RUSTYOS-048`).
+    pub glass_opacity: f32,
+    /// High-contrast opaque shell panels mode (`RUSTYOS-048`).
+    pub reduce_transparency: bool,
 }
 
 /// Metadata for a single managed window entry rendered in Dock and Workspace Overview (`RUSTYOS-023`).
@@ -328,7 +344,7 @@ pub fn extract_app_name(title: &str) -> String {
 /// Interactive click target inside the `TopBar` Left Menu area (`RUSTYOS-038`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TopBarMenuHit {
-    /// System logo ("✦").
+    /// System emblem (`UiGlyphKind::RustyLogo`).
     SystemLogo,
     /// Active application name menu.
     ActiveApp,
@@ -342,6 +358,52 @@ pub enum TopBarMenuHit {
     Window,
 }
 
+/// Action triggered from an open `TopBar` menu dropdown popover (`RUSTYOS-048`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TopBarMenuAction {
+    /// Show concise RustyOS notification card.
+    AboutRustyOs,
+    /// Toggle Workspace Overview.
+    OpenOverview,
+    /// Toggle Control Center (`QuickSettings`).
+    OpenControlCenter,
+    /// Toggle Spotlight Search.
+    OpenSpotlight,
+    /// Launch preferred terminal emulator.
+    NewTerminal,
+    /// Launch preferred file manager.
+    OpenFiles,
+    /// Switch between Floating and Tiling layout modes.
+    ToggleLayout,
+    /// Toggle `reduced_motion`.
+    ToggleReducedMotion,
+    /// Toggle `reduce_transparency`.
+    ToggleReduceTransparency,
+    /// Request non-blocking telemetry refresh.
+    RefreshMetrics,
+    /// Engage session Lock Screen.
+    LockSession,
+    /// Cycle focus to next window.
+    FocusNextWindow,
+    /// Maximize / restore focused window.
+    ToggleMaximizeFocused,
+    /// Minimize focused window.
+    MinimizeFocused,
+    /// Close focused window.
+    CloseFocused,
+}
+
+/// Hit-test outcome inside an open `TopBar` menu dropdown popover (`RUSTYOS-048`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TopBarMenuPopoverClick {
+    /// Specific menu action row clicked.
+    Action(TopBarMenuAction),
+    /// Click inside popover frame (absorb).
+    Inside,
+    /// Click outside popover frame (dismiss).
+    Outside,
+}
+
 /// Dock view state describing open window tiles, hovered slot, and overview toggle highlight (`RUSTYOS-023`).
 #[derive(Debug, Clone, Copy)]
 pub struct DockViewState<'a> {
@@ -351,8 +413,12 @@ pub struct DockViewState<'a> {
     pub windows: &'a [DockWindowEntry],
     /// Currently hovered Dock slot index (`0..3 + windows.len()`), if any.
     pub hover_slot: Option<usize>,
-    /// Whether Workspace Overview is active (highlights Dock `"Ov"` toggle tile).
+    /// Whether Workspace Overview is active (highlights Dock Overview squircle tile).
     pub overview_active: bool,
+    /// Smooth 120 ms hover lift factor (`0.0..=1.0`) (`RUSTYOS-048`).
+    pub hover_progress: f64,
+    /// Prefer instant subtle lift without animated spring (`RUSTYOS-048`).
+    pub reduced_motion: bool,
 }
 
 /// Interactive click target inside the bottom floating Dock (`RUSTYOS-023`).
@@ -468,6 +534,12 @@ pub enum QuickSettingsHit {
     VolumeDown,
     /// Increase audio volume.
     VolumeUp,
+    /// Directly set volume percentage (`0..=100`) along the Sound capsule slider (`RUSTYOS-048`).
+    SetVolumePercent(u8),
+    /// Toggle `reduce_transparency` high-contrast mode (`RUSTYOS-048`).
+    ToggleReduceTransparency,
+    /// Directly set shell glass opacity (`35..=100` percent) along the Glass slider (`RUSTYOS-048`).
+    SetGlassOpacityPercent(u8),
     /// Toggle workspace layout (`Floating <-> MasterStack`).
     ToggleLayout,
     /// Toggle accessibility `reduced_motion`.
@@ -484,6 +556,28 @@ pub enum QuickSettingsHit {
     InsidePopover,
     /// Click outside popover (dismiss Quick Settings).
     OutsidePopover,
+}
+
+/// Scales panel glass RGBA alpha by `glass_opacity` and `reduce_transparency` (`RUSTYOS-048`).
+#[must_use]
+pub(crate) fn scale_glass_rgba(
+    base: [u8; 4],
+    glass_opacity: f32,
+    reduce_transparency: bool,
+) -> [u8; 4] {
+    if reduce_transparency {
+        return [
+            base[0].saturating_sub(4),
+            base[1].saturating_sub(4),
+            base[2].saturating_sub(2),
+            base[3].max(246),
+        ];
+    }
+    let clamped = crate::config::clamp_glass_opacity(glass_opacity);
+    let scale = clamped / crate::config::DEFAULT_GLASS_OPACITY;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let alpha = (f32::from(base[3]) * scale).clamp(48.0, 252.0).round() as u8;
+    [base[0], base[1], base[2], alpha]
 }
 
 #[allow(clippy::cast_possible_truncation)]
@@ -526,32 +620,157 @@ pub fn check_lock_screen_unlock_click(
     x >= bx && x < bx + bw && y >= by && y < by + bh
 }
 
-fn status_pill_rect(screen_width: i32) -> (i32, i32, i32, i32) {
-    let status_pill_width = 168.min((screen_width - 340).max(120));
-    let status_x = screen_width - status_pill_width - 12;
-    (status_x, TOP_BAR_ITEM_Y, status_pill_width, TOP_BAR_ITEM_H)
+/// Dynamic left-side geometry for `TopBar` app name, global menus, workspace strip, and layout badge (`RUSTYOS-048`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TopBarLeftLayout {
+    pub app_x: i32,
+    pub app_w: i32,
+    pub file_x: i32,
+    pub edit_x: i32,
+    pub view_x: i32,
+    pub win_x: i32,
+    pub separator_x: i32,
+    pub ws_start_x: i32,
+    pub layout_x: i32,
+    pub layout_w: i32,
 }
 
-fn notification_badge_rect(screen_width: i32) -> (i32, i32, i32, i32) {
-    let (status_x, _, _, _) = status_pill_rect(screen_width);
-    let badge_w = 42;
-    let badge_x = status_x - badge_w - 8;
-    (badge_x, TOP_BAR_ITEM_Y, badge_w, TOP_BAR_ITEM_H)
+/// Computes `TopBar` left-side x coordinates, expanding cleanly when the active app name is wide (`RUSTYOS-048`).
+#[must_use]
+pub fn compute_top_bar_left_layout(active_app_name: &str) -> TopBarLeftLayout {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let chars = active_app_name.chars().count() as i32;
+    let app_w = (chars * 7 + 14).clamp(TOP_BAR_APP_MAX_W, 138);
+    let delta = app_w - TOP_BAR_APP_MAX_W;
+    let file_x = TOP_BAR_MENUS_START_X + delta;
+    let edit_x = file_x + TOP_BAR_MENU_FILE_W + TOP_BAR_MENUS_GAP;
+    let view_x = edit_x + TOP_BAR_MENU_EDIT_W + TOP_BAR_MENUS_GAP;
+    let win_x = view_x + TOP_BAR_MENU_VIEW_W + TOP_BAR_MENUS_GAP;
+    let separator_x = TOP_BAR_SEPARATOR_X + delta;
+    let ws_start_x = WS_START_X + delta;
+    let layout_x = ws_start_x + 9 * WS_BTN_STRIDE + 8;
+    TopBarLeftLayout {
+        app_x: TOP_BAR_APP_X,
+        app_w,
+        file_x,
+        edit_x,
+        view_x,
+        win_x,
+        separator_x,
+        ws_start_x,
+        layout_x,
+        layout_w: 52,
+    }
 }
 
-fn kbd_badge_rect(screen_width: i32, notification_count: u32) -> (i32, i32, i32, i32) {
-    let right_anchor = if notification_count > 0 {
-        notification_badge_rect(screen_width).0
+/// Dynamic right-side geometry for `TopBar` clock, Control Center, glyphs, Search, Kbd, Notifications, and Tray (`RUSTYOS-048`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TopBarRightLayout {
+    pub search_x: i32,
+    pub search_w: i32,
+    pub wifi_x: i32,
+    pub volume_x: i32,
+    pub battery_x: Option<i32>,
+    pub control_center_x: i32,
+    pub control_center_w: i32,
+    pub clock_x: i32,
+    pub clock_w: i32,
+    pub status_pill_x: i32,
+    pub status_pill_w: i32,
+    pub notif_x: i32,
+    pub notif_w: i32,
+    pub kbd_x: i32,
+    pub kbd_w: i32,
+}
+
+/// Computes compact right-aligned `TopBar` positions collapsing the battery gap when `has_battery == false` (`RUSTYOS-048`).
+#[must_use]
+pub fn compute_top_bar_right_layout(
+    screen_width: i32,
+    has_battery: bool,
+    notification_count: u32,
+    clock_text: &str,
+) -> TopBarRightLayout {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let clock_chars = clock_text.chars().count() as i32;
+    let clock_w = (clock_chars * 6 + 12).clamp(44, 122);
+    let right_edge = screen_width - 10;
+    let clock_x = (right_edge - clock_w).max(screen_width - 134);
+
+    let control_center_w = 20;
+    let control_center_x = clock_x - 6 - control_center_w;
+
+    let (battery_x, next_left) = if has_battery {
+        let bx = control_center_x - 6 - 20;
+        (Some(bx), bx)
     } else {
-        status_pill_rect(screen_width).0
+        (None, control_center_x)
     };
-    let badge_w = 32;
-    let badge_x = right_anchor - badge_w - 8;
-    (badge_x, TOP_BAR_ITEM_Y, badge_w, TOP_BAR_ITEM_H)
+
+    let volume_x = next_left - 6 - 16;
+    let wifi_x = volume_x - 6 - 16;
+    let search_w = 18;
+    let search_x = wifi_x - 10 - search_w;
+
+    let status_pill_x = wifi_x - 4;
+    let status_pill_w = (right_edge - status_pill_x).max(96);
+
+    let (notif_x, notif_w, kbd_anchor) = if notification_count > 0 {
+        let nw = 38;
+        let nx = search_x - 8 - nw;
+        (nx, nw, nx)
+    } else {
+        (search_x, 0, search_x)
+    };
+
+    let kbd_w = 30;
+    let kbd_x = kbd_anchor - 8 - kbd_w;
+
+    TopBarRightLayout {
+        search_x,
+        search_w,
+        wifi_x,
+        volume_x,
+        battery_x,
+        control_center_x,
+        control_center_w,
+        clock_x,
+        clock_w,
+        status_pill_x,
+        status_pill_w,
+        notif_x,
+        notif_w,
+        kbd_x,
+        kbd_w,
+    }
 }
 
-/// Width reserved for status glyphs (signal, volume, battery) left of the clock (`RUSTYOS-036`).
-pub const TOP_BAR_GLYPH_CLUSTER_W: i32 = 92;
+fn status_pill_rect(screen_width: i32) -> (i32, i32, i32, i32) {
+    let layout = compute_top_bar_right_layout(screen_width, false, 0, "12:00");
+    (
+        layout.status_pill_x,
+        TOP_BAR_ITEM_Y,
+        layout.status_pill_w,
+        TOP_BAR_ITEM_H,
+    )
+}
+
+#[cfg(test)]
+fn notification_badge_rect(screen_width: i32) -> (i32, i32, i32, i32) {
+    let layout = compute_top_bar_right_layout(screen_width, false, 1, "12:00");
+    (
+        layout.notif_x,
+        TOP_BAR_ITEM_Y,
+        layout.notif_w,
+        TOP_BAR_ITEM_H,
+    )
+}
+
+#[cfg(test)]
+fn kbd_badge_rect(screen_width: i32, notification_count: u32) -> (i32, i32, i32, i32) {
+    let layout = compute_top_bar_right_layout(screen_width, false, notification_count, "12:00");
+    (layout.kbd_x, TOP_BAR_ITEM_Y, layout.kbd_w, TOP_BAR_ITEM_H)
+}
 
 /// Maximum number of system tray applets displayed simultaneously in `TopBar` (`RUSTYOS-032`).
 pub const MAX_TOP_BAR_TRAY_ITEMS: usize = 6;
@@ -563,13 +782,27 @@ pub fn tray_slot_rects(
     notification_count: u32,
     tray_count: usize,
 ) -> Vec<(i32, i32, i32, i32)> {
+    tray_slot_rects_with_layout(screen_width, false, notification_count, "12:00", tray_count)
+}
+
+/// Computes `TopBar` tray pill rectangles using exact telemetry-driven right-cluster layout (`RUSTYOS-048`).
+#[must_use]
+pub fn tray_slot_rects_with_layout(
+    screen_width: i32,
+    has_battery: bool,
+    notification_count: u32,
+    clock_text: &str,
+    tray_count: usize,
+) -> Vec<(i32, i32, i32, i32)> {
     if tray_count == 0 {
         return Vec::new();
     }
     let min_left_x = WS_START_X + 9 * WS_BTN_STRIDE + 8 + 56 + 10;
-    let (kbd_x, _, _, _) = kbd_badge_rect(screen_width, notification_count);
+    let right =
+        compute_top_bar_right_layout(screen_width, has_battery, notification_count, clock_text);
+    let kbd_x = right.kbd_x;
     let avail = (kbd_x - 8 - min_left_x).max(0);
-    let slot_w = 26;
+    let slot_w = 24;
     let gap = 6;
     let stride = slot_w + gap;
     let max_fit = usize::try_from((avail + gap) / stride)
@@ -655,21 +888,56 @@ pub fn check_top_bar_notification_click(
     x: f64,
     y: f64,
 ) -> bool {
-    if notification_count == 0 || y > f64::from(TOP_BAR_HEIGHT) {
+    check_top_bar_notification_click_for_telemetry(
+        screen_width,
+        false,
+        notification_count,
+        "12:00",
+        x,
+        y,
+    )
+}
+
+/// Telemetry-aware hit-test for the `TopBar` unread notification badge (`RUSTYOS-048`).
+#[must_use]
+pub fn check_top_bar_notification_click_for_telemetry(
+    screen_width: i32,
+    has_battery: bool,
+    notification_count: u32,
+    clock_text: &str,
+    x: f64,
+    y: f64,
+) -> bool {
+    if notification_count == 0 || y < 0.0 || y > f64::from(TOP_BAR_HEIGHT) {
         return false;
     }
-    let (bx, _by, bw, _bh) = notification_badge_rect(screen_width);
-    x >= f64::from(bx) && x < f64::from(bx + bw)
+    let layout =
+        compute_top_bar_right_layout(screen_width, has_battery, notification_count, clock_text);
+    x >= f64::from(layout.notif_x) && x < f64::from(layout.notif_x + layout.notif_w)
 }
 
 /// Checks if `(x, y)` clicked the `TopBar` keyboard layout pill (`"EN"` / `"RU"`) (`RUSTYOS-029`).
 #[must_use]
 pub fn check_top_bar_kbd_click(screen_width: i32, notification_count: u32, x: f64, y: f64) -> bool {
-    if y > f64::from(TOP_BAR_HEIGHT) {
+    check_top_bar_kbd_click_for_telemetry(screen_width, false, notification_count, "12:00", x, y)
+}
+
+/// Telemetry-aware hit-test for the `TopBar` keyboard layout indicator (`RUSTYOS-048`).
+#[must_use]
+pub fn check_top_bar_kbd_click_for_telemetry(
+    screen_width: i32,
+    has_battery: bool,
+    notification_count: u32,
+    clock_text: &str,
+    x: f64,
+    y: f64,
+) -> bool {
+    if y < 0.0 || y > f64::from(TOP_BAR_HEIGHT) {
         return false;
     }
-    let (bx, _by, bw, _bh) = kbd_badge_rect(screen_width, notification_count);
-    x >= f64::from(bx) && x < f64::from(bx + bw)
+    let layout =
+        compute_top_bar_right_layout(screen_width, has_battery, notification_count, clock_text);
+    x >= f64::from(layout.kbd_x) && x < f64::from(layout.kbd_x + layout.kbd_w)
 }
 
 /// Checks if `(x, y)` clicked one of the `TopBar` system tray pills and returns its visible index (`RUSTYOS-032`).
@@ -681,12 +949,40 @@ pub fn check_top_bar_tray_click(
     x: f64,
     y: f64,
 ) -> Option<usize> {
+    check_top_bar_tray_click_for_telemetry(
+        screen_width,
+        false,
+        notification_count,
+        "12:00",
+        tray_count,
+        x,
+        y,
+    )
+}
+
+/// Telemetry-aware hit-test for `TopBar` system tray icons (`RUSTYOS-048`).
+#[must_use]
+pub fn check_top_bar_tray_click_for_telemetry(
+    screen_width: i32,
+    has_battery: bool,
+    notification_count: u32,
+    clock_text: &str,
+    tray_count: usize,
+    x: f64,
+    y: f64,
+) -> Option<usize> {
     if y < 0.0 || y > f64::from(TOP_BAR_HEIGHT) {
         return None;
     }
-    for (idx, (bx, _by, bw, _bh)) in tray_slot_rects(screen_width, notification_count, tray_count)
-        .into_iter()
-        .enumerate()
+    for (idx, (bx, _by, bw, _bh)) in tray_slot_rects_with_layout(
+        screen_width,
+        has_battery,
+        notification_count,
+        clock_text,
+        tray_count,
+    )
+    .into_iter()
+    .enumerate()
     {
         if x >= f64::from(bx) && x < f64::from(bx + bw) {
             return Some(idx);
@@ -697,7 +993,7 @@ pub fn check_top_bar_tray_click(
 
 fn quick_settings_rect(width: i32, height: i32) -> (i32, i32, i32, i32) {
     let pop_w = 320.min(width - 24).max(240);
-    let pop_h = 336.min(height - TOP_BAR_HEIGHT - 24).max(200);
+    let pop_h = 392.min(height - TOP_BAR_HEIGHT - 24).max(220);
     let pop_x = width - pop_w - 12;
     let pop_y = TOP_BAR_HEIGHT + 8;
     (pop_x, pop_y, pop_w, pop_h)
@@ -708,7 +1004,11 @@ fn dock_layout_bounds(width: i32, height: i32, window_count: usize) -> (i32, i32
     let items_count = (3 + window_count).max(3);
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let count_i32 = items_count as i32;
-    let raw_width = count_i32 * DOCK_ITEM_SIZE + (count_i32 - 1) * DOCK_ITEM_GAP + DOCK_PADDING * 2;
+    let divider_extra = i32::from(window_count > 0) * DOCK_DIVIDER_GAP;
+    let raw_width = count_i32 * DOCK_ITEM_SIZE
+        + (count_i32 - 1) * DOCK_ITEM_GAP
+        + DOCK_PADDING * 2
+        + divider_extra;
     let dock_width = raw_width.min((width - 48).max(160));
     let dock_x = (width - dock_width) / 2;
     let dock_y = height - DOCK_HEIGHT - DOCK_MARGIN_BOTTOM;
@@ -728,7 +1028,12 @@ fn dock_slot_rect(
     }
     let item_size = DOCK_ITEM_SIZE;
     let slot_i32 = i32::try_from(slot_idx).ok()?;
-    let item_x = dock_x + DOCK_PADDING + slot_i32 * (item_size + DOCK_ITEM_GAP);
+    let divider_shift = if window_count > 0 && slot_idx >= 3 {
+        DOCK_DIVIDER_GAP
+    } else {
+        0
+    };
+    let item_x = dock_x + DOCK_PADDING + slot_i32 * (item_size + DOCK_ITEM_GAP) + divider_shift;
     if item_x + item_size > dock_x + dock_width {
         return None;
     }
@@ -929,31 +1234,136 @@ pub fn check_switcher_click(
 }
 
 /// Checks if `(x, y)` clicked any item in the `TopBar` Left Menu area (`RUSTYOS-038`).
+/// Returns menu dropdown actions for an open `TopBar` left menu item (`RUSTYOS-048`).
+#[must_use]
+pub const fn top_bar_menu_items(
+    menu: TopBarMenuHit,
+) -> &'static [(&'static str, TopBarMenuAction)] {
+    match menu {
+        TopBarMenuHit::SystemLogo => &[
+            ("About RustyOS", TopBarMenuAction::AboutRustyOs),
+            ("Workspace Overview", TopBarMenuAction::OpenOverview),
+            ("Control Center", TopBarMenuAction::OpenControlCenter),
+            ("Lock Screen", TopBarMenuAction::LockSession),
+        ],
+        TopBarMenuHit::ActiveApp => &[
+            ("New Terminal", TopBarMenuAction::NewTerminal),
+            ("Open Files", TopBarMenuAction::OpenFiles),
+            ("Control Center", TopBarMenuAction::OpenControlCenter),
+        ],
+        TopBarMenuHit::File => &[
+            ("New Terminal", TopBarMenuAction::NewTerminal),
+            ("Open Files", TopBarMenuAction::OpenFiles),
+            ("Spotlight Search", TopBarMenuAction::OpenSpotlight),
+        ],
+        TopBarMenuHit::Edit => &[
+            ("Toggle Float / Tile", TopBarMenuAction::ToggleLayout),
+            (
+                "Toggle Reduced Motion",
+                TopBarMenuAction::ToggleReducedMotion,
+            ),
+            (
+                "Toggle Opaque Panels",
+                TopBarMenuAction::ToggleReduceTransparency,
+            ),
+        ],
+        TopBarMenuHit::View => &[
+            ("Workspace Overview", TopBarMenuAction::OpenOverview),
+            ("Control Center", TopBarMenuAction::OpenControlCenter),
+            ("Refresh Metrics", TopBarMenuAction::RefreshMetrics),
+        ],
+        TopBarMenuHit::Window => &[
+            ("Focus Next Window", TopBarMenuAction::FocusNextWindow),
+            (
+                "Maximize / Restore",
+                TopBarMenuAction::ToggleMaximizeFocused,
+            ),
+            ("Minimize Window", TopBarMenuAction::MinimizeFocused),
+            ("Close Window", TopBarMenuAction::CloseFocused),
+        ],
+    }
+}
+
+/// Computes the glass dropdown popover rectangle anchored beneath `menu` (`RUSTYOS-048`).
+#[must_use]
+pub fn top_bar_menu_popover_rect(
+    active_app_name: &str,
+    menu: TopBarMenuHit,
+) -> (i32, i32, i32, i32) {
+    let left = compute_top_bar_left_layout(active_app_name);
+    let anchor_x = match menu {
+        TopBarMenuHit::SystemLogo => TOP_BAR_LOGO_X,
+        TopBarMenuHit::ActiveApp => left.app_x,
+        TopBarMenuHit::File => left.file_x,
+        TopBarMenuHit::Edit => left.edit_x,
+        TopBarMenuHit::View => left.view_x,
+        TopBarMenuHit::Window => left.win_x,
+    };
+    let items_len = i32::try_from(top_bar_menu_items(menu).len()).unwrap_or(3);
+    let pop_w = 212;
+    let pop_h = 12 + items_len * 28;
+    (anchor_x, TOP_BAR_HEIGHT + 6, pop_w, pop_h)
+}
+
+/// Hit-tests `(x, y)` against an open `TopBar` menu dropdown popover (`RUSTYOS-048`).
+#[must_use]
+pub fn check_top_bar_menu_popover_click(
+    active_app_name: &str,
+    menu: TopBarMenuHit,
+    x: f64,
+    y: f64,
+) -> TopBarMenuPopoverClick {
+    let (px, py, pw, ph) = top_bar_menu_popover_rect(active_app_name, menu);
+    let fx = f64::from(px);
+    let fy = f64::from(py);
+    if x < fx || x >= fx + f64::from(pw) || y < fy || y >= fy + f64::from(ph) {
+        return TopBarMenuPopoverClick::Outside;
+    }
+    let items = top_bar_menu_items(menu);
+    let row_y = y - fy - 6.0;
+    if row_y >= 0.0 {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let idx = (row_y / 28.0).floor() as usize;
+        if let Some((_, action)) = items.get(idx) {
+            return TopBarMenuPopoverClick::Action(*action);
+        }
+    }
+    TopBarMenuPopoverClick::Inside
+}
+
+/// Hit-tests `(x, y)` against the macOS 27 `TopBar` Left Menu (`Logo`, `App`, `File`, `Edit`, `View`, `Window`) (`RUSTYOS-038`).
 #[must_use]
 pub fn check_top_bar_menu_click(x: f64, y: f64) -> Option<TopBarMenuHit> {
-    if y > f64::from(TOP_BAR_HEIGHT) {
+    check_top_bar_menu_click_for_app("RustyOS", x, y)
+}
+
+/// Active-app-width-aware hit-test for the `TopBar` Left Menu (`RUSTYOS-048`).
+#[must_use]
+pub fn check_top_bar_menu_click_for_app(
+    active_app_name: &str,
+    x: f64,
+    y: f64,
+) -> Option<TopBarMenuHit> {
+    if y < 0.0 || y > f64::from(TOP_BAR_HEIGHT) {
         return None;
     }
+    let left = compute_top_bar_left_layout(active_app_name);
     if x >= f64::from(TOP_BAR_LOGO_X) && x < f64::from(TOP_BAR_LOGO_X + TOP_BAR_LOGO_W) {
         return Some(TopBarMenuHit::SystemLogo);
     }
-    if x >= f64::from(TOP_BAR_APP_X) && x < f64::from(TOP_BAR_APP_X + TOP_BAR_APP_MAX_W) {
+    if x >= f64::from(left.app_x) && x < f64::from(left.app_x + left.app_w) {
         return Some(TopBarMenuHit::ActiveApp);
     }
-    let file_x = f64::from(TOP_BAR_MENUS_START_X);
-    if x >= file_x && x < file_x + f64::from(TOP_BAR_MENU_FILE_W) {
+    if x >= f64::from(left.file_x) && x < f64::from(left.file_x + TOP_BAR_MENU_FILE_W) {
         return Some(TopBarMenuHit::File);
     }
-    let edit_x = file_x + f64::from(TOP_BAR_MENU_FILE_W + TOP_BAR_MENUS_GAP);
-    if x >= edit_x && x < edit_x + f64::from(TOP_BAR_MENU_EDIT_W) {
+    if x >= f64::from(left.edit_x) && x < f64::from(left.edit_x + TOP_BAR_MENU_EDIT_W) {
         return Some(TopBarMenuHit::Edit);
     }
-    let view_x = edit_x + f64::from(TOP_BAR_MENU_EDIT_W + TOP_BAR_MENUS_GAP);
-    if x >= view_x && x < view_x + f64::from(TOP_BAR_MENU_VIEW_W) {
+    if x >= f64::from(left.view_x) && x < f64::from(left.view_x + TOP_BAR_MENU_VIEW_W) {
         return Some(TopBarMenuHit::View);
     }
-    let win_x = view_x + f64::from(TOP_BAR_MENU_VIEW_W + TOP_BAR_MENUS_GAP);
-    if x >= win_x && x < win_x + f64::from(TOP_BAR_MENU_WINDOW_W) {
+    if x >= f64::from(left.win_x) && x < f64::from(left.win_x + TOP_BAR_MENU_WINDOW_W) {
         return Some(TopBarMenuHit::Window);
     }
     None
@@ -962,24 +1372,62 @@ pub fn check_top_bar_menu_click(x: f64, y: f64) -> Option<TopBarMenuHit> {
 /// Checks if `(x, y)` clicked the `TopBar` Layout badge (`Float` / `Tile`).
 #[must_use]
 pub fn check_top_bar_layout_click(x: f64, y: f64) -> bool {
-    if y > f64::from(TOP_BAR_HEIGHT) {
+    check_top_bar_layout_click_for_app("RustyOS", x, y)
+}
+
+/// Active-app-width-aware hit-test for the `TopBar` Layout badge (`RUSTYOS-048`).
+#[must_use]
+pub fn check_top_bar_layout_click_for_app(active_app_name: &str, x: f64, y: f64) -> bool {
+    if y < 0.0 || y > f64::from(TOP_BAR_HEIGHT) {
         return false;
     }
-    let layout_x = f64::from(WS_START_X + 9 * WS_BTN_STRIDE + 8);
-    x >= layout_x && x < layout_x + 52.0
+    let left = compute_top_bar_left_layout(active_app_name);
+    x >= f64::from(left.layout_x) && x < f64::from(left.layout_x + left.layout_w)
+}
+
+/// Checks if `(x, y)` clicked the right `TopBar` Spotlight Search loupe (`RUSTYOS-048`).
+#[must_use]
+pub fn check_top_bar_search_click_for_telemetry(
+    screen_width: i32,
+    has_battery: bool,
+    notification_count: u32,
+    clock_text: &str,
+    x: f64,
+    y: f64,
+) -> bool {
+    if y < 0.0 || y > f64::from(TOP_BAR_HEIGHT) {
+        return false;
+    }
+    let right =
+        compute_top_bar_right_layout(screen_width, has_battery, notification_count, clock_text);
+    x >= f64::from(right.search_x - 3) && x < f64::from(right.search_x + right.search_w + 3)
 }
 
 /// Checks if `(x, y)` clicked the right `TopBar` telemetry status pill.
 #[must_use]
 pub fn check_top_bar_status_click(screen_width: i32, x: f64, y: f64) -> bool {
-    if y > f64::from(TOP_BAR_HEIGHT) {
-        return false;
-    }
-    let (sx, _sy, sw, _sh) = status_pill_rect(screen_width);
-    x >= f64::from(sx) && x < f64::from(sx + sw)
+    check_top_bar_status_click_for_telemetry(screen_width, false, 0, "12:00", x, y)
 }
 
-/// Hit-tests `(x, y)` against the open Quick Settings popover controls (`RUSTYOS-021`, `RUSTYOS-037`).
+/// Telemetry-aware hit-test for the `TopBar` status / Control Center cluster (`RUSTYOS-048`).
+#[must_use]
+pub fn check_top_bar_status_click_for_telemetry(
+    screen_width: i32,
+    has_battery: bool,
+    notification_count: u32,
+    clock_text: &str,
+    x: f64,
+    y: f64,
+) -> bool {
+    if y < 0.0 || y > f64::from(TOP_BAR_HEIGHT) {
+        return false;
+    }
+    let right =
+        compute_top_bar_right_layout(screen_width, has_battery, notification_count, clock_text);
+    x >= f64::from(right.status_pill_x) && x < f64::from(right.status_pill_x + right.status_pill_w)
+}
+
+/// Hit-tests `(x, y)` against the open Quick Settings popover controls (`RUSTYOS-021`, `RUSTYOS-037`, `RUSTYOS-048`).
 #[must_use]
 pub fn check_quick_settings_click(
     screen_size: Size<i32, smithay::utils::Physical>,
@@ -999,10 +1447,13 @@ pub fn check_quick_settings_click(
     let pad = 14;
     let inner_w = pw - pad * 2;
     let half_w = (inner_w - 8) / 2;
+    let left_x = f64::from(px + pad);
+    let right_x = f64::from(px + pad + half_w + 8);
+    let hw = f64::from(half_w);
 
-    // Audio control buttons row: y in py + 128 .. py + 154
+    // Sound control buttons row: y in py + 128 .. py + 152
     let audio_btn_y = f64::from(py + 128);
-    if y >= audio_btn_y && y < audio_btn_y + 26.0 {
+    if y >= audio_btn_y && y < audio_btn_y + 24.0 {
         let mute_x = f64::from(px + pw - pad - 116);
         let minus_x = f64::from(px + pw - pad - 62);
         let plus_x = f64::from(px + pw - pad - 30);
@@ -1017,12 +1468,35 @@ pub fn check_quick_settings_click(
         }
     }
 
-    let left_x = f64::from(px + pad);
-    let right_x = f64::from(px + pad + half_w + 8);
-    let hw = f64::from(half_w);
+    // Sound interactive capsule slider track: y in py + 158 .. py + 178
+    let track_x = f64::from(px + pad + 12);
+    let track_w = f64::from((inner_w - 24).max(1));
+    let sound_track_y = f64::from(py + 158);
+    if y >= sound_track_y && y < sound_track_y + 20.0 && x >= track_x && x < track_x + track_w {
+        let norm = ((x - track_x) / track_w).clamp(0.0, 1.0);
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let pct = (norm * 100.0).round() as u8;
+        return QuickSettingsHit::SetVolumePercent(pct.min(100));
+    }
 
-    // Action row 1: py + 196 .. py + 230
-    let row1_y = f64::from(py + 196);
+    // Glass Surface card: reduce_transparency toggle button (py + 200 .. py + 222)
+    let glass_btn_x = f64::from(px + pw - pad - 86);
+    let glass_btn_y = f64::from(py + 200);
+    if y >= glass_btn_y && y < glass_btn_y + 24.0 && x >= glass_btn_x && x < glass_btn_x + 76.0 {
+        return QuickSettingsHit::ToggleReduceTransparency;
+    }
+
+    // Glass Opacity interactive capsule slider track: y in py + 228 .. py + 248
+    let glass_track_y = f64::from(py + 228);
+    if y >= glass_track_y && y < glass_track_y + 20.0 && x >= track_x && x < track_x + track_w {
+        let norm = ((x - track_x) / track_w).clamp(0.0, 1.0);
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let pct = (35.0 + norm * 65.0).round() as u8;
+        return QuickSettingsHit::SetGlassOpacityPercent(pct.clamp(35, 100));
+    }
+
+    // Action row 1: py + 260 .. py + 294
+    let row1_y = f64::from(py + 260);
     if y >= row1_y && y < row1_y + 34.0 {
         if x >= left_x && x < left_x + hw {
             return QuickSettingsHit::ToggleLayout;
@@ -1032,8 +1506,8 @@ pub fn check_quick_settings_click(
         }
     }
 
-    // Action row 2: py + 238 .. py + 272
-    let row2_y = f64::from(py + 238);
+    // Action row 2: py + 302 .. py + 336
+    let row2_y = f64::from(py + 302);
     if y >= row2_y && y < row2_y + 34.0 {
         if x >= left_x && x < left_x + hw {
             return QuickSettingsHit::OpenSpotlight;
@@ -1043,8 +1517,8 @@ pub fn check_quick_settings_click(
         }
     }
 
-    // Action row 3 (`RUSTYOS-027`): py + 280 .. py + 314
-    let row3_y = f64::from(py + 280);
+    // Action row 3 (`RUSTYOS-027`): py + 344 .. py + 378
+    let row3_y = f64::from(py + 344);
     if y >= row3_y && y < row3_y + 34.0 {
         if x >= left_x && x < left_x + hw {
             return QuickSettingsHit::ToggleBluetooth;
@@ -1567,10 +2041,10 @@ fn render_quick_settings_popover(
         ));
     }
 
-    // 4. Quick Action toggles (2 columns, 3 rows)
+    // 4. Quick Action toggles shifted below Sound + Glass cards (`RUSTYOS-048`)
     let is_tile = qs.layout_mode == "master-stack";
     elements.push(make_solid_element(
-        Rectangle::new(Point::from((left_x, py + 196)), Size::from((half_w, 34))),
+        Rectangle::new(Point::from((left_x, py + 260)), Size::from((half_w, 34))),
         if is_tile {
             COLOR_ACCENT_MUTED
         } else {
@@ -1578,7 +2052,7 @@ fn render_quick_settings_popover(
         },
     ));
     elements.push(make_solid_element(
-        Rectangle::new(Point::from((right_x, py + 196)), Size::from((half_w, 34))),
+        Rectangle::new(Point::from((right_x, py + 260)), Size::from((half_w, 34))),
         if qs.reduced_motion {
             COLOR_ACCENT_MUTED
         } else {
@@ -1586,15 +2060,15 @@ fn render_quick_settings_popover(
         },
     ));
     elements.push(make_solid_element(
-        Rectangle::new(Point::from((left_x, py + 238)), Size::from((half_w, 34))),
+        Rectangle::new(Point::from((left_x, py + 302)), Size::from((half_w, 34))),
         COLOR_SURFACE_OVERLAY,
     ));
     elements.push(make_solid_element(
-        Rectangle::new(Point::from((right_x, py + 238)), Size::from((half_w, 34))),
+        Rectangle::new(Point::from((right_x, py + 302)), Size::from((half_w, 34))),
         COLOR_SURFACE_OVERLAY,
     ));
     elements.push(make_solid_element(
-        Rectangle::new(Point::from((left_x, py + 280)), Size::from((half_w, 34))),
+        Rectangle::new(Point::from((left_x, py + 344)), Size::from((half_w, 34))),
         if qs.bt_available && qs.bt_powered {
             COLOR_ACCENT_MUTED
         } else {
@@ -1602,7 +2076,7 @@ fn render_quick_settings_popover(
         },
     ));
     elements.push(make_solid_element(
-        Rectangle::new(Point::from((right_x, py + 280)), Size::from((half_w, 34))),
+        Rectangle::new(Point::from((right_x, py + 344)), Size::from((half_w, 34))),
         COLOR_SURFACE_OVERLAY,
     ));
 }
@@ -1658,10 +2132,17 @@ pub fn generate_shell_render_elements(
 /// Checks if a mouse click at `(x, y)` was inside the `TopBar` workspaces area and returns the target workspace (1..=9).
 #[must_use]
 pub fn check_top_bar_workspace_click(x: f64, y: f64) -> Option<u8> {
-    if y > f64::from(TOP_BAR_HEIGHT) {
+    check_top_bar_workspace_click_for_app("RustyOS", x, y)
+}
+
+/// Active-app-width-aware hit-test for the `TopBar` workspaces area (`RUSTYOS-048`).
+#[must_use]
+pub fn check_top_bar_workspace_click_for_app(active_app_name: &str, x: f64, y: f64) -> Option<u8> {
+    if y < 0.0 || y > f64::from(TOP_BAR_HEIGHT) {
         return None;
     }
-    let start_x = f64::from(WS_START_X);
+    let left = compute_top_bar_left_layout(active_app_name);
+    let start_x = f64::from(left.ws_start_x);
     let stride = f64::from(WS_BTN_STRIDE);
     let total_width = stride * 9.0;
 
@@ -1955,21 +2436,6 @@ pub fn generate_shell_text_elements(
                 spotlight_modal_rect(width, height);
             let modal_y = base_modal_y + anim_offset(spot.progress, -22.0);
 
-            // Search icon glyph centered inside accent plate
-            let search_icon_bounds = Rectangle::new(
-                Point::from((modal_x + 28, modal_y + 28)),
-                Size::from((24, 24)),
-            );
-            if let Some(el) = text_cache.render_label_centered(
-                renderer,
-                "🔍",
-                12.0,
-                text_bright,
-                search_icon_bounds,
-            ) {
-                elements.push(el);
-            }
-
             if spot.query.is_empty() {
                 if let Some(el) = text_cache.render_label(
                     renderer,
@@ -2076,67 +2542,91 @@ pub fn generate_shell_text_elements(
         }
     }
 
-    // 1b. TopBar Left Active App & Global Menus (macOS 27 style, RUSTYOS-038)
+    // 1b. TopBar Left Active App & Global Menus (macOS 27 dynamic layout, RUSTYOS-038, RUSTYOS-048)
     let ws_btn_height = TOP_BAR_ITEM_H;
     let ws_y = TOP_BAR_ITEM_Y;
 
-    // System logo ("✦")
-    if let Some(el) = text_cache.render_label_centered(
-        renderer,
-        "✦",
-        12.5,
-        [185, 138, 255, 255],
-        Rectangle::new(
-            Point::from((TOP_BAR_LOGO_X, ws_y)),
-            Size::from((TOP_BAR_LOGO_W, ws_btn_height)),
-        ),
-    ) {
-        elements.push(el);
-    }
-
-    // Focused application name (bold)
     let active_app_name = dock_view
         .windows
         .iter()
         .find(|w| w.focused)
         .map_or_else(|| "RustyOS".to_owned(), |w| extract_app_name(&w.title));
+    let left_layout = compute_top_bar_left_layout(&active_app_name);
+
     if let Some(el) = text_cache.render_label(
         renderer,
         &active_app_name,
         12.5,
         text_bright,
-        Point::from((TOP_BAR_APP_X, ws_y + 1)),
+        Point::from((left_layout.app_x, ws_y + 1)),
     ) {
         elements.push(el);
     }
 
-    // Global Menubar items
-    let file_x = TOP_BAR_MENUS_START_X;
-    let edit_x = file_x + TOP_BAR_MENU_FILE_W + TOP_BAR_MENUS_GAP;
-    let view_x = edit_x + TOP_BAR_MENU_EDIT_W + TOP_BAR_MENUS_GAP;
-    let win_x = view_x + TOP_BAR_MENU_VIEW_W + TOP_BAR_MENUS_GAP;
     let text_menu = [215, 205, 230, 230];
-
-    for (name, x, w) in [
-        ("File", file_x, TOP_BAR_MENU_FILE_W),
-        ("Edit", edit_x, TOP_BAR_MENU_EDIT_W),
-        ("View", view_x, TOP_BAR_MENU_VIEW_W),
-        ("Window", win_x, TOP_BAR_MENU_WINDOW_W),
+    for (menu_kind, name, x, w) in [
+        (
+            TopBarMenuHit::File,
+            "File",
+            left_layout.file_x,
+            TOP_BAR_MENU_FILE_W,
+        ),
+        (
+            TopBarMenuHit::Edit,
+            "Edit",
+            left_layout.edit_x,
+            TOP_BAR_MENU_EDIT_W,
+        ),
+        (
+            TopBarMenuHit::View,
+            "View",
+            left_layout.view_x,
+            TOP_BAR_MENU_VIEW_W,
+        ),
+        (
+            TopBarMenuHit::Window,
+            "Window",
+            left_layout.win_x,
+            TOP_BAR_MENU_WINDOW_W,
+        ),
     ] {
+        let color = if top_telemetry.active_menu == Some(menu_kind) {
+            text_bright
+        } else {
+            text_menu
+        };
         let bounds = Rectangle::new(Point::from((x, ws_y)), Size::from((w, ws_btn_height)));
-        if let Some(el) = text_cache.render_label_centered(renderer, name, 11.5, text_menu, bounds)
-        {
+        if let Some(el) = text_cache.render_label_centered(renderer, name, 11.5, color, bounds) {
             elements.push(el);
         }
     }
 
+    // Active TopBar left dropdown menu labels (`RUSTYOS-048`)
+    if let Some(open_menu) = top_telemetry.active_menu {
+        let (mx, my, mw, _) = top_bar_menu_popover_rect(&active_app_name, open_menu);
+        for (idx, (label, _)) in top_bar_menu_items(open_menu).iter().enumerate() {
+            let idx_i32 = i32::try_from(idx).unwrap_or(0);
+            let row_y = my + 6 + idx_i32 * 28;
+            if let Some(el) = text_cache.render_label(
+                renderer,
+                label,
+                11.5,
+                text_bright,
+                Point::from((mx + 14, row_y + 5)),
+            ) {
+                elements.push(el);
+            }
+            let _ = mw;
+        }
+    }
+
     // 2. TopBar compact workspace digits (1..=9)
-    let mut start_x = WS_START_X;
+    let mut start_x = left_layout.ws_start_x;
     for ws in 1..=9 {
         let color = if ws == active_workspace {
             [255, 255, 255, 255]
         } else {
-            text_muted
+            [178, 168, 194, 210]
         };
         let bounds = Rectangle::new(
             Point::from((start_x, ws_y)),
@@ -2157,8 +2647,8 @@ pub fn generate_shell_text_elements(
         "Float"
     };
     let layout_bounds = Rectangle::new(
-        Point::from((start_x + 8, ws_y)),
-        Size::from((52, ws_btn_height)),
+        Point::from((left_layout.layout_x, ws_y)),
+        Size::from((left_layout.layout_w, ws_btn_height)),
     );
     if let Some(el) =
         text_cache.render_label_centered(renderer, layout_label, 11.0, text_bright, layout_bounds)
@@ -2166,25 +2656,32 @@ pub fn generate_shell_text_elements(
         elements.push(el);
     }
 
-    // 4. Right status pill live telemetry text
-    let (status_x, _status_y, status_pill_width, _status_h) = status_pill_rect(width);
-    let status_text = top_telemetry.clock_hhmm.to_owned();
-    let status_bounds = Rectangle::new(
-        Point::from((status_x + TOP_BAR_GLYPH_CLUSTER_W, ws_y)),
-        Size::from((
-            status_pill_width - TOP_BAR_GLYPH_CLUSTER_W - 6,
-            ws_btn_height,
-        )),
+    // 4. Right status cluster live clock, kbd, notification badge & tray (`RUSTYOS-048`)
+    let right_layout = compute_top_bar_right_layout(
+        width,
+        top_telemetry.has_battery,
+        top_telemetry.notification_count,
+        top_telemetry.clock_hhmm,
     );
-    if let Some(el) =
-        text_cache.render_label_centered(renderer, &status_text, 10.5, text_bright, status_bounds)
-    {
+    let clock_bounds = Rectangle::new(
+        Point::from((right_layout.clock_x, ws_y)),
+        Size::from((right_layout.clock_w, ws_btn_height)),
+    );
+    if let Some(el) = text_cache.render_label_centered(
+        renderer,
+        top_telemetry.clock_hhmm,
+        10.5,
+        text_bright,
+        clock_bounds,
+    ) {
         elements.push(el);
     }
 
     // 4a. Keyboard layout indicator & unread notification badge in TopBar (`RUSTYOS-024`/`029`)
-    let (kx, _ky, kw, _kh) = kbd_badge_rect(width, top_telemetry.notification_count);
-    let kbd_bounds = Rectangle::new(Point::from((kx, ws_y)), Size::from((kw, ws_btn_height)));
+    let kbd_bounds = Rectangle::new(
+        Point::from((right_layout.kbd_x, ws_y)),
+        Size::from((right_layout.kbd_w, ws_btn_height)),
+    );
     if let Some(el) = text_cache.render_label_centered(
         renderer,
         top_telemetry.kbd_layout,
@@ -2196,13 +2693,15 @@ pub fn generate_shell_text_elements(
     }
 
     if top_telemetry.notification_count > 0 {
-        let (bx, _by, bw, _bh) = notification_badge_rect(width);
         let badge_label = if top_telemetry.notification_count > 99 {
             "N:99+".to_owned()
         } else {
             format!("N:{}", top_telemetry.notification_count)
         };
-        let badge_bounds = Rectangle::new(Point::from((bx, ws_y)), Size::from((bw, ws_btn_height)));
+        let badge_bounds = Rectangle::new(
+            Point::from((right_layout.notif_x, ws_y)),
+            Size::from((right_layout.notif_w, ws_btn_height)),
+        );
         if let Some(el) = text_cache.render_label_centered(
             renderer,
             &badge_label,
@@ -2215,9 +2714,11 @@ pub fn generate_shell_text_elements(
     }
 
     // 4aa. System tray badges (`StatusNotifierItem`) left of keyboard layout (`RUSTYOS-032`)
-    let tray_rects = tray_slot_rects(
+    let tray_rects = tray_slot_rects_with_layout(
         width,
+        top_telemetry.has_battery,
         top_telemetry.notification_count,
+        top_telemetry.clock_hhmm,
         top_telemetry.tray_items.len(),
     );
     for (item, (tx, _ty, tw, _th)) in top_telemetry.tray_items.iter().zip(tray_rects) {
@@ -2285,59 +2786,8 @@ pub fn generate_shell_text_elements(
         }
     }
 
-    // 5. Dock app initials & open window badges (`RUSTYOS-023`)
-    let dock_items_count = (3 + dock_view.windows.len()).max(3);
-    for idx in 0..dock_items_count {
-        let Some(bounds) = dock_slot_rect(width, height, dock_view.windows.len(), idx) else {
-            continue;
-        };
-        let has_dock_icon = match idx {
-            0 => dock_view.pinned_icons[0]
-                .is_some_and(|name| shape_cache.icons.has_named_icon(name, DOCK_ICON_SIZE)),
-            1 => dock_view.pinned_icons[1]
-                .is_some_and(|name| shape_cache.icons.has_named_icon(name, DOCK_ICON_SIZE)),
-            n if n >= 3 => dock_view.windows.get(n - 3).is_some_and(|entry| {
-                let key = format!("win-{}", entry.id.0);
-                shape_cache.icons.has_window_icon(
-                    renderer,
-                    &key,
-                    entry.toplevel_icon.as_ref(),
-                    entry.icon_name.as_deref(),
-                    DOCK_ICON_SIZE,
-                )
-            }),
-            _ => false,
-        };
-        if has_dock_icon {
-            continue;
-        }
-        let (label, color) = match idx {
-            0 => (">_", text_bright),
-            1 => ("Fs", text_bright),
-            2 => ("Ov", text_bright),
-            n => {
-                let win = dock_view.windows.get(n - 3);
-                let badge = win.map_or("Wn", |entry| entry.badge.as_str());
-                let col = if win.is_some_and(|entry| entry.focused) {
-                    text_bright
-                } else if win.is_some_and(|entry| entry.minimized) {
-                    [158, 148, 174, 255]
-                } else {
-                    [224, 216, 236, 255]
-                };
-                (badge, col)
-            }
-        };
-        let bounds_logical = Rectangle::new(
-            Point::from((bounds.loc.x, bounds.loc.y)),
-            Size::from((bounds.size.w, bounds.size.h)),
-        );
-        if let Some(el) =
-            text_cache.render_label_centered(renderer, label, 12.5, color, bounds_logical)
-        {
-            elements.push(el);
-        }
-    }
+    // Dock tiles now exclusively use XDG PNG, SHM, or procedural macOS 27 squircles (`RUSTYOS-048`).
+    let _ = (dock_view, shape_cache);
 
     elements
 }
@@ -2634,7 +3084,40 @@ fn render_quick_settings_text(
         elements.push(el);
     }
 
-    // Quick toggle labels (2 columns, 3 rows)
+    // Glass Surface card (`RUSTYOS-048`)
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let glass_pct = (crate::config::clamp_glass_opacity(qs.glass_opacity) * 100.0).round() as u8;
+    let glass_title = if qs.reduce_transparency {
+        "Glass: Opaque Mode".to_owned()
+    } else {
+        format!("Glass Opacity: {glass_pct}%")
+    };
+    if let Some(el) = text_cache.render_label(
+        renderer,
+        &glass_title,
+        11.0,
+        text_bright,
+        Point::from((left_x + 12, py + 202)),
+    ) {
+        elements.push(el);
+    }
+    let transp_btn_label = if qs.reduce_transparency {
+        "Glass"
+    } else {
+        "Opaque"
+    };
+    let glass_btn_x = px + pw - pad - 86;
+    if let Some(el) = text_cache.render_label_centered(
+        renderer,
+        transp_btn_label,
+        10.0,
+        text_bright,
+        Rectangle::new(Point::from((glass_btn_x, py + 200)), Size::from((76, 22))),
+    ) {
+        elements.push(el);
+    }
+
+    // Quick toggle labels (2 columns, 3 rows shifted below Glass card)
     let layout_text = if qs.layout_mode == "master-stack" {
         "Layout: Tile"
     } else {
@@ -2645,7 +3128,7 @@ fn render_quick_settings_text(
         layout_text,
         11.0,
         text_bright,
-        Rectangle::new(Point::from((left_x, py + 196)), Size::from((half_w, 34))),
+        Rectangle::new(Point::from((left_x, py + 260)), Size::from((half_w, 34))),
     ) {
         elements.push(el);
     }
@@ -2659,7 +3142,7 @@ fn render_quick_settings_text(
         motion_text,
         11.0,
         text_bright,
-        Rectangle::new(Point::from((right_x, py + 196)), Size::from((half_w, 34))),
+        Rectangle::new(Point::from((right_x, py + 260)), Size::from((half_w, 34))),
     ) {
         elements.push(el);
     }
@@ -2668,7 +3151,7 @@ fn render_quick_settings_text(
         "Open Spotlight",
         11.0,
         text_bright,
-        Rectangle::new(Point::from((left_x, py + 238)), Size::from((half_w, 34))),
+        Rectangle::new(Point::from((left_x, py + 302)), Size::from((half_w, 34))),
     ) {
         elements.push(el);
     }
@@ -2677,7 +3160,7 @@ fn render_quick_settings_text(
         "Refresh Metrics",
         11.0,
         text_bright,
-        Rectangle::new(Point::from((right_x, py + 238)), Size::from((half_w, 34))),
+        Rectangle::new(Point::from((right_x, py + 302)), Size::from((half_w, 34))),
     ) {
         elements.push(el);
     }
@@ -2691,7 +3174,7 @@ fn render_quick_settings_text(
         } else {
             text_muted
         },
-        Rectangle::new(Point::from((left_x, py + 280)), Size::from((half_w, 34))),
+        Rectangle::new(Point::from((left_x, py + 344)), Size::from((half_w, 34))),
     ) {
         elements.push(el);
     }
@@ -2700,7 +3183,7 @@ fn render_quick_settings_text(
         "Lock Session",
         11.0,
         text_bright,
-        Rectangle::new(Point::from((right_x, py + 280)), Size::from((half_w, 34))),
+        Rectangle::new(Point::from((right_x, py + 344)), Size::from((half_w, 34))),
     ) {
         elements.push(el);
     }
@@ -2961,78 +3444,83 @@ fn push_soft_shadow(
 }
 
 /// Draws monochrome status glyphs (signal, volume, battery) left of the clock (`RUSTYOS-036`).
-fn push_status_glyphs(
+fn push_top_bar_right_glyphs(
     out: &mut Vec<CompositorRenderElement>,
-    status_x: i32,
+    shape_cache: &mut crate::surfaces::UiShapeCache,
+    renderer: &mut GlesRenderer,
+    right: &TopBarRightLayout,
     t: &TopBarTelemetry<'_>,
 ) {
-    let on = rgba_to_premul_color32f([244, 240, 250, 255]);
-    let dim = rgba_to_premul_color32f([244, 240, 250, 90]);
-    let base_y = TOP_BAR_ITEM_Y + TOP_BAR_ITEM_H - 5;
-    let solid = |out: &mut Vec<CompositorRenderElement>, x: i32, y: i32, w: i32, h: i32, c| {
-        out.push(CompositorRenderElement::Solid(make_solid_element(
-            Rectangle::new(Point::from((x, y)), Size::from((w, h))),
-            c,
-        )));
-    };
+    use crate::surfaces::UiGlyphKind;
 
-    // Signal bars (network).
-    for i in 0..4 {
-        let h = 3 + i * 3;
-        solid(
-            out,
-            status_x + 8 + i * 4,
-            base_y - h,
-            3,
-            h,
-            if t.net_connected || i == 0 { on } else { dim },
-        );
+    let white = [244, 240, 250, 255];
+    let dim_white = [220, 212, 236, 225];
+    let glyph_y = TOP_BAR_ITEM_Y + (TOP_BAR_ITEM_H - 16) / 2;
+
+    if let Some(el) = shape_cache.ui_glyph_element(
+        renderer,
+        UiGlyphKind::Search,
+        15,
+        dim_white,
+        Point::from((right.search_x + 1, glyph_y + 1)),
+    ) {
+        out.push(CompositorRenderElement::Memory(el));
     }
-
-    // Speaker + waves (volume).
-    let vx = status_x + 32;
-    solid(out, vx, base_y - 9, 4, 6, on);
-    solid(out, vx + 4, base_y - 11, 3, 10, on);
-    if t.audio_muted {
-        solid(
-            out,
-            vx + 9,
-            base_y - 6,
-            8,
-            2,
-            rgba_to_premul_color32f(RGBA_DANGER),
-        );
-    } else {
-        if t.volume_percent > 0 {
-            solid(out, vx + 9, base_y - 8, 2, 6, on);
-        }
-        if t.volume_percent > 40 {
-            solid(out, vx + 13, base_y - 11, 2, 10, on);
-        }
+    if let Some(el) = shape_cache.ui_glyph_element(
+        renderer,
+        UiGlyphKind::Wifi {
+            connected: t.net_connected,
+        },
+        16,
+        white,
+        Point::from((right.wifi_x, glyph_y)),
+    ) {
+        out.push(CompositorRenderElement::Memory(el));
     }
-
-    // Battery (only when hardware battery exists).
-    if t.has_battery {
-        let bx = status_x + 62;
-        let by = base_y - 11;
-        solid(out, bx + 22, by + 3, 2, 5, on);
-        let pct = i32::from(t.battery_percent.min(100));
-        let fill_w = (pct * 16 + 50) / 100;
-        let fill_color = if t.battery_percent <= 15 {
-            rgba_to_premul_color32f(RGBA_DANGER)
-        } else if t.battery_percent <= 30 {
-            rgba_to_premul_color32f(RGBA_WARNING)
+    if let Some(el) = shape_cache.ui_glyph_element(
+        renderer,
+        UiGlyphKind::Volume {
+            level_percent: t.volume_percent,
+            muted: t.audio_muted,
+        },
+        16,
+        white,
+        Point::from((right.volume_x, glyph_y)),
+    ) {
+        out.push(CompositorRenderElement::Memory(el));
+    }
+    if let Some(bx) = right.battery_x
+        && let Some(el) = shape_cache.ui_glyph_element(
+            renderer,
+            UiGlyphKind::Battery {
+                percent: t.battery_percent,
+                charging: t.battery_percent >= 98,
+            },
+            18,
+            white,
+            Point::from((bx + 1, glyph_y - 1)),
+        )
+    {
+        out.push(CompositorRenderElement::Memory(el));
+    }
+    if let Some(el) = shape_cache.ui_glyph_element(
+        renderer,
+        UiGlyphKind::ControlCenter,
+        16,
+        if t.quick_settings_open {
+            [185, 138, 255, 255]
         } else {
-            on
-        };
-        if fill_w > 0 {
-            solid(out, bx + 3, by + 3, fill_w, 5, fill_color);
-        }
-        solid(out, bx, by, 22, 1, on);
-        solid(out, bx, by + 10, 22, 1, on);
-        solid(out, bx, by, 1, 11, on);
-        solid(out, bx + 21, by, 1, 11, on);
+            white
+        },
+        Point::from((right.control_center_x + 2, glyph_y)),
+    ) {
+        out.push(CompositorRenderElement::Memory(el));
     }
+}
+
+fn title_hue_seed(title: &str, id: u64) -> u8 {
+    let base = u8::try_from(id & 0xff).unwrap_or(0);
+    title.bytes().fold(base, u8::wrapping_add) % 4
 }
 
 /// Generates unified front-to-back shell elements with rounded corners, circular status dots,
@@ -3078,8 +3566,19 @@ pub fn generate_shell_composite_elements(
         ShellOverlayView::Spotlight(spot) => {
             let (mx, base_my, mw, mh) = spotlight_modal_rect(width, height);
             let my = base_my + anim_offset(spot.progress, -22.0);
+            let glass_op = top_telemetry.glass_opacity;
+            let reduce_tr = top_telemetry.reduce_transparency;
 
-            // Search cursor + rounded search bar + rounded result rows (above modal base)
+            // SDF Search loupe & cursor inside search input bar (`RUSTYOS-048`)
+            if let Some(el) = shape_cache.ui_glyph_element(
+                renderer,
+                crate::surfaces::UiGlyphKind::Search,
+                18,
+                [215, 205, 235, 255],
+                Point::from((mx + 30, my + 31)),
+            ) {
+                out.push(CompositorRenderElement::Memory(el));
+            }
             let cursor_x = (mx + 60 + spot.cursor_offset_x).min(mx + mw - 28);
             out.push(CompositorRenderElement::Solid(make_solid_element(
                 Rectangle::new(Point::from((cursor_x, my + 28)), Size::from((2, 24))),
@@ -3186,11 +3685,19 @@ pub fn generate_shell_composite_elements(
                 shape_cache,
                 renderer,
                 modal_rect,
-                20,
-                RGBA_SURFACE_ELEVATED,
+                WINDOW_RADIUS,
+                scale_glass_rgba(RGBA_SURFACE_ELEVATED, glass_op, reduce_tr),
                 Some(RGBA_BORDER_HIGHLIGHT),
             );
-            push_soft_shadow(&mut out, shape_cache, renderer, modal_rect, 20, 28, 115);
+            push_soft_shadow(
+                &mut out,
+                shape_cache,
+                renderer,
+                modal_rect,
+                WINDOW_RADIUS,
+                28,
+                108,
+            );
         }
         ShellOverlayView::QuickSettings(qs) => {
             let (px, base_py, pw, ph) = quick_settings_rect(width, height);
@@ -3201,7 +3708,7 @@ pub fn generate_shell_composite_elements(
             let left_x = px + pad;
             let right_x = px + pad + half_w + 8;
 
-            // 1. Primary round toggle buttons & status glyphs inside top cards
+            // 1. Primary round toggle buttons & SDF status glyphs inside top cards
             let net_circle_fill = if qs.net_connected {
                 RGBA_ACCENT
             } else {
@@ -3212,25 +3719,23 @@ pub fn generate_shell_composite_elements(
             } else {
                 RGBA_BORDER
             });
+            if let Some(el) = shape_cache.ui_glyph_element(
+                renderer,
+                crate::surfaces::UiGlyphKind::Wifi {
+                    connected: qs.net_connected,
+                },
+                16,
+                [248, 245, 255, 255],
+                Point::from((left_x + 15, py + 77)),
+            ) {
+                out.push(CompositorRenderElement::Memory(el));
+            }
             if let Some(el) = shape_cache.circle_element(
                 renderer,
                 30,
                 net_circle_fill,
                 net_circle_border,
                 Point::from((left_x + 8, py + 70)),
-            ) {
-                out.push(CompositorRenderElement::Memory(el));
-            }
-            if let Some(el) = shape_cache.circle_element(
-                renderer,
-                8,
-                if qs.net_connected {
-                    [255, 255, 255, 255]
-                } else {
-                    RGBA_DANGER
-                },
-                None,
-                Point::from((left_x + 19, py + 81)),
             ) {
                 out.push(CompositorRenderElement::Memory(el));
             }
@@ -3242,6 +3747,18 @@ pub fn generate_shell_composite_elements(
             } else {
                 RGBA_WARNING
             };
+            if let Some(el) = shape_cache.ui_glyph_element(
+                renderer,
+                crate::surfaces::UiGlyphKind::Battery {
+                    percent: qs.battery_percent,
+                    charging: qs.ac_online,
+                },
+                16,
+                [248, 245, 255, 255],
+                Point::from((right_x + 15, py + 77)),
+            ) {
+                out.push(CompositorRenderElement::Memory(el));
+            }
             if let Some(el) = shape_cache.circle_element(
                 renderer,
                 30,
@@ -3251,45 +3768,31 @@ pub fn generate_shell_composite_elements(
             ) {
                 out.push(CompositorRenderElement::Memory(el));
             }
-            if let Some(el) = shape_cache.circle_element(
-                renderer,
-                8,
-                [255, 255, 255, 255],
-                None,
-                Point::from((right_x + 19, py + 81)),
-            ) {
-                out.push(CompositorRenderElement::Memory(el));
-            }
 
-            // Leading speaker glyph inside audio slider
+            // Leading SDF speaker glyph inside Sound capsule slider
             let track_w = inner_w - 24;
             let track_x = left_x + 12;
             let track_y = py + 158;
             let fill_w = (track_w * i32::from(qs.volume_percent.min(100))) / 100;
-            let speaker_col = if fill_w > 24 {
-                COLOR_SURFACE
+            let vol_glyph_rgba = if fill_w > 24 {
+                [22, 16, 35, 255]
             } else {
-                COLOR_MUTED
+                [244, 240, 250, 255]
             };
-            out.push(CompositorRenderElement::Solid(make_solid_element(
-                Rectangle::new(Point::from((track_x + 8, track_y + 6)), Size::from((3, 6))),
-                speaker_col,
-            )));
-            out.push(CompositorRenderElement::Solid(make_solid_element(
-                Rectangle::new(
-                    Point::from((track_x + 11, track_y + 4)),
-                    Size::from((3, 10)),
-                ),
-                speaker_col,
-            )));
-            if qs.audio_muted {
-                out.push(CompositorRenderElement::Solid(make_solid_element(
-                    Rectangle::new(Point::from((track_x + 7, track_y + 4)), Size::from((8, 1))),
-                    COLOR_DANGER,
-                )));
+            if let Some(el) = shape_cache.ui_glyph_element(
+                renderer,
+                crate::surfaces::UiGlyphKind::Volume {
+                    level_percent: qs.volume_percent,
+                    muted: qs.audio_muted,
+                },
+                14,
+                vol_glyph_rgba,
+                Point::from((track_x + 5, track_y + 2)),
+            ) {
+                out.push(CompositorRenderElement::Memory(el));
             }
 
-            // Audio control pill buttons
+            // Sound control pill buttons
             let btn_y = py + 128;
             let mute_x = px + pw - pad - 116;
             let minus_x = px + pw - pad - 62;
@@ -3326,7 +3829,7 @@ pub fn generate_shell_composite_elements(
                 Some(RGBA_BORDER),
             );
 
-            // Capsule slider fill & track (DESIGN.md §12.4)
+            // Sound capsule slider fill & track (`DESIGN.md` §12.4)
             if fill_w > 0 {
                 push_rounded_glass_box(
                     &mut out,
@@ -3363,6 +3866,75 @@ pub fn generate_shell_composite_elements(
                 Some(RGBA_BORDER),
             );
 
+            // Glass Surface card (`RUSTYOS-048`): toggle + capsule opacity slider (`0.35..=1.0`)
+            let glass_btn_x = px + pw - pad - 86;
+            push_rounded_glass_box(
+                &mut out,
+                shape_cache,
+                renderer,
+                Rectangle::new(Point::from((glass_btn_x, py + 200)), Size::from((76, 22))),
+                11,
+                if qs.reduce_transparency {
+                    RGBA_ACCENT_MUTED
+                } else {
+                    RGBA_SURFACE
+                },
+                Some(if qs.reduce_transparency {
+                    RGBA_ACCENT
+                } else {
+                    RGBA_BORDER
+                }),
+            );
+            let glass_norm = (crate::config::clamp_glass_opacity(qs.glass_opacity)
+                - crate::config::MIN_GLASS_OPACITY)
+                / (1.0 - crate::config::MIN_GLASS_OPACITY);
+            #[allow(
+                clippy::cast_precision_loss,
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss
+            )]
+            let glass_fill_w = ((track_w as f32) * glass_norm.clamp(0.0, 1.0)).round() as i32;
+            let glass_track_y = py + 228;
+            if glass_fill_w > 0 {
+                push_rounded_glass_box(
+                    &mut out,
+                    shape_cache,
+                    renderer,
+                    Rectangle::new(
+                        Point::from((track_x, glass_track_y)),
+                        Size::from((glass_fill_w, 16)),
+                    ),
+                    glass_fill_w.min(8),
+                    if qs.reduce_transparency {
+                        RGBA_SUBTLE
+                    } else {
+                        RGBA_ACCENT_HOVER
+                    },
+                    None,
+                );
+            }
+            push_rounded_glass_box(
+                &mut out,
+                shape_cache,
+                renderer,
+                Rectangle::new(
+                    Point::from((track_x, glass_track_y)),
+                    Size::from((track_w, 16)),
+                ),
+                8,
+                RGBA_SURFACE,
+                Some(RGBA_BORDER),
+            );
+            push_rounded_glass_box(
+                &mut out,
+                shape_cache,
+                renderer,
+                Rectangle::new(Point::from((left_x, py + 196)), Size::from((inner_w, 56))),
+                16,
+                RGBA_SURFACE_OVERLAY,
+                Some(RGBA_BORDER),
+            );
+
             // Network & Power cards
             push_rounded_glass_box(
                 &mut out,
@@ -3383,13 +3955,13 @@ pub fn generate_shell_composite_elements(
                 Some(RGBA_BORDER),
             );
 
-            // Quick Action toggles (2 columns, 3 rows)
+            // Quick Action toggles (2 columns, 3 rows shifted below Glass Surface card)
             let is_tile = qs.layout_mode == "master-stack";
             push_rounded_glass_box(
                 &mut out,
                 shape_cache,
                 renderer,
-                Rectangle::new(Point::from((left_x, py + 196)), Size::from((half_w, 34))),
+                Rectangle::new(Point::from((left_x, py + 260)), Size::from((half_w, 34))),
                 14,
                 if is_tile {
                     RGBA_ACCENT_MUTED
@@ -3402,7 +3974,7 @@ pub fn generate_shell_composite_elements(
                 &mut out,
                 shape_cache,
                 renderer,
-                Rectangle::new(Point::from((right_x, py + 196)), Size::from((half_w, 34))),
+                Rectangle::new(Point::from((right_x, py + 260)), Size::from((half_w, 34))),
                 14,
                 if qs.reduced_motion {
                     RGBA_ACCENT_MUTED
@@ -3419,7 +3991,7 @@ pub fn generate_shell_composite_elements(
                 &mut out,
                 shape_cache,
                 renderer,
-                Rectangle::new(Point::from((left_x, py + 238)), Size::from((half_w, 34))),
+                Rectangle::new(Point::from((left_x, py + 302)), Size::from((half_w, 34))),
                 14,
                 RGBA_SURFACE_OVERLAY,
                 Some(RGBA_BORDER),
@@ -3428,7 +4000,7 @@ pub fn generate_shell_composite_elements(
                 &mut out,
                 shape_cache,
                 renderer,
-                Rectangle::new(Point::from((right_x, py + 238)), Size::from((half_w, 34))),
+                Rectangle::new(Point::from((right_x, py + 302)), Size::from((half_w, 34))),
                 14,
                 RGBA_SURFACE_OVERLAY,
                 Some(RGBA_BORDER),
@@ -3438,7 +4010,7 @@ pub fn generate_shell_composite_elements(
                 &mut out,
                 shape_cache,
                 renderer,
-                Rectangle::new(Point::from((left_x, py + 280)), Size::from((half_w, 34))),
+                Rectangle::new(Point::from((left_x, py + 344)), Size::from((half_w, 34))),
                 14,
                 if bt_active {
                     RGBA_ACCENT_MUTED
@@ -3451,7 +4023,7 @@ pub fn generate_shell_composite_elements(
                 &mut out,
                 shape_cache,
                 renderer,
-                Rectangle::new(Point::from((right_x, py + 280)), Size::from((half_w, 34))),
+                Rectangle::new(Point::from((right_x, py + 344)), Size::from((half_w, 34))),
                 14,
                 RGBA_SURFACE_OVERLAY,
                 Some(RGBA_BORDER),
@@ -3463,18 +4035,30 @@ pub fn generate_shell_composite_elements(
                 COLOR_BORDER,
             )));
 
-            // Outer glass popover (radius: 20, soft drop shadow)
+            // Outer glass popover (radius: 20, soft drop shadow, opacity scaled by Control Center slider)
             let qs_rect = Rectangle::new(Point::from((px, py)), Size::from((pw, ph)));
             push_rounded_glass_box(
                 &mut out,
                 shape_cache,
                 renderer,
                 qs_rect,
-                20,
-                RGBA_SURFACE_ELEVATED,
+                WINDOW_RADIUS,
+                scale_glass_rgba(
+                    RGBA_SURFACE_ELEVATED,
+                    qs.glass_opacity,
+                    qs.reduce_transparency,
+                ),
                 Some(RGBA_BORDER_HIGHLIGHT),
             );
-            push_soft_shadow(&mut out, shape_cache, renderer, qs_rect, 20, 24, 110);
+            push_soft_shadow(
+                &mut out,
+                shape_cache,
+                renderer,
+                qs_rect,
+                WINDOW_RADIUS,
+                24,
+                102,
+            );
         }
         ShellOverlayView::Switcher(sw) => {
             let (panel_rect, cards) = switcher_layout(screen_size, sw.cards.len());
@@ -3603,10 +4187,81 @@ pub fn generate_shell_composite_elements(
         }
     }
 
-    // 3. TopBar circular dot, rounded pills & background bar
-    let tray_rects = tray_slot_rects(
+    // 3. TopBar SDF glyphs, dynamic left/right clusters, menu popover & translucent gradient scrim (`RUSTYOS-048`)
+    let active_app_name = dock_view
+        .windows
+        .iter()
+        .find(|w| w.focused)
+        .map_or_else(|| "RustyOS".to_owned(), |w| extract_app_name(&w.title));
+    let left_layout = compute_top_bar_left_layout(&active_app_name);
+    let right_layout = compute_top_bar_right_layout(
         width,
+        top_telemetry.has_battery,
         top_telemetry.notification_count,
+        top_telemetry.clock_hhmm,
+    );
+
+    if let Some(el) = shape_cache.ui_glyph_element(
+        renderer,
+        crate::surfaces::UiGlyphKind::RustyLogo,
+        16,
+        [200, 165, 255, 255],
+        Point::from((TOP_BAR_LOGO_X + 1, TOP_BAR_ITEM_Y + 2)),
+    ) {
+        out.push(CompositorRenderElement::Memory(el));
+    }
+    push_top_bar_right_glyphs(
+        &mut out,
+        shape_cache,
+        renderer,
+        &right_layout,
+        top_telemetry,
+    );
+
+    if let Some(open_menu) = top_telemetry.active_menu {
+        let (anchor_x, anchor_w) = match open_menu {
+            TopBarMenuHit::SystemLogo => (TOP_BAR_LOGO_X - 2, TOP_BAR_LOGO_W + 4),
+            TopBarMenuHit::ActiveApp => (left_layout.app_x - 4, left_layout.app_w + 4),
+            TopBarMenuHit::File => (left_layout.file_x - 2, TOP_BAR_MENU_FILE_W + 4),
+            TopBarMenuHit::Edit => (left_layout.edit_x - 2, TOP_BAR_MENU_EDIT_W + 4),
+            TopBarMenuHit::View => (left_layout.view_x - 2, TOP_BAR_MENU_VIEW_W + 4),
+            TopBarMenuHit::Window => (left_layout.win_x - 2, TOP_BAR_MENU_WINDOW_W + 4),
+        };
+        push_rounded_glass_box(
+            &mut out,
+            shape_cache,
+            renderer,
+            Rectangle::new(
+                Point::from((anchor_x, TOP_BAR_ITEM_Y)),
+                Size::from((anchor_w, TOP_BAR_ITEM_H)),
+            ),
+            7,
+            [255, 255, 255, 34],
+            None,
+        );
+        let (mx, my, mw, mh) = top_bar_menu_popover_rect(&active_app_name, open_menu);
+        let menu_rect = Rectangle::new(Point::from((mx, my)), Size::from((mw, mh)));
+        push_rounded_glass_box(
+            &mut out,
+            shape_cache,
+            renderer,
+            menu_rect,
+            12,
+            scale_glass_rgba(
+                RGBA_SURFACE_ELEVATED,
+                top_telemetry.glass_opacity,
+                top_telemetry.reduce_transparency,
+            ),
+            Some(RGBA_BORDER_HIGHLIGHT),
+        );
+        push_soft_shadow(&mut out, shape_cache, renderer, menu_rect, 12, 18, 96);
+    }
+
+    let tray_rects = tray_slot_rects_with_layout(
+        width,
+        top_telemetry.has_battery,
+        top_telemetry.notification_count,
+        top_telemetry.clock_hhmm,
         top_telemetry.tray_items.len(),
     );
     for (item, (tx, ty, tw, th)) in top_telemetry.tray_items.iter().zip(tray_rects) {
@@ -3639,7 +4294,6 @@ pub fn generate_shell_composite_elements(
         if let Some(el) = tray_icon_el {
             out.push(CompositorRenderElement::Memory(el));
         }
-        // macOS 27 menu bar: no resting plates; only attention items get an outline (`RUSTYOS-036`).
         if item.attention {
             push_rounded_glass_box(
                 &mut out,
@@ -3654,67 +4308,58 @@ pub fn generate_shell_composite_elements(
     }
 
     if top_telemetry.notification_count > 0 {
-        let (bx, by, bw, bh) = notification_badge_rect(width);
         push_rounded_glass_box(
             &mut out,
             shape_cache,
             renderer,
-            Rectangle::new(Point::from((bx, by)), Size::from((bw, bh))),
+            Rectangle::new(
+                Point::from((right_layout.notif_x, TOP_BAR_ITEM_Y)),
+                Size::from((right_layout.notif_w, TOP_BAR_ITEM_H)),
+            ),
             10,
             RGBA_ACCENT_MUTED,
             Some(RGBA_ACCENT),
         );
     }
-    let (status_x, status_y, status_w, status_h) = status_pill_rect(width);
-    push_status_glyphs(&mut out, status_x, top_telemetry);
-    // Resting state is plate-less; the pill only highlights while Quick Settings is open (`RUSTYOS-036`).
     if top_telemetry.quick_settings_open {
         push_rounded_glass_box(
             &mut out,
             shape_cache,
             renderer,
             Rectangle::new(
-                Point::from((status_x, status_y)),
-                Size::from((status_w, status_h)),
+                Point::from((right_layout.status_pill_x, TOP_BAR_ITEM_Y)),
+                Size::from((right_layout.status_pill_w, TOP_BAR_ITEM_H)),
             ),
             10,
-            [255, 255, 255, 46],
+            [255, 255, 255, 42],
             None,
         );
     }
 
-    // Hairline divider before compact workspace indicators (`RUSTYOS-038`)
+    // Hairline divider before compact workspace indicators
     out.push(CompositorRenderElement::Solid(make_solid_element(
-        Rectangle::new(Point::from((TOP_BAR_SEPARATOR_X, 7)), Size::from((1, 12))),
+        Rectangle::new(
+            Point::from((left_layout.separator_x, 7)),
+            Size::from((1, 12)),
+        ),
         COLOR_BORDER,
     )));
 
     let ws_y = TOP_BAR_ITEM_Y;
     let ws_h = TOP_BAR_ITEM_H;
-    let mut start_x = WS_START_X;
+    let mut start_x = left_layout.ws_start_x;
     for ws in 1..=9 {
-        let ws_rect = Rectangle::new(
-            Point::from((start_x, ws_y)),
-            Size::from((WS_BTN_WIDTH, ws_h)),
-        );
         if ws == active_workspace {
             push_rounded_glass_box(
                 &mut out,
                 shape_cache,
                 renderer,
-                ws_rect,
+                Rectangle::new(
+                    Point::from((start_x, ws_y)),
+                    Size::from((WS_BTN_WIDTH, ws_h)),
+                ),
                 9,
                 RGBA_ACCENT,
-                None,
-            );
-        } else {
-            push_rounded_glass_box(
-                &mut out,
-                shape_cache,
-                renderer,
-                ws_rect,
-                9,
-                [255, 255, 255, 14],
                 None,
             );
         }
@@ -3725,32 +4370,60 @@ pub fn generate_shell_composite_elements(
         &mut out,
         shape_cache,
         renderer,
-        Rectangle::new(Point::from((start_x + 8, ws_y)), Size::from((52, ws_h))),
-        8,
-        [255, 255, 255, 16],
+        Rectangle::new(
+            Point::from((left_layout.layout_x, ws_y)),
+            Size::from((left_layout.layout_w, ws_h)),
+        ),
+        9,
+        [255, 255, 255, 14],
         (layout_mode == "master-stack").then_some(RGBA_ACCENT),
     );
 
-    // No solid bar: only a soft top scrim keeps text readable on any wallpaper (`RUSTYOS-036`).
-    for (offset, height, alpha) in [(0, 10, 120_u8), (10, 8, 78), (18, TOP_BAR_HEIGHT - 18, 38)] {
+    // Soft top translucent glass scrim scaled by glass_opacity & reduce_transparency (`RUSTYOS-048`)
+    for (offset, scrim_h, alpha) in [(0, 10, 118_u8), (10, 8, 76), (18, TOP_BAR_HEIGHT - 18, 36)] {
+        let scaled = scale_glass_rgba(
+            [15, 10, 25, alpha],
+            top_telemetry.glass_opacity,
+            top_telemetry.reduce_transparency,
+        );
         out.push(CompositorRenderElement::Solid(make_solid_element(
-            Rectangle::new(Point::from((0, offset)), Size::from((width, height))),
-            rgba_to_premul_color32f([15, 10, 25, alpha]),
+            Rectangle::new(Point::from((0, offset)), Size::from((width, scrim_h))),
+            rgba_to_premul_color32f(scaled),
         )));
     }
 
-    // 4. Dock rounded app tiles, hover/active states, rounded glass pill, and soft drop shadow (`RUSTYOS-023`)
+    // 4. Dock macOS 27 glass capsule, vertical separator, hover lift, squircles & soft drop shadow (`RUSTYOS-048`)
     let (dock_x, dock_y, dock_width, dock_items_count) =
         dock_layout_bounds(width, height, dock_view.windows.len());
+
+    if !dock_view.windows.is_empty()
+        && let Some(ov_slot) = dock_slot_rect(width, height, dock_view.windows.len(), 2)
+    {
+        let sep_x = ov_slot.loc.x + ov_slot.size.w + DOCK_ITEM_GAP / 2 + DOCK_DIVIDER_GAP / 2;
+        out.push(CompositorRenderElement::Solid(make_solid_element(
+            Rectangle::new(Point::from((sep_x, dock_y + 18)), Size::from((1, 36))),
+            COLOR_BORDER,
+        )));
+    }
 
     for i in 0..dock_items_count {
         let Some(slot_rect) = dock_slot_rect(width, height, dock_view.windows.len(), i) else {
             continue;
         };
         let item_x = slot_rect.loc.x;
-        let item_y = slot_rect.loc.y;
         let item_size = slot_rect.size.w;
         let hovered = dock_view.hover_slot == Some(i);
+        #[allow(clippy::cast_possible_truncation)]
+        let lift = if hovered {
+            if dock_view.reduced_motion {
+                2
+            } else {
+                (6.0 * dock_view.hover_progress.clamp(0.35, 1.0)).round() as i32
+            }
+        } else {
+            0
+        };
+        let item_y = slot_rect.loc.y - lift;
 
         let win_entry = (i >= 3).then(|| dock_view.windows.get(i - 3)).flatten();
         let is_minimized = win_entry.is_some_and(|w| w.minimized);
@@ -3773,7 +4446,7 @@ pub fn generate_shell_composite_elements(
                 4,
                 pip_color,
                 None,
-                Point::from((item_x + (item_size - 4) / 2, dock_y + DOCK_HEIGHT - 6)),
+                Point::from((item_x + (item_size - 4) / 2, dock_y + DOCK_HEIGHT - 7)),
             ) {
                 out.push(CompositorRenderElement::Memory(dot));
             }
@@ -3783,68 +4456,80 @@ pub fn generate_shell_composite_elements(
         let inner_offset = (item_size - inner_size) / 2;
         let icon_loc = Point::from((item_x + inner_offset, item_y + inner_offset - 2));
         let slot_icon_el = match i {
-            0 => dock_view.pinned_icons[0].and_then(|name| {
-                shape_cache
-                    .icons
-                    .icon_element_by_name(renderer, name, inner_size, icon_loc)
-                    .map(|el| crate::icons::ResolvedIconElement::Memory(Box::new(el)))
-            }),
-            1 => dock_view.pinned_icons[1].and_then(|name| {
-                shape_cache
-                    .icons
-                    .icon_element_by_name(renderer, name, inner_size, icon_loc)
-                    .map(|el| crate::icons::ResolvedIconElement::Memory(Box::new(el)))
-            }),
-            n if n >= 3 => win_entry.and_then(|w| {
-                let key = format!("win-{}", w.id.0);
-                shape_cache.icons.window_icon_element(
+            0 => shape_cache
+                .icons
+                .builtin_squircle_icon_element(
                     renderer,
-                    &key,
-                    w.toplevel_icon.as_ref(),
-                    w.icon_name.as_deref(),
+                    crate::icons::BuiltinAppIcon::Terminal,
                     inner_size,
                     icon_loc,
                 )
+                .map(|el| crate::icons::ResolvedIconElement::Memory(Box::new(el))),
+            1 => shape_cache
+                .icons
+                .builtin_squircle_icon_element(
+                    renderer,
+                    crate::icons::BuiltinAppIcon::Files,
+                    inner_size,
+                    icon_loc,
+                )
+                .map(|el| crate::icons::ResolvedIconElement::Memory(Box::new(el))),
+            2 => shape_cache
+                .icons
+                .builtin_squircle_icon_element(
+                    renderer,
+                    crate::icons::BuiltinAppIcon::Overview,
+                    inner_size,
+                    icon_loc,
+                )
+                .map(|el| crate::icons::ResolvedIconElement::Memory(Box::new(el))),
+            _ => win_entry.and_then(|w| {
+                let key = format!("win-{}", w.id.0);
+                shape_cache
+                    .icons
+                    .window_icon_element(
+                        renderer,
+                        &key,
+                        w.toplevel_icon.as_ref(),
+                        w.icon_name.as_deref(),
+                        inner_size,
+                        icon_loc,
+                    )
+                    .or_else(|| {
+                        let hue_seed = title_hue_seed(&w.title, w.id.0);
+                        shape_cache
+                            .icons
+                            .builtin_squircle_icon_element(
+                                renderer,
+                                crate::icons::BuiltinAppIcon::WindowFallback {
+                                    hue_seed,
+                                    active: is_active,
+                                },
+                                inner_size,
+                                icon_loc,
+                            )
+                            .map(|el| crate::icons::ResolvedIconElement::Memory(Box::new(el)))
+                    })
             }),
-            _ => None,
         };
         if let Some(el) = slot_icon_el {
             out.push(resolved_icon_to_element(el));
-        } else {
-            let inner_rgba = match i {
-                0 => RGBA_ACCENT,
-                1 => [76, 54, 122, 255],
-                2 if dock_view.overview_active => RGBA_ACCENT_HOVER,
-                2 => [56, 44, 86, 255],
-                _ if is_active => RGBA_ACCENT_HOVER,
-                _ if is_minimized => [32, 26, 46, 255],
-                _ => [48, 36, 72, 255],
-            };
-            push_rounded_glass_box(
-                &mut out,
-                shape_cache,
-                renderer,
-                Rectangle::new(
-                    Point::from((item_x + inner_offset, item_y + inner_offset - 2)),
-                    Size::from((inner_size, inner_size)),
-                ),
-                12,
-                inner_rgba,
-                None,
-            );
         }
-        // macOS-style tiles have no resting plate: only a faint hover highlight (`RUSTYOS-035`).
+
         if hovered || is_active {
             push_rounded_glass_box(
                 &mut out,
                 shape_cache,
                 renderer,
-                slot_rect,
-                14,
-                if is_active {
-                    [255, 255, 255, 22]
+                Rectangle::new(
+                    Point::from((item_x, item_y)),
+                    Size::from((item_size, item_size)),
+                ),
+                16,
+                if hovered {
+                    [255, 255, 255, 32]
                 } else {
-                    [255, 255, 255, 30]
+                    [255, 255, 255, 18]
                 },
                 None,
             );
@@ -3861,7 +4546,11 @@ pub fn generate_shell_composite_elements(
         renderer,
         dock_rect,
         DOCK_RADIUS,
-        [44, 34, 66, 214],
+        scale_glass_rgba(
+            [42, 32, 64, 212],
+            top_telemetry.glass_opacity,
+            top_telemetry.reduce_transparency,
+        ),
         Some(RGBA_BORDER_HIGHLIGHT),
     );
     push_soft_shadow(
@@ -3870,8 +4559,8 @@ pub fn generate_shell_composite_elements(
         renderer,
         dock_rect,
         DOCK_RADIUS,
-        18,
-        96,
+        20,
+        92,
     );
 
     // 5. Workspace Overview cards & scrim rendered below TopBar & Dock so both stay crisp and clickable (`RUSTYOS-023`/`025`)
@@ -4168,15 +4857,15 @@ pub fn generate_window_ssd_composite_elements(
         COLOR_BORDER,
     )));
     out.push(CompositorRenderElement::Solid(make_solid_element(
-        Rectangle::new(Point::from((x, y + r)), Size::from((1, h - r))),
+        Rectangle::new(Point::from((x, y + r)), Size::from((1, h - r - 1))),
         edge_border_col,
     )));
     out.push(CompositorRenderElement::Solid(make_solid_element(
-        Rectangle::new(Point::from((x + w - 1, y + r)), Size::from((1, h - r))),
+        Rectangle::new(Point::from((x + w - 1, y + r)), Size::from((1, h - r - 1))),
         edge_border_col,
     )));
     out.push(CompositorRenderElement::Solid(make_solid_element(
-        Rectangle::new(Point::from((x, y + h)), Size::from((w, 1))),
+        Rectangle::new(Point::from((x, y + h - 1)), Size::from((w, 1))),
         edge_border_col,
     )));
 
@@ -4292,8 +4981,8 @@ pub fn generate_window_shadow_elements(
     let mut out = Vec::new();
     let w = rect.width.max(64);
     let h = rect.height.max(TITLEBAR_HEIGHT + 32);
-    let spread = if is_focused { 24 } else { 14 };
-    let max_alpha = if is_focused { 110 } else { 56 };
+    let spread = if is_focused { 28 } else { 16 };
+    let max_alpha = if is_focused { 88 } else { 44 };
     push_soft_shadow(
         &mut out,
         shape_cache,
@@ -4380,6 +5069,8 @@ mod tests {
             frame_p50_us: 16_667,
             window_count: 2,
             progress: 1.0,
+            glass_opacity: crate::config::DEFAULT_GLASS_OPACITY,
+            reduce_transparency: false,
         };
         let elements_with_qs = generate_shell_render_elements(
             size,
@@ -4453,27 +5144,27 @@ mod tests {
             QuickSettingsHit::ToggleMute
         );
         assert_eq!(
-            check_quick_settings_click(size, f64::from(px + 30), f64::from(py + 215)),
+            check_quick_settings_click(size, f64::from(px + 30), f64::from(py + 275)),
             QuickSettingsHit::ToggleLayout
         );
         assert_eq!(
-            check_quick_settings_click(size, f64::from(px + 200), f64::from(py + 215)),
+            check_quick_settings_click(size, f64::from(px + 200), f64::from(py + 275)),
             QuickSettingsHit::ToggleReducedMotion
         );
         assert_eq!(
-            check_quick_settings_click(size, f64::from(px + 30), f64::from(py + 255)),
+            check_quick_settings_click(size, f64::from(px + 30), f64::from(py + 317)),
             QuickSettingsHit::OpenSpotlight
         );
         assert_eq!(
-            check_quick_settings_click(size, f64::from(px + 200), f64::from(py + 255)),
+            check_quick_settings_click(size, f64::from(px + 200), f64::from(py + 317)),
             QuickSettingsHit::RefreshMetrics
         );
         assert_eq!(
-            check_quick_settings_click(size, f64::from(px + 30), f64::from(py + 295)),
+            check_quick_settings_click(size, f64::from(px + 30), f64::from(py + 359)),
             QuickSettingsHit::ToggleBluetooth
         );
         assert_eq!(
-            check_quick_settings_click(size, f64::from(px + 200), f64::from(py + 295)),
+            check_quick_settings_click(size, f64::from(px + 200), f64::from(py + 359)),
             QuickSettingsHit::LockSession
         );
     }
@@ -4792,5 +5483,104 @@ mod tests {
             );
         }
         assert_eq!(check_switcher_click(out, 3, 20.0, 20.0), None);
+    }
+
+    #[test]
+    fn macos27_quick_settings_glass_and_volume_slider_hit_testing() {
+        let size = Size::from((1280, 800));
+        let (px, py, pw, _ph) = quick_settings_rect(size.w, size.h);
+        let pad = 14;
+        let track_x = f64::from(px + pad + 12);
+        let track_w = f64::from(pw - pad * 2 - 24);
+
+        assert_eq!(
+            check_quick_settings_click(size, track_x + track_w * 0.5, f64::from(py + 168)),
+            QuickSettingsHit::SetVolumePercent(50)
+        );
+        assert_eq!(
+            check_quick_settings_click(size, f64::from(px + pw - pad - 40), f64::from(py + 212)),
+            QuickSettingsHit::ToggleReduceTransparency
+        );
+        assert_eq!(
+            check_quick_settings_click(size, track_x + 1.0, f64::from(py + 238)),
+            QuickSettingsHit::SetGlassOpacityPercent(35)
+        );
+        assert_eq!(
+            check_quick_settings_click(size, track_x + track_w - 1.0, f64::from(py + 238)),
+            QuickSettingsHit::SetGlassOpacityPercent(100)
+        );
+
+        let tinted = scale_glass_rgba([20, 14, 34, 200], 0.50, false);
+        assert!(tinted[3] < 200 && tinted[3] >= 40);
+        let opaque = scale_glass_rgba([20, 14, 34, 180], 0.40, true);
+        assert!(opaque[3] >= 246);
+    }
+
+    #[test]
+    fn macos27_top_bar_dynamic_left_right_and_menu_popover_hit_testing() {
+        let without_bat = compute_top_bar_right_layout(1280, false, 0, "Thu 13 Nov  00:15");
+        let with_bat = compute_top_bar_right_layout(1280, true, 0, "Thu 13 Nov  00:15");
+        assert!(without_bat.battery_x.is_none());
+        assert!(with_bat.battery_x.is_some());
+        assert!(without_bat.volume_x > with_bat.volume_x);
+        assert!(check_top_bar_search_click_for_telemetry(
+            1280,
+            false,
+            0,
+            "Thu 13 Nov  00:15",
+            f64::from(without_bat.search_x + without_bat.search_w / 2),
+            14.0,
+        ));
+
+        let short_left = compute_top_bar_left_layout("RustyOS");
+        let wide_left = compute_top_bar_left_layout("Visual Studio Code");
+        assert!(wide_left.app_w > short_left.app_w);
+        assert!(wide_left.ws_start_x > short_left.ws_start_x);
+        assert_eq!(
+            check_top_bar_workspace_click_for_app(
+                "Visual Studio Code",
+                f64::from(wide_left.ws_start_x + 4),
+                14.0
+            ),
+            Some(1)
+        );
+        assert!(check_top_bar_layout_click_for_app(
+            "Visual Studio Code",
+            f64::from(wide_left.layout_x + 10),
+            14.0
+        ));
+
+        let (mx, my, _mw, _mh) = top_bar_menu_popover_rect("RustyOS", TopBarMenuHit::File);
+        assert_eq!(
+            check_top_bar_menu_popover_click(
+                "RustyOS",
+                TopBarMenuHit::File,
+                f64::from(mx + 24),
+                f64::from(my + 16),
+            ),
+            TopBarMenuPopoverClick::Action(TopBarMenuAction::NewTerminal)
+        );
+        assert_eq!(
+            check_top_bar_menu_popover_click("RustyOS", TopBarMenuHit::File, 800.0, 400.0),
+            TopBarMenuPopoverClick::Outside
+        );
+    }
+
+    #[test]
+    fn macos27_dock_divider_gap_and_radii_constants() {
+        assert_eq!(DOCK_RADIUS, 36);
+        assert_eq!(WINDOW_RADIUS, 20);
+        let overview_slot_opt = dock_slot_rect(1280, 800, 2, 2);
+        let first_win_slot_opt = dock_slot_rect(1280, 800, 2, 3);
+        assert!(overview_slot_opt.is_some());
+        assert!(first_win_slot_opt.is_some());
+        let overview_slot =
+            overview_slot_opt.unwrap_or_else(|| Rectangle::from_size(Size::from((0, 0))));
+        let first_win_slot =
+            first_win_slot_opt.unwrap_or_else(|| Rectangle::from_size(Size::from((0, 0))));
+        assert_eq!(
+            first_win_slot.loc.x - (overview_slot.loc.x + overview_slot.size.w),
+            DOCK_ITEM_GAP + DOCK_DIVIDER_GAP
+        );
     }
 }

@@ -375,9 +375,12 @@ impl BluetoothService {
         if set_bluez_powered_via_dbus(powered) {
             return true;
         }
+        if matches!(bluez_dbus_has_owner(), Some(false)) {
+            return false;
+        }
         let arg = if powered { "on" } else { "off" };
         Command::new("bluetoothctl")
-            .args(["power", arg])
+            .args(["--timeout", "2", "power", arg])
             .status()
             .is_ok_and(|s| s.success())
     }
@@ -494,6 +497,13 @@ fn set_bluez_powered_via_dbus(powered: bool) -> bool {
         .is_ok()
 }
 
+fn bluez_dbus_has_owner() -> Option<bool> {
+    let conn = zbus::blocking::Connection::system().ok()?;
+    let dbus = zbus::blocking::fdo::DBusProxy::new(&conn).ok()?;
+    let bus_name = zbus::names::BusName::try_from("org.bluez").ok()?;
+    dbus.name_has_owner(bus_name).ok()
+}
+
 fn query_bluetooth_fallback() -> BluetoothStatus {
     let sysfs_present = fs::read_dir("/sys/class/bluetooth").is_ok_and(|mut d| d.next().is_some());
     let mut status = BluetoothStatus {
@@ -502,7 +512,12 @@ fn query_bluetooth_fallback() -> BluetoothStatus {
         connected_device: None,
         status_label: format_bluetooth_label(sysfs_present, false, None),
     };
-    if let Ok(output) = Command::new("bluetoothctl").arg("show").output()
+    if matches!(bluez_dbus_has_owner(), Some(false)) {
+        return status;
+    }
+    if let Ok(output) = Command::new("bluetoothctl")
+        .args(["--timeout", "1", "show"])
+        .output()
         && output.status.success()
     {
         let text = String::from_utf8_lossy(&output.stdout);
@@ -839,6 +854,20 @@ pub fn local_clock_hhmm() -> String {
     let hh = mins_day / 60;
     let mm = mins_day % 60;
     format!("{hh:02}:{mm:02}")
+}
+
+/// Returns compact macOS-style `TopBar` date + time (`"Thu 12 Nov  14:32"`), falling back to `HH:MM` (`RUSTYOS-048`).
+#[must_use]
+pub fn local_clock_short_datetime() -> String {
+    if let Ok(output) = Command::new("date").arg("+%a %-d %b  %H:%M").output()
+        && output.status.success()
+    {
+        let text = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        if !text.is_empty() && text.len() <= 24 {
+            return text;
+        }
+    }
+    local_clock_hhmm()
 }
 
 /// Session management service interacting with `systemd-logind`.

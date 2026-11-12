@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use rusty_services::{
     AudioStatus, BluetoothStatus, BrightnessStatus, MediaAction, NetworkStatus, PowerStatus,
-    ServiceRegistry, local_clock_hhmm,
+    ServiceRegistry, local_clock_hhmm, local_clock_short_datetime,
 };
 
 const POLL_INTERVAL: Duration = Duration::from_secs(3);
@@ -34,6 +34,8 @@ pub struct SystemTelemetry {
     pub brightness: BrightnessStatus,
     /// Local wall-clock time formatted as `HH:MM`.
     pub clock_hhmm: String,
+    /// Compact macOS-style `TopBar` date + time label (`RUSTYOS-048`).
+    pub clock_date_hhmm: String,
 }
 
 impl Default for SystemTelemetry {
@@ -45,6 +47,7 @@ impl Default for SystemTelemetry {
             audio: AudioStatus::default(),
             brightness: BrightnessStatus::default(),
             clock_hhmm: "12:00".to_owned(),
+            clock_date_hhmm: "Thu 12:00".to_owned(),
         }
     }
 }
@@ -90,9 +93,6 @@ impl Drop for SystemMetricsHandle {
     fn drop(&mut self) {
         self.shared.stop.store(true, Ordering::Release);
         self.shared.cvar.notify_all();
-        if let Some(handle) = self.worker.take() {
-            let _ = handle.join();
-        }
     }
 }
 
@@ -174,6 +174,18 @@ impl SystemMetricsHandle {
             guard.audio.muted = !guard.audio.muted;
         }
         self.push_cmd(TelemetryCmd::ToggleMute);
+    }
+
+    /// Sets master output volume to `percent` (`0..=100`) optimistically and dispatches asynchronously (`RUSTYOS-048`).
+    pub fn set_volume_percent(&self, percent: u8) {
+        let clamped = percent.min(100);
+        if let Ok(mut guard) = self.shared.latest.lock() {
+            guard.audio.volume_percent = clamped;
+            if clamped > 0 {
+                guard.audio.muted = false;
+            }
+        }
+        self.push_cmd(TelemetryCmd::SetVolume(clamped));
     }
 
     /// Adjusts master output volume by `delta` and returns `(volume_percent, muted)` for OSD display.
@@ -259,6 +271,7 @@ fn poll_once(services: &ServiceRegistry) -> SystemTelemetry {
         audio: services.audio.query_status(),
         brightness: services.brightness.query_status(),
         clock_hhmm: local_clock_hhmm(),
+        clock_date_hhmm: local_clock_short_datetime(),
     }
 }
 
@@ -364,5 +377,9 @@ mod tests {
         });
         assert_eq!(bright_handle.step_brightness_with_osd(10), (true, 50));
         assert_eq!(bright_handle.step_brightness_with_osd(-90), (true, 1));
+
+        handle.set_volume_percent(42);
+        assert_eq!(handle.snapshot().audio.volume_percent, 42);
+        assert!(!handle.snapshot().audio.muted);
     }
 }
