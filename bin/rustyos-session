@@ -1,0 +1,33 @@
+#!/bin/sh
+# RustyOS Desktop Session Entry Point (`RUSTYOS-014`, ADR-0009)
+
+export XDG_CURRENT_DESKTOP=RustyOS
+export XDG_SESSION_DESKTOP=RustyOS
+export XDG_SESSION_TYPE=wayland
+
+# Find bin directory (relative or installed in PATH)
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+if [ -x "$SCRIPT_DIR/rusty-compositor" ]; then
+    COMPOSITOR_BIN="$SCRIPT_DIR/rusty-compositor"
+    SHELL_BIN="$SCRIPT_DIR/rusty-shell"
+elif command -v rusty-compositor >/dev/null 2>&1; then
+    COMPOSITOR_BIN="$(command -v rusty-compositor)"
+    SHELL_BIN="$(command -v rusty-shell)"
+else
+    # Fallback to local cargo debug build
+    COMPOSITOR_BIN="$SCRIPT_DIR/../target/debug/rusty-compositor"
+    SHELL_BIN="$SCRIPT_DIR/../target/debug/rusty-shell"
+fi
+
+if [ ! -x "$COMPOSITOR_BIN" ]; then
+    echo "Error: rusty-compositor binary not found at $COMPOSITOR_BIN" >&2
+    exit 1
+fi
+
+BACKEND_FLAG="--winit"
+if [ "$1" = "--drm" ] || [ -z "$WAYLAND_DISPLAY" -a -z "$DISPLAY" ]; then
+    BACKEND_FLAG="--drm"
+fi
+
+echo "Starting RustyOS Desktop Session (Backend: $BACKEND_FLAG)..."
+exec "$COMPOSITOR_BIN" "$BACKEND_FLAG" --spawn "$SHELL_BIN" "$@"

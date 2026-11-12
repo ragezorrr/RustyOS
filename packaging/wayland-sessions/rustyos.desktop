@@ -1,0 +1,7 @@
+[Desktop Entry]
+Name=RustyOS
+Comment=RustyOS Independent Desktop Environment in Rust
+Exec=rustyos-session
+Type=Application
+DesktopNames=RustyOS
+Keywords=Wayland;Desktop;RustyOS;

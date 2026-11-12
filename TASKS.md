@@ -150,6 +150,16 @@ hardware/software context и низкие накладные расходы.
 - **Acceptance criteria:** Пробник успешно исполняется без прав root и без падений, обнаружены аппаратные курсоры и плоскости, `docs/HARDWARE_MATRIX.md` содержит полные проверенные данные.
 - **Risks:** Несовместимость проприетарных драйверов (минимизируется разделением обнаружения возможностей от политики рендеринга).
 
+## RUSTYOS-014 --- Distribution & Session Installation Infrastructure
+
+**Статус:** done **Фаза:** 10
+
+- **Цель:** Превратить RustyOS в устанавливаемую десктопную сессию с возможностью выбора из Display Manager.
+- **Scope:** Точка входа сессии `bin/rustyos-session` (`XDG_CURRENT_DESKTOP=RustyOS`, запуск композитора и оболочки); файл сессии `packaging/wayland-sessions/rustyos.desktop`; инсталлятор `scripts/install.sh` с поддержкой пользовательской установки (`~/.local/bin`) без прав root; документация в `docs/adr/0009-distribution-and-session.md`.
+- **Dependencies:** `RUSTYOS-010`, `RUSTYOS-012`.
+- **Acceptance criteria:** `rustyos-session` находит и запускает композитор и оболочку; `rustyos.desktop` валиден по стандарту Freedesktop; сборка и тесты проходят без ошибок.
+- **Risks:** Отсутствие прав при установке (решено дефолтным префиксом `~/.local`).
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

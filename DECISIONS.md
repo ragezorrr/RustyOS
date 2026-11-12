@@ -103,6 +103,14 @@
                           Atomic KMS, DMA-BUF     
                           modifiers, fallback     
                           (ADR-0008)              
+
+  D-017                   Фаза 10 (RUSTYOS-014):  accepted
+                          сессионный лаунчер,     
+                          wayland-session entry,  
+                          пользовательский        
+                          инсталлятор             
+                          `scripts/install.sh`    
+                          (ADR-0009)              
   -----------------------------------------------------------------------
 
 ## Открытые решения
