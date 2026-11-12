@@ -1,0 +1,739 @@
+//! Interactive Spotlight application catalog, filtering, and spawning (`RUSTYOS-018b`).
+
+use std::collections::HashSet;
+use std::env;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+
+use tracing::{info, warn};
+
+const MAX_DESKTOP_FILES: usize = 512;
+const MAX_QUERY_CHARS: usize = 128;
+
+/// Single discovered or built-in desktop application entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LauncherApp {
+    /// Desktop entry identifier (e.g. `org.rustyos.terminal` or `foot.desktop`).
+    pub id: String,
+    /// Human-readable application name.
+    pub name: String,
+    /// Secondary description / comment / command hint.
+    pub subtitle: String,
+    /// Executable command template (`Exec=` field with desktop codes stripped on launch).
+    pub exec: String,
+    /// Search keywords from `Keywords=` or built-in tags.
+    pub keywords: Vec<String>,
+    /// Short 1-2 character monogram rendered inside the icon tile.
+    pub badge: String,
+}
+
+/// Filtered candidate ready for rendering or launching in Spotlight.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LauncherCandidate {
+    /// Display title.
+    pub name: String,
+    /// Display subtitle.
+    pub subtitle: String,
+    /// Command string to execute on activation.
+    pub exec: String,
+    /// Short 1-2 char monogram badge.
+    pub badge: String,
+    /// `true` when this candidate executes the raw typed command rather than a catalog app.
+    pub is_custom_command: bool,
+}
+
+/// Live state for the Spotlight launcher inside `rusty-compositor`.
+#[derive(Debug)]
+pub struct LauncherState {
+    /// Current UTF-8 search query.
+    pub query: String,
+    /// Currently highlighted index inside [`Self::filtered_candidates`].
+    pub selected_index: usize,
+    /// Application catalog populated from `.desktop` files plus built-in fallbacks.
+    pub catalog: Vec<LauncherApp>,
+    /// Spawned child processes reaped non-blockingly via `try_wait`.
+    children: Vec<Child>,
+}
+
+impl Default for LauncherState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl LauncherState {
+    /// Creates a new [`LauncherState`] discovering system `.desktop` entries and built-in fallbacks.
+    #[must_use]
+    pub fn new() -> Self {
+        let mut catalog = discover_desktop_apps();
+        merge_builtin_fallbacks(&mut catalog);
+        sort_catalog(&mut catalog);
+        Self {
+            query: String::new(),
+            selected_index: 0,
+            catalog,
+            children: Vec::new(),
+        }
+    }
+
+    /// Creates a [`LauncherState`] from an explicit catalog (primarily for deterministic tests).
+    #[must_use]
+    pub fn with_catalog(mut catalog: Vec<LauncherApp>) -> Self {
+        sort_catalog(&mut catalog);
+        Self {
+            query: String::new(),
+            selected_index: 0,
+            catalog,
+            children: Vec::new(),
+        }
+    }
+
+    /// Clears the current search query and resets selection to the top item.
+    pub fn reset(&mut self) {
+        self.query.clear();
+        self.selected_index = 0;
+    }
+
+    /// Appends printable UTF-8 text to the query and resets selection to the best match.
+    pub fn push_text(&mut self, text: &str) {
+        let mut changed = false;
+        for ch in text.chars() {
+            if ch.is_control() || ch == '\0' {
+                continue;
+            }
+            if self.query.chars().count() >= MAX_QUERY_CHARS {
+                break;
+            }
+            self.query.push(ch);
+            changed = true;
+        }
+        if changed {
+            self.selected_index = 0;
+        }
+    }
+
+    /// Deletes the last UTF-8 character from the query and resets selection.
+    pub fn pop_char(&mut self) {
+        if self.query.pop().is_some() {
+            self.selected_index = 0;
+        }
+    }
+
+    /// Returns filtered and relevance-sorted candidates for the current [`Self::query`].
+    #[must_use]
+    pub fn filtered_candidates(&self) -> Vec<LauncherCandidate> {
+        let needle = self.query.trim().to_ascii_lowercase();
+        if needle.is_empty() {
+            return self
+                .catalog
+                .iter()
+                .map(|app| LauncherCandidate {
+                    name: app.name.clone(),
+                    subtitle: app.subtitle.clone(),
+                    exec: app.exec.clone(),
+                    badge: app.badge.clone(),
+                    is_custom_command: false,
+                })
+                .collect();
+        }
+
+        let mut scored: Vec<(u8, &LauncherApp)> = self
+            .catalog
+            .iter()
+            .filter_map(|app| {
+                let score = match_score(app, &needle);
+                (score > 0).then_some((score, app))
+            })
+            .collect();
+
+        scored.sort_by(|(score_a, app_a), (score_b, app_b)| {
+            score_b.cmp(score_a).then_with(|| {
+                app_a
+                    .name
+                    .to_ascii_lowercase()
+                    .cmp(&app_b.name.to_ascii_lowercase())
+            })
+        });
+
+        let mut results: Vec<LauncherCandidate> = scored
+            .into_iter()
+            .map(|(_, app)| LauncherCandidate {
+                name: app.name.clone(),
+                subtitle: app.subtitle.clone(),
+                exec: app.exec.clone(),
+                badge: app.badge.clone(),
+                is_custom_command: false,
+            })
+            .collect();
+
+        if results.is_empty() {
+            let trimmed = self.query.trim();
+            if !trimmed.is_empty() {
+                results.push(LauncherCandidate {
+                    name: format!("Run \"{trimmed}\""),
+                    subtitle: "Execute command in RustyOS session".to_owned(),
+                    exec: trimmed.to_owned(),
+                    badge: ">_".to_owned(),
+                    is_custom_command: true,
+                });
+            }
+        }
+
+        results
+    }
+
+    /// Returns `(window_start_index, visible_slice)` for a viewport of at most `max_rows`.
+    #[must_use]
+    pub fn visible_window(&self, max_rows: usize) -> (usize, Vec<LauncherCandidate>) {
+        if max_rows == 0 {
+            return (0, Vec::new());
+        }
+        let all = self.filtered_candidates();
+        if all.is_empty() {
+            return (0, Vec::new());
+        }
+        let selected = self.selected_index.min(all.len() - 1);
+        let start = if all.len() <= max_rows {
+            0
+        } else {
+            let max_start = all.len() - max_rows;
+            selected.saturating_sub(max_rows - 1).min(max_start)
+        };
+        let end = (start + max_rows).min(all.len());
+        (start, all[start..end].to_vec())
+    }
+
+    /// Moves [`Self::selected_index`] up (`-1`) or down (`+1`) with wrap-around.
+    pub fn move_selection(&mut self, delta: isize) {
+        let len = self.filtered_candidates().len();
+        if len == 0 {
+            self.selected_index = 0;
+            return;
+        }
+        let cur = self.selected_index.min(len - 1);
+        let len_isize = isize::try_from(len).unwrap_or(isize::MAX);
+        let cur_isize = isize::try_from(cur).unwrap_or(0);
+        let next = (cur_isize + delta).rem_euclid(len_isize);
+        self.selected_index = usize::try_from(next).unwrap_or(0);
+    }
+
+    /// Returns the command string of the currently selected candidate, if any.
+    #[must_use]
+    pub fn selected_exec(&self) -> Option<String> {
+        let candidates = self.filtered_candidates();
+        if candidates.is_empty() {
+            return None;
+        }
+        let idx = self.selected_index.min(candidates.len() - 1);
+        Some(candidates[idx].exec.clone())
+    }
+
+    /// Returns the command string for a visible row offset `row_offset` (`0..max_rows`).
+    #[must_use]
+    pub fn exec_at_visible_row(&self, max_rows: usize, row_offset: usize) -> Option<String> {
+        let (_start, visible) = self.visible_window(max_rows);
+        visible.get(row_offset).map(|item| item.exec.clone())
+    }
+
+    /// Non-blockingly reaps any exited child processes spawned from Spotlight.
+    pub fn reap_children(&mut self) {
+        self.children
+            .retain_mut(|child| matches!(child.try_wait(), Ok(None)));
+    }
+
+    /// Spawns a desktop `Exec=` command asynchronously with `WAYLAND_DISPLAY` and `RUSTYOS_IPC_SOCKET`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a human-readable error string if the command is empty or fails to spawn.
+    pub fn launch_command(
+        &mut self,
+        command: &str,
+        wayland_display: &str,
+        ipc_socket: &Path,
+    ) -> Result<u32, String> {
+        self.reap_children();
+        let tokens = parse_exec_argv(command);
+        let Some((program, args)) = tokens.split_first() else {
+            return Err("empty application command".to_owned());
+        };
+
+        let child = Command::new(program)
+            .args(args)
+            .env("WAYLAND_DISPLAY", wayland_display)
+            .env("RUSTYOS_IPC_SOCKET", ipc_socket)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|err| format!("failed to launch '{program}': {err}"))?;
+
+        let pid = child.id();
+        info!(
+            program = %program,
+            pid,
+            wayland_display = %wayland_display,
+            "Launched application from Spotlight"
+        );
+        self.children.push(child);
+        Ok(pid)
+    }
+
+    /// Launches whichever candidate is currently selected.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if no candidate exists or process spawn fails.
+    pub fn launch_selected(
+        &mut self,
+        wayland_display: &str,
+        ipc_socket: &Path,
+    ) -> Result<u32, String> {
+        let Some(exec) = self.selected_exec() else {
+            return Err("no matching application to launch".to_owned());
+        };
+        let res = self.launch_command(&exec, wayland_display, ipc_socket);
+        if let Err(err) = &res {
+            warn!(error = %err, exec = %exec, "Spotlight launch failed");
+        }
+        res
+    }
+}
+
+fn match_score(app: &LauncherApp, needle: &str) -> u8 {
+    let name_lower = app.name.to_ascii_lowercase();
+    if name_lower == needle {
+        return 120;
+    }
+    if name_lower.starts_with(needle) {
+        return 100;
+    }
+    if name_lower
+        .split_whitespace()
+        .any(|word| word.starts_with(needle))
+    {
+        return 80;
+    }
+    if name_lower.contains(needle) {
+        return 60;
+    }
+    if app.exec.to_ascii_lowercase().contains(needle) {
+        return 45;
+    }
+    if app
+        .keywords
+        .iter()
+        .any(|kw| kw.to_ascii_lowercase().contains(needle))
+    {
+        return 30;
+    }
+    if app.subtitle.to_ascii_lowercase().contains(needle) {
+        return 15;
+    }
+    0
+}
+
+fn priority_rank(app: &LauncherApp) -> u8 {
+    let bin = exec_basename(&app.exec);
+    match bin.as_str() {
+        "foot" | "kitty" | "alacritty" | "wezterm" | "ghostty" | "weston-terminal" | "konsole"
+        | "gnome-terminal" | "xfce4-terminal" => 0,
+        "nautilus" | "dolphin" | "thunar" | "nemo" | "pcmanfm" => 1,
+        "firefox" | "chromium" | "google-chrome" | "brave" => 2,
+        "es2gears_wayland" | "glmark2-wayland" => 3,
+        "rusty-settings" => 4,
+        _ => 10,
+    }
+}
+
+fn sort_catalog(catalog: &mut [LauncherApp]) {
+    catalog.sort_by(|a, b| {
+        priority_rank(a).cmp(&priority_rank(b)).then_with(|| {
+            a.name
+                .to_ascii_lowercase()
+                .cmp(&b.name.to_ascii_lowercase())
+        })
+    });
+}
+
+fn exec_basename(exec: &str) -> String {
+    let first = parse_exec_argv(exec).into_iter().next().unwrap_or_default();
+    Path::new(&first)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(&first)
+        .to_ascii_lowercase()
+}
+
+fn discover_desktop_apps() -> Vec<LauncherApp> {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    if let Ok(xdg_data_home) = env::var("XDG_DATA_HOME") {
+        if !xdg_data_home.trim().is_empty() {
+            dirs.push(PathBuf::from(xdg_data_home).join("applications"));
+        }
+    } else if let Ok(home) = env::var("HOME")
+        && !home.trim().is_empty()
+    {
+        dirs.push(PathBuf::from(home).join(".local/share/applications"));
+    }
+    dirs.push(PathBuf::from("/usr/local/share/applications"));
+    dirs.push(PathBuf::from("/usr/share/applications"));
+
+    let mut seen_keys: HashSet<String> = HashSet::new();
+    let mut apps: Vec<LauncherApp> = Vec::new();
+
+    for dir in dirs {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if apps.len() >= MAX_DESKTOP_FILES {
+                break;
+            }
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("desktop") {
+                continue;
+            }
+            let Ok(contents) = fs::read_to_string(&path) else {
+                continue;
+            };
+            let id = path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("app.desktop")
+                .to_owned();
+            if let Some(app) = parse_desktop_entry(&contents, &id) {
+                let dedupe_key = format!(
+                    "{}::{}",
+                    app.name.to_ascii_lowercase(),
+                    exec_basename(&app.exec)
+                );
+                if seen_keys.insert(dedupe_key) {
+                    apps.push(app);
+                }
+            }
+        }
+    }
+
+    apps
+}
+
+fn merge_builtin_fallbacks(catalog: &mut Vec<LauncherApp>) {
+    let existing_bins: HashSet<String> =
+        catalog.iter().map(|app| exec_basename(&app.exec)).collect();
+
+    let defaults = [
+        LauncherApp {
+            id: "org.rustyos.terminal".to_owned(),
+            name: "Terminal".to_owned(),
+            subtitle: "Command line shell (foot)".to_owned(),
+            exec: "foot".to_owned(),
+            keywords: vec!["shell".to_owned(), "console".to_owned(), "cli".to_owned()],
+            badge: ">_".to_owned(),
+        },
+        LauncherApp {
+            id: "org.rustyos.files".to_owned(),
+            name: "Files".to_owned(),
+            subtitle: "Browse folders & documents".to_owned(),
+            exec: "nautilus".to_owned(),
+            keywords: vec!["folder".to_owned(), "manager".to_owned()],
+            badge: "Fi".to_owned(),
+        },
+        LauncherApp {
+            id: "org.rustyos.gears".to_owned(),
+            name: "ES2 Gears Demo".to_owned(),
+            subtitle: "OpenGL ES Wayland benchmark".to_owned(),
+            exec: "es2gears_wayland".to_owned(),
+            keywords: vec!["opengl".to_owned(), "gl".to_owned(), "benchmark".to_owned()],
+            badge: "GL".to_owned(),
+        },
+    ];
+
+    for item in defaults {
+        if !existing_bins.contains(&exec_basename(&item.exec)) {
+            catalog.push(item);
+        }
+    }
+}
+
+/// Parses a single XDG `.desktop` file `[Desktop Entry]` section.
+#[must_use]
+pub fn parse_desktop_entry(contents: &str, id: &str) -> Option<LauncherApp> {
+    let mut in_desktop_entry = false;
+    let mut entry_type: Option<String> = None;
+    let mut name: Option<String> = None;
+    let mut comment: Option<String> = None;
+    let mut generic_name: Option<String> = None;
+    let mut exec: Option<String> = None;
+    let mut keywords: Vec<String> = Vec::new();
+    let mut no_display = false;
+    let mut hidden = false;
+
+    for raw_line in contents.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if line.starts_with('[') && line.ends_with(']') {
+            if in_desktop_entry {
+                break;
+            }
+            in_desktop_entry = line == "[Desktop Entry]";
+            continue;
+        }
+        if !in_desktop_entry {
+            continue;
+        }
+        let Some((key, val)) = line.split_once('=') else {
+            continue;
+        };
+        let key = key.trim();
+        let val = val.trim();
+        match key {
+            "Type" => entry_type = Some(val.to_owned()),
+            "Name" => name = Some(val.to_owned()),
+            "Comment" => comment = Some(val.to_owned()),
+            "GenericName" => generic_name = Some(val.to_owned()),
+            "Exec" => exec = Some(val.to_owned()),
+            "Keywords" => {
+                keywords = val
+                    .split(';')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(ToOwned::to_owned)
+                    .collect();
+            }
+            "NoDisplay" => no_display = val.eq_ignore_ascii_case("true"),
+            "Hidden" => hidden = val.eq_ignore_ascii_case("true"),
+            _ => {}
+        }
+    }
+
+    if no_display || hidden {
+        return None;
+    }
+    if entry_type.as_deref() != Some("Application") {
+        return None;
+    }
+    let name = name.filter(|s| !s.is_empty())?;
+    let exec = exec.filter(|s| !parse_exec_argv(s).is_empty())?;
+    let subtitle = comment
+        .or(generic_name)
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| exec_basename(&exec));
+    let badge = make_badge(&name, &exec);
+
+    Some(LauncherApp {
+        id: id.to_owned(),
+        name,
+        subtitle,
+        exec,
+        keywords,
+        badge,
+    })
+}
+
+/// Splits an XDG `Exec=` command string into program + arguments, stripping `%f`/`%u`/etc. field codes.
+#[must_use]
+pub fn parse_exec_argv(exec: &str) -> Vec<String> {
+    let mut raw_tokens = Vec::new();
+    let mut current = String::new();
+    let mut in_single = false;
+    let mut in_double = false;
+    let mut escaped = false;
+    let mut token_started = false;
+
+    for ch in exec.chars() {
+        if escaped {
+            current.push(ch);
+            escaped = false;
+            token_started = true;
+            continue;
+        }
+        if ch == '\\' && !in_single {
+            escaped = true;
+            token_started = true;
+            continue;
+        }
+        if ch == '\'' && !in_double {
+            in_single = !in_single;
+            token_started = true;
+            continue;
+        }
+        if ch == '"' && !in_single {
+            in_double = !in_double;
+            token_started = true;
+            continue;
+        }
+        if ch.is_whitespace() && !in_single && !in_double {
+            if token_started || !current.is_empty() {
+                raw_tokens.push(std::mem::take(&mut current));
+                token_started = false;
+            }
+            continue;
+        }
+        current.push(ch);
+        token_started = true;
+    }
+    if token_started || !current.is_empty() {
+        raw_tokens.push(current);
+    }
+
+    raw_tokens
+        .into_iter()
+        .filter_map(|tok| {
+            if matches!(
+                tok.as_str(),
+                "%f" | "%F"
+                    | "%u"
+                    | "%U"
+                    | "%d"
+                    | "%D"
+                    | "%n"
+                    | "%N"
+                    | "%i"
+                    | "%c"
+                    | "%k"
+                    | "@@u"
+                    | "@@"
+            ) {
+                None
+            } else {
+                let cleaned = tok.replace("%%", "%");
+                (!cleaned.is_empty()).then_some(cleaned)
+            }
+        })
+        .collect()
+}
+
+fn make_badge(name: &str, exec: &str) -> String {
+    let bin = exec_basename(exec);
+    if matches!(
+        bin.as_str(),
+        "foot" | "kitty" | "alacritty" | "wezterm" | "ghostty" | "weston-terminal"
+    ) {
+        return ">_".to_owned();
+    }
+    let words: Vec<&str> = name.split_whitespace().collect();
+    if words.len() >= 2 {
+        let mut out = String::new();
+        if let Some(c1) = words[0].chars().next() {
+            out.push(c1.to_ascii_uppercase());
+        }
+        if let Some(c2) = words[1].chars().next() {
+            out.push(c2.to_ascii_uppercase());
+        }
+        if !out.is_empty() {
+            return out;
+        }
+    }
+    name.chars().take(2).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_desktop_entry_and_strips_field_codes() -> Result<(), String> {
+        let desktop = r"
+[Desktop Entry]
+Type=Application
+Name=Firefox Web Browser
+Comment=Browse the World Wide Web
+Exec=/usr/lib/firefox/firefox --new-window %U
+Keywords=Internet;WWW;Browser;
+NoDisplay=false
+
+[Desktop Action new-private-window]
+Name=New Private Window
+Exec=firefox --private-window
+";
+        let app = parse_desktop_entry(desktop, "firefox.desktop")
+            .ok_or_else(|| "valid desktop entry should parse".to_owned())?;
+        assert_eq!(app.name, "Firefox Web Browser");
+        assert_eq!(app.subtitle, "Browse the World Wide Web");
+        assert_eq!(app.keywords, vec!["Internet", "WWW", "Browser"]);
+        assert_eq!(
+            parse_exec_argv(&app.exec),
+            vec!["/usr/lib/firefox/firefox", "--new-window"]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn skips_nodisplay_and_non_application_entries() {
+        let hidden = "[Desktop Entry]\nType=Application\nName=Hidden\nExec=foo\nNoDisplay=true\n";
+        assert!(parse_desktop_entry(hidden, "hidden.desktop").is_none());
+
+        let link = "[Desktop Entry]\nType=Link\nName=Docs\nURL=https://example.com\n";
+        assert!(parse_desktop_entry(link, "link.desktop").is_none());
+    }
+
+    #[test]
+    fn filtering_scoring_selection_and_custom_command_fallback_work() {
+        let mut state = LauncherState::with_catalog(vec![
+            LauncherApp {
+                id: "1".to_owned(),
+                name: "Files".to_owned(),
+                subtitle: "File Manager".to_owned(),
+                exec: "nautilus".to_owned(),
+                keywords: vec!["folder".to_owned()],
+                badge: "Fi".to_owned(),
+            },
+            LauncherApp {
+                id: "2".to_owned(),
+                name: "Terminal".to_owned(),
+                subtitle: "Shell".to_owned(),
+                exec: "foot".to_owned(),
+                keywords: vec!["console".to_owned()],
+                badge: ">_".to_owned(),
+            },
+            LauncherApp {
+                id: "3".to_owned(),
+                name: "ES2 Gears Demo".to_owned(),
+                subtitle: "Benchmark".to_owned(),
+                exec: "es2gears_wayland".to_owned(),
+                keywords: vec!["opengl".to_owned()],
+                badge: "EG".to_owned(),
+            },
+            LauncherApp {
+                id: "4".to_owned(),
+                name: "Audio Mixer".to_owned(),
+                subtitle: "Volume Control".to_owned(),
+                exec: "pavucontrol".to_owned(),
+                keywords: vec!["sound".to_owned()],
+                badge: "AM".to_owned(),
+            },
+        ]);
+
+        assert_eq!(state.filtered_candidates().len(), 4);
+        assert_eq!(state.selected_exec().as_deref(), Some("foot"));
+
+        state.move_selection(1);
+        assert_eq!(state.selected_index, 1);
+        state.move_selection(-2); // wraps around 4 items: 1 - 2 mod 4 = 3
+        assert_eq!(state.selected_index, 3);
+
+        // Windowed viewport scrolling keeps selected index visible
+        let (start, win) = state.visible_window(3);
+        assert_eq!(start, 1);
+        assert_eq!(win.len(), 3);
+
+        // Query filtering matches keyword & resets selection
+        state.push_text("open");
+        let filtered = state.filtered_candidates();
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].exec, "es2gears_wayland");
+        assert_eq!(state.selected_index, 0);
+
+        // Popping chars and typing arbitrary binary triggers custom command fallback
+        state.reset();
+        state.push_text("weston-terminal");
+        let fallback = state.filtered_candidates();
+        assert_eq!(fallback.len(), 1);
+        assert!(fallback[0].is_custom_command);
+        assert_eq!(fallback[0].exec, "weston-terminal");
+    }
+}

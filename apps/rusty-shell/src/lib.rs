@@ -379,6 +379,7 @@ impl DesktopShell {
         self.tokens.motion.reduced_motion = snapshot.reduced_motion;
         self.quick_settings.reduced_motion = snapshot.reduced_motion;
         self.launcher.open = snapshot.launcher_active;
+        self.launcher.query.clone_from(&snapshot.launcher_query);
         self.screen_locked = snapshot.screen_locked;
 
         if self.overview_active != snapshot.overview_active {
@@ -580,6 +581,7 @@ mod tests {
             reduced_motion: false,
             overview_active: false,
             launcher_active: false,
+            launcher_query: String::new(),
             screen_locked: false,
             notification_count: 0,
             frame_interval_p50_us: 16_700,

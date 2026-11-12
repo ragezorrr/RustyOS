@@ -142,6 +142,8 @@ pub struct RustyCompositorState {
     pub overview_active: bool,
     /// Whether the Spotlight application launcher overlay is open (`RUSTYOS-018`).
     pub launcher_active: bool,
+    /// Interactive Spotlight query, catalog, and selection state (`RUSTYOS-018b`).
+    pub launcher: crate::launcher::LauncherState,
     /// Whether the session lock screen is active (`RUSTYOS-009`/`010`).
     pub screen_locked: bool,
     /// Count of notifications received via shell IPC (`RUSTYOS-009`/`010`).
@@ -234,6 +236,7 @@ impl RustyCompositorState {
             animations: AnimationEngine::default(),
             overview_active: false,
             launcher_active: false,
+            launcher: crate::launcher::LauncherState::new(),
             screen_locked: false,
             notification_count: 0,
         })
@@ -246,6 +249,36 @@ impl RustyCompositorState {
             self.running = false;
             self.loop_signal.stop();
         }
+    }
+
+    /// Toggles the Spotlight application launcher overlay and resets query state.
+    pub fn toggle_launcher(&mut self) {
+        self.launcher_active = !self.launcher_active;
+        self.launcher.reset();
+    }
+
+    /// Closes the Spotlight overlay and clears its active search query.
+    pub fn close_launcher(&mut self) {
+        self.launcher_active = false;
+        self.launcher.reset();
+    }
+
+    /// Launches the currently highlighted candidate from Spotlight and closes the overlay.
+    pub fn launch_spotlight_selected(&mut self) {
+        let ipc_path = rusty_ipc::default_ipc_socket_path(&self.socket_name);
+        let _ = self.launcher.launch_selected(&self.socket_name, &ipc_path);
+        self.close_launcher();
+    }
+
+    /// Launches the Spotlight candidate at visible row offset `row_offset` and closes the overlay.
+    pub fn launch_spotlight_row(&mut self, row_offset: usize) {
+        if let Some(cmd) = self.launcher.exec_at_visible_row(3, row_offset) {
+            let ipc_path = rusty_ipc::default_ipc_socket_path(&self.socket_name);
+            let _ = self
+                .launcher
+                .launch_command(&cmd, &self.socket_name, &ipc_path);
+        }
+        self.close_launcher();
     }
 
     /// Returns the elapsed duration since compositor startup.
@@ -523,6 +556,7 @@ impl RustyCompositorState {
             reduced_motion: self.animations.reduced_motion(),
             overview_active: self.overview_active,
             launcher_active: self.launcher_active,
+            launcher_query: self.launcher.query.clone(),
             screen_locked: self.screen_locked,
             notification_count: self.notification_count,
             frame_interval_p50_us: timing.interval_p50_us,
@@ -570,11 +604,18 @@ impl RustyCompositorState {
                 );
             }
             ShellRequest::ToggleLauncher => {
-                self.launcher_active = !self.launcher_active;
+                self.toggle_launcher();
                 info!(
                     launcher_active = self.launcher_active,
                     "Toggled Spotlight application launcher via IPC"
                 );
+            }
+            ShellRequest::LaunchCommand { command } => {
+                let ipc_path = rusty_ipc::default_ipc_socket_path(&self.socket_name);
+                let _ = self
+                    .launcher
+                    .launch_command(&command, &self.socket_name, &ipc_path);
+                self.close_launcher();
             }
             ShellRequest::SetReducedMotion { enabled } => {
                 self.animations.set_reduced_motion(enabled);

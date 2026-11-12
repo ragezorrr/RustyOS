@@ -200,6 +200,7 @@ fn dispatch_and_refresh_clients(
         error!(error = %err, "Failed to dispatch Wayland client events");
     }
     app_state.prune_dead_windows();
+    app_state.launcher.reap_children();
     app_state.space.refresh();
     app_state.popups.cleanup();
     if let Err(err) = display.flush_clients() {
@@ -374,6 +375,26 @@ fn render_winit_frame(
         let has_text = text_cache.has_font();
 
         if !layer_surfaces_present {
+            let (win_start, visible_items) = if state.launcher_active {
+                state.launcher.visible_window(3)
+            } else {
+                (0, Vec::new())
+            };
+            let cursor_offset_x = if state.launcher_active && !state.launcher.query.is_empty() {
+                text_cache.measure_text(&state.launcher.query, 14.5).0
+            } else {
+                0
+            };
+            let spotlight_view =
+                state
+                    .launcher_active
+                    .then_some(crate::shell_render::SpotlightRenderState {
+                        query: &state.launcher.query,
+                        selected_in_window: state.launcher.selected_index.saturating_sub(win_start),
+                        cursor_offset_x,
+                        items: &visible_items,
+                    });
+
             let text_elements = crate::shell_render::generate_shell_text_elements(
                 text_cache,
                 renderer,
@@ -381,7 +402,7 @@ fn render_winit_frame(
                 active_ws,
                 layout_str,
                 window_count,
-                state.launcher_active,
+                spotlight_view.as_ref(),
             );
             render_list.extend(
                 text_elements
@@ -395,7 +416,7 @@ fn render_winit_frame(
                 layout_str,
                 window_count,
                 has_focused,
-                state.launcher_active,
+                spotlight_view.as_ref(),
                 has_text,
             );
             render_list.extend(

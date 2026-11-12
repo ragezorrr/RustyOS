@@ -18,11 +18,18 @@ use tracing::info;
 
 use crate::state::RustyCompositorState;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum KeyIntercept {
     ExitCompositor,
     ToggleReducedMotion,
     ToggleLauncher,
+    LauncherClose,
+    LauncherActivate,
+    LauncherMove(isize),
+    LauncherBackspace,
+    LauncherClear,
+    LauncherText(String),
+    LauncherConsume,
     Wm(WmAction),
 }
 
@@ -76,11 +83,23 @@ impl RustyCompositorState {
             key_state,
             serial,
             time,
-            |_state, modifiers, handle| {
+            |state, modifiers, handle| {
                 if key_state != KeyState::Pressed {
-                    return FilterResult::Forward;
+                    return if state.launcher_active {
+                        FilterResult::Intercept(KeyIntercept::LauncherConsume)
+                    } else {
+                        FilterResult::Forward
+                    };
                 }
                 let sym = handle.modified_sym();
+                if state.launcher_active {
+                    let utf8 = sym.key_char().map(|ch| ch.to_string());
+                    return FilterResult::Intercept(match_launcher_key(
+                        *modifiers,
+                        sym,
+                        utf8.as_deref(),
+                    ));
+                }
                 if let Some(action) = match_shortcut(*modifiers, sym) {
                     FilterResult::Intercept(action)
                 } else {
@@ -102,16 +121,35 @@ impl RustyCompositorState {
                 );
             }
             Some(KeyIntercept::ToggleLauncher) => {
-                self.launcher_active = !self.launcher_active;
+                self.toggle_launcher();
                 info!(
                     launcher_active = self.launcher_active,
                     "Toggled Spotlight application launcher overlay"
                 );
             }
+            Some(KeyIntercept::LauncherClose) => {
+                self.close_launcher();
+                info!("Closed Spotlight application launcher");
+            }
+            Some(KeyIntercept::LauncherActivate) => {
+                self.launch_spotlight_selected();
+            }
+            Some(KeyIntercept::LauncherMove(delta)) => {
+                self.launcher.move_selection(delta);
+            }
+            Some(KeyIntercept::LauncherBackspace) => {
+                self.launcher.pop_char();
+            }
+            Some(KeyIntercept::LauncherClear) => {
+                self.launcher.reset();
+            }
+            Some(KeyIntercept::LauncherText(text)) => {
+                self.launcher.push_text(&text);
+            }
+            Some(KeyIntercept::LauncherConsume) | None => {}
             Some(KeyIntercept::Wm(action)) => {
                 self.apply_wm_action(action, serial);
             }
-            None => {}
         }
     }
 
@@ -167,6 +205,27 @@ impl RustyCompositorState {
         pointer.frame(self);
     }
 
+    fn handle_launcher_pointer_click(&mut self) {
+        let output_size = self
+            .space
+            .output_geometry(&self.output)
+            .map_or_else(|| Size::from((1280, 800)), |geo| geo.size)
+            .to_physical(1);
+        match crate::shell_render::check_spotlight_click(
+            output_size,
+            self.pointer_location.x,
+            self.pointer_location.y,
+        ) {
+            crate::shell_render::SpotlightHit::Row(row_idx) => {
+                self.launch_spotlight_row(row_idx);
+            }
+            crate::shell_render::SpotlightHit::InsideModal => {}
+            crate::shell_render::SpotlightHit::OutsideModal => {
+                self.close_launcher();
+            }
+        }
+    }
+
     fn handle_pointer_button<B: InputBackend>(&mut self, event: &B::PointerButtonEvent) {
         let serial = SERIAL_COUNTER.next_serial();
         let button = event.button_code();
@@ -184,6 +243,12 @@ impl RustyCompositorState {
             ) {
                 let ws = WorkspaceId::new_clamped(target_ws);
                 self.apply_wm_action(WmAction::SwitchWorkspace(ws), serial);
+                return;
+            }
+
+            // Handle Spotlight clicks exclusively while launcher overlay is open (RUSTYOS-018b)
+            if self.launcher_active {
+                self.handle_launcher_pointer_click();
                 return;
             }
 
@@ -308,6 +373,55 @@ impl RustyCompositorState {
         pointer.axis(self, frame);
         pointer.frame(self);
     }
+}
+
+fn match_launcher_key(modifiers: ModifiersState, sym: Keysym, utf8: Option<&str>) -> KeyIntercept {
+    if modifiers.ctrl && modifiers.alt && sym.raw() == Keysym::BackSpace.raw() {
+        return KeyIntercept::ExitCompositor;
+    }
+    if sym.raw() == Keysym::Escape.raw() {
+        return KeyIntercept::LauncherClose;
+    }
+    if (modifiers.logo || modifiers.alt) && sym.raw() == Keysym::space.raw() {
+        return KeyIntercept::ToggleLauncher;
+    }
+    if sym.raw() == Keysym::Return.raw() || sym.raw() == Keysym::KP_Enter.raw() {
+        return KeyIntercept::LauncherActivate;
+    }
+    if sym.raw() == Keysym::Up.raw()
+        || sym.raw() == Keysym::KP_Up.raw()
+        || (modifiers.ctrl
+            && (sym == Keysym::p || sym == Keysym::P || sym == Keysym::k || sym == Keysym::K))
+    {
+        return KeyIntercept::LauncherMove(-1);
+    }
+    if sym.raw() == Keysym::Down.raw()
+        || sym.raw() == Keysym::KP_Down.raw()
+        || sym.raw() == Keysym::Tab.raw()
+        || (modifiers.ctrl
+            && (sym == Keysym::n || sym == Keysym::N || sym == Keysym::j || sym == Keysym::J))
+    {
+        return KeyIntercept::LauncherMove(1);
+    }
+    if sym.raw() == Keysym::BackSpace.raw() {
+        return if modifiers.ctrl {
+            KeyIntercept::LauncherClear
+        } else {
+            KeyIntercept::LauncherBackspace
+        };
+    }
+    if modifiers.ctrl && (sym == Keysym::u || sym == Keysym::U) {
+        return KeyIntercept::LauncherClear;
+    }
+    if !modifiers.ctrl
+        && !modifiers.alt
+        && !modifiers.logo
+        && let Some(text) = utf8
+        && text.chars().any(|c| !c.is_control() && c != '\0')
+    {
+        return KeyIntercept::LauncherText(text.to_owned());
+    }
+    KeyIntercept::LauncherConsume
 }
 
 /// Maps keyboard modifiers and keysyms to compositor / window manager actions.
@@ -437,6 +551,56 @@ mod tests {
         assert_eq!(
             match_shortcut(ModifiersState::default(), Keysym::Escape),
             Some(KeyIntercept::ExitCompositor)
+        );
+    }
+
+    #[test]
+    fn launcher_key_intercept_isolates_typing_navigation_and_escape() {
+        let none = ModifiersState::default();
+        let ctrl = ModifiersState {
+            ctrl: true,
+            ..ModifiersState::default()
+        };
+        let logo = ModifiersState {
+            logo: true,
+            ..ModifiersState::default()
+        };
+
+        assert_eq!(
+            match_launcher_key(none, Keysym::Escape, None),
+            KeyIntercept::LauncherClose
+        );
+        assert_eq!(
+            match_launcher_key(logo, Keysym::space, Some(" ")),
+            KeyIntercept::ToggleLauncher
+        );
+        assert_eq!(
+            match_launcher_key(none, Keysym::Return, Some("\r")),
+            KeyIntercept::LauncherActivate
+        );
+        assert_eq!(
+            match_launcher_key(none, Keysym::Down, None),
+            KeyIntercept::LauncherMove(1)
+        );
+        assert_eq!(
+            match_launcher_key(none, Keysym::Up, None),
+            KeyIntercept::LauncherMove(-1)
+        );
+        assert_eq!(
+            match_launcher_key(none, Keysym::BackSpace, None),
+            KeyIntercept::LauncherBackspace
+        );
+        assert_eq!(
+            match_launcher_key(ctrl, Keysym::BackSpace, None),
+            KeyIntercept::LauncherClear
+        );
+        assert_eq!(
+            match_launcher_key(none, Keysym::a, Some("a")),
+            KeyIntercept::LauncherText("a".to_owned())
+        );
+        assert_eq!(
+            match_launcher_key(ctrl, Keysym::a, Some("\x01")),
+            KeyIntercept::LauncherConsume
         );
     }
 }

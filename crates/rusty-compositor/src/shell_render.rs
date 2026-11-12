@@ -255,16 +255,81 @@ fn render_dock(
     }
 }
 
+/// Live Spotlight view state passed into shell rendering (`RUSTYOS-018b`).
+#[derive(Debug, Clone)]
+pub struct SpotlightRenderState<'a> {
+    /// Current search string entered by the user.
+    pub query: &'a str,
+    /// Highlighted row offset within `items` (`0..3`).
+    pub selected_in_window: usize,
+    /// Horizontal offset of the cursor relative to search text origin.
+    pub cursor_offset_x: i32,
+    /// Up to 3 visible filtered candidates to render.
+    pub items: &'a [crate::launcher::LauncherCandidate],
+}
+
+/// Interactive click target inside or outside the Spotlight modal (`RUSTYOS-018b`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpotlightHit {
+    /// Clicked one of the visible result rows (`0..3`).
+    Row(usize),
+    /// Clicked inside the modal frame/search box (keep Spotlight open).
+    InsideModal,
+    /// Clicked outside the modal (dismiss Spotlight).
+    OutsideModal,
+}
+
+#[must_use]
+fn spotlight_modal_rect(width: i32, height: i32) -> (i32, i32, i32, i32) {
+    let modal_width = 560.min(width - 40).max(280);
+    let modal_height = 240.min(height - 80).max(140);
+    let modal_x = (width - modal_width) / 2;
+    let modal_y = (height - modal_height) / 3;
+    (modal_x, modal_y, modal_width, modal_height)
+}
+
+/// Hit-tests `(x, y)` against the open Spotlight modal and its up to 3 visible rows (`RUSTYOS-018b`).
+#[must_use]
+pub fn check_spotlight_click(
+    screen_size: Size<i32, smithay::utils::Physical>,
+    x: f64,
+    y: f64,
+) -> SpotlightHit {
+    let (modal_x, modal_y, modal_width, modal_height) =
+        spotlight_modal_rect(screen_size.w, screen_size.h);
+    let mx = f64::from(modal_x);
+    let my = f64::from(modal_y);
+    let mw = f64::from(modal_width);
+    let mh = f64::from(modal_height);
+
+    if x < mx || x >= mx + mw || y < my || y >= my + mh {
+        return SpotlightHit::OutsideModal;
+    }
+
+    let row_h = 44;
+    let start_row_y = modal_y + 80;
+    let row_x_min = f64::from(modal_x + 16);
+    let row_x_max = f64::from(modal_x + modal_width - 16);
+    if x >= row_x_min && x < row_x_max {
+        for i in 0..3_i32 {
+            let ry = f64::from(start_row_y + i * (row_h + 4));
+            if y >= ry && y < ry + f64::from(row_h) {
+                return SpotlightHit::Row(usize::try_from(i).unwrap_or(0));
+            }
+        }
+    }
+
+    SpotlightHit::InsideModal
+}
+
 fn render_spotlight_modal(
     elements: &mut Vec<SolidColorRenderElement>,
     width: i32,
     height: i32,
+    spotlight: &SpotlightRenderState<'_>,
     has_text: bool,
 ) {
-    let modal_width = 560.min(width - 40);
-    let modal_height = 240.min(height - 80);
-    let modal_x = (width - modal_width) / 2;
-    let modal_y = (height - modal_height) / 3;
+    let (modal_x, modal_y, modal_width, modal_height) = spotlight_modal_rect(width, height);
 
     // 7. Spotlight Glass Box - Outer glass highlight rim
     let rim_geo = Rectangle::new(
@@ -295,11 +360,9 @@ fn render_spotlight_modal(
     );
     elements.push(make_solid_element(search_icon_geo, COLOR_ACCENT));
 
-    // 7d. Text input cursor
-    let cursor_geo = Rectangle::new(
-        Point::from((modal_x + 62, modal_y + 26)),
-        Size::from((2, 24)),
-    );
+    // 7d. Dynamic text input cursor placed after typed query
+    let cursor_x = (modal_x + 64 + spotlight.cursor_offset_x).min(modal_x + modal_width - 28);
+    let cursor_geo = Rectangle::new(Point::from((cursor_x, modal_y + 26)), Size::from((2, 24)));
     elements.push(make_solid_element(cursor_geo, COLOR_TEXT));
 
     if !has_text {
@@ -318,12 +381,14 @@ fn render_spotlight_modal(
     );
     elements.push(make_solid_element(divider_geo, COLOR_BORDER));
 
-    // 7g. Search results (top 3 suggested applications)
+    // 7g. Search results (up to 3 visible matching applications)
     let row_h = 44;
     let start_row_y = modal_y + 80;
-    for i in 0..3 {
+    let row_count = spotlight.items.len().min(3);
+    for idx in 0..row_count {
+        let i = i32::try_from(idx).unwrap_or(0);
         let row_y = start_row_y + i * (row_h + 4);
-        let is_selected = i == 0;
+        let is_selected = idx == spotlight.selected_in_window;
 
         let row_bg = Rectangle::new(
             Point::from((modal_x + 16, row_y)),
@@ -347,10 +412,12 @@ fn render_spotlight_modal(
             Point::from((modal_x + 28, row_y + 10)),
             Size::from((24, 24)),
         );
-        let icon_color = match i {
-            0 => COLOR_ACCENT,
-            1 => COLOR_ACCENT_MUTED,
-            _ => COLOR_SUBTLE,
+        let icon_color = if is_selected {
+            COLOR_ACCENT
+        } else if idx == 1 {
+            COLOR_ACCENT_MUTED
+        } else {
+            COLOR_SUBTLE
         };
         elements.push(make_solid_element(app_icon, icon_color));
 
@@ -380,7 +447,7 @@ pub fn generate_shell_render_elements(
     layout_mode: &str,
     window_count: usize,
     has_focused_window: bool,
-    launcher_active: bool,
+    spotlight: Option<&SpotlightRenderState<'_>>,
     has_text: bool,
 ) -> Vec<SolidColorRenderElement> {
     let mut elements = Vec::new();
@@ -402,8 +469,8 @@ pub fn generate_shell_render_elements(
         has_focused_window,
     );
 
-    if launcher_active {
-        render_spotlight_modal(&mut elements, width, height, has_text);
+    if let Some(spot) = spotlight {
+        render_spotlight_modal(&mut elements, width, height, spot, has_text);
     }
 
     // Smithay's render_output expects elements in front-to-back order.
@@ -606,7 +673,7 @@ pub fn generate_shell_text_elements(
     active_workspace: u8,
     layout_mode: &str,
     window_count: usize,
-    launcher_active: bool,
+    spotlight: Option<&SpotlightRenderState<'_>>,
 ) -> Vec<MemoryRenderBufferRenderElement<GlesRenderer>> {
     let mut elements = Vec::new();
     if !text_cache.has_font() {
@@ -620,35 +687,63 @@ pub fn generate_shell_text_elements(
     let text_subtle = [118, 107, 133, 255]; // #766B85
 
     // 1. Spotlight labels (topmost when active)
-    if launcher_active {
-        let modal_width = 560.min(width - 40);
-        let modal_height = 240.min(height - 80);
-        let modal_x = (width - modal_width) / 2;
-        let modal_y = (height - modal_height) / 3;
+    if let Some(spot) = spotlight {
+        let (modal_x, modal_y, _modal_width, _modal_height) = spotlight_modal_rect(width, height);
 
-        if let Some(el) = text_cache.render_label(
+        // Search icon glyph centered inside accent plate
+        let search_icon_bounds = Rectangle::new(
+            Point::from((modal_x + 28, modal_y + 26)),
+            Size::from((24, 24)),
+        );
+        if let Some(el) =
+            text_cache.render_label_centered(renderer, "/", 13.0, text_bright, search_icon_bounds)
+        {
+            elements.push(el);
+        }
+
+        if spot.query.is_empty() {
+            if let Some(el) = text_cache.render_label(
+                renderer,
+                "Search RustyOS...",
+                14.5,
+                text_muted,
+                Point::from((modal_x + 70, modal_y + 28)),
+            ) {
+                elements.push(el);
+            }
+        } else if let Some(el) = text_cache.render_label(
             renderer,
-            "Search RustyOS...",
+            spot.query,
             14.5,
-            text_muted,
-            Point::from((modal_x + 70, modal_y + 28)),
+            text_bright,
+            Point::from((modal_x + 64, modal_y + 28)),
         ) {
             elements.push(el);
         }
 
-        let entries = [
-            ("Terminal", "Command line shell (foot)"),
-            ("Files", "Browse folders & documents"),
-            ("ES2 Gears Demo", "OpenGL ES Wayland benchmark"),
-        ];
         let start_row_y = modal_y + 80;
         let row_h = 44;
-        for (i, (title, sub)) in entries.iter().enumerate() {
+        for (i, item) in spot.items.iter().take(3).enumerate() {
             #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
             let row_y = start_row_y + (i as i32) * (row_h + 4);
+
+            let badge_bounds = Rectangle::new(
+                Point::from((modal_x + 28, row_y + 10)),
+                Size::from((24, 24)),
+            );
+            if let Some(el) = text_cache.render_label_centered(
+                renderer,
+                &item.badge,
+                10.5,
+                text_bright,
+                badge_bounds,
+            ) {
+                elements.push(el);
+            }
+
             if let Some(el) = text_cache.render_label(
                 renderer,
-                title,
+                &item.name,
                 13.5,
                 text_bright,
                 Point::from((modal_x + 62, row_y + 6)),
@@ -657,7 +752,7 @@ pub fn generate_shell_text_elements(
             }
             if let Some(el) = text_cache.render_label(
                 renderer,
-                sub,
+                &item.subtitle,
                 10.5,
                 text_muted,
                 Point::from((modal_x + 62, row_y + 24)),
@@ -795,12 +890,47 @@ mod tests {
     fn generate_shell_render_elements_produces_non_empty_layout() {
         let size = Size::from((1280, 800));
         let elements =
-            generate_shell_render_elements(size, 1, "master-stack", 2, true, false, false);
+            generate_shell_render_elements(size, 1, "master-stack", 2, true, None, false);
         assert!(!elements.is_empty());
 
+        let sample_items = [crate::launcher::LauncherCandidate {
+            name: "Terminal".to_owned(),
+            subtitle: "foot".to_owned(),
+            exec: "foot".to_owned(),
+            badge: ">_".to_owned(),
+            is_custom_command: false,
+        }];
+        let spot = SpotlightRenderState {
+            query: "foot",
+            selected_in_window: 0,
+            cursor_offset_x: 32,
+            items: &sample_items,
+        };
         let elements_with_launcher =
-            generate_shell_render_elements(size, 1, "master-stack", 2, true, true, false);
+            generate_shell_render_elements(size, 1, "master-stack", 2, true, Some(&spot), false);
         assert!(elements_with_launcher.len() > elements.len());
+    }
+
+    #[test]
+    fn spotlight_click_detects_rows_inside_and_outside_modal() {
+        let size = Size::from((1280, 800));
+        let (mx, my, mw, _mh) = spotlight_modal_rect(size.w, size.h);
+        assert_eq!(
+            check_spotlight_click(size, f64::from(mx + 40), f64::from(my + 95)),
+            SpotlightHit::Row(0)
+        );
+        assert_eq!(
+            check_spotlight_click(size, f64::from(mx + 40), f64::from(my + 145)),
+            SpotlightHit::Row(1)
+        );
+        assert_eq!(
+            check_spotlight_click(size, f64::from(mx + 40), f64::from(my + 30)),
+            SpotlightHit::InsideModal
+        );
+        assert_eq!(
+            check_spotlight_click(size, f64::from(mx + mw + 20), f64::from(my + 30)),
+            SpotlightHit::OutsideModal
+        );
     }
 
     #[test]

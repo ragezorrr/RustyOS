@@ -81,6 +81,8 @@ pub struct DesktopStateSnapshot {
     pub overview_active: bool,
     /// Whether the application launcher / Spotlight overlay is active (`RUSTYOS-018`).
     pub launcher_active: bool,
+    /// Current Spotlight search query (`RUSTYOS-018b`).
+    pub launcher_query: String,
     /// Whether the session lock screen is active.
     pub screen_locked: bool,
     /// Number of unread/active notifications held by the compositor/shell bridge.
@@ -101,6 +103,7 @@ impl Default for DesktopStateSnapshot {
             reduced_motion: false,
             overview_active: false,
             launcher_active: false,
+            launcher_query: String::new(),
             screen_locked: false,
             notification_count: 0,
             frame_interval_p50_us: 16_667,
@@ -138,6 +141,11 @@ pub enum ShellRequest {
     ToggleOverview,
     /// Toggles the application launcher / Spotlight search overlay (`RUSTYOS-018`).
     ToggleLauncher,
+    /// Requests the compositor to spawn an application command from Spotlight (`RUSTYOS-018b`).
+    LaunchCommand {
+        /// Desktop command line to execute.
+        command: String,
+    },
     /// Enables or disables `reduced_motion` mode.
     SetReducedMotion {
         /// New `reduced_motion` state.
@@ -249,6 +257,10 @@ impl ShellRequest {
             Self::ToggleLauncher => {
                 let _ = writeln!(out, "TOGGLE_LAUNCHER");
             }
+            Self::LaunchCommand { command } => {
+                let clean_cmd = sanitize_token(command);
+                let _ = writeln!(out, "LAUNCH_COMMAND|{clean_cmd}");
+            }
             Self::SetReducedMotion { enabled } => {
                 let flag = u8::from(*enabled);
                 let _ = writeln!(out, "SET_REDUCED_MOTION|{flag}");
@@ -356,6 +368,17 @@ impl ShellRequest {
             "TOGGLE_LAYOUT" => Ok(Self::ToggleLayoutMode),
             "TOGGLE_OVERVIEW" => Ok(Self::ToggleOverview),
             "TOGGLE_LAUNCHER" => Ok(Self::ToggleLauncher),
+            "LAUNCH_COMMAND" => {
+                let command = parts.next().map_or("", str::trim);
+                if command.is_empty() {
+                    return Err(IpcError::InvalidFrame(
+                        "LAUNCH_COMMAND requires a non-empty command".to_owned(),
+                    ));
+                }
+                Ok(Self::LaunchCommand {
+                    command: command.to_owned(),
+                })
+            }
             "SET_REDUCED_MOTION" => {
                 let flag = parse_bool_flag(parts.next(), "SET_REDUCED_MOTION")?;
                 Ok(Self::SetReducedMotion { enabled: flag })
@@ -422,7 +445,7 @@ impl CompositorEvent {
                 }
                 let _ = writeln!(
                     out,
-                    "SNAPSHOT|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+                    "SNAPSHOT|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
                     snap.active_workspace,
                     sanitize_token(&snap.layout_mode),
                     u8::from(snap.reduced_motion),
@@ -433,6 +456,7 @@ impl CompositorEvent {
                     snap.input_latency_p95_us,
                     wins_buf,
                     u8::from(snap.launcher_active),
+                    sanitize_token(&snap.launcher_query),
                 );
             }
             Self::Error { code, message } => {
@@ -559,6 +583,7 @@ where
     }
 
     let launcher_active = parse_bool_flag(parts.next(), "launcher_active").unwrap_or(false);
+    let launcher_query = parts.next().unwrap_or_default().to_owned();
 
     Ok(CompositorEvent::StateSnapshot(DesktopStateSnapshot {
         active_workspace,
@@ -566,6 +591,7 @@ where
         reduced_motion,
         overview_active,
         launcher_active,
+        launcher_query,
         screen_locked,
         notification_count,
         frame_interval_p50_us,
@@ -807,6 +833,10 @@ mod tests {
             ShellRequest::FocusWindow { window_id: 42 },
             ShellRequest::ToggleLayoutMode,
             ShellRequest::ToggleOverview,
+            ShellRequest::ToggleLauncher,
+            ShellRequest::LaunchCommand {
+                command: "foot --title RustyOS".to_owned(),
+            },
             ShellRequest::SetReducedMotion { enabled: true },
             ShellRequest::SetLockScreen { locked: true },
             ShellRequest::Notify {
@@ -827,7 +857,8 @@ mod tests {
             layout_mode: "master-stack".to_owned(),
             reduced_motion: true,
             overview_active: true,
-            launcher_active: false,
+            launcher_active: true,
+            launcher_query: "foot".to_owned(),
             screen_locked: false,
             notification_count: 3,
             frame_interval_p50_us: 16_680,

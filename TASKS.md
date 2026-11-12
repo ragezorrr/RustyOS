@@ -233,6 +233,20 @@ hardware/software context и низкие накладные расходы.
 - **Acceptance criteria:** При наличии системного шрифта (или `RUSTYOS_FONT_PATH`) отображаются чёткие подписи вместо заглушек; без шрифта происходит безопасный fallback; 35 тестов и clippy проходят без предупреждений.
 - **Risks:** Минимальные (текстуры кэшируются по ключу `(text, size_tenths, rgba)` без аллокаций на каждый кадр).
 
+## RUSTYOS-018b --- Interactive Spotlight (Input, Search Filtering & App Launching)
+
+**Статус:** done **Фаза:** 17 (Interactive Shell Workflow)
+
+- **Цель:** Сделать Spotlight полноценным интерактивным лаунчером с вводом UTF-8 текста, фильтрацией `.desktop`-приложений, навигацией и асинхронным запуском внутри Wayland-сессии.
+- **Scope:**
+  - `crates/rusty-compositor/src/launcher.rs`: `LauncherState`, парсер XDG `.desktop` файлов со снятием `%f`/`%U` кодов, scoring-фильтрация, оконный скролл, fallback на произвольную команду (`Run "..."`), безопасный `Command::spawn` с `WAYLAND_DISPLAY`/`RUSTYOS_IPC_SOCKET` и неблокирующим `reap_children`.
+  - `crates/rusty-compositor/src/input.rs` и `state.rs`: изоляция клавиатуры и мыши при активном Spotlight (`Escape` закрывает лаунчер без выхода из композитора, `Up`/`Down`/`Tab`/`Enter`/`BackSpace`/`Ctrl+U`, клик по строке запускает приложение, клик снаружи закрывает).
+  - `crates/rusty-compositor/src/shell_render.rs` и `winit_backend.rs`: `SpotlightRenderState`, `SpotlightHit`, динамическое позиционирование каретки курсора и отрисовка до 3 видимых совпадений с бейджами.
+  - `crates/rusty-ipc/src/lib.rs` и `apps/rusty-shell/src/lib.rs`: обратная совместимая синхронизация `launcher_query` и команда `ShellRequest::LaunchCommand`.
+- **Dependencies:** `RUSTYOS-018`, `RUSTYOS-020`.
+- **Acceptance criteria:** Набор текста фильтрует список приложений и двигает каретку; `Up`/`Down`/`Enter` или клик мышью запускают выбранное приложение в композитор; `Escape` закрывает лаунчер; 40 тестов и clippy проходят без предупреждений.
+- **Risks:** Минимальные (при отсутствии `WAYLAND_DISPLAY`-совместимого бинарника ошибка запуска логируется без падения композитора; дочерние процессы жнутся неблокирующим `try_wait`).
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance
