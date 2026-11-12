@@ -352,23 +352,42 @@ layout and material behavior follow macOS 27. No Apple assets or branding.
 
 ### 12.1 Menu bar (top panel)
 
-- No solid background by default: text and icons sit on the wallpaper. A soft top gradient/shadow
-  keeps contrast. A solid/tinted fallback is selected by `reduce transparency` or config.
-- Height ~24-26 logical px (current 32 is too tall); text 13 px, medium weight.
-- Left: active-app menu (name bold) followed by menus; workspace indicators are compact pills.
-- Right (monochrome glyphs, 16 px, ~12 px gaps): tray items, network, battery, search,
-  control-center toggle (pill highlight when open), keyboard layout, date and time.
-- Replace the text status string (`Vol .. • .. • time`) with glyphs and a plain clock.
+- Completely transparent by default (`24 px` logical height, zero dark scrim stripe): crisp
+  white text and icons sit directly on the wallpaper with a subtle 1px drop shadow for
+  readability. A high-contrast solid fallback surface is enabled only by `reduce_transparency = true`.
+- Typography: bundled **Inter** (`Inter-SemiBold` for bold active-app name, `Inter-Regular` for
+  menus and clock) at unified `13 px` on a shared optical baseline.
+- Left: pure monochrome white original RustyOS chamfered hexagon emblem (`#FCFAFF`), bold
+  active-app name, and global menus (`File`, `Edit`, `View`, `Go`, `Window`, `Help`).
+- Workspace strip (`1..=9` + `Float`/`Tile`), SNI tray icons, standalone `Volume` glyph, and
+  keyboard badge (`EN`/`RU`) are hidden by default for 1:1 visual minimalism and enabled opt-in via
+  `[ui]` in `config.toml` (`menubar_show_workspaces`, `menubar_show_tray`,
+  `menubar_show_input_source`, `menubar_show_volume`); workspaces and window layout remain directly
+  accessible via `Go`/`Window` menus, Overview, Control Center, and keyboard shortcuts.
+- Right (`4x4` SSAA SDF monochrome glyphs, `16 px` / `20 px` battery, `10 px` gaps in macOS order):
+  `Battery` (monochrome white capsule; red `<= 20%`, omitted when absent) -> `Wi-Fi` ->
+  `Search` (bright white) -> `Control Center` (translucent pill highlight when open) ->
+  neutral locale plain Clock (`"Wed Apr 1  9:41 AM"`, or 24h `"Wed Apr 1  09:41"` with `clock_24h = true`).
 
 ### 12.2 Dock
 
-- Wide floating capsule (radius = pill-like, >= 20), detached ~8-12 px from the bottom edge,
-  width grows with item count; light frosted fill, 1 px top-lit rim, soft outer shadow.
-- Icons 48-56 px, consistent squircle shape, ~6-8 px gaps; real app icons first, monogram only
-  as fallback.
-- Running indicator: 4 px dot below the icon. Separator before trash/recent items.
-- Hover: icon magnification or lift with short (120 ms) interruptible motion; reduced motion
-  disables magnification.
+- Concentric rounded floating glass container (`DOCK_HEIGHT = 68 px`, `DOCK_RADIUS = 22 px`,
+  `DOCK_MARGIN_BOTTOM = 8 px`), width dynamically fits `6` pinned apps + running windows + `2`
+  utility slots; light top-lit frosted fill (`sample_dock_glass_pixel`) with 4×4 Bayer dithering,
+  luminous 1 px top specular rim tapering softly along sides/bottom, outer soft drop shadow, and an
+  opaque high-contrast plum-slate fallback when `reduce_transparency = true`.
+- Resting slots have zero grey box outlines: crisp `50 px` `4x4` SSAA superellipse (exponent `4.8`)
+  app icons sit over `6 px` gaps (`52 px` hit slots) with a soft ambient drop shadow behind squircle
+  cards (`dock_icon_shadow_element`).
+- Default macOS cadence of original RustyOS artwork (`Files`, `Overview`, `Terminal`, `Browser`,
+  `Notes`, `Settings`) + running window slots (preferring real XDG PNG / SHM toplevel icons over
+  `WindowFallback`), followed by a centered `1 px` hairline vertical divider and free-standing
+  `Downloads` (stacked blue folder) and `Trash` (tapered frosted silver wastebasket) utility icons.
+- Running indicator: crisp `5x5` SDF circular dot (`#F8F6FF` active, amber `#E8C477` minimized,
+  muted translucent for inactive windows) anchored `7 px` above the Dock bottom edge.
+- Hover: quantized icon magnification (`50..=58 px`) and smooth upward lift (`+6 px`, `120 ms`
+  interruptible animation; subtle `2 px` static lift when `reduced_motion = true`), accompanied by
+  a floating frosted glass tooltip pill naming the hovered application above the Dock.
 
 ### 12.3 Windows and menus
 

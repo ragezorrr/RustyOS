@@ -213,15 +213,15 @@ fn fill_rounded_rect(
     }
 }
 
-fn fill_capsule_with_rim(
+fn fill_rounded_rect_with_rim(
     canvas: &mut [u8],
     stride: usize,
     w: usize,
     h: usize,
+    radius: usize,
     fill: [u8; 4],
     rim: [u8; 4],
 ) {
-    let radius = (h / 2).max(1);
     for py in 0..h {
         let row_offset = py * stride;
         for px in 0..w {
@@ -242,6 +242,9 @@ fn fill_capsule_with_rim(
     }
 }
 
+const BUNDLED_INTER_REGULAR: &[u8] = include_bytes!("../../../assets/fonts/Inter-Regular.ttf");
+const BUNDLED_INTER_SEMIBOLD: &[u8] = include_bytes!("../../../assets/fonts/Inter-SemiBold.ttf");
+
 fn system_font() -> Option<&'static Font> {
     static FONT: OnceLock<Option<Font>> = OnceLock::new();
     FONT.get_or_init(|| {
@@ -258,6 +261,9 @@ fn system_font() -> Option<&'static Font> {
         {
             return Some(font);
         }
+        if let Ok(font) = Font::from_bytes(BUNDLED_INTER_REGULAR, FontSettings::default()) {
+            return Some(font);
+        }
         for path in CANDIDATES {
             if Path::new(path).exists()
                 && let Ok(bytes) = std::fs::read(path)
@@ -269,6 +275,13 @@ fn system_font() -> Option<&'static Font> {
         None
     })
     .as_ref()
+}
+
+fn bold_font() -> Option<&'static Font> {
+    static FONT: OnceLock<Option<Font>> = OnceLock::new();
+    FONT.get_or_init(|| Font::from_bytes(BUNDLED_INTER_SEMIBOLD, FontSettings::default()).ok())
+        .as_ref()
+        .or_else(system_font)
 }
 
 #[allow(
@@ -290,14 +303,54 @@ fn draw_text_argb8888(
     origin_y: i32,
     centered_in_box: Option<(usize, usize)>,
 ) {
-    let Some(font) = system_font() else {
-        return;
+    draw_text_weighted_argb8888(
+        canvas,
+        stride,
+        canvas_w,
+        canvas_h,
+        text,
+        false,
+        size_px,
+        rgba,
+        origin_x,
+        origin_y,
+        centered_in_box,
+    );
+}
+
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss,
+    clippy::cast_possible_wrap,
+    clippy::too_many_arguments
+)]
+fn draw_text_weighted_argb8888(
+    canvas: &mut [u8],
+    stride: usize,
+    canvas_w: usize,
+    canvas_h: usize,
+    text: &str,
+    bold: bool,
+    size_px: f32,
+    rgba: [u8; 4],
+    origin_x: i32,
+    origin_y: i32,
+    centered_in_box: Option<(usize, usize)>,
+) -> usize {
+    let Some(metric_font) = system_font() else {
+        return 0;
+    };
+    let font = if bold {
+        bold_font().unwrap_or(metric_font)
+    } else {
+        metric_font
     };
     if text.is_empty() {
-        return;
+        return 0;
     }
 
-    let line_metrics = font.horizontal_line_metrics(size_px);
+    let line_metrics = metric_font.horizontal_line_metrics(size_px);
     let ascent = line_metrics.map_or(size_px * 0.8, |m| m.ascent);
     let descent = line_metrics.map_or(-size_px * 0.2, |m| m.descent);
     let line_h = (ascent - descent).ceil().max(size_px);
@@ -360,10 +413,27 @@ fn draw_text_argb8888(
             }
         }
     }
+    total_w.ceil() as usize
 }
 
-/// Renders `TopBar` into an ARGB8888 buffer slice according to `TopBarState`.
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn measure_text_width_px(text: &str, bold: bool, size_px: f32) -> usize {
+    let Some(base) = system_font() else {
+        return text.len() * 8;
+    };
+    let font = if bold {
+        bold_font().unwrap_or(base)
+    } else {
+        base
+    };
+    let w: f32 = text
+        .chars()
+        .map(|ch| font.metrics(ch, size_px).advance_width)
+        .sum();
+    (w.ceil() as usize).max(1)
+}
+
+/// Renders transparent macOS-style `TopBar` into an ARGB8888 buffer slice (`RUSTYOS-049`).
 pub fn render_top_bar_pixels(
     canvas: &mut [u8],
     width: u32,
@@ -373,207 +443,84 @@ pub fn render_top_bar_pixels(
     let stride = (width * 4) as usize;
     let w = width as usize;
     let h = height as usize;
+    let item_h = h.saturating_sub(4).max(18);
+    let item_y = h.saturating_sub(item_h) / 2;
 
-    // Background: surface_elevated (#20182E)
-    fill_rect(canvas, stride, 0, 0, w, h, colors::SURFACE_ELEVATED);
+    canvas.fill(0);
 
-    // Bottom border line: 1px subtle glass border
-    if h > 1 {
-        fill_rect(canvas, stride, 0, h - 1, w, 1, colors::BORDER_SUBTLE);
+    // Monochrome chamfered hexagon emblem placeholder at left edge (x = 12)
+    if h >= 20 && w >= 40 {
+        let cy = h / 2;
+        fill_rounded_rect(
+            canvas,
+            stride,
+            13,
+            cy.saturating_sub(6),
+            12,
+            12,
+            4,
+            [252, 250, 255, 255],
+        );
     }
 
-    let has_font = system_font().is_some();
+    let pure_white = [252, 250, 255, 255];
+    let menu_white = [245, 242, 252, 245];
+    let font_px = 13.0;
+    let mut cursor_x = 36_usize;
 
-    // Workspace pills (1..=9)
-    let active_ws = top_bar.active_workspace;
-    let mut x = 12;
-    let pill_w = 26;
-    let pill_h = 20;
-    let pill_y = 6;
-
-    for ws in 1..=9 {
-        if ws == active_ws {
-            fill_rounded_rect(
-                canvas,
-                stride,
-                x,
-                pill_y,
-                pill_w,
-                pill_h,
-                6,
-                colors::ACCENT_NEON,
-            );
-        } else if !has_font {
-            fill_rect(
-                canvas,
-                stride,
-                x + (pill_w - 6) / 2,
-                pill_y + (pill_h - 2) / 2,
-                6,
-                2,
-                colors::TEXT_SUBTLE,
-            );
-        }
-        let text_rgba = if ws == active_ws {
-            [244, 240, 250, 255]
-        } else {
-            [166, 155, 181, 255]
-        };
-        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-        draw_text_argb8888(
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    {
+        let app_adv = draw_text_weighted_argb8888(
             canvas,
             stride,
             w,
             h,
-            &ws.to_string(),
-            12.0,
-            text_rgba,
-            x as i32,
-            pill_y as i32,
-            Some((pill_w, pill_h)),
+            "RustyOS",
+            true,
+            font_px,
+            pure_white,
+            cursor_x as i32,
+            item_y as i32,
+            Some((measure_text_width_px("RustyOS", true, font_px) + 6, item_h)),
         );
-        x += pill_w + 4;
-    }
+        cursor_x += app_adv + 16;
 
-    // Layout indicator pill
-    fill_rounded_rect(
-        canvas,
-        stride,
-        x + 8,
-        pill_y,
-        56,
-        pill_h,
-        6,
-        colors::SURFACE_OVERLAY,
-    );
-    let layout_accent = if top_bar.layout_mode == "master-stack" {
-        colors::ACCENT_NEON
-    } else {
-        colors::TEXT_SUBTLE
-    };
-    fill_rect(canvas, stride, x + 8, pill_y, 3, pill_h, layout_accent);
-    let layout_label = if top_bar.layout_mode == "master-stack" {
-        "Tile"
-    } else {
-        "Float"
-    };
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    draw_text_argb8888(
-        canvas,
-        stride,
-        w,
-        h,
-        layout_label,
-        11.5,
-        [244, 240, 250, 255],
-        (x + 11) as i32,
-        pill_y as i32,
-        Some((53, pill_h)),
-    );
-
-    // Unread notification pill next to status pill (`RUSTYOS-024`)
-    if top_bar.notification_count > 0 && w > 210 {
-        let badge_w = 42;
-        let badge_x = w - 130 - 12 - badge_w - 8;
-        fill_rect(
-            canvas,
-            stride,
-            badge_x,
-            pill_y,
-            badge_w,
-            pill_h,
-            colors::ACCENT_MUTED,
-        );
-        fill_rect(
-            canvas,
-            stride,
-            badge_x,
-            pill_y,
-            badge_w,
-            1,
-            colors::ACCENT_NEON,
-        );
-        if has_font {
-            let label = if top_bar.notification_count > 99 {
-                "N:99+".to_owned()
-            } else {
-                format!("N:{}", top_bar.notification_count)
-            };
-            #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-            draw_text_argb8888(
+        for label in ["File", "Edit", "View", "Go", "Window", "Help"] {
+            let box_w = measure_text_width_px(label, false, font_px) + 12;
+            if cursor_x + box_w > w.saturating_sub(180) {
+                break;
+            }
+            let _ = draw_text_weighted_argb8888(
                 canvas,
                 stride,
                 w,
                 h,
-                &label,
-                10.5,
-                colors::TEXT_BRIGHT,
-                badge_x as i32,
-                pill_y as i32,
-                Some((badge_w, pill_h)),
+                label,
+                false,
+                font_px,
+                menu_white,
+                cursor_x as i32,
+                item_y as i32,
+                Some((box_w, item_h)),
             );
+            cursor_x += box_w + 2;
         }
-    }
 
-    // Status pill on the right
-    if w > 150 {
-        let status_w = 130;
-        let status_x = w - status_w - 12;
-        fill_rounded_rect(
-            canvas,
-            stride,
-            status_x,
-            pill_y,
-            status_w,
-            pill_h,
-            8,
-            colors::SURFACE_OVERLAY,
-        );
-        // Green rounded status dot
-        fill_rounded_rect(
-            canvas,
-            stride,
-            status_x + 8,
-            pill_y + 6,
-            8,
-            8,
-            4,
-            colors::SUCCESS_GREEN,
-        );
-        if has_font {
-            let status_text = format!("{}  {}%", top_bar.clock_label, top_bar.battery_percent);
-            #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-            draw_text_argb8888(
+        if w > 180 {
+            let clock_w = measure_text_width_px(&top_bar.clock_label, false, font_px) + 8;
+            let clock_x = w.saturating_sub(clock_w + 12);
+            let _ = draw_text_weighted_argb8888(
                 canvas,
                 stride,
                 w,
                 h,
-                &status_text,
-                11.0,
-                [244, 240, 250, 255],
-                (status_x + 18) as i32,
-                pill_y as i32,
-                Some((status_w - 22, pill_h)),
-            );
-        } else {
-            // Status bars fallback
-            fill_rect(
-                canvas,
-                stride,
-                status_x + 24,
-                pill_y + 8,
-                40,
-                4,
-                colors::TEXT_MUTED,
-            );
-            fill_rect(
-                canvas,
-                stride,
-                status_x + 72,
-                pill_y + 6,
-                46,
-                8,
-                colors::ACCENT_MUTED,
+                &top_bar.clock_label,
+                false,
+                font_px,
+                pure_white,
+                clock_x as i32,
+                item_y as i32,
+                Some((clock_w, item_h)),
             );
         }
     }
@@ -587,29 +534,38 @@ pub fn render_dock_pixels(canvas: &mut [u8], width: u32, height: u32, dock: &[cr
 
     canvas.fill(0);
 
-    // Outer stadium capsule glass rim & dark purple frosted fill
-    fill_capsule_with_rim(
+    // Concentric rounded glass Dock container without heavy capsule ends (`RUSTYOS-050`)
+    let radius = 20.min(h / 2).max(1);
+    fill_rounded_rect_with_rim(
         canvas,
         stride,
         w,
         h,
+        radius,
         colors::SURFACE_ELEVATED,
         colors::BORDER_HIGHLIGHT,
     );
 
-    // Dock item rounded squircles (`RUSTYOS-048`)
-    let item_size: usize = 40;
-    let item_y: usize = 7;
-    let divider_w = if dock.is_empty() { 0 } else { 8 };
-    let items_count = (3 + dock.len()).min((w.saturating_sub(16 + divider_w)) / 52);
+    // Dock item squircles without resting grey backing boxes (`RUSTYOS-050`)
+    let item_size: usize = h.saturating_sub(18).clamp(28, 50);
+    let item_y: usize = 6;
+    let item_gap: usize = 6;
+    let divider_w: usize = 12;
+    let pinned_count: usize = 6;
+    let left_count = pinned_count + dock.len();
+    let max_slots = w
+        .saturating_sub(16 + divider_w)
+        .checked_div(item_size + item_gap)
+        .unwrap_or(0);
+    let total_items = (left_count + 2).min(max_slots);
     let mut item_x = 10;
 
-    for i in 0..items_count {
-        if i == 3 {
+    for i in 0..total_items {
+        if i == left_count {
             fill_rect(
                 canvas,
                 stride,
-                item_x - 2,
+                item_x + divider_w / 2 - 3,
                 item_y + 4,
                 1,
                 item_size.saturating_sub(8),
@@ -618,39 +574,24 @@ pub fn render_dock_pixels(canvas: &mut [u8], width: u32, height: u32, dock: &[cr
             item_x += divider_w;
         }
 
-        // Subtle glass backing slot + macOS 27 colorful rounded squircle plate
-        fill_rounded_rect(
-            canvas,
-            stride,
-            item_x,
-            item_y,
-            item_size,
-            item_size,
-            10,
-            colors::SURFACE_OVERLAY,
-        );
-
-        let inner_size = 30;
-        let inner_offset = (item_size - inner_size) / 2;
         let icon_color: [u8; 4] = match i {
-            0 => [0x48, 0x2A, 0x26, 0xFF], // macOS Terminal dark slate-indigo
-            1 => [0xF8, 0x94, 0x2E, 0xFF], // Finder/Files sky blue [B,G,R,A]
-            2 => colors::ACCENT_NEON,      // Overview neon violet
+            0 => [0xF8, 0x94, 0x2E, 0xFF], // Files sky blue [B,G,R,A]
+            1 => [0xF2, 0xEE, 0xEC, 0xFF], // Overview silver grid card
+            2 => [0x3C, 0x2C, 0x2E, 0xFF], // Terminal dark slate-indigo
+            3 => [0xFA, 0xF6, 0xFF, 0xFF], // Browser compass white
+            4 => [0x24, 0xD6, 0xFF, 0xFF], // Notes warm amber/cream
+            5 => [0xBE, 0xB6, 0xB2, 0xFF], // Settings metallic gear
+            n if n == left_count => [0xEC, 0x8C, 0x26, 0xFF], // Downloads blue folder
+            n if n == left_count + 1 => [0xD4, 0xCE, 0xC8, 0xFF], // Trash silver cylinder
             _ => colors::ACCENT_MUTED,     // Running app squircle
         };
+        let corner_r = (item_size / 4).max(6);
         fill_rounded_rect(
-            canvas,
-            stride,
-            item_x + inner_offset,
-            item_y + inner_offset,
-            inner_size,
-            inner_size,
-            8,
-            icon_color,
+            canvas, stride, item_x, item_y, item_size, item_size, corner_r, icon_color,
         );
 
-        // Minimal 4x4 circular active indicator dot under running/pinned tiles
-        if i >= 3 || dock.is_empty() {
+        // Minimal 4x4 circular active indicator dot under Files and running windows
+        if i == 0 || (i >= pinned_count && i < left_count) {
             fill_rounded_rect(
                 canvas,
                 stride,
@@ -659,11 +600,11 @@ pub fn render_dock_pixels(canvas: &mut [u8], width: u32, height: u32, dock: &[cr
                 4,
                 4,
                 2,
-                colors::ACCENT_NEON,
+                [0xFF, 0xF6, 0xF8, 0xF0],
             );
         }
 
-        item_x += item_size + 10;
+        item_x += item_size + item_gap;
     }
 }
 
@@ -997,7 +938,7 @@ impl LayerShellHandler for ShellClientData {
                 width = 1280;
             }
             if height == 0 {
-                height = 32;
+                height = 24;
             }
             self.top_bar_size = (width, height);
         }
@@ -1073,7 +1014,7 @@ impl ShellWaylandClient {
             dock_surface: None,
             launcher_surface: None,
             top_bar_size: (1280, 32),
-            dock_size: (240, 56),
+            dock_size: (488, 68),
             launcher_size: (560, 240),
             shell_state: initial_shell,
             running: true,
@@ -1089,8 +1030,8 @@ impl ShellWaylandClient {
             None,
         );
         top_layer.set_anchor(Anchor::TOP | Anchor::LEFT | Anchor::RIGHT);
-        top_layer.set_size(0, 32);
-        top_layer.set_exclusive_zone(32);
+        top_layer.set_size(0, 24);
+        top_layer.set_exclusive_zone(24);
         top_layer.set_keyboard_interactivity(KeyboardInteractivity::None);
         top_layer.commit();
         data.top_bar_surface = Some(top_layer);
@@ -1105,8 +1046,8 @@ impl ShellWaylandClient {
             None,
         );
         dock_layer.set_anchor(Anchor::BOTTOM);
-        dock_layer.set_size(240, 56);
-        dock_layer.set_margin(0, 0, 12, 0);
+        dock_layer.set_size(488, 68);
+        dock_layer.set_margin(0, 0, 8, 0);
         dock_layer.set_exclusive_zone(68);
         dock_layer.set_keyboard_interactivity(KeyboardInteractivity::None);
         dock_layer.commit();
@@ -1220,30 +1161,28 @@ mod tests {
     #[test]
     fn render_top_bar_pixels_generates_valid_surface_buffer() {
         let shell = DesktopShell::default();
-        let (w, h) = (1280u32, 32u32);
+        let (w, h) = (1280u32, 24u32);
         let mut buffer = vec![0u8; (w * h * 4) as usize];
 
         render_top_bar_pixels(&mut buffer, w, h, &shell.top_bar);
 
-        // Verify background pixels match SURFACE_ELEVATED (#20182E)
-        assert_eq!(buffer[0..4], colors::SURFACE_ELEVATED);
-        // Verify bottom border line has subtle border
+        // Transparent Menu Bar by default (zero solid backdrop / border scrim)
+        assert_eq!(buffer[0..4], [0, 0, 0, 0]);
         let border_offset = ((h - 1) * w * 4) as usize;
-        assert_eq!(
-            buffer[border_offset..border_offset + 4],
-            colors::BORDER_SUBTLE
-        );
+        assert_eq!(buffer[border_offset..border_offset + 4], [0, 0, 0, 0]);
+        // Monochrome emblem and Inter Menu Bar labels rendered into the buffer
+        assert!(buffer.as_chunks::<4>().0.iter().any(|px| px[3] > 200));
     }
 
     #[test]
     fn render_dock_pixels_generates_valid_glass_rim_and_tiles() {
         let shell = DesktopShell::default();
-        let (w, h) = (240u32, 56u32);
+        let (w, h) = (488u32, 68u32);
         let mut buffer = vec![0u8; (w * h * 4) as usize];
 
         render_dock_pixels(&mut buffer, w, h, &shell.dock);
 
-        // Stadium corners outside capsule radius remain transparent
+        // Corners outside concentric Dock radius remain transparent
         assert_eq!(buffer[0..4], [0, 0, 0, 0]);
         // Top-center edge matches BORDER_HIGHLIGHT glass rim
         let top_rim_px = ((w / 2) * 4) as usize;
@@ -1254,6 +1193,9 @@ mod tests {
             buffer[interior_px..interior_px + 4],
             colors::SURFACE_ELEVATED
         );
+        // Active running dot sits centered under the first (Files) tile
+        let dot_px = ((w * 4) * (h - 5) + 35 * 4) as usize;
+        assert_eq!(buffer[dot_px..dot_px + 4], [0xFF, 0xF6, 0xF8, 0xF0]);
     }
 
     #[test]

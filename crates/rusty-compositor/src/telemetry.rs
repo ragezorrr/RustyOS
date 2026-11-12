@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use rusty_services::{
     AudioStatus, BluetoothStatus, BrightnessStatus, MediaAction, NetworkStatus, PowerStatus,
-    ServiceRegistry, local_clock_hhmm, local_clock_short_datetime,
+    ServiceRegistry, local_clock_hhmm, local_clock_short_datetime_fmt,
 };
 
 const POLL_INTERVAL: Duration = Duration::from_secs(3);
@@ -34,8 +34,10 @@ pub struct SystemTelemetry {
     pub brightness: BrightnessStatus,
     /// Local wall-clock time formatted as `HH:MM`.
     pub clock_hhmm: String,
-    /// Compact macOS-style `TopBar` date + time label (`RUSTYOS-048`).
+    /// Compact macOS-style `TopBar` date + 12h time label (`"Wed Apr 1  9:41 AM"`).
     pub clock_date_hhmm: String,
+    /// Compact macOS-style `TopBar` date + 24h time label (`"Wed Apr 1  09:41"`).
+    pub clock_date_24h: String,
 }
 
 impl Default for SystemTelemetry {
@@ -47,7 +49,8 @@ impl Default for SystemTelemetry {
             audio: AudioStatus::default(),
             brightness: BrightnessStatus::default(),
             clock_hhmm: "12:00".to_owned(),
-            clock_date_hhmm: "Thu 12:00".to_owned(),
+            clock_date_hhmm: "Wed Apr 1  9:41 AM".to_owned(),
+            clock_date_24h: "Wed Apr 1  09:41".to_owned(),
         }
     }
 }
@@ -271,7 +274,8 @@ fn poll_once(services: &ServiceRegistry) -> SystemTelemetry {
         audio: services.audio.query_status(),
         brightness: services.brightness.query_status(),
         clock_hhmm: local_clock_hhmm(),
-        clock_date_hhmm: local_clock_short_datetime(),
+        clock_date_hhmm: local_clock_short_datetime_fmt(false),
+        clock_date_24h: local_clock_short_datetime_fmt(true),
     }
 }
 

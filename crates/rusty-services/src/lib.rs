@@ -856,18 +856,35 @@ pub fn local_clock_hhmm() -> String {
     format!("{hh:02}:{mm:02}")
 }
 
-/// Returns compact macOS-style `TopBar` date + time (`"Thu 12 Nov  14:32"`), falling back to `HH:MM` (`RUSTYOS-048`).
+/// Returns compact macOS-style `TopBar` date + time in neutral C locale (`RUSTYOS-049`), falling back to `HH:MM`.
+///
+/// - When `use_24h == false` (default): `"Wed Apr 1  9:41 AM"`
+/// - When `use_24h == true`: `"Wed Apr 1  09:41"`
 #[must_use]
-pub fn local_clock_short_datetime() -> String {
-    if let Ok(output) = Command::new("date").arg("+%a %-d %b  %H:%M").output()
+pub fn local_clock_short_datetime_fmt(use_24h: bool) -> String {
+    let fmt_arg = if use_24h {
+        "+%a %b %-d  %H:%M"
+    } else {
+        "+%a %b %-d  %-I:%M %p"
+    };
+    if let Ok(output) = Command::new("date")
+        .env("LC_ALL", "C")
+        .arg(fmt_arg)
+        .output()
         && output.status.success()
     {
         let text = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-        if !text.is_empty() && text.len() <= 24 {
+        if !text.is_empty() && text.len() <= 28 {
             return text;
         }
     }
     local_clock_hhmm()
+}
+
+/// Returns compact macOS-style `TopBar` date + time (`"Wed Apr 1  9:41 AM"`), falling back to `HH:MM` (`RUSTYOS-048`/`049`).
+#[must_use]
+pub fn local_clock_short_datetime() -> String {
+    local_clock_short_datetime_fmt(false)
 }
 
 /// Session management service interacting with `systemd-logind`.
@@ -979,6 +996,13 @@ mod tests {
         let clock = local_clock_hhmm();
         assert_eq!(clock.len(), 5);
         assert_eq!(clock.as_bytes().get(2), Some(&b':'));
+
+        let dt_12h = local_clock_short_datetime_fmt(false);
+        assert!(dt_12h.contains("AM") || dt_12h.contains("PM") || dt_12h.len() == 5);
+        assert!(dt_12h.is_ascii());
+
+        let dt_24h = local_clock_short_datetime_fmt(true);
+        assert!(dt_24h.contains(':') && dt_24h.is_ascii());
     }
 
     #[test]

@@ -63,6 +63,7 @@ pub fn clamp_display_scale(scale: f64) -> f64 {
 
 /// Persistent user preferences loaded from `~/.config/rustyos/config.toml`.
 #[derive(Debug, Clone, PartialEq)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct UserConfig {
     /// Comma-separated XKB layout list (e.g. `"us,ru"`).
     pub keyboard_layout: String,
@@ -80,6 +81,16 @@ pub struct UserConfig {
     pub glass_opacity: f32,
     /// Render nearly opaque shell panels for legibility/accessibility (`RUSTYOS-048`).
     pub reduce_transparency: bool,
+    /// Show compact workspace numbers (`1..=9`) and layout badge in Menu Bar (`RUSTYOS-049`, default `false`).
+    pub menubar_show_workspaces: bool,
+    /// Show `StatusNotifierItem` tray applets in Menu Bar (`RUSTYOS-049`, default `false`).
+    pub menubar_show_tray: bool,
+    /// Show keyboard input source indicator (`EN`/`RU`) in Menu Bar (`RUSTYOS-049`, default `false`).
+    pub menubar_show_input_source: bool,
+    /// Show standalone volume speaker glyph next to Wi-Fi in Menu Bar (`RUSTYOS-049`, default `false`).
+    pub menubar_show_volume: bool,
+    /// Format Menu Bar clock using 24-hour time (`RUSTYOS-049`, default `false` = macOS 12h AM/PM).
+    pub clock_24h: bool,
     /// Prefer the highest supported refresh rate (60/120/144/240 Hz) at the display's native
     /// resolution on DRM/KMS outputs (`RUSTYOS-042`).
     pub prefer_max_refresh: bool,
@@ -108,6 +119,11 @@ impl Default for UserConfig {
             reduced_motion: false,
             glass_opacity: DEFAULT_GLASS_OPACITY,
             reduce_transparency: false,
+            menubar_show_workspaces: false,
+            menubar_show_tray: false,
+            menubar_show_input_source: false,
+            menubar_show_volume: false,
+            clock_24h: false,
             prefer_max_refresh: true,
             vrr_mode: VrrMode::Fullscreen,
             display_scale: 1.0,
@@ -239,21 +255,7 @@ impl UserConfig {
                     self.repeat_rate = n.clamp(1, 120);
                 }
             }
-            ("ui", "reduced_motion") => {
-                if let Ok(b) = val.parse::<bool>() {
-                    self.reduced_motion = b;
-                }
-            }
-            ("ui", "glass_opacity") => {
-                if let Ok(v) = val.parse::<f32>() {
-                    self.glass_opacity = clamp_glass_opacity(v);
-                }
-            }
-            ("ui", "reduce_transparency") => {
-                if let Ok(b) = val.parse::<bool>() {
-                    self.reduce_transparency = b;
-                }
-            }
+            ("ui", _) => self.apply_ui_kv(key, val),
             ("display", "prefer_max_refresh") => {
                 if let Ok(b) = val.parse::<bool>() {
                     self.prefer_max_refresh = b;
@@ -285,12 +287,21 @@ impl UserConfig {
                         .insert(output_name.to_owned(), clamp_display_scale(scale));
                 }
             }
-            ("ui", "wallpaper") => {
+            ("autostart", "commands") => {
+                self.autostart = parse_toml_string_array(val);
+            }
+            _ => {}
+        }
+    }
+
+    fn apply_ui_kv(&mut self, key: &str, val: &str) {
+        match key {
+            "wallpaper" => {
                 if let Some(s) = parse_toml_string(val) {
                     self.wallpaper = expand_user_path(&s);
                 }
             }
-            ("ui", "cursor_theme") => {
+            "cursor_theme" => {
                 if let Some(s) = parse_toml_string(val) {
                     let trimmed = s.trim();
                     if !trimmed.is_empty() {
@@ -298,8 +309,31 @@ impl UserConfig {
                     }
                 }
             }
-            ("autostart", "commands") => {
-                self.autostart = parse_toml_string_array(val);
+            "glass_opacity" => {
+                if let Ok(v) = val.parse::<f32>() {
+                    self.glass_opacity = clamp_glass_opacity(v);
+                }
+            }
+            "reduced_motion"
+            | "reduce_transparency"
+            | "menubar_show_workspaces"
+            | "menubar_show_tray"
+            | "menubar_show_input_source"
+            | "menubar_show_volume"
+            | "clock_24h" => {
+                if let Ok(b) = val.parse::<bool>() {
+                    let target = match key {
+                        "reduced_motion" => &mut self.reduced_motion,
+                        "reduce_transparency" => &mut self.reduce_transparency,
+                        "menubar_show_workspaces" => &mut self.menubar_show_workspaces,
+                        "menubar_show_tray" => &mut self.menubar_show_tray,
+                        "menubar_show_input_source" => &mut self.menubar_show_input_source,
+                        "menubar_show_volume" => &mut self.menubar_show_volume,
+                        "clock_24h" => &mut self.clock_24h,
+                        _ => return,
+                    };
+                    *target = b;
+                }
             }
             _ => {}
         }
@@ -641,16 +675,31 @@ mod tests {
         let defaults = UserConfig::default();
         assert!((defaults.glass_opacity - DEFAULT_GLASS_OPACITY).abs() < 1e-6);
         assert!(!defaults.reduce_transparency);
+        assert!(!defaults.menubar_show_workspaces);
+        assert!(!defaults.menubar_show_tray);
+        assert!(!defaults.menubar_show_input_source);
+        assert!(!defaults.menubar_show_volume);
+        assert!(!defaults.clock_24h);
 
         let cfg = UserConfig::parse_toml(
             r"
             [ui]
             glass_opacity = 0.62
             reduce_transparency = true
+            menubar_show_workspaces = true
+            menubar_show_tray = true
+            menubar_show_input_source = true
+            menubar_show_volume = true
+            clock_24h = true
             ",
         );
         assert!((cfg.glass_opacity - 0.62).abs() < 1e-6);
         assert!(cfg.reduce_transparency);
+        assert!(cfg.menubar_show_workspaces);
+        assert!(cfg.menubar_show_tray);
+        assert!(cfg.menubar_show_input_source);
+        assert!(cfg.menubar_show_volume);
+        assert!(cfg.clock_24h);
 
         let clamped_low = UserConfig::parse_toml("[ui]\nglass_opacity = 0.05\n");
         assert!((clamped_low.glass_opacity - MIN_GLASS_OPACITY).abs() < 1e-6);

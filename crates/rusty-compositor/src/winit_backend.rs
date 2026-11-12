@@ -743,10 +743,16 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
                 passive: item.status == crate::tray::TrayStatus::Passive,
             })
             .collect();
+        let clock_label = if state.clock_24h {
+            &tel.clock_date_24h
+        } else {
+            &tel.clock_date_hhmm
+        };
         let top_telemetry = crate::shell_render::TopBarTelemetry {
-            clock_hhmm: &tel.clock_date_hhmm,
+            clock_hhmm: clock_label,
             battery_percent: tel.power.percentage,
             has_battery: tel.power.has_battery,
+            ac_online: tel.power.ac_online,
             net_connected: tel.network.connected,
             volume_percent: tel.audio.volume_percent,
             audio_muted: tel.audio.muted,
@@ -757,6 +763,10 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
             active_menu: state.active_top_bar_menu,
             glass_opacity: state.glass_opacity,
             reduce_transparency: state.reduce_transparency,
+            show_workspaces: state.menubar_show_workspaces,
+            show_tray: state.menubar_show_tray,
+            show_input_source: state.menubar_show_input_source,
+            show_volume: state.menubar_show_volume,
         };
 
         let toast_views: Vec<crate::shell_render::NotificationToastView<'_>> = state

@@ -602,14 +602,22 @@ impl RustyCompositorState {
             self.close_top_bar_menu();
         }
 
-        if let Some(target_ws) =
-            crate::shell_render::check_top_bar_workspace_click_for_app(&active_app_name, x, y)
-        {
+        if let Some(target_ws) = crate::shell_render::check_top_bar_workspace_click_with_options(
+            &active_app_name,
+            self.menubar_show_workspaces,
+            x,
+            y,
+        ) {
             let ws = WorkspaceId::new_clamped(target_ws);
             self.apply_wm_action(WmAction::SwitchWorkspace(ws), serial);
             return true;
         }
-        if crate::shell_render::check_top_bar_layout_click_for_app(&active_app_name, x, y) {
+        if crate::shell_render::check_top_bar_layout_click_with_options(
+            &active_app_name,
+            self.menubar_show_workspaces,
+            x,
+            y,
+        ) {
             self.apply_wm_action(WmAction::ToggleLayoutMode, serial);
             return true;
         }
@@ -629,59 +637,64 @@ impl RustyCompositorState {
         y: f64,
     ) -> bool {
         let tel = self.telemetry.snapshot();
-        let has_battery = tel.power.has_battery;
-        let clock_text = tel.clock_date_hhmm.as_str();
-        let notif_count = self.notification_count;
+        let clock_text = if self.clock_24h {
+            tel.clock_date_24h.as_str()
+        } else {
+            tel.clock_date_hhmm.as_str()
+        };
+        let opts = crate::shell_render::TopBarLayoutOptions {
+            has_battery: tel.power.has_battery,
+            notification_count: self.notification_count,
+            show_volume: self.menubar_show_volume,
+            show_input_source: self.menubar_show_input_source,
+            show_workspaces: self.menubar_show_workspaces,
+            show_tray: self.menubar_show_tray,
+        };
 
-        if crate::shell_render::check_top_bar_search_click_for_telemetry(
+        if crate::shell_render::check_top_bar_search_click_for_options(
             output_width,
-            has_battery,
-            notif_count,
             clock_text,
+            opts,
             x,
             y,
         ) {
             self.toggle_launcher();
             return true;
         }
-        if crate::shell_render::check_top_bar_status_click_for_telemetry(
+        if crate::shell_render::check_top_bar_status_click_for_options(
             output_width,
-            has_battery,
-            notif_count,
             clock_text,
+            opts,
             x,
             y,
         ) {
             self.toggle_quick_settings();
             return true;
         }
-        if crate::shell_render::check_top_bar_notification_click_for_telemetry(
+        if crate::shell_render::check_top_bar_notification_click_for_options(
             output_width,
-            has_battery,
-            notif_count,
             clock_text,
+            opts,
             x,
             y,
         ) {
             self.clear_notifications();
             return true;
         }
-        if crate::shell_render::check_top_bar_kbd_click_for_telemetry(
+        if crate::shell_render::check_top_bar_kbd_click_for_options(
             output_width,
-            has_battery,
-            notif_count,
             clock_text,
+            opts,
             x,
             y,
         ) {
             self.cycle_keyboard_layout();
             return true;
         }
-        if let Some(tray_idx) = crate::shell_render::check_top_bar_tray_click_for_telemetry(
+        if let Some(tray_idx) = crate::shell_render::check_top_bar_tray_click_for_options(
             output_width,
-            has_battery,
-            notif_count,
             clock_text,
+            opts,
             self.tray_items.len(),
             x,
             y,

@@ -89,7 +89,7 @@ impl Default for TopBarState {
         Self {
             active_workspace: 1,
             layout_mode: "floating".to_owned(),
-            clock_label: "12:00".to_owned(),
+            clock_label: "Wed Apr 1  9:41 AM".to_owned(),
             battery_percent: 100,
             network_label: "Wi-Fi Connected".to_owned(),
             frame_interval_p50_us: 16_667,

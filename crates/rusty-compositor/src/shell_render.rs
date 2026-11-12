@@ -43,63 +43,63 @@ fn resolved_icon_to_element(icon: crate::icons::ResolvedIconElement) -> Composit
 /// Resize grab border thickness in logical pixels (`RUSTYOS-022`).
 pub const RESIZE_GRAB_BORDER: f64 = 6.0;
 
-/// `TopBar` height in logical pixels.
-pub const TOP_BAR_HEIGHT: i32 = 26;
+/// `TopBar` height in logical pixels (`macOS` standard 24 px Menu Bar, `RUSTYOS-049`).
+pub const TOP_BAR_HEIGHT: i32 = 24;
 
-/// Vertical offset of `TopBar` pills/labels inside the bar (`RUSTYOS-036`).
-pub const TOP_BAR_ITEM_Y: i32 = 3;
+/// Vertical offset of `TopBar` pills/labels inside the bar (`RUSTYOS-036`/`049`).
+pub const TOP_BAR_ITEM_Y: i32 = 2;
 
 /// Height of `TopBar` pills/labels (`RUSTYOS-036`).
 pub const TOP_BAR_ITEM_H: i32 = 20;
 
+/// Unified font size in logical pixels for Menu Bar active app, menu items, and clock (`RUSTYOS-049`).
+pub const TOP_BAR_FONT_SIZE: f32 = 13.0;
+
 /// Server-Side Decoration (SSD) titlebar height in logical pixels (`RUSTYOS-019`).
 pub const TITLEBAR_HEIGHT: i32 = 28;
 
-/// Dock height in logical pixels (`RUSTYOS-035`: 56 px tile + 8 px padding on both sides).
-pub const DOCK_HEIGHT: i32 = 72;
+/// Dock container height in logical pixels (`RUSTYOS-050`: 50 px icon + concentric padding & 4 px dot).
+pub const DOCK_HEIGHT: i32 = 68;
 
 /// Dock bottom margin from screen edge.
 pub const DOCK_MARGIN_BOTTOM: i32 = 8;
 
-/// Dock tile edge length in logical pixels (`RUSTYOS-035`).
-pub const DOCK_ITEM_SIZE: i32 = 56;
+/// Dock hit-slot width/height in logical pixels (`RUSTYOS-050`).
+pub const DOCK_ITEM_SIZE: i32 = 52;
 
-/// Gap between Dock tiles in logical pixels (`RUSTYOS-035`).
-pub const DOCK_ITEM_GAP: i32 = 8;
+/// Horizontal gap between Dock icons in logical pixels (`RUSTYOS-050`).
+pub const DOCK_ITEM_GAP: i32 = 6;
 
-/// Dock capsule inner padding in logical pixels (`RUSTYOS-035`).
+/// Dock inner horizontal/vertical padding in logical pixels (`RUSTYOS-050`).
 pub const DOCK_PADDING: i32 = 8;
 
-/// Dock capsule corner radius in logical pixels (`DESIGN.md` §12: `DOCK_HEIGHT / 2 = 36`).
-pub const DOCK_RADIUS: i32 = 36;
+/// Dock corner radius in logical pixels (`RUSTYOS-050`: concentric outer curve matching macOS Dock).
+pub const DOCK_RADIUS: i32 = 22;
 
-/// Extra horizontal spacing allocated for the vertical divider between pinned apps and running windows (`RUSTYOS-048`).
-pub const DOCK_DIVIDER_GAP: i32 = 12;
+/// Extra horizontal spacing allocated for the hairline divider before Downloads/Trash (`RUSTYOS-050`).
+pub const DOCK_DIVIDER_GAP: i32 = 14;
 
-/// App icon edge length inside a Dock tile (`RUSTYOS-035`).
-pub const DOCK_ICON_SIZE: i32 = 48;
+/// Resting app icon edge length inside a Dock slot (`RUSTYOS-050`).
+pub const DOCK_ICON_SIZE: i32 = 50;
+
+/// Number of left-side pinned app slots before running windows (`RUSTYOS-050`).
+pub const DOCK_PINNED_COUNT: usize = 6;
+
+/// Number of right-side utility slots after the divider (`Downloads`, `Trash`) (`RUSTYOS-050`).
+pub const DOCK_UTILITY_COUNT: usize = 2;
 
 /// SSD window frame & glass popover corner radius in logical pixels (`DESIGN.md` §12.3).
 pub const WINDOW_RADIUS: i32 = 20;
 
-/// `TopBar` Left Menu metrics (macOS 27 Active App & Global Menus) (`RUSTYOS-038`).
+/// `TopBar` Left Menu metrics (`macOS` Menu Bar layout with `Inter` 13 px) (`RUSTYOS-038`/`049`).
 pub const TOP_BAR_LOGO_X: i32 = 12;
 pub const TOP_BAR_LOGO_W: i32 = 18;
 pub const TOP_BAR_APP_X: i32 = 34;
-pub const TOP_BAR_APP_MAX_W: i32 = 78;
-pub const TOP_BAR_MENUS_START_X: i32 = 118;
-pub const TOP_BAR_MENU_FILE_W: i32 = 28;
-pub const TOP_BAR_MENU_EDIT_W: i32 = 28;
-pub const TOP_BAR_MENU_VIEW_W: i32 = 32;
-pub const TOP_BAR_MENU_WINDOW_W: i32 = 50;
-pub const TOP_BAR_MENUS_GAP: i32 = 10;
-pub const TOP_BAR_SEPARATOR_X: i32 = 296;
 
-/// Workspace button width, stride, and start position for compact indicators (`RUSTYOS-038`).
+/// Workspace button width, stride, and default start offset when optional strip is enabled (`RUSTYOS-038`/`049`).
 pub const WS_BTN_WIDTH: i32 = 18;
 pub const WS_BTN_GAP: i32 = 3;
 pub const WS_BTN_STRIDE: i32 = WS_BTN_WIDTH + WS_BTN_GAP;
-pub const WS_START_X: i32 = 308;
 
 const fn premul(r: f32, g: f32, b: f32, a: f32) -> Color32F {
     Color32F::new(r * a, g * a, b * a, a)
@@ -166,16 +166,36 @@ pub struct TopBarTrayItem<'a> {
     pub passive: bool,
 }
 
-/// Live hardware/session telemetry displayed inside `TopBar` (`RUSTYOS-021`, `RUSTYOS-048`).
+/// Visibility and telemetry flags controlling optional items in the `TopBar` (`RUSTYOS-049`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct TopBarLayoutOptions {
+    /// Whether a hardware battery is present.
+    pub has_battery: bool,
+    /// Active unread desktop notification count.
+    pub notification_count: u32,
+    /// Show standalone volume glyph left of Battery/Wi-Fi.
+    pub show_volume: bool,
+    /// Show keyboard input source indicator (`EN`/`RU`).
+    pub show_input_source: bool,
+    /// Show workspace numbers `1..=9` and layout badge.
+    pub show_workspaces: bool,
+    /// Show `StatusNotifierItem` tray applets.
+    pub show_tray: bool,
+}
+
+/// Live hardware/session telemetry displayed inside `TopBar` (`RUSTYOS-021`, `RUSTYOS-048`, `RUSTYOS-049`).
 #[derive(Debug, Clone)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct TopBarTelemetry<'a> {
-    /// Local wall-clock date/time label shown in `TopBar` (`HH:MM` or `"Thu 12 Nov  14:32"`).
+    /// Local wall-clock date/time label shown in `TopBar` (`"Wed Apr 1  9:41 AM"`).
     pub clock_hhmm: &'a str,
     /// Battery percentage (`0..=100`).
     pub battery_percent: u8,
     /// Whether a hardware battery is present.
     pub has_battery: bool,
+    /// Whether AC adapter is plugged in (`RUSTYOS-049`).
+    pub ac_online: bool,
     /// Whether an active network interface is up.
     pub net_connected: bool,
     /// Master output volume (`0..=100`).
@@ -188,7 +208,7 @@ pub struct TopBarTelemetry<'a> {
     pub notification_count: u32,
     /// Active keyboard layout badge code (`"EN"`, `"RU"`, etc.) (`RUSTYOS-029`).
     pub kbd_layout: &'a str,
-    /// Registered `StatusNotifierItem` tray badges rendered left of the keyboard indicator (`RUSTYOS-032`).
+    /// Registered `StatusNotifierItem` tray badges rendered when `show_tray == true` (`RUSTYOS-032`).
     pub tray_items: &'a [TopBarTrayItem<'a>],
     /// Currently open `TopBar` left menu dropdown if any (`RUSTYOS-048`).
     pub active_menu: Option<TopBarMenuHit>,
@@ -196,14 +216,38 @@ pub struct TopBarTelemetry<'a> {
     pub glass_opacity: f32,
     /// High-contrast opaque shell panels mode (`RUSTYOS-048`).
     pub reduce_transparency: bool,
+    /// Show workspace digits `1..=9` and `Float`/`Tile` pill (`RUSTYOS-049`, default `false`).
+    pub show_workspaces: bool,
+    /// Show host SNI system tray icons in Menu Bar (`RUSTYOS-049`, default `false`).
+    pub show_tray: bool,
+    /// Show keyboard layout badge in Menu Bar (`RUSTYOS-049`, default `false`).
+    pub show_input_source: bool,
+    /// Show standalone speaker volume icon in Menu Bar (`RUSTYOS-049`, default `false`).
+    pub show_volume: bool,
+}
+
+impl TopBarTelemetry<'_> {
+    /// Extracts [`TopBarLayoutOptions`] matching the active telemetry and UI toggles.
+    #[must_use]
+    pub const fn layout_options(&self) -> TopBarLayoutOptions {
+        TopBarLayoutOptions {
+            has_battery: self.has_battery,
+            notification_count: self.notification_count,
+            show_volume: self.show_volume,
+            show_input_source: self.show_input_source,
+            show_workspaces: self.show_workspaces,
+            show_tray: self.show_tray,
+        }
+    }
 }
 
 impl Default for TopBarTelemetry<'static> {
     fn default() -> Self {
         Self {
-            clock_hhmm: "12:00",
+            clock_hhmm: "Wed Apr 1  9:41 AM",
             battery_percent: 100,
             has_battery: false,
+            ac_online: false,
             net_connected: true,
             volume_percent: 75,
             audio_muted: false,
@@ -214,6 +258,10 @@ impl Default for TopBarTelemetry<'static> {
             active_menu: None,
             glass_opacity: crate::config::DEFAULT_GLASS_OPACITY,
             reduce_transparency: false,
+            show_workspaces: false,
+            show_tray: false,
+            show_input_source: false,
+            show_volume: false,
         }
     }
 }
@@ -341,7 +389,7 @@ pub fn extract_app_name(title: &str) -> String {
     truncate_ascii(trimmed, 14)
 }
 
-/// Interactive click target inside the `TopBar` Left Menu area (`RUSTYOS-038`).
+/// Interactive click target inside the `TopBar` Left Menu area (`RUSTYOS-038`/`049`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TopBarMenuHit {
     /// System emblem (`UiGlyphKind::RustyLogo`).
@@ -354,15 +402,21 @@ pub enum TopBarMenuHit {
     Edit,
     /// Global View menu.
     View,
+    /// Global Go menu (`RUSTYOS-049`).
+    Go,
     /// Global Window menu.
     Window,
+    /// Global Help menu (`RUSTYOS-049`).
+    Help,
 }
 
-/// Action triggered from an open `TopBar` menu dropdown popover (`RUSTYOS-048`).
+/// Action triggered from an open `TopBar` menu dropdown popover (`RUSTYOS-048`/`049`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TopBarMenuAction {
     /// Show concise RustyOS notification card.
     AboutRustyOs,
+    /// Show concise keyboard shortcuts reference card (`RUSTYOS-049`).
+    ShowShortcuts,
     /// Toggle Workspace Overview.
     OpenOverview,
     /// Toggle Control Center (`QuickSettings`).
@@ -373,6 +427,10 @@ pub enum TopBarMenuAction {
     NewTerminal,
     /// Launch preferred file manager.
     OpenFiles,
+    /// Switch to next workspace (`RUSTYOS-049`).
+    NextWorkspace,
+    /// Switch to previous workspace (`RUSTYOS-049`).
+    PrevWorkspace,
     /// Switch between Floating and Tiling layout modes.
     ToggleLayout,
     /// Toggle `reduced_motion`.
@@ -411,7 +469,7 @@ pub struct DockViewState<'a> {
     pub pinned_icons: [Option<&'a str>; 2],
     /// Open visible windows on the active workspace in stable slot order.
     pub windows: &'a [DockWindowEntry],
-    /// Currently hovered Dock slot index (`0..3 + windows.len()`), if any.
+    /// Currently hovered Dock slot index (`0..DOCK_PINNED_COUNT + windows.len() + DOCK_UTILITY_COUNT`), if any.
     pub hover_slot: Option<usize>,
     /// Whether Workspace Overview is active (highlights Dock Overview squircle tile).
     pub overview_active: bool,
@@ -421,17 +479,27 @@ pub struct DockViewState<'a> {
     pub reduced_motion: bool,
 }
 
-/// Interactive click target inside the bottom floating Dock (`RUSTYOS-023`).
+/// Interactive click target inside the bottom floating Dock (`RUSTYOS-023` / `RUSTYOS-050`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DockHit {
-    /// Pinned Terminal launcher (`>_`).
-    PinnedTerminal,
-    /// Pinned Files launcher (`Fs`).
+    /// Pinned Files launcher (`Files`).
     PinnedFiles,
-    /// Workspace Overview toggle button (`Ov`).
+    /// Workspace Overview / App Grid toggle (`Overview`).
     ToggleOverview,
+    /// Pinned Terminal launcher (`Terminal`).
+    PinnedTerminal,
+    /// Pinned Browser launcher (`Browser`).
+    PinnedBrowser,
+    /// Pinned Notes launcher (`Notes`).
+    PinnedNotes,
+    /// Pinned System Settings launcher (`Settings`).
+    PinnedSettings,
     /// Running window tile at `index` inside `ordered_visible_windows`.
     WindowSlot(usize),
+    /// Utility folder shortcut (`Downloads`).
+    PinnedDownloads,
+    /// Utility wastebasket shortcut (`Trash`).
+    PinnedTrash,
 }
 
 /// Live data for the Workspace Overview / Expose card grid (`RUSTYOS-023`).
@@ -620,56 +688,99 @@ pub fn check_lock_screen_unlock_click(
     x >= bx && x < bx + bw && y >= by && y < by + bh
 }
 
-/// Dynamic left-side geometry for `TopBar` app name, global menus, workspace strip, and layout badge (`RUSTYOS-048`).
+/// Dynamic left-side geometry for `TopBar` app name, global menus, optional workspace strip, and layout badge (`RUSTYOS-048`/`049`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TopBarLeftLayout {
     pub app_x: i32,
     pub app_w: i32,
     pub file_x: i32,
+    pub file_w: i32,
     pub edit_x: i32,
+    pub edit_w: i32,
     pub view_x: i32,
+    pub view_w: i32,
+    pub go_x: i32,
+    pub go_w: i32,
     pub win_x: i32,
+    pub win_w: i32,
+    pub help_x: i32,
+    pub help_w: i32,
+    pub show_workspaces: bool,
     pub separator_x: i32,
     pub ws_start_x: i32,
     pub layout_x: i32,
     pub layout_w: i32,
 }
 
-/// Computes `TopBar` left-side x coordinates, expanding cleanly when the active app name is wide (`RUSTYOS-048`).
+fn measure_menu_box_width(label: &str) -> i32 {
+    (crate::text::measure_ui_text_width(label, TOP_BAR_FONT_SIZE, crate::text::FontWeight::Regular)
+        + 14)
+        .max(26)
+}
+
+/// Computes `TopBar` left-side x coordinates (`macOS` Menu Bar rhythm: `Logo  App  File  Edit  View  Go  Window  Help`) (`RUSTYOS-048`/`049`).
 #[must_use]
 pub fn compute_top_bar_left_layout(active_app_name: &str) -> TopBarLeftLayout {
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    let chars = active_app_name.chars().count() as i32;
-    let app_w = (chars * 7 + 14).clamp(TOP_BAR_APP_MAX_W, 138);
-    let delta = app_w - TOP_BAR_APP_MAX_W;
-    let file_x = TOP_BAR_MENUS_START_X + delta;
-    let edit_x = file_x + TOP_BAR_MENU_FILE_W + TOP_BAR_MENUS_GAP;
-    let view_x = edit_x + TOP_BAR_MENU_EDIT_W + TOP_BAR_MENUS_GAP;
-    let win_x = view_x + TOP_BAR_MENU_VIEW_W + TOP_BAR_MENUS_GAP;
-    let separator_x = TOP_BAR_SEPARATOR_X + delta;
-    let ws_start_x = WS_START_X + delta;
+    compute_top_bar_left_layout_with_options(active_app_name, false)
+}
+
+/// Computes `TopBar` left-side layout with explicit workspace-strip visibility (`RUSTYOS-049`).
+#[must_use]
+pub fn compute_top_bar_left_layout_with_options(
+    active_app_name: &str,
+    show_workspaces: bool,
+) -> TopBarLeftLayout {
+    let app_w = (crate::text::measure_ui_text_width(
+        active_app_name,
+        TOP_BAR_FONT_SIZE,
+        crate::text::FontWeight::Bold,
+    ) + 12)
+        .clamp(44, 168);
+    let file_x = TOP_BAR_APP_X + app_w;
+    let file_w = measure_menu_box_width("File");
+    let edit_x = file_x + file_w;
+    let edit_w = measure_menu_box_width("Edit");
+    let view_x = edit_x + edit_w;
+    let view_w = measure_menu_box_width("View");
+    let go_x = view_x + view_w;
+    let go_w = measure_menu_box_width("Go");
+    let win_x = go_x + go_w;
+    let win_w = measure_menu_box_width("Window");
+    let help_x = win_x + win_w;
+    let help_w = measure_menu_box_width("Help");
+    let separator_x = help_x + help_w + 10;
+    let ws_start_x = separator_x + 12;
     let layout_x = ws_start_x + 9 * WS_BTN_STRIDE + 8;
     TopBarLeftLayout {
         app_x: TOP_BAR_APP_X,
         app_w,
         file_x,
+        file_w,
         edit_x,
+        edit_w,
         view_x,
+        view_w,
+        go_x,
+        go_w,
         win_x,
+        win_w,
+        help_x,
+        help_w,
+        show_workspaces,
         separator_x,
         ws_start_x,
         layout_x,
-        layout_w: 52,
+        layout_w: 50,
     }
 }
 
-/// Dynamic right-side geometry for `TopBar` clock, Control Center, glyphs, Search, Kbd, Notifications, and Tray (`RUSTYOS-048`).
+/// Dynamic right-side geometry for `TopBar` matching macOS order (`Battery · Wi-Fi · Search · Control Center · Clock`) (`RUSTYOS-048`/`049`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TopBarRightLayout {
     pub search_x: i32,
     pub search_w: i32,
     pub wifi_x: i32,
-    pub volume_x: i32,
+    pub volume_x: Option<i32>,
     pub battery_x: Option<i32>,
     pub control_center_x: i32,
     pub control_center_w: i32,
@@ -677,13 +788,16 @@ pub struct TopBarRightLayout {
     pub clock_w: i32,
     pub status_pill_x: i32,
     pub status_pill_w: i32,
+    pub status_hit_x: i32,
+    pub status_hit_w: i32,
     pub notif_x: i32,
     pub notif_w: i32,
-    pub kbd_x: i32,
+    pub kbd_x: Option<i32>,
     pub kbd_w: i32,
+    pub tray_anchor_x: i32,
 }
 
-/// Computes compact right-aligned `TopBar` positions collapsing the battery gap when `has_battery == false` (`RUSTYOS-048`).
+/// Computes compact right-aligned `TopBar` positions for `RUSTYOS-049` defaults (`show_* = false`).
 #[must_use]
 pub fn compute_top_bar_right_layout(
     screen_width: i32,
@@ -691,40 +805,80 @@ pub fn compute_top_bar_right_layout(
     notification_count: u32,
     clock_text: &str,
 ) -> TopBarRightLayout {
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    let clock_chars = clock_text.chars().count() as i32;
-    let clock_w = (clock_chars * 6 + 12).clamp(44, 122);
+    compute_top_bar_right_layout_with_options(
+        screen_width,
+        clock_text,
+        TopBarLayoutOptions {
+            has_battery,
+            notification_count,
+            ..TopBarLayoutOptions::default()
+        },
+    )
+}
+
+/// Computes right-aligned `TopBar` geometry from exact `Inter` text width and visibility options (`RUSTYOS-049`).
+#[must_use]
+pub fn compute_top_bar_right_layout_with_options(
+    screen_width: i32,
+    clock_text: &str,
+    opts: TopBarLayoutOptions,
+) -> TopBarRightLayout {
+    let clock_w = (crate::text::measure_ui_text_width(
+        clock_text,
+        TOP_BAR_FONT_SIZE,
+        crate::text::FontWeight::Regular,
+    ) + 8)
+        .clamp(42, 220);
     let right_edge = screen_width - 10;
-    let clock_x = (right_edge - clock_w).max(screen_width - 134);
+    let clock_x = (right_edge - clock_w).max(screen_width - 236);
 
-    let control_center_w = 20;
-    let control_center_x = clock_x - 6 - control_center_w;
+    let control_center_w = 18;
+    let control_center_x = clock_x - 10 - control_center_w;
 
-    let (battery_x, next_left) = if has_battery {
-        let bx = control_center_x - 6 - 20;
-        (Some(bx), bx)
+    let search_w = 16;
+    let search_x = control_center_x - 10 - search_w;
+
+    let wifi_x = search_x - 10 - 16;
+    let mut left_cursor = wifi_x;
+
+    let battery_x = if opts.has_battery {
+        let bx = left_cursor - 10 - 20;
+        left_cursor = bx;
+        Some(bx)
     } else {
-        (None, control_center_x)
+        None
     };
 
-    let volume_x = next_left - 6 - 16;
-    let wifi_x = volume_x - 6 - 16;
-    let search_w = 18;
-    let search_x = wifi_x - 10 - search_w;
+    let volume_x = if opts.show_volume {
+        let vx = left_cursor - 10 - 16;
+        left_cursor = vx;
+        Some(vx)
+    } else {
+        None
+    };
 
-    let status_pill_x = wifi_x - 4;
-    let status_pill_w = (right_edge - status_pill_x).max(96);
+    let status_pill_x = control_center_x - 3;
+    let status_pill_w = control_center_w + 6;
+    let status_hit_x = left_cursor - 4;
+    let status_hit_w = (right_edge - status_hit_x).max(88);
 
-    let (notif_x, notif_w, kbd_anchor) = if notification_count > 0 {
+    let (notif_x, notif_w) = if opts.notification_count > 0 {
         let nw = 38;
-        let nx = search_x - 8 - nw;
-        (nx, nw, nx)
+        let nx = left_cursor - 8 - nw;
+        left_cursor = nx;
+        (nx, nw)
     } else {
-        (search_x, 0, search_x)
+        (left_cursor, 0)
     };
 
-    let kbd_w = 30;
-    let kbd_x = kbd_anchor - 8 - kbd_w;
+    let kbd_w = 28;
+    let kbd_x = if opts.show_input_source {
+        let kx = left_cursor - 8 - kbd_w;
+        left_cursor = kx;
+        Some(kx)
+    } else {
+        None
+    };
 
     TopBarRightLayout {
         search_x,
@@ -738,10 +892,13 @@ pub fn compute_top_bar_right_layout(
         clock_w,
         status_pill_x,
         status_pill_w,
+        status_hit_x,
+        status_hit_w,
         notif_x,
         notif_w,
         kbd_x,
         kbd_w,
+        tray_anchor_x: left_cursor,
     }
 }
 
@@ -768,40 +925,66 @@ fn notification_badge_rect(screen_width: i32) -> (i32, i32, i32, i32) {
 
 #[cfg(test)]
 fn kbd_badge_rect(screen_width: i32, notification_count: u32) -> (i32, i32, i32, i32) {
-    let layout = compute_top_bar_right_layout(screen_width, false, notification_count, "12:00");
-    (layout.kbd_x, TOP_BAR_ITEM_Y, layout.kbd_w, TOP_BAR_ITEM_H)
+    let layout = compute_top_bar_right_layout_with_options(
+        screen_width,
+        "12:00",
+        TopBarLayoutOptions {
+            notification_count,
+            show_input_source: true,
+            ..TopBarLayoutOptions::default()
+        },
+    );
+    (
+        layout.kbd_x.unwrap_or(layout.tray_anchor_x),
+        TOP_BAR_ITEM_Y,
+        layout.kbd_w,
+        TOP_BAR_ITEM_H,
+    )
 }
 
 /// Maximum number of system tray applets displayed simultaneously in `TopBar` (`RUSTYOS-032`).
 pub const MAX_TOP_BAR_TRAY_ITEMS: usize = 6;
 
-/// Computes `TopBar` tray pill rectangles positioned immediately left of the keyboard indicator (`RUSTYOS-032`).
+/// Computes `TopBar` tray pill rectangles when tray visibility is enabled (`RUSTYOS-032`/`049`).
 #[must_use]
 pub fn tray_slot_rects(
     screen_width: i32,
     notification_count: u32,
     tray_count: usize,
 ) -> Vec<(i32, i32, i32, i32)> {
-    tray_slot_rects_with_layout(screen_width, false, notification_count, "12:00", tray_count)
+    tray_slot_rects_with_options(
+        screen_width,
+        "12:00",
+        TopBarLayoutOptions {
+            notification_count,
+            show_tray: true,
+            show_input_source: true,
+            ..TopBarLayoutOptions::default()
+        },
+        tray_count,
+    )
 }
 
-/// Computes `TopBar` tray pill rectangles using exact telemetry-driven right-cluster layout (`RUSTYOS-048`).
+/// Computes `TopBar` tray pill rectangles using exact telemetry and visibility flags (`RUSTYOS-048`/`049`).
 #[must_use]
-pub fn tray_slot_rects_with_layout(
+pub fn tray_slot_rects_with_options(
     screen_width: i32,
-    has_battery: bool,
-    notification_count: u32,
     clock_text: &str,
+    opts: TopBarLayoutOptions,
     tray_count: usize,
 ) -> Vec<(i32, i32, i32, i32)> {
-    if tray_count == 0 {
+    if tray_count == 0 || !opts.show_tray {
         return Vec::new();
     }
-    let min_left_x = WS_START_X + 9 * WS_BTN_STRIDE + 8 + 56 + 10;
-    let right =
-        compute_top_bar_right_layout(screen_width, has_battery, notification_count, clock_text);
-    let kbd_x = right.kbd_x;
-    let avail = (kbd_x - 8 - min_left_x).max(0);
+    let left = compute_top_bar_left_layout_with_options("RustyOS", opts.show_workspaces);
+    let min_left_x = if opts.show_workspaces {
+        left.layout_x + left.layout_w + 10
+    } else {
+        left.help_x + left.help_w + 12
+    };
+    let right = compute_top_bar_right_layout_with_options(screen_width, clock_text, opts);
+    let anchor_x = right.tray_anchor_x;
+    let avail = (anchor_x - 8 - min_left_x).max(0);
     let slot_w = 24;
     let gap = 6;
     let stride = slot_w + gap;
@@ -813,7 +996,7 @@ pub fn tray_slot_rects_with_layout(
         return Vec::new();
     }
     let count_i32 = i32::try_from(count).unwrap_or(0);
-    let first_x = kbd_x - 8 - (count_i32 * stride - gap);
+    let first_x = anchor_x - 8 - (count_i32 * stride - gap);
     (0..count)
         .map(|idx| {
             let idx_i32 = i32::try_from(idx).unwrap_or(0);
@@ -825,6 +1008,28 @@ pub fn tray_slot_rects_with_layout(
             )
         })
         .collect()
+}
+
+/// Backwards-compatible wrapper for telemetry-driven tray rectangles (`RUSTYOS-048`).
+#[must_use]
+pub fn tray_slot_rects_with_layout(
+    screen_width: i32,
+    has_battery: bool,
+    notification_count: u32,
+    clock_text: &str,
+    tray_count: usize,
+) -> Vec<(i32, i32, i32, i32)> {
+    tray_slot_rects_with_options(
+        screen_width,
+        clock_text,
+        TopBarLayoutOptions {
+            has_battery,
+            notification_count,
+            show_tray: true,
+            ..TopBarLayoutOptions::default()
+        },
+        tray_count,
+    )
 }
 
 /// Maximum number of floating notification toasts shown simultaneously (`RUSTYOS-024`).
@@ -898,6 +1103,22 @@ pub fn check_top_bar_notification_click(
     )
 }
 
+/// Telemetry-aware hit-test for the `TopBar` unread notification badge (`RUSTYOS-048`/`049`).
+#[must_use]
+pub fn check_top_bar_notification_click_for_options(
+    screen_width: i32,
+    clock_text: &str,
+    opts: TopBarLayoutOptions,
+    x: f64,
+    y: f64,
+) -> bool {
+    if opts.notification_count == 0 || y < 0.0 || y > f64::from(TOP_BAR_HEIGHT) {
+        return false;
+    }
+    let layout = compute_top_bar_right_layout_with_options(screen_width, clock_text, opts);
+    x >= f64::from(layout.notif_x) && x < f64::from(layout.notif_x + layout.notif_w)
+}
+
 /// Telemetry-aware hit-test for the `TopBar` unread notification badge (`RUSTYOS-048`).
 #[must_use]
 pub fn check_top_bar_notification_click_for_telemetry(
@@ -908,18 +1129,52 @@ pub fn check_top_bar_notification_click_for_telemetry(
     x: f64,
     y: f64,
 ) -> bool {
-    if notification_count == 0 || y < 0.0 || y > f64::from(TOP_BAR_HEIGHT) {
-        return false;
-    }
-    let layout =
-        compute_top_bar_right_layout(screen_width, has_battery, notification_count, clock_text);
-    x >= f64::from(layout.notif_x) && x < f64::from(layout.notif_x + layout.notif_w)
+    check_top_bar_notification_click_for_options(
+        screen_width,
+        clock_text,
+        TopBarLayoutOptions {
+            has_battery,
+            notification_count,
+            ..TopBarLayoutOptions::default()
+        },
+        x,
+        y,
+    )
 }
 
-/// Checks if `(x, y)` clicked the `TopBar` keyboard layout pill (`"EN"` / `"RU"`) (`RUSTYOS-029`).
+/// Checks if `(x, y)` clicked the `TopBar` keyboard layout pill (`"EN"` / `"RU"`) when visible (`RUSTYOS-029`).
 #[must_use]
 pub fn check_top_bar_kbd_click(screen_width: i32, notification_count: u32, x: f64, y: f64) -> bool {
-    check_top_bar_kbd_click_for_telemetry(screen_width, false, notification_count, "12:00", x, y)
+    check_top_bar_kbd_click_for_options(
+        screen_width,
+        "12:00",
+        TopBarLayoutOptions {
+            notification_count,
+            show_input_source: true,
+            ..TopBarLayoutOptions::default()
+        },
+        x,
+        y,
+    )
+}
+
+/// Option-aware hit-test for the `TopBar` keyboard layout indicator (`RUSTYOS-049`).
+#[must_use]
+pub fn check_top_bar_kbd_click_for_options(
+    screen_width: i32,
+    clock_text: &str,
+    opts: TopBarLayoutOptions,
+    x: f64,
+    y: f64,
+) -> bool {
+    if !opts.show_input_source || y < 0.0 || y > f64::from(TOP_BAR_HEIGHT) {
+        return false;
+    }
+    let layout = compute_top_bar_right_layout_with_options(screen_width, clock_text, opts);
+    let Some(kbd_x) = layout.kbd_x else {
+        return false;
+    };
+    x >= f64::from(kbd_x) && x < f64::from(kbd_x + layout.kbd_w)
 }
 
 /// Telemetry-aware hit-test for the `TopBar` keyboard layout indicator (`RUSTYOS-048`).
@@ -932,12 +1187,18 @@ pub fn check_top_bar_kbd_click_for_telemetry(
     x: f64,
     y: f64,
 ) -> bool {
-    if y < 0.0 || y > f64::from(TOP_BAR_HEIGHT) {
-        return false;
-    }
-    let layout =
-        compute_top_bar_right_layout(screen_width, has_battery, notification_count, clock_text);
-    x >= f64::from(layout.kbd_x) && x < f64::from(layout.kbd_x + layout.kbd_w)
+    check_top_bar_kbd_click_for_options(
+        screen_width,
+        clock_text,
+        TopBarLayoutOptions {
+            has_battery,
+            notification_count,
+            show_input_source: true,
+            ..TopBarLayoutOptions::default()
+        },
+        x,
+        y,
+    )
 }
 
 /// Checks if `(x, y)` clicked one of the `TopBar` system tray pills and returns its visible index (`RUSTYOS-032`).
@@ -949,15 +1210,44 @@ pub fn check_top_bar_tray_click(
     x: f64,
     y: f64,
 ) -> Option<usize> {
-    check_top_bar_tray_click_for_telemetry(
+    check_top_bar_tray_click_for_options(
         screen_width,
-        false,
-        notification_count,
         "12:00",
+        TopBarLayoutOptions {
+            notification_count,
+            show_tray: true,
+            show_input_source: true,
+            ..TopBarLayoutOptions::default()
+        },
         tray_count,
         x,
         y,
     )
+}
+
+/// Option-aware hit-test for `TopBar` system tray icons (`RUSTYOS-049`).
+#[must_use]
+pub fn check_top_bar_tray_click_for_options(
+    screen_width: i32,
+    clock_text: &str,
+    opts: TopBarLayoutOptions,
+    tray_count: usize,
+    x: f64,
+    y: f64,
+) -> Option<usize> {
+    if !opts.show_tray || y < 0.0 || y > f64::from(TOP_BAR_HEIGHT) {
+        return None;
+    }
+    for (idx, (bx, _by, bw, _bh)) in
+        tray_slot_rects_with_options(screen_width, clock_text, opts, tray_count)
+            .into_iter()
+            .enumerate()
+    {
+        if x >= f64::from(bx) && x < f64::from(bx + bw) {
+            return Some(idx);
+        }
+    }
+    None
 }
 
 /// Telemetry-aware hit-test for `TopBar` system tray icons (`RUSTYOS-048`).
@@ -971,24 +1261,19 @@ pub fn check_top_bar_tray_click_for_telemetry(
     x: f64,
     y: f64,
 ) -> Option<usize> {
-    if y < 0.0 || y > f64::from(TOP_BAR_HEIGHT) {
-        return None;
-    }
-    for (idx, (bx, _by, bw, _bh)) in tray_slot_rects_with_layout(
+    check_top_bar_tray_click_for_options(
         screen_width,
-        has_battery,
-        notification_count,
         clock_text,
+        TopBarLayoutOptions {
+            has_battery,
+            notification_count,
+            show_tray: true,
+            ..TopBarLayoutOptions::default()
+        },
         tray_count,
+        x,
+        y,
     )
-    .into_iter()
-    .enumerate()
-    {
-        if x >= f64::from(bx) && x < f64::from(bx + bw) {
-            return Some(idx);
-        }
-    }
-    None
 }
 
 fn quick_settings_rect(width: i32, height: i32) -> (i32, i32, i32, i32) {
@@ -1001,10 +1286,10 @@ fn quick_settings_rect(width: i32, height: i32) -> (i32, i32, i32, i32) {
 
 #[must_use]
 fn dock_layout_bounds(width: i32, height: i32, window_count: usize) -> (i32, i32, i32, usize) {
-    let items_count = (3 + window_count).max(3);
+    let items_count = DOCK_PINNED_COUNT + window_count + DOCK_UTILITY_COUNT;
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let count_i32 = items_count as i32;
-    let divider_extra = i32::from(window_count > 0) * DOCK_DIVIDER_GAP;
+    let divider_extra = DOCK_DIVIDER_GAP;
     let raw_width = count_i32 * DOCK_ITEM_SIZE
         + (count_i32 - 1) * DOCK_ITEM_GAP
         + DOCK_PADDING * 2
@@ -1026,9 +1311,10 @@ fn dock_slot_rect(
     if slot_idx >= items_count {
         return None;
     }
+    let left_count = DOCK_PINNED_COUNT + window_count;
     let item_size = DOCK_ITEM_SIZE;
     let slot_i32 = i32::try_from(slot_idx).ok()?;
-    let divider_shift = if window_count > 0 && slot_idx >= 3 {
+    let divider_shift = if slot_idx >= left_count {
         DOCK_DIVIDER_GAP
     } else {
         0
@@ -1043,6 +1329,47 @@ fn dock_slot_rect(
     ))
 }
 
+#[must_use]
+fn dock_tooltip_label(dock_view: &DockViewState<'_>, slot_idx: usize) -> Option<String> {
+    let left_count = DOCK_PINNED_COUNT + dock_view.windows.len();
+    match slot_idx {
+        0 => Some("Files".to_string()),
+        1 => Some("Overview".to_string()),
+        2 => Some("Terminal".to_string()),
+        3 => Some("Browser".to_string()),
+        4 => Some("Notes".to_string()),
+        5 => Some("Settings".to_string()),
+        n if n < left_count => dock_view
+            .windows
+            .get(n - DOCK_PINNED_COUNT)
+            .map(|w| truncate_ascii(&w.title, 26)),
+        n if n == left_count => Some("Downloads".to_string()),
+        n if n == left_count + 1 => Some("Trash".to_string()),
+        _ => None,
+    }
+}
+
+#[must_use]
+fn dock_tooltip_rect_and_label(
+    width: i32,
+    height: i32,
+    dock_view: &DockViewState<'_>,
+) -> Option<(Rectangle<i32, smithay::utils::Physical>, String)> {
+    let slot_idx = dock_view.hover_slot?;
+    let slot = dock_slot_rect(width, height, dock_view.windows.len(), slot_idx)?;
+    let label = dock_tooltip_label(dock_view, slot_idx)?;
+    let text_w = crate::text::measure_ui_text_width(&label, 12.0, crate::text::FontWeight::Bold);
+    let pill_w = (text_w + 22).clamp(48, 220);
+    let pill_h = 26;
+    let slot_center_x = slot.loc.x + slot.size.w / 2;
+    let pill_x = (slot_center_x - pill_w / 2).clamp(12, (width - pill_w - 12).max(12));
+    let pill_y = (height - DOCK_HEIGHT - DOCK_MARGIN_BOTTOM - pill_h - 14).max(TOP_BAR_HEIGHT + 8);
+    Some((
+        Rectangle::new(Point::from((pill_x, pill_y)), Size::from((pill_w, pill_h))),
+        label,
+    ))
+}
+
 /// Hit-tests `(x, y)` against Dock slots and returns the hovered/clicked slot index (`RUSTYOS-023`).
 #[must_use]
 pub fn check_dock_slot(
@@ -1051,7 +1378,7 @@ pub fn check_dock_slot(
     x: f64,
     y: f64,
 ) -> Option<usize> {
-    let items_count = (3 + window_count).max(3);
+    let items_count = DOCK_PINNED_COUNT + window_count + DOCK_UTILITY_COUNT;
     for idx in 0..items_count {
         if let Some(rect) = dock_slot_rect(screen_size.w, screen_size.h, window_count, idx) {
             let rx = f64::from(rect.loc.x);
@@ -1066,7 +1393,7 @@ pub fn check_dock_slot(
     None
 }
 
-/// Hit-tests a pointer click at `(x, y)` against the bottom Dock (`RUSTYOS-023`).
+/// Hit-tests a pointer click at `(x, y)` against the bottom Dock (`RUSTYOS-023` / `RUSTYOS-050`).
 #[must_use]
 pub fn check_dock_click(
     screen_size: Size<i32, smithay::utils::Physical>,
@@ -1075,14 +1402,18 @@ pub fn check_dock_click(
     y: f64,
 ) -> Option<DockHit> {
     let slot = check_dock_slot(screen_size, window_count, x, y)?;
+    let left_count = DOCK_PINNED_COUNT + window_count;
     match slot {
-        0 => Some(DockHit::PinnedTerminal),
-        1 => Some(DockHit::PinnedFiles),
-        2 => Some(DockHit::ToggleOverview),
-        n => {
-            let win_idx = n - 3;
-            (win_idx < window_count).then_some(DockHit::WindowSlot(win_idx))
-        }
+        0 => Some(DockHit::PinnedFiles),
+        1 => Some(DockHit::ToggleOverview),
+        2 => Some(DockHit::PinnedTerminal),
+        3 => Some(DockHit::PinnedBrowser),
+        4 => Some(DockHit::PinnedNotes),
+        5 => Some(DockHit::PinnedSettings),
+        n if n < left_count => Some(DockHit::WindowSlot(n - DOCK_PINNED_COUNT)),
+        n if n == left_count => Some(DockHit::PinnedDownloads),
+        n if n == left_count + 1 => Some(DockHit::PinnedTrash),
+        _ => None,
     }
 }
 
@@ -1272,6 +1603,12 @@ pub const fn top_bar_menu_items(
             ("Control Center", TopBarMenuAction::OpenControlCenter),
             ("Refresh Metrics", TopBarMenuAction::RefreshMetrics),
         ],
+        TopBarMenuHit::Go => &[
+            ("Workspace Overview", TopBarMenuAction::OpenOverview),
+            ("Next Workspace", TopBarMenuAction::NextWorkspace),
+            ("Previous Workspace", TopBarMenuAction::PrevWorkspace),
+            ("Spotlight Search", TopBarMenuAction::OpenSpotlight),
+        ],
         TopBarMenuHit::Window => &[
             ("Focus Next Window", TopBarMenuAction::FocusNextWindow),
             (
@@ -1279,12 +1616,18 @@ pub const fn top_bar_menu_items(
                 TopBarMenuAction::ToggleMaximizeFocused,
             ),
             ("Minimize Window", TopBarMenuAction::MinimizeFocused),
+            ("Toggle Float / Tile", TopBarMenuAction::ToggleLayout),
             ("Close Window", TopBarMenuAction::CloseFocused),
+        ],
+        TopBarMenuHit::Help => &[
+            ("About RustyOS", TopBarMenuAction::AboutRustyOs),
+            ("Keyboard Shortcuts", TopBarMenuAction::ShowShortcuts),
+            ("Refresh Metrics", TopBarMenuAction::RefreshMetrics),
         ],
     }
 }
 
-/// Computes the glass dropdown popover rectangle anchored beneath `menu` (`RUSTYOS-048`).
+/// Computes the glass dropdown popover rectangle anchored beneath `menu` (`RUSTYOS-048`/`049`).
 #[must_use]
 pub fn top_bar_menu_popover_rect(
     active_app_name: &str,
@@ -1297,10 +1640,12 @@ pub fn top_bar_menu_popover_rect(
         TopBarMenuHit::File => left.file_x,
         TopBarMenuHit::Edit => left.edit_x,
         TopBarMenuHit::View => left.view_x,
+        TopBarMenuHit::Go => left.go_x,
         TopBarMenuHit::Window => left.win_x,
+        TopBarMenuHit::Help => left.help_x,
     };
     let items_len = i32::try_from(top_bar_menu_items(menu).len()).unwrap_or(3);
-    let pop_w = 212;
+    let pop_w = 216;
     let pop_h = 12 + items_len * 28;
     (anchor_x, TOP_BAR_HEIGHT + 6, pop_w, pop_h)
 }
@@ -1331,13 +1676,13 @@ pub fn check_top_bar_menu_popover_click(
     TopBarMenuPopoverClick::Inside
 }
 
-/// Hit-tests `(x, y)` against the macOS 27 `TopBar` Left Menu (`Logo`, `App`, `File`, `Edit`, `View`, `Window`) (`RUSTYOS-038`).
+/// Hit-tests `(x, y)` against the `TopBar` Left Menu (`Logo`, `App`, `File`, `Edit`, `View`, `Go`, `Window`, `Help`) (`RUSTYOS-038`/`049`).
 #[must_use]
 pub fn check_top_bar_menu_click(x: f64, y: f64) -> Option<TopBarMenuHit> {
     check_top_bar_menu_click_for_app("RustyOS", x, y)
 }
 
-/// Active-app-width-aware hit-test for the `TopBar` Left Menu (`RUSTYOS-048`).
+/// Active-app-width-aware hit-test for the `TopBar` Left Menu (`RUSTYOS-048`/`049`).
 #[must_use]
 pub fn check_top_bar_menu_click_for_app(
     active_app_name: &str,
@@ -1351,38 +1696,63 @@ pub fn check_top_bar_menu_click_for_app(
     if x >= f64::from(TOP_BAR_LOGO_X) && x < f64::from(TOP_BAR_LOGO_X + TOP_BAR_LOGO_W) {
         return Some(TopBarMenuHit::SystemLogo);
     }
-    if x >= f64::from(left.app_x) && x < f64::from(left.app_x + left.app_w) {
-        return Some(TopBarMenuHit::ActiveApp);
-    }
-    if x >= f64::from(left.file_x) && x < f64::from(left.file_x + TOP_BAR_MENU_FILE_W) {
-        return Some(TopBarMenuHit::File);
-    }
-    if x >= f64::from(left.edit_x) && x < f64::from(left.edit_x + TOP_BAR_MENU_EDIT_W) {
-        return Some(TopBarMenuHit::Edit);
-    }
-    if x >= f64::from(left.view_x) && x < f64::from(left.view_x + TOP_BAR_MENU_VIEW_W) {
-        return Some(TopBarMenuHit::View);
-    }
-    if x >= f64::from(left.win_x) && x < f64::from(left.win_x + TOP_BAR_MENU_WINDOW_W) {
-        return Some(TopBarMenuHit::Window);
+    for (hit, bx, bw) in [
+        (TopBarMenuHit::ActiveApp, left.app_x, left.app_w),
+        (TopBarMenuHit::File, left.file_x, left.file_w),
+        (TopBarMenuHit::Edit, left.edit_x, left.edit_w),
+        (TopBarMenuHit::View, left.view_x, left.view_w),
+        (TopBarMenuHit::Go, left.go_x, left.go_w),
+        (TopBarMenuHit::Window, left.win_x, left.win_w),
+        (TopBarMenuHit::Help, left.help_x, left.help_w),
+    ] {
+        if x >= f64::from(bx) && x < f64::from(bx + bw) {
+            return Some(hit);
+        }
     }
     None
 }
 
-/// Checks if `(x, y)` clicked the `TopBar` Layout badge (`Float` / `Tile`).
+/// Checks if `(x, y)` clicked the `TopBar` Layout badge when visible (`Float` / `Tile`).
 #[must_use]
 pub fn check_top_bar_layout_click(x: f64, y: f64) -> bool {
-    check_top_bar_layout_click_for_app("RustyOS", x, y)
+    check_top_bar_layout_click_with_options("RustyOS", true, x, y)
 }
 
 /// Active-app-width-aware hit-test for the `TopBar` Layout badge (`RUSTYOS-048`).
 #[must_use]
 pub fn check_top_bar_layout_click_for_app(active_app_name: &str, x: f64, y: f64) -> bool {
+    check_top_bar_layout_click_with_options(active_app_name, true, x, y)
+}
+
+/// Option-aware hit-test for the optional `TopBar` Layout badge (`RUSTYOS-049`).
+#[must_use]
+pub fn check_top_bar_layout_click_with_options(
+    active_app_name: &str,
+    show_workspaces: bool,
+    x: f64,
+    y: f64,
+) -> bool {
+    if !show_workspaces || y < 0.0 || y > f64::from(TOP_BAR_HEIGHT) {
+        return false;
+    }
+    let left = compute_top_bar_left_layout_with_options(active_app_name, show_workspaces);
+    x >= f64::from(left.layout_x) && x < f64::from(left.layout_x + left.layout_w)
+}
+
+/// Option-aware hit-test for the right `TopBar` Spotlight Search loupe (`RUSTYOS-049`).
+#[must_use]
+pub fn check_top_bar_search_click_for_options(
+    screen_width: i32,
+    clock_text: &str,
+    opts: TopBarLayoutOptions,
+    x: f64,
+    y: f64,
+) -> bool {
     if y < 0.0 || y > f64::from(TOP_BAR_HEIGHT) {
         return false;
     }
-    let left = compute_top_bar_left_layout(active_app_name);
-    x >= f64::from(left.layout_x) && x < f64::from(left.layout_x + left.layout_w)
+    let right = compute_top_bar_right_layout_with_options(screen_width, clock_text, opts);
+    x >= f64::from(right.search_x - 3) && x < f64::from(right.search_x + right.search_w + 3)
 }
 
 /// Checks if `(x, y)` clicked the right `TopBar` Spotlight Search loupe (`RUSTYOS-048`).
@@ -1395,18 +1765,39 @@ pub fn check_top_bar_search_click_for_telemetry(
     x: f64,
     y: f64,
 ) -> bool {
-    if y < 0.0 || y > f64::from(TOP_BAR_HEIGHT) {
-        return false;
-    }
-    let right =
-        compute_top_bar_right_layout(screen_width, has_battery, notification_count, clock_text);
-    x >= f64::from(right.search_x - 3) && x < f64::from(right.search_x + right.search_w + 3)
+    check_top_bar_search_click_for_options(
+        screen_width,
+        clock_text,
+        TopBarLayoutOptions {
+            has_battery,
+            notification_count,
+            ..TopBarLayoutOptions::default()
+        },
+        x,
+        y,
+    )
 }
 
-/// Checks if `(x, y)` clicked the right `TopBar` telemetry status pill.
+/// Checks if `(x, y)` clicked the right `TopBar` Control Center / status cluster.
 #[must_use]
 pub fn check_top_bar_status_click(screen_width: i32, x: f64, y: f64) -> bool {
     check_top_bar_status_click_for_telemetry(screen_width, false, 0, "12:00", x, y)
+}
+
+/// Option-aware hit-test for the `TopBar` status / Control Center cluster (`RUSTYOS-049`).
+#[must_use]
+pub fn check_top_bar_status_click_for_options(
+    screen_width: i32,
+    clock_text: &str,
+    opts: TopBarLayoutOptions,
+    x: f64,
+    y: f64,
+) -> bool {
+    if y < 0.0 || y > f64::from(TOP_BAR_HEIGHT) {
+        return false;
+    }
+    let right = compute_top_bar_right_layout_with_options(screen_width, clock_text, opts);
+    x >= f64::from(right.status_hit_x) && x < f64::from(right.status_hit_x + right.status_hit_w)
 }
 
 /// Telemetry-aware hit-test for the `TopBar` status / Control Center cluster (`RUSTYOS-048`).
@@ -1419,12 +1810,17 @@ pub fn check_top_bar_status_click_for_telemetry(
     x: f64,
     y: f64,
 ) -> bool {
-    if y < 0.0 || y > f64::from(TOP_BAR_HEIGHT) {
-        return false;
-    }
-    let right =
-        compute_top_bar_right_layout(screen_width, has_battery, notification_count, clock_text);
-    x >= f64::from(right.status_pill_x) && x < f64::from(right.status_pill_x + right.status_pill_w)
+    check_top_bar_status_click_for_options(
+        screen_width,
+        clock_text,
+        TopBarLayoutOptions {
+            has_battery,
+            notification_count,
+            ..TopBarLayoutOptions::default()
+        },
+        x,
+        y,
+    )
 }
 
 /// Hit-tests `(x, y)` against the open Quick Settings popover controls (`RUSTYOS-021`, `RUSTYOS-037`, `RUSTYOS-048`).
@@ -1550,16 +1946,19 @@ fn render_top_bar(
     telemetry: &TopBarTelemetry<'_>,
     has_text: bool,
 ) {
-    // 1. TopBar Background (full width, height 32, elevated surface)
-    let top_bar_geo = Rectangle::new(Point::from((0, 0)), Size::from((width, TOP_BAR_HEIGHT)));
-    elements.push(make_solid_element(top_bar_geo, COLOR_SURFACE_ELEVATED));
+    let left_layout =
+        compute_top_bar_left_layout_with_options("RustyOS", telemetry.show_workspaces);
 
-    // 1b. TopBar 1px bottom border (subtle translucency)
-    let top_bar_border =
-        Rectangle::new(Point::from((0, TOP_BAR_HEIGHT - 1)), Size::from((width, 1)));
-    elements.push(make_solid_element(top_bar_border, COLOR_BORDER));
+    // 1. TopBar Background (opaque only when reduce_transparency is requested)
+    if telemetry.reduce_transparency {
+        let top_bar_geo = Rectangle::new(Point::from((0, 0)), Size::from((width, TOP_BAR_HEIGHT)));
+        elements.push(make_solid_element(top_bar_geo, COLOR_SURFACE_ELEVATED));
+        let top_bar_border =
+            Rectangle::new(Point::from((0, TOP_BAR_HEIGHT - 1)), Size::from((width, 1)));
+        elements.push(make_solid_element(top_bar_border, COLOR_BORDER));
+    }
 
-    // 2. Active App Menu & Global Menus in TopBar (macOS 27 style, RUSTYOS-038)
+    // 2. Active App Menu placeholder (when no font renderer is active)
     elements.push(make_solid_element(
         Rectangle::new(
             Point::from((TOP_BAR_LOGO_X, TOP_BAR_ITEM_Y)),
@@ -1570,66 +1969,25 @@ fn render_top_bar(
     if !has_text {
         elements.push(make_solid_element(
             Rectangle::new(
-                Point::from((TOP_BAR_APP_X, TOP_BAR_ITEM_Y)),
-                Size::from((TOP_BAR_APP_MAX_W, TOP_BAR_ITEM_H)),
+                Point::from((left_layout.app_x, TOP_BAR_ITEM_Y)),
+                Size::from((left_layout.app_w, TOP_BAR_ITEM_H)),
             ),
             COLOR_SURFACE_OVERLAY,
         ));
     }
-    // Hairline divider before workspace indicators
-    elements.push(make_solid_element(
-        Rectangle::new(Point::from((TOP_BAR_SEPARATOR_X, 7)), Size::from((1, 12))),
-        COLOR_BORDER,
-    ));
 
-    // 3. Compact Workspaces indicators in TopBar (1..=9) (RUSTYOS-038)
-    let ws_btn_height = TOP_BAR_ITEM_H;
-    let ws_y = TOP_BAR_ITEM_Y;
-    let mut start_x = WS_START_X;
-
-    for ws in 1..=9 {
-        let is_active = ws == active_workspace;
-        let ws_geo = Rectangle::new(
-            Point::from((start_x, ws_y)),
-            Size::from((WS_BTN_WIDTH, ws_btn_height)),
+    // 3. Optional Workspace indicators and layout badge (`menubar_show_workspaces = true`)
+    if telemetry.show_workspaces {
+        render_top_bar_workspaces(
+            elements,
+            &left_layout,
+            active_workspace,
+            layout_mode,
+            has_text,
         );
-
-        if is_active {
-            elements.push(make_solid_element(ws_geo, COLOR_ACCENT));
-        } else {
-            elements.push(make_solid_element(ws_geo, COLOR_SURFACE_OVERLAY));
-            if !has_text {
-                let pip_geo = Rectangle::new(
-                    Point::from((
-                        start_x + (WS_BTN_WIDTH - 6) / 2,
-                        ws_y + (ws_btn_height - 2) / 2,
-                    )),
-                    Size::from((6, 2)),
-                );
-                elements.push(make_solid_element(pip_geo, COLOR_SUBTLE));
-            }
-        }
-        start_x += WS_BTN_STRIDE;
     }
 
-    // 4. Layout indicator in TopBar
-    let layout_bg = Rectangle::new(
-        Point::from((start_x + 8, ws_y)),
-        Size::from((52, ws_btn_height)),
-    );
-    elements.push(make_solid_element(layout_bg, COLOR_SURFACE_OVERLAY));
-
-    // Left accent strip for layout indicator
-    let layout_accent = if layout_mode == "master-stack" {
-        COLOR_ACCENT
-    } else {
-        COLOR_SUBTLE
-    };
-    let layout_strip = Rectangle::new(
-        Point::from((start_x + 8, ws_y)),
-        Size::from((3, ws_btn_height)),
-    );
-    elements.push(make_solid_element(layout_strip, layout_accent));
+    let ws_y = TOP_BAR_ITEM_Y;
 
     // 4. Status area on the right side of TopBar (battery, network, audio, clock)
     let (status_x, status_y, status_pill_width, status_h) = status_pill_rect(width);
@@ -1674,6 +2032,68 @@ fn render_top_bar(
     }
 }
 
+fn render_top_bar_workspaces(
+    elements: &mut Vec<SolidColorRenderElement>,
+    left_layout: &TopBarLeftLayout,
+    active_workspace: u8,
+    layout_mode: &str,
+    has_text: bool,
+) {
+    elements.push(make_solid_element(
+        Rectangle::new(
+            Point::from((left_layout.separator_x, 6)),
+            Size::from((1, 12)),
+        ),
+        COLOR_BORDER,
+    ));
+
+    let ws_btn_height = TOP_BAR_ITEM_H;
+    let ws_y = TOP_BAR_ITEM_Y;
+    let mut start_x = left_layout.ws_start_x;
+
+    for ws in 1..=9 {
+        let is_active = ws == active_workspace;
+        let ws_geo = Rectangle::new(
+            Point::from((start_x, ws_y)),
+            Size::from((WS_BTN_WIDTH, ws_btn_height)),
+        );
+
+        if is_active {
+            elements.push(make_solid_element(ws_geo, COLOR_ACCENT));
+        } else {
+            elements.push(make_solid_element(ws_geo, COLOR_SURFACE_OVERLAY));
+            if !has_text {
+                let pip_geo = Rectangle::new(
+                    Point::from((
+                        start_x + (WS_BTN_WIDTH - 6) / 2,
+                        ws_y + (ws_btn_height - 2) / 2,
+                    )),
+                    Size::from((6, 2)),
+                );
+                elements.push(make_solid_element(pip_geo, COLOR_SUBTLE));
+            }
+        }
+        start_x += WS_BTN_STRIDE;
+    }
+
+    let layout_bg = Rectangle::new(
+        Point::from((left_layout.layout_x, ws_y)),
+        Size::from((left_layout.layout_w, ws_btn_height)),
+    );
+    elements.push(make_solid_element(layout_bg, COLOR_SURFACE_OVERLAY));
+
+    let layout_accent = if layout_mode == "master-stack" {
+        COLOR_ACCENT
+    } else {
+        COLOR_SUBTLE
+    };
+    let layout_strip = Rectangle::new(
+        Point::from((left_layout.layout_x, ws_y)),
+        Size::from((3, ws_btn_height)),
+    );
+    elements.push(make_solid_element(layout_strip, layout_accent));
+}
+
 fn render_dock(
     elements: &mut Vec<SolidColorRenderElement>,
     width: i32,
@@ -1682,11 +2102,9 @@ fn render_dock(
     has_focused_window: bool,
 ) {
     // 5. Dock Background (floating centered pill at the bottom with outer rim)
-    let dock_items_count = (3 + window_count).max(3); // 3 pinned apps + open windows
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    let dock_width = ((dock_items_count as i32) * 52 + 16).min(width - 48);
-    let dock_x = (width - dock_width) / 2;
-    let dock_y = height - DOCK_HEIGHT - DOCK_MARGIN_BOTTOM;
+    let (dock_x, dock_y, dock_width, dock_items_count) =
+        dock_layout_bounds(width, height, window_count);
+    let left_count = DOCK_PINNED_COUNT + window_count;
 
     // 5a. Outer glass highlight rim (1px around dock)
     let dock_rim_geo = Rectangle::new(
@@ -1703,51 +2121,43 @@ fn render_dock(
     elements.push(make_solid_element(dock_geo, COLOR_SURFACE_ELEVATED));
 
     // 6. Dock Item slots
-    let mut item_x = dock_x + 8;
-    let item_y = dock_y + 8;
-    let item_size = 40;
-
     for i in 0..dock_items_count {
-        let is_running_window = i >= 3;
+        let Some(slot_rect) = dock_slot_rect(width, height, window_count, i) else {
+            continue;
+        };
+        let is_running_window = i >= DOCK_PINNED_COUNT && i < left_count;
         let is_focused = is_running_window && has_focused_window;
 
-        // Base icon tile
-        let item_geo = Rectangle::new(
-            Point::from((item_x, item_y)),
-            Size::from((item_size, item_size)),
-        );
-        elements.push(make_solid_element(item_geo, COLOR_SURFACE_OVERLAY));
-
-        // Inner app glyph plate
-        let inner_size = 28;
-        let inner_offset = (item_size - inner_size) / 2;
+        let inner_size = 40;
+        let inner_offset = (slot_rect.size.w - inner_size) / 2;
         let inner_geo = Rectangle::new(
-            Point::from((item_x + inner_offset, item_y + inner_offset)),
+            Point::from((
+                slot_rect.loc.x + inner_offset,
+                slot_rect.loc.y + inner_offset - 2,
+            )),
             Size::from((inner_size, inner_size)),
         );
         let inner_color = match i {
-            0 => COLOR_ACCENT,       // Terminal / Core
-            1 => COLOR_ACCENT_MUTED, // Files
-            2 => COLOR_SUBTLE,       // Browser / Settings
+            0 => COLOR_ACCENT_MUTED, // Files
+            1 => COLOR_SUBTLE,       // Overview
+            2 => COLOR_ACCENT,       // Terminal
+            3..=5 => COLOR_ACCENT_HOVER,
             _ if is_focused => COLOR_ACCENT_HOVER,
             _ => COLOR_MUTED,
         };
         elements.push(make_solid_element(inner_geo, inner_color));
 
-        // Active running indicator pip under running windows
+        // Active running indicator pip under Files / running windows
         if is_running_window || i == 0 {
-            let pip_width = 8;
             let pip_geo = Rectangle::new(
                 Point::from((
-                    item_x + (item_size - pip_width) / 2,
-                    dock_y + DOCK_HEIGHT - 5,
+                    slot_rect.loc.x + (slot_rect.size.w - 4) / 2,
+                    dock_y + DOCK_HEIGHT - 7,
                 )),
-                Size::from((pip_width, 2)),
+                Size::from((4, 4)),
             );
             elements.push(make_solid_element(pip_geo, COLOR_ACCENT));
         }
-
-        item_x += item_size + 12;
     }
 }
 
@@ -2129,19 +2539,30 @@ pub fn generate_shell_render_elements(
     elements
 }
 
-/// Checks if a mouse click at `(x, y)` was inside the `TopBar` workspaces area and returns the target workspace (1..=9).
+/// Checks if a mouse click at `(x, y)` was inside the `TopBar` workspaces area when visible and returns the target workspace (1..=9).
 #[must_use]
 pub fn check_top_bar_workspace_click(x: f64, y: f64) -> Option<u8> {
-    check_top_bar_workspace_click_for_app("RustyOS", x, y)
+    check_top_bar_workspace_click_with_options("RustyOS", true, x, y)
 }
 
 /// Active-app-width-aware hit-test for the `TopBar` workspaces area (`RUSTYOS-048`).
 #[must_use]
 pub fn check_top_bar_workspace_click_for_app(active_app_name: &str, x: f64, y: f64) -> Option<u8> {
-    if y < 0.0 || y > f64::from(TOP_BAR_HEIGHT) {
+    check_top_bar_workspace_click_with_options(active_app_name, true, x, y)
+}
+
+/// Option-aware hit-test for the optional `TopBar` workspaces area (`RUSTYOS-049`).
+#[must_use]
+pub fn check_top_bar_workspace_click_with_options(
+    active_app_name: &str,
+    show_workspaces: bool,
+    x: f64,
+    y: f64,
+) -> Option<u8> {
+    if !show_workspaces || y < 0.0 || y > f64::from(TOP_BAR_HEIGHT) {
         return None;
     }
-    let left = compute_top_bar_left_layout(active_app_name);
+    let left = compute_top_bar_left_layout_with_options(active_app_name, show_workspaces);
     let start_x = f64::from(left.ws_start_x);
     let stride = f64::from(WS_BTN_STRIDE);
     let total_width = stride * 9.0;
@@ -2542,66 +2963,117 @@ pub fn generate_shell_text_elements(
         }
     }
 
-    // 1b. TopBar Left Active App & Global Menus (macOS 27 dynamic layout, RUSTYOS-038, RUSTYOS-048)
+    // 1b. TopBar Left Active App & Global Menus (`RUSTYOS-038`, `RUSTYOS-048`, `RUSTYOS-049`)
     let ws_btn_height = TOP_BAR_ITEM_H;
     let ws_y = TOP_BAR_ITEM_Y;
+    let bar_shadow = [8, 5, 14, 96];
+    let drop_shadow = !top_telemetry.reduce_transparency;
 
     let active_app_name = dock_view
         .windows
         .iter()
         .find(|w| w.focused)
         .map_or_else(|| "RustyOS".to_owned(), |w| extract_app_name(&w.title));
-    let left_layout = compute_top_bar_left_layout(&active_app_name);
+    let opts = top_telemetry.layout_options();
+    let left_layout =
+        compute_top_bar_left_layout_with_options(&active_app_name, top_telemetry.show_workspaces);
 
-    if let Some(el) = text_cache.render_label(
+    let app_bounds = Rectangle::new(
+        Point::from((left_layout.app_x, ws_y)),
+        Size::from((left_layout.app_w, ws_btn_height)),
+    );
+    let pure_white = [252, 250, 255, 255];
+    if let Some(el) = text_cache.render_label_centered_weighted(
         renderer,
         &active_app_name,
-        12.5,
-        text_bright,
-        Point::from((left_layout.app_x, ws_y + 1)),
+        crate::text::FontWeight::Bold,
+        TOP_BAR_FONT_SIZE,
+        pure_white,
+        app_bounds,
     ) {
         elements.push(el);
     }
+    if drop_shadow
+        && let Some(el) = text_cache.render_label_centered_weighted(
+            renderer,
+            &active_app_name,
+            crate::text::FontWeight::Bold,
+            TOP_BAR_FONT_SIZE,
+            bar_shadow,
+            Rectangle::new(
+                Point::from((app_bounds.loc.x, app_bounds.loc.y + 1)),
+                app_bounds.size,
+            ),
+        )
+    {
+        elements.push(el);
+    }
 
-    let text_menu = [215, 205, 230, 230];
+    let text_menu = [245, 242, 252, 245];
     for (menu_kind, name, x, w) in [
         (
             TopBarMenuHit::File,
             "File",
             left_layout.file_x,
-            TOP_BAR_MENU_FILE_W,
+            left_layout.file_w,
         ),
         (
             TopBarMenuHit::Edit,
             "Edit",
             left_layout.edit_x,
-            TOP_BAR_MENU_EDIT_W,
+            left_layout.edit_w,
         ),
         (
             TopBarMenuHit::View,
             "View",
             left_layout.view_x,
-            TOP_BAR_MENU_VIEW_W,
+            left_layout.view_w,
         ),
+        (TopBarMenuHit::Go, "Go", left_layout.go_x, left_layout.go_w),
         (
             TopBarMenuHit::Window,
             "Window",
             left_layout.win_x,
-            TOP_BAR_MENU_WINDOW_W,
+            left_layout.win_w,
+        ),
+        (
+            TopBarMenuHit::Help,
+            "Help",
+            left_layout.help_x,
+            left_layout.help_w,
         ),
     ] {
         let color = if top_telemetry.active_menu == Some(menu_kind) {
-            text_bright
+            [255, 255, 255, 255]
         } else {
             text_menu
         };
         let bounds = Rectangle::new(Point::from((x, ws_y)), Size::from((w, ws_btn_height)));
-        if let Some(el) = text_cache.render_label_centered(renderer, name, 11.5, color, bounds) {
+        if let Some(el) = text_cache.render_label_centered_weighted(
+            renderer,
+            name,
+            crate::text::FontWeight::Regular,
+            TOP_BAR_FONT_SIZE,
+            color,
+            bounds,
+        ) {
+            elements.push(el);
+        }
+        if drop_shadow
+            && let Some(el) = text_cache.render_label_centered_weighted(
+                renderer,
+                name,
+                crate::text::FontWeight::Regular,
+                TOP_BAR_FONT_SIZE,
+                bar_shadow,
+                Rectangle::new(Point::from((x, ws_y + 1)), bounds.size),
+            )
+        {
             elements.push(el);
         }
     }
 
-    // Active TopBar left dropdown menu labels (`RUSTYOS-048`)
+    // Active TopBar left dropdown menu labels (`RUSTYOS-048`, `RUSTYOS-049`)
     if let Some(open_menu) = top_telemetry.active_menu {
         let (mx, my, mw, _) = top_bar_menu_popover_rect(&active_app_name, open_menu);
         for (idx, (label, _)) in top_bar_menu_items(open_menu).iter().enumerate() {
@@ -2610,7 +3082,7 @@ pub fn generate_shell_text_elements(
             if let Some(el) = text_cache.render_label(
                 renderer,
                 label,
-                11.5,
+                12.0,
                 text_bright,
                 Point::from((mx + 14, row_y + 5)),
             ) {
@@ -2620,76 +3092,94 @@ pub fn generate_shell_text_elements(
         }
     }
 
-    // 2. TopBar compact workspace digits (1..=9)
-    let mut start_x = left_layout.ws_start_x;
-    for ws in 1..=9 {
-        let color = if ws == active_workspace {
-            [255, 255, 255, 255]
+    // 2. Optional TopBar workspace digits & layout mode (`menubar_show_workspaces = true`)
+    if top_telemetry.show_workspaces {
+        let mut start_x = left_layout.ws_start_x;
+        for ws in 1..=9 {
+            let color = if ws == active_workspace {
+                [255, 255, 255, 255]
+            } else {
+                [210, 202, 224, 220]
+            };
+            let bounds = Rectangle::new(
+                Point::from((start_x, ws_y)),
+                Size::from((WS_BTN_WIDTH, ws_btn_height)),
+            );
+            if let Some(el) =
+                text_cache.render_label_centered(renderer, &ws.to_string(), 10.5, color, bounds)
+            {
+                elements.push(el);
+            }
+            start_x += WS_BTN_STRIDE;
+        }
+
+        let layout_label = if layout_mode == "master-stack" {
+            "Tile"
         } else {
-            [178, 168, 194, 210]
+            "Float"
         };
-        let bounds = Rectangle::new(
-            Point::from((start_x, ws_y)),
-            Size::from((WS_BTN_WIDTH, ws_btn_height)),
+        let layout_bounds = Rectangle::new(
+            Point::from((left_layout.layout_x, ws_y)),
+            Size::from((left_layout.layout_w, ws_btn_height)),
         );
-        if let Some(el) =
-            text_cache.render_label_centered(renderer, &ws.to_string(), 10.5, color, bounds)
-        {
+        if let Some(el) = text_cache.render_label_centered(
+            renderer,
+            layout_label,
+            11.0,
+            text_bright,
+            layout_bounds,
+        ) {
             elements.push(el);
         }
-        start_x += WS_BTN_STRIDE;
     }
 
-    // 3. Layout mode label
-    let layout_label = if layout_mode == "master-stack" {
-        "Tile"
-    } else {
-        "Float"
-    };
-    let layout_bounds = Rectangle::new(
-        Point::from((left_layout.layout_x, ws_y)),
-        Size::from((left_layout.layout_w, ws_btn_height)),
-    );
-    if let Some(el) =
-        text_cache.render_label_centered(renderer, layout_label, 11.0, text_bright, layout_bounds)
-    {
-        elements.push(el);
-    }
-
-    // 4. Right status cluster live clock, kbd, notification badge & tray (`RUSTYOS-048`)
-    let right_layout = compute_top_bar_right_layout(
-        width,
-        top_telemetry.has_battery,
-        top_telemetry.notification_count,
-        top_telemetry.clock_hhmm,
-    );
+    // 4. Right status cluster live clock and optional kbd / notification badge / tray (`RUSTYOS-049`)
+    let right_layout =
+        compute_top_bar_right_layout_with_options(width, top_telemetry.clock_hhmm, opts);
     let clock_bounds = Rectangle::new(
         Point::from((right_layout.clock_x, ws_y)),
         Size::from((right_layout.clock_w, ws_btn_height)),
     );
-    if let Some(el) = text_cache.render_label_centered(
+    if let Some(el) = text_cache.render_label_centered_weighted(
         renderer,
         top_telemetry.clock_hhmm,
-        10.5,
-        text_bright,
+        crate::text::FontWeight::Regular,
+        TOP_BAR_FONT_SIZE,
+        pure_white,
         clock_bounds,
     ) {
         elements.push(el);
     }
-
-    // 4a. Keyboard layout indicator & unread notification badge in TopBar (`RUSTYOS-024`/`029`)
-    let kbd_bounds = Rectangle::new(
-        Point::from((right_layout.kbd_x, ws_y)),
-        Size::from((right_layout.kbd_w, ws_btn_height)),
-    );
-    if let Some(el) = text_cache.render_label_centered(
-        renderer,
-        top_telemetry.kbd_layout,
-        10.5,
-        text_bright,
-        kbd_bounds,
-    ) {
+    if drop_shadow
+        && let Some(el) = text_cache.render_label_centered_weighted(
+            renderer,
+            top_telemetry.clock_hhmm,
+            crate::text::FontWeight::Regular,
+            TOP_BAR_FONT_SIZE,
+            bar_shadow,
+            Rectangle::new(
+                Point::from((right_layout.clock_x, ws_y + 1)),
+                clock_bounds.size,
+            ),
+        )
+    {
         elements.push(el);
+    }
+
+    if let Some(kbd_x) = right_layout.kbd_x {
+        let kbd_bounds = Rectangle::new(
+            Point::from((kbd_x, ws_y)),
+            Size::from((right_layout.kbd_w, ws_btn_height)),
+        );
+        if let Some(el) = text_cache.render_label_centered(
+            renderer,
+            top_telemetry.kbd_layout,
+            10.5,
+            pure_white,
+            kbd_bounds,
+        ) {
+            elements.push(el);
+        }
     }
 
     if top_telemetry.notification_count > 0 {
@@ -2702,43 +3192,45 @@ pub fn generate_shell_text_elements(
             Point::from((right_layout.notif_x, ws_y)),
             Size::from((right_layout.notif_w, ws_btn_height)),
         );
-        if let Some(el) = text_cache.render_label_centered(
-            renderer,
-            &badge_label,
-            10.5,
-            text_bright,
-            badge_bounds,
-        ) {
+        if let Some(el) =
+            text_cache.render_label_centered(renderer, &badge_label, 10.5, pure_white, badge_bounds)
+        {
             elements.push(el);
         }
     }
 
-    // 4aa. System tray badges (`StatusNotifierItem`) left of keyboard layout (`RUSTYOS-032`)
-    let tray_rects = tray_slot_rects_with_layout(
-        width,
-        top_telemetry.has_battery,
-        top_telemetry.notification_count,
-        top_telemetry.clock_hhmm,
-        top_telemetry.tray_items.len(),
-    );
-    for (item, (tx, _ty, tw, _th)) in top_telemetry.tray_items.iter().zip(tray_rects) {
-        let has_tray_icon = item.icon_pixmap.is_some()
-            || (!item.icon_name.is_empty() && shape_cache.icons.has_named_icon(item.icon_name, 16));
-        if has_tray_icon {
-            continue;
-        }
-        let label_color = if item.attention {
-            [255, 210, 214, 255]
-        } else if item.passive {
-            text_muted
-        } else {
-            text_bright
-        };
-        let tray_bounds = Rectangle::new(Point::from((tx, ws_y)), Size::from((tw, ws_btn_height)));
-        if let Some(el) =
-            text_cache.render_label_centered(renderer, item.label, 9.5, label_color, tray_bounds)
-        {
-            elements.push(el);
+    if top_telemetry.show_tray {
+        let tray_rects = tray_slot_rects_with_options(
+            width,
+            top_telemetry.clock_hhmm,
+            opts,
+            top_telemetry.tray_items.len(),
+        );
+        for (item, (tx, _ty, tw, _th)) in top_telemetry.tray_items.iter().zip(tray_rects) {
+            let has_tray_icon = item.icon_pixmap.is_some()
+                || (!item.icon_name.is_empty()
+                    && shape_cache.icons.has_named_icon(item.icon_name, 16));
+            if has_tray_icon {
+                continue;
+            }
+            let label_color = if item.attention {
+                [255, 210, 214, 255]
+            } else if item.passive {
+                text_muted
+            } else {
+                pure_white
+            };
+            let tray_bounds =
+                Rectangle::new(Point::from((tx, ws_y)), Size::from((tw, ws_btn_height)));
+            if let Some(el) = text_cache.render_label_centered(
+                renderer,
+                item.label,
+                9.5,
+                label_color,
+                tray_bounds,
+            ) {
+                elements.push(el);
+            }
         }
     }
 
@@ -2786,8 +3278,29 @@ pub fn generate_shell_text_elements(
         }
     }
 
-    // Dock tiles now exclusively use XDG PNG, SHM, or procedural macOS 27 squircles (`RUSTYOS-048`).
-    let _ = (dock_view, shape_cache);
+    // 5. Dock hover tooltip label (`RUSTYOS-050`)
+    if !matches!(
+        overlay,
+        ShellOverlayView::Spotlight(_)
+            | ShellOverlayView::QuickSettings(_)
+            | ShellOverlayView::Switcher(_)
+    ) && let Some((tooltip_rect, tooltip_label)) =
+        dock_tooltip_rect_and_label(width, height, dock_view)
+        && let Some(el) = text_cache.render_label_centered_weighted(
+            renderer,
+            &tooltip_label,
+            crate::text::FontWeight::Bold,
+            12.0,
+            [252, 250, 255, 255],
+            Rectangle::new(
+                Point::from((tooltip_rect.loc.x, tooltip_rect.loc.y)),
+                Size::from((tooltip_rect.size.w, tooltip_rect.size.h)),
+            ),
+        )
+    {
+        elements.push(el);
+    }
+    let _ = shape_cache;
 
     elements
 }
@@ -3443,7 +3956,7 @@ fn push_soft_shadow(
     }
 }
 
-/// Draws monochrome status glyphs (signal, volume, battery) left of the clock (`RUSTYOS-036`).
+/// Draws monochrome macOS Menu Bar glyphs (`[Volume] · [Battery] · Wi-Fi · Search · Control Center`) (`RUSTYOS-036`, `RUSTYOS-049`).
 fn push_top_bar_right_glyphs(
     out: &mut Vec<CompositorRenderElement>,
     shape_cache: &mut crate::surfaces::UiShapeCache,
@@ -3453,69 +3966,78 @@ fn push_top_bar_right_glyphs(
 ) {
     use crate::surfaces::UiGlyphKind;
 
-    let white = [244, 240, 250, 255];
-    let dim_white = [220, 212, 236, 225];
+    let white = [252, 250, 255, 255];
+    let shadow = [8, 5, 14, 96];
+    let drop_shadow = !t.reduce_transparency;
     let glyph_y = TOP_BAR_ITEM_Y + (TOP_BAR_ITEM_H - 16) / 2;
 
-    if let Some(el) = shape_cache.ui_glyph_element(
-        renderer,
-        UiGlyphKind::Search,
-        15,
-        dim_white,
-        Point::from((right.search_x + 1, glyph_y + 1)),
-    ) {
-        out.push(CompositorRenderElement::Memory(el));
+    let mut push_glyph = |kind: UiGlyphKind,
+                          size_px: i32,
+                          rgba: [u8; 4],
+                          loc: Point<i32, smithay::utils::Logical>| {
+        if let Some(el) = shape_cache.ui_glyph_element(renderer, kind, size_px, rgba, loc) {
+            out.push(CompositorRenderElement::Memory(el));
+        }
+        if drop_shadow
+            && let Some(el) = shape_cache.ui_glyph_element(
+                renderer,
+                kind,
+                size_px,
+                shadow,
+                Point::from((loc.x, loc.y + 1)),
+            )
+        {
+            out.push(CompositorRenderElement::Memory(el));
+        }
+    };
+
+    if let Some(vx) = right.volume_x {
+        push_glyph(
+            UiGlyphKind::Volume {
+                level_percent: t.volume_percent,
+                muted: t.audio_muted,
+            },
+            16,
+            white,
+            Point::from((vx, glyph_y)),
+        );
     }
-    if let Some(el) = shape_cache.ui_glyph_element(
-        renderer,
+    if let Some(bx) = right.battery_x {
+        push_glyph(
+            UiGlyphKind::Battery {
+                percent: t.battery_percent,
+                charging: t.ac_online && t.battery_percent < 99,
+            },
+            20,
+            white,
+            Point::from((bx, TOP_BAR_ITEM_Y)),
+        );
+    }
+    push_glyph(
         UiGlyphKind::Wifi {
             connected: t.net_connected,
         },
         16,
         white,
         Point::from((right.wifi_x, glyph_y)),
-    ) {
-        out.push(CompositorRenderElement::Memory(el));
-    }
-    if let Some(el) = shape_cache.ui_glyph_element(
-        renderer,
-        UiGlyphKind::Volume {
-            level_percent: t.volume_percent,
-            muted: t.audio_muted,
-        },
+    );
+    push_glyph(
+        UiGlyphKind::Search,
         16,
         white,
-        Point::from((right.volume_x, glyph_y)),
-    ) {
-        out.push(CompositorRenderElement::Memory(el));
-    }
-    if let Some(bx) = right.battery_x
-        && let Some(el) = shape_cache.ui_glyph_element(
-            renderer,
-            UiGlyphKind::Battery {
-                percent: t.battery_percent,
-                charging: t.battery_percent >= 98,
-            },
-            18,
-            white,
-            Point::from((bx + 1, glyph_y - 1)),
-        )
-    {
-        out.push(CompositorRenderElement::Memory(el));
-    }
-    if let Some(el) = shape_cache.ui_glyph_element(
-        renderer,
+        Point::from((right.search_x, glyph_y)),
+    );
+    let cc_color = if t.quick_settings_open {
+        [255, 255, 255, 255]
+    } else {
+        white
+    };
+    push_glyph(
         UiGlyphKind::ControlCenter,
         16,
-        if t.quick_settings_open {
-            [185, 138, 255, 255]
-        } else {
-            white
-        },
-        Point::from((right.control_center_x + 2, glyph_y)),
-    ) {
-        out.push(CompositorRenderElement::Memory(el));
-    }
+        cc_color,
+        Point::from((right.control_center_x + 1, glyph_y)),
+    );
 }
 
 fn title_hue_seed(title: &str, id: u64) -> u8 {
@@ -4187,27 +4709,39 @@ pub fn generate_shell_composite_elements(
         }
     }
 
-    // 3. TopBar SDF glyphs, dynamic left/right clusters, menu popover & translucent gradient scrim (`RUSTYOS-048`)
+    // 3. TopBar macOS Menu Bar SDF glyphs, optional tray/workspaces, menu popover & transparent default (`RUSTYOS-048`, `RUSTYOS-049`)
     let active_app_name = dock_view
         .windows
         .iter()
         .find(|w| w.focused)
         .map_or_else(|| "RustyOS".to_owned(), |w| extract_app_name(&w.title));
-    let left_layout = compute_top_bar_left_layout(&active_app_name);
-    let right_layout = compute_top_bar_right_layout(
-        width,
-        top_telemetry.has_battery,
-        top_telemetry.notification_count,
-        top_telemetry.clock_hhmm,
-    );
+    let opts = top_telemetry.layout_options();
+    let left_layout =
+        compute_top_bar_left_layout_with_options(&active_app_name, top_telemetry.show_workspaces);
+    let right_layout =
+        compute_top_bar_right_layout_with_options(width, top_telemetry.clock_hhmm, opts);
 
+    let pure_white = [252, 250, 255, 255];
+    let bar_shadow = [8, 5, 14, 96];
+    let logo_loc = Point::from((TOP_BAR_LOGO_X + 1, TOP_BAR_ITEM_Y + 2));
     if let Some(el) = shape_cache.ui_glyph_element(
         renderer,
         crate::surfaces::UiGlyphKind::RustyLogo,
         16,
-        [200, 165, 255, 255],
-        Point::from((TOP_BAR_LOGO_X + 1, TOP_BAR_ITEM_Y + 2)),
+        pure_white,
+        logo_loc,
     ) {
+        out.push(CompositorRenderElement::Memory(el));
+    }
+    if !top_telemetry.reduce_transparency
+        && let Some(el) = shape_cache.ui_glyph_element(
+            renderer,
+            crate::surfaces::UiGlyphKind::RustyLogo,
+            16,
+            bar_shadow,
+            Point::from((logo_loc.x, logo_loc.y + 1)),
+        )
+    {
         out.push(CompositorRenderElement::Memory(el));
     }
     push_top_bar_right_glyphs(
@@ -4221,11 +4755,13 @@ pub fn generate_shell_composite_elements(
     if let Some(open_menu) = top_telemetry.active_menu {
         let (anchor_x, anchor_w) = match open_menu {
             TopBarMenuHit::SystemLogo => (TOP_BAR_LOGO_X - 2, TOP_BAR_LOGO_W + 4),
-            TopBarMenuHit::ActiveApp => (left_layout.app_x - 4, left_layout.app_w + 4),
-            TopBarMenuHit::File => (left_layout.file_x - 2, TOP_BAR_MENU_FILE_W + 4),
-            TopBarMenuHit::Edit => (left_layout.edit_x - 2, TOP_BAR_MENU_EDIT_W + 4),
-            TopBarMenuHit::View => (left_layout.view_x - 2, TOP_BAR_MENU_VIEW_W + 4),
-            TopBarMenuHit::Window => (left_layout.win_x - 2, TOP_BAR_MENU_WINDOW_W + 4),
+            TopBarMenuHit::ActiveApp => (left_layout.app_x - 2, left_layout.app_w + 4),
+            TopBarMenuHit::File => (left_layout.file_x - 2, left_layout.file_w + 4),
+            TopBarMenuHit::Edit => (left_layout.edit_x - 2, left_layout.edit_w + 4),
+            TopBarMenuHit::View => (left_layout.view_x - 2, left_layout.view_w + 4),
+            TopBarMenuHit::Go => (left_layout.go_x - 2, left_layout.go_w + 4),
+            TopBarMenuHit::Window => (left_layout.win_x - 2, left_layout.win_w + 4),
+            TopBarMenuHit::Help => (left_layout.help_x - 2, left_layout.help_w + 4),
         };
         push_rounded_glass_box(
             &mut out,
@@ -4235,8 +4771,8 @@ pub fn generate_shell_composite_elements(
                 Point::from((anchor_x, TOP_BAR_ITEM_Y)),
                 Size::from((anchor_w, TOP_BAR_ITEM_H)),
             ),
-            7,
-            [255, 255, 255, 34],
+            5,
+            [255, 255, 255, 42],
             None,
         );
         let (mx, my, mw, mh) = top_bar_menu_popover_rect(&active_app_name, open_menu);
@@ -4257,53 +4793,57 @@ pub fn generate_shell_composite_elements(
         push_soft_shadow(&mut out, shape_cache, renderer, menu_rect, 12, 18, 96);
     }
 
-    let tray_rects = tray_slot_rects_with_layout(
-        width,
-        top_telemetry.has_battery,
-        top_telemetry.notification_count,
-        top_telemetry.clock_hhmm,
-        top_telemetry.tray_items.len(),
-    );
-    for (item, (tx, ty, tw, th)) in top_telemetry.tray_items.iter().zip(tray_rects) {
-        if item.attention || !item.passive {
-            let dot_color = if item.attention {
-                COLOR_DANGER
-            } else {
-                COLOR_ACCENT
-            };
-            out.push(CompositorRenderElement::Solid(make_solid_element(
-                Rectangle::new(Point::from((tx + tw - 5, ty + 2)), Size::from((3, 3))),
-                dot_color,
-            )));
-        }
-        let icon_loc = Point::from((tx + (tw - 16) / 2, ty + (th - 16) / 2));
-        let tray_icon_el = item
-            .icon_pixmap
-            .and_then(|pm| {
-                shape_cache
-                    .icons
-                    .icon_element_from_pixmap(renderer, item.key, pm, 16, icon_loc)
-            })
-            .or_else(|| {
-                (!item.icon_name.is_empty()).then(|| {
+    if top_telemetry.show_tray {
+        let tray_rects = tray_slot_rects_with_options(
+            width,
+            top_telemetry.clock_hhmm,
+            opts,
+            top_telemetry.tray_items.len(),
+        );
+        for (item, (tx, ty, tw, th)) in top_telemetry.tray_items.iter().zip(tray_rects) {
+            if item.attention || !item.passive {
+                let dot_color = if item.attention {
+                    COLOR_DANGER
+                } else {
+                    COLOR_ACCENT
+                };
+                out.push(CompositorRenderElement::Solid(make_solid_element(
+                    Rectangle::new(Point::from((tx + tw - 5, ty + 2)), Size::from((3, 3))),
+                    dot_color,
+                )));
+            }
+            let icon_loc = Point::from((tx + (tw - 16) / 2, ty + (th - 16) / 2));
+            let tray_icon_el = item
+                .icon_pixmap
+                .and_then(|pm| {
                     shape_cache
                         .icons
-                        .icon_element_by_name(renderer, item.icon_name, 16, icon_loc)
-                })?
-            });
-        if let Some(el) = tray_icon_el {
-            out.push(CompositorRenderElement::Memory(el));
-        }
-        if item.attention {
-            push_rounded_glass_box(
-                &mut out,
-                shape_cache,
-                renderer,
-                Rectangle::new(Point::from((tx, ty)), Size::from((tw, th))),
-                10,
-                [229, 107, 117, 40],
-                Some(RGBA_DANGER),
-            );
+                        .icon_element_from_pixmap(renderer, item.key, pm, 16, icon_loc)
+                })
+                .or_else(|| {
+                    (!item.icon_name.is_empty()).then(|| {
+                        shape_cache.icons.icon_element_by_name(
+                            renderer,
+                            item.icon_name,
+                            16,
+                            icon_loc,
+                        )
+                    })?
+                });
+            if let Some(el) = tray_icon_el {
+                out.push(CompositorRenderElement::Memory(el));
+            }
+            if item.attention {
+                push_rounded_glass_box(
+                    &mut out,
+                    shape_cache,
+                    renderer,
+                    Rectangle::new(Point::from((tx, ty)), Size::from((tw, th))),
+                    10,
+                    [229, 107, 117, 40],
+                    Some(RGBA_DANGER),
+                );
+            }
         }
     }
 
@@ -4330,79 +4870,111 @@ pub fn generate_shell_composite_elements(
                 Point::from((right_layout.status_pill_x, TOP_BAR_ITEM_Y)),
                 Size::from((right_layout.status_pill_w, TOP_BAR_ITEM_H)),
             ),
-            10,
+            6,
             [255, 255, 255, 42],
             None,
         );
     }
 
-    // Hairline divider before compact workspace indicators
-    out.push(CompositorRenderElement::Solid(make_solid_element(
-        Rectangle::new(
-            Point::from((left_layout.separator_x, 7)),
-            Size::from((1, 12)),
-        ),
-        COLOR_BORDER,
-    )));
+    if top_telemetry.show_workspaces {
+        out.push(CompositorRenderElement::Solid(make_solid_element(
+            Rectangle::new(
+                Point::from((left_layout.separator_x, 6)),
+                Size::from((1, 12)),
+            ),
+            COLOR_BORDER,
+        )));
 
-    let ws_y = TOP_BAR_ITEM_Y;
-    let ws_h = TOP_BAR_ITEM_H;
-    let mut start_x = left_layout.ws_start_x;
-    for ws in 1..=9 {
-        if ws == active_workspace {
-            push_rounded_glass_box(
-                &mut out,
-                shape_cache,
-                renderer,
-                Rectangle::new(
-                    Point::from((start_x, ws_y)),
-                    Size::from((WS_BTN_WIDTH, ws_h)),
-                ),
-                9,
-                RGBA_ACCENT,
-                None,
-            );
+        let ws_y = TOP_BAR_ITEM_Y;
+        let ws_h = TOP_BAR_ITEM_H;
+        let mut start_x = left_layout.ws_start_x;
+        for ws in 1..=9 {
+            if ws == active_workspace {
+                push_rounded_glass_box(
+                    &mut out,
+                    shape_cache,
+                    renderer,
+                    Rectangle::new(
+                        Point::from((start_x, ws_y)),
+                        Size::from((WS_BTN_WIDTH, ws_h)),
+                    ),
+                    9,
+                    RGBA_ACCENT,
+                    None,
+                );
+            }
+            start_x += WS_BTN_STRIDE;
         }
-        start_x += WS_BTN_STRIDE;
+
+        push_rounded_glass_box(
+            &mut out,
+            shape_cache,
+            renderer,
+            Rectangle::new(
+                Point::from((left_layout.layout_x, ws_y)),
+                Size::from((left_layout.layout_w, ws_h)),
+            ),
+            9,
+            [255, 255, 255, 14],
+            (layout_mode == "master-stack").then_some(RGBA_ACCENT),
+        );
     }
 
-    push_rounded_glass_box(
-        &mut out,
-        shape_cache,
-        renderer,
-        Rectangle::new(
-            Point::from((left_layout.layout_x, ws_y)),
-            Size::from((left_layout.layout_w, ws_h)),
-        ),
-        9,
-        [255, 255, 255, 14],
-        (layout_mode == "master-stack").then_some(RGBA_ACCENT),
-    );
-
-    // Soft top translucent glass scrim scaled by glass_opacity & reduce_transparency (`RUSTYOS-048`)
-    for (offset, scrim_h, alpha) in [(0, 10, 118_u8), (10, 8, 76), (18, TOP_BAR_HEIGHT - 18, 36)] {
-        let scaled = scale_glass_rgba(
-            [15, 10, 25, alpha],
-            top_telemetry.glass_opacity,
-            top_telemetry.reduce_transparency,
-        );
+    // Fully transparent TopBar by default (`reduce_transparency == false`);
+    // render solid high-contrast bar only when `reduce_transparency` is enabled (`RUSTYOS-049`).
+    if top_telemetry.reduce_transparency {
         out.push(CompositorRenderElement::Solid(make_solid_element(
-            Rectangle::new(Point::from((0, offset)), Size::from((width, scrim_h))),
-            rgba_to_premul_color32f(scaled),
+            Rectangle::new(Point::from((0, TOP_BAR_HEIGHT - 1)), Size::from((width, 1))),
+            COLOR_BORDER,
+        )));
+        out.push(CompositorRenderElement::Solid(make_solid_element(
+            Rectangle::new(Point::from((0, 0)), Size::from((width, TOP_BAR_HEIGHT))),
+            rgba_to_premul_color32f([20, 15, 32, 245]),
         )));
     }
 
-    // 4. Dock macOS 27 glass capsule, vertical separator, hover lift, squircles & soft drop shadow (`RUSTYOS-048`)
+    // 4. Dock macOS glass container, 4x4 SSAA icons, soft drop shadows, hover magnification, tooltip & divider (`RUSTYOS-050`)
+    if !matches!(
+        overlay,
+        ShellOverlayView::Spotlight(_)
+            | ShellOverlayView::QuickSettings(_)
+            | ShellOverlayView::Switcher(_)
+    ) && let Some((tooltip_rect, _)) = dock_tooltip_rect_and_label(width, height, dock_view)
+    {
+        push_rounded_glass_box(
+            &mut out,
+            shape_cache,
+            renderer,
+            tooltip_rect,
+            9,
+            scale_glass_rgba(
+                [42, 34, 62, 224],
+                top_telemetry.glass_opacity,
+                top_telemetry.reduce_transparency,
+            ),
+            Some(RGBA_BORDER_HIGHLIGHT),
+        );
+        push_soft_shadow(&mut out, shape_cache, renderer, tooltip_rect, 9, 10, 72);
+    }
+
     let (dock_x, dock_y, dock_width, dock_items_count) =
         dock_layout_bounds(width, height, dock_view.windows.len());
+    let left_count = DOCK_PINNED_COUNT + dock_view.windows.len();
+    let _ = dock_view.pinned_icons;
 
-    if !dock_view.windows.is_empty()
-        && let Some(ov_slot) = dock_slot_rect(width, height, dock_view.windows.len(), 2)
+    let mut dock_icons = Vec::with_capacity(dock_items_count);
+    let mut dock_dots_and_divider = Vec::new();
+    let mut dock_icon_shadows = Vec::with_capacity(dock_items_count);
+
+    if let Some(last_app_slot) =
+        dock_slot_rect(width, height, dock_view.windows.len(), left_count - 1)
     {
-        let sep_x = ov_slot.loc.x + ov_slot.size.w + DOCK_ITEM_GAP / 2 + DOCK_DIVIDER_GAP / 2;
-        out.push(CompositorRenderElement::Solid(make_solid_element(
-            Rectangle::new(Point::from((sep_x, dock_y + 18)), Size::from((1, 36))),
-            COLOR_BORDER,
+        let sep_x = last_app_slot.loc.x
+            + last_app_slot.size.w
+            + i32::midpoint(DOCK_ITEM_GAP, DOCK_DIVIDER_GAP);
+        dock_dots_and_divider.push(CompositorRenderElement::Solid(make_solid_element(
+            Rectangle::new(Point::from((sep_x, dock_y + 15)), Size::from((1, 38))),
+            rgba_to_premul_color32f([255, 255, 255, 64]),
         )));
     }
 
@@ -4413,77 +4985,84 @@ pub fn generate_shell_composite_elements(
         let item_x = slot_rect.loc.x;
         let item_size = slot_rect.size.w;
         let hovered = dock_view.hover_slot == Some(i);
+        let hover_factor = if hovered {
+            if dock_view.reduced_motion {
+                0.25
+            } else {
+                dock_view.hover_progress.clamp(0.35, 1.0)
+            }
+        } else {
+            0.0
+        };
         #[allow(clippy::cast_possible_truncation)]
         let lift = if hovered {
             if dock_view.reduced_motion {
                 2
             } else {
-                (6.0 * dock_view.hover_progress.clamp(0.35, 1.0)).round() as i32
+                (6.0 * hover_factor).round() as i32
             }
         } else {
             0
         };
-        let item_y = slot_rect.loc.y - lift;
+        #[allow(clippy::cast_possible_truncation)]
+        let extra_half = if hovered {
+            ((4.0 * hover_factor).round() as i32).clamp(0, 4)
+        } else {
+            0
+        };
+        let draw_size = DOCK_ICON_SIZE + extra_half * 2;
+        let icon_x = item_x + (item_size - draw_size) / 2;
+        let icon_y = (dock_y + 7) - extra_half - lift;
+        let icon_loc = Point::from((icon_x, icon_y));
 
-        let win_entry = (i >= 3).then(|| dock_view.windows.get(i - 3)).flatten();
+        let win_entry = (i >= DOCK_PINNED_COUNT && i < left_count)
+            .then(|| dock_view.windows.get(i - DOCK_PINNED_COUNT))
+            .flatten();
         let is_minimized = win_entry.is_some_and(|w| w.minimized);
         let is_active = match i {
-            2 => dock_view.overview_active,
-            n if n >= 3 => win_entry.is_some_and(|w| w.focused && !w.minimized),
-            _ => false,
+            0 => true,
+            1 => dock_view.overview_active,
+            _ => win_entry.is_some_and(|w| w.focused && !w.minimized),
         };
-        let has_running_dot = win_entry.is_some() || (i == 2 && dock_view.overview_active);
+        let has_running_dot =
+            win_entry.is_some() || i == 0 || (i == 1 && dock_view.overview_active);
         if has_running_dot {
             let pip_color = if is_minimized {
-                RGBA_WARNING
+                [232, 196, 119, 235]
             } else if is_active {
-                RGBA_ACCENT
+                [248, 246, 255, 240]
             } else {
-                RGBA_ACCENT_MUTED
+                [230, 224, 245, 165]
             };
             if let Some(dot) = shape_cache.circle_element(
                 renderer,
-                4,
+                5,
                 pip_color,
                 None,
-                Point::from((item_x + (item_size - 4) / 2, dock_y + DOCK_HEIGHT - 7)),
+                Point::from((item_x + (item_size - 5) / 2, dock_y + DOCK_HEIGHT - 8)),
             ) {
-                out.push(CompositorRenderElement::Memory(dot));
+                dock_dots_and_divider.push(CompositorRenderElement::Memory(dot));
             }
         }
 
-        let inner_size = DOCK_ICON_SIZE;
-        let inner_offset = (item_size - inner_size) / 2;
-        let icon_loc = Point::from((item_x + inner_offset, item_y + inner_offset - 2));
-        let slot_icon_el = match i {
-            0 => shape_cache
+        let builtin_for_slot = match i {
+            0 => Some(crate::icons::BuiltinAppIcon::Files),
+            1 => Some(crate::icons::BuiltinAppIcon::Overview),
+            2 => Some(crate::icons::BuiltinAppIcon::Terminal),
+            3 => Some(crate::icons::BuiltinAppIcon::Browser),
+            4 => Some(crate::icons::BuiltinAppIcon::Notes),
+            5 => Some(crate::icons::BuiltinAppIcon::Settings),
+            n if n == left_count => Some(crate::icons::BuiltinAppIcon::Downloads),
+            n if n == left_count + 1 => Some(crate::icons::BuiltinAppIcon::Trash),
+            _ => None,
+        };
+        let slot_icon_el = if let Some(kind) = builtin_for_slot {
+            shape_cache
                 .icons
-                .builtin_squircle_icon_element(
-                    renderer,
-                    crate::icons::BuiltinAppIcon::Terminal,
-                    inner_size,
-                    icon_loc,
-                )
-                .map(|el| crate::icons::ResolvedIconElement::Memory(Box::new(el))),
-            1 => shape_cache
-                .icons
-                .builtin_squircle_icon_element(
-                    renderer,
-                    crate::icons::BuiltinAppIcon::Files,
-                    inner_size,
-                    icon_loc,
-                )
-                .map(|el| crate::icons::ResolvedIconElement::Memory(Box::new(el))),
-            2 => shape_cache
-                .icons
-                .builtin_squircle_icon_element(
-                    renderer,
-                    crate::icons::BuiltinAppIcon::Overview,
-                    inner_size,
-                    icon_loc,
-                )
-                .map(|el| crate::icons::ResolvedIconElement::Memory(Box::new(el))),
-            _ => win_entry.and_then(|w| {
+                .builtin_squircle_icon_element(renderer, kind, draw_size, icon_loc)
+                .map(|el| crate::icons::ResolvedIconElement::Memory(Box::new(el)))
+        } else {
+            win_entry.and_then(|w| {
                 let key = format!("win-{}", w.id.0);
                 shape_cache
                     .icons
@@ -4492,7 +5071,7 @@ pub fn generate_shell_composite_elements(
                         &key,
                         w.toplevel_icon.as_ref(),
                         w.icon_name.as_deref(),
-                        inner_size,
+                        draw_size,
                         icon_loc,
                     )
                     .or_else(|| {
@@ -4505,62 +5084,53 @@ pub fn generate_shell_composite_elements(
                                     hue_seed,
                                     active: is_active,
                                 },
-                                inner_size,
+                                draw_size,
                                 icon_loc,
                             )
                             .map(|el| crate::icons::ResolvedIconElement::Memory(Box::new(el)))
                     })
-            }),
+            })
         };
         if let Some(el) = slot_icon_el {
-            out.push(resolved_icon_to_element(el));
-        }
-
-        if hovered || is_active {
-            push_rounded_glass_box(
-                &mut out,
-                shape_cache,
-                renderer,
-                Rectangle::new(
-                    Point::from((item_x, item_y)),
-                    Size::from((item_size, item_size)),
-                ),
-                16,
-                if hovered {
-                    [255, 255, 255, 32]
-                } else {
-                    [255, 255, 255, 18]
-                },
-                None,
-            );
+            dock_icons.push(resolved_icon_to_element(el));
+            // Squircle app cards carry a matched rounded drop shadow; free-standing Downloads/Trash
+            // sit cleanly on top of the frosted glass without a square shadow behind them.
+            if i < left_count
+                && let Some(shadow) =
+                    shape_cache.dock_icon_shadow_element(renderer, draw_size, icon_loc)
+            {
+                dock_icon_shadows.push(CompositorRenderElement::Memory(shadow));
+            }
         }
     }
+
+    out.extend(dock_icons);
+    out.extend(dock_dots_and_divider);
+    out.extend(dock_icon_shadows);
 
     let dock_rect = Rectangle::new(
         Point::from((dock_x, dock_y)),
         Size::from((dock_width, DOCK_HEIGHT)),
     );
-    push_rounded_glass_box(
-        &mut out,
-        shape_cache,
+    if let Some(dock_glass) = shape_cache.dock_glass_panel_element(
         renderer,
-        dock_rect,
+        dock_width,
+        DOCK_HEIGHT,
         DOCK_RADIUS,
-        scale_glass_rgba(
-            [42, 32, 64, 212],
-            top_telemetry.glass_opacity,
-            top_telemetry.reduce_transparency,
-        ),
-        Some(RGBA_BORDER_HIGHLIGHT),
-    );
+        top_telemetry.glass_opacity,
+        top_telemetry.reduce_transparency,
+        Point::from((dock_x, dock_y)),
+    ) {
+        out.push(CompositorRenderElement::Memory(dock_glass));
+    }
     push_soft_shadow(
         &mut out,
         shape_cache,
         renderer,
         dock_rect,
         DOCK_RADIUS,
-        20,
-        92,
+        24,
+        96,
     );
 
     // 5. Workspace Overview cards & scrim rendered below TopBar & Dock so both stay crisp and clickable (`RUSTYOS-023`/`025`)
@@ -5088,39 +5658,46 @@ mod tests {
     #[test]
     fn top_bar_and_quick_settings_hit_testing_work_accurately() {
         let size = Size::from((1280, 800));
-        assert!(check_top_bar_status_click(size.w, 1200.0, 14.0));
-        assert!(!check_top_bar_status_click(size.w, 100.0, 14.0));
-        assert!(check_top_bar_layout_click(515.0, 14.0));
-        assert!(!check_top_bar_layout_click(50.0, 14.0));
-        assert!(!check_top_bar_layout_click(300.0, 14.0));
+        assert!(check_top_bar_status_click(size.w, 1200.0, 12.0));
+        assert!(!check_top_bar_status_click(size.w, 100.0, 12.0));
 
-        // Test TopBar Left Menu hits (RUSTYOS-038)
+        let left_ws = compute_top_bar_left_layout_with_options("RustyOS", true);
+        let layout_mid = f64::from(left_ws.layout_x + left_ws.layout_w / 2);
+        assert!(check_top_bar_layout_click(layout_mid, 12.0));
+        assert!(!check_top_bar_layout_click_with_options(
+            "RustyOS", false, layout_mid, 12.0
+        ));
+        assert!(!check_top_bar_layout_click(50.0, 12.0));
+        assert!(!check_top_bar_layout_click(300.0, 12.0));
+
+        // Test TopBar Left Menu hits (`RUSTYOS-038`, `RUSTYOS-049`: macOS File/Edit/View/Go/Window/Help)
+        let left = compute_top_bar_left_layout("RustyOS");
         assert_eq!(
-            check_top_bar_menu_click(15.0, 14.0),
+            check_top_bar_menu_click(f64::from(TOP_BAR_LOGO_X + TOP_BAR_LOGO_W / 2), 12.0),
             Some(TopBarMenuHit::SystemLogo)
         );
+        for (hit, bx, bw) in [
+            (TopBarMenuHit::ActiveApp, left.app_x, left.app_w),
+            (TopBarMenuHit::File, left.file_x, left.file_w),
+            (TopBarMenuHit::Edit, left.edit_x, left.edit_w),
+            (TopBarMenuHit::View, left.view_x, left.view_w),
+            (TopBarMenuHit::Go, left.go_x, left.go_w),
+            (TopBarMenuHit::Window, left.win_x, left.win_w),
+            (TopBarMenuHit::Help, left.help_x, left.help_w),
+        ] {
+            assert_eq!(
+                check_top_bar_menu_click(f64::from(bx + bw / 2), 12.0),
+                Some(hit)
+            );
+        }
         assert_eq!(
-            check_top_bar_menu_click(50.0, 14.0),
-            Some(TopBarMenuHit::ActiveApp)
+            check_top_bar_menu_click(f64::from(left.help_x + left.help_w + 15), 12.0),
+            None
         );
         assert_eq!(
-            check_top_bar_menu_click(130.0, 14.0),
-            Some(TopBarMenuHit::File)
+            check_top_bar_menu_click(15.0, f64::from(TOP_BAR_HEIGHT + 5)),
+            None
         );
-        assert_eq!(
-            check_top_bar_menu_click(165.0, 14.0),
-            Some(TopBarMenuHit::Edit)
-        );
-        assert_eq!(
-            check_top_bar_menu_click(205.0, 14.0),
-            Some(TopBarMenuHit::View)
-        );
-        assert_eq!(
-            check_top_bar_menu_click(250.0, 14.0),
-            Some(TopBarMenuHit::Window)
-        );
-        assert_eq!(check_top_bar_menu_click(300.0, 14.0), None);
-        assert_eq!(check_top_bar_menu_click(15.0, 30.0), None);
 
         let (px, py, pw, _ph) = quick_settings_rect(size.w, size.h);
         assert_eq!(
@@ -5193,10 +5770,15 @@ mod tests {
 
     #[test]
     fn workspace_click_mapping_accurately_detects_all_nine_workspaces() {
+        let left = compute_top_bar_left_layout_with_options("RustyOS", true);
         for ws in 1u8..=9u8 {
-            let x = f64::from(WS_START_X) + f64::from(i32::from(ws - 1) * WS_BTN_STRIDE) + 5.0;
-            let detected = check_top_bar_workspace_click(x, 15.0);
+            let x = f64::from(left.ws_start_x) + f64::from(i32::from(ws - 1) * WS_BTN_STRIDE) + 5.0;
+            let detected = check_top_bar_workspace_click(x, 12.0);
             assert_eq!(detected, Some(ws));
+            assert_eq!(
+                check_top_bar_workspace_click_with_options("RustyOS", false, x, 12.0),
+                None
+            );
         }
 
         // Clicks outside top bar height or beyond bounds return None
@@ -5292,11 +5874,16 @@ mod tests {
         let win_count = 2;
 
         for (slot_idx, expected) in [
-            (0, DockHit::PinnedTerminal),
-            (1, DockHit::PinnedFiles),
-            (2, DockHit::ToggleOverview),
-            (3, DockHit::WindowSlot(0)),
-            (4, DockHit::WindowSlot(1)),
+            (0, DockHit::PinnedFiles),
+            (1, DockHit::ToggleOverview),
+            (2, DockHit::PinnedTerminal),
+            (3, DockHit::PinnedBrowser),
+            (4, DockHit::PinnedNotes),
+            (5, DockHit::PinnedSettings),
+            (6, DockHit::WindowSlot(0)),
+            (7, DockHit::WindowSlot(1)),
+            (8, DockHit::PinnedDownloads),
+            (9, DockHit::PinnedTrash),
         ] {
             let slot_rect = dock_slot_rect(size.w, size.h, win_count, slot_idx)
                 .unwrap_or_else(|| Rectangle::from_size(Size::from((0, 0))));
@@ -5518,36 +6105,62 @@ mod tests {
 
     #[test]
     fn macos27_top_bar_dynamic_left_right_and_menu_popover_hit_testing() {
-        let without_bat = compute_top_bar_right_layout(1280, false, 0, "Thu 13 Nov  00:15");
-        let with_bat = compute_top_bar_right_layout(1280, true, 0, "Thu 13 Nov  00:15");
+        let without_bat = compute_top_bar_right_layout(1280, false, 0, "Wed Apr 1  9:41 AM");
+        let with_bat = compute_top_bar_right_layout(1280, true, 0, "Wed Apr 1  9:41 AM");
         assert!(without_bat.battery_x.is_none());
+        assert!(without_bat.volume_x.is_none());
+        assert!(without_bat.kbd_x.is_none());
         assert!(with_bat.battery_x.is_some());
-        assert!(without_bat.volume_x > with_bat.volume_x);
-        assert!(check_top_bar_search_click_for_telemetry(
+        let bat_x = with_bat.battery_x.unwrap_or(i32::MAX);
+        // Exact macOS right order: Battery · Wi-Fi · Search · Control Center · Clock
+        assert!(bat_x < with_bat.wifi_x);
+        assert!(with_bat.wifi_x < with_bat.search_x);
+        assert!(with_bat.search_x < with_bat.control_center_x);
+        assert!(with_bat.control_center_x < with_bat.clock_x);
+
+        let all_opts = compute_top_bar_right_layout_with_options(
             1280,
-            false,
-            0,
-            "Thu 13 Nov  00:15",
+            "Wed Apr 1  9:41 AM",
+            TopBarLayoutOptions {
+                has_battery: true,
+                notification_count: 0,
+                show_volume: true,
+                show_input_source: true,
+                show_workspaces: true,
+                show_tray: true,
+            },
+        );
+        assert!(all_opts.volume_x.is_some());
+        assert!(all_opts.kbd_x.is_some());
+        assert!(all_opts.kbd_x.unwrap_or(0) < all_opts.volume_x.unwrap_or(0));
+        assert!(all_opts.volume_x.unwrap_or(0) < all_opts.battery_x.unwrap_or(0));
+
+        assert!(check_top_bar_search_click_for_options(
+            1280,
+            "Wed Apr 1  9:41 AM",
+            TopBarLayoutOptions::default(),
             f64::from(without_bat.search_x + without_bat.search_w / 2),
-            14.0,
+            12.0,
         ));
 
-        let short_left = compute_top_bar_left_layout("RustyOS");
-        let wide_left = compute_top_bar_left_layout("Visual Studio Code");
+        let short_left = compute_top_bar_left_layout_with_options("RustyOS", true);
+        let wide_left = compute_top_bar_left_layout_with_options("Visual Studio Code", true);
         assert!(wide_left.app_w > short_left.app_w);
+        assert!(wide_left.help_x > short_left.help_x);
         assert!(wide_left.ws_start_x > short_left.ws_start_x);
         assert_eq!(
-            check_top_bar_workspace_click_for_app(
+            check_top_bar_workspace_click_with_options(
                 "Visual Studio Code",
+                true,
                 f64::from(wide_left.ws_start_x + 4),
-                14.0
+                12.0
             ),
             Some(1)
         );
         assert!(check_top_bar_layout_click_for_app(
             "Visual Studio Code",
             f64::from(wide_left.layout_x + 10),
-            14.0
+            12.0
         ));
 
         let (mx, my, _mw, _mh) = top_bar_menu_popover_rect("RustyOS", TopBarMenuHit::File);
@@ -5560,6 +6173,25 @@ mod tests {
             ),
             TopBarMenuPopoverClick::Action(TopBarMenuAction::NewTerminal)
         );
+        let (gx, gy, _gw, _gh) = top_bar_menu_popover_rect("RustyOS", TopBarMenuHit::Go);
+        assert_eq!(
+            check_top_bar_menu_popover_click(
+                "RustyOS",
+                TopBarMenuHit::Go,
+                f64::from(gx + 24),
+                f64::from(gy + 16),
+            ),
+            TopBarMenuPopoverClick::Action(TopBarMenuAction::OpenOverview)
+        );
+        assert_eq!(
+            check_top_bar_menu_popover_click(
+                "RustyOS",
+                TopBarMenuHit::Go,
+                f64::from(gx + 24),
+                f64::from(gy + 44),
+            ),
+            TopBarMenuPopoverClick::Action(TopBarMenuAction::NextWorkspace)
+        );
         assert_eq!(
             check_top_bar_menu_popover_click("RustyOS", TopBarMenuHit::File, 800.0, 400.0),
             TopBarMenuPopoverClick::Outside
@@ -5567,20 +6199,38 @@ mod tests {
     }
 
     #[test]
-    fn macos27_dock_divider_gap_and_radii_constants() {
-        assert_eq!(DOCK_RADIUS, 36);
+    fn macos_dock_divider_gap_tooltip_and_radii_constants() {
+        assert_eq!(DOCK_HEIGHT, 68);
+        assert_eq!(DOCK_RADIUS, 22);
+        assert_eq!(DOCK_ICON_SIZE, 50);
+        assert_eq!(DOCK_ITEM_GAP, 6);
         assert_eq!(WINDOW_RADIUS, 20);
-        let overview_slot_opt = dock_slot_rect(1280, 800, 2, 2);
-        let first_win_slot_opt = dock_slot_rect(1280, 800, 2, 3);
-        assert!(overview_slot_opt.is_some());
-        assert!(first_win_slot_opt.is_some());
-        let overview_slot =
-            overview_slot_opt.unwrap_or_else(|| Rectangle::from_size(Size::from((0, 0))));
-        let first_win_slot =
-            first_win_slot_opt.unwrap_or_else(|| Rectangle::from_size(Size::from((0, 0))));
+        let last_app_slot_opt = dock_slot_rect(1280, 800, 2, 7);
+        let downloads_slot_opt = dock_slot_rect(1280, 800, 2, 8);
+        assert!(last_app_slot_opt.is_some());
+        assert!(downloads_slot_opt.is_some());
+        let last_app_slot =
+            last_app_slot_opt.unwrap_or_else(|| Rectangle::from_size(Size::from((0, 0))));
+        let downloads_slot =
+            downloads_slot_opt.unwrap_or_else(|| Rectangle::from_size(Size::from((0, 0))));
         assert_eq!(
-            first_win_slot.loc.x - (overview_slot.loc.x + overview_slot.size.w),
+            downloads_slot.loc.x - (last_app_slot.loc.x + last_app_slot.size.w),
             DOCK_ITEM_GAP + DOCK_DIVIDER_GAP
         );
+
+        let dock_view = DockViewState {
+            pinned_icons: [None, None],
+            windows: &[],
+            hover_slot: Some(0),
+            overview_active: false,
+            hover_progress: 1.0,
+            reduced_motion: false,
+        };
+        let tooltip_opt = dock_tooltip_rect_and_label(1280, 800, &dock_view);
+        assert!(tooltip_opt.is_some());
+        if let Some((pill_rect, label)) = tooltip_opt {
+            assert_eq!(label, "Files");
+            assert!(pill_rect.loc.y + pill_rect.size.h < 800 - DOCK_HEIGHT - DOCK_MARGIN_BOTTOM);
+        }
     }
 }

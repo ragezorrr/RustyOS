@@ -688,6 +688,39 @@ hardware/software context и низкие накладные расходы.
   - `cargo fmt --all --check` и `cargo clippy --workspace --all-targets --offline -- -D warnings` завершаются без предупреждений; 90/90 тестов `rusty-compositor`, 5/5 тестов `rusty-shell` и 114/114 запущенных тестов workspace проходят (1 предсуществующий тест `rusty-services::tests::networkmanager_and_bluetooth_formatters_handle_all_states` пропущен флагом `--skip`).
 - **Risks:** Нулевые новые внешние зависимости; реальный FBO blur-behind для полупрозрачного стекла остаётся отдельной задачей будущего этапа; живая визуальная сверка скриншота в дисплейной сессии (`cargo run -p rusty-compositor`) в headless sandbox не запускалась.
 
+## RUSTYOS-049 --- 1:1 macOS Menu Bar Visual Parity, Bundled Inter Typography & Minimal Bar Configuration
+
+- **Owner:** AI Agent + User
+- **Status:** done
+- **Priority:** P0
+- **Phase:** 7 / UX
+- **ADR / Decision:** ADR-0018 / D-026
+- **Acceptance Criteria:**
+  - В `assets/fonts/` добавлены встроенные через `include_bytes!` шрифты **Inter** (`Inter-Regular.ttf`, `Inter-SemiBold.ttf`, `LICENSE.txt` OFL-1.1) с поддержкой Latin и Cyrillic без новых внешних Rust-зависимостей и `unsafe`; в `crates/rusty-compositor/src/text.rs` добавлены `FontWeight::{Regular, Bold}`, `measure_ui_text_width`, `measure_text_weighted`, `render_label_weighted`, `render_label_centered_weighted` и выравнивание по единой оптической базовой линии регулярного начертания.
+  - В `crates/rusty-compositor/src/shell_render.rs` высота верхней панели переведена на `TOP_BAR_HEIGHT = 24`, единый кегль `TOP_BAR_FONT_SIZE = 13.0` (`FontWeight::Bold` для активного приложения + `FontWeight::Regular` для меню `File`, `Edit`, `View`, `Go`, `Window`, `Help` и часов) с 1 px текстовым/иконочным drop-shadow при прозрачном режиме; убран тёмный трёхуровневый скрайм при `reduce_transparency = false` (сплошная панель только при `reduce_transparency = true`); перекрашена оригинальная монохромная шестиугольная эмблема `RustyLogo` в чистый белый `#FCFAFF`; правый кластер выстроен в точном порядке macOS (`[Battery] · Wi-Fi · Search · Control Center · Clock`).
+  - В `crates/rusty-compositor/src/surfaces.rs` качество рендера всех UI SDF-глифов повышено до 4×4 суперсэмплинга (`sample_ui_glyph_pixel`), обновлены `sample_rusty_logo_uv`, `sample_wifi_glyph_uv` (`sd_arc_up`), `sample_battery_glyph_uv`, `sample_search_glyph_uv` и `sample_control_center_glyph_uv`.
+  - В `crates/rusty-compositor/src/config.rs`, `state.rs`, `input.rs` и `winit_backend.rs` скрыты по умолчанию полоса воркспейсов `1..=9` + `Float`/`Tile`, SNI tray, `EN` и `Volume` через настраиваемые `[ui]`-параметры (`menubar_show_workspaces`, `menubar_show_tray`, `menubar_show_input_source`, `menubar_show_volume`, `clock_24h` = `false`); в меню `Go`/`Window`/`Help` добавлены `NextWorkspace`, `PrevWorkspace` (`switch_workspace_relative`) и `ShowShortcuts`.
+  - В `crates/rusty-services/src/lib.rs` и `telemetry.rs` добавлен нейтральный `LC_ALL=C` формат часов macOS (`local_clock_short_datetime_fmt`: `"Wed Apr 1  9:41 AM"` и 24h `"Wed Apr 1  09:41"`); в `apps/rusty-shell/src/{lib,wayland}.rs` синхронизирован прозрачный рендер Menu Bar `24 px` и встроенный Inter.
+  - Обновлены `DESIGN.md` §12.1, `ADR-0018`, запись `D-026` в `DECISIONS.md` и статус задачи в `TASKS.md`.
+- **Verification:** `cargo fmt --all --check` и `cargo clippy --workspace --all-targets --offline -- -D warnings` завершились без предупреждений; 117/117 тестов workspace прошли без пропусков (`rusty_animation` 4/4, `rusty_compositor` 92/92, `rusty_ipc` 3/3, `rusty_services` 6/6, `rusty_shell` 5/5, `rusty_wm` 7/7); живая проверка `rusty-compositor --winit` (EGL/OpenGL ES 3.2, Mesa Intel Graphics) и инспекция захваченного скриншота окна подтвердили 1:1 визуальную чистоту Menu Bar.
+- **Risks:** Нулевые новые внешние Rust-зависимости; отображение в нативном `--drm` режиме требует отдельного запуска вне nested-сессии.
+
+## RUSTYOS-050 --- 1:1 macOS Dock Visual Parity, Top-Lit Liquid Glass & 4x4 SSAA Squircle Icons
+
+- **Owner:** AI Agent + User
+- **Status:** done
+- **Priority:** P0
+- **Phase:** 7 / UX
+- **ADR / Decision:** ADR-0019 / D-027
+- **Acceptance Criteria:**
+  - В `crates/rusty-compositor/src/surfaces.rs` добавлены `UiShapeCache::dock_glass_panel_element` (`sample_dock_glass_pixel`: полупрозрачное top-lit стекло с 1 px верхним бликом и 4×4 Bayer дитерингом, непрозрачный fallback при `reduce_transparency = true`) и `UiShapeCache::dock_icon_shadow_element` (`sample_dock_icon_shadow_pixel`).
+  - В `crates/rusty-compositor/src/icons.rs` добавлены `BuiltinAppIcon::{Browser, Notes, Settings, Downloads, Trash}`, `squircle_sd` переведён на суперэллипс с экспонентой `4.8` и верхним бликом без замкнутой окантовки, суперсэмплинг `sample_builtin_squircle_pixel` повышен до 4×4 (16 выборок на пиксель), а `Downloads` и `Trash` реализованы свободными силуэтами без квадратной подложки.
+  - В `crates/rusty-compositor/src/shell_render.rs` геометрические константы выровнены под референс macOS (`DOCK_HEIGHT = 68`, `DOCK_RADIUS = 22`, `DOCK_ITEM_SIZE = 52`, `DOCK_ICON_SIZE = 50`, `DOCK_ITEM_GAP = 6`, `DOCK_DIVIDER_GAP = 14`, `DOCK_PINNED_COUNT = 6`, `DOCK_UTILITY_COUNT = 2`), убраны серые слот-боксы, добавлен постоянный вертикальный разделитель перед `Downloads`/`Trash`, `5x5` SDF-точки запущенных/активных/свёрнутых приложений, квантованное hover-увеличение (`50..=58 px`, +6 px вверх, с уважением `reduced_motion`), тень только под squircle-карточками и стеклянный tooltip `dock_tooltip_rect_and_label`.
+  - В `crates/rusty-compositor/src/state.rs` (`handle_dock_hit`, `dock_preferred_candidates`, `launch_dock_app_or_spotlight`) подключён запуск/переключение `Browser`, `Notes`, `Settings` (fallback в Control Center), `Downloads` (`$HOME/Downloads`) и `Trash` (`trash:///`); в `apps/rusty-shell/src/wayland.rs` синхронизированы `render_dock_pixels`, концентрический радиус `20` и размер surface `(488, 68)`.
+  - Обновлены `DESIGN.md` §12.2, `ADR-0019`, запись `D-027` в `DECISIONS.md` и статус `RUSTYOS-050` в `TASKS.md`.
+- **Verification:** `cargo fmt --all --check` и `cargo clippy --workspace --all-targets --offline -- -D warnings` завершились с кодом 0 без предупреждений; 118/118 тестов workspace прошли без пропусков (`rusty_animation` 4/4, `rusty_compositor` 93/93, `rusty_ipc` 3/3, `rusty_services` 6/6, `rusty_shell` 5/5, `rusty_wm` 7/7); живая проверка `rusty-compositor --winit` и визуальная инспекция скриншота + 200% Dock-кропа подтвердили чистоту иконок, стекла, тени, разделителя и индикаторной точки.
+- **Risks:** Нулевые новые внешние Rust-зависимости и ноль `unsafe`; многопроходный GLES FBO blur-behind вынесен за пределы текущей задачи (эмулируется top-lit альфа-градиентом).
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

@@ -102,15 +102,25 @@ struct IconCacheKey {
     fingerprint: u64,
 }
 
-/// Procedural macOS 27 squircle app icons for Dock pinned slots and unthemed windows (`RUSTYOS-048`).
+/// Procedural macOS-style app icons for Dock pinned slots and unthemed windows (`RUSTYOS-048`/`050`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BuiltinAppIcon {
     /// Obsidian-violet Terminal squircle with `>_` prompt motif.
     Terminal,
-    /// Sky-blue Finder/Files folder squircle.
+    /// Sky-blue Files / Finder folder squircle.
     Files,
-    /// Violet-indigo Mission Control / Overview glass cards squircle.
+    /// Silver frosted App Overview / Launcher grid squircle.
     Overview,
+    /// White & azure Compass Browser squircle (`RUSTYOS-050`).
+    Browser,
+    /// Warm amber-headed ruled Notes squircle (`RUSTYOS-050`).
+    Notes,
+    /// Brushed silver metallic gear Settings squircle (`RUSTYOS-050`).
+    Settings,
+    /// Free-standing stacked translucent blue Downloads folder (`RUSTYOS-050`).
+    Downloads,
+    /// Free-standing tapered frosted silver Trash wastebasket (`RUSTYOS-050`).
+    Trash,
     /// Frosted jewel-tone window card squircle for windows lacking an XDG PNG or SHM icon.
     WindowFallback {
         /// Deterministic color bucket derived from the application ID.
@@ -1343,9 +1353,9 @@ fn zlib_decompress(data: &[u8], expected_hint: usize, max_inflate_bytes: usize) 
 }
 
 fn squircle_sd(u: f32, v: f32, cx: f32, cy: f32, hw: f32, hh: f32) -> f32 {
-    let dx = ((u - cx).abs() / hw.max(0.01)).powf(3.8);
-    let dy = ((v - cy).abs() / hh.max(0.01)).powf(3.8);
-    ((dx + dy).powf(1.0 / 3.8) - 1.0) * hw.min(hh)
+    let dx = ((u - cx).abs() / hw.max(0.01)).powf(4.8);
+    let dy = ((v - cy).abs() / hh.max(0.01)).powf(4.8);
+    ((dx + dy).powf(1.0 / 4.8) - 1.0) * hw.min(hh)
 }
 
 fn sq_sd_rounded_box(u: f32, v: f32, cx: f32, cy: f32, hw: f32, hh: f32, r: f32) -> f32 {
@@ -1366,6 +1376,12 @@ fn sq_sd_segment(u: f32, v: f32, ax: f32, ay: f32, bx: f32, by: f32, r: f32) -> 
         0.0
     };
     (pax - bax * h).hypot(pay - bay * h) - r
+}
+
+fn sq_sd_ellipse(u: f32, v: f32, cx: f32, cy: f32, rx: f32, ry: f32) -> f32 {
+    let nx = (u - cx) / rx.max(0.01);
+    let ny = (v - cy) / ry.max(0.01);
+    (nx.hypot(ny) - 1.0) * rx.min(ry)
 }
 
 fn sq_cov(sd: f32, edge: f32) -> f32 {
@@ -1392,17 +1408,117 @@ fn lerp_rgb(top: [f32; 3], bot: [f32; 3], t: f32) -> [f32; 3] {
     ]
 }
 
+fn sample_downloads_uv(u: f32, v: f32, edge: f32) -> [f32; 4] {
+    let mut col = [0.0_f32; 4];
+
+    // Stacked translucent back folder with top-left tab
+    let tab = sq_sd_rounded_box(u, v, 0.31, 0.25, 0.14, 0.055, 0.03);
+    let back = sq_sd_rounded_box(u, v, 0.50, 0.37, 0.34, 0.14, 0.045);
+    let back_cov = sq_cov(tab.min(back), edge);
+    if back_cov > 0.0 {
+        let back_rgb = lerp_rgb([56.0, 140.0, 232.0], [34.0, 96.0, 198.0], (v - 0.19) * 3.2);
+        col = blend_rgba(
+            col,
+            [back_rgb[0], back_rgb[1], back_rgb[2], back_cov * 0.90],
+        );
+    }
+
+    // Middle folder stack layer
+    let mid = sq_sd_rounded_box(u, v, 0.50, 0.45, 0.36, 0.15, 0.045);
+    let mid_cov = sq_cov(mid, edge);
+    if mid_cov > 0.0 {
+        let mid_rgb = lerp_rgb([96.0, 184.0, 252.0], [42.0, 126.0, 226.0], (v - 0.30) * 3.0);
+        col = blend_rgba(col, [mid_rgb[0], mid_rgb[1], mid_rgb[2], mid_cov * 0.94]);
+    }
+
+    // Glossy front Downloads folder card + downward arrow emblem
+    let front = sq_sd_rounded_box(u, v, 0.50, 0.60, 0.38, 0.23, 0.05);
+    let front_cov = sq_cov(front, edge);
+    if front_cov > 0.0 {
+        let front_rgb = lerp_rgb([96.0, 196.0, 255.0], [30.0, 108.0, 222.0], (v - 0.37) * 2.2);
+        let top_lip = (1.0 - ((v - 0.37).max(0.0) / 0.035)).clamp(0.0, 1.0);
+        let mut fc = lerp_rgb(front_rgb, [196.0, 234.0, 255.0], top_lip * 0.35);
+
+        let stem = sq_sd_segment(u, v, 0.50, 0.48, 0.50, 0.68, 0.028);
+        let arm_l = sq_sd_segment(u, v, 0.40, 0.60, 0.50, 0.70, 0.026);
+        let arm_r = sq_sd_segment(u, v, 0.60, 0.60, 0.50, 0.70, 0.026);
+        let arrow_cov = sq_cov(stem.min(arm_l).min(arm_r), edge);
+        if arrow_cov > 0.0 {
+            fc = lerp_rgb(fc, [232.0, 245.0, 255.0], arrow_cov * 0.85);
+        }
+        col = blend_rgba(col, [fc[0], fc[1], fc[2], front_cov]);
+    }
+
+    col
+}
+
+fn sample_trash_uv(u: f32, v: f32, edge: f32) -> [f32; 4] {
+    let mut col = [0.0_f32; 4];
+    let body_top = 0.22_f32;
+    let body_bot = 0.84_f32;
+    let t_y = ((v - body_top) / (body_bot - body_top)).clamp(0.0, 1.0);
+    let hw = 0.31 - 0.075 * t_y;
+
+    // Tapered cylindrical silver-glass wastebasket: rim ellipse (rx=0.31) sits tangent to wall hw(0)=0.31
+    let dx = (u - 0.50).abs() - hw;
+    let dy_top = body_top - v;
+    let dy_bot = v - body_bot;
+    let base_cap = sq_sd_ellipse(u, v, 0.50, body_bot, 0.235, 0.042);
+    let top_rim = sq_sd_ellipse(u, v, 0.50, body_top, 0.31, 0.052);
+    let wall_sd = dx.max(dy_top).max(dy_bot);
+    let body_sd = wall_sd.min(base_cap).min(top_rim);
+    let body_cov = sq_cov(body_sd, edge);
+
+    if body_cov > 0.0 {
+        let nx = ((u - 0.50) / hw.max(0.05)).clamp(-1.0, 1.0);
+        // Brushed cylindrical reflection highlight strongest left-of-center + subtle rib flute
+        let spec = (-(nx + 0.32).powi(2) / 0.14).exp() * 0.38;
+        let edge_shade = (nx * nx) * 0.22;
+        let rib = ((nx * 7.0 * std::f32::consts::PI).cos() * 0.035).clamp(-0.04, 0.04);
+        let shade = (0.74 + spec - edge_shade - t_y * 0.10 + rib).clamp(0.38, 1.0);
+        let red = 218.0 * shade;
+        let green = 222.0 * shade;
+        let blue = 230.0 * shade;
+        col = [red, green, blue, body_cov * 0.96];
+    }
+
+    // Hollow recessed dark inner opening + bright metallic rim ellipse
+    let hollow = sq_sd_ellipse(u, v, 0.50, body_top, 0.275, 0.034);
+    let hollow_cov = sq_cov(hollow, edge);
+    if hollow_cov > 0.0 {
+        let h_rgb = lerp_rgb([64.0, 68.0, 78.0], [116.0, 122.0, 134.0], (u - 0.22) * 1.4);
+        col = blend_rgba(col, [h_rgb[0], h_rgb[1], h_rgb[2], hollow_cov * 0.88]);
+    }
+    let rim_ring = (top_rim.abs() - 0.010).max(0.0) - 0.002;
+    let rim_cov = sq_cov(rim_ring, edge);
+    if rim_cov > 0.0 {
+        col = blend_rgba(col, [242.0, 245.0, 250.0, rim_cov * 0.88]);
+    }
+
+    col
+}
+
 fn sample_squircle_uv(u: f32, v: f32, edge: f32, icon: BuiltinAppIcon) -> [f32; 4] {
-    let shell_sd = squircle_sd(u, v, 0.50, 0.50, 0.45, 0.45);
+    match icon {
+        BuiltinAppIcon::Downloads => return sample_downloads_uv(u, v, edge),
+        BuiltinAppIcon::Trash => return sample_trash_uv(u, v, edge),
+        _ => {}
+    }
+
+    let shell_sd = squircle_sd(u, v, 0.50, 0.50, 0.455, 0.455);
     let shell_cov = sq_cov(shell_sd, edge);
     if shell_cov <= 0.001 {
         return [0.0; 4];
     }
     let grad_t = (v * 1.1 - 0.05).clamp(0.0, 1.0);
     let (top_rgb, bot_rgb) = match icon {
-        BuiltinAppIcon::Terminal => ([34.0, 26.0, 56.0], [16.0, 12.0, 28.0]),
-        BuiltinAppIcon::Files => ([56.0, 189.0, 248.0], [29.0, 78.0, 216.0]),
-        BuiltinAppIcon::Overview => ([168.0, 85.0, 247.0], [79.0, 70.0, 229.0]),
+        BuiltinAppIcon::Terminal => ([48.0, 44.0, 60.0], [18.0, 16.0, 28.0]),
+        BuiltinAppIcon::Files => ([90.0, 206.0, 255.0], [26.0, 114.0, 242.0]),
+        BuiltinAppIcon::Overview => ([250.0, 250.0, 253.0], [222.0, 225.0, 236.0]),
+        BuiltinAppIcon::Browser => ([250.0, 251.0, 255.0], [224.0, 229.0, 240.0]),
+        BuiltinAppIcon::Notes => ([252.0, 251.0, 246.0], [235.0, 233.0, 226.0]),
+        BuiltinAppIcon::Settings => ([178.0, 182.0, 190.0], [114.0, 118.0, 128.0]),
+        BuiltinAppIcon::Downloads | BuiltinAppIcon::Trash => ([0.0; 3], [0.0; 3]),
         BuiltinAppIcon::WindowFallback { hue_seed, active } => {
             let palettes: [([f32; 3], [f32; 3]); 4] = [
                 ([139.0, 92.0, 246.0], [76.0, 29.0, 149.0]),
@@ -1426,13 +1542,122 @@ fn sample_squircle_uv(u: f32, v: f32, edge: f32, icon: BuiltinAppIcon) -> [f32; 
 
     col = paint_squircle_glyph(u, v, edge, icon, col);
 
-    // Subtle macOS glass specular rim highlight brightest along the top inner lip
-    let rim_mask = if shell_sd > -0.028 { 1.0 } else { 0.0 };
-    if rim_mask > 0.0 {
-        let rim_alpha = (0.36 * (1.15 - v).clamp(0.15, 1.0)) * rim_mask;
-        col = blend_rgba(col, [244.0, 240.0, 255.0, rim_alpha]);
+    // Subtle macOS-style top specular lip only (no harsh white ring around the bottom/sides)
+    if shell_sd > -0.022 && v < 0.52 {
+        let top_weight = ((0.52 - v) / 0.48).clamp(0.0, 1.0);
+        col = blend_rgba(col, [252.0, 250.0, 255.0, 0.26 * top_weight]);
+    } else if v > 0.88 {
+        let bot_shade = ((v - 0.88) / 0.12).clamp(0.0, 1.0) * 0.08;
+        col = blend_rgba(col, [8.0, 6.0, 14.0, bot_shade]);
     }
     [col[0], col[1], col[2], col[3] * shell_cov]
+}
+
+fn paint_overview_glyph(u: f32, v: f32, edge: f32, mut col: [f32; 4]) -> [f32; 4] {
+    let pill = sq_sd_rounded_box(u, v, 0.50, 0.245, 0.21, 0.038, 0.036);
+    let pill_cov = sq_cov(pill, edge);
+    if pill_cov > 0.0 {
+        col = blend_rgba(col, [182.0, 186.0, 198.0, pill_cov * 0.72]);
+    }
+    let tile_colors: [[f32; 3]; 6] = [
+        [56.0, 189.0, 248.0],
+        [52.0, 211.0, 153.0],
+        [248.0, 113.0, 113.0],
+        [251.0, 191.0, 36.0],
+        [167.0, 139.0, 250.0],
+        [148.0, 163.0, 184.0],
+    ];
+    for (idx, &tile_color) in tile_colors.iter().enumerate() {
+        let col_i = idx % 3;
+        let row_i = idx / 3;
+        #[allow(clippy::cast_precision_loss)]
+        let cx = 0.28 + col_i as f32 * 0.22;
+        #[allow(clippy::cast_precision_loss)]
+        let cy = 0.44 + row_i as f32 * 0.23;
+        let tile_sd = sq_sd_rounded_box(u, v, cx, cy, 0.075, 0.075, 0.025);
+        let cov = sq_cov(tile_sd, edge);
+        if cov > 0.0 {
+            col = blend_rgba(col, [tile_color[0], tile_color[1], tile_color[2], cov]);
+        }
+    }
+    col
+}
+
+fn paint_browser_glyph(u: f32, v: f32, edge: f32, mut col: [f32; 4]) -> [f32; 4] {
+    let dial_sd = (u - 0.50).hypot(v - 0.50) - 0.345;
+    let dial_cov = sq_cov(dial_sd, edge);
+    if dial_cov > 0.0 {
+        let dial_rgb = lerp_rgb([64.0, 184.0, 255.0], [18.0, 96.0, 236.0], (v - 0.16) * 1.45);
+        col = blend_rgba(col, [dial_rgb[0], dial_rgb[1], dial_rgb[2], dial_cov]);
+
+        if dial_sd > -0.055 && dial_sd < -0.022 {
+            let angle = (v - 0.50).atan2(u - 0.50);
+            let tick = ((angle * 12.0).cos() * 0.5 + 0.5).powf(4.0);
+            col = blend_rgba(col, [235.0, 246.0, 255.0, tick * 0.55 * dial_cov]);
+        }
+    }
+    let dx = u - 0.50;
+    let dy = v - 0.50;
+    let s = std::f32::consts::FRAC_1_SQRT_2;
+    let along = dx * s - dy * s;
+    let perp = (dx * s + dy * s).abs();
+    let half_len = 0.275_f32;
+    let half_w = 0.068_f32;
+    let t = (along.abs() / half_len).clamp(0.0, 1.0);
+    let width_at = half_w * (1.0 - t);
+    let needle_sd = (perp - width_at).max(along.abs() - half_len);
+    let needle_cov = sq_cov(needle_sd, edge * 0.9);
+    if needle_cov > 0.0 {
+        let needle_rgb = if along >= 0.0 {
+            [252.0, 72.0, 58.0]
+        } else {
+            [248.0, 250.0, 255.0]
+        };
+        col = blend_rgba(
+            col,
+            [needle_rgb[0], needle_rgb[1], needle_rgb[2], needle_cov],
+        );
+    }
+    let pivot_cov = sq_cov((u - 0.50).hypot(v - 0.50) - 0.026, edge);
+    if pivot_cov > 0.0 {
+        col = blend_rgba(col, [215.0, 224.0, 238.0, pivot_cov]);
+    }
+    col
+}
+
+fn paint_settings_glyph(u: f32, v: f32, edge: f32, mut col: [f32; 4]) -> [f32; 4] {
+    let dx = u - 0.50;
+    let dy = v - 0.50;
+    let r = dx.hypot(dy);
+    let well_cov = sq_cov(r - 0.35, edge);
+    if well_cov > 0.0 {
+        let well_rgb = lerp_rgb([74.0, 78.0, 86.0], [98.0, 102.0, 112.0], (v - 0.15) * 1.4);
+        col = blend_rgba(
+            col,
+            [well_rgb[0], well_rgb[1], well_rgb[2], well_cov * 0.92],
+        );
+    }
+    let angle = dy.atan2(dx);
+    let teeth = ((angle * 10.0).cos() * 3.2).clamp(-1.0, 1.0);
+    let outer_r = 0.285 + 0.034 * teeth;
+    let gear_sd = (r - outer_r).max(0.145 - r);
+    let gear_cov = sq_cov(gear_sd, edge);
+    if gear_cov > 0.0 {
+        let g_rgb = lerp_rgb(
+            [238.0, 241.0, 246.0],
+            [164.0, 170.0, 180.0],
+            (v - 0.2) * 1.6,
+        );
+        col = blend_rgba(col, [g_rgb[0], g_rgb[1], g_rgb[2], gear_cov]);
+    }
+    let spoke_mod = (angle * 3.0).cos().abs();
+    let in_spokes = r < 0.16 && r > 0.055 && spoke_mod > 0.72;
+    let hub_cov = sq_cov((r - 0.058).max(0.03 - r), edge);
+    if in_spokes || hub_cov > 0.0 {
+        let a = if in_spokes { 0.9 } else { hub_cov };
+        col = blend_rgba(col, [212.0, 217.0, 226.0, a]);
+    }
+    col
 }
 
 fn paint_squircle_glyph(
@@ -1444,46 +1669,70 @@ fn paint_squircle_glyph(
 ) -> [f32; 4] {
     match icon {
         BuiltinAppIcon::Terminal => {
-            let leg_top = sq_sd_segment(u, v, 0.25, 0.34, 0.43, 0.48, 0.036);
-            let leg_bot = sq_sd_segment(u, v, 0.43, 0.48, 0.25, 0.62, 0.036);
+            // Subtle metallic inner bevel lip
+            let inner_bevel = squircle_sd(u, v, 0.50, 0.50, 0.405, 0.405);
+            let ring_cov = sq_cov((inner_bevel.abs() - 0.011).max(-inner_bevel - 0.03), edge);
+            if ring_cov > 0.0 {
+                col = blend_rgba(col, [188.0, 184.0, 212.0, ring_cov * 0.22]);
+            }
+            let leg_top = sq_sd_segment(u, v, 0.26, 0.34, 0.43, 0.48, 0.036);
+            let leg_bot = sq_sd_segment(u, v, 0.43, 0.48, 0.26, 0.62, 0.036);
             let chevron_cov = sq_cov(leg_top.min(leg_bot), edge);
             if chevron_cov > 0.0 {
-                col = blend_rgba(col, [238.0, 232.0, 255.0, chevron_cov]);
+                col = blend_rgba(col, [244.0, 240.0, 255.0, chevron_cov]);
             }
             let bar = sq_sd_segment(u, v, 0.50, 0.62, 0.72, 0.62, 0.034);
             let bar_cov = sq_cov(bar, edge);
             if bar_cov > 0.0 {
-                col = blend_rgba(col, [52.0, 211.0, 153.0, bar_cov]);
+                col = blend_rgba(col, [64.0, 224.0, 160.0, bar_cov]);
             }
         }
         BuiltinAppIcon::Files => {
-            let tab = sq_sd_rounded_box(u, v, 0.34, 0.33, 0.14, 0.06, 0.03);
-            let back = sq_sd_rounded_box(u, v, 0.50, 0.46, 0.30, 0.14, 0.05);
+            let tab = sq_sd_rounded_box(u, v, 0.34, 0.31, 0.14, 0.06, 0.03);
+            let back = sq_sd_rounded_box(u, v, 0.50, 0.44, 0.31, 0.14, 0.05);
             let flap_cov = sq_cov(tab.min(back), edge);
             if flap_cov > 0.0 {
-                col = blend_rgba(col, [30.0, 64.0, 175.0, flap_cov * 0.55]);
+                col = blend_rgba(col, [22.0, 82.0, 198.0, flap_cov * 0.78]);
             }
-            let paper = sq_sd_rounded_box(u, v, 0.50, 0.42, 0.25, 0.08, 0.025);
+            let paper = sq_sd_rounded_box(u, v, 0.50, 0.40, 0.26, 0.075, 0.025);
             let paper_cov = sq_cov(paper, edge);
             if paper_cov > 0.0 {
-                col = blend_rgba(col, [241.0, 245.0, 249.0, paper_cov * 0.94]);
+                col = blend_rgba(col, [248.0, 251.0, 255.0, paper_cov * 0.96]);
             }
-            let front = sq_sd_rounded_box(u, v, 0.50, 0.57, 0.30, 0.16, 0.055);
+            let front = sq_sd_rounded_box(u, v, 0.50, 0.57, 0.31, 0.18, 0.055);
             let front_cov = sq_cov(front, edge);
             if front_cov > 0.0 {
-                let f_rgb = lerp_rgb([125.0, 211.0, 252.0], [37.0, 99.0, 235.0], (v - 0.41) * 3.0);
+                let f_rgb = lerp_rgb(
+                    [224.0, 244.0, 255.0],
+                    [142.0, 204.0, 255.0],
+                    (v - 0.39) * 2.8,
+                );
                 col = blend_rgba(col, [f_rgb[0], f_rgb[1], f_rgb[2], front_cov]);
             }
         }
-        BuiltinAppIcon::Overview => {
-            let c1 = sq_sd_rounded_box(u, v, 0.35, 0.35, 0.135, 0.105, 0.035);
-            let c2 = sq_sd_rounded_box(u, v, 0.66, 0.38, 0.12, 0.095, 0.035);
-            let c3 = sq_sd_rounded_box(u, v, 0.50, 0.65, 0.21, 0.11, 0.038);
-            let cards_cov = sq_cov(c1.min(c2).min(c3), edge);
-            if cards_cov > 0.0 {
-                col = blend_rgba(col, [246.0, 243.0, 255.0, cards_cov * 0.90]);
+        BuiltinAppIcon::Overview => return paint_overview_glyph(u, v, edge, col),
+        BuiltinAppIcon::Browser => return paint_browser_glyph(u, v, edge, col),
+        BuiltinAppIcon::Notes => {
+            // Warm amber header bar across top + cream ruled notebook paper lines
+            if v < 0.295 {
+                let hdr_rgb = lerp_rgb([255.0, 214.0, 36.0], [244.0, 182.0, 12.0], v / 0.295);
+                col = [hdr_rgb[0], hdr_rgb[1], hdr_rgb[2], 1.0];
+            }
+            let divider_sd = (v - 0.305).abs() - 0.010;
+            let div_cov = sq_cov(divider_sd, edge);
+            if div_cov > 0.0 {
+                col = blend_rgba(col, [186.0, 168.0, 134.0, div_cov * 0.65]);
+            }
+            for rule_y in [0.46_f32, 0.60, 0.74] {
+                let rule_sd = sq_sd_segment(u, v, 0.14, rule_y, 0.86, rule_y, 0.008);
+                let rule_cov = sq_cov(rule_sd, edge);
+                if rule_cov > 0.0 {
+                    col = blend_rgba(col, [196.0, 192.0, 184.0, rule_cov * 0.80]);
+                }
             }
         }
+        BuiltinAppIcon::Settings => return paint_settings_glyph(u, v, edge, col),
+        BuiltinAppIcon::Downloads | BuiltinAppIcon::Trash => {}
         BuiltinAppIcon::WindowFallback { .. } => {
             let win = sq_sd_rounded_box(u, v, 0.50, 0.51, 0.27, 0.22, 0.05);
             let win_cov = sq_cov(win, edge);
@@ -1511,10 +1760,10 @@ fn paint_squircle_glyph(
 #[allow(clippy::cast_precision_loss)]
 fn sample_builtin_squircle_pixel(px: i32, py: i32, size_px: i32, icon: BuiltinAppIcon) -> [u8; 4] {
     let dim = size_px.max(1) as f32;
-    let edge = 1.25 / dim;
+    let edge = 1.15 / dim;
     let mut sum = [0.0_f32; 4];
-    for sy in [0.25_f32, 0.75] {
-        for sx in [0.25_f32, 0.75] {
+    for sy in [0.125_f32, 0.375, 0.625, 0.875] {
+        for sx in [0.125_f32, 0.375, 0.625, 0.875] {
             let u = (px as f32 + sx) / dim;
             let v = (py as f32 + sy) / dim;
             let s = sample_squircle_uv(u, v, edge, icon);
@@ -1525,15 +1774,15 @@ fn sample_builtin_squircle_pixel(px: i32, py: i32, size_px: i32, icon: BuiltinAp
             sum[3] += a;
         }
     }
-    let avg_a = (sum[3] * 0.25).clamp(0.0, 1.0);
+    let avg_a = (sum[3] * (1.0 / 16.0)).clamp(0.0, 1.0);
     if avg_a <= 0.001 {
         return [0, 0, 0, 0];
     }
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     [
-        (sum[2] * 0.25).clamp(0.0, 255.0).round() as u8,
-        (sum[1] * 0.25).clamp(0.0, 255.0).round() as u8,
-        (sum[0] * 0.25).clamp(0.0, 255.0).round() as u8,
+        (sum[2] * (1.0 / 16.0)).clamp(0.0, 255.0).round() as u8,
+        (sum[1] * (1.0 / 16.0)).clamp(0.0, 255.0).round() as u8,
+        (sum[0] * (1.0 / 16.0)).clamp(0.0, 255.0).round() as u8,
         (avg_a * 255.0).clamp(0.0, 255.0).round() as u8,
     ]
 }
@@ -1695,10 +1944,15 @@ mod tests {
         assert_eq!(resolved, Some(icon_file));
         let _ = fs::remove_dir_all(&base);
 
-        // Verify procedural macOS 27 squircles have clean transparent corners & distinct centers
+        // Verify all procedural macOS Dock icons have clean transparent corners & distinct centers
         let term_center = sample_builtin_squircle_pixel(24, 24, 48, BuiltinAppIcon::Terminal);
         let files_center = sample_builtin_squircle_pixel(24, 30, 48, BuiltinAppIcon::Files);
         let overview_center = sample_builtin_squircle_pixel(24, 24, 48, BuiltinAppIcon::Overview);
+        let browser_center = sample_builtin_squircle_pixel(24, 24, 48, BuiltinAppIcon::Browser);
+        let notes_center = sample_builtin_squircle_pixel(24, 24, 48, BuiltinAppIcon::Notes);
+        let settings_center = sample_builtin_squircle_pixel(24, 24, 48, BuiltinAppIcon::Settings);
+        let downloads_center = sample_builtin_squircle_pixel(24, 30, 48, BuiltinAppIcon::Downloads);
+        let trash_center = sample_builtin_squircle_pixel(24, 24, 48, BuiltinAppIcon::Trash);
         let fallback_center = sample_builtin_squircle_pixel(
             24,
             24,
@@ -1708,14 +1962,34 @@ mod tests {
                 active: true,
             },
         );
-        for px in [term_center, files_center, overview_center, fallback_center] {
+        for px in [
+            term_center,
+            files_center,
+            overview_center,
+            browser_center,
+            notes_center,
+            settings_center,
+            downloads_center,
+            fallback_center,
+        ] {
             assert_eq!(px[3], 255);
         }
+        assert!(trash_center[3] >= 240);
         assert_ne!(term_center, files_center);
         assert_ne!(files_center, overview_center);
+        assert_ne!(browser_center, notes_center);
+        assert_ne!(settings_center, downloads_center);
+        assert_ne!(downloads_center, trash_center);
 
-        let corner = sample_builtin_squircle_pixel(0, 0, 48, BuiltinAppIcon::Files);
-        assert_eq!(corner[3], 0);
+        for kind in [
+            BuiltinAppIcon::Files,
+            BuiltinAppIcon::Browser,
+            BuiltinAppIcon::Downloads,
+            BuiltinAppIcon::Trash,
+        ] {
+            let corner = sample_builtin_squircle_pixel(0, 0, 48, kind);
+            assert_eq!(corner[3], 0, "{kind:?} corner should stay transparent");
+        }
         Ok(())
     }
 }

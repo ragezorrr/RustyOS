@@ -52,6 +52,15 @@ struct ShadowCornerKey {
     max_alpha: u8,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct DockGlassKey {
+    width: u16,
+    height: u16,
+    radius: u16,
+    glass_pct: u8,
+    reduce_transparency: bool,
+}
+
 #[derive(Debug)]
 struct CachedCursor {
     buffer: MemoryRenderBuffer,
@@ -98,6 +107,8 @@ pub struct UiShapeCache {
     corners: HashMap<CornerKey, (MemoryRenderBuffer, Size<i32, Logical>)>,
     shadow_corners: HashMap<ShadowCornerKey, (MemoryRenderBuffer, Size<i32, Logical>)>,
     glyphs: HashMap<GlyphKey, MemoryRenderBuffer>,
+    dock_glass_panels: HashMap<DockGlassKey, MemoryRenderBuffer>,
+    dock_icon_shadows: HashMap<u16, MemoryRenderBuffer>,
     wallpaper: CachedWallpaper,
     cursor_arrow: Option<MemoryRenderBuffer>,
     xcursors: HashMap<(Option<String>, &'static str, u32), Option<CachedCursor>>,
@@ -223,6 +234,98 @@ impl UiShapeCache {
         MemoryRenderBufferRenderElement::from_buffer(
             renderer,
             loc.to_f64().to_physical(1.0),
+            buf,
+            None,
+            None,
+            None,
+            Kind::Unspecified,
+        )
+        .ok()
+    }
+
+    /// Returns a GPU-cached macOS-style translucent top-lit frosted glass Dock container (`RUSTYOS-050`).
+    #[allow(
+        clippy::too_many_arguments,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
+    pub fn dock_glass_panel_element(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        width: i32,
+        height: i32,
+        radius: i32,
+        glass_opacity: f32,
+        reduce_transparency: bool,
+        loc: Point<i32, Logical>,
+    ) -> Option<MemoryRenderBufferRenderElement<GlesRenderer>> {
+        if width <= 0 || height <= 0 {
+            return None;
+        }
+        let w_u16 = u16::try_from(width).ok()?;
+        let h_u16 = u16::try_from(height).ok()?;
+        let r_u16 = u16::try_from(radius.clamp(0, width.min(height) / 2)).ok()?;
+        let glass_pct = (crate::config::clamp_glass_opacity(glass_opacity) * 100.0).round() as u8;
+        let key = DockGlassKey {
+            width: w_u16,
+            height: h_u16,
+            radius: r_u16,
+            glass_pct,
+            reduce_transparency,
+        };
+        if !self.dock_glass_panels.contains_key(&key) {
+            if self.dock_glass_panels.len() >= 16 {
+                self.dock_glass_panels.clear();
+            }
+            let clamped_glass = f32::from(glass_pct) / 100.0;
+            let buf = rasterize_rgba_rect(width, height, |px, py| {
+                sample_dock_glass_pixel(
+                    px,
+                    py,
+                    width,
+                    height,
+                    i32::from(r_u16),
+                    clamped_glass,
+                    reduce_transparency,
+                )
+            });
+            self.dock_glass_panels.insert(key, buf);
+        }
+        let buf = self.dock_glass_panels.get(&key)?;
+        MemoryRenderBufferRenderElement::from_buffer(
+            renderer,
+            loc.to_f64().to_physical(1.0),
+            buf,
+            None,
+            None,
+            None,
+            Kind::Unspecified,
+        )
+        .ok()
+    }
+
+    /// Returns a GPU-cached soft ambient drop shadow behind a Dock app icon (`RUSTYOS-050`).
+    pub fn dock_icon_shadow_element(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        icon_size: i32,
+        icon_loc: Point<i32, Logical>,
+    ) -> Option<MemoryRenderBufferRenderElement<GlesRenderer>> {
+        if icon_size <= 0 {
+            return None;
+        }
+        let key = u16::try_from(icon_size).ok()?;
+        let pad = 7;
+        let total = icon_size + pad * 2;
+        let buf = self.dock_icon_shadows.entry(key).or_insert_with(|| {
+            rasterize_rgba_rect(total, total, |px, py| {
+                sample_dock_icon_shadow_pixel(px, py, icon_size, pad)
+            })
+        });
+        let shadow_loc = Point::from((icon_loc.x - pad, icon_loc.y - pad + 3));
+        MemoryRenderBufferRenderElement::from_buffer(
+            renderer,
+            shadow_loc.to_f64().to_physical(1.0),
             buf,
             None,
             None,
@@ -421,7 +524,7 @@ impl UiShapeCache {
         .ok()
     }
 
-    /// Returns a GPU-cached 2x2-supersampled SDF UI icon glyph for `TopBar` or `Spotlight` (`RUSTYOS-048`).
+    /// Returns a GPU-cached 4x4-supersampled SDF UI icon glyph for `TopBar` or `Spotlight` (`RUSTYOS-048`/`049`).
     pub fn ui_glyph_element(
         &mut self,
         renderer: &mut GlesRenderer,
@@ -855,59 +958,79 @@ fn sd_cov(sd: f32, edge_w: f32) -> f32 {
     (0.5 - sd / edge_w.max(0.01)).clamp(0.0, 1.0)
 }
 
-fn sample_rusty_logo_uv(u: f32, v: f32, edge: f32, tint: [f32; 4]) -> [f32; 4] {
-    const CREST: [(f32, f32); 5] = [
-        (0.50, 0.14),
-        (0.84, 0.42),
-        (0.71, 0.84),
-        (0.29, 0.84),
-        (0.16, 0.42),
-    ];
-    let outer = signed_distance_polygon(u, v, &CREST);
-    let core_cut = sd_circle(u, v, 0.50, 0.53, 0.125);
-    let sd = outer.max(-core_cut);
-    let cov = sd_cov(sd, edge);
-    let spark_cov = sd_cov(sd_circle(u, v, 0.50, 0.53, 0.052), edge);
-    let alpha = tint[3] * cov.max(spark_cov);
-    if alpha <= 0.001 {
-        return [0.0; 4];
-    }
-    let sheen = if u > 0.50 { 1.06 } else { 0.92 };
-    let red = (tint[0] * sheen).clamp(0.0, 255.0);
-    let green = (tint[1] * sheen).clamp(0.0, 255.0);
-    let blue = (tint[2] * 1.08).clamp(0.0, 255.0);
-    // Tint center spark gently toward Purple Glass lavender
-    let mix = spark_cov * (1.0 - cov);
+fn blend_premul_over(bg: [f32; 4], fg_rgb: [f32; 3], fg_a: f32) -> [f32; 4] {
+    let a = fg_a.clamp(0.0, 1.0);
+    let inv = 1.0 - a;
     [
-        red * (1.0 - mix) + 196.0 * mix,
-        green * (1.0 - mix) + 181.0 * mix,
-        blue * (1.0 - mix) + 253.0 * mix,
-        alpha,
+        fg_rgb[0] * a + bg[0] * inv,
+        fg_rgb[1] * a + bg[1] * inv,
+        fg_rgb[2] * a + bg[2] * inv,
+        a + bg[3] * inv,
     ]
+}
+
+fn premul_tint(tint: [f32; 4], cov: f32) -> [f32; 4] {
+    let a = (tint[3] * cov).clamp(0.0, 1.0);
+    [tint[0] * a, tint[1] * a, tint[2] * a, a]
+}
+
+/// Signed distance to an upward-opening circular arc with true rounded endcaps (`Inigo Quilez sdArc`).
+fn sd_arc_up(
+    u: f32,
+    v: f32,
+    cx: f32,
+    cy: f32,
+    radius: f32,
+    half_angle_rad: f32,
+    stroke: f32,
+) -> f32 {
+    let px = (u - cx).abs();
+    let py = cy - v;
+    let (sin_a, cos_a) = half_angle_rad.sin_cos();
+    let dist = if px * cos_a < py * sin_a {
+        (px.hypot(py) - radius).abs()
+    } else {
+        (px - radius * sin_a).hypot(py - radius * cos_a)
+    };
+    dist - stroke
+}
+
+fn sample_rusty_logo_uv(u: f32, v: f32, edge: f32, tint: [f32; 4]) -> [f32; 4] {
+    // Original sleek chamfered hexagonal crest for RustyOS, pure monochrome with transparent inner cutout.
+    const CREST: [(f32, f32); 6] = [
+        (0.50, 0.14),
+        (0.81, 0.31),
+        (0.81, 0.67),
+        (0.50, 0.86),
+        (0.19, 0.67),
+        (0.19, 0.31),
+    ];
+    let outer = signed_distance_polygon(u, v, &CREST) - 0.025;
+    let inner_cut = sd_circle(u, v, 0.50, 0.50, 0.125);
+    let sd = outer.max(-inner_cut);
+    let cov = sd_cov(sd, edge);
+    premul_tint(tint, cov)
 }
 
 fn sample_wifi_glyph_uv(u: f32, v: f32, edge: f32, tint: [f32; 4], connected: bool) -> [f32; 4] {
     let cx = 0.50;
     let cy = 0.77;
-    let dx = u - cx;
-    let dy = cy - v;
-    let dist = dx.hypot(dy);
-    let cone_sd = (dx.abs() - dy * 0.95).max(-dy + 0.04);
+    let half_angle = 0.74_f32; // ~42.4 deg per side -> crisp macOS fan
+    let stroke = 0.052;
 
-    let mut sd = sd_circle(u, v, cx, cy, 0.078);
-    for radius in [0.24_f32, 0.42, 0.60] {
-        let arc_sd = ((dist - radius).abs() - 0.046).max(cone_sd);
-        sd = sd.min(arc_sd);
+    let mut sd = sd_circle(u, v, cx, cy, 0.072);
+    for radius in [0.225_f32, 0.395, 0.565] {
+        sd = sd.min(sd_arc_up(u, v, cx, cy, radius, half_angle, stroke));
     }
+
     let base_alpha = if connected { tint[3] } else { tint[3] * 0.42 };
     let cov = sd_cov(sd, edge);
-    let slash_cov = if connected {
-        0.0
-    } else {
-        sd_cov(sd_segment(u, v, 0.22, 0.20, 0.80, 0.78, 0.042), edge)
-    };
-    let a = (base_alpha * cov).max(tint[3] * slash_cov);
-    [tint[0], tint[1], tint[2], a]
+    let base = premul_tint([tint[0], tint[1], tint[2], base_alpha], cov);
+    if connected {
+        return base;
+    }
+    let slash_cov = sd_cov(sd_segment(u, v, 0.20, 0.20, 0.80, 0.80, 0.044), edge);
+    blend_premul_over(base, [tint[0], tint[1], tint[2]], tint[3] * slash_cov)
 }
 
 fn sample_volume_glyph_uv(
@@ -929,26 +1052,20 @@ fn sample_volume_glyph_uv(
         let dist = dx.hypot(dy);
         let cone_sd = (dy - dx * 1.10).max(-dx + 0.05);
         if level_percent > 0 {
-            speaker_sd = speaker_sd.min(((dist - 0.18).abs() - 0.040).max(cone_sd));
+            speaker_sd = speaker_sd.min(((dist - 0.18).abs() - 0.042).max(cone_sd));
         }
         if level_percent > 48 {
-            speaker_sd = speaker_sd.min(((dist - 0.32).abs() - 0.040).max(cone_sd));
+            speaker_sd = speaker_sd.min(((dist - 0.32).abs() - 0.042).max(cone_sd));
         }
     }
 
     let speaker_cov = sd_cov(speaker_sd, edge);
     if muted {
-        let slash_cov = sd_cov(sd_segment(u, v, 0.20, 0.20, 0.82, 0.80, 0.044), edge);
-        let a = (tint[3] * 0.55 * speaker_cov).max(tint[3] * slash_cov);
-        let m = slash_cov;
-        return [
-            tint[0] * (1.0 - m) + 248.0 * m,
-            tint[1] * (1.0 - m) + 113.0 * m,
-            tint[2] * (1.0 - m) + 113.0 * m,
-            a,
-        ];
+        let base = premul_tint([tint[0], tint[1], tint[2], tint[3] * 0.55], speaker_cov);
+        let slash_cov = sd_cov(sd_segment(u, v, 0.20, 0.20, 0.82, 0.80, 0.046), edge);
+        return blend_premul_over(base, [248.0, 113.0, 113.0], tint[3] * slash_cov);
     }
-    [tint[0], tint[1], tint[2], tint[3] * speaker_cov]
+    premul_tint(tint, speaker_cov)
 }
 
 fn sample_battery_glyph_uv(
@@ -959,72 +1076,85 @@ fn sample_battery_glyph_uv(
     percent: u8,
     charging: bool,
 ) -> [f32; 4] {
-    let shell_ring = sd_rounded_box(u, v, 0.46, 0.50, 0.32, 0.20, 0.08).abs() - 0.036;
-    let nub = sd_rounded_box(u, v, 0.84, 0.50, 0.036, 0.078, 0.024);
-    let frame_cov = sd_cov(shell_ring.min(nub), edge);
+    let body_outer = sd_rounded_box(u, v, 0.45, 0.50, 0.35, 0.22, 0.10);
+    let nub = sd_rounded_box(u, v, 0.85, 0.50, 0.034, 0.088, 0.025);
+    let shell_ring = body_outer.abs() - 0.036;
 
-    let frac = f32::from(percent.clamp(6, 100)) / 100.0;
-    let fill_w = 0.24 * frac;
-    let fill_cx = 0.22 + fill_w;
-    let fill_sd = sd_rounded_box(u, v, fill_cx, 0.50, fill_w, 0.105, 0.032);
-    let fill_cov = sd_cov(fill_sd, edge);
-
-    let (fr, fg, fb) = if charging || percent > 20 {
-        (52.0_f32, 211.0_f32, 153.0_f32)
-    } else {
-        (248.0_f32, 113.0_f32, 113.0_f32)
-    };
-    let bolt_cov = if charging {
-        let b1 = sd_segment(u, v, 0.50, 0.34, 0.41, 0.52, 0.032);
-        let b2 = sd_segment(u, v, 0.41, 0.52, 0.51, 0.52, 0.030);
-        let b3 = sd_segment(u, v, 0.51, 0.52, 0.42, 0.67, 0.032);
-        sd_cov(b1.min(b2).min(b3), edge)
-    } else {
-        0.0
-    };
-
-    let mut out = [
-        tint[0] * frame_cov,
-        tint[1] * frame_cov,
-        tint[2] * frame_cov,
-        tint[3] * frame_cov,
-    ];
-    if fill_cov > 0.0 {
-        let fa = tint[3] * fill_cov * 0.92;
-        out = [
-            fr * fa + out[0] * (1.0 - fa),
-            fg * fa + out[1] * (1.0 - fa),
-            fb * fa + out[2] * (1.0 - fa),
-            fa + out[3] * (1.0 - fa),
-        ];
+    // Clean macOS monochrome pill: solid white when nearly full (>=92%), crisp translucent track + fill otherwise.
+    let mut out = [0.0_f32; 4];
+    let interior_cov = sd_cov(body_outer + 0.036, edge);
+    if interior_cov > 0.0 {
+        out = blend_premul_over(
+            out,
+            [tint[0], tint[1], tint[2]],
+            tint[3] * interior_cov * 0.28,
+        );
     }
-    if bolt_cov > 0.0 {
-        let ba = tint[3] * bolt_cov;
-        out = [
-            255.0 * ba + out[0] * (1.0 - ba),
-            255.0 * ba + out[1] * (1.0 - ba),
-            255.0 * ba + out[2] * (1.0 - ba),
-            ba + out[3] * (1.0 - ba),
-        ];
+
+    let frame_cov = sd_cov(shell_ring.min(nub), edge);
+    if frame_cov > 0.0 {
+        out = blend_premul_over(out, [tint[0], tint[1], tint[2]], tint[3] * frame_cov * 0.92);
+    }
+
+    let frac = if percent >= 92 {
+        1.0_f32
+    } else {
+        f32::from(percent.clamp(8, 100)) / 100.0
+    };
+    let fill_max_hw = 0.27;
+    let fill_hw = fill_max_hw * frac;
+    let fill_cx = 0.18 + fill_hw;
+    let fill_sd = sd_rounded_box(u, v, fill_cx, 0.50, fill_hw, 0.135, 0.048);
+    let fill_cov = sd_cov(fill_sd, edge);
+    if fill_cov > 0.0 {
+        let fill_rgb = if !charging && percent <= 20 {
+            [248.0_f32, 113.0, 113.0]
+        } else {
+            [tint[0], tint[1], tint[2]]
+        };
+        out = blend_premul_over(out, fill_rgb, tint[3] * fill_cov);
+    }
+
+    if charging {
+        let b1 = sd_segment(u, v, 0.49, 0.33, 0.40, 0.51, 0.032);
+        let b2 = sd_segment(u, v, 0.40, 0.51, 0.50, 0.51, 0.030);
+        let b3 = sd_segment(u, v, 0.50, 0.51, 0.41, 0.67, 0.032);
+        let bolt_cov = sd_cov(b1.min(b2).min(b3), edge);
+        if bolt_cov > 0.0 {
+            out = blend_premul_over(out, [18.0, 14.0, 28.0], tint[3] * bolt_cov * 0.88);
+        }
     }
     out
 }
 
 fn sample_search_glyph_uv(u: f32, v: f32, edge: f32, tint: [f32; 4]) -> [f32; 4] {
-    let ring = sd_circle(u, v, 0.42, 0.42, 0.22).abs() - 0.048;
-    let handle = sd_segment(u, v, 0.59, 0.59, 0.83, 0.83, 0.052);
+    let ring = sd_circle(u, v, 0.42, 0.42, 0.225).abs() - 0.056;
+    let handle = sd_segment(u, v, 0.59, 0.59, 0.83, 0.83, 0.058);
     let cov = sd_cov(ring.min(handle), edge);
-    [tint[0], tint[1], tint[2], tint[3] * cov]
+    premul_tint(tint, cov)
 }
 
 fn sample_control_center_glyph_uv(u: f32, v: f32, edge: f32, tint: [f32; 4]) -> [f32; 4] {
-    let top_track = sd_rounded_box(u, v, 0.50, 0.31, 0.34, 0.125, 0.125).abs() - 0.032;
-    let top_knob = sd_circle(u, v, 0.31, 0.31, 0.075);
-    let bot_track = sd_rounded_box(u, v, 0.50, 0.69, 0.34, 0.125, 0.125).abs() - 0.032;
-    let bot_knob = sd_circle(u, v, 0.69, 0.69, 0.075);
-    let sd = top_track.min(top_knob).min(bot_track).min(bot_knob);
-    let cov = sd_cov(sd, edge);
-    [tint[0], tint[1], tint[2], tint[3] * cov]
+    let top_capsule = sd_rounded_box(u, v, 0.50, 0.32, 0.34, 0.125, 0.125);
+    let bot_capsule = sd_rounded_box(u, v, 0.50, 0.68, 0.34, 0.125, 0.125);
+    let track_outline = (top_capsule.abs() - 0.034).min(bot_capsule.abs() - 0.034);
+    let track_fill = top_capsule.min(bot_capsule);
+    let knobs = sd_circle(u, v, 0.33, 0.32, 0.082).min(sd_circle(u, v, 0.67, 0.68, 0.082));
+
+    let mut out = [0.0_f32; 4];
+    let fill_cov = sd_cov(track_fill, edge);
+    if fill_cov > 0.0 {
+        out = blend_premul_over(out, [tint[0], tint[1], tint[2]], tint[3] * fill_cov * 0.26);
+    }
+    let rim_cov = sd_cov(track_outline, edge);
+    if rim_cov > 0.0 {
+        out = blend_premul_over(out, [tint[0], tint[1], tint[2]], tint[3] * rim_cov * 0.92);
+    }
+    let knob_cov = sd_cov(knobs, edge);
+    if knob_cov > 0.0 {
+        out = blend_premul_over(out, [tint[0], tint[1], tint[2]], tint[3] * knob_cov);
+    }
+    out
 }
 
 #[allow(clippy::cast_precision_loss)]
@@ -1035,20 +1165,18 @@ fn sample_ui_glyph_pixel(
     kind: UiGlyphKind,
     tint_rgba: [u8; 4],
 ) -> [u8; 4] {
+    const SUBSAMPLES: [f32; 4] = [0.125, 0.375, 0.625, 0.875];
     let dim = size_px.max(1) as f32;
-    let edge = 1.15 / dim;
+    let edge = 1.05 / dim;
     let tint = [
         f32::from(tint_rgba[0]),
         f32::from(tint_rgba[1]),
         f32::from(tint_rgba[2]),
         f32::from(tint_rgba[3]) / 255.0,
     ];
-    let mut sum_r = 0.0_f32;
-    let mut sum_g = 0.0_f32;
-    let mut sum_b = 0.0_f32;
-    let mut sum_a = 0.0_f32;
-    for sy in [0.25_f32, 0.75] {
-        for sx in [0.25_f32, 0.75] {
+    let mut sum = [0.0_f32; 4];
+    for sy in SUBSAMPLES {
+        for sx in SUBSAMPLES {
             let u = (px as f32 + sx) / dim;
             let v = (py as f32 + sy) / dim;
             let s = match kind {
@@ -1061,63 +1189,26 @@ fn sample_ui_glyph_pixel(
                     muted,
                 } => sample_volume_glyph_uv(u, v, edge, tint, level_percent, muted),
                 UiGlyphKind::Battery { percent, charging } => {
-                    return sample_battery_subpixel_avg(px, py, dim, edge, tint, percent, charging);
+                    sample_battery_glyph_uv(u, v, edge, tint, percent, charging)
                 }
                 UiGlyphKind::Search => sample_search_glyph_uv(u, v, edge, tint),
                 UiGlyphKind::ControlCenter => sample_control_center_glyph_uv(u, v, edge, tint),
             };
-            let a = s[3].clamp(0.0, 1.0);
-            sum_r += s[0] * a;
-            sum_g += s[1] * a;
-            sum_b += s[2] * a;
-            sum_a += a;
+            sum[0] += s[0];
+            sum[1] += s[1];
+            sum[2] += s[2];
+            sum[3] += s[3];
         }
     }
-    let avg_a = (sum_a * 0.25).clamp(0.0, 1.0);
+    let avg_a = (sum[3] * 0.0625).clamp(0.0, 1.0);
     if avg_a <= 0.001 {
         return [0, 0, 0, 0];
     }
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     [
-        (sum_b * 0.25).clamp(0.0, 255.0).round() as u8,
-        (sum_g * 0.25).clamp(0.0, 255.0).round() as u8,
-        (sum_r * 0.25).clamp(0.0, 255.0).round() as u8,
-        (avg_a * 255.0).clamp(0.0, 255.0).round() as u8,
-    ]
-}
-
-fn sample_battery_subpixel_avg(
-    px: i32,
-    py: i32,
-    dim: f32,
-    edge: f32,
-    tint: [f32; 4],
-    percent: u8,
-    charging: bool,
-) -> [u8; 4] {
-    let mut sum = [0.0_f32; 4];
-    for sy in [0.25_f32, 0.75] {
-        for sx in [0.25_f32, 0.75] {
-            #[allow(clippy::cast_precision_loss)]
-            let u = (px as f32 + sx) / dim;
-            #[allow(clippy::cast_precision_loss)]
-            let v = (py as f32 + sy) / dim;
-            let p = sample_battery_glyph_uv(u, v, edge, tint, percent, charging);
-            sum[0] += p[0];
-            sum[1] += p[1];
-            sum[2] += p[2];
-            sum[3] += p[3];
-        }
-    }
-    let avg_a = (sum[3] * 0.25).clamp(0.0, 1.0);
-    if avg_a <= 0.001 {
-        return [0, 0, 0, 0];
-    }
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    [
-        (sum[2] * 0.25).clamp(0.0, 255.0).round() as u8,
-        (sum[1] * 0.25).clamp(0.0, 255.0).round() as u8,
-        (sum[0] * 0.25).clamp(0.0, 255.0).round() as u8,
+        (sum[2] * 0.0625).clamp(0.0, 255.0).round() as u8,
+        (sum[1] * 0.0625).clamp(0.0, 255.0).round() as u8,
+        (sum[0] * 0.0625).clamp(0.0, 255.0).round() as u8,
         (avg_a * 255.0).clamp(0.0, 255.0).round() as u8,
     ]
 }
@@ -1620,6 +1711,137 @@ pub(crate) fn parse_xcursor_bytes(
     Some((w_i32, h_i32, xh_i32, yh_i32, bgra))
 }
 
+fn rasterize_rgba_rect(
+    width: i32,
+    height: i32,
+    sample: impl Fn(i32, i32) -> [u8; 4],
+) -> MemoryRenderBuffer {
+    let w = width.max(1);
+    let h = height.max(1);
+    let mut mem_buf = MemoryRenderBuffer::new(Fourcc::Argb8888, (w, h), 1, Transform::Normal, None);
+    {
+        let mut ctx = mem_buf.render();
+        let _ = ctx.draw(|pixels| {
+            let w_u = usize::try_from(w).unwrap_or(0);
+            for py in 0..h {
+                for px in 0..w {
+                    let row = usize::try_from(py).unwrap_or(0);
+                    let col = usize::try_from(px).unwrap_or(0);
+                    let idx = (row * w_u + col) * 4;
+                    if idx + 4 <= pixels.len() {
+                        let p = sample(px, py);
+                        pixels[idx..idx + 4].copy_from_slice(&p);
+                    }
+                }
+            }
+            Ok::<_, std::convert::Infallible>(vec![smithay::utils::Rectangle::from_size(
+                Size::from((w, h)),
+            )])
+        });
+    }
+    mem_buf
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn sample_dock_glass_pixel(
+    px: i32,
+    py: i32,
+    width: i32,
+    height: i32,
+    radius: i32,
+    glass_opacity: f32,
+    reduce_transparency: bool,
+) -> [u8; 4] {
+    const BAYER4: [[u8; 4]; 4] = [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]];
+
+    let w_f = width.max(1) as f32;
+    let h_f = height.max(1) as f32;
+    let hw = w_f * 0.5;
+    let hh = h_f * 0.5;
+    let r = (radius as f32).clamp(0.0, hw.min(hh));
+    let u = px as f32 + 0.5;
+    let v = py as f32 + 0.5;
+
+    let sd = sd_rounded_box(u, v, hw, hh, hw, hh, r);
+    let cov = sd_cov(sd, 1.15);
+    if cov <= 0.001 {
+        return [0, 0, 0, 0];
+    }
+
+    let t_v = (v / h_f).clamp(0.0, 1.0);
+    let by = usize::try_from(py.rem_euclid(4)).unwrap_or(0);
+    let bx = usize::try_from(px.rem_euclid(4)).unwrap_or(0);
+    let dither = (f32::from(BAYER4[by][bx]) / 16.0 - 0.5) * 0.9;
+
+    // 1 px perimeter highlight weighted cleanly toward the top curved edge like macOS liquid glass.
+    let rim_band = (1.0 - ((-sd - 0.15).max(0.0) / 1.35)).clamp(0.0, 1.0);
+    let dir_light = (1.0 - t_v * 0.72).clamp(0.26, 1.0);
+
+    if reduce_transparency {
+        let rim_mix = rim_band * (0.08 + 0.12 * dir_light);
+        let r_col = (31.0 - 4.0 * t_v + dither) * (1.0 - rim_mix) + 244.0 * rim_mix;
+        let g_col = (25.0 - 4.0 * t_v + dither) * (1.0 - rim_mix) + 238.0 * rim_mix;
+        let b_col = (45.0 - 5.0 * t_v + dither) * (1.0 - rim_mix) + 255.0 * rim_mix;
+        return premul_pixel(r_col, g_col, b_col, (246.0 / 255.0) * cov);
+    }
+
+    let glass_scale = crate::config::clamp_glass_opacity(glass_opacity);
+    let base_a = (0.32 - 0.08 * t_v) * (0.42 + 0.58 * glass_scale);
+    let mut layer = [
+        (118.0 - 30.0 * t_v + dither) * base_a,
+        (112.0 - 30.0 * t_v + dither) * base_a,
+        (142.0 - 32.0 * t_v + dither) * base_a,
+        base_a,
+    ];
+
+    if t_v < 0.22 && sd < -0.5 {
+        let sheen_a = (1.0 - t_v / 0.22) * 0.055 * glass_scale;
+        layer = blend_premul_over(layer, [255.0, 248.0, 255.0], sheen_a);
+    }
+
+    let rim_alpha = rim_band * (0.08 + 0.30 * dir_light);
+    if rim_alpha > 0.001 {
+        layer = blend_premul_over(layer, [255.0, 252.0, 255.0], rim_alpha);
+    }
+
+    let out_a = (layer[3] * cov).clamp(0.0, 1.0);
+    if layer[3] <= 1e-4 || out_a <= 1e-4 {
+        return [0, 0, 0, 0];
+    }
+    premul_pixel(
+        layer[0] / layer[3],
+        layer[1] / layer[3],
+        layer[2] / layer[3],
+        out_a,
+    )
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn sample_dock_icon_shadow_pixel(px: i32, py: i32, icon_size: i32, pad: i32) -> [u8; 4] {
+    let total = (icon_size + pad * 2).max(1) as f32;
+    let center = total * 0.5;
+    let half = (icon_size as f32 * 0.5 - 1.5).max(1.0);
+    let r = (icon_size as f32 * 0.23).min(half);
+    let sd = sd_rounded_box(
+        px as f32 + 0.5,
+        py as f32 + 0.5,
+        center,
+        center,
+        half,
+        half,
+        r,
+    );
+    let spread = (pad as f32 - 0.4).max(1.0);
+    let t = (sd.max(0.0) / spread).clamp(0.0, 1.0);
+    let falloff = 1.0 - t;
+    let alpha = if sd <= 0.0 {
+        0.30
+    } else {
+        0.30 * falloff * falloff * falloff
+    };
+    premul_pixel(10.0, 6.0, 18.0, alpha)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1798,5 +2020,40 @@ mod tests {
             let corner = sample_ui_glyph_pixel(0, 0, 16, kind, white);
             assert_eq!(corner[3], 0, "Glyph {kind:?} corner should be transparent");
         }
+    }
+
+    #[test]
+    fn dock_glass_and_icon_shadow_rasterize_cleanly() {
+        let width = 320;
+        let height = 68;
+        let radius = 22;
+
+        // Translucent frosted Dock glass: corners transparent, top rim brighter than center,
+        // and center remains light/translucent rather than an opaque dark slab.
+        let corner = sample_dock_glass_pixel(0, 0, width, height, radius, 0.78, false);
+        let top_rim = sample_dock_glass_pixel(width / 2, 0, width, height, radius, 0.78, false);
+        let center =
+            sample_dock_glass_pixel(width / 2, height / 2, width, height, radius, 0.78, false);
+        assert_eq!(corner[3], 0);
+        assert!(top_rim[3] > center[3]);
+        assert!(center[3] > 20 && center[3] <= 120);
+
+        // Reduce-transparency mode falls back to opaque dark plum-slate container.
+        let opaque_center =
+            sample_dock_glass_pixel(width / 2, height / 2, width, height, radius, 0.78, true);
+        assert!(opaque_center[3] >= 245);
+
+        // Soft icon drop shadow fades cleanly to zero at outer pad corners.
+        let icon_size = 50;
+        let pad = 7;
+        let shadow_corner = sample_dock_icon_shadow_pixel(0, 0, icon_size, pad);
+        let shadow_center = sample_dock_icon_shadow_pixel(
+            i32::midpoint(icon_size, pad * 2),
+            i32::midpoint(icon_size, pad * 2),
+            icon_size,
+            pad,
+        );
+        assert_eq!(shadow_corner[3], 0);
+        assert!(shadow_center[3] > 40);
     }
 }

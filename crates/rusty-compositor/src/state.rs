@@ -425,6 +425,16 @@ pub struct RustyCompositorState {
     pub glass_opacity: f32,
     /// High-contrast opaque shell panels mode (`RUSTYOS-048`).
     pub reduce_transparency: bool,
+    /// Show workspace digits `1..=9` and `Float`/`Tile` pill in Menu Bar (`RUSTYOS-049`).
+    pub menubar_show_workspaces: bool,
+    /// Show host SNI system tray icons in Menu Bar (`RUSTYOS-049`).
+    pub menubar_show_tray: bool,
+    /// Show keyboard layout badge in Menu Bar (`RUSTYOS-049`).
+    pub menubar_show_input_source: bool,
+    /// Show standalone speaker volume icon in Menu Bar (`RUSTYOS-049`).
+    pub menubar_show_volume: bool,
+    /// Display 24-hour clock format instead of 12-hour AM/PM (`RUSTYOS-049`).
+    pub clock_24h: bool,
     /// Whether the Spotlight application launcher overlay is open (`RUSTYOS-018`).
     pub launcher_active: bool,
     /// Animated Spotlight transition progress (`0.0` closed -> `1.0` open) (`RUSTYOS-025`).
@@ -619,6 +629,11 @@ impl RustyCompositorState {
 
         let initial_glass_opacity = user_config.glass_opacity;
         let initial_reduce_transparency = user_config.reduce_transparency;
+        let initial_menubar_show_workspaces = user_config.menubar_show_workspaces;
+        let initial_menubar_show_tray = user_config.menubar_show_tray;
+        let initial_menubar_show_input_source = user_config.menubar_show_input_source;
+        let initial_menubar_show_volume = user_config.menubar_show_volume;
+        let initial_clock_24h = user_config.clock_24h;
 
         let mut state = Self {
             start_time: Instant::now(),
@@ -688,6 +703,11 @@ impl RustyCompositorState {
             active_top_bar_menu: None,
             glass_opacity: initial_glass_opacity,
             reduce_transparency: initial_reduce_transparency,
+            menubar_show_workspaces: initial_menubar_show_workspaces,
+            menubar_show_tray: initial_menubar_show_tray,
+            menubar_show_input_source: initial_menubar_show_input_source,
+            menubar_show_volume: initial_menubar_show_volume,
+            clock_24h: initial_clock_24h,
             launcher_active: false,
             launcher_anim: AnimatedValue::new_settled(0.0),
             launcher: crate::launcher::LauncherState::new(),
@@ -1724,6 +1744,12 @@ impl RustyCompositorState {
             crate::shell_render::TopBarMenuAction::FocusNextWindow => {
                 self.apply_wm_action(WmAction::FocusNext, serial);
             }
+            crate::shell_render::TopBarMenuAction::NextWorkspace => {
+                self.switch_workspace_relative(1, serial);
+            }
+            crate::shell_render::TopBarMenuAction::PrevWorkspace => {
+                self.switch_workspace_relative(-1, serial);
+            }
             crate::shell_render::TopBarMenuAction::ToggleMaximizeFocused => {
                 self.apply_wm_action(WmAction::ToggleMaximizeFocused, serial);
             }
@@ -1734,6 +1760,13 @@ impl RustyCompositorState {
             }
             crate::shell_render::TopBarMenuAction::CloseFocused => {
                 self.apply_wm_action(WmAction::CloseFocused, serial);
+            }
+            crate::shell_render::TopBarMenuAction::ShowShortcuts => {
+                let _ = self.push_notification(
+                    Urgency::Low,
+                    "RustyOS Shortcuts".to_owned(),
+                    "Super+Space: Search • Super+Tab: Switcher • Super+1..9: Workspaces".to_owned(),
+                );
             }
         }
     }
@@ -2263,40 +2296,108 @@ impl RustyCompositorState {
         }
     }
 
-    /// Executes an interactive Dock click action (`RUSTYOS-023` / `RUSTYOS-032`).
+    fn dock_preferred_candidates(
+        hit: crate::shell_render::DockHit,
+    ) -> Option<&'static [&'static str]> {
+        const FILES: &[&str] = &["nautilus", "dolphin", "thunar", "nemo", "pcmanfm"];
+        const TERMINAL: &[&str] = &[
+            "foot",
+            "kitty",
+            "alacritty",
+            "wezterm",
+            "ghostty",
+            "weston-terminal",
+            "gnome-terminal",
+            "konsole",
+            "xfce4-terminal",
+        ];
+        const BROWSER: &[&str] = &[
+            "firefox",
+            "chromium",
+            "google-chrome",
+            "brave-browser",
+            "epiphany",
+            "falkon",
+        ];
+        const NOTES: &[&str] = &[
+            "gnome-text-editor",
+            "gedit",
+            "kate",
+            "mousepad",
+            "featherpad",
+            "obsidian",
+        ];
+        match hit {
+            crate::shell_render::DockHit::PinnedFiles => Some(FILES),
+            crate::shell_render::DockHit::PinnedTerminal => Some(TERMINAL),
+            crate::shell_render::DockHit::PinnedBrowser => Some(BROWSER),
+            crate::shell_render::DockHit::PinnedNotes => Some(NOTES),
+            _ => None,
+        }
+    }
+
+    fn launch_dock_app_or_spotlight(&mut self, candidates: &[&str], ipc_path: &std::path::Path) {
+        self.close_overview();
+        if !self
+            .launcher
+            .launch_preferred(candidates, &self.socket_name, ipc_path)
+        {
+            self.toggle_launcher();
+        }
+    }
+
+    /// Executes an interactive Dock click action (`RUSTYOS-023` / `RUSTYOS-032` / `RUSTYOS-050`).
     pub fn handle_dock_hit(&mut self, hit: crate::shell_render::DockHit, serial: Serial) {
         let ipc_path = rusty_ipc::default_ipc_socket_path(&self.socket_name);
+        if let Some(candidates) = Self::dock_preferred_candidates(hit) {
+            self.launch_dock_app_or_spotlight(candidates, &ipc_path);
+            return;
+        }
         match hit {
-            crate::shell_render::DockHit::PinnedTerminal => {
+            crate::shell_render::DockHit::PinnedSettings => {
                 self.close_overview();
-                let launched = self.launcher.launch_preferred(
-                    &[
-                        "foot",
-                        "kitty",
-                        "alacritty",
-                        "wezterm",
-                        "ghostty",
-                        "weston-terminal",
-                        "gnome-terminal",
-                        "konsole",
-                        "xfce4-terminal",
-                    ],
+                if !self.launcher.launch_preferred(
+                    &["rusty-settings", "gnome-control-center", "systemsettings"],
                     &self.socket_name,
                     &ipc_path,
-                );
-                if !launched {
-                    self.toggle_launcher();
+                ) {
+                    self.toggle_quick_settings();
                 }
             }
-            crate::shell_render::DockHit::PinnedFiles => {
+            crate::shell_render::DockHit::PinnedDownloads => {
                 self.close_overview();
-                let launched = self.launcher.launch_preferred(
-                    &["nautilus", "dolphin", "thunar", "nemo", "pcmanfm"],
-                    &self.socket_name,
-                    &ipc_path,
-                );
-                if !launched {
-                    self.toggle_launcher();
+                let opened = std::env::var_os("HOME")
+                    .map(|h| std::path::PathBuf::from(h).join("Downloads"))
+                    .filter(|p| p.exists())
+                    .and_then(|p| p.to_str().map(str::to_owned))
+                    .filter(|s| !s.chars().any(char::is_whitespace))
+                    .is_some_and(|dir| {
+                        self.launcher
+                            .launch_command(
+                                &format!("xdg-open {dir}"),
+                                &self.socket_name,
+                                &ipc_path,
+                            )
+                            .is_ok()
+                    });
+                if !opened {
+                    self.launch_dock_app_or_spotlight(
+                        &["nautilus", "dolphin", "thunar", "nemo", "pcmanfm"],
+                        &ipc_path,
+                    );
+                }
+            }
+            crate::shell_render::DockHit::PinnedTrash => {
+                self.close_overview();
+                let opened = self
+                    .launcher
+                    .launch_command("xdg-open trash:///", &self.socket_name, &ipc_path)
+                    .is_ok();
+                if !opened {
+                    self.launch_dock_app_or_spotlight(
+                        &["nautilus", "dolphin", "thunar", "nemo", "pcmanfm"],
+                        &ipc_path,
+                    );
                 }
             }
             crate::shell_render::DockHit::ToggleOverview => {
@@ -2317,6 +2418,7 @@ impl RustyCompositorState {
                     }
                 }
             }
+            _ => {}
         }
     }
 

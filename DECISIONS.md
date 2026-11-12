@@ -176,6 +176,21 @@
                           Vector Chrome & Glass   
                           Surface Controls        
                           (ADR-0017)              
+
+  D-026                   Фаза 7/UX               accepted
+                          (RUSTYOS-049):          
+                          1:1 macOS Menu Bar      
+                          Visual Parity, Bundled  
+                          Inter Typography &      
+                          Minimal Bar Config      
+                          (ADR-0018)              
+
+  D-027                   Фаза 7/UX               accepted
+                          (RUSTYOS-050):          
+                          1:1 macOS Dock Visual   
+                          Parity, Top-Lit Glass & 
+                          4x4 SSAA Squircle Icons 
+                          (ADR-0019)              
   -----------------------------------------------------------------------
 
 ## Открытые решения
