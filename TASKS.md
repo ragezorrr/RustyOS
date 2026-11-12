@@ -343,6 +343,19 @@ hardware/software context и низкие накладные расходы.
 - **Acceptance criteria:** Сеть и Bluetooth опрашиваются через System D-Bus без блокировки event loop с безопасным fallback; клик по плитке Bluetooth оптимистично обновляет UI и переключает питание адаптера в фоне; клик `Lock Session` мгновенно включает Lock Screen; 53 теста и `clippy -D warnings` проходят без предупреждений.
 - **Risks:** При отсутствии системной шины D-Bus, `NetworkManager` или `bluetoothd` сервисы корректно деградируют на `/sys/class/*` или статус `Unavailable`.
 
+## RUSTYOS-028 --- Native TTY DRM/KMS & `libinput` Render Loop
+
+**Статус:** done **Фаза:** 25 (Native TTY DRM/KMS Scanout & Input)
+
+- **Цель:** Перевести `--drm` / `--kms` из режима однократного hardware-пробинга в полноценный нативный TTY render loop с `LibSeatSession`, `DrmDevice` + `DrmSurface` + `DrmCompositor`, `LibinputInputBackend` (мышь/тачпад/клавиатура), VT-переключением (`Ctrl+Alt+F1..F7`) и общим композитингом shell + Wayland + XWayland, сохранив безопасный probe-fallback внутри активной графической сессии.
+- **Scope:**
+  - `crates/rusty-compositor/src/input.rs`: подключено относительное движение указателя `InputEvent::PointerMotion` (`libinput` мыши/тачпады) через общую функцию `apply_pointer_position`, чистый кламп `clamp_relative_pointer` и unit-тест.
+  - `crates/rusty-compositor/src/winit_backend.rs`: выделен общий `build_frame_render_list` (с опциональным software-курсором `Purple Glass` для универсальной совместимости AMD/Intel/NVIDIA без зависимости от hardware cursor planes) и переиспользуемые `dispatch_and_refresh_clients`, `finalize_frame_timing`, `spawn_test_client`.
+  - `crates/rusty-compositor/src/drm_backend.rs`: реализованы `select_preferred_drm_mode`, `mode_refresh_interval_us`, поиск активного коннектора/CRTC (`find_primary_connector_setup`), цикл `DrmCompositor` (`GbmAllocator`, `GbmFramebufferExporter`), `LibinputInputBackend` с мгновенной коалесценцией перерисовки, `DrmEvent::VBlank` pacing, `SessionEvent::PauseSession`/`ActivateSession` (`reset_buffers`), безопасный fallback на `probe_primary_drm_device` при занятом DRM Master и unit-тесты.
+- **Dependencies:** `RUSTYOS-006`, `RUSTYOS-019`, `RUSTYOS-025`, `RUSTYOS-026`.
+- **Acceptance criteria:** Из TTY (`Ctrl+Alt+F3`) `--drm` захватывает seat/DRM Master, поднимает Wayland/XWayland/IPC, рендерит оболочку с software-курсором на частоте монитора по `VBlank` и корректно переживает VT switch; внутри вложенной сессии безопасно падает на диагностику `probe_primary_drm_device`; 55 тестов и `clippy -D warnings` проходят без предупреждений.
+- **Risks:** Требуется живая проверка на реальном железе из TTY (`Ctrl+Alt+F3`); в nested-окружении выполняется только компиляция, юнит-тесты и fallback-диагностика.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

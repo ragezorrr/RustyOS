@@ -1,21 +1,26 @@
-//! Native DRM/KMS, GBM, EGL, and DMA-BUF graphics backend (`RUSTYOS-006`).
+//! Native DRM/KMS, GBM, EGL, DMA-BUF, and `libinput` backend (`RUSTYOS-006`, `RUSTYOS-028`).
 //!
 //! Provides two execution levels:
 //! 1. **Runtime Capability Discovery & Offscreen GBM/EGL/DMA-BUF Verification (`--drm-probe`)**:
 //!    Safely inspects `/dev/dri/card*` and `/dev/dri/renderD*` without stealing DRM Master from
 //!    an active desktop session, enumerates KMS connectors/modes/planes/capabilities, initializes
 //!    `GbmDevice` + `EGLDisplay` + `GlesRenderer`, allocates a hardware `DMA-BUF` buffer via GBM,
-//!    renders a test quadrant frame on the GPU, and verifies `DMA-BUF` import.
-//! 2. **Full Native KMS Session (`--drm` / `--kms`)**:
-//!    Initializes `LibSeatSession`, `UdevBackend`, and `DrmDevice` for native TTY operation,
-//!    with automatic diagnostic fallback to capability probing when invoked inside an active
-//!    graphical session where DRM Master is already held.
+//!    renders a test frame on the GPU, and verifies `DMA-BUF` import.
+//! 2. **Full Native TTY KMS Session (`--drm` / `--kms`)**:
+//!    Initializes `LibSeatSession`, `UdevBackend`, `DrmDevice` + `DrmSurface` + `DrmCompositor`,
+//!    and `LibinputInputBackend` (relative & absolute pointer + keyboard + VT switch handling)
+//!    for bare-metal TTY Wayland + XWayland rendering, with automatic diagnostic fallback to
+//!    capability probing when invoked inside an active graphical session where DRM Master is held.
 
+use std::cell::RefCell;
 use std::fmt::Write as _;
 use std::fs::{self, File};
 use std::os::unix::io::OwnedFd;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
+use std::time::{Duration, Instant};
 
+use rusty_ipc::{IpcServer, default_ipc_socket_path};
 use smithay::{
     backend::{
         allocator::{
@@ -23,23 +28,44 @@ use smithay::{
             dmabuf::{Dmabuf, DmabufAllocator},
             gbm::{GbmAllocator, GbmBufferFlags, GbmDevice},
         },
-        drm::{DrmDevice, DrmDeviceFd, DrmNode, NodeType},
+        drm::{
+            DrmDevice, DrmDeviceFd, DrmEvent, DrmNode, NodeType,
+            compositor::{DrmCompositor, FrameFlags},
+            exporter::gbm::GbmFramebufferExporter,
+        },
         egl::{EGLContext, EGLDevice, EGLDisplay},
+        libinput::{LibinputInputBackend, LibinputSessionInterface},
         renderer::{
             Bind, Color32F, Frame, ImportDma, Renderer, gles::GlesRenderer, sync::SyncPoint,
         },
-        session::{Session, libseat::LibSeatSession},
+        session::{Event as SessionEvent, Session, libseat::LibSeatSession},
         udev::UdevBackend,
     },
-    reexports::drm::{
-        ClientCapability, Device as BasicDevice, DriverCapability,
-        control::{Device as ControlDevice, connector},
+    output::{Mode as OutputMode, Scale},
+    reexports::{
+        calloop::{
+            EventLoop,
+            timer::{TimeoutAction, Timer},
+        },
+        drm::{
+            ClientCapability, Device as BasicDevice, DriverCapability,
+            control::{
+                Device as ControlDevice, Mode as ControlMode, ModeTypeFlags, connector, crtc,
+            },
+        },
+        input::Libinput,
+        rustix::fs::OFlags,
+        wayland_server::Display,
     },
-    utils::{DeviceFd, Rectangle, Transform},
+    utils::{DeviceFd, Logical, Physical, Point, Rectangle, Size, Transform},
+    wayland::socket::ListeningSocketSource,
 };
 use tracing::{info, warn};
 
-use crate::{BackendMode, BootstrapReport, CompositorConfig, CompositorError};
+use crate::{
+    BackendMode, BootstrapReport, CompositorConfig, CompositorError,
+    state::{PRIMARY_OUTPUT_ID, RustyCompositorState},
+};
 
 /// Summary of a discovered KMS display connector.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -190,75 +216,541 @@ pub fn run_drm_probe(config: &CompositorConfig) -> Result<BootstrapReport, Compo
     })
 }
 
+type RustyDrmCompositor =
+    DrmCompositor<GbmAllocator<DrmDeviceFd>, GbmFramebufferExporter<DrmDeviceFd>, (), DrmDeviceFd>;
+
+#[derive(Debug, Clone)]
+struct PrimaryConnectorSetup {
+    connector: connector::Handle,
+    crtc: crtc::Handle,
+    mode: ControlMode,
+    connector_name: String,
+    pixel_size: Size<i32, Physical>,
+    vrefresh: u32,
+}
+
+enum SessionStartOutcome {
+    Completed(Box<BootstrapReport>),
+    DeferToProbe(String),
+}
+
+struct DrmRuntime {
+    drm_device: DrmDevice,
+    libinput: Libinput,
+    renderer: GlesRenderer,
+    drm_compositor: RustyDrmCompositor,
+    text_cache: crate::text::TextCache,
+    shape_cache: crate::surfaces::UiShapeCache,
+    pixel_size: Size<i32, Physical>,
+    total_output_pixels: u64,
+    paused: bool,
+    vblank_pending: bool,
+    needs_redraw: bool,
+    frame_start: Option<Instant>,
+    rendered_frames: u64,
+    max_frames: Option<u64>,
+}
+
+impl DrmRuntime {
+    fn render_and_queue(&mut self, state: &mut RustyCompositorState) {
+        if !state.running || self.paused {
+            return;
+        }
+        if self.vblank_pending {
+            self.needs_redraw = true;
+            return;
+        }
+
+        let render_start = Instant::now();
+        state.tick_animations();
+        state.expire_notifications();
+
+        let render_list = crate::winit_backend::build_frame_render_list(
+            &mut self.renderer,
+            &mut self.text_cache,
+            &mut self.shape_cache,
+            state,
+            self.pixel_size,
+            true,
+        );
+
+        match self.drm_compositor.render_frame(
+            &mut self.renderer,
+            &render_list,
+            crate::winit_backend::BACKGROUND_COLOR,
+            FrameFlags::DEFAULT,
+        ) {
+            Ok(result) => {
+                if result.is_empty {
+                    self.needs_redraw = false;
+                } else if let Err(err) = self.drm_compositor.queue_frame(()) {
+                    warn!(error = ?err, "Failed to queue DRM/KMS page flip");
+                    self.needs_redraw = true;
+                } else {
+                    self.vblank_pending = true;
+                    self.needs_redraw = false;
+                    self.frame_start = Some(render_start);
+                }
+            }
+            Err(err) => {
+                warn!(error = ?err, "DRM/KMS render_frame error");
+                self.needs_redraw = true;
+            }
+        }
+    }
+
+    fn handle_vblank(&mut self, state: &mut RustyCompositorState) {
+        if let Err(err) = self.drm_compositor.frame_submitted() {
+            warn!(error = ?err, "Failed to mark DRM/KMS frame as submitted");
+        }
+        self.vblank_pending = false;
+
+        let present_done = Instant::now();
+        let frame_start = self.frame_start.take().unwrap_or(present_done);
+        state.frame_timing.record_frame(
+            frame_start,
+            present_done,
+            1,
+            self.total_output_pixels,
+            self.total_output_pixels,
+        );
+
+        let elapsed = state.elapsed();
+        for window in state.space.elements() {
+            window.send_frame(&state.output, elapsed, Some(Duration::ZERO), |_, _| {
+                Some(state.output.clone())
+            });
+        }
+        state.space.refresh();
+        state.popups.cleanup();
+        let _ = state.display_handle.flush_clients();
+
+        self.rendered_frames = self.rendered_frames.saturating_add(1);
+        if let Some(limit) = self.max_frames
+            && self.rendered_frames >= limit
+        {
+            info!(
+                rendered_frames = self.rendered_frames,
+                "Reached configured --max-frames limit on DRM/KMS; stopping"
+            );
+            state.request_shutdown();
+            return;
+        }
+
+        if self.needs_redraw && !self.paused && state.running {
+            self.render_and_queue(state);
+        }
+    }
+}
+
+/// Selects the preferred DRM display mode (falling back to the first reported mode).
+#[must_use]
+pub fn select_preferred_drm_mode(modes: &[ControlMode]) -> Option<ControlMode> {
+    modes
+        .iter()
+        .find(|m| m.mode_type().contains(ModeTypeFlags::PREFERRED))
+        .or_else(|| modes.first())
+        .copied()
+}
+
+/// Converts a display vertical refresh rate (`Hz`) into a clamped frame pacing interval (`us`).
+#[must_use]
+pub fn mode_refresh_interval_us(vrefresh: u32) -> u64 {
+    let hz = u64::from(vrefresh.max(1));
+    (1_000_000 / hz).max(1_000)
+}
+
 /// Executes the native DRM/KMS backend (`--drm` / `--kms`).
 ///
-/// Attempts to open `LibSeatSession` and acquire DRM Master on the primary GPU via `UdevBackend`.
-/// If DRM Master is unavailable because an existing desktop compositor is active on the seat,
-/// performs a full hardware capability & GBM/EGL/DMA-BUF probe and records the exact status.
+/// Attempts to acquire `LibSeatSession`, DRM Master, `DrmCompositor`, and `LibinputInputBackend`
+/// for full bare-metal TTY rendering. If DRM Master is unavailable because an existing desktop
+/// compositor holds the seat, falls back non-invasively to full capability & GBM/EGL/DMA-BUF
+/// verification.
 ///
 /// # Errors
 ///
-/// Returns [`CompositorError`] if no DRM GPU is available or hardware probing fails.
+/// Returns [`CompositorError`] if running natively fails fatally or hardware probing fails.
 pub fn run_native_drm_kms(config: &CompositorConfig) -> Result<BootstrapReport, CompositorError> {
-    let master_status = match try_initialize_kms_session() {
-        Ok(status) => status,
-        Err(reason) => {
+    match try_run_native_drm_session(config)? {
+        SessionStartOutcome::Completed(report) => Ok(*report),
+        SessionStartOutcome::DeferToProbe(reason) => {
             warn!(
                 reason = %reason,
                 "Active graphical session holds DRM Master; falling back to non-invasive DRM/GBM/EGL hardware verification"
             );
-            format!("deferred ({reason})")
+            let master_status = format!("deferred ({reason})");
+            let report = probe_primary_drm_device(&master_status)?;
+            log_hardware_report(&report);
+
+            if let Some(path) = &config.metrics_out {
+                fs::write(path, report.to_json())
+                    .map_err(|err| CompositorError::MetricsExport(err.to_string()))?;
+                info!(path = %path, "Exported DRM/GBM/EGL capability JSON report");
+            }
+
+            Ok(BootstrapReport {
+                version: env!("CARGO_PKG_VERSION"),
+                backend: BackendMode::NativeDrmKms,
+                socket_name: None,
+                frame_timing: None,
+                drm_report: Some(report),
+            })
+        }
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+fn try_run_native_drm_session(
+    config: &CompositorConfig,
+) -> Result<SessionStartOutcome, CompositorError> {
+    let Ok((mut session, session_notifier)) = LibSeatSession::new() else {
+        return Ok(SessionStartOutcome::DeferToProbe(
+            "libseat session open failed".to_owned(),
+        ));
+    };
+    let seat_name = session.seat();
+
+    let Ok(udev_backend) = UdevBackend::new(&seat_name) else {
+        return Ok(SessionStartOutcome::DeferToProbe(
+            "udev backend scan failed".to_owned(),
+        ));
+    };
+    let Some((_, primary_path)) = udev_backend.device_list().find(|(_, path)| {
+        DrmNode::from_path(path).is_ok_and(|node| node.ty() == NodeType::Primary)
+    }) else {
+        return Ok(SessionStartOutcome::DeferToProbe(
+            "no primary DRM node reported by udev".to_owned(),
+        ));
+    };
+
+    let primary_node = match DrmNode::from_path(primary_path) {
+        Ok(node) => node,
+        Err(err) => {
+            return Ok(SessionStartOutcome::DeferToProbe(format!(
+                "invalid primary DRM node: {err}"
+            )));
         }
     };
 
-    let report = probe_primary_drm_device(&master_status)?;
-    log_hardware_report(&report);
-
-    if let Some(path) = &config.metrics_out {
-        fs::write(path, report.to_json())
-            .map_err(|err| CompositorError::MetricsExport(err.to_string()))?;
-        info!(path = %path, "Exported DRM/GBM/EGL capability JSON report");
-    }
-
-    Ok(BootstrapReport {
-        version: env!("CARGO_PKG_VERSION"),
-        backend: BackendMode::NativeDrmKms,
-        socket_name: None,
-        frame_timing: None,
-        drm_report: Some(report),
-    })
-}
-
-fn try_initialize_kms_session() -> Result<String, String> {
-    let (mut session, _notifier) =
-        LibSeatSession::new().map_err(|err| format!("libseat open failed: {err}"))?;
-    let seat_name = session.seat();
-
-    let udev_backend =
-        UdevBackend::new(&seat_name).map_err(|err| format!("udev scan failed: {err}"))?;
-    let (_, primary_path) = udev_backend
-        .device_list()
-        .find(|(_, path)| DrmNode::from_path(path).is_ok_and(|node| node.ty() == NodeType::Primary))
-        .ok_or_else(|| "no primary DRM node reported by udev".to_owned())?;
-
-    let fd = session
-        .open(
-            primary_path,
-            smithay::reexports::rustix::fs::OFlags::RDWR
-                | smithay::reexports::rustix::fs::OFlags::CLOEXEC
-                | smithay::reexports::rustix::fs::OFlags::NOCTTY
-                | smithay::reexports::rustix::fs::OFlags::NONBLOCK,
-        )
-        .map_err(|err| format!("session device open failed: {err:?}"))?;
+    let fd = match session.open(
+        primary_path,
+        OFlags::RDWR | OFlags::CLOEXEC | OFlags::NOCTTY | OFlags::NONBLOCK,
+    ) {
+        Ok(fd) => fd,
+        Err(err) => {
+            return Ok(SessionStartOutcome::DeferToProbe(format!(
+                "session device open failed: {err:?}"
+            )));
+        }
+    };
 
     let drm_fd = DrmDeviceFd::new(DeviceFd::from(fd));
-    let (_drm_device, _drm_notifier) =
-        DrmDevice::new(drm_fd, false).map_err(|err| format!("DrmDevice::new failed: {err}"))?;
+    let (mut drm_device, drm_notifier) = match DrmDevice::new(drm_fd, false) {
+        Ok(pair) => pair,
+        Err(err) => {
+            return Ok(SessionStartOutcome::DeferToProbe(format!(
+                "DrmDevice::new failed: {err}"
+            )));
+        }
+    };
 
-    Ok(format!(
-        "acquired DRM Master on {} (seat: {seat_name})",
-        primary_path.display()
-    ))
+    let gbm_device = match GbmDevice::new(drm_device.device_fd().clone()) {
+        Ok(gbm) => gbm,
+        Err(err) => {
+            return Ok(SessionStartOutcome::DeferToProbe(format!(
+                "GbmDevice::new failed: {err}"
+            )));
+        }
+    };
+
+    let (_egl_display, renderer) = match init_gbm_egl_renderer(&gbm_device) {
+        Ok(pair) => pair,
+        Err(err) => {
+            return Ok(SessionStartOutcome::DeferToProbe(format!(
+                "GBM EGL renderer init failed: {err}"
+            )));
+        }
+    };
+
+    let setup = match find_primary_connector_setup(&drm_device) {
+        Ok(setup) => setup,
+        Err(reason) => return Ok(SessionStartOutcome::DeferToProbe(reason)),
+    };
+
+    let drm_surface = match drm_device.create_surface(setup.crtc, setup.mode, &[setup.connector]) {
+        Ok(surface) => surface,
+        Err(err) => {
+            return Ok(SessionStartOutcome::DeferToProbe(format!(
+                "DRM surface creation failed: {err}"
+            )));
+        }
+    };
+
+    let mut libinput = Libinput::new_with_udev(LibinputSessionInterface::from(session.clone()));
+    if libinput.udev_assign_seat(&seat_name).is_err() {
+        return Ok(SessionStartOutcome::DeferToProbe(format!(
+            "libinput failed to assign seat {seat_name}"
+        )));
+    }
+    let libinput_backend = LibinputInputBackend::new(libinput.clone());
+
+    let mut event_loop: EventLoop<'static, RustyCompositorState> =
+        EventLoop::try_new().map_err(|err| CompositorError::EventLoop(err.to_string()))?;
+    let mut display: Display<RustyCompositorState> =
+        Display::new().map_err(|err| CompositorError::WaylandDisplay(err.to_string()))?;
+    let listening_socket = ListeningSocketSource::new_auto()
+        .map_err(|err| CompositorError::WaylandSocket(err.to_string()))?;
+    let socket_name = listening_socket
+        .socket_name()
+        .to_string_lossy()
+        .into_owned();
+
+    let mut state = RustyCompositorState::new(
+        &display,
+        socket_name.clone(),
+        event_loop.get_signal(),
+        setup.pixel_size,
+    )?;
+
+    let refresh_milli_hz = i32::try_from(setup.vrefresh.saturating_mul(1000)).unwrap_or(60_000);
+    let output_mode = OutputMode {
+        size: setup.pixel_size,
+        refresh: refresh_milli_hz,
+    };
+    state.output.change_current_state(
+        Some(output_mode),
+        Some(Transform::Normal),
+        Some(Scale::Integer(1)),
+        Some((0, 0).into()),
+    );
+    state.output.set_preferred(output_mode);
+    let work_area = crate::shell_render::usable_work_area(setup.pixel_size);
+    state.wm.upsert_output(PRIMARY_OUTPUT_ID, work_area);
+    let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+    state.sync_space_with_wm(serial);
+    state.pointer_location = Point::<f64, Logical>::from((
+        f64::from(setup.pixel_size.w) / 2.0,
+        f64::from(setup.pixel_size.h) / 2.0,
+    ));
+
+    state.animations.set_reduced_motion(config.reduced_motion);
+    state.telemetry = crate::telemetry::SystemMetricsHandle::start_background();
+    state.dbus_notifications =
+        crate::dbus_notifications::DbusNotificationHandle::start_background();
+
+    let gbm_allocator = GbmAllocator::new(
+        gbm_device.clone(),
+        GbmBufferFlags::RENDERING | GbmBufferFlags::SCANOUT,
+    );
+    let gbm_exporter = GbmFramebufferExporter::new(gbm_device, Some(primary_node));
+    let render_formats: Vec<_> = renderer
+        .egl_context()
+        .dmabuf_render_formats()
+        .iter()
+        .copied()
+        .collect();
+    let cursor_size = drm_device.cursor_size();
+    let drm_compositor = DrmCompositor::new(
+        &state.output,
+        drm_surface,
+        None,
+        gbm_allocator,
+        gbm_exporter,
+        [Fourcc::Argb8888, Fourcc::Xrgb8888],
+        render_formats,
+        cursor_size,
+        None,
+    )
+    .map_err(|err| CompositorError::BackendInit(format!("DrmCompositor::new failed: {err:?}")))?;
+
+    let total_output_pixels = u64::try_from(setup.pixel_size.w.max(0)).unwrap_or(0)
+        * u64::try_from(setup.pixel_size.h.max(0)).unwrap_or(0);
+    let runtime = Rc::new(RefCell::new(DrmRuntime {
+        drm_device,
+        libinput,
+        renderer,
+        drm_compositor,
+        text_cache: crate::text::TextCache::new(),
+        shape_cache: crate::surfaces::UiShapeCache::new(),
+        pixel_size: setup.pixel_size,
+        total_output_pixels,
+        paused: false,
+        vblank_pending: false,
+        needs_redraw: true,
+        frame_start: None,
+        rendered_frames: 0,
+        max_frames: config.max_frames,
+    }));
+
+    let loop_handle = event_loop.handle();
+    let _xwayland_started = crate::xwayland::spawn_xwayland_source(&display.handle(), &loop_handle);
+
+    loop_handle
+        .insert_source(listening_socket, |client_stream, _metadata, app_state| {
+            info!("Accepted new Wayland client connection (DRM/KMS)");
+            app_state.insert_client_stream(client_stream);
+        })
+        .map_err(|err| CompositorError::EventLoop(err.to_string()))?;
+
+    let rt_input = Rc::clone(&runtime);
+    loop_handle
+        .insert_source(libinput_backend, move |event, _metadata, app_state| {
+            app_state.process_input_event(event);
+            let mut rt = rt_input.borrow_mut();
+            rt.needs_redraw = true;
+            if !rt.vblank_pending && !rt.paused {
+                rt.render_and_queue(app_state);
+            }
+        })
+        .map_err(|err| CompositorError::EventLoop(err.to_string()))?;
+
+    let rt_session = Rc::clone(&runtime);
+    loop_handle
+        .insert_source(session_notifier, move |event, _metadata, app_state| {
+            let mut rt = rt_session.borrow_mut();
+            match event {
+                SessionEvent::PauseSession => {
+                    info!("VT switched away; pausing DRM device and libinput");
+                    rt.paused = true;
+                    rt.vblank_pending = false;
+                    rt.libinput.suspend();
+                    rt.drm_device.pause();
+                }
+                SessionEvent::ActivateSession => {
+                    info!("VT activated; resuming DRM device and libinput");
+                    if let Err(err) = rt.drm_device.activate(false) {
+                        warn!(error = ?err, "Failed to re-activate DRM device");
+                    }
+                    if rt.libinput.resume().is_err() {
+                        warn!("Failed to resume libinput context");
+                    }
+                    rt.drm_compositor.reset_buffers();
+                    rt.paused = false;
+                    rt.needs_redraw = true;
+                    rt.render_and_queue(app_state);
+                }
+            }
+        })
+        .map_err(|err| CompositorError::EventLoop(err.to_string()))?;
+
+    let rt_drm = Rc::clone(&runtime);
+    loop_handle
+        .insert_source(
+            drm_notifier,
+            move |event, _metadata, app_state| match event {
+                DrmEvent::VBlank(_) => rt_drm.borrow_mut().handle_vblank(app_state),
+                DrmEvent::Error(err) => warn!(error = ?err, "DRM device event error"),
+            },
+        )
+        .map_err(|err| CompositorError::EventLoop(err.to_string()))?;
+
+    let frame_interval = Duration::from_micros(mode_refresh_interval_us(setup.vrefresh));
+    let rt_timer = Rc::clone(&runtime);
+    loop_handle
+        .insert_source(
+            Timer::from_duration(frame_interval),
+            move |_deadline, _metadata, app_state| {
+                if !app_state.running {
+                    return TimeoutAction::Drop;
+                }
+                rt_timer.borrow_mut().render_and_queue(app_state);
+                TimeoutAction::ToDuration(frame_interval)
+            },
+        )
+        .map_err(|err| CompositorError::EventLoop(err.to_string()))?;
+
+    let ipc_socket_path = default_ipc_socket_path(&socket_name);
+    let mut ipc_server = IpcServer::bind(ipc_socket_path.clone()).ok();
+
+    info!(
+        connector = %setup.connector_name,
+        width = setup.pixel_size.w,
+        height = setup.pixel_size.h,
+        refresh_hz = setup.vrefresh,
+        seat = %seat_name,
+        wayland_display = %socket_name,
+        ipc_socket = %ipc_socket_path.display(),
+        "RustyOS Native DRM/KMS compositor active"
+    );
+
+    for cmd in &config.spawn_clients {
+        crate::winit_backend::spawn_test_client(cmd, &socket_name, &ipc_socket_path);
+    }
+
+    runtime.borrow_mut().render_and_queue(&mut state);
+
+    event_loop
+        .run(Some(Duration::from_millis(4)), &mut state, |app_state| {
+            crate::winit_backend::dispatch_and_refresh_clients(
+                &mut display,
+                ipc_server.as_mut(),
+                app_state,
+            );
+        })
+        .map_err(|err| CompositorError::EventLoop(err.to_string()))?;
+
+    let timing_summary = crate::winit_backend::finalize_frame_timing(
+        &state,
+        BackendMode::NativeDrmKms,
+        setup.pixel_size,
+        config.metrics_out.as_deref(),
+    )?;
+
+    Ok(SessionStartOutcome::Completed(Box::new(BootstrapReport {
+        version: env!("CARGO_PKG_VERSION"),
+        backend: BackendMode::NativeDrmKms,
+        socket_name: Some(socket_name),
+        frame_timing: Some(timing_summary),
+        drm_report: None,
+    })))
+}
+
+fn find_primary_connector_setup(drm_device: &DrmDevice) -> Result<PrimaryConnectorSetup, String> {
+    let resources = drm_device
+        .resource_handles()
+        .map_err(|err| format!("DRM resource_handles error: {err}"))?;
+
+    for &conn_handle in resources.connectors() {
+        let Ok(info) = drm_device.get_connector(conn_handle, false) else {
+            continue;
+        };
+        if info.state() != connector::State::Connected {
+            continue;
+        }
+        let Some(mode) = select_preferred_drm_mode(info.modes()) else {
+            continue;
+        };
+
+        let candidate_crtc = info
+            .current_encoder()
+            .into_iter()
+            .chain(info.encoders().iter().copied())
+            .find_map(|enc_handle| {
+                let enc = drm_device.get_encoder(enc_handle).ok()?;
+                enc.crtc().or_else(|| {
+                    resources
+                        .filter_crtcs(enc.possible_crtcs())
+                        .into_iter()
+                        .next()
+                })
+            });
+
+        if let Some(crtc) = candidate_crtc {
+            let (w, h) = mode.size();
+            let vrefresh = mode.vrefresh().max(1);
+            let connector_name = format!("{:?}-{}", info.interface(), info.interface_id());
+            return Ok(PrimaryConnectorSetup {
+                connector: conn_handle,
+                crtc,
+                mode,
+                connector_name,
+                pixel_size: Size::from((i32::from(w), i32::from(h))),
+                vrefresh,
+            });
+        }
+    }
+
+    Err("no connected DRM connector with a compatible CRTC and mode".to_owned())
 }
 
 fn probe_primary_drm_device(kms_master_status: &str) -> Result<DrmHardwareReport, CompositorError> {
@@ -526,5 +1018,15 @@ mod tests {
         assert!(json.contains("\"atomic_modesetting\": true"));
         assert!(json.contains("\"preferred_mode\": \"1920x1080@60Hz\""));
         assert!(json.contains("\"gbm_egl_dmabuf_test_passed\": true"));
+    }
+
+    #[test]
+    fn mode_refresh_interval_covers_high_refresh_panels() {
+        assert_eq!(mode_refresh_interval_us(60), 16_666);
+        assert_eq!(mode_refresh_interval_us(120), 8_333);
+        assert_eq!(mode_refresh_interval_us(144), 6_944);
+        assert_eq!(mode_refresh_interval_us(240), 4_166);
+        assert_eq!(mode_refresh_interval_us(0), 1_000_000);
+        assert!(select_preferred_drm_mode(&[]).is_none());
     }
 }

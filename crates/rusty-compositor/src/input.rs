@@ -6,7 +6,7 @@ use rusty_wm::{SnapTarget, WmAction, WorkspaceId};
 use smithay::{
     backend::input::{
         AbsolutePositionEvent, Axis, AxisSource, ButtonState, Event, InputBackend, InputEvent,
-        KeyState, KeyboardKeyEvent, PointerAxisEvent, PointerButtonEvent,
+        KeyState, KeyboardKeyEvent, PointerAxisEvent, PointerButtonEvent, PointerMotionEvent,
     },
     input::{
         keyboard::{FilterResult, Keysym, ModifiersState},
@@ -48,6 +48,7 @@ impl RustyCompositorState {
         self.frame_timing.mark_input_event(Instant::now());
         match event {
             InputEvent::Keyboard { event } => self.handle_keyboard_event::<B>(&event),
+            InputEvent::PointerMotion { event } => self.handle_pointer_motion::<B>(&event),
             InputEvent::PointerMotionAbsolute { event } => {
                 self.handle_pointer_motion_absolute::<B>(&event);
             }
@@ -224,6 +225,16 @@ impl RustyCompositorState {
         }
     }
 
+    fn handle_pointer_motion<B: InputBackend>(&mut self, event: &B::PointerMotionEvent) {
+        let output_geo = self
+            .space
+            .output_geometry(&self.output)
+            .map_or_else(|| Size::from((1280, 800)), |geo| geo.size);
+        let pos = clamp_relative_pointer(self.pointer_location, event.delta(), output_geo);
+        let time = Event::time_msec(event);
+        self.apply_pointer_position(pos, time, output_geo);
+    }
+
     fn handle_pointer_motion_absolute<B: InputBackend>(
         &mut self,
         event: &B::PointerMotionAbsoluteEvent,
@@ -234,12 +245,21 @@ impl RustyCompositorState {
             .map_or_else(|| Size::from((1280, 800)), |geo| geo.size);
 
         let pos: Point<f64, Logical> = event.position_transformed(output_geo);
+        let time = Event::time_msec(event);
+        self.apply_pointer_position(pos, time, output_geo);
+    }
+
+    fn apply_pointer_position(
+        &mut self,
+        pos: Point<f64, Logical>,
+        time: u32,
+        output_geo: Size<i32, Logical>,
+    ) {
         self.pointer_location = pos;
 
         if self.screen_locked {
             self.dock_hover_slot = None;
             let serial = SERIAL_COUNTER.next_serial();
-            let time = Event::time_msec(event);
             let pointer = self.pointer.clone();
             pointer.motion(
                 self,
@@ -313,7 +333,6 @@ impl RustyCompositorState {
         }
 
         let serial = SERIAL_COUNTER.next_serial();
-        let time = Event::time_msec(event);
         let under = self
             .target_surface_under(pos)
             .map(|(_win, surface, origin)| (surface, origin));
@@ -812,6 +831,22 @@ const fn keysym_to_workspace_index(sym: Keysym) -> Option<u8> {
     }
 }
 
+/// Clamps a relative pointer delta (`libinput` mice/trackpads) to `[0, output_geo - 1]`.
+#[must_use]
+pub fn clamp_relative_pointer(
+    current: Point<f64, Logical>,
+    delta: Point<f64, Logical>,
+    output_geo: Size<i32, Logical>,
+) -> Point<f64, Logical> {
+    let max_x = f64::from((output_geo.w - 1).max(0));
+    let max_y = f64::from((output_geo.h - 1).max(0));
+    (
+        (current.x + delta.x).clamp(0.0, max_x),
+        (current.y + delta.y).clamp(0.0, max_y),
+    )
+        .into()
+}
+
 fn compute_resized_rect(
     start: rusty_wm::Rect,
     edges: crate::shell_render::ResizeEdges,
@@ -1030,5 +1065,17 @@ mod tests {
         assert_eq!(top_left.width, 240);
         assert_eq!(top_left.y, 32);
         assert_eq!(top_left.height, (100 + 300) - 32);
+    }
+
+    #[test]
+    fn clamp_relative_pointer_keeps_cursor_inside_output_bounds() {
+        let bounds = Size::from((1920, 1080));
+        let p = clamp_relative_pointer((10.0, 20.0).into(), (-50.0, -40.0).into(), bounds);
+        assert!((p.x - 0.0).abs() < f64::EPSILON);
+        assert!((p.y - 0.0).abs() < f64::EPSILON);
+
+        let p2 = clamp_relative_pointer((1900.0, 1060.0).into(), (100.0, 80.0).into(), bounds);
+        assert!((p2.x - 1919.0).abs() < f64::EPSILON);
+        assert!((p2.y - 1079.0).abs() < f64::EPSILON);
     }
 }

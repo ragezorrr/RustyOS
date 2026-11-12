@@ -33,9 +33,8 @@ use crate::{
     state::{PRIMARY_OUTPUT_ID, RustyCompositorState},
 };
 
-/// Clear color for the nested compositor background (dark slate inspired by macOS dark desktop).
 /// Background clear color matching `background = "#0F0A19"` from `DESIGN.md` (Version 2.0).
-const BACKGROUND_COLOR: Color32F = Color32F::new(0.059, 0.039, 0.098, 1.0);
+pub(crate) const BACKGROUND_COLOR: Color32F = Color32F::new(0.059, 0.039, 0.098, 1.0);
 
 /// Runs the nested Smithay + Winit compositor event loop.
 ///
@@ -165,8 +164,12 @@ pub fn run_nested_winit(config: &CompositorConfig) -> Result<BootstrapReport, Co
         })
         .map_err(|err| CompositorError::EventLoop(err.to_string()))?;
 
-    let timing_summary =
-        finalize_frame_timing(&state, initial_size, config.metrics_out.as_deref())?;
+    let timing_summary = finalize_frame_timing(
+        &state,
+        BackendMode::NestedWinit,
+        initial_size,
+        config.metrics_out.as_deref(),
+    )?;
 
     Ok(BootstrapReport {
         version: env!("CARGO_PKG_VERSION"),
@@ -185,7 +188,7 @@ fn inject_bench_pointer_step(app_state: &mut RustyCompositorState, rendered_fram
     app_state.inject_synthetic_pointer_motion((x, y).into(), time_msec);
 }
 
-fn dispatch_and_refresh_clients(
+pub(crate) fn dispatch_and_refresh_clients(
     display: &mut Display<RustyCompositorState>,
     ipc_server: Option<&mut IpcServer>,
     app_state: &mut RustyCompositorState,
@@ -210,8 +213,9 @@ fn dispatch_and_refresh_clients(
         .record_dispatch_duration(dispatch_start.elapsed());
 }
 
-fn finalize_frame_timing(
+pub(crate) fn finalize_frame_timing(
     state: &RustyCompositorState,
+    backend_mode: BackendMode,
     initial_size: smithay::utils::Size<i32, smithay::utils::Physical>,
     metrics_out: Option<&str>,
 ) -> Result<crate::frame_timing::FrameTimingSummary, CompositorError> {
@@ -226,7 +230,7 @@ fn finalize_frame_timing(
             .output
             .current_mode()
             .map_or((initial_size.w, initial_size.h), |m| (m.size.w, m.size.h));
-        let json = timing_summary.to_json(BackendMode::NestedWinit.as_str(), mode_size);
+        let json = timing_summary.to_json(backend_mode.as_str(), mode_size);
         fs::write(path, json).map_err(|err| CompositorError::MetricsExport(err.to_string()))?;
         info!(path = %path, "Exported frame timing JSON report");
     }
@@ -327,6 +331,270 @@ fn window_title(window: &smithay::desktop::Window, id: rusty_wm::WindowId) -> St
     format!("Window #{}", id.0)
 }
 
+/// Builds the front-to-back composite render element list shared by nested Winit and native DRM/KMS.
+#[allow(clippy::too_many_lines)]
+pub(crate) fn build_frame_render_list(
+    renderer: &mut GlesRenderer,
+    text_cache: &mut crate::text::TextCache,
+    shape_cache: &mut crate::surfaces::UiShapeCache,
+    state: &mut RustyCompositorState,
+    size: smithay::utils::Size<i32, smithay::utils::Physical>,
+    include_software_cursor: bool,
+) -> Vec<CompositorRenderElement> {
+    let active_ws = state.wm.active_workspace_id().0;
+    let layout_str = match state.wm.active_layout_mode() {
+        rusty_wm::LayoutMode::Floating => "floating",
+        rusty_wm::LayoutMode::MasterStack => "master-stack",
+    };
+    let visible_windows: Vec<(rusty_wm::WindowId, rusty_wm::Rect)> = state
+        .wm
+        .visible_windows()
+        .into_iter()
+        .map(|w| (w.id, w.geometry))
+        .collect();
+    let window_count = visible_windows.len();
+    let focused_win = state.wm.focused_window();
+
+    let mut render_list: Vec<CompositorRenderElement> = Vec::new();
+    if include_software_cursor {
+        #[allow(clippy::cast_possible_truncation)]
+        let cursor_x = state.pointer_location.x.round() as i32 - 6;
+        #[allow(clippy::cast_possible_truncation)]
+        let cursor_y = state.pointer_location.y.round() as i32 - 6;
+        if let Some(cursor_el) = shape_cache.circle_element(
+            renderer,
+            14,
+            [244, 238, 255, 245],
+            Some([148, 87, 255, 255]),
+            Point::from((cursor_x, cursor_y)),
+        ) {
+            render_list.push(CompositorRenderElement::Memory(cursor_el));
+        }
+    }
+
+    let tel = state.telemetry.snapshot();
+    let timing = state.frame_timing.summary();
+    let lock_progress = state.lock_screen_anim.current();
+    if state.screen_locked || lock_progress > 0.01 {
+        let lock_view = crate::shell_render::LockScreenRenderState {
+            clock_hhmm: &tel.clock_hhmm,
+            network_label: &tel.network.status_label,
+            battery_percent: tel.power.percentage,
+            has_battery: tel.power.has_battery,
+            window_count,
+            progress: lock_progress,
+        };
+        render_list.extend(crate::shell_render::generate_lock_screen_elements(
+            text_cache,
+            shape_cache,
+            renderer,
+            size,
+            &lock_view,
+        ));
+    }
+
+    let layer_surfaces_present = push_layer_elements(
+        &mut render_list,
+        &state.output,
+        renderer,
+        &[Layer::Overlay, Layer::Top],
+    );
+
+    if !layer_surfaces_present {
+        let top_telemetry = crate::shell_render::TopBarTelemetry {
+            clock_hhmm: &tel.clock_hhmm,
+            battery_percent: tel.power.percentage,
+            has_battery: tel.power.has_battery,
+            net_connected: tel.network.connected,
+            volume_percent: tel.audio.volume_percent,
+            audio_muted: tel.audio.muted,
+            quick_settings_open: state.quick_settings_active,
+            notification_count: state.notification_count,
+        };
+
+        let toast_views: Vec<crate::shell_render::NotificationToastView<'_>> = state
+            .notifications
+            .iter()
+            .rev()
+            .take(crate::shell_render::MAX_VISIBLE_NOTIFICATIONS)
+            .map(|n| crate::shell_render::NotificationToastView {
+                id: n.id,
+                urgency: n.urgency,
+                title: &n.title,
+                body: &n.body,
+            })
+            .collect();
+
+        let mut dock_windows: Vec<crate::shell_render::DockWindowEntry> = visible_windows
+            .iter()
+            .map(|&(win_id, rect)| {
+                let title = state.smithay_window_for_id(win_id).map_or_else(
+                    || format!("Window #{}", win_id.0),
+                    |win| window_title(&win, win_id),
+                );
+                let badge = crate::shell_render::make_window_badge(&title);
+                crate::shell_render::DockWindowEntry {
+                    id: win_id,
+                    title,
+                    badge,
+                    dimensions: format!("{}x{}", rect.width, rect.height),
+                    focused: focused_win == Some(win_id),
+                }
+            })
+            .collect();
+        dock_windows.sort_by_key(|entry| entry.id.0);
+
+        let dock_view = crate::shell_render::DockViewState {
+            windows: &dock_windows,
+            hover_slot: state.dock_hover_slot,
+            overview_active: state.overview_active,
+        };
+
+        let launcher_progress = state.launcher_anim.current();
+        let show_launcher = state.launcher_active || launcher_progress > 0.01;
+        let (win_start, visible_items) = if show_launcher {
+            state.launcher.visible_window(3)
+        } else {
+            (0, Vec::new())
+        };
+        let cursor_offset_x = if show_launcher && !state.launcher.query.is_empty() {
+            text_cache.measure_text(&state.launcher.query, 14.5).0
+        } else {
+            0
+        };
+        let spotlight_view = show_launcher.then_some(crate::shell_render::SpotlightRenderState {
+            query: &state.launcher.query,
+            selected_in_window: state.launcher.selected_index.saturating_sub(win_start),
+            cursor_offset_x,
+            items: &visible_items,
+            progress: launcher_progress,
+        });
+
+        let qs_progress = state.quick_settings_anim.current();
+        let show_qs = !show_launcher && (state.quick_settings_active || qs_progress > 0.01);
+        let qs_view = show_qs.then_some(crate::shell_render::QuickSettingsRenderState {
+            layout_mode: layout_str,
+            reduced_motion: state.animations.reduced_motion(),
+            network_label: &tel.network.status_label,
+            net_connected: tel.network.connected,
+            bt_available: tel.bluetooth.available,
+            bt_powered: tel.bluetooth.powered,
+            bt_label: &tel.bluetooth.status_label,
+            battery_percent: tel.power.percentage,
+            has_battery: tel.power.has_battery,
+            ac_online: tel.power.ac_online,
+            volume_percent: tel.audio.volume_percent,
+            audio_muted: tel.audio.muted,
+            frame_p50_us: timing.interval_p50_us,
+            window_count,
+            progress: qs_progress,
+        });
+
+        let ov_progress = state.overview_anim.current();
+        let show_ov = !show_launcher && !show_qs && (state.overview_active || ov_progress > 0.01);
+        let ov_view = show_ov.then_some(crate::shell_render::OverviewRenderState {
+            active_workspace: active_ws,
+            layout_mode: layout_str,
+            windows: &dock_windows,
+            progress: ov_progress,
+        });
+
+        let overlay = if let Some(spot) = spotlight_view.as_ref() {
+            crate::shell_render::ShellOverlayView::Spotlight(spot)
+        } else if let Some(qs) = qs_view.as_ref() {
+            crate::shell_render::ShellOverlayView::QuickSettings(qs)
+        } else if let Some(ov) = ov_view.as_ref() {
+            crate::shell_render::ShellOverlayView::Overview(ov)
+        } else {
+            crate::shell_render::ShellOverlayView::None
+        };
+
+        render_list.extend(crate::shell_render::generate_shell_composite_elements(
+            text_cache,
+            shape_cache,
+            renderer,
+            size,
+            active_ws,
+            layout_str,
+            &dock_view,
+            &top_telemetry,
+            overlay,
+            &toast_views,
+        ));
+    }
+
+    // Render managed windows and their SSD titlebars in top-to-bottom stacking order
+    for &(win_id, rect) in visible_windows.iter().rev() {
+        let origin = state
+            .animations
+            .animated_window_origin(win_id.0)
+            .unwrap_or((rect.x, rect.y));
+        let frame_rect = rusty_wm::Rect::new(origin.0, origin.1, rect.width, rect.height);
+        let is_focused = focused_win == Some(win_id);
+
+        let smithay_win = state.smithay_window_for_id(win_id);
+        let title_text = smithay_win.as_ref().map_or_else(
+            || format!("Window #{}", win_id.0),
+            |win| window_title(win, win_id),
+        );
+
+        render_list.extend(crate::shell_render::generate_window_ssd_composite_elements(
+            text_cache,
+            shape_cache,
+            renderer,
+            frame_rect,
+            &title_text,
+            is_focused,
+        ));
+
+        if let Some(smithay_win) = smithay_win {
+            let geo_loc = smithay_win.geometry().loc;
+            let client_loc = Point::<i32, Logical>::from((
+                origin.0 - geo_loc.x,
+                origin.1 + crate::shell_render::TITLEBAR_HEIGHT - geo_loc.y,
+            ))
+            .to_physical_precise_round(1.0);
+            render_list.extend(
+                <smithay::desktop::Window as AsRenderElements<GlesRenderer>>::render_elements::<
+                    WaylandSurfaceRenderElement<GlesRenderer>,
+                >(
+                    &smithay_win,
+                    renderer,
+                    client_loc,
+                    smithay::utils::Scale::from(1.0),
+                    1.0,
+                )
+                .into_iter()
+                .map(CompositorRenderElement::Surface),
+            );
+        }
+
+        render_list.extend(crate::shell_render::generate_window_shadow_elements(
+            shape_cache,
+            renderer,
+            frame_rect,
+            is_focused,
+        ));
+    }
+
+    if layer_surfaces_present {
+        push_layer_elements(
+            &mut render_list,
+            &state.output,
+            renderer,
+            &[Layer::Bottom, Layer::Background],
+        );
+    }
+
+    if let Some(wallpaper) =
+        shape_cache.wallpaper_element(renderer, Size::<i32, Logical>::from((size.w, size.h)))
+    {
+        render_list.push(CompositorRenderElement::Memory(wallpaper));
+    }
+
+    render_list
+}
+
 #[allow(clippy::too_many_lines)]
 fn render_winit_frame(
     backend: &mut WinitGraphicsBackend<GlesRenderer>,
@@ -354,243 +622,8 @@ fn render_winit_frame(
             backend.buffer_age().unwrap_or(0)
         };
         let (renderer, mut framebuffer) = backend.bind().map_err(|err| err.to_string())?;
-
-        let active_ws = state.wm.active_workspace_id().0;
-        let layout_str = match state.wm.active_layout_mode() {
-            rusty_wm::LayoutMode::Floating => "floating",
-            rusty_wm::LayoutMode::MasterStack => "master-stack",
-        };
-        let visible_windows: Vec<(rusty_wm::WindowId, rusty_wm::Rect)> = state
-            .wm
-            .visible_windows()
-            .into_iter()
-            .map(|w| (w.id, w.geometry))
-            .collect();
-        let window_count = visible_windows.len();
-        let focused_win = state.wm.focused_window();
-
-        let mut render_list: Vec<CompositorRenderElement> = Vec::new();
-        let tel = state.telemetry.snapshot();
-        let timing = state.frame_timing.summary();
-        let lock_progress = state.lock_screen_anim.current();
-        if state.screen_locked || lock_progress > 0.01 {
-            let lock_view = crate::shell_render::LockScreenRenderState {
-                clock_hhmm: &tel.clock_hhmm,
-                network_label: &tel.network.status_label,
-                battery_percent: tel.power.percentage,
-                has_battery: tel.power.has_battery,
-                window_count,
-                progress: lock_progress,
-            };
-            render_list.extend(crate::shell_render::generate_lock_screen_elements(
-                text_cache,
-                shape_cache,
-                renderer,
-                size,
-                &lock_view,
-            ));
-        }
-
-        let layer_surfaces_present = push_layer_elements(
-            &mut render_list,
-            &state.output,
-            renderer,
-            &[Layer::Overlay, Layer::Top],
-        );
-
-        if !layer_surfaces_present {
-            let top_telemetry = crate::shell_render::TopBarTelemetry {
-                clock_hhmm: &tel.clock_hhmm,
-                battery_percent: tel.power.percentage,
-                has_battery: tel.power.has_battery,
-                net_connected: tel.network.connected,
-                volume_percent: tel.audio.volume_percent,
-                audio_muted: tel.audio.muted,
-                quick_settings_open: state.quick_settings_active,
-                notification_count: state.notification_count,
-            };
-
-            let toast_views: Vec<crate::shell_render::NotificationToastView<'_>> = state
-                .notifications
-                .iter()
-                .rev()
-                .take(crate::shell_render::MAX_VISIBLE_NOTIFICATIONS)
-                .map(|n| crate::shell_render::NotificationToastView {
-                    id: n.id,
-                    urgency: n.urgency,
-                    title: &n.title,
-                    body: &n.body,
-                })
-                .collect();
-
-            let mut dock_windows: Vec<crate::shell_render::DockWindowEntry> = visible_windows
-                .iter()
-                .map(|&(win_id, rect)| {
-                    let title = state.smithay_window_for_id(win_id).map_or_else(
-                        || format!("Window #{}", win_id.0),
-                        |win| window_title(&win, win_id),
-                    );
-                    let badge = crate::shell_render::make_window_badge(&title);
-                    crate::shell_render::DockWindowEntry {
-                        id: win_id,
-                        title,
-                        badge,
-                        dimensions: format!("{}x{}", rect.width, rect.height),
-                        focused: focused_win == Some(win_id),
-                    }
-                })
-                .collect();
-            dock_windows.sort_by_key(|entry| entry.id.0);
-
-            let dock_view = crate::shell_render::DockViewState {
-                windows: &dock_windows,
-                hover_slot: state.dock_hover_slot,
-                overview_active: state.overview_active,
-            };
-
-            let launcher_progress = state.launcher_anim.current();
-            let show_launcher = state.launcher_active || launcher_progress > 0.01;
-            let (win_start, visible_items) = if show_launcher {
-                state.launcher.visible_window(3)
-            } else {
-                (0, Vec::new())
-            };
-            let cursor_offset_x = if show_launcher && !state.launcher.query.is_empty() {
-                text_cache.measure_text(&state.launcher.query, 14.5).0
-            } else {
-                0
-            };
-            let spotlight_view =
-                show_launcher.then_some(crate::shell_render::SpotlightRenderState {
-                    query: &state.launcher.query,
-                    selected_in_window: state.launcher.selected_index.saturating_sub(win_start),
-                    cursor_offset_x,
-                    items: &visible_items,
-                    progress: launcher_progress,
-                });
-
-            let qs_progress = state.quick_settings_anim.current();
-            let show_qs = !show_launcher && (state.quick_settings_active || qs_progress > 0.01);
-            let qs_view = show_qs.then_some(crate::shell_render::QuickSettingsRenderState {
-                layout_mode: layout_str,
-                reduced_motion: state.animations.reduced_motion(),
-                network_label: &tel.network.status_label,
-                net_connected: tel.network.connected,
-                bt_available: tel.bluetooth.available,
-                bt_powered: tel.bluetooth.powered,
-                bt_label: &tel.bluetooth.status_label,
-                battery_percent: tel.power.percentage,
-                has_battery: tel.power.has_battery,
-                ac_online: tel.power.ac_online,
-                volume_percent: tel.audio.volume_percent,
-                audio_muted: tel.audio.muted,
-                frame_p50_us: timing.interval_p50_us,
-                window_count,
-                progress: qs_progress,
-            });
-
-            let ov_progress = state.overview_anim.current();
-            let show_ov =
-                !show_launcher && !show_qs && (state.overview_active || ov_progress > 0.01);
-            let ov_view = show_ov.then_some(crate::shell_render::OverviewRenderState {
-                active_workspace: active_ws,
-                layout_mode: layout_str,
-                windows: &dock_windows,
-                progress: ov_progress,
-            });
-
-            let overlay = if let Some(spot) = spotlight_view.as_ref() {
-                crate::shell_render::ShellOverlayView::Spotlight(spot)
-            } else if let Some(qs) = qs_view.as_ref() {
-                crate::shell_render::ShellOverlayView::QuickSettings(qs)
-            } else if let Some(ov) = ov_view.as_ref() {
-                crate::shell_render::ShellOverlayView::Overview(ov)
-            } else {
-                crate::shell_render::ShellOverlayView::None
-            };
-
-            render_list.extend(crate::shell_render::generate_shell_composite_elements(
-                text_cache,
-                shape_cache,
-                renderer,
-                size,
-                active_ws,
-                layout_str,
-                &dock_view,
-                &top_telemetry,
-                overlay,
-                &toast_views,
-            ));
-        }
-
-        // Render managed windows and their SSD titlebars in top-to-bottom stacking order
-        for &(win_id, rect) in visible_windows.iter().rev() {
-            let origin = state
-                .animations
-                .animated_window_origin(win_id.0)
-                .unwrap_or((rect.x, rect.y));
-            let frame_rect = rusty_wm::Rect::new(origin.0, origin.1, rect.width, rect.height);
-            let is_focused = focused_win == Some(win_id);
-
-            let smithay_win = state.smithay_window_for_id(win_id);
-            let title_text = smithay_win.as_ref().map_or_else(
-                || format!("Window #{}", win_id.0),
-                |win| window_title(win, win_id),
-            );
-
-            render_list.extend(crate::shell_render::generate_window_ssd_composite_elements(
-                text_cache,
-                shape_cache,
-                renderer,
-                frame_rect,
-                &title_text,
-                is_focused,
-            ));
-
-            if let Some(smithay_win) = smithay_win {
-                let geo_loc = smithay_win.geometry().loc;
-                let client_loc = Point::<i32, Logical>::from((
-                    origin.0 - geo_loc.x,
-                    origin.1 + crate::shell_render::TITLEBAR_HEIGHT - geo_loc.y,
-                ))
-                .to_physical_precise_round(1.0);
-                render_list.extend(
-                    <smithay::desktop::Window as AsRenderElements<GlesRenderer>>::render_elements::<
-                        WaylandSurfaceRenderElement<GlesRenderer>,
-                    >(
-                        &smithay_win,
-                        renderer,
-                        client_loc,
-                        smithay::utils::Scale::from(1.0),
-                        1.0,
-                    )
-                    .into_iter()
-                    .map(CompositorRenderElement::Surface),
-                );
-            }
-
-            render_list.extend(crate::shell_render::generate_window_shadow_elements(
-                shape_cache,
-                renderer,
-                frame_rect,
-                is_focused,
-            ));
-        }
-
-        if layer_surfaces_present {
-            push_layer_elements(
-                &mut render_list,
-                &state.output,
-                renderer,
-                &[Layer::Bottom, Layer::Background],
-            );
-        }
-
-        if let Some(wallpaper) =
-            shape_cache.wallpaper_element(renderer, Size::<i32, Logical>::from((size.w, size.h)))
-        {
-            render_list.push(CompositorRenderElement::Memory(wallpaper));
-        }
+        let render_list =
+            build_frame_render_list(renderer, text_cache, shape_cache, state, size, false);
 
         let render_result = damage_tracker
             .render_output(
@@ -657,7 +690,11 @@ fn render_winit_frame(
     Ok(())
 }
 
-fn spawn_test_client(command: &str, socket_name: &str, ipc_socket_path: &std::path::Path) {
+pub(crate) fn spawn_test_client(
+    command: &str,
+    socket_name: &str,
+    ipc_socket_path: &std::path::Path,
+) {
     let mut parts = command.split_whitespace();
     let Some(program) = parts.next() else {
         return;
