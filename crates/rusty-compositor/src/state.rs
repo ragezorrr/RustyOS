@@ -10,7 +10,7 @@ use rusty_wm::{LayoutMode, OutputId, Rect, WindowId, WindowManager, WmAction, Wo
 use smithay::{
     backend::renderer::utils::on_commit_buffer_handler,
     delegate_compositor, delegate_data_device, delegate_layer_shell, delegate_output,
-    delegate_seat, delegate_shm, delegate_xdg_shell,
+    delegate_seat, delegate_shm, delegate_xdg_decoration, delegate_xdg_shell,
     desktop::{
         LayerSurface as DesktopLayerSurface, PopupManager, Space, Window, WindowSurfaceType,
         layer_map_for_output,
@@ -23,6 +23,7 @@ use smithay::{
     output::{Mode, Output, PhysicalProperties, Scale, Subpixel},
     reexports::{
         calloop::LoopSignal,
+        wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode as DecorationMode,
         wayland_protocols::xdg::shell::server::xdg_toplevel,
         wayland_server::{
             Client, Display, DisplayHandle,
@@ -46,7 +47,10 @@ use smithay::{
                 Layer, LayerSurface as WlrLayerSurface, LayerSurfaceData, WlrLayerShellHandler,
                 WlrLayerShellState,
             },
-            xdg::{PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState},
+            xdg::{
+                PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
+                decoration::{XdgDecorationHandler, XdgDecorationState},
+            },
         },
         shm::{ShmHandler, ShmState},
     },
@@ -123,6 +127,8 @@ pub struct RustyCompositorState {
     pub compositor_state: CompositorState,
     /// `xdg_wm_base` shell protocol state.
     pub xdg_shell_state: XdgShellState,
+    /// `zxdg_decoration_manager_v1` SSD negotiation state.
+    pub xdg_decoration_state: XdgDecorationState,
     /// `zwlr_layer_shell_v1` desktop panel/dock shell protocol state (`RUSTYOS-016`).
     pub wlr_layer_shell_state: WlrLayerShellState,
     /// `wl_shm` shared-memory buffer state.
@@ -184,6 +190,7 @@ impl RustyCompositorState {
 
         let compositor_state = CompositorState::new::<Self>(&display_handle);
         let xdg_shell_state = XdgShellState::new::<Self>(&display_handle);
+        let xdg_decoration_state = XdgDecorationState::new::<Self>(&display_handle);
         let wlr_layer_shell_state = WlrLayerShellState::new::<Self>(&display_handle);
         let shm_state = ShmState::new::<Self>(&display_handle, Vec::new());
         let output_manager_state = OutputManagerState::new_with_xdg_output::<Self>(&display_handle);
@@ -239,6 +246,7 @@ impl RustyCompositorState {
             output,
             compositor_state,
             xdg_shell_state,
+            xdg_decoration_state,
             wlr_layer_shell_state,
             shm_state,
             output_manager_state,
@@ -592,7 +600,11 @@ impl RustyCompositorState {
 
             if let Some(window) = self.smithay_window_for_id(win_id) {
                 let client_height = (rect.height - crate::shell_render::TITLEBAR_HEIGHT).max(64);
-                let client_origin = (origin.0, origin.1 + crate::shell_render::TITLEBAR_HEIGHT);
+                let geo_loc = window.geometry().loc;
+                let client_origin = (
+                    origin.0 - geo_loc.x,
+                    origin.1 + crate::shell_render::TITLEBAR_HEIGHT - geo_loc.y,
+                );
                 if let Some(toplevel) = window.toplevel() {
                     toplevel.with_pending_state(|state| {
                         state.size = Some((rect.width, client_height).into());
@@ -642,7 +654,11 @@ impl RustyCompositorState {
                 && let Some(window) = self.smithay_window_for_id(win_id)
             {
                 let is_focused = focused_id == Some(win_id);
-                let client_origin = (origin.0, origin.1 + crate::shell_render::TITLEBAR_HEIGHT);
+                let geo_loc = window.geometry().loc;
+                let client_origin = (
+                    origin.0 - geo_loc.x,
+                    origin.1 + crate::shell_render::TITLEBAR_HEIGHT - geo_loc.y,
+                );
                 self.space.map_element(window, client_origin, is_focused);
             }
         }
@@ -805,6 +821,21 @@ impl CompositorHandler for RustyCompositorState {
                 .then(|| w.clone())
         }) {
             window.on_commit();
+            if let Some(win_id) = self.window_id_for_smithay(&window)
+                && let Some(wm_win) = self.wm.window(win_id)
+            {
+                let origin = self
+                    .animations
+                    .animated_window_origin(win_id.0)
+                    .unwrap_or((wm_win.geometry.x, wm_win.geometry.y));
+                let geo_loc = window.geometry().loc;
+                let client_origin = (
+                    origin.0 - geo_loc.x,
+                    origin.1 + crate::shell_render::TITLEBAR_HEIGHT - geo_loc.y,
+                );
+                let is_focused = self.wm.focused_window() == Some(win_id);
+                self.space.map_element(window, client_origin, is_focused);
+            }
         }
 
         // Handle zwlr_layer_surface_v1 commits and arrange
@@ -899,9 +930,11 @@ impl XdgShellHandler for RustyCompositorState {
         let win_id = self.wm.next_window_id();
         let rect = self.wm.map_window(win_id, None);
 
+        let client_height = (rect.height - crate::shell_render::TITLEBAR_HEIGHT).max(64);
         surface.with_pending_state(|state| {
             state.states.set(xdg_toplevel::State::Activated);
-            state.size = Some((rect.width, rect.height).into());
+            state.size = Some((rect.width, client_height).into());
+            state.decoration_mode = Some(DecorationMode::ServerSide);
         });
         surface.send_configure();
 
@@ -989,10 +1022,34 @@ impl WlrLayerShellHandler for RustyCompositorState {
     }
 }
 
+impl XdgDecorationHandler for RustyCompositorState {
+    fn new_decoration(&mut self, toplevel: ToplevelSurface) {
+        toplevel.with_pending_state(|state| {
+            state.decoration_mode = Some(DecorationMode::ServerSide);
+        });
+        toplevel.send_configure();
+    }
+
+    fn request_mode(&mut self, toplevel: ToplevelSurface, _mode: DecorationMode) {
+        toplevel.with_pending_state(|state| {
+            state.decoration_mode = Some(DecorationMode::ServerSide);
+        });
+        toplevel.send_configure();
+    }
+
+    fn unset_mode(&mut self, toplevel: ToplevelSurface) {
+        toplevel.with_pending_state(|state| {
+            state.decoration_mode = Some(DecorationMode::ServerSide);
+        });
+        toplevel.send_configure();
+    }
+}
+
 delegate_compositor!(RustyCompositorState);
 delegate_shm!(RustyCompositorState);
 delegate_output!(RustyCompositorState);
 delegate_seat!(RustyCompositorState);
 delegate_data_device!(RustyCompositorState);
 delegate_xdg_shell!(RustyCompositorState);
+delegate_xdg_decoration!(RustyCompositorState);
 delegate_layer_shell!(RustyCompositorState);

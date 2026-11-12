@@ -176,7 +176,10 @@ pub fn make_window_badge(title: &str) -> String {
     if trimmed.is_empty() {
         return "Wn".to_owned();
     }
-    let words: Vec<&str> = trimmed.split_whitespace().collect();
+    let words: Vec<&str> = trimmed
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect();
     if words.len() >= 2 {
         let mut badge = String::new();
         if let Some(c1) = words[0].chars().next() {
@@ -273,7 +276,7 @@ pub enum QuickSettingsHit {
 }
 
 fn status_pill_rect(screen_width: i32) -> (i32, i32, i32, i32) {
-    let status_pill_width = 186.min((screen_width - 370).max(120));
+    let status_pill_width = 200.min((screen_width - 370).max(120));
     let status_x = screen_width - status_pill_width - 12;
     (status_x, 6, status_pill_width, 20)
 }
@@ -290,7 +293,9 @@ fn quick_settings_rect(width: i32, height: i32) -> (i32, i32, i32, i32) {
 fn dock_layout_bounds(width: i32, height: i32, window_count: usize) -> (i32, i32, i32, usize) {
     let items_count = (3 + window_count).max(3);
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    let dock_width = ((items_count as i32) * 52 + 16).min((width - 48).max(172));
+    let count_i32 = items_count as i32;
+    let raw_width = count_i32 * 40 + (count_i32 - 1) * 12 + 16;
+    let dock_width = raw_width.min((width - 48).max(160));
     let dock_x = (width - dock_width) / 2;
     let dock_y = height - DOCK_HEIGHT - DOCK_MARGIN_BOTTOM;
     (dock_x, dock_y, dock_width, items_count)
@@ -529,7 +534,7 @@ fn format_status_pill_label(t: &TopBarTelemetry<'_>) -> String {
     let vol_part = if t.audio_muted {
         "Mute".to_owned()
     } else {
-        format!("V{}%", t.volume_percent)
+        format!("Vol {}%", t.volume_percent)
     };
     if t.has_battery {
         format!("{vol_part} • {}% • {}", t.battery_percent, t.clock_hhmm)
@@ -1363,7 +1368,6 @@ pub fn generate_shell_text_elements(
     let height = screen_size.h;
     let text_bright = [244, 240, 250, 255]; // #F4F0FA
     let text_muted = [166, 155, 181, 255]; // #A69BB5
-    let text_subtle = [118, 107, 133, 255]; // #766B85
 
     // 1. Overlay labels (Spotlight or Quick Settings popover)
     match overlay {
@@ -1514,22 +1518,15 @@ pub fn generate_shell_text_elements(
         };
         let (label, color) = match idx {
             0 => (">_", text_bright),
-            1 => ("Fs", text_subtle),
-            2 => (
-                "Ov",
-                if dock_view.overview_active {
-                    text_bright
-                } else {
-                    text_subtle
-                },
-            ),
+            1 => ("Fs", text_bright),
+            2 => ("Ov", text_bright),
             n => {
                 let win = dock_view.windows.get(n - 3);
                 let badge = win.map_or("Wn", |entry| entry.badge.as_str());
                 let col = if win.is_some_and(|entry| entry.focused) {
                     text_bright
                 } else {
-                    text_muted
+                    [224, 216, 236, 255]
                 };
                 (badge, col)
             }
@@ -1862,7 +1859,6 @@ const RGBA_ACCENT: [u8; 4] = [165, 110, 255, 255]; // #A56EFF
 const RGBA_ACCENT_HOVER: [u8; 4] = [185, 138, 255, 255]; // #B98AFF
 const RGBA_ACCENT_MUTED: [u8; 4] = [118, 80, 181, 255]; // #7650B5
 const RGBA_SUBTLE: [u8; 4] = [118, 107, 133, 255]; // #766B85
-const RGBA_MUTED: [u8; 4] = [166, 155, 181, 255]; // #A69BB5
 const RGBA_BORDER: [u8; 4] = [255, 255, 255, 31];
 const RGBA_BORDER_HIGHLIGHT: [u8; 4] = [255, 255, 255, 56];
 const RGBA_DANGER: [u8; 4] = [229, 107, 117, 255];
@@ -2550,11 +2546,11 @@ pub fn generate_shell_composite_elements(
         let inner_offset = (item_size - inner_size) / 2;
         let inner_rgba = match i {
             0 => RGBA_ACCENT,
-            1 => RGBA_ACCENT_MUTED,
+            1 => [76, 54, 122, 255],
             2 if dock_view.overview_active => RGBA_ACCENT_HOVER,
-            2 => RGBA_SUBTLE,
+            2 => [56, 44, 86, 255],
             _ if is_active => RGBA_ACCENT_HOVER,
-            _ => RGBA_MUTED,
+            _ => [48, 36, 72, 255],
         };
         push_rounded_glass_box(
             &mut out,
@@ -3086,5 +3082,7 @@ mod tests {
             check_overview_click(size, 3, 10.0, 100.0),
             OverviewHit::Dismiss
         );
+        assert_eq!(make_window_badge("RustyOS_Main : bash — Konsole"), "RM");
+        assert_eq!(make_window_badge("Cursor Agents"), "CA");
     }
 }

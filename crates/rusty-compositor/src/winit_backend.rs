@@ -497,9 +497,10 @@ fn render_winit_frame(
             ));
 
             if let Some(smithay_win) = smithay_win {
+                let geo_loc = smithay_win.geometry().loc;
                 let client_loc = Point::<i32, Logical>::from((
-                    origin.0,
-                    origin.1 + crate::shell_render::TITLEBAR_HEIGHT,
+                    origin.0 - geo_loc.x,
+                    origin.1 + crate::shell_render::TITLEBAR_HEIGHT - geo_loc.y,
                 ))
                 .to_physical_precise_round(1.0);
                 render_list.extend(
