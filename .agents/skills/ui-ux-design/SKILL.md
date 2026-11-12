@@ -12,3 +12,6 @@ name: ui-ux-design
 - Respect reduced motion and scaling.
 - Do not copy proprietary assets or exact branded interfaces.
 - Check GPU cost of blur, shadows and transparency.
+- Target macOS 27 Liquid Glass geometry per DESIGN.md section 12 (transparent menu bar,
+  capsule Dock with real icons, radius 20+ for windows/menus); keep the purple palette.
+- Inspect only the relevant screenshots in docs/design/references/ before UI work.

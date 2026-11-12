@@ -1,6 +1,6 @@
 # RustyOS — Design System
 
-Version: 2.0  
+Version: 2.1 (macOS 27 alignment)  
 Status: Active  
 Scope: Entire desktop environment
 
@@ -171,11 +171,11 @@ border = "#FFFFFF12"
 
 ```toml
 [radius]
-small = 6
-medium = 10
-large = 16
-xlarge = 22
-pill = 999
+small = 8      # controls, list rows
+medium = 12     # cards, buttons
+large = 20      # windows, menus, popovers, control-center tiles
+xlarge = 26     # Spotlight, large sheets
+pill = 999      # Dock capsule, toggles, menu-bar pills
 ```
 
 ### 5.3 Spacing
@@ -224,6 +224,7 @@ All system components must follow the same visual language.
 - Consistent spacing.
 - Subtle hover and active feedback.
 - Visible running application indicators.
+- See section 12 for the macOS 27 target geometry.
 
 ### Panels
 
@@ -340,6 +341,63 @@ When the design evolves:
 - Avoid introducing competing design systems.
 
 The design system should evolve incrementally, not through unrelated redesigns.
+
+## 12. macOS 27 Alignment (Liquid Glass)
+
+Source: user-provided references in `docs/design/references/` (`desktop`, `context-menu`,
+`control-center-overview`, `finder-window-dark`, `window-management`) and public descriptions of
+macOS 26/27 Liquid Glass. Pixel values are approximate, measured from those screenshots at ~2x,
+and are targets in logical pixels. RustyOS keeps its purple palette (section 5.1); only geometry,
+layout and material behavior follow macOS 27. No Apple assets or branding.
+
+### 12.1 Menu bar (top panel)
+
+- No solid background by default: text and icons sit on the wallpaper. A soft top gradient/shadow
+  keeps contrast. A solid/tinted fallback is selected by `reduce transparency` or config.
+- Height ~24-26 logical px (current 32 is too tall); text 13 px, medium weight.
+- Left: active-app menu (name bold) followed by menus; workspace indicators are compact pills.
+- Right (monochrome glyphs, 16 px, ~12 px gaps): tray items, network, battery, search,
+  control-center toggle (pill highlight when open), keyboard layout, date and time.
+- Replace the text status string (`Vol .. • .. • time`) with glyphs and a plain clock.
+
+### 12.2 Dock
+
+- Wide floating capsule (radius = pill-like, >= 20), detached ~8-12 px from the bottom edge,
+  width grows with item count; light frosted fill, 1 px top-lit rim, soft outer shadow.
+- Icons 48-56 px, consistent squircle shape, ~6-8 px gaps; real app icons first, monogram only
+  as fallback.
+- Running indicator: 4 px dot below the icon. Separator before trash/recent items.
+- Hover: icon magnification or lift with short (120 ms) interruptible motion; reduced motion
+  disables magnification.
+
+### 12.3 Windows and menus
+
+- Window radius `large` (20) with wide soft shadow (blur ~40-60, low alpha); active window has a
+  stronger shadow, inactive a flatter one.
+- Titlebar traffic lights 12-13 px, ~8 px spacing, left aligned; toolbar items grouped in
+  rounded capsules.
+- Menus/popovers: radius `large`, 4-6 px inner padding, item height ~28 px, monochrome leading
+  icons, secondary-colored shortcuts right-aligned, hairline separators, hover fill uses accent.
+- Sidebars are lighter/translucent than content area; selected row uses accent fill with
+  `medium` radius.
+
+### 12.4 Control center and quick settings
+
+- Tiles use `large` radius glass cards; primary toggles are large round buttons (accent when on).
+- Sliders: full-width capsule track, leading icon, accent fill, no tick marks.
+- Panel anchors under the menu-bar control-center toggle.
+
+### 12.5 Material and depth
+
+- True lensing/blur is optional and needs a separate ADR (GLES shader cost, hardware matrix).
+  Until approved, emulate glass with alpha, top-lit gradient and inner rim; always provide an
+  opaque fallback and respect the transparency setting.
+- Planned user setting `glass_opacity` (Liquid Glass slider equivalent) is not yet approved or
+  implemented; see TASKS.md when scheduled.
+
+### 12.6 Mission Control / Overview
+
+- Workspace strip at the top with captions, windows tiled in a grid below, Dock stays visible.
 
 ---
 

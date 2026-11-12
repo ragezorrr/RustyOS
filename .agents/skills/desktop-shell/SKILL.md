@@ -12,3 +12,4 @@ name: desktop-shell
 - Use shared design tokens and accessible interaction states.
 - Shell crash/restart must not unnecessarily terminate compositor.
 - Do not add a UI toolkit or process boundary without approval.
+- Panel, Dock, quick settings and overview follow DESIGN.md section 12 (macOS 27 alignment).

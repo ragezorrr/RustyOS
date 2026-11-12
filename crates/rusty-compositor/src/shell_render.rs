@@ -32,11 +32,29 @@ pub const TOP_BAR_HEIGHT: i32 = 32;
 /// Server-Side Decoration (SSD) titlebar height in logical pixels (`RUSTYOS-019`).
 pub const TITLEBAR_HEIGHT: i32 = 28;
 
-/// Dock height in logical pixels.
-pub const DOCK_HEIGHT: i32 = 56;
+/// Dock height in logical pixels (`RUSTYOS-035`: 56 px tile + 8 px padding on both sides).
+pub const DOCK_HEIGHT: i32 = 72;
 
 /// Dock bottom margin from screen edge.
-pub const DOCK_MARGIN_BOTTOM: i32 = 12;
+pub const DOCK_MARGIN_BOTTOM: i32 = 8;
+
+/// Dock tile edge length in logical pixels (`RUSTYOS-035`).
+pub const DOCK_ITEM_SIZE: i32 = 56;
+
+/// Gap between Dock tiles in logical pixels (`RUSTYOS-035`).
+pub const DOCK_ITEM_GAP: i32 = 8;
+
+/// Dock capsule inner padding in logical pixels (`RUSTYOS-035`).
+pub const DOCK_PADDING: i32 = 8;
+
+/// Dock capsule corner radius in logical pixels (`RUSTYOS-035`).
+pub const DOCK_RADIUS: i32 = 24;
+
+/// App icon edge length inside a Dock tile (`RUSTYOS-035`).
+pub const DOCK_ICON_SIZE: i32 = 48;
+
+/// SSD window frame corner radius in logical pixels (`RUSTYOS-035`).
+pub const WINDOW_RADIUS: i32 = 12;
 
 /// Workspace button width and stride for topbar indicators and click handling.
 pub const WS_BTN_WIDTH: i32 = 26;
@@ -600,7 +618,7 @@ fn dock_layout_bounds(width: i32, height: i32, window_count: usize) -> (i32, i32
     let items_count = (3 + window_count).max(3);
     #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
     let count_i32 = items_count as i32;
-    let raw_width = count_i32 * 40 + (count_i32 - 1) * 12 + 16;
+    let raw_width = count_i32 * DOCK_ITEM_SIZE + (count_i32 - 1) * DOCK_ITEM_GAP + DOCK_PADDING * 2;
     let dock_width = raw_width.min((width - 48).max(160));
     let dock_x = (width - dock_width) / 2;
     let dock_y = height - DOCK_HEIGHT - DOCK_MARGIN_BOTTOM;
@@ -618,14 +636,14 @@ fn dock_slot_rect(
     if slot_idx >= items_count {
         return None;
     }
-    let item_size = 40;
+    let item_size = DOCK_ITEM_SIZE;
     let slot_i32 = i32::try_from(slot_idx).ok()?;
-    let item_x = dock_x + 8 + slot_i32 * (item_size + 12);
+    let item_x = dock_x + DOCK_PADDING + slot_i32 * (item_size + DOCK_ITEM_GAP);
     if item_x + item_size > dock_x + dock_width {
         return None;
     }
     Some(Rectangle::new(
-        Point::from((item_x, dock_y + 8)),
+        Point::from((item_x, dock_y + DOCK_PADDING)),
         Size::from((item_size, item_size)),
     ))
 }
@@ -3404,23 +3422,25 @@ pub fn generate_shell_composite_elements(
         };
         let has_running_dot = win_entry.is_some() || (i == 2 && dock_view.overview_active);
         if has_running_dot {
-            let (pip_w, pip_color) = if is_minimized {
-                (4, COLOR_WARNING)
+            let pip_color = if is_minimized {
+                RGBA_WARNING
             } else if is_active {
-                (8, COLOR_ACCENT)
+                RGBA_ACCENT
             } else {
-                (8, COLOR_ACCENT_MUTED)
+                RGBA_ACCENT_MUTED
             };
-            out.push(CompositorRenderElement::Solid(make_solid_element(
-                Rectangle::new(
-                    Point::from((item_x + (item_size - pip_w) / 2, dock_y + DOCK_HEIGHT - 5)),
-                    Size::from((pip_w, 2)),
-                ),
+            if let Some(dot) = shape_cache.circle_element(
+                renderer,
+                4,
                 pip_color,
-            )));
+                None,
+                Point::from((item_x + (item_size - 4) / 2, dock_y + DOCK_HEIGHT - 6)),
+            ) {
+                out.push(CompositorRenderElement::Memory(dot));
+            }
         }
 
-        let inner_size = 28;
+        let inner_size = DOCK_ICON_SIZE;
         let inner_offset = (item_size - inner_size) / 2;
         let slot_icon_name = match i {
             0 => dock_view.pinned_icons[0],
@@ -3433,7 +3453,7 @@ pub fn generate_shell_composite_elements(
                 renderer,
                 name,
                 inner_size,
-                Point::from((item_x + inner_offset, item_y + inner_offset)),
+                Point::from((item_x + inner_offset, item_y + inner_offset - 2)),
             )
         });
         if let Some(el) = slot_icon_el {
@@ -3453,30 +3473,30 @@ pub fn generate_shell_composite_elements(
                 shape_cache,
                 renderer,
                 Rectangle::new(
-                    Point::from((item_x + inner_offset, item_y + inner_offset)),
+                    Point::from((item_x + inner_offset, item_y + inner_offset - 2)),
                     Size::from((inner_size, inner_size)),
                 ),
-                6,
+                12,
                 inner_rgba,
                 None,
             );
         }
-        let tile_border = if is_active {
-            Some(RGBA_ACCENT)
-        } else if hovered {
-            Some(RGBA_BORDER_HIGHLIGHT)
-        } else {
-            None
-        };
-        push_rounded_glass_box(
-            &mut out,
-            shape_cache,
-            renderer,
-            slot_rect,
-            8,
-            RGBA_SURFACE_OVERLAY,
-            tile_border,
-        );
+        // macOS-style tiles have no resting plate: only a faint hover highlight (`RUSTYOS-035`).
+        if hovered || is_active {
+            push_rounded_glass_box(
+                &mut out,
+                shape_cache,
+                renderer,
+                slot_rect,
+                14,
+                if is_active {
+                    [255, 255, 255, 22]
+                } else {
+                    [255, 255, 255, 30]
+                },
+                None,
+            );
+        }
     }
 
     let dock_rect = Rectangle::new(
@@ -3488,11 +3508,19 @@ pub fn generate_shell_composite_elements(
         shape_cache,
         renderer,
         dock_rect,
-        12,
-        RGBA_SURFACE_ELEVATED,
+        DOCK_RADIUS,
+        [44, 34, 66, 214],
         Some(RGBA_BORDER_HIGHLIGHT),
     );
-    push_soft_shadow(&mut out, shape_cache, renderer, dock_rect, 12, 14, 96);
+    push_soft_shadow(
+        &mut out,
+        shape_cache,
+        renderer,
+        dock_rect,
+        DOCK_RADIUS,
+        18,
+        96,
+    );
 
     // 5. Workspace Overview cards & scrim rendered below TopBar & Dock so both stay crisp and clickable (`RUSTYOS-023`/`025`)
     if let ShellOverlayView::Overview(ov) = overlay {
@@ -3723,7 +3751,7 @@ pub fn generate_window_ssd_composite_elements(
     }
 
     // Rounded top corners (8px radius) + seamless 1px glass border around window frame
-    let r = 8;
+    let r = WINDOW_RADIUS;
     let titlebar_rgba = if is_focused {
         RGBA_SURFACE_OVERLAY
     } else {
@@ -3912,14 +3940,14 @@ pub fn generate_window_shadow_elements(
     let mut out = Vec::new();
     let w = rect.width.max(64);
     let h = rect.height.max(TITLEBAR_HEIGHT + 32);
-    let spread = if is_focused { 14 } else { 10 };
-    let max_alpha = if is_focused { 96 } else { 58 };
+    let spread = if is_focused { 24 } else { 14 };
+    let max_alpha = if is_focused { 110 } else { 56 };
     push_soft_shadow(
         &mut out,
         shape_cache,
         renderer,
         Rectangle::new(Point::from((rect.x, rect.y)), Size::from((w, h))),
-        8,
+        WINDOW_RADIUS,
         spread,
         max_alpha,
     );
