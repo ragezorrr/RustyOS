@@ -287,6 +287,21 @@ hardware/software context и низкие накладные расходы.
 - **Acceptance criteria:** Клик по слотам Dock (`>_`, `Fs`, `Ov`, открытые окна) запускает/фокусирует соответствующие окна или переключает Overview; Overview отображает сетку превью-карточек активного рабочего стола без перекрытия TopBar/Dock; 47 тестов и `clippy -D warnings` проходят без предупреждений.
 - **Risks:** Минимальные (при отсутствии установленного терминала/файлового менеджера клик открывает Spotlight).
 
+## RUSTYOS-024 --- Notification HUD & IPC Shell Parity
+
+**Статус:** done **Фаза:** 21 (Notifications & IPC Parity)
+
+- **Цель:** Добавить живой Notification HUD (правый верхний стек тост-баннеров со срочностью, автоистечением по TTL, кликом для скрытия и счётчиком непрочитанных в TopBar) с полной синхронизацией между `rusty-compositor`, `rusty-ipc` и `apps/rusty-shell`.
+- **Scope:**
+  - `crates/rusty-ipc/src/lib.rs`: `NotificationSummary`, поле `notifications` в `DesktopStateSnapshot` с безопасным `%`-экранированием и обратной совместимостью с 11-польными v1-снимками, запросы `DismissNotification` и `ClearNotifications`.
+  - `crates/rusty-compositor/src/state.rs`: `CompositorNotification`, очередь уведомлений (`push_notification`, `expire_notifications`, `dismiss_notification`, `clear_notifications`, `trigger_demo_notification`) и обработка IPC-событий.
+  - `crates/rusty-compositor/src/shell_render.rs` и `winit_backend.rs`: `NotificationToastView`, скруглённые стеклянные тосты (`Low`/`Normal`/`Critical` акценты, тень, кнопка `x`), счётчик `N:<count>` в TopBar, скрытие тостов при открытом Quick Settings/Spotlight и unit-тесты hit-testing.
+  - `crates/rusty-compositor/src/input.rs`: хоткеи `Alt+N` (демо-уведомление) и `Alt+Shift+N` (очистка), клик по тосту или бейджу TopBar.
+  - `apps/rusty-shell/src/lib.rs` и `wayland.rs`: `TopBarState::notification_count`, `NotificationCenter::sync_from_snapshot` / `dismiss` / `clear`, отрисовка бейджа `N:<count>` в SHM-буфере TopBar.
+- **Dependencies:** `RUSTYOS-010`, `RUSTYOS-021`, `RUSTYOS-022`.
+- **Acceptance criteria:** `Alt+N` и IPC `Notify` создают тост в правом верхнем углу с цветовым акцентом urgency; тосты автоматически истекают по TTL или закрываются кликом / `Alt+Shift+N`; `rusty-shell` синхронизирует очередь по `DesktopStateSnapshot`; 48 тестов и `clippy -D warnings` проходят без предупреждений.
+- **Risks:** Минимальные (размер снимка IPC ограничен до `MAX_IPC_MESSAGE_BYTES` с усечением до 8 видимых уведомлений).
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

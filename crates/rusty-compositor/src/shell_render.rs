@@ -106,10 +106,12 @@ pub struct TopBarTelemetry<'a> {
     pub net_connected: bool,
     /// Master output volume (`0..=100`).
     pub volume_percent: u8,
-    /// Whether master audio output is muted.
+    /// Master audio output is muted.
     pub audio_muted: bool,
     /// Whether the Quick Settings popover is currently open.
     pub quick_settings_open: bool,
+    /// Number of active/unread desktop notifications (`RUSTYOS-024`).
+    pub notification_count: u32,
 }
 
 impl Default for TopBarTelemetry<'static> {
@@ -122,8 +124,22 @@ impl Default for TopBarTelemetry<'static> {
             volume_percent: 75,
             audio_muted: false,
             quick_settings_open: false,
+            notification_count: 0,
         }
     }
+}
+
+/// Active notification toast view rendered in the top-right Notification HUD (`RUSTYOS-024`).
+#[derive(Debug, Clone)]
+pub struct NotificationToastView<'a> {
+    /// Unique notification identifier.
+    pub id: u64,
+    /// Urgency level controlling accent color.
+    pub urgency: rusty_ipc::Urgency,
+    /// Short notification title.
+    pub title: &'a str,
+    /// Notification body text.
+    pub body: &'a str,
 }
 
 /// Live data for the Quick Settings Control Center popover (`RUSTYOS-021`).
@@ -279,6 +295,81 @@ fn status_pill_rect(screen_width: i32) -> (i32, i32, i32, i32) {
     let status_pill_width = 200.min((screen_width - 370).max(120));
     let status_x = screen_width - status_pill_width - 12;
     (status_x, 6, status_pill_width, 20)
+}
+
+fn notification_badge_rect(screen_width: i32) -> (i32, i32, i32, i32) {
+    let (status_x, _, _, _) = status_pill_rect(screen_width);
+    let badge_w = 42;
+    let badge_x = status_x - badge_w - 8;
+    (badge_x, 6, badge_w, 20)
+}
+
+/// Maximum number of floating notification toasts shown simultaneously (`RUSTYOS-024`).
+pub const MAX_VISIBLE_NOTIFICATIONS: usize = 4;
+
+/// Computes top-right stacked rectangles for up to [`MAX_VISIBLE_NOTIFICATIONS`] active toasts (`RUSTYOS-024`).
+#[must_use]
+pub fn notification_toast_rects(
+    screen_size: Size<i32, smithay::utils::Physical>,
+    count: usize,
+) -> Vec<Rectangle<i32, smithay::utils::Physical>> {
+    let visible = count.min(MAX_VISIBLE_NOTIFICATIONS);
+    if visible == 0 {
+        return Vec::new();
+    }
+    let width = screen_size.w.max(320);
+    let toast_w = 320.min((width - 32).max(200));
+    let toast_h = 68;
+    let gap = 10;
+    let toast_x = width - toast_w - 16;
+    let start_y = TOP_BAR_HEIGHT + 12;
+
+    let mut rects = Vec::with_capacity(visible);
+    for idx in 0..visible {
+        let idx_i32 = i32::try_from(idx).unwrap_or(0);
+        let y = start_y + idx_i32 * (toast_h + gap);
+        rects.push(Rectangle::new(
+            Point::from((toast_x, y)),
+            Size::from((toast_w, toast_h)),
+        ));
+    }
+    rects
+}
+
+/// Hit-tests `(x, y)` against visible top-right Notification HUD toasts (`RUSTYOS-024`).
+#[must_use]
+pub fn check_notification_click(
+    screen_size: Size<i32, smithay::utils::Physical>,
+    visible_count: usize,
+    x: f64,
+    y: f64,
+) -> Option<usize> {
+    let rects = notification_toast_rects(screen_size, visible_count);
+    for (idx, rect) in rects.into_iter().enumerate() {
+        let rx = f64::from(rect.loc.x);
+        let ry = f64::from(rect.loc.y);
+        let rw = f64::from(rect.size.w);
+        let rh = f64::from(rect.size.h);
+        if x >= rx && x < rx + rw && y >= ry && y < ry + rh {
+            return Some(idx);
+        }
+    }
+    None
+}
+
+/// Checks if `(x, y)` clicked the `TopBar` unread notification badge pill (`RUSTYOS-024`).
+#[must_use]
+pub fn check_top_bar_notification_click(
+    screen_width: i32,
+    notification_count: u32,
+    x: f64,
+    y: f64,
+) -> bool {
+    if notification_count == 0 || y > f64::from(TOP_BAR_HEIGHT) {
+        return false;
+    }
+    let (bx, _by, bw, _bh) = notification_badge_rect(screen_width);
+    x >= f64::from(bx) && x < f64::from(bx + bw)
 }
 
 fn quick_settings_rect(width: i32, height: i32) -> (i32, i32, i32, i32) {
@@ -1347,7 +1438,7 @@ pub fn generate_window_ssd_elements(
 }
 
 /// Generates GPU-cached real font text labels for `TopBar`, `Dock`, `Spotlight`, `QuickSettings`,
-/// and `Workspace Overview` (`RUSTYOS-020`/`021`/`023`).
+/// `Workspace Overview`, and `Notification HUD` (`RUSTYOS-020`/`021`/`023`/`024`).
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 pub fn generate_shell_text_elements(
     text_cache: &mut crate::text::TextCache,
@@ -1358,6 +1449,7 @@ pub fn generate_shell_text_elements(
     dock_view: &DockViewState<'_>,
     top_telemetry: &TopBarTelemetry<'_>,
     overlay: ShellOverlayView<'_>,
+    notifications: &[NotificationToastView<'_>],
 ) -> Vec<MemoryRenderBufferRenderElement<GlesRenderer>> {
     let mut elements = Vec::new();
     if !text_cache.has_font() {
@@ -1508,6 +1600,70 @@ pub fn generate_shell_text_elements(
         text_cache.render_label_centered(renderer, &status_text, 10.5, text_bright, status_bounds)
     {
         elements.push(el);
+    }
+
+    // 4a. Unread notification count badge in TopBar (`RUSTYOS-024`)
+    if top_telemetry.notification_count > 0 {
+        let (bx, _by, bw, _bh) = notification_badge_rect(width);
+        let badge_label = if top_telemetry.notification_count > 99 {
+            "N:99+".to_owned()
+        } else {
+            format!("N:{}", top_telemetry.notification_count)
+        };
+        let badge_bounds = Rectangle::new(Point::from((bx, ws_y)), Size::from((bw, ws_btn_height)));
+        if let Some(el) = text_cache.render_label_centered(
+            renderer,
+            &badge_label,
+            10.5,
+            text_bright,
+            badge_bounds,
+        ) {
+            elements.push(el);
+        }
+    }
+
+    // 4b. Floating top-right Notification HUD toast labels (`RUSTYOS-024`)
+    if !matches!(
+        overlay,
+        ShellOverlayView::Spotlight(_) | ShellOverlayView::QuickSettings(_)
+    ) && !notifications.is_empty()
+    {
+        let rects = notification_toast_rects(screen_size, notifications.len());
+        for (toast, card) in notifications.iter().zip(rects) {
+            let tx = card.loc.x;
+            let ty = card.loc.y;
+            let tw = card.size.w;
+
+            let title_text = truncate_ascii(toast.title, 30);
+            if let Some(el) = text_cache.render_label(
+                renderer,
+                &title_text,
+                12.5,
+                text_bright,
+                Point::from((tx + 22, ty + 11)),
+            ) {
+                elements.push(el);
+            }
+
+            let body_text = truncate_ascii(toast.body, 40);
+            if let Some(el) = text_cache.render_label(
+                renderer,
+                &body_text,
+                10.5,
+                text_muted,
+                Point::from((tx + 22, ty + 34)),
+            ) {
+                elements.push(el);
+            }
+
+            let close_bounds =
+                Rectangle::new(Point::from((tx + tw - 26, ty + 10)), Size::from((18, 18)));
+            if let Some(el) =
+                text_cache.render_label_centered(renderer, "x", 10.5, text_muted, close_bounds)
+            {
+                elements.push(el);
+            }
+        }
     }
 
     // 5. Dock app initials & open window badges (`RUSTYOS-023`)
@@ -2084,7 +2240,7 @@ fn push_soft_shadow(
 }
 
 /// Generates unified front-to-back shell elements with rounded corners, circular status dots,
-/// soft shadows, interactive Dock badges, Overview cards, and GPU-cached typography (`RUSTYOS-022`/`023`).
+/// soft shadows, interactive Dock badges, Overview cards, Notification HUD, and GPU-cached typography (`RUSTYOS-022`/`023`/`024`).
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub fn generate_shell_composite_elements(
     text_cache: &mut crate::text::TextCache,
@@ -2096,6 +2252,7 @@ pub fn generate_shell_composite_elements(
     dock_view: &DockViewState<'_>,
     top_telemetry: &TopBarTelemetry<'_>,
     overlay: ShellOverlayView<'_>,
+    notifications: &[NotificationToastView<'_>],
 ) -> Vec<CompositorRenderElement> {
     let mut out = Vec::new();
     let width = screen_size.w;
@@ -2112,6 +2269,7 @@ pub fn generate_shell_composite_elements(
         dock_view,
         top_telemetry,
         overlay,
+        notifications,
     );
     for el in all_text {
         out.push(CompositorRenderElement::Memory(el));
@@ -2414,7 +2572,68 @@ pub fn generate_shell_composite_elements(
         }
     }
 
+    // 2b. Floating top-right Notification HUD toasts (`RUSTYOS-024`)
+    if !matches!(
+        overlay,
+        ShellOverlayView::Spotlight(_) | ShellOverlayView::QuickSettings(_)
+    ) && !notifications.is_empty()
+    {
+        let rects = notification_toast_rects(screen_size, notifications.len());
+        for (toast, card) in notifications.iter().zip(rects) {
+            let tx = card.loc.x;
+            let ty = card.loc.y;
+            let tw = card.size.w;
+            let th = card.size.h;
+
+            let stripe_rgba = match toast.urgency {
+                rusty_ipc::Urgency::Low => RGBA_SUCCESS,
+                rusty_ipc::Urgency::Normal => RGBA_ACCENT,
+                rusty_ipc::Urgency::Critical => RGBA_DANGER,
+            };
+            push_rounded_glass_box(
+                &mut out,
+                shape_cache,
+                renderer,
+                Rectangle::new(Point::from((tx + 10, ty + 12)), Size::from((4, th - 24))),
+                2,
+                stripe_rgba,
+                None,
+            );
+            push_rounded_glass_box(
+                &mut out,
+                shape_cache,
+                renderer,
+                Rectangle::new(Point::from((tx + tw - 26, ty + 10)), Size::from((18, 18))),
+                5,
+                RGBA_SURFACE_OVERLAY,
+                Some(RGBA_BORDER),
+            );
+            push_rounded_glass_box(
+                &mut out,
+                shape_cache,
+                renderer,
+                card,
+                10,
+                RGBA_SURFACE_ELEVATED,
+                Some(RGBA_BORDER_HIGHLIGHT),
+            );
+            push_soft_shadow(&mut out, shape_cache, renderer, card, 10, 12, 88);
+        }
+    }
+
     // 3. TopBar circular dot, rounded pills & background bar
+    if top_telemetry.notification_count > 0 {
+        let (bx, by, bw, bh) = notification_badge_rect(width);
+        push_rounded_glass_box(
+            &mut out,
+            shape_cache,
+            renderer,
+            Rectangle::new(Point::from((bx, by)), Size::from((bw, bh))),
+            6,
+            RGBA_ACCENT_MUTED,
+            Some(RGBA_ACCENT),
+        );
+    }
     let (status_x, status_y, status_w, status_h) = status_pill_rect(width);
     if let Some(el) = shape_cache.circle_element(
         renderer,
@@ -3084,5 +3303,38 @@ mod tests {
         );
         assert_eq!(make_window_badge("RustyOS_Main : bash — Konsole"), "RM");
         assert_eq!(make_window_badge("Cursor Agents"), "CA");
+    }
+
+    #[test]
+    fn notification_toast_and_badge_hit_testing_match_rendered_bounds() {
+        let size = Size::from((1280, 800));
+        let rects = notification_toast_rects(size, 6);
+        // Capped at MAX_VISIBLE_NOTIFICATIONS (4)
+        assert_eq!(rects.len(), MAX_VISIBLE_NOTIFICATIONS);
+
+        for (idx, rect) in rects.iter().enumerate() {
+            let cx = f64::from(rect.loc.x + rect.size.w / 2);
+            let cy = f64::from(rect.loc.y + rect.size.h / 2);
+            assert_eq!(check_notification_click(size, 4, cx, cy), Some(idx));
+        }
+
+        // Outside toasts returns None
+        assert_eq!(check_notification_click(size, 4, 100.0, 200.0), None);
+        assert_eq!(check_notification_click(size, 0, 1100.0, 60.0), None);
+
+        // TopBar unread notification badge pill hit-testing
+        let (bx, by, bw, bh) = notification_badge_rect(size.w);
+        assert!(check_top_bar_notification_click(
+            size.w,
+            2,
+            f64::from(bx + bw / 2),
+            f64::from(by + bh / 2)
+        ));
+        assert!(!check_top_bar_notification_click(
+            size.w,
+            0,
+            f64::from(bx + bw / 2),
+            f64::from(by + bh / 2)
+        ));
     }
 }

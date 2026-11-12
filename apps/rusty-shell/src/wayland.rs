@@ -413,6 +413,50 @@ pub fn render_top_bar_pixels(
         Some((53, pill_h)),
     );
 
+    // Unread notification pill next to status pill (`RUSTYOS-024`)
+    if top_bar.notification_count > 0 && w > 210 {
+        let badge_w = 42;
+        let badge_x = w - 130 - 12 - badge_w - 8;
+        fill_rect(
+            canvas,
+            stride,
+            badge_x,
+            pill_y,
+            badge_w,
+            pill_h,
+            colors::ACCENT_MUTED,
+        );
+        fill_rect(
+            canvas,
+            stride,
+            badge_x,
+            pill_y,
+            badge_w,
+            1,
+            colors::ACCENT_NEON,
+        );
+        if has_font {
+            let label = if top_bar.notification_count > 99 {
+                "N:99+".to_owned()
+            } else {
+                format!("N:{}", top_bar.notification_count)
+            };
+            #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+            draw_text_argb8888(
+                canvas,
+                stride,
+                w,
+                h,
+                &label,
+                10.5,
+                colors::TEXT_BRIGHT,
+                badge_x as i32,
+                pill_y as i32,
+                Some((badge_w, pill_h)),
+            );
+        }
+    }
+
     // Status pill on the right
     if w > 150 {
         let status_w = 130;

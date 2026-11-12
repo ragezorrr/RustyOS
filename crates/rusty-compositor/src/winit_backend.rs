@@ -329,6 +329,7 @@ fn render_winit_frame(
 ) -> Result<(), String> {
     let render_start = Instant::now();
     state.tick_animations();
+    state.expire_notifications();
     let size = backend.window_size();
     let full_damage = Rectangle::from_size(size);
     let total_output_pixels =
@@ -378,7 +379,21 @@ fn render_winit_frame(
                 volume_percent: tel.audio.volume_percent,
                 audio_muted: tel.audio.muted,
                 quick_settings_open: state.quick_settings_active,
+                notification_count: state.notification_count,
             };
+
+            let toast_views: Vec<crate::shell_render::NotificationToastView<'_>> = state
+                .notifications
+                .iter()
+                .rev()
+                .take(crate::shell_render::MAX_VISIBLE_NOTIFICATIONS)
+                .map(|n| crate::shell_render::NotificationToastView {
+                    id: n.id,
+                    urgency: n.urgency,
+                    title: &n.title,
+                    body: &n.body,
+                })
+                .collect();
 
             let mut dock_windows: Vec<crate::shell_render::DockWindowEntry> = visible_windows
                 .iter()
@@ -469,6 +484,7 @@ fn render_winit_frame(
                 &dock_view,
                 &top_telemetry,
                 overlay,
+                &toast_views,
             ));
         }
 

@@ -371,6 +371,29 @@ mod tests {
         let snap_closed = compositor.build_ipc_snapshot();
         assert!(!snap_closed.launcher_active);
 
+        // Test Notification HUD lifecycle & IPC commands (RUSTYOS-024)
+        compositor.handle_ipc_request(rusty_ipc::ShellRequest::Notify {
+            urgency: rusty_ipc::Urgency::Low,
+            title: "Build".to_owned(),
+            body: "Compiled".to_owned(),
+        });
+        let id2 = compositor.push_notification_at(
+            rusty_ipc::Urgency::Critical,
+            "Alert".to_owned(),
+            "Low battery".to_owned(),
+            std::time::Duration::from_secs(1),
+        );
+        let notif_snap = compositor.build_ipc_snapshot();
+        assert_eq!(notif_snap.notification_count, 2);
+        assert_eq!(notif_snap.notifications.len(), 2);
+
+        compositor.handle_ipc_request(rusty_ipc::ShellRequest::DismissNotification { id: id2 });
+        assert_eq!(compositor.notification_count, 1);
+
+        compositor.expire_notifications_at(std::time::Duration::from_secs(100));
+        assert_eq!(compositor.notification_count, 0);
+        assert_eq!(compositor.notifications, Vec::new());
+
         compositor.request_shutdown();
         assert!(!compositor.running);
         Ok(())

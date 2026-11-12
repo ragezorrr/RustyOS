@@ -67,6 +67,19 @@ pub struct WindowSummary {
     pub maximized: bool,
 }
 
+/// Summary of an active desktop notification exposed to `rusty-shell` (`RUSTYOS-024`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NotificationSummary {
+    /// Unique monotonic notification ID assigned by the compositor.
+    pub id: u64,
+    /// Notification urgency level.
+    pub urgency: Urgency,
+    /// Short notification title.
+    pub title: String,
+    /// Notification body text.
+    pub body: String,
+}
+
 /// Complete snapshot of compositor state sent to `rusty-shell` for `TopBar`, `Dock`, `Overview`, and `QuickSettings`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(clippy::struct_excessive_bools)]
@@ -93,6 +106,8 @@ pub struct DesktopStateSnapshot {
     pub input_latency_p95_us: u64,
     /// Currently managed windows across workspaces.
     pub windows: Vec<WindowSummary>,
+    /// Active desktop notifications in compositor HUD queue (`RUSTYOS-024`).
+    pub notifications: Vec<NotificationSummary>,
 }
 
 impl Default for DesktopStateSnapshot {
@@ -109,6 +124,7 @@ impl Default for DesktopStateSnapshot {
             frame_interval_p50_us: 16_667,
             input_latency_p95_us: 0,
             windows: Vec::new(),
+            notifications: Vec::new(),
         }
     }
 }
@@ -165,6 +181,13 @@ pub enum ShellRequest {
         /// Notification body text.
         body: String,
     },
+    /// Dismisses a single active notification by ID (`RUSTYOS-024`).
+    DismissNotification {
+        /// Notification identifier returned in [`NotificationSummary`].
+        id: u64,
+    },
+    /// Clears all active notifications (`RUSTYOS-024`).
+    ClearNotifications,
 }
 
 /// Events/responses sent from `rusty-compositor` (server) to `rusty-shell` (client).
@@ -281,6 +304,12 @@ impl ShellRequest {
                     "NOTIFY|{}|{clean_title}|{clean_body}",
                     urgency.as_str()
                 );
+            }
+            Self::DismissNotification { id } => {
+                let _ = writeln!(out, "DISMISS_NOTIFICATION|{id}");
+            }
+            Self::ClearNotifications => {
+                let _ = writeln!(out, "CLEAR_NOTIFICATIONS");
             }
         }
         out
@@ -404,6 +433,16 @@ impl ShellRequest {
                     body: body.to_owned(),
                 })
             }
+            "DISMISS_NOTIFICATION" => {
+                let id_str = parts
+                    .next()
+                    .ok_or_else(|| IpcError::InvalidFrame("missing notification id".to_owned()))?;
+                let id = id_str.parse::<u64>().map_err(|_| {
+                    IpcError::InvalidFrame(format!("invalid notification id '{id_str}'"))
+                })?;
+                Ok(Self::DismissNotification { id })
+            }
+            "CLEAR_NOTIFICATIONS" => Ok(Self::ClearNotifications),
             other => Err(IpcError::InvalidFrame(format!(
                 "unknown request command '{other}'"
             ))),
@@ -443,9 +482,30 @@ impl CompositorEvent {
                 if wins_buf.is_empty() {
                     wins_buf.push('-');
                 }
+                let mut notifs_buf = String::new();
+                for notif in snap.notifications.iter().take(8) {
+                    let entry = format!(
+                        "{}:{}:{}:{}",
+                        notif.id,
+                        notif.urgency.as_str(),
+                        escape_notif_text(&notif.title, 64),
+                        escape_notif_text(&notif.body, 160),
+                    );
+                    let extra = entry.len() + usize::from(!notifs_buf.is_empty());
+                    if wins_buf.len() + notifs_buf.len() + extra + 256 >= MAX_IPC_MESSAGE_BYTES {
+                        break;
+                    }
+                    if !notifs_buf.is_empty() {
+                        notifs_buf.push(',');
+                    }
+                    notifs_buf.push_str(&entry);
+                }
+                if notifs_buf.is_empty() {
+                    notifs_buf.push('-');
+                }
                 let _ = writeln!(
                     out,
-                    "SNAPSHOT|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+                    "SNAPSHOT|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
                     snap.active_workspace,
                     sanitize_token(&snap.layout_mode),
                     u8::from(snap.reduced_motion),
@@ -457,6 +517,7 @@ impl CompositorEvent {
                     wins_buf,
                     u8::from(snap.launcher_active),
                     sanitize_token(&snap.launcher_query),
+                    notifs_buf,
                 );
             }
             Self::Error { code, message } => {
@@ -584,6 +645,33 @@ where
 
     let launcher_active = parse_bool_flag(parts.next(), "launcher_active").unwrap_or(false);
     let launcher_query = parts.next().unwrap_or_default().to_owned();
+    let notifs_raw = parts.next().unwrap_or("-");
+
+    let mut notifications = Vec::new();
+    if notifs_raw != "-" && !notifs_raw.is_empty() {
+        for item in notifs_raw.split(',') {
+            let mut nparts = item.split(':');
+            let id = nparts
+                .next()
+                .ok_or_else(|| IpcError::InvalidFrame("missing notification id".to_owned()))?
+                .parse::<u64>()
+                .map_err(|_| IpcError::InvalidFrame("invalid notification id".to_owned()))?;
+            let urg_raw = nparts
+                .next()
+                .ok_or_else(|| IpcError::InvalidFrame("missing notification urgency".to_owned()))?;
+            let urgency = Urgency::parse(urg_raw).ok_or_else(|| {
+                IpcError::InvalidFrame(format!("invalid notification urgency '{urg_raw}'"))
+            })?;
+            let title_raw = nparts.next().unwrap_or("");
+            let body_raw = nparts.next().unwrap_or("");
+            notifications.push(NotificationSummary {
+                id,
+                urgency,
+                title: unescape_notif_text(title_raw),
+                body: unescape_notif_text(body_raw),
+            });
+        }
+    }
 
     Ok(CompositorEvent::StateSnapshot(DesktopStateSnapshot {
         active_workspace,
@@ -597,6 +685,7 @@ where
         frame_interval_p50_us,
         input_latency_p95_us,
         windows,
+        notifications,
     }))
 }
 
@@ -817,6 +906,47 @@ fn sanitize_token(input: &str) -> String {
         .collect()
 }
 
+fn escape_notif_text(input: &str, max_chars: usize) -> String {
+    let mut out = String::with_capacity(input.len().min(max_chars));
+    for c in input.chars().take(max_chars) {
+        match c {
+            '%' => out.push_str("%25"),
+            '|' => out.push_str("%7C"),
+            ',' => out.push_str("%2C"),
+            ':' => out.push_str("%3A"),
+            '\n' | '\r' => out.push(' '),
+            other if other.is_control() => out.push(' '),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+fn unescape_notif_text(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut chars = input.chars();
+    while let Some(c) = chars.next() {
+        if c == '%' {
+            let rest: String = chars.clone().take(2).collect();
+            let decoded = match rest.as_str() {
+                "25" => Some('%'),
+                "7C" => Some('|'),
+                "2C" => Some(','),
+                "3A" => Some(':'),
+                _ => None,
+            };
+            if let Some(ch) = decoded {
+                let _ = chars.next();
+                let _ = chars.next();
+                out.push(ch);
+                continue;
+            }
+        }
+        out.push(c);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -844,6 +974,8 @@ mod tests {
                 title: "Battery Low".to_owned(),
                 body: "10% remaining".to_owned(),
             },
+            ShellRequest::DismissNotification { id: 7 },
+            ShellRequest::ClearNotifications,
         ];
 
         for req in requests {
@@ -860,7 +992,7 @@ mod tests {
             launcher_active: true,
             launcher_query: "foot".to_owned(),
             screen_locked: false,
-            notification_count: 3,
+            notification_count: 2,
             frame_interval_p50_us: 16_680,
             input_latency_p95_us: 6_500,
             windows: vec![
@@ -877,10 +1009,34 @@ mod tests {
                     maximized: true,
                 },
             ],
+            notifications: vec![
+                NotificationSummary {
+                    id: 11,
+                    urgency: Urgency::Normal,
+                    title: "Wi-Fi: Home, 5GHz".to_owned(),
+                    body: "Connected (100%)".to_owned(),
+                },
+                NotificationSummary {
+                    id: 12,
+                    urgency: Urgency::Critical,
+                    title: "Battery: 10% | Alert".to_owned(),
+                    body: "Plug in charger".to_owned(),
+                },
+            ],
         });
         let encoded_snap = snapshot.encode_line();
         let decoded_snap = CompositorEvent::decode_line(&encoded_snap)?;
         assert_eq!(decoded_snap, snapshot);
+
+        // Legacy 11-field SNAPSHOT without notifications field decodes cleanly.
+        let legacy_line = "v1|SNAPSHOT|3|floating|0|1|0|0|16667|500|-|0|";
+        let decoded_legacy = CompositorEvent::decode_line(legacy_line)?;
+        if let CompositorEvent::StateSnapshot(legacy_snap) = decoded_legacy {
+            assert_eq!(legacy_snap.active_workspace, 3);
+            assert_eq!(legacy_snap.notifications, Vec::new());
+        } else {
+            return Err(IpcError::InvalidFrame("expected snapshot".to_owned()));
+        }
         Ok(())
     }
 

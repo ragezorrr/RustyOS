@@ -11,8 +11,8 @@ use std::time::Duration;
 
 use rusty_animation::{AnimatedValue, Easing, MotionTokens};
 use rusty_ipc::{
-    CompositorEvent, DesktopStateSnapshot, IpcClient, IpcError, ShellRequest, Urgency,
-    WindowSummary,
+    CompositorEvent, DesktopStateSnapshot, IpcClient, IpcError, NotificationSummary, ShellRequest,
+    Urgency, WindowSummary,
 };
 use rusty_services::ServiceRegistry;
 
@@ -80,6 +80,8 @@ pub struct TopBarState {
     pub frame_interval_p50_us: u64,
     /// 95th percentile input latency reported by the compositor (`us`).
     pub input_latency_p95_us: u64,
+    /// Active/unread notification count from compositor HUD (`RUSTYOS-024`).
+    pub notification_count: u32,
 }
 
 impl Default for TopBarState {
@@ -92,6 +94,7 @@ impl Default for TopBarState {
             network_label: "Wi-Fi Connected".to_owned(),
             frame_interval_p50_us: 16_667,
             input_latency_p95_us: 0,
+            notification_count: 0,
         }
     }
 }
@@ -249,6 +252,45 @@ impl NotificationCenter {
     pub fn active(&self) -> &[NotificationItem] {
         &self.items
     }
+
+    /// Dismisses a notification by ID (`RUSTYOS-024`).
+    pub fn dismiss(&mut self, id: u64) -> bool {
+        let prev = self.items.len();
+        self.items.retain(|item| item.id != id);
+        self.items.len() < prev
+    }
+
+    /// Clears all notifications (`RUSTYOS-024`).
+    pub fn clear(&mut self) {
+        self.items.clear();
+    }
+
+    /// Synchronizes local notification queue from a compositor [`DesktopStateSnapshot`] (`RUSTYOS-024`).
+    pub fn sync_from_snapshot(&mut self, summaries: &[NotificationSummary], now: Duration) {
+        let mut synced = Vec::with_capacity(summaries.len());
+        for summary in summaries {
+            let ttl = match summary.urgency {
+                Urgency::Low => Duration::from_secs(4),
+                Urgency::Normal => Duration::from_secs(6),
+                Urgency::Critical => Duration::from_secs(12),
+            };
+            let created_at = self
+                .items
+                .iter()
+                .find(|existing| existing.id == summary.id)
+                .map_or(now, |existing| existing.created_at);
+            self.next_id = self.next_id.max(summary.id);
+            synced.push(NotificationItem {
+                id: summary.id,
+                urgency: summary.urgency,
+                title: summary.title.clone(),
+                body: summary.body.clone(),
+                created_at,
+                ttl,
+            });
+        }
+        self.items = synced;
+    }
 }
 
 /// Quick settings control panel state (`QuickSettings`).
@@ -375,12 +417,15 @@ impl DesktopShell {
         self.top_bar.layout_mode.clone_from(&snapshot.layout_mode);
         self.top_bar.frame_interval_p50_us = snapshot.frame_interval_p50_us;
         self.top_bar.input_latency_p95_us = snapshot.input_latency_p95_us;
+        self.top_bar.notification_count = snapshot.notification_count;
 
         self.tokens.motion.reduced_motion = snapshot.reduced_motion;
         self.quick_settings.reduced_motion = snapshot.reduced_motion;
         self.launcher.open = snapshot.launcher_active;
         self.launcher.query.clone_from(&snapshot.launcher_query);
         self.screen_locked = snapshot.screen_locked;
+        self.notifications
+            .sync_from_snapshot(&snapshot.notifications, now);
 
         if self.overview_active != snapshot.overview_active {
             self.overview_active = snapshot.overview_active;
@@ -583,7 +628,7 @@ mod tests {
             launcher_active: false,
             launcher_query: String::new(),
             screen_locked: false,
-            notification_count: 0,
+            notification_count: 1,
             frame_interval_p50_us: 16_700,
             input_latency_p95_us: 6_400,
             windows: vec![WindowSummary {
@@ -591,6 +636,12 @@ mod tests {
                 workspace: 1,
                 focused: true,
                 maximized: false,
+            }],
+            notifications: vec![NotificationSummary {
+                id: 1,
+                urgency: Urgency::Normal,
+                title: "Welcome".to_owned(),
+                body: "RustyOS Ready".to_owned(),
             }],
         };
 
@@ -647,6 +698,8 @@ mod tests {
             let hud = shell_2.render_hud_summary();
             assert!(hud.contains("ws=5"));
             assert!(hud.contains("active=true"));
+            assert!(hud.contains("[Notifications] active=1"));
+            assert_eq!(shell_2.top_bar.notification_count, 1);
         }
 
         let _ = server_thread.join();

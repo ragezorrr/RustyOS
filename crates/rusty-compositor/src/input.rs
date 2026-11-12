@@ -25,6 +25,8 @@ enum KeyIntercept {
     ToggleLauncher,
     ToggleQuickSettings,
     ToggleOverview,
+    TriggerNotification,
+    ClearNotifications,
     OverviewClose,
     QuickSettingsClose,
     LauncherClose,
@@ -156,6 +158,18 @@ impl RustyCompositorState {
                     overview_active = self.overview_active,
                     "Toggled Workspace Overview"
                 );
+            }
+            KeyIntercept::TriggerNotification => {
+                let id = self.trigger_demo_notification();
+                info!(
+                    id,
+                    count = self.notification_count,
+                    "Triggered Notification HUD toast"
+                );
+            }
+            KeyIntercept::ClearNotifications => {
+                self.clear_notifications();
+                info!("Cleared all Notification HUD toasts");
             }
             KeyIntercept::OverviewClose => {
                 self.close_overview();
@@ -381,6 +395,15 @@ impl RustyCompositorState {
                 self.toggle_quick_settings();
                 return;
             }
+            if crate::shell_render::check_top_bar_notification_click(
+                output_width,
+                self.notification_count,
+                self.pointer_location.x,
+                self.pointer_location.y,
+            ) {
+                self.clear_notifications();
+                return;
+            }
 
             // Handle Spotlight clicks exclusively while launcher overlay is open (RUSTYOS-018b)
             if self.launcher_active {
@@ -394,12 +417,31 @@ impl RustyCompositorState {
                 return;
             }
 
-            // Handle bottom Dock clicks (`RUSTYOS-023`) before Overview/windows
+            // Handle floating Notification HUD toast clicks to dismiss (`RUSTYOS-024`)
             let output_phys = self
                 .space
                 .output_geometry(&self.output)
                 .map_or_else(|| Size::from((1280, 800)), |geo| geo.size)
                 .to_physical(1);
+            let visible_toast_ids: Vec<u64> = self
+                .notifications
+                .iter()
+                .rev()
+                .take(crate::shell_render::MAX_VISIBLE_NOTIFICATIONS)
+                .map(|n| n.id)
+                .collect();
+            if let Some(toast_idx) = crate::shell_render::check_notification_click(
+                output_phys,
+                visible_toast_ids.len(),
+                self.pointer_location.x,
+                self.pointer_location.y,
+            ) && let Some(&toast_id) = visible_toast_ids.get(toast_idx)
+            {
+                self.dismiss_notification(toast_id);
+                return;
+            }
+
+            // Handle bottom Dock clicks (`RUSTYOS-023`) before Overview/windows
             let ordered_ids = self.ordered_visible_window_ids();
             if let Some(dock_hit) = crate::shell_render::check_dock_click(
                 output_phys,
@@ -669,6 +711,13 @@ const fn match_shortcut(modifiers: ModifiersState, sym: Keysym) -> Option<KeyInt
         Keysym::r | Keysym::R => Some(KeyIntercept::ToggleReducedMotion),
         Keysym::s | Keysym::S => Some(KeyIntercept::ToggleQuickSettings),
         Keysym::e | Keysym::E => Some(KeyIntercept::ToggleOverview),
+        Keysym::n | Keysym::N => {
+            if modifiers.shift {
+                Some(KeyIntercept::ClearNotifications)
+            } else {
+                Some(KeyIntercept::TriggerNotification)
+            }
+        }
         _ => None,
     }
 }
@@ -792,6 +841,14 @@ mod tests {
         assert_eq!(
             match_shortcut(alt, Keysym::e),
             Some(KeyIntercept::ToggleOverview)
+        );
+        assert_eq!(
+            match_shortcut(alt, Keysym::n),
+            Some(KeyIntercept::TriggerNotification)
+        );
+        assert_eq!(
+            match_shortcut(alt_shift, Keysym::n),
+            Some(KeyIntercept::ClearNotifications)
         );
     }
 

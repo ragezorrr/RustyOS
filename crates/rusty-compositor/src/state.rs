@@ -5,7 +5,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use rusty_animation::{AnimationEngine, LogicalRect};
-use rusty_ipc::{CompositorEvent, DesktopStateSnapshot, ShellRequest, WindowSummary};
+use rusty_ipc::{
+    CompositorEvent, DesktopStateSnapshot, NotificationSummary, ShellRequest, Urgency,
+    WindowSummary,
+};
 use rusty_wm::{LayoutMode, OutputId, Rect, WindowId, WindowManager, WmAction, WorkspaceId};
 use smithay::{
     backend::renderer::utils::on_commit_buffer_handler,
@@ -169,8 +172,28 @@ pub struct RustyCompositorState {
     pub telemetry: crate::telemetry::SystemMetricsHandle,
     /// Whether the session lock screen is active (`RUSTYOS-009`/`010`).
     pub screen_locked: bool,
-    /// Count of notifications received via shell IPC (`RUSTYOS-009`/`010`).
+    /// Count of active notifications held in compositor HUD queue (`RUSTYOS-009`/`010`/`024`).
     pub notification_count: u32,
+    /// Active desktop notification queue rendered in Notification HUD & exposed via IPC (`RUSTYOS-024`).
+    pub notifications: Vec<CompositorNotification>,
+    next_notification_id: u64,
+}
+
+/// Active notification banner tracked by the compositor (`RUSTYOS-024`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompositorNotification {
+    /// Unique monotonic identifier.
+    pub id: u64,
+    /// Notification urgency level.
+    pub urgency: Urgency,
+    /// Short notification title.
+    pub title: String,
+    /// Notification body text.
+    pub body: String,
+    /// Monotonic creation offset from compositor startup (`start_time.elapsed()`).
+    pub created_at: Duration,
+    /// Auto-dismiss time-to-live.
+    pub ttl: Duration,
 }
 
 impl RustyCompositorState {
@@ -268,6 +291,8 @@ impl RustyCompositorState {
             telemetry: crate::telemetry::SystemMetricsHandle::static_default(),
             screen_locked: false,
             notification_count: 0,
+            notifications: Vec::new(),
+            next_notification_id: 0,
         })
     }
 
@@ -309,6 +334,108 @@ impl RustyCompositorState {
     /// Closes the Quick Settings popover.
     pub fn close_quick_settings(&mut self) {
         self.quick_settings_active = false;
+    }
+
+    /// Pushes a notification into the compositor HUD queue using current monotonic uptime (`RUSTYOS-024`).
+    pub fn push_notification(&mut self, urgency: Urgency, title: String, body: String) -> u64 {
+        let now = self.start_time.elapsed();
+        self.push_notification_at(urgency, title, body, now)
+    }
+
+    /// Pushes a notification at explicit monotonic timestamp `now` (`RUSTYOS-024`).
+    pub fn push_notification_at(
+        &mut self,
+        urgency: Urgency,
+        title: String,
+        body: String,
+        now: Duration,
+    ) -> u64 {
+        const MAX_QUEUE_LEN: usize = 16;
+        self.next_notification_id = self.next_notification_id.saturating_add(1);
+        let ttl = match urgency {
+            Urgency::Low => Duration::from_secs(4),
+            Urgency::Normal => Duration::from_secs(6),
+            Urgency::Critical => Duration::from_secs(12),
+        };
+        let id = self.next_notification_id;
+        self.notifications.push(CompositorNotification {
+            id,
+            urgency,
+            title,
+            body,
+            created_at: now,
+            ttl,
+        });
+        if self.notifications.len() > MAX_QUEUE_LEN {
+            let excess = self.notifications.len() - MAX_QUEUE_LEN;
+            self.notifications.drain(0..excess);
+        }
+        self.sync_notification_count();
+        id
+    }
+
+    /// Removes notifications whose TTL has elapsed as of current uptime (`RUSTYOS-024`).
+    pub fn expire_notifications(&mut self) {
+        let now = self.start_time.elapsed();
+        self.expire_notifications_at(now);
+    }
+
+    /// Removes notifications whose TTL has elapsed at explicit monotonic timestamp `now` (`RUSTYOS-024`).
+    pub fn expire_notifications_at(&mut self, now: Duration) {
+        self.notifications
+            .retain(|n| now.saturating_sub(n.created_at) < n.ttl);
+        self.sync_notification_count();
+    }
+
+    /// Dismisses a single active notification by ID (`RUSTYOS-024`).
+    pub fn dismiss_notification(&mut self, id: u64) -> bool {
+        let prev_len = self.notifications.len();
+        self.notifications.retain(|n| n.id != id);
+        self.sync_notification_count();
+        self.notifications.len() < prev_len
+    }
+
+    /// Clears all active notifications from the HUD queue (`RUSTYOS-024`).
+    pub fn clear_notifications(&mut self) {
+        self.notifications.clear();
+        self.sync_notification_count();
+    }
+
+    /// Pushes a live workspace/telemetry status notification (`Alt+N`, `RUSTYOS-024`).
+    pub fn trigger_demo_notification(&mut self) -> u64 {
+        let next_idx = self.next_notification_id % 3;
+        let urgency = match next_idx {
+            0 => Urgency::Normal,
+            1 => Urgency::Low,
+            _ => Urgency::Critical,
+        };
+        let ws = self.wm.active_workspace_id().0;
+        let win_count = self.wm.visible_windows().len();
+        let tel = self.telemetry.snapshot();
+        let (title, body) = match urgency {
+            Urgency::Normal => (
+                format!("Workspace {ws} Status"),
+                format!("{win_count} windows • {}", tel.network.status_label),
+            ),
+            Urgency::Low => (
+                "System Telemetry".to_owned(),
+                format!(
+                    "Vol {}%{} • {}",
+                    tel.audio.volume_percent,
+                    if tel.audio.muted { " (Muted)" } else { "" },
+                    tel.clock_hhmm
+                ),
+            ),
+            Urgency::Critical => (
+                "Attention Required".to_owned(),
+                "Click toast or Alt+Shift+N to dismiss".to_owned(),
+            ),
+        };
+        self.push_notification(urgency, title, body)
+    }
+
+    fn sync_notification_count(&mut self) {
+        self.notification_count = u32::try_from(self.notifications.len()).unwrap_or(u32::MAX);
     }
 
     /// Toggles Workspace Overview / Expose mode (`RUSTYOS-023`).
@@ -696,6 +823,16 @@ impl RustyCompositorState {
             .collect();
 
         let timing = self.frame_timing.summary();
+        let notifications = self
+            .notifications
+            .iter()
+            .map(|n| NotificationSummary {
+                id: n.id,
+                urgency: n.urgency,
+                title: n.title.clone(),
+                body: n.body.clone(),
+            })
+            .collect();
         DesktopStateSnapshot {
             active_workspace: active_ws.0,
             layout_mode: layout_str.to_owned(),
@@ -708,6 +845,7 @@ impl RustyCompositorState {
             frame_interval_p50_us: timing.interval_p50_us,
             input_latency_p95_us: timing.input_p95_us,
             windows,
+            notifications,
         }
     }
 
@@ -779,14 +917,28 @@ impl RustyCompositorState {
                 title,
                 body,
             } => {
-                self.notification_count = self.notification_count.saturating_add(1);
+                let id = self.push_notification(urgency, title.clone(), body.clone());
                 info!(
+                    id,
                     urgency = urgency.as_str(),
                     title = %title,
                     body = %body,
                     count = self.notification_count,
                     "Received desktop notification via IPC"
                 );
+            }
+            ShellRequest::DismissNotification { id } => {
+                let dismissed = self.dismiss_notification(id);
+                info!(
+                    id,
+                    dismissed,
+                    count = self.notification_count,
+                    "Processed notification dismissal via IPC"
+                );
+            }
+            ShellRequest::ClearNotifications => {
+                self.clear_notifications();
+                info!("Cleared all active notifications via IPC");
             }
         }
         CompositorEvent::StateSnapshot(self.build_ipc_snapshot())
