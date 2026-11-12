@@ -11,6 +11,7 @@ description = "RustyOS Wayland compositor"
 fontdue.workspace = true
 rusty-animation.workspace = true
 rusty-ipc.workspace = true
+rusty-services.workspace = true
 rusty-wm.workspace = true
 smithay.workspace = true
 tracing.workspace = true

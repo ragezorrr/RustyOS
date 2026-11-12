@@ -76,6 +76,7 @@ pub fn run_nested_winit(config: &CompositorConfig) -> Result<BootstrapReport, Co
         initial_size,
     )?;
     state.animations.set_reduced_motion(config.reduced_motion);
+    state.telemetry = crate::telemetry::SystemMetricsHandle::start_background();
     let mut damage_tracker = OutputDamageTracker::from_output(&state.output);
     let mut text_cache = crate::text::TextCache::new();
     let loop_handle = event_loop.handle();
@@ -375,6 +376,18 @@ fn render_winit_frame(
         let has_text = text_cache.has_font();
 
         if !layer_surfaces_present {
+            let tel = state.telemetry.snapshot();
+            let timing = state.frame_timing.summary();
+            let top_telemetry = crate::shell_render::TopBarTelemetry {
+                clock_hhmm: &tel.clock_hhmm,
+                battery_percent: tel.power.percentage,
+                has_battery: tel.power.has_battery,
+                net_connected: tel.network.connected,
+                volume_percent: tel.audio.volume_percent,
+                audio_muted: tel.audio.muted,
+                quick_settings_open: state.quick_settings_active,
+            };
+
             let (win_start, visible_items) = if state.launcher_active {
                 state.launcher.visible_window(3)
             } else {
@@ -395,6 +408,30 @@ fn render_winit_frame(
                         items: &visible_items,
                     });
 
+            let qs_view = (!state.launcher_active && state.quick_settings_active).then_some(
+                crate::shell_render::QuickSettingsRenderState {
+                    layout_mode: layout_str,
+                    reduced_motion: state.animations.reduced_motion(),
+                    network_label: &tel.network.status_label,
+                    net_connected: tel.network.connected,
+                    battery_percent: tel.power.percentage,
+                    has_battery: tel.power.has_battery,
+                    ac_online: tel.power.ac_online,
+                    volume_percent: tel.audio.volume_percent,
+                    audio_muted: tel.audio.muted,
+                    frame_p50_us: timing.interval_p50_us,
+                    window_count,
+                },
+            );
+
+            let overlay = if let Some(spot) = spotlight_view.as_ref() {
+                crate::shell_render::ShellOverlayView::Spotlight(spot)
+            } else if let Some(qs) = qs_view.as_ref() {
+                crate::shell_render::ShellOverlayView::QuickSettings(qs)
+            } else {
+                crate::shell_render::ShellOverlayView::None
+            };
+
             let text_elements = crate::shell_render::generate_shell_text_elements(
                 text_cache,
                 renderer,
@@ -402,7 +439,8 @@ fn render_winit_frame(
                 active_ws,
                 layout_str,
                 window_count,
-                spotlight_view.as_ref(),
+                &top_telemetry,
+                overlay,
             );
             render_list.extend(
                 text_elements
@@ -416,7 +454,8 @@ fn render_winit_frame(
                 layout_str,
                 window_count,
                 has_focused,
-                spotlight_view.as_ref(),
+                &top_telemetry,
+                overlay,
                 has_text,
             );
             render_list.extend(

@@ -144,6 +144,10 @@ pub struct RustyCompositorState {
     pub launcher_active: bool,
     /// Interactive Spotlight query, catalog, and selection state (`RUSTYOS-018b`).
     pub launcher: crate::launcher::LauncherState,
+    /// Whether the Quick Settings Control Center popover is open (`RUSTYOS-021`).
+    pub quick_settings_active: bool,
+    /// Non-blocking system telemetry & quick audio controls (`RUSTYOS-021`).
+    pub telemetry: crate::telemetry::SystemMetricsHandle,
     /// Whether the session lock screen is active (`RUSTYOS-009`/`010`).
     pub screen_locked: bool,
     /// Count of notifications received via shell IPC (`RUSTYOS-009`/`010`).
@@ -237,6 +241,8 @@ impl RustyCompositorState {
             overview_active: false,
             launcher_active: false,
             launcher: crate::launcher::LauncherState::new(),
+            quick_settings_active: false,
+            telemetry: crate::telemetry::SystemMetricsHandle::static_default(),
             screen_locked: false,
             notification_count: 0,
         })
@@ -254,6 +260,9 @@ impl RustyCompositorState {
     /// Toggles the Spotlight application launcher overlay and resets query state.
     pub fn toggle_launcher(&mut self) {
         self.launcher_active = !self.launcher_active;
+        if self.launcher_active {
+            self.quick_settings_active = false;
+        }
         self.launcher.reset();
     }
 
@@ -261,6 +270,20 @@ impl RustyCompositorState {
     pub fn close_launcher(&mut self) {
         self.launcher_active = false;
         self.launcher.reset();
+    }
+
+    /// Toggles the `TopBar` Quick Settings popover and triggers an async telemetry refresh when opened.
+    pub fn toggle_quick_settings(&mut self) {
+        self.quick_settings_active = !self.quick_settings_active;
+        if self.quick_settings_active {
+            self.close_launcher();
+            self.telemetry.request_refresh();
+        }
+    }
+
+    /// Closes the Quick Settings popover.
+    pub fn close_quick_settings(&mut self) {
+        self.quick_settings_active = false;
     }
 
     /// Launches the currently highlighted candidate from Spotlight and closes the overlay.

@@ -247,6 +247,20 @@ hardware/software context и низкие накладные расходы.
 - **Acceptance criteria:** Набор текста фильтрует список приложений и двигает каретку; `Up`/`Down`/`Enter` или клик мышью запускают выбранное приложение в композитор; `Escape` закрывает лаунчер; 40 тестов и clippy проходят без предупреждений.
 - **Risks:** Минимальные (при отсутствии `WAYLAND_DISPLAY`-совместимого бинарника ошибка запуска логируется без падения композитора; дочерние процессы жнутся неблокирующим `try_wait`).
 
+## RUSTYOS-021 --- Quick Settings Popover & Live System Telemetry
+
+**Статус:** done **Фаза:** 18 (Control Center & Live Telemetry)
+
+- **Цель:** Добавить выпадающий Quick Settings Popover по клику на статусную пилюлю TopBar (или `Alt+S`) и живые системные метрики (`Power`, `Network`, `Audio`, локальные часы, `p50` кадра) без блокировки event loop композитора.
+- **Scope:**
+  - `crates/rusty-services/src/lib.rs`: `AudioService::set_volume`, `AudioService::toggle_mute` (`wpctl`/`pactl`), `format_wpctl_volume` и `local_clock_hhmm`.
+  - `crates/rusty-compositor/src/telemetry.rs`: фоновый поток `SystemMetricsHandle` (`start_background()`), кэширующий опрос сервисов раз в 3 с и асинхронно выполняющий изменения громкости/mute без задержки кадра.
+  - `crates/rusty-compositor/src/shell_render.rs` и `winit_backend.rs`: живая статусная пилюля TopBar, кликабельный бейдж раскладки (`Float`/`Tile`), карточка Quick Settings (`QuickSettingsRenderState`, `ShellOverlayView`, `QuickSettingsHit`) с плитками сети/питания, ползунком и кнопками громкости, а также тумблерами `Layout`, `Reduced Motion`, `Open Spotlight` и `Refresh Metrics`.
+  - `crates/rusty-compositor/src/input.rs` и `state.rs`: перехват кликов TopBar/QuickSettings и закрытие по `Escape` или клику вне карточки.
+- **Dependencies:** `RUSTYOS-011`, `RUSTYOS-018b`, `RUSTYOS-020`.
+- **Acceptance criteria:** Клик по правой пилюле TopBar или `Alt+S` открывает Quick Settings; громкость/mute, раскладка и `reduced_motion` работают без блокировки event loop; 43 теста и clippy проходят без предупреждений.
+- **Risks:** Минимальные (без PipeWire/PulseAudio UI обновляется оптимистично и не роняет композитор).
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

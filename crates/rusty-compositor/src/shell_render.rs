@@ -77,11 +77,234 @@ fn make_solid_element(
     )
 }
 
+/// Live hardware/session telemetry displayed inside `TopBar` (`RUSTYOS-021`).
+#[derive(Debug, Clone)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct TopBarTelemetry<'a> {
+    /// Local wall-clock time (`HH:MM`).
+    pub clock_hhmm: &'a str,
+    /// Battery percentage (`0..=100`).
+    pub battery_percent: u8,
+    /// Whether a hardware battery is present.
+    pub has_battery: bool,
+    /// Whether an active network interface is up.
+    pub net_connected: bool,
+    /// Master output volume (`0..=100`).
+    pub volume_percent: u8,
+    /// Whether master audio output is muted.
+    pub audio_muted: bool,
+    /// Whether the Quick Settings popover is currently open.
+    pub quick_settings_open: bool,
+}
+
+impl Default for TopBarTelemetry<'static> {
+    fn default() -> Self {
+        Self {
+            clock_hhmm: "12:00",
+            battery_percent: 100,
+            has_battery: false,
+            net_connected: true,
+            volume_percent: 75,
+            audio_muted: false,
+            quick_settings_open: false,
+        }
+    }
+}
+
+/// Live data for the Quick Settings Control Center popover (`RUSTYOS-021`).
+#[derive(Debug, Clone)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct QuickSettingsRenderState<'a> {
+    /// Active workspace layout mode (`"floating"` or `"master-stack"`).
+    pub layout_mode: &'a str,
+    /// Accessibility reduced-motion flag.
+    pub reduced_motion: bool,
+    /// Human-readable network label (SSID / Ethernet / Disconnected).
+    pub network_label: &'a str,
+    /// Whether network interface is up.
+    pub net_connected: bool,
+    /// Battery charge percentage.
+    pub battery_percent: u8,
+    /// Whether a hardware battery was detected.
+    pub has_battery: bool,
+    /// Whether AC adapter is connected.
+    pub ac_online: bool,
+    /// Master output volume percentage (`0..=100`).
+    pub volume_percent: u8,
+    /// Master audio mute flag.
+    pub audio_muted: bool,
+    /// Median frame interval in microseconds (`p50`).
+    pub frame_p50_us: u64,
+    /// Number of visible windows on active workspace.
+    pub window_count: usize,
+}
+
+/// Active modal/popover overlay rendered on top of the compositor shell.
+#[derive(Debug, Clone, Copy)]
+pub enum ShellOverlayView<'a> {
+    /// No overlay open.
+    None,
+    /// Spotlight application launcher overlay.
+    Spotlight(&'a SpotlightRenderState<'a>),
+    /// Quick Settings Control Center popover (`RUSTYOS-021`).
+    QuickSettings(&'a QuickSettingsRenderState<'a>),
+}
+
+/// Interactive click target inside or outside the Quick Settings popover (`RUSTYOS-021`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuickSettingsHit {
+    /// Mute / unmute audio output.
+    ToggleMute,
+    /// Decrease audio volume.
+    VolumeDown,
+    /// Increase audio volume.
+    VolumeUp,
+    /// Toggle workspace layout (`Floating <-> MasterStack`).
+    ToggleLayout,
+    /// Toggle accessibility `reduced_motion`.
+    ToggleReducedMotion,
+    /// Switch to Spotlight application launcher.
+    OpenSpotlight,
+    /// Trigger immediate background telemetry refresh.
+    RefreshMetrics,
+    /// Click inside popover frame (absorb event, keep open).
+    InsidePopover,
+    /// Click outside popover (dismiss Quick Settings).
+    OutsidePopover,
+}
+
+fn status_pill_rect(screen_width: i32) -> (i32, i32, i32, i32) {
+    let status_pill_width = 186.min((screen_width - 370).max(120));
+    let status_x = screen_width - status_pill_width - 12;
+    (status_x, 6, status_pill_width, 20)
+}
+
+fn quick_settings_rect(width: i32, height: i32) -> (i32, i32, i32, i32) {
+    let pop_w = 304.min(width - 24).max(240);
+    let pop_h = 286.min(height - TOP_BAR_HEIGHT - 24).max(200);
+    let pop_x = width - pop_w - 12;
+    let pop_y = TOP_BAR_HEIGHT + 8;
+    (pop_x, pop_y, pop_w, pop_h)
+}
+
+/// Checks if `(x, y)` clicked the `TopBar` Layout badge (`Float` / `Tile`).
+#[must_use]
+pub fn check_top_bar_layout_click(x: f64, y: f64) -> bool {
+    if y > f64::from(TOP_BAR_HEIGHT) {
+        return false;
+    }
+    let layout_x = f64::from(WS_START_X + 9 * WS_BTN_STRIDE + 8);
+    x >= layout_x && x < layout_x + 56.0
+}
+
+/// Checks if `(x, y)` clicked the right `TopBar` telemetry status pill.
+#[must_use]
+pub fn check_top_bar_status_click(screen_width: i32, x: f64, y: f64) -> bool {
+    if y > f64::from(TOP_BAR_HEIGHT) {
+        return false;
+    }
+    let (sx, _sy, sw, _sh) = status_pill_rect(screen_width);
+    x >= f64::from(sx) && x < f64::from(sx + sw)
+}
+
+/// Hit-tests `(x, y)` against the open Quick Settings popover controls (`RUSTYOS-021`).
+#[must_use]
+pub fn check_quick_settings_click(
+    screen_size: Size<i32, smithay::utils::Physical>,
+    x: f64,
+    y: f64,
+) -> QuickSettingsHit {
+    let (px, py, pw, ph) = quick_settings_rect(screen_size.w, screen_size.h);
+    let fx = f64::from(px);
+    let fy = f64::from(py);
+    let fw = f64::from(pw);
+    let fh = f64::from(ph);
+
+    if x < fx || x >= fx + fw || y < fy || y >= fy + fh {
+        return QuickSettingsHit::OutsidePopover;
+    }
+
+    let pad = 14;
+    let inner_w = pw - pad * 2;
+    let half_w = (inner_w - 8) / 2;
+
+    // Audio control buttons row: y in py + 136 .. py + 158
+    let audio_btn_y = f64::from(py + 136);
+    if y >= audio_btn_y && y < audio_btn_y + 22.0 {
+        let mute_x = f64::from(px + pw - pad - 116);
+        let minus_x = f64::from(px + pw - pad - 62);
+        let plus_x = f64::from(px + pw - pad - 30);
+        if x >= mute_x && x < mute_x + 48.0 {
+            return QuickSettingsHit::ToggleMute;
+        }
+        if x >= minus_x && x < minus_x + 28.0 {
+            return QuickSettingsHit::VolumeDown;
+        }
+        if x >= plus_x && x < plus_x + 28.0 {
+            return QuickSettingsHit::VolumeUp;
+        }
+    }
+
+    let left_x = f64::from(px + pad);
+    let right_x = f64::from(px + pad + half_w + 8);
+    let hw = f64::from(half_w);
+
+    // Action row 1: py + 202 .. py + 234
+    let row1_y = f64::from(py + 202);
+    if y >= row1_y && y < row1_y + 32.0 {
+        if x >= left_x && x < left_x + hw {
+            return QuickSettingsHit::ToggleLayout;
+        }
+        if x >= right_x && x < right_x + hw {
+            return QuickSettingsHit::ToggleReducedMotion;
+        }
+    }
+
+    // Action row 2: py + 242 .. py + 274
+    let row2_y = f64::from(py + 242);
+    if y >= row2_y && y < row2_y + 32.0 {
+        if x >= left_x && x < left_x + hw {
+            return QuickSettingsHit::OpenSpotlight;
+        }
+        if x >= right_x && x < right_x + hw {
+            return QuickSettingsHit::RefreshMetrics;
+        }
+    }
+
+    QuickSettingsHit::InsidePopover
+}
+
+fn format_status_pill_label(t: &TopBarTelemetry<'_>) -> String {
+    let vol_part = if t.audio_muted {
+        "Mute".to_owned()
+    } else {
+        format!("V{}%", t.volume_percent)
+    };
+    if t.has_battery {
+        format!("{vol_part} • {}% • {}", t.battery_percent, t.clock_hhmm)
+    } else {
+        let net_part = if t.net_connected { "Online" } else { "Offline" };
+        format!("{net_part} • {vol_part} • {}", t.clock_hhmm)
+    }
+}
+
+fn truncate_ascii(text: &str, max_chars: usize) -> String {
+    let count = text.chars().count();
+    if count <= max_chars {
+        text.to_owned()
+    } else {
+        let mut out: String = text.chars().take(max_chars.saturating_sub(1)).collect();
+        out.push('…');
+        out
+    }
+}
+
 fn render_top_bar(
     elements: &mut Vec<SolidColorRenderElement>,
     width: i32,
     active_workspace: u8,
     layout_mode: &str,
+    telemetry: &TopBarTelemetry<'_>,
     has_text: bool,
 ) {
     // 1. TopBar Background (full width, height 32, elevated surface)
@@ -149,25 +372,39 @@ fn render_top_bar(
     );
     elements.push(make_solid_element(layout_strip, layout_accent));
 
-    // 4. Status area on the right side of TopBar (battery, network, clock indicator)
-    let status_pill_width = 130;
-    let status_x = width - status_pill_width - 12;
+    // 4. Status area on the right side of TopBar (battery, network, audio, clock)
+    let (status_x, status_y, status_pill_width, status_h) = status_pill_rect(width);
     let status_pill_geo = Rectangle::new(
-        Point::from((status_x, ws_y)),
-        Size::from((status_pill_width, ws_btn_height)),
+        Point::from((status_x, status_y)),
+        Size::from((status_pill_width, status_h)),
     );
-    elements.push(make_solid_element(status_pill_geo, COLOR_SURFACE_OVERLAY));
+    let pill_bg = if telemetry.quick_settings_open {
+        COLOR_ACCENT_MUTED
+    } else {
+        COLOR_SURFACE_OVERLAY
+    };
+    elements.push(make_solid_element(status_pill_geo, pill_bg));
 
     // Top subtle highlight on status pill
     let status_highlight = Rectangle::new(
-        Point::from((status_x, ws_y)),
+        Point::from((status_x, status_y)),
         Size::from((status_pill_width, 1)),
     );
-    elements.push(make_solid_element(status_highlight, COLOR_BORDER));
+    let highlight_col = if telemetry.quick_settings_open {
+        COLOR_ACCENT
+    } else {
+        COLOR_BORDER
+    };
+    elements.push(make_solid_element(status_highlight, highlight_col));
 
-    // Green status dot (system healthy / online)
+    // Status dot (green if online, amber if offline)
     let dot_geo = Rectangle::new(Point::from((status_x + 8, ws_y + 6)), Size::from((8, 8)));
-    elements.push(make_solid_element(dot_geo, COLOR_SUCCESS));
+    let dot_color = if telemetry.net_connected {
+        COLOR_SUCCESS
+    } else {
+        COLOR_WARNING
+    };
+    elements.push(make_solid_element(dot_geo, dot_color));
 
     if !has_text {
         // Accent status bars fallback when no font is available
@@ -439,15 +676,150 @@ fn render_spotlight_modal(
     }
 }
 
-/// Generates custom GLES render elements for `TopBar` and `Dock`.
+#[allow(clippy::too_many_lines)]
+fn render_quick_settings_popover(
+    elements: &mut Vec<SolidColorRenderElement>,
+    width: i32,
+    height: i32,
+    qs: &QuickSettingsRenderState<'_>,
+) {
+    let (px, py, pw, ph) = quick_settings_rect(width, height);
+    let pad = 14;
+    let inner_w = pw - pad * 2;
+    let half_w = (inner_w - 8) / 2;
+
+    // 1. Outer glass rim + elevated body
+    elements.push(make_solid_element(
+        Rectangle::new(Point::from((px - 1, py - 1)), Size::from((pw + 2, ph + 2))),
+        COLOR_BORDER_HIGHLIGHT,
+    ));
+    elements.push(make_solid_element(
+        Rectangle::new(Point::from((px, py)), Size::from((pw, ph))),
+        COLOR_SURFACE_ELEVATED,
+    ));
+
+    // Header divider
+    elements.push(make_solid_element(
+        Rectangle::new(Point::from((px + pad, py + 52)), Size::from((inner_w, 1))),
+        COLOR_BORDER,
+    ));
+
+    // 2. Network & Power info tiles
+    let left_x = px + pad;
+    let right_x = px + pad + half_w + 8;
+    elements.push(make_solid_element(
+        Rectangle::new(Point::from((left_x, py + 62)), Size::from((half_w, 56))),
+        COLOR_SURFACE_OVERLAY,
+    ));
+    elements.push(make_solid_element(
+        Rectangle::new(Point::from((left_x + 10, py + 72)), Size::from((8, 8))),
+        if qs.net_connected {
+            COLOR_SUCCESS
+        } else {
+            COLOR_DANGER
+        },
+    ));
+
+    elements.push(make_solid_element(
+        Rectangle::new(Point::from((right_x, py + 62)), Size::from((half_w, 56))),
+        COLOR_SURFACE_OVERLAY,
+    ));
+    elements.push(make_solid_element(
+        Rectangle::new(Point::from((right_x + 10, py + 72)), Size::from((8, 8))),
+        if qs.ac_online || qs.battery_percent > 20 {
+            COLOR_SUCCESS
+        } else {
+            COLOR_WARNING
+        },
+    ));
+
+    // 3. Audio slider card
+    elements.push(make_solid_element(
+        Rectangle::new(Point::from((left_x, py + 128)), Size::from((inner_w, 64))),
+        COLOR_SURFACE_OVERLAY,
+    ));
+
+    // Mute, -, + buttons inside audio card
+    let btn_y = py + 136;
+    let mute_x = px + pw - pad - 116;
+    let minus_x = px + pw - pad - 62;
+    let plus_x = px + pw - pad - 30;
+    elements.push(make_solid_element(
+        Rectangle::new(Point::from((mute_x, btn_y)), Size::from((48, 22))),
+        if qs.audio_muted {
+            COLOR_DANGER
+        } else {
+            COLOR_SURFACE
+        },
+    ));
+    elements.push(make_solid_element(
+        Rectangle::new(Point::from((minus_x, btn_y)), Size::from((28, 22))),
+        COLOR_SURFACE,
+    ));
+    elements.push(make_solid_element(
+        Rectangle::new(Point::from((plus_x, btn_y)), Size::from((28, 22))),
+        COLOR_SURFACE,
+    ));
+
+    // Audio progress bar track + fill
+    let track_w = inner_w - 24;
+    let track_x = left_x + 12;
+    let track_y = py + 170;
+    elements.push(make_solid_element(
+        Rectangle::new(Point::from((track_x, track_y)), Size::from((track_w, 8))),
+        COLOR_SURFACE,
+    ));
+    let fill_w = (track_w * i32::from(qs.volume_percent.min(100))) / 100;
+    if fill_w > 0 {
+        elements.push(make_solid_element(
+            Rectangle::new(Point::from((track_x, track_y)), Size::from((fill_w, 8))),
+            if qs.audio_muted {
+                COLOR_SUBTLE
+            } else {
+                COLOR_ACCENT
+            },
+        ));
+    }
+
+    // 4. Quick Action toggles (2x2 grid)
+    let is_tile = qs.layout_mode == "master-stack";
+    elements.push(make_solid_element(
+        Rectangle::new(Point::from((left_x, py + 202)), Size::from((half_w, 32))),
+        if is_tile {
+            COLOR_ACCENT_MUTED
+        } else {
+            COLOR_SURFACE_OVERLAY
+        },
+    ));
+    elements.push(make_solid_element(
+        Rectangle::new(Point::from((right_x, py + 202)), Size::from((half_w, 32))),
+        if qs.reduced_motion {
+            COLOR_ACCENT_MUTED
+        } else {
+            COLOR_SURFACE_OVERLAY
+        },
+    ));
+    elements.push(make_solid_element(
+        Rectangle::new(Point::from((left_x, py + 242)), Size::from((half_w, 32))),
+        COLOR_SURFACE_OVERLAY,
+    ));
+    elements.push(make_solid_element(
+        Rectangle::new(Point::from((right_x, py + 242)), Size::from((half_w, 32))),
+        COLOR_SURFACE_OVERLAY,
+    ));
+}
+
+/// Generates custom GLES render elements for `TopBar`, `Dock`, and active shell overlays.
 #[must_use]
+#[allow(clippy::too_many_arguments)]
 pub fn generate_shell_render_elements(
     screen_size: Size<i32, smithay::utils::Physical>,
     active_workspace: u8,
     layout_mode: &str,
     window_count: usize,
     has_focused_window: bool,
-    spotlight: Option<&SpotlightRenderState<'_>>,
+    top_telemetry: &TopBarTelemetry<'_>,
+    overlay: ShellOverlayView<'_>,
     has_text: bool,
 ) -> Vec<SolidColorRenderElement> {
     let mut elements = Vec::new();
@@ -459,6 +831,7 @@ pub fn generate_shell_render_elements(
         width,
         active_workspace,
         layout_mode,
+        top_telemetry,
         has_text,
     );
     render_dock(
@@ -469,8 +842,14 @@ pub fn generate_shell_render_elements(
         has_focused_window,
     );
 
-    if let Some(spot) = spotlight {
-        render_spotlight_modal(&mut elements, width, height, spot, has_text);
+    match overlay {
+        ShellOverlayView::None => {}
+        ShellOverlayView::Spotlight(spot) => {
+            render_spotlight_modal(&mut elements, width, height, spot, has_text);
+        }
+        ShellOverlayView::QuickSettings(qs) => {
+            render_quick_settings_popover(&mut elements, width, height, qs);
+        }
     }
 
     // Smithay's render_output expects elements in front-to-back order.
@@ -664,8 +1043,8 @@ pub fn generate_window_ssd_elements(
     elements
 }
 
-/// Generates GPU-cached real font text labels for `TopBar`, `Dock`, and `Spotlight` (`RUSTYOS-020`).
-#[allow(clippy::too_many_lines)]
+/// Generates GPU-cached real font text labels for `TopBar`, `Dock`, `Spotlight`, and `QuickSettings` (`RUSTYOS-020`/`021`).
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 pub fn generate_shell_text_elements(
     text_cache: &mut crate::text::TextCache,
     renderer: &mut GlesRenderer,
@@ -673,7 +1052,8 @@ pub fn generate_shell_text_elements(
     active_workspace: u8,
     layout_mode: &str,
     window_count: usize,
-    spotlight: Option<&SpotlightRenderState<'_>>,
+    top_telemetry: &TopBarTelemetry<'_>,
+    overlay: ShellOverlayView<'_>,
 ) -> Vec<MemoryRenderBufferRenderElement<GlesRenderer>> {
     let mut elements = Vec::new();
     if !text_cache.has_font() {
@@ -686,79 +1066,90 @@ pub fn generate_shell_text_elements(
     let text_muted = [166, 155, 181, 255]; // #A69BB5
     let text_subtle = [118, 107, 133, 255]; // #766B85
 
-    // 1. Spotlight labels (topmost when active)
-    if let Some(spot) = spotlight {
-        let (modal_x, modal_y, _modal_width, _modal_height) = spotlight_modal_rect(width, height);
+    // 1. Overlay labels (Spotlight or Quick Settings popover)
+    match overlay {
+        ShellOverlayView::None => {}
+        ShellOverlayView::Spotlight(spot) => {
+            let (modal_x, modal_y, _modal_width, _modal_height) =
+                spotlight_modal_rect(width, height);
 
-        // Search icon glyph centered inside accent plate
-        let search_icon_bounds = Rectangle::new(
-            Point::from((modal_x + 28, modal_y + 26)),
-            Size::from((24, 24)),
-        );
-        if let Some(el) =
-            text_cache.render_label_centered(renderer, "/", 13.0, text_bright, search_icon_bounds)
-        {
-            elements.push(el);
-        }
-
-        if spot.query.is_empty() {
-            if let Some(el) = text_cache.render_label(
-                renderer,
-                "Search RustyOS...",
-                14.5,
-                text_muted,
-                Point::from((modal_x + 70, modal_y + 28)),
-            ) {
-                elements.push(el);
-            }
-        } else if let Some(el) = text_cache.render_label(
-            renderer,
-            spot.query,
-            14.5,
-            text_bright,
-            Point::from((modal_x + 64, modal_y + 28)),
-        ) {
-            elements.push(el);
-        }
-
-        let start_row_y = modal_y + 80;
-        let row_h = 44;
-        for (i, item) in spot.items.iter().take(3).enumerate() {
-            #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-            let row_y = start_row_y + (i as i32) * (row_h + 4);
-
-            let badge_bounds = Rectangle::new(
-                Point::from((modal_x + 28, row_y + 10)),
+            // Search icon glyph centered inside accent plate
+            let search_icon_bounds = Rectangle::new(
+                Point::from((modal_x + 28, modal_y + 26)),
                 Size::from((24, 24)),
             );
             if let Some(el) = text_cache.render_label_centered(
                 renderer,
-                &item.badge,
-                10.5,
+                "/",
+                13.0,
                 text_bright,
-                badge_bounds,
+                search_icon_bounds,
             ) {
                 elements.push(el);
             }
 
-            if let Some(el) = text_cache.render_label(
+            if spot.query.is_empty() {
+                if let Some(el) = text_cache.render_label(
+                    renderer,
+                    "Search RustyOS...",
+                    14.5,
+                    text_muted,
+                    Point::from((modal_x + 70, modal_y + 28)),
+                ) {
+                    elements.push(el);
+                }
+            } else if let Some(el) = text_cache.render_label(
                 renderer,
-                &item.name,
-                13.5,
+                spot.query,
+                14.5,
                 text_bright,
-                Point::from((modal_x + 62, row_y + 6)),
+                Point::from((modal_x + 64, modal_y + 28)),
             ) {
                 elements.push(el);
             }
-            if let Some(el) = text_cache.render_label(
-                renderer,
-                &item.subtitle,
-                10.5,
-                text_muted,
-                Point::from((modal_x + 62, row_y + 24)),
-            ) {
-                elements.push(el);
+
+            let start_row_y = modal_y + 80;
+            let row_h = 44;
+            for (i, item) in spot.items.iter().take(3).enumerate() {
+                #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+                let row_y = start_row_y + (i as i32) * (row_h + 4);
+
+                let badge_bounds = Rectangle::new(
+                    Point::from((modal_x + 28, row_y + 10)),
+                    Size::from((24, 24)),
+                );
+                if let Some(el) = text_cache.render_label_centered(
+                    renderer,
+                    &item.badge,
+                    10.5,
+                    text_bright,
+                    badge_bounds,
+                ) {
+                    elements.push(el);
+                }
+
+                if let Some(el) = text_cache.render_label(
+                    renderer,
+                    &item.name,
+                    13.5,
+                    text_bright,
+                    Point::from((modal_x + 62, row_y + 6)),
+                ) {
+                    elements.push(el);
+                }
+                if let Some(el) = text_cache.render_label(
+                    renderer,
+                    &item.subtitle,
+                    10.5,
+                    text_muted,
+                    Point::from((modal_x + 62, row_y + 24)),
+                ) {
+                    elements.push(el);
+                }
             }
+        }
+        ShellOverlayView::QuickSettings(qs) => {
+            render_quick_settings_text(text_cache, renderer, width, height, qs, &mut elements);
         }
     }
 
@@ -800,20 +1191,16 @@ pub fn generate_shell_text_elements(
         elements.push(el);
     }
 
-    // 4. Right status pill text
-    let status_pill_width = 130;
-    let status_x = width - status_pill_width - 12;
+    // 4. Right status pill live telemetry text
+    let (status_x, _status_y, status_pill_width, _status_h) = status_pill_rect(width);
+    let status_text = format_status_pill_label(top_telemetry);
     let status_bounds = Rectangle::new(
         Point::from((status_x + 18, ws_y)),
         Size::from((status_pill_width - 22, ws_btn_height)),
     );
-    if let Some(el) = text_cache.render_label_centered(
-        renderer,
-        "RustyOS • Live",
-        11.0,
-        text_bright,
-        status_bounds,
-    ) {
+    if let Some(el) =
+        text_cache.render_label_centered(renderer, &status_text, 10.5, text_bright, status_bounds)
+    {
         elements.push(el);
     }
 
@@ -846,6 +1233,196 @@ pub fn generate_shell_text_elements(
     }
 
     elements
+}
+
+#[allow(clippy::too_many_lines)]
+fn render_quick_settings_text(
+    text_cache: &mut crate::text::TextCache,
+    renderer: &mut GlesRenderer,
+    width: i32,
+    height: i32,
+    qs: &QuickSettingsRenderState<'_>,
+    elements: &mut Vec<MemoryRenderBufferRenderElement<GlesRenderer>>,
+) {
+    let (px, py, pw, _ph) = quick_settings_rect(width, height);
+    let pad = 14;
+    let inner_w = pw - pad * 2;
+    let half_w = (inner_w - 8) / 2;
+    let left_x = px + pad;
+    let right_x = px + pad + half_w + 8;
+
+    let text_bright = [244, 240, 250, 255];
+    let text_muted = [166, 155, 181, 255];
+
+    if let Some(el) = text_cache.render_label(
+        renderer,
+        "Quick Settings",
+        13.5,
+        text_bright,
+        Point::from((left_x, py + 12)),
+    ) {
+        elements.push(el);
+    }
+
+    #[allow(clippy::cast_precision_loss)]
+    let p50_ms = (qs.frame_p50_us as f64) / 1000.0;
+    let perf_sub = format!("{p50_ms:.1} ms p50 • {} win", qs.window_count);
+    if let Some(el) = text_cache.render_label(
+        renderer,
+        &perf_sub,
+        10.5,
+        text_muted,
+        Point::from((left_x, py + 31)),
+    ) {
+        elements.push(el);
+    }
+
+    // Network tile
+    if let Some(el) = text_cache.render_label(
+        renderer,
+        "Network",
+        11.5,
+        text_bright,
+        Point::from((left_x + 24, py + 69)),
+    ) {
+        elements.push(el);
+    }
+    let net_sub = truncate_ascii(qs.network_label, 17);
+    if let Some(el) = text_cache.render_label(
+        renderer,
+        &net_sub,
+        10.5,
+        text_muted,
+        Point::from((left_x + 10, py + 92)),
+    ) {
+        elements.push(el);
+    }
+
+    // Power tile
+    if let Some(el) = text_cache.render_label(
+        renderer,
+        "Power",
+        11.5,
+        text_bright,
+        Point::from((right_x + 24, py + 69)),
+    ) {
+        elements.push(el);
+    }
+    let power_sub = if qs.has_battery {
+        if qs.ac_online {
+            format!("Bat {}% (AC)", qs.battery_percent)
+        } else {
+            format!("Battery {}%", qs.battery_percent)
+        }
+    } else {
+        "AC Power".to_owned()
+    };
+    if let Some(el) = text_cache.render_label(
+        renderer,
+        &power_sub,
+        10.5,
+        text_muted,
+        Point::from((right_x + 10, py + 92)),
+    ) {
+        elements.push(el);
+    }
+
+    // Audio row
+    let vol_title = if qs.audio_muted {
+        format!("Audio: Muted ({}%)", qs.volume_percent)
+    } else {
+        format!("Audio: {}%", qs.volume_percent)
+    };
+    if let Some(el) = text_cache.render_label(
+        renderer,
+        &vol_title,
+        11.5,
+        text_bright,
+        Point::from((left_x + 12, py + 139)),
+    ) {
+        elements.push(el);
+    }
+
+    let btn_y = py + 136;
+    let mute_x = px + pw - pad - 116;
+    let minus_x = px + pw - pad - 62;
+    let plus_x = px + pw - pad - 30;
+    let mute_label = if qs.audio_muted { "Unmute" } else { "Mute" };
+    if let Some(el) = text_cache.render_label_centered(
+        renderer,
+        mute_label,
+        10.5,
+        text_bright,
+        Rectangle::new(Point::from((mute_x, btn_y)), Size::from((48, 22))),
+    ) {
+        elements.push(el);
+    }
+    if let Some(el) = text_cache.render_label_centered(
+        renderer,
+        "-",
+        13.0,
+        text_bright,
+        Rectangle::new(Point::from((minus_x, btn_y)), Size::from((28, 22))),
+    ) {
+        elements.push(el);
+    }
+    if let Some(el) = text_cache.render_label_centered(
+        renderer,
+        "+",
+        13.0,
+        text_bright,
+        Rectangle::new(Point::from((plus_x, btn_y)), Size::from((28, 22))),
+    ) {
+        elements.push(el);
+    }
+
+    // Quick toggle labels (2x2 grid)
+    let layout_text = if qs.layout_mode == "master-stack" {
+        "Layout: Tile"
+    } else {
+        "Layout: Float"
+    };
+    if let Some(el) = text_cache.render_label_centered(
+        renderer,
+        layout_text,
+        11.0,
+        text_bright,
+        Rectangle::new(Point::from((left_x, py + 202)), Size::from((half_w, 32))),
+    ) {
+        elements.push(el);
+    }
+    let motion_text = if qs.reduced_motion {
+        "Motion: Reduced"
+    } else {
+        "Motion: Smooth"
+    };
+    if let Some(el) = text_cache.render_label_centered(
+        renderer,
+        motion_text,
+        11.0,
+        text_bright,
+        Rectangle::new(Point::from((right_x, py + 202)), Size::from((half_w, 32))),
+    ) {
+        elements.push(el);
+    }
+    if let Some(el) = text_cache.render_label_centered(
+        renderer,
+        "Open Spotlight",
+        11.0,
+        text_bright,
+        Rectangle::new(Point::from((left_x, py + 242)), Size::from((half_w, 32))),
+    ) {
+        elements.push(el);
+    }
+    if let Some(el) = text_cache.render_label_centered(
+        renderer,
+        "Refresh Metrics",
+        11.0,
+        text_bright,
+        Rectangle::new(Point::from((right_x, py + 242)), Size::from((half_w, 32))),
+    ) {
+        elements.push(el);
+    }
 }
 
 /// Generates centered title text element for a window's SSD titlebar (`RUSTYOS-020`).
@@ -889,8 +1466,17 @@ mod tests {
     #[test]
     fn generate_shell_render_elements_produces_non_empty_layout() {
         let size = Size::from((1280, 800));
-        let elements =
-            generate_shell_render_elements(size, 1, "master-stack", 2, true, None, false);
+        let top_tel = TopBarTelemetry::default();
+        let elements = generate_shell_render_elements(
+            size,
+            1,
+            "master-stack",
+            2,
+            true,
+            &top_tel,
+            ShellOverlayView::None,
+            false,
+        );
         assert!(!elements.is_empty());
 
         let sample_items = [crate::launcher::LauncherCandidate {
@@ -906,9 +1492,89 @@ mod tests {
             cursor_offset_x: 32,
             items: &sample_items,
         };
-        let elements_with_launcher =
-            generate_shell_render_elements(size, 1, "master-stack", 2, true, Some(&spot), false);
+        let elements_with_launcher = generate_shell_render_elements(
+            size,
+            1,
+            "master-stack",
+            2,
+            true,
+            &top_tel,
+            ShellOverlayView::Spotlight(&spot),
+            false,
+        );
         assert!(elements_with_launcher.len() > elements.len());
+
+        let qs = QuickSettingsRenderState {
+            layout_mode: "master-stack",
+            reduced_motion: false,
+            network_label: "Wi-Fi Connected",
+            net_connected: true,
+            battery_percent: 88,
+            has_battery: true,
+            ac_online: true,
+            volume_percent: 75,
+            audio_muted: false,
+            frame_p50_us: 16_667,
+            window_count: 2,
+        };
+        let elements_with_qs = generate_shell_render_elements(
+            size,
+            1,
+            "master-stack",
+            2,
+            true,
+            &top_tel,
+            ShellOverlayView::QuickSettings(&qs),
+            false,
+        );
+        assert!(elements_with_qs.len() > elements.len());
+    }
+
+    #[test]
+    fn top_bar_and_quick_settings_hit_testing_work_accurately() {
+        let size = Size::from((1280, 800));
+        assert!(check_top_bar_status_click(size.w, 1200.0, 14.0));
+        assert!(!check_top_bar_status_click(size.w, 100.0, 14.0));
+        assert!(check_top_bar_layout_click(300.0, 14.0));
+        assert!(!check_top_bar_layout_click(50.0, 14.0));
+
+        let (px, py, pw, _ph) = quick_settings_rect(size.w, size.h);
+        assert_eq!(
+            check_quick_settings_click(size, 100.0, 200.0),
+            QuickSettingsHit::OutsidePopover
+        );
+        assert_eq!(
+            check_quick_settings_click(size, f64::from(px + 20), f64::from(py + 20)),
+            QuickSettingsHit::InsidePopover
+        );
+        assert_eq!(
+            check_quick_settings_click(size, f64::from(px + pw - 14 - 20), f64::from(py + 145)),
+            QuickSettingsHit::VolumeUp
+        );
+        assert_eq!(
+            check_quick_settings_click(size, f64::from(px + pw - 14 - 50), f64::from(py + 145)),
+            QuickSettingsHit::VolumeDown
+        );
+        assert_eq!(
+            check_quick_settings_click(size, f64::from(px + pw - 14 - 90), f64::from(py + 145)),
+            QuickSettingsHit::ToggleMute
+        );
+        assert_eq!(
+            check_quick_settings_click(size, f64::from(px + 30), f64::from(py + 215)),
+            QuickSettingsHit::ToggleLayout
+        );
+        assert_eq!(
+            check_quick_settings_click(size, f64::from(px + 200), f64::from(py + 215)),
+            QuickSettingsHit::ToggleReducedMotion
+        );
+        assert_eq!(
+            check_quick_settings_click(size, f64::from(px + 30), f64::from(py + 255)),
+            QuickSettingsHit::OpenSpotlight
+        );
+        assert_eq!(
+            check_quick_settings_click(size, f64::from(px + 200), f64::from(py + 255)),
+            QuickSettingsHit::RefreshMetrics
+        );
     }
 
     #[test]

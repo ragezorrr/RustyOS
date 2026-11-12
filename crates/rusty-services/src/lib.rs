@@ -279,6 +279,68 @@ impl AudioService {
 
         status
     }
+
+    /// Sets master output volume (`0..=100`) via `wpctl` or `pactl`.
+    #[must_use]
+    pub fn set_volume(&self, percent: u8) -> bool {
+        let clamped = percent.min(100);
+        let wpctl_arg = format_wpctl_volume(clamped);
+        if Command::new("wpctl")
+            .args(["set-volume", "@DEFAULT_AUDIO_SINK@", &wpctl_arg])
+            .status()
+            .is_ok_and(|s| s.success())
+        {
+            return true;
+        }
+        let pactl_arg = format!("{clamped}%");
+        Command::new("pactl")
+            .args(["set-sink-volume", "@DEFAULT_SINK@", &pactl_arg])
+            .status()
+            .is_ok_and(|s| s.success())
+    }
+
+    /// Toggles master output mute via `wpctl` or `pactl`.
+    #[must_use]
+    pub fn toggle_mute(&self) -> bool {
+        if Command::new("wpctl")
+            .args(["set-mute", "@DEFAULT_AUDIO_SINK@", "toggle"])
+            .status()
+            .is_ok_and(|s| s.success())
+        {
+            return true;
+        }
+        Command::new("pactl")
+            .args(["set-sink-mute", "@DEFAULT_SINK@", "toggle"])
+            .status()
+            .is_ok_and(|s| s.success())
+    }
+}
+
+/// Formats `percent` (`0..=100`) into `wpctl` scalar volume string (e.g. `"0.75"`).
+#[must_use]
+pub fn format_wpctl_volume(percent: u8) -> String {
+    let clamped = percent.min(100);
+    format!("{:.2}", f32::from(clamped) / 100.0)
+}
+
+/// Returns current local wall-clock time as `"HH:MM"` using system `date` (with UTC fallback).
+#[must_use]
+pub fn local_clock_hhmm() -> String {
+    if let Ok(output) = Command::new("date").arg("+%H:%M").output()
+        && output.status.success()
+    {
+        let text = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        if text.len() == 5 && text.as_bytes().get(2) == Some(&b':') {
+            return text;
+        }
+    }
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let mins_day = (secs / 60) % (24 * 60);
+    let hh = mins_day / 60;
+    let mm = mins_day % 60;
+    format!("{hh:02}:{mm:02}")
 }
 
 /// Session management service interacting with `systemd-logind`.
@@ -372,5 +434,14 @@ mod tests {
         let audio = AudioService::new();
         let st = audio.query_status();
         assert!(st.volume_percent <= 100);
+    }
+
+    #[test]
+    fn wpctl_volume_and_clock_helpers_format_cleanly() {
+        assert_eq!(format_wpctl_volume(75), "0.75");
+        assert_eq!(format_wpctl_volume(150), "1.00");
+        let clock = local_clock_hhmm();
+        assert_eq!(clock.len(), 5);
+        assert_eq!(clock.as_bytes().get(2), Some(&b':'));
     }
 }

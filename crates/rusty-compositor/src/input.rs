@@ -23,6 +23,8 @@ enum KeyIntercept {
     ExitCompositor,
     ToggleReducedMotion,
     ToggleLauncher,
+    ToggleQuickSettings,
+    QuickSettingsClose,
     LauncherClose,
     LauncherActivate,
     LauncherMove(isize),
@@ -100,6 +102,9 @@ impl RustyCompositorState {
                         utf8.as_deref(),
                     ));
                 }
+                if state.quick_settings_active && sym.raw() == Keysym::Escape.raw() {
+                    return FilterResult::Intercept(KeyIntercept::QuickSettingsClose);
+                }
                 if let Some(action) = match_shortcut(*modifiers, sym) {
                     FilterResult::Intercept(action)
                 } else {
@@ -126,6 +131,17 @@ impl RustyCompositorState {
                     launcher_active = self.launcher_active,
                     "Toggled Spotlight application launcher overlay"
                 );
+            }
+            Some(KeyIntercept::ToggleQuickSettings) => {
+                self.toggle_quick_settings();
+                info!(
+                    quick_settings_active = self.quick_settings_active,
+                    "Toggled Quick Settings popover"
+                );
+            }
+            Some(KeyIntercept::QuickSettingsClose) => {
+                self.close_quick_settings();
+                info!("Closed Quick Settings popover");
             }
             Some(KeyIntercept::LauncherClose) => {
                 self.close_launcher();
@@ -226,6 +242,46 @@ impl RustyCompositorState {
         }
     }
 
+    fn handle_quick_settings_pointer_click(&mut self, serial: smithay::utils::Serial) {
+        let output_size = self
+            .space
+            .output_geometry(&self.output)
+            .map_or_else(|| Size::from((1280, 800)), |geo| geo.size)
+            .to_physical(1);
+        match crate::shell_render::check_quick_settings_click(
+            output_size,
+            self.pointer_location.x,
+            self.pointer_location.y,
+        ) {
+            crate::shell_render::QuickSettingsHit::ToggleMute => {
+                self.telemetry.toggle_mute();
+            }
+            crate::shell_render::QuickSettingsHit::VolumeDown => {
+                self.telemetry.step_volume(-5);
+            }
+            crate::shell_render::QuickSettingsHit::VolumeUp => {
+                self.telemetry.step_volume(5);
+            }
+            crate::shell_render::QuickSettingsHit::ToggleLayout => {
+                self.apply_wm_action(WmAction::ToggleLayoutMode, serial);
+            }
+            crate::shell_render::QuickSettingsHit::ToggleReducedMotion => {
+                let _ = self.animations.toggle_reduced_motion();
+            }
+            crate::shell_render::QuickSettingsHit::OpenSpotlight => {
+                self.toggle_launcher();
+            }
+            crate::shell_render::QuickSettingsHit::RefreshMetrics => {
+                self.telemetry.request_refresh();
+            }
+            crate::shell_render::QuickSettingsHit::InsidePopover => {}
+            crate::shell_render::QuickSettingsHit::OutsidePopover => {
+                self.close_quick_settings();
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_lines)]
     fn handle_pointer_button<B: InputBackend>(&mut self, event: &B::PointerButtonEvent) {
         let serial = SERIAL_COUNTER.next_serial();
         let button = event.button_code();
@@ -236,7 +292,12 @@ impl RustyCompositorState {
         }
 
         if button_state == ButtonState::Pressed {
-            // Check for TopBar click to switch workspaces via mouse
+            let output_width = self
+                .space
+                .output_geometry(&self.output)
+                .map_or(1280, |geo| geo.size.w);
+
+            // Check for TopBar click to switch workspaces, toggle layout, or open Quick Settings
             if let Some(target_ws) = crate::shell_render::check_top_bar_workspace_click(
                 self.pointer_location.x,
                 self.pointer_location.y,
@@ -245,10 +306,31 @@ impl RustyCompositorState {
                 self.apply_wm_action(WmAction::SwitchWorkspace(ws), serial);
                 return;
             }
+            if crate::shell_render::check_top_bar_layout_click(
+                self.pointer_location.x,
+                self.pointer_location.y,
+            ) {
+                self.apply_wm_action(WmAction::ToggleLayoutMode, serial);
+                return;
+            }
+            if crate::shell_render::check_top_bar_status_click(
+                output_width,
+                self.pointer_location.x,
+                self.pointer_location.y,
+            ) {
+                self.toggle_quick_settings();
+                return;
+            }
 
             // Handle Spotlight clicks exclusively while launcher overlay is open (RUSTYOS-018b)
             if self.launcher_active {
                 self.handle_launcher_pointer_click();
+                return;
+            }
+
+            // Handle Quick Settings popover clicks exclusively while open (RUSTYOS-021)
+            if self.quick_settings_active {
+                self.handle_quick_settings_pointer_click(serial);
                 return;
             }
 
@@ -473,6 +555,7 @@ const fn match_shortcut(modifiers: ModifiersState, sym: Keysym) -> Option<KeyInt
         Keysym::c | Keysym::C => Some(KeyIntercept::Wm(WmAction::SnapFocused(SnapTarget::Center))),
         Keysym::o | Keysym::O => Some(KeyIntercept::Wm(WmAction::MoveFocusedToNextOutput)),
         Keysym::r | Keysym::R => Some(KeyIntercept::ToggleReducedMotion),
+        Keysym::s | Keysym::S => Some(KeyIntercept::ToggleQuickSettings),
         _ => None,
     }
 }
