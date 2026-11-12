@@ -620,8 +620,8 @@ pub fn check_top_bar_tray_click(
 }
 
 fn quick_settings_rect(width: i32, height: i32) -> (i32, i32, i32, i32) {
-    let pop_w = 304.min(width - 24).max(240);
-    let pop_h = 326.min(height - TOP_BAR_HEIGHT - 24).max(200);
+    let pop_w = 320.min(width - 24).max(240);
+    let pop_h = 336.min(height - TOP_BAR_HEIGHT - 24).max(200);
     let pop_x = width - pop_w - 12;
     let pop_y = TOP_BAR_HEIGHT + 8;
     (pop_x, pop_y, pop_w, pop_h)
@@ -872,7 +872,7 @@ pub fn check_top_bar_status_click(screen_width: i32, x: f64, y: f64) -> bool {
     x >= f64::from(sx) && x < f64::from(sx + sw)
 }
 
-/// Hit-tests `(x, y)` against the open Quick Settings popover controls (`RUSTYOS-021`).
+/// Hit-tests `(x, y)` against the open Quick Settings popover controls (`RUSTYOS-021`, `RUSTYOS-037`).
 #[must_use]
 pub fn check_quick_settings_click(
     screen_size: Size<i32, smithay::utils::Physical>,
@@ -893,9 +893,9 @@ pub fn check_quick_settings_click(
     let inner_w = pw - pad * 2;
     let half_w = (inner_w - 8) / 2;
 
-    // Audio control buttons row: y in py + 136 .. py + 158
-    let audio_btn_y = f64::from(py + 136);
-    if y >= audio_btn_y && y < audio_btn_y + 22.0 {
+    // Audio control buttons row: y in py + 128 .. py + 154
+    let audio_btn_y = f64::from(py + 128);
+    if y >= audio_btn_y && y < audio_btn_y + 26.0 {
         let mute_x = f64::from(px + pw - pad - 116);
         let minus_x = f64::from(px + pw - pad - 62);
         let plus_x = f64::from(px + pw - pad - 30);
@@ -914,9 +914,9 @@ pub fn check_quick_settings_click(
     let right_x = f64::from(px + pad + half_w + 8);
     let hw = f64::from(half_w);
 
-    // Action row 1: py + 202 .. py + 234
-    let row1_y = f64::from(py + 202);
-    if y >= row1_y && y < row1_y + 32.0 {
+    // Action row 1: py + 196 .. py + 230
+    let row1_y = f64::from(py + 196);
+    if y >= row1_y && y < row1_y + 34.0 {
         if x >= left_x && x < left_x + hw {
             return QuickSettingsHit::ToggleLayout;
         }
@@ -925,9 +925,9 @@ pub fn check_quick_settings_click(
         }
     }
 
-    // Action row 2: py + 242 .. py + 274
-    let row2_y = f64::from(py + 242);
-    if y >= row2_y && y < row2_y + 32.0 {
+    // Action row 2: py + 238 .. py + 272
+    let row2_y = f64::from(py + 238);
+    if y >= row2_y && y < row2_y + 34.0 {
         if x >= left_x && x < left_x + hw {
             return QuickSettingsHit::OpenSpotlight;
         }
@@ -936,9 +936,9 @@ pub fn check_quick_settings_click(
         }
     }
 
-    // Action row 3 (`RUSTYOS-027`): py + 282 .. py + 314
-    let row3_y = f64::from(py + 282);
-    if y >= row3_y && y < row3_y + 32.0 {
+    // Action row 3 (`RUSTYOS-027`): py + 280 .. py + 314
+    let row3_y = f64::from(py + 280);
+    if y >= row3_y && y < row3_y + 34.0 {
         if x >= left_x && x < left_x + hw {
             return QuickSettingsHit::ToggleBluetooth;
         }
@@ -1364,32 +1364,32 @@ fn render_quick_settings_popover(
 
     // Header divider
     elements.push(make_solid_element(
-        Rectangle::new(Point::from((px + pad, py + 52)), Size::from((inner_w, 1))),
+        Rectangle::new(Point::from((px + pad, py + 50)), Size::from((inner_w, 1))),
         COLOR_BORDER,
     ));
 
-    // 2. Network & Power info tiles
+    // 2. Network & Power info tiles (macOS Control Center style)
     let left_x = px + pad;
     let right_x = px + pad + half_w + 8;
     elements.push(make_solid_element(
-        Rectangle::new(Point::from((left_x, py + 62)), Size::from((half_w, 56))),
+        Rectangle::new(Point::from((left_x, py + 56)), Size::from((half_w, 58))),
         COLOR_SURFACE_OVERLAY,
     ));
     elements.push(make_solid_element(
-        Rectangle::new(Point::from((left_x + 10, py + 72)), Size::from((8, 8))),
+        Rectangle::new(Point::from((left_x + 12, py + 71)), Size::from((28, 28))),
         if qs.net_connected {
-            COLOR_SUCCESS
+            COLOR_ACCENT_MUTED
         } else {
-            COLOR_DANGER
+            COLOR_SURFACE
         },
     ));
 
     elements.push(make_solid_element(
-        Rectangle::new(Point::from((right_x, py + 62)), Size::from((half_w, 56))),
+        Rectangle::new(Point::from((right_x, py + 56)), Size::from((half_w, 58))),
         COLOR_SURFACE_OVERLAY,
     ));
     elements.push(make_solid_element(
-        Rectangle::new(Point::from((right_x + 10, py + 72)), Size::from((8, 8))),
+        Rectangle::new(Point::from((right_x + 12, py + 71)), Size::from((28, 28))),
         if qs.ac_online || qs.battery_percent > 20 {
             COLOR_SUCCESS
         } else {
@@ -1399,12 +1399,12 @@ fn render_quick_settings_popover(
 
     // 3. Audio slider card
     elements.push(make_solid_element(
-        Rectangle::new(Point::from((left_x, py + 128)), Size::from((inner_w, 64))),
+        Rectangle::new(Point::from((left_x, py + 122)), Size::from((inner_w, 66))),
         COLOR_SURFACE_OVERLAY,
     ));
 
     // Mute, -, + buttons inside audio card
-    let btn_y = py + 136;
+    let btn_y = py + 128;
     let mute_x = px + pw - pad - 116;
     let minus_x = px + pw - pad - 62;
     let plus_x = px + pw - pad - 30;
@@ -1425,18 +1425,18 @@ fn render_quick_settings_popover(
         COLOR_SURFACE,
     ));
 
-    // Audio progress bar track + fill
+    // Capsule audio progress bar track + fill
     let track_w = inner_w - 24;
     let track_x = left_x + 12;
-    let track_y = py + 170;
+    let track_y = py + 158;
     elements.push(make_solid_element(
-        Rectangle::new(Point::from((track_x, track_y)), Size::from((track_w, 8))),
+        Rectangle::new(Point::from((track_x, track_y)), Size::from((track_w, 18))),
         COLOR_SURFACE,
     ));
     let fill_w = (track_w * i32::from(qs.volume_percent.min(100))) / 100;
     if fill_w > 0 {
         elements.push(make_solid_element(
-            Rectangle::new(Point::from((track_x, track_y)), Size::from((fill_w, 8))),
+            Rectangle::new(Point::from((track_x, track_y)), Size::from((fill_w, 18))),
             if qs.audio_muted {
                 COLOR_SUBTLE
             } else {
@@ -1445,10 +1445,10 @@ fn render_quick_settings_popover(
         ));
     }
 
-    // 4. Quick Action toggles (2x2 grid)
+    // 4. Quick Action toggles (2 columns, 3 rows)
     let is_tile = qs.layout_mode == "master-stack";
     elements.push(make_solid_element(
-        Rectangle::new(Point::from((left_x, py + 202)), Size::from((half_w, 32))),
+        Rectangle::new(Point::from((left_x, py + 196)), Size::from((half_w, 34))),
         if is_tile {
             COLOR_ACCENT_MUTED
         } else {
@@ -1456,7 +1456,7 @@ fn render_quick_settings_popover(
         },
     ));
     elements.push(make_solid_element(
-        Rectangle::new(Point::from((right_x, py + 202)), Size::from((half_w, 32))),
+        Rectangle::new(Point::from((right_x, py + 196)), Size::from((half_w, 34))),
         if qs.reduced_motion {
             COLOR_ACCENT_MUTED
         } else {
@@ -1464,11 +1464,23 @@ fn render_quick_settings_popover(
         },
     ));
     elements.push(make_solid_element(
-        Rectangle::new(Point::from((left_x, py + 242)), Size::from((half_w, 32))),
+        Rectangle::new(Point::from((left_x, py + 238)), Size::from((half_w, 34))),
         COLOR_SURFACE_OVERLAY,
     ));
     elements.push(make_solid_element(
-        Rectangle::new(Point::from((right_x, py + 242)), Size::from((half_w, 32))),
+        Rectangle::new(Point::from((right_x, py + 238)), Size::from((half_w, 34))),
+        COLOR_SURFACE_OVERLAY,
+    ));
+    elements.push(make_solid_element(
+        Rectangle::new(Point::from((left_x, py + 280)), Size::from((half_w, 34))),
+        if qs.bt_available && qs.bt_powered {
+            COLOR_ACCENT_MUTED
+        } else {
+            COLOR_SURFACE_OVERLAY
+        },
+    ));
+    elements.push(make_solid_element(
+        Rectangle::new(Point::from((right_x, py + 280)), Size::from((half_w, 34))),
         COLOR_SURFACE_OVERLAY,
     ));
 }
@@ -2293,7 +2305,7 @@ fn render_quick_settings_text(
 
     if let Some(el) = text_cache.render_label(
         renderer,
-        "Quick Settings",
+        "Control Center",
         13.5,
         text_bright,
         Point::from((left_x, py + 12)),
@@ -2320,17 +2332,17 @@ fn render_quick_settings_text(
         "Network",
         11.5,
         text_bright,
-        Point::from((left_x + 24, py + 69)),
+        Point::from((left_x + 46, py + 64)),
     ) {
         elements.push(el);
     }
-    let net_sub = truncate_ascii(qs.network_label, 17);
+    let net_sub = truncate_ascii(qs.network_label, 13);
     if let Some(el) = text_cache.render_label(
         renderer,
         &net_sub,
-        10.5,
+        10.0,
         text_muted,
-        Point::from((left_x + 10, py + 92)),
+        Point::from((left_x + 46, py + 86)),
     ) {
         elements.push(el);
     }
@@ -2341,7 +2353,7 @@ fn render_quick_settings_text(
         "Power",
         11.5,
         text_bright,
-        Point::from((right_x + 24, py + 69)),
+        Point::from((right_x + 46, py + 64)),
     ) {
         elements.push(el);
     }
@@ -2357,30 +2369,30 @@ fn render_quick_settings_text(
     if let Some(el) = text_cache.render_label(
         renderer,
         &power_sub,
-        10.5,
+        10.0,
         text_muted,
-        Point::from((right_x + 10, py + 92)),
+        Point::from((right_x + 46, py + 86)),
     ) {
         elements.push(el);
     }
 
     // Audio row
     let vol_title = if qs.audio_muted {
-        format!("Audio: Muted ({}%)", qs.volume_percent)
+        format!("Sound: Muted ({}%)", qs.volume_percent)
     } else {
-        format!("Audio: {}%", qs.volume_percent)
+        format!("Sound: {}%", qs.volume_percent)
     };
     if let Some(el) = text_cache.render_label(
         renderer,
         &vol_title,
         11.5,
         text_bright,
-        Point::from((left_x + 12, py + 139)),
+        Point::from((left_x + 12, py + 133)),
     ) {
         elements.push(el);
     }
 
-    let btn_y = py + 136;
+    let btn_y = py + 128;
     let mute_x = px + pw - pad - 116;
     let minus_x = px + pw - pad - 62;
     let plus_x = px + pw - pad - 30;
@@ -2388,7 +2400,7 @@ fn render_quick_settings_text(
     if let Some(el) = text_cache.render_label_centered(
         renderer,
         mute_label,
-        10.5,
+        10.0,
         text_bright,
         Rectangle::new(Point::from((mute_x, btn_y)), Size::from((48, 22))),
     ) {
@@ -2413,7 +2425,7 @@ fn render_quick_settings_text(
         elements.push(el);
     }
 
-    // Quick toggle labels (2x2 grid)
+    // Quick toggle labels (2 columns, 3 rows)
     let layout_text = if qs.layout_mode == "master-stack" {
         "Layout: Tile"
     } else {
@@ -2424,7 +2436,7 @@ fn render_quick_settings_text(
         layout_text,
         11.0,
         text_bright,
-        Rectangle::new(Point::from((left_x, py + 202)), Size::from((half_w, 32))),
+        Rectangle::new(Point::from((left_x, py + 196)), Size::from((half_w, 34))),
     ) {
         elements.push(el);
     }
@@ -2438,7 +2450,7 @@ fn render_quick_settings_text(
         motion_text,
         11.0,
         text_bright,
-        Rectangle::new(Point::from((right_x, py + 202)), Size::from((half_w, 32))),
+        Rectangle::new(Point::from((right_x, py + 196)), Size::from((half_w, 34))),
     ) {
         elements.push(el);
     }
@@ -2447,7 +2459,7 @@ fn render_quick_settings_text(
         "Open Spotlight",
         11.0,
         text_bright,
-        Rectangle::new(Point::from((left_x, py + 242)), Size::from((half_w, 32))),
+        Rectangle::new(Point::from((left_x, py + 238)), Size::from((half_w, 34))),
     ) {
         elements.push(el);
     }
@@ -2456,7 +2468,7 @@ fn render_quick_settings_text(
         "Refresh Metrics",
         11.0,
         text_bright,
-        Rectangle::new(Point::from((right_x, py + 242)), Size::from((half_w, 32))),
+        Rectangle::new(Point::from((right_x, py + 238)), Size::from((half_w, 34))),
     ) {
         elements.push(el);
     }
@@ -2470,7 +2482,7 @@ fn render_quick_settings_text(
         } else {
             text_muted
         },
-        Rectangle::new(Point::from((left_x, py + 282)), Size::from((half_w, 32))),
+        Rectangle::new(Point::from((left_x, py + 280)), Size::from((half_w, 34))),
     ) {
         elements.push(el);
     }
@@ -2479,7 +2491,7 @@ fn render_quick_settings_text(
         "Lock Session",
         11.0,
         text_bright,
-        Rectangle::new(Point::from((right_x, py + 282)), Size::from((half_w, 32))),
+        Rectangle::new(Point::from((right_x, py + 280)), Size::from((half_w, 34))),
     ) {
         elements.push(el);
     }
@@ -2987,56 +2999,96 @@ pub fn generate_shell_composite_elements(
             let left_x = px + pad;
             let right_x = px + pad + half_w + 8;
 
-            // Circular network & power dots
+            // 1. Primary round toggle buttons & status glyphs inside top cards
+            let net_circle_fill = if qs.net_connected {
+                RGBA_ACCENT
+            } else {
+                RGBA_SURFACE
+            };
+            let net_circle_border = Some(if qs.net_connected {
+                RGBA_BORDER_HIGHLIGHT
+            } else {
+                RGBA_BORDER
+            });
+            if let Some(el) = shape_cache.circle_element(
+                renderer,
+                30,
+                net_circle_fill,
+                net_circle_border,
+                Point::from((left_x + 8, py + 70)),
+            ) {
+                out.push(CompositorRenderElement::Memory(el));
+            }
             if let Some(el) = shape_cache.circle_element(
                 renderer,
                 8,
                 if qs.net_connected {
-                    RGBA_SUCCESS
+                    [255, 255, 255, 255]
                 } else {
                     RGBA_DANGER
                 },
                 None,
-                Point::from((left_x + 10, py + 72)),
+                Point::from((left_x + 19, py + 81)),
+            ) {
+                out.push(CompositorRenderElement::Memory(el));
+            }
+
+            let power_fill = if qs.ac_online {
+                RGBA_SUCCESS
+            } else if qs.battery_percent > 20 {
+                RGBA_ACCENT_MUTED
+            } else {
+                RGBA_WARNING
+            };
+            if let Some(el) = shape_cache.circle_element(
+                renderer,
+                30,
+                power_fill,
+                Some(RGBA_BORDER_HIGHLIGHT),
+                Point::from((right_x + 8, py + 70)),
             ) {
                 out.push(CompositorRenderElement::Memory(el));
             }
             if let Some(el) = shape_cache.circle_element(
                 renderer,
                 8,
-                if qs.ac_online || qs.battery_percent > 20 {
-                    RGBA_SUCCESS
-                } else {
-                    RGBA_WARNING
-                },
+                [255, 255, 255, 255],
                 None,
-                Point::from((right_x + 10, py + 72)),
+                Point::from((right_x + 19, py + 81)),
             ) {
                 out.push(CompositorRenderElement::Memory(el));
             }
 
-            // Rounded Network & Power cards
-            push_rounded_glass_box(
-                &mut out,
-                shape_cache,
-                renderer,
-                Rectangle::new(Point::from((left_x, py + 62)), Size::from((half_w, 56))),
-                8,
-                RGBA_SURFACE_OVERLAY,
-                Some(RGBA_BORDER),
-            );
-            push_rounded_glass_box(
-                &mut out,
-                shape_cache,
-                renderer,
-                Rectangle::new(Point::from((right_x, py + 62)), Size::from((half_w, 56))),
-                8,
-                RGBA_SURFACE_OVERLAY,
-                Some(RGBA_BORDER),
-            );
+            // Leading speaker glyph inside audio slider
+            let track_w = inner_w - 24;
+            let track_x = left_x + 12;
+            let track_y = py + 158;
+            let fill_w = (track_w * i32::from(qs.volume_percent.min(100))) / 100;
+            let speaker_col = if fill_w > 24 {
+                COLOR_SURFACE
+            } else {
+                COLOR_MUTED
+            };
+            out.push(CompositorRenderElement::Solid(make_solid_element(
+                Rectangle::new(Point::from((track_x + 8, track_y + 6)), Size::from((3, 6))),
+                speaker_col,
+            )));
+            out.push(CompositorRenderElement::Solid(make_solid_element(
+                Rectangle::new(
+                    Point::from((track_x + 11, track_y + 4)),
+                    Size::from((3, 10)),
+                ),
+                speaker_col,
+            )));
+            if qs.audio_muted {
+                out.push(CompositorRenderElement::Solid(make_solid_element(
+                    Rectangle::new(Point::from((track_x + 7, track_y + 4)), Size::from((8, 1))),
+                    COLOR_DANGER,
+                )));
+            }
 
-            // Audio slider buttons & progress track
-            let btn_y = py + 136;
+            // Audio control pill buttons
+            let btn_y = py + 128;
             let mute_x = px + pw - pad - 116;
             let minus_x = px + pw - pad - 62;
             let plus_x = px + pw - pad - 30;
@@ -3045,95 +3097,128 @@ pub fn generate_shell_composite_elements(
                 shape_cache,
                 renderer,
                 Rectangle::new(Point::from((mute_x, btn_y)), Size::from((48, 22))),
-                6,
+                11,
                 if qs.audio_muted {
                     RGBA_DANGER
                 } else {
                     RGBA_SURFACE
                 },
-                None,
+                Some(RGBA_BORDER),
             );
             push_rounded_glass_box(
                 &mut out,
                 shape_cache,
                 renderer,
                 Rectangle::new(Point::from((minus_x, btn_y)), Size::from((28, 22))),
-                6,
+                11,
                 RGBA_SURFACE,
-                None,
+                Some(RGBA_BORDER),
             );
             push_rounded_glass_box(
                 &mut out,
                 shape_cache,
                 renderer,
                 Rectangle::new(Point::from((plus_x, btn_y)), Size::from((28, 22))),
-                6,
+                11,
                 RGBA_SURFACE,
-                None,
+                Some(RGBA_BORDER),
             );
 
-            let track_w = inner_w - 24;
-            let track_x = left_x + 12;
-            let track_y = py + 170;
-            let fill_w = (track_w * i32::from(qs.volume_percent.min(100))) / 100;
+            // Capsule slider fill & track (DESIGN.md §12.4)
             if fill_w > 0 {
-                out.push(CompositorRenderElement::Solid(make_solid_element(
-                    Rectangle::new(Point::from((track_x, track_y)), Size::from((fill_w, 8))),
+                push_rounded_glass_box(
+                    &mut out,
+                    shape_cache,
+                    renderer,
+                    Rectangle::new(Point::from((track_x, track_y)), Size::from((fill_w, 18))),
+                    fill_w.min(9),
                     if qs.audio_muted {
-                        COLOR_SUBTLE
+                        RGBA_SUBTLE
                     } else {
-                        COLOR_ACCENT
+                        RGBA_ACCENT
                     },
-                )));
+                    None,
+                );
             }
-            out.push(CompositorRenderElement::Solid(make_solid_element(
-                Rectangle::new(Point::from((track_x, track_y)), Size::from((track_w, 8))),
-                COLOR_SURFACE,
-            )));
             push_rounded_glass_box(
                 &mut out,
                 shape_cache,
                 renderer,
-                Rectangle::new(Point::from((left_x, py + 128)), Size::from((inner_w, 64))),
-                8,
+                Rectangle::new(Point::from((track_x, track_y)), Size::from((track_w, 18))),
+                9,
+                RGBA_SURFACE,
+                Some(RGBA_BORDER),
+            );
+
+            // Sound card
+            push_rounded_glass_box(
+                &mut out,
+                shape_cache,
+                renderer,
+                Rectangle::new(Point::from((left_x, py + 122)), Size::from((inner_w, 66))),
+                16,
                 RGBA_SURFACE_OVERLAY,
                 Some(RGBA_BORDER),
             );
 
-            // 2x2 rounded toggle buttons
+            // Network & Power cards
+            push_rounded_glass_box(
+                &mut out,
+                shape_cache,
+                renderer,
+                Rectangle::new(Point::from((left_x, py + 56)), Size::from((half_w, 58))),
+                16,
+                RGBA_SURFACE_OVERLAY,
+                Some(RGBA_BORDER),
+            );
+            push_rounded_glass_box(
+                &mut out,
+                shape_cache,
+                renderer,
+                Rectangle::new(Point::from((right_x, py + 56)), Size::from((half_w, 58))),
+                16,
+                RGBA_SURFACE_OVERLAY,
+                Some(RGBA_BORDER),
+            );
+
+            // Quick Action toggles (2 columns, 3 rows)
             let is_tile = qs.layout_mode == "master-stack";
             push_rounded_glass_box(
                 &mut out,
                 shape_cache,
                 renderer,
-                Rectangle::new(Point::from((left_x, py + 202)), Size::from((half_w, 32))),
-                8,
+                Rectangle::new(Point::from((left_x, py + 196)), Size::from((half_w, 34))),
+                14,
                 if is_tile {
                     RGBA_ACCENT_MUTED
                 } else {
                     RGBA_SURFACE_OVERLAY
                 },
-                Some(RGBA_BORDER),
+                Some(if is_tile { RGBA_ACCENT } else { RGBA_BORDER }),
             );
             push_rounded_glass_box(
                 &mut out,
                 shape_cache,
                 renderer,
-                Rectangle::new(Point::from((right_x, py + 202)), Size::from((half_w, 32))),
-                8,
+                Rectangle::new(Point::from((right_x, py + 196)), Size::from((half_w, 34))),
+                14,
                 if qs.reduced_motion {
                     RGBA_ACCENT_MUTED
                 } else {
                     RGBA_SURFACE_OVERLAY
                 },
-                Some(RGBA_BORDER),
+                Some(if qs.reduced_motion {
+                    RGBA_ACCENT
+                } else {
+                    RGBA_BORDER
+                }),
             );
             push_rounded_glass_box(
                 &mut out,
                 shape_cache,
                 renderer,
-                Rectangle::new(Point::from((left_x, py + 242)), Size::from((half_w, 32))),
-                8,
+                Rectangle::new(Point::from((left_x, py + 238)), Size::from((half_w, 34))),
+                14,
                 RGBA_SURFACE_OVERLAY,
                 Some(RGBA_BORDER),
             );
@@ -3141,50 +3226,53 @@ pub fn generate_shell_composite_elements(
                 &mut out,
                 shape_cache,
                 renderer,
-                Rectangle::new(Point::from((right_x, py + 242)), Size::from((half_w, 32))),
-                8,
+                Rectangle::new(Point::from((right_x, py + 238)), Size::from((half_w, 34))),
+                14,
                 RGBA_SURFACE_OVERLAY,
                 Some(RGBA_BORDER),
             );
+            let bt_active = qs.bt_available && qs.bt_powered;
             push_rounded_glass_box(
                 &mut out,
                 shape_cache,
                 renderer,
-                Rectangle::new(Point::from((left_x, py + 282)), Size::from((half_w, 32))),
-                8,
-                if qs.bt_available && qs.bt_powered {
+                Rectangle::new(Point::from((left_x, py + 280)), Size::from((half_w, 34))),
+                14,
+                if bt_active {
                     RGBA_ACCENT_MUTED
                 } else {
                     RGBA_SURFACE_OVERLAY
                 },
-                Some(RGBA_BORDER),
+                Some(if bt_active { RGBA_ACCENT } else { RGBA_BORDER }),
             );
             push_rounded_glass_box(
                 &mut out,
                 shape_cache,
                 renderer,
-                Rectangle::new(Point::from((right_x, py + 282)), Size::from((half_w, 32))),
-                8,
+                Rectangle::new(Point::from((right_x, py + 280)), Size::from((half_w, 34))),
+                14,
                 RGBA_SURFACE_OVERLAY,
                 Some(RGBA_BORDER),
             );
 
+            // Hairline separator
             out.push(CompositorRenderElement::Solid(make_solid_element(
-                Rectangle::new(Point::from((left_x, py + 52)), Size::from((inner_w, 1))),
+                Rectangle::new(Point::from((left_x, py + 50)), Size::from((inner_w, 1))),
                 COLOR_BORDER,
             )));
 
+            // Outer glass popover (radius: 20, soft drop shadow)
             let qs_rect = Rectangle::new(Point::from((px, py)), Size::from((pw, ph)));
             push_rounded_glass_box(
                 &mut out,
                 shape_cache,
                 renderer,
                 qs_rect,
-                12,
+                20,
                 RGBA_SURFACE_ELEVATED,
                 Some(RGBA_BORDER_HIGHLIGHT),
             );
-            push_soft_shadow(&mut out, shape_cache, renderer, qs_rect, 12, 16, 105);
+            push_soft_shadow(&mut out, shape_cache, renderer, qs_rect, 20, 24, 110);
         }
         ShellOverlayView::Switcher(sw) => {
             let (panel_rect, cards) = switcher_layout(screen_size, sw.cards.len());
