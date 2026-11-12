@@ -170,6 +170,16 @@ hardware/software context и низкие накладные расходы.
 - **Acceptance criteria:** Элементы интерфейса не сливаются с темным фоном; TopBar и Dock четко выделены контрастными рамками и подложками; активные воркспейсы и окна имеют яркую неоновую индикацию; все 28 юнит-тестов проходят; clippy и rustfmt проходят без ошибок.
 - **Risks:** Нулевые (локальное обновление визуальных констант и геометрии элементов оверлея).
 
+## RUSTYOS-016 --- Wayland Layer-Shell Protocol (`zwlr_layer_shell_v1`)
+
+**Статус:** done **Фаза:** 12 (Product Evolution)
+
+- **Цель:** Реализовать поддержку протокола `zwlr_layer_shell_v1` в композиторе для независимых панелей, дока, оверлеев и автоматического расчёта эксклюзивной рабочей зоны.
+- **Scope:** Крейт `crates/rusty-compositor`: глобал `WlrLayerShellState`, реализация трейта `WlrLayerShellHandler`, макрос `delegate_layer_shell!`, маппинг `LayerMap` на выход (`Output`), обработка коммитов и начального конфигурирования layer surface, динамический пересчёт `non_exclusive_zone` и синхронизация рабочего пространства окон с `WindowManager`, поддержка правильного порядка слоёв (`Overlay`, `Top`, `Bottom`, `Background`) в `target_surface_under` для фокуса мыши, fallback на встроенные оверлеи при отсутствии внешних клиентов layer-shell.
+- **Dependencies:** `RUSTYOS-012`, `RUSTYOS-015`.
+- **Acceptance criteria:** Глобал `zwlr_layer_shell_v1` регистрируется на Wayland display; клиенты layer-shell успешно маппятся на `LayerMap`; рабочая область окон динамически адаптируется под exclusive zone; юнит-тесты и clippy проходят.
+- **Risks:** Коллизия событий ввода между окнами и панелями (решено строгой иерархией слоёв в `target_surface_under`).
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

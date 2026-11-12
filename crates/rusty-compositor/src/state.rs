@@ -9,9 +9,12 @@ use rusty_ipc::{CompositorEvent, DesktopStateSnapshot, ShellRequest, WindowSumma
 use rusty_wm::{LayoutMode, OutputId, Rect, WindowId, WindowManager, WmAction, WorkspaceId};
 use smithay::{
     backend::renderer::utils::on_commit_buffer_handler,
-    delegate_compositor, delegate_data_device, delegate_output, delegate_seat, delegate_shm,
-    delegate_xdg_shell,
-    desktop::{PopupManager, Space, Window, WindowSurfaceType},
+    delegate_compositor, delegate_data_device, delegate_layer_shell, delegate_output,
+    delegate_seat, delegate_shm, delegate_xdg_shell,
+    desktop::{
+        LayerSurface as DesktopLayerSurface, PopupManager, Space, Window, WindowSurfaceType,
+        layer_map_for_output,
+    },
     input::{
         Seat, SeatHandler, SeatState,
         keyboard::{KeyboardHandle, XkbConfig},
@@ -24,13 +27,13 @@ use smithay::{
         wayland_server::{
             Client, Display, DisplayHandle,
             backend::{ClientData, ClientId, DisconnectReason},
-            protocol::{wl_buffer, wl_seat, wl_surface::WlSurface},
+            protocol::{wl_buffer, wl_output::WlOutput, wl_seat, wl_surface::WlSurface},
         },
     },
     utils::{IsAlive, Logical, Point, Serial, Size, Transform},
     wayland::{
         buffer::BufferHandler,
-        compositor::{CompositorClientState, CompositorHandler, CompositorState},
+        compositor::{self, CompositorClientState, CompositorHandler, CompositorState},
         output::{OutputHandler, OutputManagerState},
         selection::{
             SelectionHandler,
@@ -38,8 +41,12 @@ use smithay::{
                 ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler,
             },
         },
-        shell::xdg::{
-            PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
+        shell::{
+            wlr_layer::{
+                Layer, LayerSurface as WlrLayerSurface, LayerSurfaceData, WlrLayerShellHandler,
+                WlrLayerShellState,
+            },
+            xdg::{PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState},
         },
         shm::{ShmHandler, ShmState},
     },
@@ -98,6 +105,8 @@ pub struct RustyCompositorState {
     pub compositor_state: CompositorState,
     /// `xdg_wm_base` shell protocol state.
     pub xdg_shell_state: XdgShellState,
+    /// `zwlr_layer_shell_v1` desktop panel/dock shell protocol state (`RUSTYOS-016`).
+    pub wlr_layer_shell_state: WlrLayerShellState,
     /// `wl_shm` shared-memory buffer state.
     pub shm_state: ShmState,
     /// `wl_output` and `xdg_output` manager state.
@@ -143,6 +152,7 @@ impl RustyCompositorState {
 
         let compositor_state = CompositorState::new::<Self>(&display_handle);
         let xdg_shell_state = XdgShellState::new::<Self>(&display_handle);
+        let wlr_layer_shell_state = WlrLayerShellState::new::<Self>(&display_handle);
         let shm_state = ShmState::new::<Self>(&display_handle, Vec::new());
         let output_manager_state = OutputManagerState::new_with_xdg_output::<Self>(&display_handle);
         let data_device_state = DataDeviceState::new::<Self>(&display_handle);
@@ -197,6 +207,7 @@ impl RustyCompositorState {
             output,
             compositor_state,
             xdg_shell_state,
+            wlr_layer_shell_state,
             shm_state,
             output_manager_state,
             seat_state,
@@ -240,6 +251,51 @@ impl RustyCompositorState {
             window.surface_under(relative_point, WindowSurfaceType::ALL)?;
         let surface_origin = (window_loc + surface_offset).to_f64();
         Some((window.clone(), surface, surface_origin))
+    }
+
+    /// Finds the topmost surface (layer shell or window) under the given logical point,
+    /// respecting Wayland layer-shell stacking order (Overlay -> Top -> Windows -> Bottom -> Background).
+    #[must_use]
+    pub fn target_surface_under(
+        &self,
+        point: Point<f64, Logical>,
+    ) -> Option<(Option<Window>, WlSurface, Point<f64, Logical>)> {
+        let layer_map = layer_map_for_output(&self.output);
+
+        // 1. Overlay & Top layers
+        for layer in layer_map.layers().rev() {
+            if matches!(layer.layer(), Layer::Overlay | Layer::Top)
+                && let Some(geo) = layer_map.layer_geometry(layer)
+                && geo.to_f64().contains(point)
+            {
+                let rel = point - geo.loc.to_f64();
+                if let Some((surf, offset)) = layer.surface_under(rel, WindowSurfaceType::ALL) {
+                    let origin = (geo.loc + offset).to_f64();
+                    return Some((None, surf, origin));
+                }
+            }
+        }
+
+        // 2. Windows in desktop space
+        if let Some((window, surface, origin)) = self.surface_under_pointer(point) {
+            return Some((Some(window), surface, origin));
+        }
+
+        // 3. Bottom & Background layers
+        for layer in layer_map.layers().rev() {
+            if matches!(layer.layer(), Layer::Bottom | Layer::Background)
+                && let Some(geo) = layer_map.layer_geometry(layer)
+                && geo.to_f64().contains(point)
+            {
+                let rel = point - geo.loc.to_f64();
+                if let Some((surf, offset)) = layer.surface_under(rel, WindowSurfaceType::ALL) {
+                    let origin = (geo.loc + offset).to_f64();
+                    return Some((None, surf, origin));
+                }
+            }
+        }
+
+        None
     }
 
     /// Looks up the [`WindowId`] associated with a Smithay [`Window`].
@@ -548,6 +604,45 @@ impl CompositorHandler for RustyCompositorState {
             window.on_commit();
         }
 
+        // Handle zwlr_layer_surface_v1 commits and arrange
+        let layer_work_area = {
+            let mut layer_map = layer_map_for_output(&self.output);
+            if let Some(layer) = layer_map
+                .layer_for_surface(surface, WindowSurfaceType::ALL)
+                .cloned()
+            {
+                let initial_configure_sent = compositor::with_states(surface, |states| {
+                    states
+                        .data_map
+                        .get::<LayerSurfaceData>()
+                        .map(|data| data.lock().is_ok_and(|d| d.initial_configure_sent))
+                })
+                .unwrap_or_default();
+
+                if !initial_configure_sent {
+                    layer.layer_surface().send_configure();
+                }
+
+                layer_map.arrange();
+                let non_exclusive = layer_map.non_exclusive_zone();
+                Some(Rect::new(
+                    non_exclusive.loc.x,
+                    non_exclusive.loc.y,
+                    non_exclusive.size.w,
+                    non_exclusive.size.h,
+                ))
+            } else {
+                None
+            }
+        };
+
+        if let Some(wm_rect) = layer_work_area {
+            self.wm.upsert_output(OutputId(1), wm_rect);
+            let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+            self.sync_space_with_wm(serial);
+            return;
+        }
+
         self.popups.commit(surface);
     }
 }
@@ -646,9 +741,55 @@ impl XdgShellHandler for RustyCompositorState {
     }
 }
 
+impl WlrLayerShellHandler for RustyCompositorState {
+    fn shell_state(&mut self) -> &mut WlrLayerShellState {
+        &mut self.wlr_layer_shell_state
+    }
+
+    fn new_layer_surface(
+        &mut self,
+        surface: WlrLayerSurface,
+        output: Option<WlOutput>,
+        _layer: Layer,
+        namespace: String,
+    ) {
+        let output = output
+            .as_ref()
+            .and_then(Output::from_resource)
+            .unwrap_or_else(|| self.output.clone());
+
+        let mut layer_map = layer_map_for_output(&output);
+        let desktop_layer = DesktopLayerSurface::new(surface, namespace.clone());
+        if let Err(err) = layer_map.map_layer(&desktop_layer) {
+            warn!(error = ?err, namespace = %namespace, "Failed to map layer surface to output");
+        } else {
+            info!(
+                namespace = %namespace,
+                output = output.name(),
+                "Mapped new zwlr_layer_surface_v1 layer to output"
+            );
+        }
+    }
+
+    fn layer_destroyed(&mut self, surface: WlrLayerSurface) {
+        let mut layer_map = layer_map_for_output(&self.output);
+        let target_layer = layer_map
+            .layers()
+            .find(|l| l.layer_surface() == &surface)
+            .cloned();
+
+        if let Some(layer) = target_layer {
+            layer_map.unmap_layer(&layer);
+            layer_map.arrange();
+            info!(namespace = %layer.namespace(), "Unmapped destroyed layer surface");
+        }
+    }
+}
+
 delegate_compositor!(RustyCompositorState);
 delegate_shm!(RustyCompositorState);
 delegate_output!(RustyCompositorState);
 delegate_seat!(RustyCompositorState);
 delegate_data_device!(RustyCompositorState);
 delegate_xdg_shell!(RustyCompositorState);
+delegate_layer_shell!(RustyCompositorState);

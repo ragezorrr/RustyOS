@@ -47,7 +47,7 @@ impl RustyCompositorState {
 
         let serial = SERIAL_COUNTER.next_serial();
         let under = self
-            .surface_under_pointer(pos)
+            .target_surface_under(pos)
             .map(|(_win, surface, origin)| (surface, origin));
 
         let pointer = self.pointer.clone();
@@ -122,7 +122,7 @@ impl RustyCompositorState {
         let serial = SERIAL_COUNTER.next_serial();
         let time = Event::time_msec(event);
         let under = self
-            .surface_under_pointer(pos)
+            .target_surface_under(pos)
             .map(|(_win, surface, origin)| (surface, origin));
 
         let pointer = self.pointer.clone();
@@ -154,10 +154,12 @@ impl RustyCompositorState {
                 return;
             }
 
-            if let Some((window, _surface, _origin)) =
-                self.surface_under_pointer(self.pointer_location)
+            if let Some((win_opt, _surface, _origin)) =
+                self.target_surface_under(self.pointer_location)
             {
-                if let Some(win_id) = self.window_id_for_smithay(&window) {
+                if let Some(window) = win_opt
+                    && let Some(win_id) = self.window_id_for_smithay(&window)
+                {
                     self.wm.focus_and_raise(win_id);
                     self.sync_space_with_wm(serial);
                 }

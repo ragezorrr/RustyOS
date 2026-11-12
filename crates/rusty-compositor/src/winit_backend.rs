@@ -291,13 +291,18 @@ fn render_winit_frame(
         };
         let window_count = state.wm.visible_windows().len();
         let has_focused = state.wm.focused_window().is_some();
-        let shell_elements = crate::shell_render::generate_shell_render_elements(
-            size,
-            active_ws,
-            layout_str,
-            window_count,
-            has_focused,
-        );
+        let has_layer_surfaces = smithay::desktop::layer_map_for_output(&state.output).len() > 0;
+        let shell_elements = if has_layer_surfaces {
+            Vec::new()
+        } else {
+            crate::shell_render::generate_shell_render_elements(
+                size,
+                active_ws,
+                layout_str,
+                window_count,
+                has_focused,
+            )
+        };
 
         let render_result =
             render_output::<GlesRenderer, SolidColorRenderElement, smithay::desktop::Window, _>(

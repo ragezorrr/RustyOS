@@ -358,4 +358,24 @@ mod tests {
         assert!(!compositor.running);
         Ok(())
     }
+
+    #[test]
+    fn layer_shell_global_is_registered_and_layer_map_configured() -> Result<(), Box<dyn Error>> {
+        let event_loop: EventLoop<'static, state::RustyCompositorState> = EventLoop::try_new()?;
+        let display: Display<state::RustyCompositorState> = Display::new()?;
+
+        let compositor = state::RustyCompositorState::new(
+            &display,
+            "wayland-layer-test-0".to_owned(),
+            event_loop.get_signal(),
+            (1920, 1080).into(),
+        )?;
+
+        // Verify layer shell global exists and layer map on output is initialized
+        let _layer_global = compositor.wlr_layer_shell_state.shell_global();
+        let layer_map = smithay::desktop::layer_map_for_output(&compositor.output);
+        assert_eq!(layer_map.len(), 0);
+
+        Ok(())
+    }
 }
