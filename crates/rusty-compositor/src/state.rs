@@ -338,7 +338,7 @@ impl RustyCompositorState {
         let keyboard = Self::init_seat_keyboard(&mut seat, &user_config)?;
         let pointer = seat.add_pointer();
 
-        let output = Self::create_initial_output(&display_handle, initial_size);
+        let (output, primary_global) = Self::create_initial_output(&display_handle, initial_size);
 
         let mut space = Space::default();
         space.map_output(&output, (0, 0));
@@ -348,7 +348,7 @@ impl RustyCompositorState {
         let mut wm = WindowManager::new(work_area);
         wm.upsert_output_with_full_area(PRIMARY_OUTPUT_ID, work_area, full_area);
 
-        let primary_entry = crate::outputs::OutputEntry::new(
+        let mut primary_entry = crate::outputs::OutputEntry::new(
             PRIMARY_OUTPUT_ID,
             "winit-0",
             output.clone(),
@@ -358,6 +358,7 @@ impl RustyCompositorState {
             60_000,
             true,
         );
+        primary_entry.global_id = Some(primary_global);
         let output_map = crate::outputs::OutputMap::new(primary_entry);
 
         let mut state = Self {
@@ -437,7 +438,10 @@ impl RustyCompositorState {
     fn create_initial_output(
         display_handle: &DisplayHandle,
         initial_size: Size<i32, smithay::utils::Physical>,
-    ) -> Output {
+    ) -> (
+        Output,
+        smithay::reexports::wayland_server::backend::GlobalId,
+    ) {
         let output = Output::new(
             "winit-0".to_owned(),
             PhysicalProperties {
@@ -447,7 +451,7 @@ impl RustyCompositorState {
                 model: "Nested Winit Output".to_owned(),
             },
         );
-        let _output_global = output.create_global::<Self>(display_handle);
+        let output_global = output.create_global::<Self>(display_handle);
 
         let mode = Mode {
             size: initial_size,
@@ -460,7 +464,7 @@ impl RustyCompositorState {
             Some((0, 0).into()),
         );
         output.set_preferred(mode);
-        output
+        (output, output_global)
     }
 
     /// Dynamically registers and maps a new display output into the compositor workspace (`RUSTYOS-040`).
@@ -476,7 +480,7 @@ impl RustyCompositorState {
         let name_str = name.into();
         let new_id = self.output_map.next_output_id();
         let output = Output::new(name_str.clone(), physical_props);
-        let _output_global = output.create_global::<Self>(&self.display_handle);
+        let output_global = output.create_global::<Self>(&self.display_handle);
         output.change_current_state(
             Some(mode),
             Some(Transform::Normal),
@@ -499,7 +503,7 @@ impl RustyCompositorState {
         self.wm
             .upsert_output_with_full_area(new_id, work_area, work_area);
 
-        let entry = crate::outputs::OutputEntry::new(
+        let mut entry = crate::outputs::OutputEntry::new(
             new_id,
             name_str,
             output,
@@ -509,6 +513,7 @@ impl RustyCompositorState {
             mode.refresh,
             false,
         );
+        entry.global_id = Some(output_global);
         self.output_map.add(entry);
 
         let serial = smithay::utils::SERIAL_COUNTER.next_serial();
@@ -526,6 +531,9 @@ impl RustyCompositorState {
         };
 
         self.space.unmap_output(&removed.output);
+        if let Some(gid) = removed.global_id {
+            self.display_handle.remove_global::<Self>(gid);
+        }
         self.wm.remove_output(id);
 
         if removed.is_primary {
@@ -586,27 +594,37 @@ impl RustyCompositorState {
         self.wm.window(win_id).is_some_and(|w| w.fullscreen)
     }
 
-    /// Returns the topmost unminimized fullscreen window on the active workspace if no modal
+    /// Returns the topmost unminimized fullscreen window on the primary output if no modal
     /// shell overlay currently occludes it (`RUSTYOS-041`).
     #[must_use]
     pub fn active_unoccluded_fullscreen_window(&self) -> Option<WindowId> {
-        let overlay_active = self.screen_locked
-            || self.launcher_active
-            || self.quick_settings_active
-            || self.overview_active
-            || self.window_switcher.is_some()
-            || self.osd.is_some()
-            || !self.notifications.is_empty()
-            || self.lock_screen_anim.current() > 0.01
-            || self.launcher_anim.current() > 0.01
-            || self.quick_settings_anim.current() > 0.01
-            || self.overview_anim.current() > 0.01;
-        if overlay_active {
+        self.active_unoccluded_fullscreen_window_on(self.output_map.primary().id)
+    }
+
+    /// Returns the topmost unminimized fullscreen window on `output_id` if no active overlay
+    /// occludes that display (`RUSTYOS-042`).
+    #[must_use]
+    pub fn active_unoccluded_fullscreen_window_on(&self, output_id: OutputId) -> Option<WindowId> {
+        if self.screen_locked || self.lock_screen_anim.current() > 0.01 {
             return None;
+        }
+        if output_id == self.output_map.primary().id {
+            let overlay_active = self.launcher_active
+                || self.quick_settings_active
+                || self.overview_active
+                || self.window_switcher.is_some()
+                || self.osd.is_some()
+                || !self.notifications.is_empty()
+                || self.launcher_anim.current() > 0.01
+                || self.quick_settings_anim.current() > 0.01
+                || self.overview_anim.current() > 0.01;
+            if overlay_active {
+                return None;
+            }
         }
 
         self.wm
-            .visible_windows()
+            .visible_windows_for_output(output_id)
             .into_iter()
             .rev()
             .find(|w| !self.is_window_minimized(w.id))

@@ -13,7 +13,7 @@
 //!    capability probing when invoked inside an active graphical session where DRM Master is held.
 
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::fs::{self, File};
 use std::os::unix::io::OwnedFd;
@@ -25,12 +25,12 @@ use rusty_ipc::{IpcServer, default_ipc_socket_path};
 use smithay::{
     backend::{
         allocator::{
-            Allocator, Fourcc, Modifier,
+            Allocator, Format, Fourcc, Modifier,
             dmabuf::{Dmabuf, DmabufAllocator},
             gbm::{GbmAllocator, GbmBufferFlags, GbmDevice},
         },
         drm::{
-            DrmDevice, DrmDeviceFd, DrmEvent, DrmNode, NodeType,
+            DrmDevice, DrmDeviceFd, DrmEvent, DrmNode, DrmSurface, NodeType, VrrSupport,
             compositor::{DrmCompositor, FrameFlags, PrimaryPlaneElement},
             exporter::gbm::GbmFramebufferExporter,
         },
@@ -40,7 +40,7 @@ use smithay::{
             Bind, Color32F, Frame, ImportDma, Renderer, gles::GlesRenderer, sync::SyncPoint,
         },
         session::{Event as SessionEvent, Session, libseat::LibSeatSession},
-        udev::UdevBackend,
+        udev::{UdevBackend, UdevEvent},
     },
     output::{Mode as OutputMode, Scale},
     reexports::{
@@ -237,79 +237,271 @@ enum SessionStartOutcome {
 }
 
 #[allow(clippy::struct_excessive_bools)]
-struct DrmRuntime {
-    drm_device: DrmDevice,
-    libinput: Libinput,
-    renderer: GlesRenderer,
+struct DrmOutputState {
+    output_id: rusty_wm::OutputId,
+    connector: connector::Handle,
+    connector_name: String,
     drm_compositor: RustyDrmCompositor,
-    text_cache: crate::text::TextCache,
-    shape_cache: crate::surfaces::UiShapeCache,
     pixel_size: Size<i32, Physical>,
     total_output_pixels: u64,
-    paused: bool,
+    vrefresh: u32,
+    vrr_support: VrrSupport,
+    vrr_enabled: bool,
     vblank_pending: bool,
     vblank_queued_at: Option<Instant>,
     needs_redraw: bool,
     last_frame_direct_scanout: bool,
     frame_start: Option<Instant>,
+    next_frame_at: Instant,
+}
+
+struct DrmRuntime {
+    drm_device: DrmDevice,
+    primary_node: DrmNode,
+    gbm_device: GbmDevice<DrmDeviceFd>,
+    libinput: Libinput,
+    renderer: GlesRenderer,
+    render_formats: Vec<Format>,
+    cursor_size: Size<u32, smithay::utils::Buffer>,
+    text_cache: crate::text::TextCache,
+    shape_cache: crate::surfaces::UiShapeCache,
+    outputs: HashMap<crtc::Handle, DrmOutputState>,
+    output_order: Vec<crtc::Handle>,
+    paused: bool,
+    pending_hotplug_rescan: bool,
     rendered_frames: u64,
     max_frames: Option<u64>,
 }
 
+/// Evaluates whether runtime VRR should be active for `output_id` given `vrr_mode` (`RUSTYOS-042`).
+#[must_use]
+pub(crate) fn want_vrr_for_output(
+    vrr_mode: crate::config::VrrMode,
+    state: &RustyCompositorState,
+    output_id: rusty_wm::OutputId,
+) -> bool {
+    match vrr_mode {
+        crate::config::VrrMode::Off => false,
+        crate::config::VrrMode::Fullscreen => state
+            .active_unoccluded_fullscreen_window_on(output_id)
+            .is_some(),
+        crate::config::VrrMode::Always => true,
+    }
+}
+
+struct DrmOutputContext<'a> {
+    primary_node: DrmNode,
+    gbm_device: &'a GbmDevice<DrmDeviceFd>,
+    render_formats: &'a [Format],
+    cursor_size: Size<u32, smithay::utils::Buffer>,
+}
+
+fn build_drm_output_state(
+    ctx: &DrmOutputContext<'_>,
+    setup: &PrimaryConnectorSetup,
+    smithay_output: &smithay::output::Output,
+    output_id: rusty_wm::OutputId,
+    drm_surface: DrmSurface,
+) -> Result<DrmOutputState, CompositorError> {
+    let gbm_allocator = GbmAllocator::new(
+        ctx.gbm_device.clone(),
+        GbmBufferFlags::RENDERING | GbmBufferFlags::SCANOUT,
+    );
+    let gbm_exporter = GbmFramebufferExporter::new(ctx.gbm_device.clone(), Some(ctx.primary_node));
+    let drm_compositor = DrmCompositor::new(
+        smithay_output,
+        drm_surface,
+        None,
+        gbm_allocator,
+        gbm_exporter,
+        [Fourcc::Argb8888, Fourcc::Xrgb8888],
+        ctx.render_formats.iter().copied(),
+        ctx.cursor_size,
+        None,
+    )
+    .map_err(|err| CompositorError::BackendInit(format!("DrmCompositor::new failed: {err:?}")))?;
+
+    let vrr_support = drm_compositor
+        .vrr_supported(setup.connector)
+        .unwrap_or(VrrSupport::NotSupported);
+    let total_output_pixels = u64::try_from(setup.pixel_size.w.max(0)).unwrap_or(0)
+        * u64::try_from(setup.pixel_size.h.max(0)).unwrap_or(0);
+    info!(
+        connector = %setup.connector_name,
+        output_id = output_id.0,
+        width = setup.pixel_size.w,
+        height = setup.pixel_size.h,
+        refresh_hz = setup.vrefresh,
+        vrr_support = ?vrr_support,
+        "Initialized KMS DrmCompositor output"
+    );
+
+    Ok(DrmOutputState {
+        output_id,
+        connector: setup.connector,
+        connector_name: setup.connector_name.clone(),
+        drm_compositor,
+        pixel_size: setup.pixel_size,
+        total_output_pixels,
+        vrefresh: setup.vrefresh,
+        vrr_support,
+        vrr_enabled: false,
+        vblank_pending: false,
+        vblank_queued_at: None,
+        needs_redraw: true,
+        last_frame_direct_scanout: false,
+        frame_start: None,
+        next_frame_at: Instant::now(),
+    })
+}
+
+impl DrmOutputState {
+    fn reset_if_vblank_timed_out(&mut self) -> bool {
+        if !self.vblank_pending {
+            return true;
+        }
+        let timed_out = self
+            .vblank_queued_at
+            .is_some_and(|queued| queued.elapsed() >= Duration::from_millis(500));
+        if timed_out {
+            warn!(
+                connector = %self.connector_name,
+                "DRM VBlank watchdog (>500ms); resetting output compositor pipeline"
+            );
+            self.vblank_pending = false;
+            self.vblank_queued_at = None;
+            let _ = self.drm_compositor.clear();
+            let _ = self.drm_compositor.reset_state();
+            self.drm_compositor.reset_buffers();
+            self.drm_compositor.reset_buffer_ages();
+            true
+        } else {
+            self.needs_redraw = true;
+            false
+        }
+    }
+
+    fn apply_runtime_vrr(&mut self, want_vrr: bool) {
+        if self.vrr_support != VrrSupport::Supported || self.vrr_enabled == want_vrr {
+            return;
+        }
+        match self.drm_compositor.use_vrr(want_vrr) {
+            Ok(()) => {
+                info!(
+                    connector = %self.connector_name,
+                    vrr = want_vrr,
+                    "Updated runtime VRR state"
+                );
+                self.vrr_enabled = want_vrr;
+            }
+            Err(err) => {
+                warn!(
+                    connector = %self.connector_name,
+                    error = ?err,
+                    "Failed to toggle runtime VRR; falling back to fixed refresh"
+                );
+                self.vrr_support = VrrSupport::NotSupported;
+                self.vrr_enabled = false;
+            }
+        }
+    }
+}
+
 impl DrmRuntime {
-    fn render_and_queue(&mut self, state: &mut RustyCompositorState) {
+    fn fastest_refresh_interval(&self) -> Duration {
+        let min_us = self
+            .outputs
+            .values()
+            .map(|o| mode_refresh_interval_us(o.vrefresh))
+            .min()
+            .unwrap_or(16_667);
+        Duration::from_micros(min_us)
+    }
+
+    fn mark_all_dirty(&mut self) {
+        for out in self.outputs.values_mut() {
+            out.needs_redraw = true;
+        }
+    }
+
+    fn render_ready_outputs(&mut self, state: &mut RustyCompositorState, force_timer: bool) {
         if !state.running || self.paused {
             return;
         }
-        if self.vblank_pending {
-            let timed_out = self
-                .vblank_queued_at
-                .is_some_and(|queued| queued.elapsed() >= Duration::from_millis(500));
-            if timed_out {
-                warn!("DRM VBlank watchdog (>500ms); resetting compositor pipeline");
-                self.vblank_pending = false;
-                self.vblank_queued_at = None;
-                let _ = self.drm_compositor.clear();
-                let _ = self.drm_compositor.reset_state();
-                self.drm_compositor.reset_buffers();
-                self.drm_compositor.reset_buffer_ages();
-            } else {
-                self.needs_redraw = true;
+        let now = Instant::now();
+        let crtcs = self.output_order.clone();
+        for crtc in crtcs {
+            let should_draw = self
+                .outputs
+                .get(&crtc)
+                .is_some_and(|out| out.needs_redraw || (force_timer && now >= out.next_frame_at));
+            if should_draw {
+                self.render_and_queue_output(crtc, state);
+            }
+        }
+    }
+
+    fn render_and_queue_output(&mut self, crtc: crtc::Handle, state: &mut RustyCompositorState) {
+        if !state.running || self.paused {
+            return;
+        }
+        let want_vrr;
+        let output_id;
+        let pixel_size;
+        let interval;
+        {
+            let Some(out) = self.outputs.get_mut(&crtc) else {
+                return;
+            };
+            if !out.reset_if_vblank_timed_out() {
                 return;
             }
+            output_id = out.output_id;
+            pixel_size = out.pixel_size;
+            interval = Duration::from_micros(mode_refresh_interval_us(out.vrefresh));
+            want_vrr = want_vrr_for_output(state.user_config.vrr_mode, state, output_id);
+            out.apply_runtime_vrr(want_vrr);
         }
 
         let render_start = Instant::now();
         state.tick_animations();
         state.expire_notifications();
 
-        if state.pending_screenshot.is_some() {
-            let snap_list = crate::winit_backend::build_frame_render_list(
+        let is_primary = state.output_map.primary().id == output_id;
+        if is_primary && state.pending_screenshot.is_some() {
+            let snap_list = crate::winit_backend::build_frame_render_list_for_output(
                 &mut self.renderer,
                 &mut self.text_cache,
                 &mut self.shape_cache,
                 state,
-                self.pixel_size,
+                output_id,
+                pixel_size,
                 false,
             );
             crate::winit_backend::process_pending_screenshot(
                 &mut self.renderer,
                 &snap_list,
                 state,
-                self.pixel_size,
+                pixel_size,
             );
         }
 
-        let render_list = crate::winit_backend::build_frame_render_list(
+        let render_list = crate::winit_backend::build_frame_render_list_for_output(
             &mut self.renderer,
             &mut self.text_cache,
             &mut self.shape_cache,
             state,
-            self.pixel_size,
+            output_id,
+            pixel_size,
             true,
         );
 
-        match self.drm_compositor.render_frame(
+        let Some(out) = self.outputs.get_mut(&crtc) else {
+            return;
+        };
+        out.next_frame_at = Instant::now() + interval;
+
+        match out.drm_compositor.render_frame(
             &mut self.renderer,
             &render_list,
             crate::winit_backend::BACKGROUND_COLOR,
@@ -317,56 +509,78 @@ impl DrmRuntime {
         ) {
             Ok(result) => {
                 if result.is_empty {
-                    self.needs_redraw = false;
-                    self.last_frame_direct_scanout = false;
+                    out.needs_redraw = false;
+                    out.last_frame_direct_scanout = false;
                 } else {
                     let direct_scanout =
                         matches!(result.primary_element, PrimaryPlaneElement::Element(_));
-                    if let Err(err) = self.drm_compositor.queue_frame(()) {
-                        warn!(error = ?err, "Failed to queue DRM/KMS page flip");
-                        self.needs_redraw = true;
-                        self.last_frame_direct_scanout = false;
+                    if let Err(err) = out.drm_compositor.queue_frame(()) {
+                        warn!(
+                            connector = %out.connector_name,
+                            error = ?err,
+                            "Failed to queue DRM/KMS page flip"
+                        );
+                        out.needs_redraw = true;
+                        out.last_frame_direct_scanout = false;
                     } else {
-                        self.vblank_pending = true;
-                        self.vblank_queued_at = Some(Instant::now());
-                        self.needs_redraw = false;
-                        self.frame_start = Some(render_start);
-                        self.last_frame_direct_scanout = direct_scanout;
+                        out.vblank_pending = true;
+                        out.vblank_queued_at = Some(Instant::now());
+                        out.needs_redraw = false;
+                        out.frame_start = Some(render_start);
+                        out.last_frame_direct_scanout = direct_scanout;
                     }
                 }
             }
             Err(err) => {
-                warn!(error = ?err, "DRM/KMS render_frame error");
-                self.needs_redraw = true;
-                self.last_frame_direct_scanout = false;
+                warn!(
+                    connector = %out.connector_name,
+                    error = ?err,
+                    "DRM/KMS render_frame error"
+                );
+                out.needs_redraw = true;
+                out.last_frame_direct_scanout = false;
             }
         }
     }
 
-    fn handle_vblank(&mut self, state: &mut RustyCompositorState) {
-        if let Err(err) = self.drm_compositor.frame_submitted() {
-            warn!(error = ?err, "Failed to mark DRM/KMS frame as submitted");
+    fn handle_vblank(&mut self, crtc: crtc::Handle, state: &mut RustyCompositorState) {
+        let Some(out) = self.outputs.get_mut(&crtc) else {
+            return;
+        };
+        if let Err(err) = out.drm_compositor.frame_submitted() {
+            warn!(
+                connector = %out.connector_name,
+                error = ?err,
+                "Failed to mark DRM/KMS frame as submitted"
+            );
         }
-        self.vblank_pending = false;
-        self.vblank_queued_at = None;
+        out.vblank_pending = false;
+        out.vblank_queued_at = None;
 
         let present_done = Instant::now();
-        let frame_start = self.frame_start.take().unwrap_or(present_done);
+        let frame_start = out.frame_start.take().unwrap_or(present_done);
         state.frame_timing.record_frame(
             frame_start,
             present_done,
             1,
-            self.total_output_pixels,
-            self.total_output_pixels,
+            out.total_output_pixels,
+            out.total_output_pixels,
         );
         state
             .frame_timing
-            .record_direct_scanout(self.last_frame_direct_scanout);
+            .record_direct_scanout(out.last_frame_direct_scanout);
+
+        let output_id = out.output_id;
+        let should_requeue = out.needs_redraw;
+        let target_output = state
+            .output_map
+            .get(output_id)
+            .map_or_else(|| state.output.clone(), |entry| entry.output.clone());
 
         let elapsed = state.elapsed();
         for window in state.space.elements() {
-            window.send_frame(&state.output, elapsed, Some(Duration::ZERO), |_, _| {
-                Some(state.output.clone())
+            window.send_frame(&target_output, elapsed, Some(Duration::ZERO), |_, _| {
+                Some(target_output.clone())
             });
         }
         state.space.refresh();
@@ -385,20 +599,179 @@ impl DrmRuntime {
             return;
         }
 
-        if self.needs_redraw && !self.paused && state.running {
-            self.render_and_queue(state);
+        if should_requeue && !self.paused && state.running {
+            self.render_and_queue_output(crtc, state);
         }
     }
+
+    fn attach_secondary_connector(
+        &mut self,
+        setup: &PrimaryConnectorSetup,
+        state: &mut RustyCompositorState,
+    ) -> bool {
+        if self
+            .outputs
+            .values()
+            .any(|o| o.connector == setup.connector)
+            || self.outputs.contains_key(&setup.crtc)
+        {
+            return false;
+        }
+        let drm_surface =
+            match self
+                .drm_device
+                .create_surface(setup.crtc, setup.mode, &[setup.connector])
+            {
+                Ok(surf) => surf,
+                Err(err) => {
+                    warn!(
+                        connector = %setup.connector_name,
+                        error = ?err,
+                        "Failed to create DrmSurface for secondary display"
+                    );
+                    return false;
+                }
+            };
+        let next_loc = state.output_map.next_adjacent_location();
+        let refresh_milli_hz = i32::try_from(setup.vrefresh.saturating_mul(1000)).unwrap_or(60_000);
+        let mode = OutputMode {
+            size: setup.pixel_size,
+            refresh: refresh_milli_hz,
+        };
+        let props = smithay::output::PhysicalProperties {
+            size: (0, 0).into(),
+            subpixel: smithay::output::Subpixel::Unknown,
+            make: "DRM/KMS".to_owned(),
+            model: setup.connector_name.clone(),
+        };
+        let new_id = state.add_output(
+            setup.connector_name.clone(),
+            props,
+            mode,
+            Scale::Integer(1),
+            next_loc,
+        );
+        let Some(smithay_output) = state.output_map.get(new_id).map(|e| e.output.clone()) else {
+            state.remove_output(new_id);
+            return false;
+        };
+        let ctx = DrmOutputContext {
+            primary_node: self.primary_node,
+            gbm_device: &self.gbm_device,
+            render_formats: &self.render_formats,
+            cursor_size: self.cursor_size,
+        };
+        match build_drm_output_state(&ctx, setup, &smithay_output, new_id, drm_surface) {
+            Ok(out_state) => {
+                self.output_order.push(setup.crtc);
+                self.outputs.insert(setup.crtc, out_state);
+                true
+            }
+            Err(err) => {
+                warn!(
+                    connector = %setup.connector_name,
+                    error = %err,
+                    "Failed to initialize secondary DrmOutputState; rolling back"
+                );
+                state.remove_output(new_id);
+                false
+            }
+        }
+    }
+
+    fn sync_hotplug_connectors(&mut self, state: &mut RustyCompositorState) {
+        if self.paused {
+            self.pending_hotplug_rescan = true;
+            return;
+        }
+        self.pending_hotplug_rescan = false;
+
+        let connected = find_all_connected_connectors_with_prefs(
+            &self.drm_device,
+            state.user_config.prefer_max_refresh,
+            Some(&self.outputs),
+        );
+
+        let current_crtcs = self.output_order.clone();
+        for crtc in current_crtcs {
+            if self.outputs.len() <= 1 {
+                break;
+            }
+            let still_connected = self.outputs.get(&crtc).is_some_and(|out| {
+                connected
+                    .iter()
+                    .any(|c| c.connector == out.connector && c.connector_name == out.connector_name)
+            });
+            if !still_connected && let Some(removed) = self.outputs.remove(&crtc) {
+                self.output_order.retain(|c| *c != crtc);
+                state.remove_output(removed.output_id);
+                info!(
+                    connector = %removed.connector_name,
+                    output_id = removed.output_id.0,
+                    "Hotplug: Removed disconnected DRM output"
+                );
+            }
+        }
+
+        for setup in &connected {
+            let crtc = setup.crtc;
+            if self.attach_secondary_connector(setup, state) {
+                self.render_and_queue_output(crtc, state);
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ModeDescriptor {
+    size: (u16, u16),
+    vrefresh: u32,
+    preferred: bool,
+    clock: u32,
+}
+
+fn select_best_mode_index(modes: &[ModeDescriptor], prefer_max_refresh: bool) -> Option<usize> {
+    let base_idx = modes
+        .iter()
+        .position(|m| m.preferred)
+        .or_else(|| (!modes.is_empty()).then_some(0))?;
+    if !prefer_max_refresh {
+        return Some(base_idx);
+    }
+
+    let target_size = modes[base_idx].size;
+    modes
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| m.size == target_size)
+        .max_by_key(|(_, m)| (m.vrefresh, m.preferred, m.clock))
+        .map(|(idx, _)| idx)
+        .or(Some(base_idx))
 }
 
 /// Selects the preferred DRM display mode (falling back to the first reported mode).
 #[must_use]
 pub fn select_preferred_drm_mode(modes: &[ControlMode]) -> Option<ControlMode> {
-    modes
+    select_best_drm_mode(modes, false)
+}
+
+/// Selects the optimal DRM mode for the panel's preferred resolution, optionally prioritizing the
+/// highest supported vertical refresh rate (`60/120/144/240 Hz`) (`RUSTYOS-042`).
+#[must_use]
+pub fn select_best_drm_mode(
+    modes: &[ControlMode],
+    prefer_max_refresh: bool,
+) -> Option<ControlMode> {
+    let descriptors: Vec<ModeDescriptor> = modes
         .iter()
-        .find(|m| m.mode_type().contains(ModeTypeFlags::PREFERRED))
-        .or_else(|| modes.first())
-        .copied()
+        .map(|m| ModeDescriptor {
+            size: m.size(),
+            vrefresh: m.vrefresh(),
+            preferred: m.mode_type().contains(ModeTypeFlags::PREFERRED),
+            clock: m.clock(),
+        })
+        .collect();
+    select_best_mode_index(&descriptors, prefer_max_refresh).map(|idx| modes[idx])
 }
 
 /// Converts a display vertical refresh rate (`Hz`) into a clamped frame pacing interval (`us`).
@@ -520,19 +893,24 @@ fn try_run_native_drm_session(
         }
     };
 
-    let setup = match find_primary_connector_setup(&drm_device) {
-        Ok(setup) => setup,
-        Err(reason) => return Ok(SessionStartOutcome::DeferToProbe(reason)),
+    let user_cfg = crate::config::UserConfig::load_default();
+    let setups =
+        find_all_connected_connectors_with_prefs(&drm_device, user_cfg.prefer_max_refresh, None);
+    let Some(setup) = setups.first().cloned() else {
+        return Ok(SessionStartOutcome::DeferToProbe(
+            "no connected DRM connector with a compatible CRTC and mode".to_owned(),
+        ));
     };
 
-    let drm_surface = match drm_device.create_surface(setup.crtc, setup.mode, &[setup.connector]) {
-        Ok(surface) => surface,
-        Err(err) => {
-            return Ok(SessionStartOutcome::DeferToProbe(format!(
-                "DRM surface creation failed: {err}"
-            )));
-        }
-    };
+    let primary_surface =
+        match drm_device.create_surface(setup.crtc, setup.mode, &[setup.connector]) {
+            Ok(surface) => surface,
+            Err(err) => {
+                return Ok(SessionStartOutcome::DeferToProbe(format!(
+                    "DRM surface creation failed: {err}"
+                )));
+            }
+        };
 
     let mut libinput = Libinput::new_with_udev(LibinputSessionInterface::from(session.clone()));
     if libinput.udev_assign_seat(&seat_name).is_err() {
@@ -604,7 +982,7 @@ fn try_run_native_drm_session(
     state.tray = crate::tray::TrayWatcherHandle::start_background();
 
     let client_dmabuf_formats = renderer.dmabuf_formats();
-    let scanout_formats: Vec<_> = drm_surface
+    let scanout_formats: Vec<_> = primary_surface
         .plane_info()
         .formats
         .iter()
@@ -634,11 +1012,6 @@ fn try_run_native_drm_session(
         }
     }
 
-    let gbm_allocator = GbmAllocator::new(
-        gbm_device.clone(),
-        GbmBufferFlags::RENDERING | GbmBufferFlags::SCANOUT,
-    );
-    let gbm_exporter = GbmFramebufferExporter::new(gbm_device, Some(primary_node));
     let render_formats: Vec<_> = renderer
         .egl_context()
         .dmabuf_render_formats()
@@ -646,39 +1019,48 @@ fn try_run_native_drm_session(
         .copied()
         .collect();
     let cursor_size = drm_device.cursor_size();
-    let drm_compositor = DrmCompositor::new(
-        &state.output,
-        drm_surface,
-        None,
-        gbm_allocator,
-        gbm_exporter,
-        [Fourcc::Argb8888, Fourcc::Xrgb8888],
-        render_formats,
+    let primary_ctx = DrmOutputContext {
+        primary_node,
+        gbm_device: &gbm_device,
+        render_formats: &render_formats,
         cursor_size,
-        None,
-    )
-    .map_err(|err| CompositorError::BackendInit(format!("DrmCompositor::new failed: {err:?}")))?;
+    };
+    let primary_out_state = build_drm_output_state(
+        &primary_ctx,
+        &setup,
+        &state.output,
+        PRIMARY_OUTPUT_ID,
+        primary_surface,
+    )?;
 
-    let total_output_pixels = u64::try_from(setup.pixel_size.w.max(0)).unwrap_or(0)
-        * u64::try_from(setup.pixel_size.h.max(0)).unwrap_or(0);
+    let mut outputs = HashMap::new();
+    let output_order = vec![setup.crtc];
+    outputs.insert(setup.crtc, primary_out_state);
+
     let runtime = Rc::new(RefCell::new(DrmRuntime {
         drm_device,
+        primary_node,
+        gbm_device,
         libinput,
         renderer,
-        drm_compositor,
+        render_formats,
+        cursor_size,
         text_cache: crate::text::TextCache::new(),
         shape_cache: crate::surfaces::UiShapeCache::new(),
-        pixel_size: setup.pixel_size,
-        total_output_pixels,
+        outputs,
+        output_order,
         paused: false,
-        vblank_pending: false,
-        vblank_queued_at: None,
-        needs_redraw: true,
-        last_frame_direct_scanout: false,
-        frame_start: None,
+        pending_hotplug_rescan: false,
         rendered_frames: 0,
         max_frames: config.max_frames,
     }));
+
+    {
+        let mut rt = runtime.borrow_mut();
+        for extra in setups.iter().skip(1) {
+            rt.attach_secondary_connector(extra, &mut state);
+        }
+    }
 
     let loop_handle = event_loop.handle();
     let _xwayland_started = crate::xwayland::spawn_xwayland_source(&display.handle(), &loop_handle);
@@ -702,11 +1084,31 @@ fn try_run_native_drm_session(
                 return;
             }
             let mut rt = rt_input.borrow_mut();
-            rt.needs_redraw = true;
-            if !rt.vblank_pending && !rt.paused {
-                rt.render_and_queue(app_state);
-            }
+            rt.mark_all_dirty();
+            rt.render_ready_outputs(app_state, false);
         })
+        .map_err(|err| CompositorError::EventLoop(err.to_string()))?;
+
+    let rt_udev = Rc::clone(&runtime);
+    let primary_dev_id = primary_node.dev_id();
+    loop_handle
+        .insert_source(
+            udev_backend,
+            move |event, _metadata, app_state| match event {
+                UdevEvent::Added { device_id, .. }
+                | UdevEvent::Changed { device_id }
+                | UdevEvent::Removed { device_id }
+                    if device_id == primary_dev_id =>
+                {
+                    info!(
+                        device_id,
+                        "Udev DRM hotplug event received; rescanning connectors"
+                    );
+                    rt_udev.borrow_mut().sync_hotplug_connectors(app_state);
+                }
+                _ => {}
+            },
+        )
         .map_err(|err| CompositorError::EventLoop(err.to_string()))?;
 
     let rt_session = Rc::clone(&runtime);
@@ -717,9 +1119,11 @@ fn try_run_native_drm_session(
                 SessionEvent::PauseSession => {
                     info!("VT switched away; pausing DRM device and libinput");
                     rt.paused = true;
-                    rt.vblank_pending = false;
-                    rt.vblank_queued_at = None;
-                    rt.frame_start = None;
+                    for out in rt.outputs.values_mut() {
+                        out.vblank_pending = false;
+                        out.vblank_queued_at = None;
+                        out.frame_start = None;
+                    }
                     app_state.active_window_drag = None;
                     app_state.active_window_resize = None;
                     rt.libinput.suspend();
@@ -739,19 +1143,24 @@ fn try_run_native_drm_session(
                     } else {
                         let _ = rt.libinput.dispatch();
                     }
-                    if let Err(err) = rt.drm_compositor.clear() {
-                        warn!(error = ?err, "DrmCompositor::clear on VT activate failed");
+                    for out in rt.outputs.values_mut() {
+                        if let Err(err) = out.drm_compositor.clear() {
+                            warn!(connector = %out.connector_name, error = ?err, "DrmCompositor::clear on VT activate failed");
+                        }
+                        if let Err(err) = out.drm_compositor.reset_state() {
+                            warn!(connector = %out.connector_name, error = ?err, "DrmCompositor::reset_state on VT activate failed");
+                        }
+                        out.drm_compositor.reset_buffers();
+                        out.drm_compositor.reset_buffer_ages();
+                        out.vblank_pending = false;
+                        out.vblank_queued_at = None;
+                        out.needs_redraw = true;
                     }
-                    if let Err(err) = rt.drm_compositor.reset_state() {
-                        warn!(error = ?err, "DrmCompositor::reset_state on VT activate failed");
-                    }
-                    rt.drm_compositor.reset_buffers();
-                    rt.drm_compositor.reset_buffer_ages();
                     rt.paused = false;
-                    rt.vblank_pending = false;
-                    rt.vblank_queued_at = None;
-                    rt.needs_redraw = true;
-                    rt.render_and_queue(app_state);
+                    if rt.pending_hotplug_rescan {
+                        rt.sync_hotplug_connectors(app_state);
+                    }
+                    rt.render_ready_outputs(app_state, true);
                 }
             }
         })
@@ -762,23 +1171,24 @@ fn try_run_native_drm_session(
         .insert_source(
             drm_notifier,
             move |event, _metadata, app_state| match event {
-                DrmEvent::VBlank(_) => rt_drm.borrow_mut().handle_vblank(app_state),
+                DrmEvent::VBlank(crtc) => rt_drm.borrow_mut().handle_vblank(crtc, app_state),
                 DrmEvent::Error(err) => warn!(error = ?err, "DRM device event error"),
             },
         )
         .map_err(|err| CompositorError::EventLoop(err.to_string()))?;
 
-    let frame_interval = Duration::from_micros(mode_refresh_interval_us(setup.vrefresh));
+    let initial_interval = runtime.borrow().fastest_refresh_interval();
     let rt_timer = Rc::clone(&runtime);
     loop_handle
         .insert_source(
-            Timer::from_duration(frame_interval),
+            Timer::from_duration(initial_interval),
             move |_deadline, _metadata, app_state| {
                 if !app_state.running {
                     return TimeoutAction::Drop;
                 }
-                rt_timer.borrow_mut().render_and_queue(app_state);
-                TimeoutAction::ToDuration(frame_interval)
+                let mut rt = rt_timer.borrow_mut();
+                rt.render_ready_outputs(app_state, true);
+                TimeoutAction::ToDuration(rt.fastest_refresh_interval())
             },
         )
         .map_err(|err| CompositorError::EventLoop(err.to_string()))?;
@@ -791,6 +1201,7 @@ fn try_run_native_drm_session(
         width = setup.pixel_size.w,
         height = setup.pixel_size.h,
         refresh_hz = setup.vrefresh,
+        active_outputs = runtime.borrow().outputs.len(),
         seat = %seat_name,
         wayland_display = %socket_name,
         ipc_socket = %ipc_socket_path.display(),
@@ -802,7 +1213,7 @@ fn try_run_native_drm_session(
         crate::winit_backend::spawn_test_client(cmd, &socket_name, &ipc_socket_path);
     }
 
-    runtime.borrow_mut().render_and_queue(&mut state);
+    runtime.borrow_mut().render_ready_outputs(&mut state, true);
 
     event_loop
         .run(Some(Duration::from_millis(4)), &mut state, |app_state| {
@@ -830,63 +1241,33 @@ fn try_run_native_drm_session(
     })))
 }
 
-fn find_primary_connector_setup(drm_device: &DrmDevice) -> Result<PrimaryConnectorSetup, String> {
-    let resources = drm_device
-        .resource_handles()
-        .map_err(|err| format!("DRM resource_handles error: {err}"))?;
-
-    for &conn_handle in resources.connectors() {
-        let Ok(info) = drm_device.get_connector(conn_handle, false) else {
-            continue;
-        };
-        if info.state() != connector::State::Connected {
-            continue;
-        }
-        let Some(mode) = select_preferred_drm_mode(info.modes()) else {
-            continue;
-        };
-
-        let candidate_crtc = info
-            .current_encoder()
-            .into_iter()
-            .chain(info.encoders().iter().copied())
-            .find_map(|enc_handle| {
-                let enc = drm_device.get_encoder(enc_handle).ok()?;
-                enc.crtc().or_else(|| {
-                    resources
-                        .filter_crtcs(enc.possible_crtcs())
-                        .into_iter()
-                        .next()
-                })
-            });
-
-        if let Some(crtc) = candidate_crtc {
-            let (w, h) = mode.size();
-            let vrefresh = mode.vrefresh().max(1);
-            let connector_name = format!("{:?}-{}", info.interface(), info.interface_id());
-            return Ok(PrimaryConnectorSetup {
-                connector: conn_handle,
-                crtc,
-                mode,
-                connector_name,
-                pixel_size: Size::from((i32::from(w), i32::from(h))),
-                vrefresh,
-            });
-        }
-    }
-
-    Err("no connected DRM connector with a compatible CRTC and mode".to_owned())
-}
-
 /// Discovers all connected KMS connectors and their candidate CRTC/modes (`RUSTYOS-040`).
 #[must_use]
 pub fn find_all_connected_connectors(drm_device: &DrmDevice) -> Vec<PrimaryConnectorSetup> {
+    find_all_connected_connectors_with_prefs(drm_device, true, None)
+}
+
+fn find_all_connected_connectors_with_prefs(
+    drm_device: &DrmDevice,
+    prefer_max_refresh: bool,
+    active_outputs: Option<&HashMap<crtc::Handle, DrmOutputState>>,
+) -> Vec<PrimaryConnectorSetup> {
     let Ok(resources) = drm_device.resource_handles() else {
         return Vec::new();
     };
 
     let mut setups = Vec::new();
     let mut claimed_crtcs = HashSet::new();
+    if let Some(active) = active_outputs {
+        for (&crtc, out_state) in active {
+            if drm_device
+                .get_connector(out_state.connector, false)
+                .is_ok_and(|info| info.state() == connector::State::Connected)
+            {
+                claimed_crtcs.insert(crtc);
+            }
+        }
+    }
 
     for &conn_handle in resources.connectors() {
         let Ok(info) = drm_device.get_connector(conn_handle, false) else {
@@ -895,25 +1276,32 @@ pub fn find_all_connected_connectors(drm_device: &DrmDevice) -> Vec<PrimaryConne
         if info.state() != connector::State::Connected {
             continue;
         }
-        let Some(mode) = select_preferred_drm_mode(info.modes()) else {
+        let Some(mode) = select_best_drm_mode(info.modes(), prefer_max_refresh) else {
             continue;
         };
 
-        let candidate_crtc = info
-            .current_encoder()
-            .into_iter()
-            .chain(info.encoders().iter().copied())
-            .find_map(|enc_handle| {
-                let enc = drm_device.get_encoder(enc_handle).ok()?;
-                enc.crtc()
-                    .filter(|c| !claimed_crtcs.contains(c))
-                    .or_else(|| {
-                        resources
-                            .filter_crtcs(enc.possible_crtcs())
-                            .into_iter()
-                            .find(|c| !claimed_crtcs.contains(c))
-                    })
-            });
+        let active_crtc = active_outputs.and_then(|active| {
+            active
+                .iter()
+                .find(|(_, out_state)| out_state.connector == conn_handle)
+                .map(|(&crtc, _)| crtc)
+        });
+        let candidate_crtc = active_crtc.or_else(|| {
+            info.current_encoder()
+                .into_iter()
+                .chain(info.encoders().iter().copied())
+                .find_map(|enc_handle| {
+                    let enc = drm_device.get_encoder(enc_handle).ok()?;
+                    enc.crtc()
+                        .filter(|c| !claimed_crtcs.contains(c))
+                        .or_else(|| {
+                            resources
+                                .filter_crtcs(enc.possible_crtcs())
+                                .into_iter()
+                                .find(|c| !claimed_crtcs.contains(c))
+                        })
+                })
+        });
 
         if let Some(crtc) = candidate_crtc {
             claimed_crtcs.insert(crtc);
@@ -1281,5 +1669,40 @@ mod tests {
         assert_eq!(mode_refresh_interval_us(240), 4_166);
         assert_eq!(mode_refresh_interval_us(0), 1_000_000);
         assert!(select_preferred_drm_mode(&[]).is_none());
+    }
+
+    #[test]
+    fn mode_selector_prefers_highest_refresh_at_native_resolution() {
+        let modes = [
+            ModeDescriptor {
+                size: (2560, 1440),
+                vrefresh: 60,
+                preferred: true,
+                clock: 241_500,
+            },
+            ModeDescriptor {
+                size: (2560, 1440),
+                vrefresh: 144,
+                preferred: false,
+                clock: 586_000,
+            },
+            ModeDescriptor {
+                size: (2560, 1440),
+                vrefresh: 240,
+                preferred: false,
+                clock: 980_000,
+            },
+            // Lower resolution at higher refresh must not override preferred native size.
+            ModeDescriptor {
+                size: (1920, 1080),
+                vrefresh: 360,
+                preferred: false,
+                clock: 700_000,
+            },
+        ];
+
+        assert_eq!(select_best_mode_index(&modes, false), Some(0));
+        assert_eq!(select_best_mode_index(&modes, true), Some(2));
+        assert_eq!(select_best_mode_index(&[], true), None);
     }
 }

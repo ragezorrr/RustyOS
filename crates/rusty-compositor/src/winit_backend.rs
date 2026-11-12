@@ -354,8 +354,24 @@ fn window_title(window: &smithay::desktop::Window, id: rusty_wm::WindowId) -> St
     format!("Window #{}", id.0)
 }
 
-/// Builds the front-to-back composite render element list shared by nested Winit and native DRM/KMS.
-#[allow(clippy::too_many_lines)]
+/// Returns output-local pointer coordinates if `pointer` falls within (or near) `output_geo` (`RUSTYOS-042`).
+#[must_use]
+#[allow(clippy::cast_possible_truncation)]
+pub(crate) fn pointer_local_if_on_output(
+    pointer: Point<f64, Logical>,
+    output_geo: Rectangle<i32, Logical>,
+) -> Option<Point<i32, Logical>> {
+    let gx = pointer.x.round() as i32;
+    let gy = pointer.y.round() as i32;
+    let margin = 64;
+    let in_bounds = gx >= output_geo.loc.x - margin
+        && gx < output_geo.loc.x + output_geo.size.w + margin
+        && gy >= output_geo.loc.y - margin
+        && gy < output_geo.loc.y + output_geo.size.h + margin;
+    in_bounds.then(|| Point::from((gx - output_geo.loc.x, gy - output_geo.loc.y)))
+}
+
+/// Builds the front-to-back composite render element list for the primary output.
 pub(crate) fn build_frame_render_list(
     renderer: &mut GlesRenderer,
     text_cache: &mut crate::text::TextCache,
@@ -364,6 +380,39 @@ pub(crate) fn build_frame_render_list(
     size: smithay::utils::Size<i32, smithay::utils::Physical>,
     include_software_cursor: bool,
 ) -> Vec<CompositorRenderElement> {
+    let primary_id = state.output_map.primary().id;
+    build_frame_render_list_for_output(
+        renderer,
+        text_cache,
+        shape_cache,
+        state,
+        primary_id,
+        size,
+        include_software_cursor,
+    )
+}
+
+/// Builds the front-to-back composite render element list scoped to a specific output (`RUSTYOS-042`).
+#[allow(clippy::too_many_lines)]
+pub(crate) fn build_frame_render_list_for_output(
+    renderer: &mut GlesRenderer,
+    text_cache: &mut crate::text::TextCache,
+    shape_cache: &mut crate::surfaces::UiShapeCache,
+    state: &mut RustyCompositorState,
+    output_id: rusty_wm::OutputId,
+    size: smithay::utils::Size<i32, smithay::utils::Physical>,
+    include_software_cursor: bool,
+) -> Vec<CompositorRenderElement> {
+    let output_entry = state
+        .output_map
+        .get(output_id)
+        .cloned()
+        .unwrap_or_else(|| state.output_map.primary().clone());
+    let output_loc = output_entry.location;
+    let output_geo = output_entry.logical_geometry();
+    let smithay_output = output_entry.output;
+    let is_primary = output_entry.is_primary;
+
     let active_ws = state.wm.active_workspace_id().0;
     let layout_str = match state.wm.active_layout_mode() {
         rusty_wm::LayoutMode::Floating => "floating",
@@ -372,6 +421,12 @@ pub(crate) fn build_frame_render_list(
     let visible_windows: Vec<(rusty_wm::WindowId, rusty_wm::Rect)> = state
         .wm
         .visible_windows()
+        .into_iter()
+        .map(|w| (w.id, w.geometry))
+        .collect();
+    let output_windows: Vec<(rusty_wm::WindowId, rusty_wm::Rect)> = state
+        .wm
+        .visible_windows_for_output(output_entry.id)
         .into_iter()
         .map(|w| (w.id, w.geometry))
         .collect();
@@ -385,12 +440,8 @@ pub(crate) fn build_frame_render_list(
         .filter(|id| !state.is_window_minimized(*id));
 
     let mut render_list: Vec<CompositorRenderElement> = Vec::new();
-    if include_software_cursor {
-        #[allow(clippy::cast_possible_truncation)]
-        let ptr = Point::from((
-            state.pointer_location.x.round() as i32,
-            state.pointer_location.y.round() as i32,
-        ));
+    let local_ptr = pointer_local_if_on_output(state.pointer_location, output_geo);
+    if include_software_cursor && let Some(ptr) = local_ptr {
         match &state.cursor_status {
             CursorImageStatus::Hidden => {}
             CursorImageStatus::Surface(surf) if surf.alive() => {
@@ -421,13 +472,10 @@ pub(crate) fn build_frame_render_list(
 
     if let Some(ref dnd_surface) = state.dnd_icon
         && dnd_surface.alive()
+        && let Some(ptr) = local_ptr
     {
-        #[allow(clippy::cast_possible_truncation)]
-        let dnd_loc = Point::<i32, Logical>::from((
-            state.pointer_location.x.round() as i32 + 10,
-            state.pointer_location.y.round() as i32 + 10,
-        ))
-        .to_physical_precise_round(1.0);
+        let dnd_loc =
+            Point::<i32, Logical>::from((ptr.x + 10, ptr.y + 10)).to_physical_precise_round(1.0);
         render_list.extend(
             render_elements_from_surface_tree::<
                 GlesRenderer,
@@ -466,7 +514,8 @@ pub(crate) fn build_frame_render_list(
         ));
     }
 
-    if !state.screen_locked
+    if is_primary
+        && !state.screen_locked
         && let Some(osd) = state.osd.as_ref()
     {
         let osd_view = crate::shell_render::OsdRenderState {
@@ -485,17 +534,17 @@ pub(crate) fn build_frame_render_list(
 
     let layer_surfaces_present = push_layer_elements(
         &mut render_list,
-        &state.output,
+        &smithay_output,
         renderer,
         &[Layer::Overlay, Layer::Top],
     );
     let fullscreen_win = if layer_surfaces_present {
         None
     } else {
-        state.active_unoccluded_fullscreen_window()
+        state.active_unoccluded_fullscreen_window_on(output_entry.id)
     };
 
-    if !layer_surfaces_present && fullscreen_win.is_none() {
+    if is_primary && !layer_surfaces_present && fullscreen_win.is_none() {
         let tray_views: Vec<crate::shell_render::TopBarTrayItem<'_>> = state
             .tray_items
             .iter()
@@ -686,8 +735,8 @@ pub(crate) fn build_frame_render_list(
         ));
     }
 
-    // Render managed windows and their SSD titlebars (or clean CSD rim) in top-to-bottom stacking order
-    for &(win_id, rect) in visible_windows.iter().rev() {
+    // Render managed windows belonging to this output and their SSD titlebars in top-to-bottom order
+    for &(win_id, rect) in output_windows.iter().rev() {
         if state.is_window_minimized(win_id) {
             continue;
         }
@@ -696,10 +745,14 @@ pub(crate) fn build_frame_render_list(
         {
             continue;
         }
-        let origin = state
+        let global_origin = state
             .animations
             .animated_window_origin(win_id.0)
             .unwrap_or((rect.x, rect.y));
+        let origin = (
+            global_origin.0 - output_loc.x,
+            global_origin.1 - output_loc.y,
+        );
         let is_focused = focused_win == Some(win_id);
         let is_fullscreen = fullscreen_win == Some(win_id) || state.is_window_fullscreen(win_id);
         let has_ssd = !is_fullscreen && !state.window_uses_csd(win_id);
@@ -802,7 +855,7 @@ pub(crate) fn build_frame_render_list(
     if layer_surfaces_present {
         push_layer_elements(
             &mut render_list,
-            &state.output,
+            &smithay_output,
             renderer,
             &[Layer::Bottom, Layer::Background],
         );
@@ -1066,5 +1119,36 @@ pub(crate) fn spawn_test_client(
         Err(err) => {
             warn!(program, error = %err, "Failed to spawn child Wayland client");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pointer_local_maps_coordinates_only_for_matching_output() {
+        let out1 = Rectangle::new((0, 0).into(), (1920, 1080).into());
+        let out2 = Rectangle::new((1920, 0).into(), (2560, 1440).into());
+
+        // Pointer inside monitor 2 maps to monitor-local origin and stays out of monitor 1 beyond margin.
+        assert_eq!(
+            pointer_local_if_on_output((2500.0, 720.0).into(), out2),
+            Some(Point::from((580, 720)))
+        );
+        assert_eq!(
+            pointer_local_if_on_output((2500.0, 720.0).into(), out1),
+            None
+        );
+
+        // Near monitor boundary within 64px cursor margin maps cleanly into both during transitions.
+        assert_eq!(
+            pointer_local_if_on_output((1930.0, 400.0).into(), out1),
+            Some(Point::from((1930, 400)))
+        );
+        assert_eq!(
+            pointer_local_if_on_output((1930.0, 400.0).into(), out2),
+            Some(Point::from((10, 400)))
+        );
     }
 }

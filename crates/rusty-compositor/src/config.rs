@@ -11,6 +11,30 @@ use std::path::{Path, PathBuf};
 use smithay::input::keyboard::XkbConfig;
 use tracing::{info, warn};
 
+/// Variable Refresh Rate (`Adaptive Sync` / `VRR`) runtime policy (`RUSTYOS-042`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VrrMode {
+    /// Disable runtime VRR toggling.
+    Off,
+    /// Automatically enable VRR only when an unoccluded fullscreen window is displayed on a
+    /// supported CRTC (`VrrSupport::Supported`, without forcing a modeset).
+    #[default]
+    Fullscreen,
+    /// Enable VRR continuously on outputs where the kernel reports `VrrSupport::Supported`.
+    Always,
+}
+
+impl VrrMode {
+    fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "off" | "false" | "disabled" | "never" => Some(Self::Off),
+            "fullscreen" | "auto" => Some(Self::Fullscreen),
+            "always" | "on" | "true" | "enabled" => Some(Self::Always),
+            _ => None,
+        }
+    }
+}
+
 /// Persistent user preferences loaded from `~/.config/rustyos/config.toml`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UserConfig {
@@ -26,6 +50,11 @@ pub struct UserConfig {
     pub repeat_rate: i32,
     /// Prefer instant transitions (`reduced_motion`).
     pub reduced_motion: bool,
+    /// Prefer the highest supported refresh rate (60/120/144/240 Hz) at the display's native
+    /// resolution on DRM/KMS outputs (`RUSTYOS-042`).
+    pub prefer_max_refresh: bool,
+    /// Variable Refresh Rate (`VRR`) runtime policy on DRM/KMS (`RUSTYOS-042`).
+    pub vrr_mode: VrrMode,
     /// Optional custom desktop wallpaper `.png` path (`~/` expanded).
     pub wallpaper: Option<PathBuf>,
     /// Optional `XCursor` theme override (falls back to `XCURSOR_THEME` and system themes).
@@ -43,6 +72,8 @@ impl Default for UserConfig {
             repeat_delay: 200,
             repeat_rate: 25,
             reduced_motion: false,
+            prefer_max_refresh: true,
+            vrr_mode: VrrMode::Fullscreen,
             wallpaper: None,
             cursor_theme: None,
             autostart: Vec::new(),
@@ -135,60 +166,76 @@ impl UserConfig {
                 continue;
             }
 
-            match (section.as_str(), key) {
-                ("keyboard", "layout") => {
-                    if let Some(s) = parse_toml_string(val)
-                        && !s.trim().is_empty()
-                    {
-                        cfg.keyboard_layout = s;
-                    }
-                }
-                ("keyboard", "variant") => {
-                    if let Some(s) = parse_toml_string(val) {
-                        cfg.keyboard_variant = s;
-                    }
-                }
-                ("keyboard", "options") => {
-                    if let Some(s) = parse_toml_string(val) {
-                        cfg.keyboard_options = s;
-                    }
-                }
-                ("keyboard", "repeat_delay") => {
-                    if let Ok(n) = val.parse::<i32>() {
-                        cfg.repeat_delay = n.clamp(50, 2000);
-                    }
-                }
-                ("keyboard", "repeat_rate") => {
-                    if let Ok(n) = val.parse::<i32>() {
-                        cfg.repeat_rate = n.clamp(1, 120);
-                    }
-                }
-                ("ui", "reduced_motion") => {
-                    if let Ok(b) = val.parse::<bool>() {
-                        cfg.reduced_motion = b;
-                    }
-                }
-                ("ui", "wallpaper") => {
-                    if let Some(s) = parse_toml_string(val) {
-                        cfg.wallpaper = expand_user_path(&s);
-                    }
-                }
-                ("ui", "cursor_theme") => {
-                    if let Some(s) = parse_toml_string(val) {
-                        let trimmed = s.trim();
-                        if !trimmed.is_empty() {
-                            cfg.cursor_theme = Some(trimmed.to_owned());
-                        }
-                    }
-                }
-                ("autostart", "commands") => {
-                    cfg.autostart = parse_toml_string_array(val);
-                }
-                _ => {}
-            }
+            cfg.apply_toml_kv(&section, key, val);
         }
 
         cfg
+    }
+
+    fn apply_toml_kv(&mut self, section: &str, key: &str, val: &str) {
+        match (section, key) {
+            ("keyboard", "layout") => {
+                if let Some(s) = parse_toml_string(val)
+                    && !s.trim().is_empty()
+                {
+                    self.keyboard_layout = s;
+                }
+            }
+            ("keyboard", "variant") => {
+                if let Some(s) = parse_toml_string(val) {
+                    self.keyboard_variant = s;
+                }
+            }
+            ("keyboard", "options") => {
+                if let Some(s) = parse_toml_string(val) {
+                    self.keyboard_options = s;
+                }
+            }
+            ("keyboard", "repeat_delay") => {
+                if let Ok(n) = val.parse::<i32>() {
+                    self.repeat_delay = n.clamp(50, 2000);
+                }
+            }
+            ("keyboard", "repeat_rate") => {
+                if let Ok(n) = val.parse::<i32>() {
+                    self.repeat_rate = n.clamp(1, 120);
+                }
+            }
+            ("ui", "reduced_motion") => {
+                if let Ok(b) = val.parse::<bool>() {
+                    self.reduced_motion = b;
+                }
+            }
+            ("display", "prefer_max_refresh") => {
+                if let Ok(b) = val.parse::<bool>() {
+                    self.prefer_max_refresh = b;
+                }
+            }
+            ("display", "vrr" | "vrr_mode") => {
+                if let Some(s) = parse_toml_string(val)
+                    && let Some(mode) = VrrMode::parse(&s)
+                {
+                    self.vrr_mode = mode;
+                }
+            }
+            ("ui", "wallpaper") => {
+                if let Some(s) = parse_toml_string(val) {
+                    self.wallpaper = expand_user_path(&s);
+                }
+            }
+            ("ui", "cursor_theme") => {
+                if let Some(s) = parse_toml_string(val) {
+                    let trimmed = s.trim();
+                    if !trimmed.is_empty() {
+                        self.cursor_theme = Some(trimmed.to_owned());
+                    }
+                }
+            }
+            ("autostart", "commands") => {
+                self.autostart = parse_toml_string_array(val);
+            }
+            _ => {}
+        }
     }
 
     /// Builds a Smithay [`XkbConfig`] referencing the configured layout, variant, and options.
@@ -429,5 +476,30 @@ mod tests {
         assert_eq!(layout_short_code("English (US)", 0, "us,ru"), "EN");
         assert_eq!(layout_short_code("Russian", 1, "us,ru"), "RU");
         assert_eq!(layout_short_code("Unknown Layout", 1, "us,pl"), "PL");
+    }
+
+    #[test]
+    fn parses_display_vrr_and_refresh_preferences() {
+        let defaults = UserConfig::default();
+        assert!(defaults.prefer_max_refresh);
+        assert_eq!(defaults.vrr_mode, VrrMode::Fullscreen);
+
+        let cfg = UserConfig::parse_toml(
+            r#"
+            [display]
+            prefer_max_refresh = false
+            vrr = "always"
+            "#,
+        );
+        assert!(!cfg.prefer_max_refresh);
+        assert_eq!(cfg.vrr_mode, VrrMode::Always);
+
+        let cfg_off = UserConfig::parse_toml(
+            r#"
+            [display]
+            vrr_mode = "off"
+            "#,
+        );
+        assert_eq!(cfg_off.vrr_mode, VrrMode::Off);
     }
 }

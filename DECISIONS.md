@@ -120,6 +120,14 @@
                           `DrmCompositor` с GLES  
                           fallback (ADR-0010)     
   -----------------------------------------------------------------------
+  D-019                   Фазы 3/4/9              accepted
+                          (RUSTYOS-042):          
+                          Per-CRTC `DrmOutputState`
+                          + Udev hotplug + max    
+                          refresh mode selection +
+                          runtime VRR + per-output
+                          render list (ADR-0011)  
+  -----------------------------------------------------------------------
 
 ## Открытые решения
 

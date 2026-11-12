@@ -347,11 +347,21 @@ impl WindowManager {
     pub fn visible_windows(&self) -> Vec<&ManagedWindow> {
         let mut result = Vec::new();
         for output in &self.outputs {
-            if let Some(ws) = self.workspace(output.active_workspace) {
-                for &win_id in &ws.stacking {
-                    if let Some(win) = self.window(win_id) {
-                        result.push(win);
-                    }
+            result.extend(self.visible_windows_for_output(output.id));
+        }
+        result
+    }
+
+    /// Returns visible windows on `output_id`'s active workspace, ordered back-to-front (`RUSTYOS-042`).
+    #[must_use]
+    pub fn visible_windows_for_output(&self, output_id: OutputId) -> Vec<&ManagedWindow> {
+        let mut result = Vec::new();
+        if let Some(output) = self.outputs.iter().find(|o| o.id == output_id)
+            && let Some(ws) = self.workspace(output.active_workspace)
+        {
+            for &win_id in &ws.stacking {
+                if let Some(win) = self.window(win_id) {
+                    result.push(win);
                 }
             }
         }
@@ -1039,5 +1049,27 @@ mod tests {
         assert_eq!(wm.window(w1).map(|w| w.geometry), Some(work));
         assert_eq!(wm.set_window_fullscreen(w1, true), Some(full));
         assert_eq!(wm.set_window_fullscreen(w1, false), Some(work));
+    }
+
+    #[test]
+    fn visible_windows_for_output_isolates_per_display_workspaces() {
+        let mut wm = WindowManager::new(Rect::new(0, 0, 1920, 1080));
+        wm.upsert_output(OutputId(2), Rect::new(1920, 0, 2560, 1440));
+
+        let w1 = wm.next_window_id();
+        wm.map_window(w1, Some((800, 600)));
+
+        wm.move_focused_to_next_output();
+        let w2 = wm.next_window_id();
+        wm.map_window(w2, Some((1000, 700)));
+
+        assert_eq!(
+            wm.visible_windows_for_output(OutputId(2))
+                .iter()
+                .map(|w| w.id)
+                .collect::<Vec<_>>(),
+            vec![w1, w2]
+        );
+        assert_eq!(wm.visible_windows_for_output(OutputId(1)).len(), 0);
     }
 }

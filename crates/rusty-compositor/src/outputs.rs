@@ -10,6 +10,7 @@
 use rusty_wm::{OutputId, Rect};
 use smithay::{
     output::{Mode, Output, PhysicalProperties, Scale, Subpixel},
+    reexports::wayland_server::backend::GlobalId,
     utils::{Logical, Physical, Point, Rectangle, Size},
 };
 use tracing::info;
@@ -33,6 +34,8 @@ pub struct OutputEntry {
     pub refresh_milli_hz: i32,
     /// Whether this output is the primary desktop display.
     pub is_primary: bool,
+    /// Wayland `wl_output` global handle registered for this display (`RUSTYOS-042`).
+    pub global_id: Option<GlobalId>,
 }
 
 impl OutputEntry {
@@ -58,6 +61,7 @@ impl OutputEntry {
             scale: if scale > 0.1 { scale } else { 1.0 },
             refresh_milli_hz,
             is_primary,
+            global_id: None,
         }
     }
 

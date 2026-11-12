@@ -575,6 +575,25 @@ hardware/software context и низкие накладные расходы.
   - `tests::dmabuf_global_and_unoccluded_fullscreen_fallback_behavior`.
 - **Risks:** Нулевые новые внешние зависимости; аппаратный KMS direct scanout (`--drm`) не запускался в headless-среде (по правилам `HARDWARE.md` требуется bare-metal прогон на целевом GPU для подтверждения `direct_scanout_frames > 0`).
 
+## RUSTYOS-042 --- Multi-Monitor DRM/KMS, Mixed-Refresh & VRR
+
+**Статус:** done **Фаза:** 33
+
+**Goal:** Перевести DRM/KMS backend на per-CRTC multi-monitor конвейер с независимым VBlank/page-flip циклом для mixed refresh (`60/120/144/240 Hz`), runtime Udev hotplug, выбором максимального refresh rate на preferred-разрешении, безопасным runtime VRR (`VrrMode`) и per-output изоляцией рендер-листа (ADR-0011, `D-019`).
+
+**Scope (Approved Option A):**
+- `crates/rusty-wm/src/lib.rs`: добавлен `WindowManager::visible_windows_for_output(output_id)` для изоляции видимых окон по активному workspace конкретного дисплея.
+- `crates/rusty-compositor/src/config.rs`: добавлен enum `VrrMode` (`Off` / `Fullscreen` / `Always`), настройки `[display]` (`prefer_max_refresh`, `vrr` / `vrr_mode`) и helper `UserConfig::apply_toml_kv`.
+- `crates/rusty-compositor/src/outputs.rs` & `crates/rusty-compositor/src/state.rs`: хранение и отзыв `wl_output` `GlobalId` при удалении выхода, добавление `active_unoccluded_fullscreen_window_on(output_id)` с изоляцией shell-оверлеев на primary output и дублированием `LockScreen` на все выходы.
+- `crates/rusty-compositor/src/winit_backend.rs`: параметризация `build_frame_render_list_for_output` по `OutputEntry` (локальные координаты окон и курсора `pointer_local_if_on_output`, primary-only chrome, per-output wallpaper/layer-shell).
+- `crates/rusty-compositor/src/drm_backend.rs`: перевод `DrmRuntime` на per-CRTC `HashMap<crtc::Handle, DrmOutputState>` (`DrmEvent::VBlank(crtc)`), подключение `UdevBackend` hotplug (`sync_hotplug_connectors`, `attach_secondary_connector`), `select_best_drm_mode`, `want_vrr_for_output` и `DrmOutputState::apply_runtime_vrr`.
+- `docs/adr/0011-multi-monitor-drm-vrr.md` & `DECISIONS.md` (`D-019`): зафиксировано архитектурное решение Вариант A.
+
+**Verification:**
+- `cargo fmt --check`, `cargo clippy --workspace --all-targets --offline -- -D warnings` и `cargo test --workspace --offline` пройдены: `91/91` тестов passed (`4` `rusty_animation`, `66` `rusty_compositor`, `3` `rusty_ipc`, `6` `rusty_services`, `5` `rusty_shell`, `7` `rusty_wm`).
+- Новые unit/integration тесты: `visible_windows_for_output_isolates_per_display_workspaces`, `parses_display_vrr_and_refresh_preferences`, `pointer_local_maps_coordinates_only_for_matching_output`, `mode_selector_prefers_highest_refresh_at_native_resolution`, `per_output_fullscreen_vrr_and_hotplug_isolation`.
+- **Risks:** Нулевые новые внешние зависимости; аппаратный multi-monitor `--drm`, live Udev hotplug и VRR-панель не запускались в headless-среде (по правилам `HARDWARE.md` требуется bare-metal проверка на реальных GPU/мониторах).
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

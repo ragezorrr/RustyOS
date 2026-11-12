@@ -828,4 +828,101 @@ mod tests {
 
         Ok(())
     }
+
+    #[test]
+    fn per_output_fullscreen_vrr_and_hotplug_isolation() -> Result<(), Box<dyn Error>> {
+        let display: Display<RustyCompositorState> = Display::new()?;
+        let event_loop: EventLoop<RustyCompositorState> = EventLoop::try_new()?;
+        let mut compositor = RustyCompositorState::new(
+            &display,
+            "rusty-test-mm-vrr".to_owned(),
+            event_loop.get_signal(),
+            (1920, 1080).into(),
+        )?;
+
+        let out1 = rusty_wm::OutputId(1);
+        let out2 = compositor.add_output(
+            "DP-2",
+            smithay::output::PhysicalProperties {
+                size: (0, 0).into(),
+                subpixel: smithay::output::Subpixel::Unknown,
+                make: "RustyOS".to_owned(),
+                model: "240Hz Display".to_owned(),
+            },
+            smithay::output::Mode {
+                size: (2560, 1440).into(),
+                refresh: 240_000,
+            },
+            smithay::output::Scale::Integer(1),
+            (1920, 0).into(),
+        );
+        assert!(
+            compositor
+                .output_map
+                .get(out2)
+                .is_some_and(|e| e.global_id.is_some())
+        );
+
+        let w1 = compositor.wm.next_window_id();
+        let _ = compositor.wm.map_window(w1, Some((900, 600)));
+
+        let w2 = compositor.wm.next_window_id();
+        let _ = compositor.wm.map_window(w2, Some((1000, 700)));
+        let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+        assert_eq!(compositor.move_focused_to_next_output(serial), Some(w2));
+        compositor.apply_wm_action(rusty_wm::WmAction::ToggleFullscreen, serial);
+
+        // Monitor 2 is unoccluded fullscreen; monitor 1 remains normal desktop.
+        assert_eq!(
+            compositor.active_unoccluded_fullscreen_window_on(out1),
+            None
+        );
+        assert_eq!(
+            compositor.active_unoccluded_fullscreen_window_on(out2),
+            Some(w2)
+        );
+        assert!(drm_backend::want_vrr_for_output(
+            config::VrrMode::Fullscreen,
+            &compositor,
+            out2
+        ));
+        assert!(!drm_backend::want_vrr_for_output(
+            config::VrrMode::Fullscreen,
+            &compositor,
+            out1
+        ));
+        assert!(drm_backend::want_vrr_for_output(
+            config::VrrMode::Always,
+            &compositor,
+            out1
+        ));
+        assert!(!drm_backend::want_vrr_for_output(
+            config::VrrMode::Off,
+            &compositor,
+            out2
+        ));
+
+        // Primary Spotlight launcher must not disrupt unoccluded fullscreen/VRR on secondary display.
+        compositor.handle_ipc_request(rusty_ipc::ShellRequest::ToggleLauncher);
+        assert_eq!(
+            compositor.active_unoccluded_fullscreen_window_on(out2),
+            Some(w2)
+        );
+
+        // Session lock screen covers every output and suspends fullscreen bypass everywhere.
+        compositor.handle_ipc_request(rusty_ipc::ShellRequest::SetLockScreen { locked: true });
+        assert_eq!(
+            compositor.active_unoccluded_fullscreen_window_on(out2),
+            None
+        );
+        compositor.handle_ipc_request(rusty_ipc::ShellRequest::SetLockScreen { locked: false });
+        compositor.handle_ipc_request(rusty_ipc::ShellRequest::SetReducedMotion { enabled: true });
+
+        // Hotplug unplug cleanly unregisters secondary output and migrates w2 onto out1.
+        assert!(compositor.remove_output(out2));
+        assert_eq!(compositor.output_map.count(), 1);
+        assert!(compositor.wm.window(w2).is_some());
+
+        Ok(())
+    }
 }
