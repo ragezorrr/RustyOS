@@ -1,5 +1,7 @@
 //! Input routing and keyboard shortcuts for `rusty-compositor` (`RUSTYOS-002` / `RUSTYOS-005`).
 
+use std::time::Instant;
+
 use rusty_wm::{SnapTarget, WmAction, WorkspaceId};
 use smithay::{
     backend::input::{
@@ -25,6 +27,7 @@ enum KeyIntercept {
 impl RustyCompositorState {
     /// Processes an input event from an [`InputBackend`] (such as Winit).
     pub fn process_input_event<B: InputBackend>(&mut self, event: InputEvent<B>) {
+        self.frame_timing.mark_input_event(Instant::now());
         match event {
             InputEvent::Keyboard { event } => self.handle_keyboard_event::<B>(&event),
             InputEvent::PointerMotionAbsolute { event } => {
@@ -34,6 +37,29 @@ impl RustyCompositorState {
             InputEvent::PointerAxis { event } => self.handle_pointer_axis::<B>(&event),
             _ => {}
         }
+    }
+
+    /// Injects a synthetic pointer motion event at the given logical coordinates (`--bench-input`).
+    pub fn inject_synthetic_pointer_motion(&mut self, pos: Point<f64, Logical>, time_msec: u32) {
+        self.frame_timing.mark_input_event(Instant::now());
+        self.pointer_location = pos;
+
+        let serial = SERIAL_COUNTER.next_serial();
+        let under = self
+            .surface_under_pointer(pos)
+            .map(|(_win, surface, origin)| (surface, origin));
+
+        let pointer = self.pointer.clone();
+        pointer.motion(
+            self,
+            under,
+            &MotionEvent {
+                location: pos,
+                serial,
+                time: time_msec,
+            },
+        );
+        pointer.frame(self);
     }
 
     fn handle_keyboard_event<B: InputBackend>(&mut self, event: &B::KeyboardKeyEvent) {

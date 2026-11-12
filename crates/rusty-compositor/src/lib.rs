@@ -54,6 +54,10 @@ pub struct CompositorConfig {
     pub spawn_clients: Vec<String>,
     /// Optional file path to export frame timing JSON metrics on exit (`RUSTYOS-003`).
     pub metrics_out: Option<String>,
+    /// Inject deterministic synthetic pointer input before each frame (`RUSTYOS-007`).
+    pub bench_input: bool,
+    /// Force full-output damage submission instead of tracked damage rectangles (`RUSTYOS-007`).
+    pub force_full_damage: bool,
 }
 
 impl CompositorConfig {
@@ -65,6 +69,8 @@ impl CompositorConfig {
             max_frames: None,
             spawn_clients: Vec::new(),
             metrics_out: None,
+            bench_input: false,
+            force_full_damage: false,
         }
     }
 }
@@ -204,6 +210,8 @@ where
                 }
                 config.metrics_out = Some(trimmed.to_owned());
             }
+            "--bench-input" => config.bench_input = true,
+            "--force-full-damage" => config.force_full_damage = true,
             other => return Err(CompositorError::InvalidArgument(other.to_owned())),
         }
     }
@@ -294,6 +302,8 @@ mod tests {
             "es2gears_wayland",
             "--metrics-out",
             "/tmp/metrics.json",
+            "--bench-input",
+            "--force-full-damage",
         ]);
         assert_eq!(
             nested,
@@ -302,6 +312,8 @@ mod tests {
                 max_frames: Some(10),
                 spawn_clients: vec!["wayland-info".to_owned(), "es2gears_wayland".to_owned()],
                 metrics_out: Some("/tmp/metrics.json".to_owned()),
+                bench_input: true,
+                force_full_damage: true,
             })
         );
 

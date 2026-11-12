@@ -1,7 +1,8 @@
-//! Low-overhead frame timing and pacing instrumentation (`RUSTYOS-003`).
+//! Low-overhead frame timing, input-to-present latency, event-loop dispatch,
+//! and damage-ratio instrumentation (`RUSTYOS-003` & `RUSTYOS-007`).
 //!
-//! Uses a fixed-capacity ring buffer preallocated at startup so recording frame samples
-//! on the hot rendering path performs zero heap allocations and takes no locks.
+//! Uses fixed-capacity ring buffers preallocated at startup so recording frame and
+//! dispatch samples on the hot rendering path performs zero heap allocations and takes no locks.
 
 use std::fmt::Write as _;
 use std::time::{Duration, Instant};
@@ -21,9 +22,14 @@ pub struct FrameSample {
     pub interval_us: Option<u64>,
     /// Number of damage rectangles submitted for this frame (`0` if undamaged).
     pub damage_rects: u32,
+    /// Ratio of damaged pixels to total output pixels in permille (`0..=1000`).
+    pub damage_ratio_permille: u16,
+    /// End-to-end latency from the earliest pending input event to `present_done` (microseconds).
+    pub input_to_present_us: Option<u64>,
 }
 
-/// Aggregated statistical summary of frame pacing and render durations.
+/// Aggregated statistical summary of frame pacing, render durations, input latency,
+/// event-loop dispatch, and damage tracking efficiency.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FrameTimingSummary {
     /// Total frames recorded since collector creation.
@@ -40,8 +46,16 @@ pub struct FrameTimingSummary {
     pub late_frames: u64,
     /// Count of frame intervals exceeding `2.0x` target budget (missed display refresh).
     pub missed_frames: u64,
-    /// Count of render passes that took longer than the target frame budget (event-loop stall).
+    /// Count of render passes that took longer than the target frame budget (render stall).
     pub render_stalls: u64,
+    /// Count of non-render event-loop dispatch cycles exceeding half a frame budget.
+    pub dispatch_stalls: u64,
+    /// Count of frames with zero damaged pixels (`damage_rects == 0`).
+    pub zero_damage_frames: u64,
+    /// Average damaged area ratio in permille (`0..=1000`).
+    pub damage_ratio_avg_permille: u16,
+    /// 95th percentile damaged area ratio in permille (`0..=1000`).
+    pub damage_ratio_p95_permille: u16,
     /// Minimum inter-frame interval in microseconds.
     pub interval_min_us: u64,
     /// 50th percentile (median) inter-frame interval in microseconds.
@@ -60,6 +74,24 @@ pub struct FrameTimingSummary {
     pub render_p99_us: u64,
     /// Maximum frame render duration in microseconds.
     pub render_max_us: u64,
+    /// Number of frames that presented a new input event.
+    pub input_samples: usize,
+    /// 50th percentile input-to-present latency in microseconds.
+    pub input_p50_us: u64,
+    /// 95th percentile input-to-present latency in microseconds.
+    pub input_p95_us: u64,
+    /// 99th percentile input-to-present latency in microseconds.
+    pub input_p99_us: u64,
+    /// Maximum input-to-present latency in microseconds.
+    pub input_max_us: u64,
+    /// 50th percentile event-loop client dispatch duration in microseconds.
+    pub dispatch_p50_us: u64,
+    /// 95th percentile event-loop client dispatch duration in microseconds.
+    pub dispatch_p95_us: u64,
+    /// 99th percentile event-loop client dispatch duration in microseconds.
+    pub dispatch_p99_us: u64,
+    /// Maximum event-loop client dispatch duration in microseconds.
+    pub dispatch_max_us: u64,
 }
 
 impl FrameTimingSummary {
@@ -67,7 +99,7 @@ impl FrameTimingSummary {
     #[must_use]
     pub fn to_log_line(&self) -> String {
         format!(
-            "frames={} target_us={} interval_us(p50/p95/p99/max)={}/{}/{}/{} render_us(p50/p95/p99/max)={}/{}/{}/{} late={} missed={} stalls={}",
+            "frames={} target_us={} interval_us(p50/p95/p99/max)={}/{}/{}/{} render_us(p50/p95/p99/max)={}/{}/{}/{} input_us(n={}:p50/p95/max)={}/{}/{} dispatch_us(p95/max)={}/{} damage_permille(avg/p95/zero)={}/{}/{} late={} missed={} stalls={}/{}",
             self.total_frames,
             self.target_interval_us,
             self.interval_p50_us,
@@ -78,16 +110,26 @@ impl FrameTimingSummary {
             self.render_p95_us,
             self.render_p99_us,
             self.render_max_us,
+            self.input_samples,
+            self.input_p50_us,
+            self.input_p95_us,
+            self.input_max_us,
+            self.dispatch_p95_us,
+            self.dispatch_max_us,
+            self.damage_ratio_avg_permille,
+            self.damage_ratio_p95_permille,
+            self.zero_damage_frames,
             self.late_frames,
             self.missed_frames,
             self.render_stalls,
+            self.dispatch_stalls,
         )
     }
 
     /// Formats a structured JSON report including hardware/software context.
     #[must_use]
     pub fn to_json(&self, backend: &str, mode_size: (i32, i32)) -> String {
-        let mut out = String::with_capacity(512);
+        let mut out = String::with_capacity(1024);
         let _ = writeln!(out, "{{");
         let _ = writeln!(out, "  \"backend\": \"{backend}\",");
         let _ = writeln!(
@@ -110,6 +152,16 @@ impl FrameTimingSummary {
         let _ = writeln!(out, "  \"late_frames\": {},", self.late_frames);
         let _ = writeln!(out, "  \"missed_frames\": {},", self.missed_frames);
         let _ = writeln!(out, "  \"render_stalls\": {},", self.render_stalls);
+        let _ = writeln!(out, "  \"dispatch_stalls\": {},", self.dispatch_stalls);
+        let _ = writeln!(
+            out,
+            "  \"zero_damage_frames\": {},",
+            self.zero_damage_frames
+        );
+        let _ = writeln!(out, "  \"damage_ratio_permille\": {{");
+        let _ = writeln!(out, "    \"avg\": {},", self.damage_ratio_avg_permille);
+        let _ = writeln!(out, "    \"p95\": {}", self.damage_ratio_p95_permille);
+        let _ = writeln!(out, "  }},");
         let _ = writeln!(out, "  \"interval_us\": {{");
         let _ = writeln!(out, "    \"min\": {},", self.interval_min_us);
         let _ = writeln!(out, "    \"p50\": {},", self.interval_p50_us);
@@ -122,27 +174,47 @@ impl FrameTimingSummary {
         let _ = writeln!(out, "    \"p95\": {},", self.render_p95_us);
         let _ = writeln!(out, "    \"p99\": {},", self.render_p99_us);
         let _ = writeln!(out, "    \"max\": {}", self.render_max_us);
+        let _ = writeln!(out, "  }},");
+        let _ = writeln!(out, "  \"input_to_present_us\": {{");
+        let _ = writeln!(out, "    \"samples\": {},", self.input_samples);
+        let _ = writeln!(out, "    \"p50\": {},", self.input_p50_us);
+        let _ = writeln!(out, "    \"p95\": {},", self.input_p95_us);
+        let _ = writeln!(out, "    \"p99\": {},", self.input_p99_us);
+        let _ = writeln!(out, "    \"max\": {}", self.input_max_us);
+        let _ = writeln!(out, "  }},");
+        let _ = writeln!(out, "  \"event_loop_dispatch_us\": {{");
+        let _ = writeln!(out, "    \"p50\": {},", self.dispatch_p50_us);
+        let _ = writeln!(out, "    \"p95\": {},", self.dispatch_p95_us);
+        let _ = writeln!(out, "    \"p99\": {},", self.dispatch_p99_us);
+        let _ = writeln!(out, "    \"max\": {}", self.dispatch_max_us);
         let _ = writeln!(out, "  }}");
         let _ = write!(out, "}}");
         out
     }
 }
 
-/// Preallocated ring-buffer collector for frame pacing and render duration metrics.
+/// Preallocated ring-buffer collector for frame pacing, render durations,
+/// input-to-present latency, event-loop dispatch, and damage ratio metrics.
 #[derive(Debug, Clone)]
 pub struct FrameTimingCollector {
     samples: Vec<FrameSample>,
+    dispatch_samples_us: Vec<u64>,
     capacity: usize,
     write_cursor: usize,
+    dispatch_cursor: usize,
     total_frames: u64,
     target_refresh_mhz: i32,
     target_interval_us: u64,
     late_threshold_us: u64,
     missed_threshold_us: u64,
+    dispatch_stall_threshold_us: u64,
     late_frames: u64,
     missed_frames: u64,
     render_stalls: u64,
+    dispatch_stalls: u64,
+    zero_damage_frames: u64,
     last_present_instant: Option<Instant>,
+    pending_input_instant: Option<Instant>,
 }
 
 impl FrameTimingCollector {
@@ -155,20 +227,27 @@ impl FrameTimingCollector {
         let target_interval_us = 1_000_000_000_u64 / refresh_u64;
         let late_threshold_us = target_interval_us + (target_interval_us / 2);
         let missed_threshold_us = target_interval_us.saturating_mul(2);
+        let dispatch_stall_threshold_us = (target_interval_us / 2).max(1_000);
 
         Self {
             samples: Vec::with_capacity(cap),
+            dispatch_samples_us: Vec::with_capacity(cap),
             capacity: cap,
             write_cursor: 0,
+            dispatch_cursor: 0,
             total_frames: 0,
             target_refresh_mhz: refresh_mhz,
             target_interval_us,
             late_threshold_us,
             missed_threshold_us,
+            dispatch_stall_threshold_us,
             late_frames: 0,
             missed_frames: 0,
             render_stalls: 0,
+            dispatch_stalls: 0,
+            zero_damage_frames: 0,
             last_present_instant: None,
+            pending_input_instant: None,
         }
     }
 
@@ -181,9 +260,35 @@ impl FrameTimingCollector {
         self.target_interval_us = target_interval_us;
         self.late_threshold_us = target_interval_us + (target_interval_us / 2);
         self.missed_threshold_us = target_interval_us.saturating_mul(2);
+        self.dispatch_stall_threshold_us = (target_interval_us / 2).max(1_000);
     }
 
-    /// Records a completed frame using monotonic `Instant` timestamps.
+    /// Marks the arrival of an input event (`Instant::now()`).
+    ///
+    /// Preserves the earliest unpresented input timestamp so the next presented frame
+    /// records the true worst-case input-to-present latency for that frame window.
+    pub fn mark_input_event(&mut self, timestamp: Instant) {
+        if self.pending_input_instant.is_none() {
+            self.pending_input_instant = Some(timestamp);
+        }
+    }
+
+    /// Records the duration of a non-render event-loop dispatch cycle.
+    pub fn record_dispatch_duration(&mut self, duration: Duration) {
+        let us = u64::try_from(duration.as_micros()).unwrap_or(u64::MAX);
+        if us > self.dispatch_stall_threshold_us {
+            self.dispatch_stalls = self.dispatch_stalls.saturating_add(1);
+        }
+
+        if self.dispatch_samples_us.len() < self.capacity {
+            self.dispatch_samples_us.push(us);
+        } else {
+            self.dispatch_samples_us[self.dispatch_cursor] = us;
+        }
+        self.dispatch_cursor = (self.dispatch_cursor + 1) % self.capacity;
+    }
+
+    /// Records a completed frame using monotonic `Instant` timestamps and pixel damage stats.
     ///
     /// Performs zero heap allocations once the ring buffer reaches `capacity`.
     pub fn record_frame(
@@ -191,6 +296,8 @@ impl FrameTimingCollector {
         render_start: Instant,
         present_done: Instant,
         damage_rects: u32,
+        damaged_pixels: u64,
+        total_output_pixels: u64,
     ) -> FrameSample {
         let render_duration = present_done.saturating_duration_since(render_start);
         let interval = self
@@ -198,7 +305,20 @@ impl FrameTimingCollector {
             .map(|prev| present_done.saturating_duration_since(prev));
         self.last_present_instant = Some(present_done);
 
-        self.record_durations(render_duration, interval, damage_rects)
+        let input_latency = self
+            .pending_input_instant
+            .take()
+            .map(|input_ts| present_done.saturating_duration_since(input_ts));
+
+        let ratio_permille = compute_damage_permille(damaged_pixels, total_output_pixels);
+
+        self.record_durations_ext(
+            render_duration,
+            interval,
+            damage_rects,
+            ratio_permille,
+            input_latency,
+        )
     }
 
     /// Records a frame from explicit durations (useful for deterministic unit tests).
@@ -208,13 +328,38 @@ impl FrameTimingCollector {
         interval: Option<Duration>,
         damage_rects: u32,
     ) -> FrameSample {
+        let default_permille = if damage_rects == 0 { 0 } else { 1000 };
+        self.record_durations_ext(
+            render_duration,
+            interval,
+            damage_rects,
+            default_permille,
+            None,
+        )
+    }
+
+    /// Records a frame with explicit damage ratio and optional input-to-present latency.
+    pub fn record_durations_ext(
+        &mut self,
+        render_duration: Duration,
+        interval: Option<Duration>,
+        damage_rects: u32,
+        damage_ratio_permille: u16,
+        input_latency: Option<Duration>,
+    ) -> FrameSample {
         self.total_frames = self.total_frames.saturating_add(1);
 
         let render_duration_us = u64::try_from(render_duration.as_micros()).unwrap_or(u64::MAX);
         let interval_us = interval.map(|d| u64::try_from(d.as_micros()).unwrap_or(u64::MAX));
+        let input_to_present_us =
+            input_latency.map(|d| u64::try_from(d.as_micros()).unwrap_or(u64::MAX));
 
         if render_duration_us > self.target_interval_us {
             self.render_stalls = self.render_stalls.saturating_add(1);
+        }
+
+        if damage_rects == 0 || damage_ratio_permille == 0 {
+            self.zero_damage_frames = self.zero_damage_frames.saturating_add(1);
         }
 
         if let Some(iv_us) = interval_us {
@@ -231,6 +376,8 @@ impl FrameTimingCollector {
             render_duration_us,
             interval_us,
             damage_rects,
+            damage_ratio_permille: damage_ratio_permille.min(1000),
+            input_to_present_us,
         };
 
         if self.samples.len() < self.capacity {
@@ -258,16 +405,31 @@ impl FrameTimingCollector {
         let mut renders: Vec<u64> = self.samples.iter().map(|s| s.render_duration_us).collect();
         renders.sort_unstable();
 
-        let interval_min_us = intervals.first().copied().unwrap_or(0);
-        let interval_p50_us = percentile_sorted(&intervals, 50);
-        let interval_p95_us = percentile_sorted(&intervals, 95);
-        let interval_p99_us = percentile_sorted(&intervals, 99);
-        let interval_max_us = intervals.last().copied().unwrap_or(0);
+        let mut inputs: Vec<u64> = self
+            .samples
+            .iter()
+            .filter_map(|s| s.input_to_present_us)
+            .collect();
+        inputs.sort_unstable();
 
-        let render_p50_us = percentile_sorted(&renders, 50);
-        let render_p95_us = percentile_sorted(&renders, 95);
-        let render_p99_us = percentile_sorted(&renders, 99);
-        let render_max_us = renders.last().copied().unwrap_or(0);
+        let mut dispatches: Vec<u64> = self.dispatch_samples_us.clone();
+        dispatches.sort_unstable();
+
+        let mut damages: Vec<u64> = self
+            .samples
+            .iter()
+            .map(|s| u64::from(s.damage_ratio_permille))
+            .collect();
+        damages.sort_unstable();
+
+        let damage_avg = if damages.is_empty() {
+            0
+        } else {
+            let sum: u64 = damages.iter().sum();
+            let avg = sum / u64::try_from(damages.len()).unwrap_or(1);
+            u16::try_from(avg.min(1000)).unwrap_or(1000)
+        };
+        let damage_p95 = u16::try_from(percentile_sorted(&damages, 95).min(1000)).unwrap_or(1000);
 
         FrameTimingSummary {
             total_frames: self.total_frames,
@@ -278,17 +440,39 @@ impl FrameTimingCollector {
             late_frames: self.late_frames,
             missed_frames: self.missed_frames,
             render_stalls: self.render_stalls,
-            interval_min_us,
-            interval_p50_us,
-            interval_p95_us,
-            interval_p99_us,
-            interval_max_us,
-            render_p50_us,
-            render_p95_us,
-            render_p99_us,
-            render_max_us,
+            dispatch_stalls: self.dispatch_stalls,
+            zero_damage_frames: self.zero_damage_frames,
+            damage_ratio_avg_permille: damage_avg,
+            damage_ratio_p95_permille: damage_p95,
+            interval_min_us: intervals.first().copied().unwrap_or(0),
+            interval_p50_us: percentile_sorted(&intervals, 50),
+            interval_p95_us: percentile_sorted(&intervals, 95),
+            interval_p99_us: percentile_sorted(&intervals, 99),
+            interval_max_us: intervals.last().copied().unwrap_or(0),
+            render_p50_us: percentile_sorted(&renders, 50),
+            render_p95_us: percentile_sorted(&renders, 95),
+            render_p99_us: percentile_sorted(&renders, 99),
+            render_max_us: renders.last().copied().unwrap_or(0),
+            input_samples: inputs.len(),
+            input_p50_us: percentile_sorted(&inputs, 50),
+            input_p95_us: percentile_sorted(&inputs, 95),
+            input_p99_us: percentile_sorted(&inputs, 99),
+            input_max_us: inputs.last().copied().unwrap_or(0),
+            dispatch_p50_us: percentile_sorted(&dispatches, 50),
+            dispatch_p95_us: percentile_sorted(&dispatches, 95),
+            dispatch_p99_us: percentile_sorted(&dispatches, 99),
+            dispatch_max_us: dispatches.last().copied().unwrap_or(0),
         }
     }
+}
+
+fn compute_damage_permille(damaged_pixels: u64, total_output_pixels: u64) -> u16 {
+    if total_output_pixels == 0 || damaged_pixels == 0 {
+        return 0;
+    }
+    let clamped = damaged_pixels.min(total_output_pixels);
+    let permille = clamped.saturating_mul(1000) / total_output_pixels;
+    u16::try_from(permille.min(1000)).unwrap_or(1000)
 }
 
 fn percentile_sorted(sorted: &[u64], pct: usize) -> u64 {
@@ -361,5 +545,44 @@ mod tests {
         let summary = collector.summary();
         assert_eq!(summary.total_frames, 40);
         assert_eq!(summary.retained_samples, 16);
+    }
+
+    #[test]
+    fn collector_tracks_input_latency_dispatch_stalls_and_damage_ratio() {
+        let mut collector = FrameTimingCollector::new(32, 60_000);
+
+        let base = Instant::now();
+        let input_ts = base;
+        let render_start = base + Duration::from_millis(4);
+        let present_done = base + Duration::from_millis(6);
+
+        collector.mark_input_event(input_ts);
+        // Subsequent input before present should not overwrite the earliest pending input timestamp.
+        collector.mark_input_event(base + Duration::from_millis(2));
+
+        let sample = collector.record_frame(render_start, present_done, 2, 256_000, 1_024_000);
+        assert_eq!(sample.damage_ratio_permille, 250);
+        assert_eq!(sample.input_to_present_us, Some(6_000));
+
+        // Frame with zero damage and no input.
+        collector.record_durations_ext(
+            Duration::from_micros(400),
+            Some(Duration::from_micros(16_667)),
+            0,
+            0,
+            None,
+        );
+
+        // Normal dispatch (120 us) and stalled dispatch (10 ms > 8.33 ms threshold).
+        collector.record_dispatch_duration(Duration::from_micros(120));
+        collector.record_dispatch_duration(Duration::from_millis(10));
+
+        let summary = collector.summary();
+        assert_eq!(summary.input_samples, 1);
+        assert_eq!(summary.input_p50_us, 6_000);
+        assert_eq!(summary.zero_damage_frames, 1);
+        assert_eq!(summary.damage_ratio_avg_permille, 125);
+        assert_eq!(summary.dispatch_stalls, 1);
+        assert_eq!(summary.dispatch_max_us, 10_000);
     }
 }

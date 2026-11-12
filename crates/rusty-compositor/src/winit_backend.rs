@@ -83,6 +83,8 @@ pub fn run_nested_winit(config: &CompositorConfig) -> Result<BootstrapReport, Co
     // 3. Periodic 60 Hz frame tick (~16.6 ms) compensated for render duration so the
     // end-to-end presentation cadence stays aligned with the 16.67 ms budget.
     let max_frames = config.max_frames;
+    let bench_input = config.bench_input;
+    let force_full_damage = config.force_full_damage;
     let mut rendered_frames: u64 = 0;
 
     loop_handle
@@ -93,8 +95,17 @@ pub fn run_nested_winit(config: &CompositorConfig) -> Result<BootstrapReport, Co
                     return TimeoutAction::Drop;
                 }
 
+                if bench_input {
+                    inject_bench_pointer_step(app_state, rendered_frames);
+                }
+
                 let tick_start = Instant::now();
-                if let Err(err) = render_winit_frame(&mut backend, &mut damage_tracker, app_state) {
+                if let Err(err) = render_winit_frame(
+                    &mut backend,
+                    &mut damage_tracker,
+                    app_state,
+                    force_full_damage,
+                ) {
                     warn!(error = %err, "Frame render error on Winit backend");
                 }
 
@@ -132,15 +143,7 @@ pub fn run_nested_winit(config: &CompositorConfig) -> Result<BootstrapReport, Co
 
     event_loop
         .run(Some(Duration::from_millis(4)), &mut state, |app_state| {
-            if let Err(err) = display.dispatch_clients(app_state) {
-                error!(error = %err, "Failed to dispatch Wayland client events");
-            }
-            app_state.prune_dead_windows();
-            app_state.space.refresh();
-            app_state.popups.cleanup();
-            if let Err(err) = display.flush_clients() {
-                warn!(error = %err, "Failed to flush Wayland clients");
-            }
+            dispatch_and_refresh_clients(&mut display, app_state);
         })
         .map_err(|err| CompositorError::EventLoop(err.to_string()))?;
 
@@ -154,6 +157,33 @@ pub fn run_nested_winit(config: &CompositorConfig) -> Result<BootstrapReport, Co
         frame_timing: Some(timing_summary),
         drm_report: None,
     })
+}
+
+fn inject_bench_pointer_step(app_state: &mut RustyCompositorState, rendered_frames: u64) {
+    let step = rendered_frames % 240;
+    let x = 120.0 + f64::from(u32::try_from(step).unwrap_or(0)) * 4.0;
+    let y = 120.0 + f64::from(u32::try_from(step % 120).unwrap_or(0)) * 3.0;
+    let time_msec = u32::try_from(app_state.elapsed().as_millis()).unwrap_or(0);
+    app_state.inject_synthetic_pointer_motion((x, y).into(), time_msec);
+}
+
+fn dispatch_and_refresh_clients(
+    display: &mut Display<RustyCompositorState>,
+    app_state: &mut RustyCompositorState,
+) {
+    let dispatch_start = Instant::now();
+    if let Err(err) = display.dispatch_clients(app_state) {
+        error!(error = %err, "Failed to dispatch Wayland client events");
+    }
+    app_state.prune_dead_windows();
+    app_state.space.refresh();
+    app_state.popups.cleanup();
+    if let Err(err) = display.flush_clients() {
+        warn!(error = %err, "Failed to flush Wayland clients");
+    }
+    app_state
+        .frame_timing
+        .record_dispatch_duration(dispatch_start.elapsed());
 }
 
 fn finalize_frame_timing(
@@ -222,13 +252,23 @@ fn render_winit_frame(
     backend: &mut WinitGraphicsBackend<GlesRenderer>,
     damage_tracker: &mut OutputDamageTracker,
     state: &mut RustyCompositorState,
+    force_full_damage: bool,
 ) -> Result<(), String> {
     let render_start = Instant::now();
     let size = backend.window_size();
     let full_damage = Rectangle::from_size(size);
+    let total_output_pixels =
+        u64::try_from(size.w.max(0)).unwrap_or(0) * u64::try_from(size.h.max(0)).unwrap_or(0);
     let damage_rects: u32;
+    let damaged_pixels: u64;
+    let tracked_damage: Option<Vec<Rectangle<i32, smithay::utils::Physical>>>;
 
     {
+        let buffer_age = if force_full_damage {
+            0
+        } else {
+            backend.buffer_age().unwrap_or(0)
+        };
         let (renderer, mut framebuffer) = backend.bind().map_err(|err| err.to_string())?;
         let custom_elements: [&smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement<GlesRenderer>; 0] = [];
 
@@ -244,7 +284,7 @@ fn render_winit_frame(
             renderer,
             &mut framebuffer,
             1.0,
-            0,
+            buffer_age,
             [&state.space],
             &custom_elements,
             damage_tracker,
@@ -252,9 +292,26 @@ fn render_winit_frame(
         )
         .map_err(|err| err.to_string())?;
 
-        damage_rects = render_result
-            .damage
-            .map_or(0, |rects| u32::try_from(rects.len()).unwrap_or(u32::MAX));
+        if force_full_damage {
+            damage_rects = 1;
+            damaged_pixels = total_output_pixels;
+            tracked_damage = Some(vec![full_damage]);
+        } else if let Some(rects) = render_result.damage {
+            damage_rects = u32::try_from(rects.len()).unwrap_or(u32::MAX);
+            damaged_pixels = rects
+                .iter()
+                .map(|r| {
+                    u64::try_from(r.size.w.max(0)).unwrap_or(0)
+                        * u64::try_from(r.size.h.max(0)).unwrap_or(0)
+                })
+                .sum::<u64>()
+                .min(total_output_pixels);
+            tracked_damage = Some(rects.clone());
+        } else {
+            damage_rects = 0;
+            damaged_pixels = 0;
+            tracked_damage = None;
+        }
     }
 
     let elapsed = state.elapsed();
@@ -268,14 +325,19 @@ fn render_winit_frame(
     state.popups.cleanup();
     let _ = state.display_handle.flush_clients();
 
+    let submit_slice = tracked_damage.as_deref();
     backend
-        .submit(Some(&[full_damage]))
+        .submit(submit_slice)
         .map_err(|err| err.to_string())?;
 
     let present_done = Instant::now();
-    state
-        .frame_timing
-        .record_frame(render_start, present_done, damage_rects);
+    state.frame_timing.record_frame(
+        render_start,
+        present_done,
+        damage_rects,
+        damaged_pixels,
+        total_output_pixels,
+    );
 
     // Ensure the Window trait bound is used cleanly.
     let _ = <smithay::desktop::Window as AsRenderElements<GlesRenderer>>::render_elements::<
