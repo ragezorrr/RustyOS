@@ -128,6 +128,13 @@
                           runtime VRR + per-output
                           render list (ADR-0011)  
   -----------------------------------------------------------------------
+  D-020                   Фазы 6/8/9              accepted
+                          (RUSTYOS-043):          
+                          `wp_fractional_scale_v1`
+                          + `wp_viewporter` +     
+                          per-output `[display]`  
+                          HiDPI scaling (ADR-0012)
+  -----------------------------------------------------------------------
 
 ## Открытые решения
 

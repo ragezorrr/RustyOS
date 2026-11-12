@@ -4,6 +4,7 @@
 //! sections and provides safe defaults (`us,ru` + `grp:alt_shift_toggle`) when the config file is
 //! absent or partially specified.
 
+use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -35,8 +36,18 @@ impl VrrMode {
     }
 }
 
+/// Clamps a configured or detected display scale factor into a safe range (`0.5..=4.0`).
+#[must_use]
+pub fn clamp_display_scale(scale: f64) -> f64 {
+    if scale.is_finite() {
+        scale.clamp(0.5, 4.0)
+    } else {
+        1.0
+    }
+}
+
 /// Persistent user preferences loaded from `~/.config/rustyos/config.toml`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct UserConfig {
     /// Comma-separated XKB layout list (e.g. `"us,ru"`).
     pub keyboard_layout: String,
@@ -55,6 +66,10 @@ pub struct UserConfig {
     pub prefer_max_refresh: bool,
     /// Variable Refresh Rate (`VRR`) runtime policy on DRM/KMS (`RUSTYOS-042`).
     pub vrr_mode: VrrMode,
+    /// Default `HiDPI` scale factor applied when no per-output override exists (`RUSTYOS-043`).
+    pub display_scale: f64,
+    /// Optional per-connector `HiDPI` scale overrides (`"eDP-1" -> 1.5`, `"DP-1" -> 2.0`) (`RUSTYOS-043`).
+    pub output_scales: BTreeMap<String, f64>,
     /// Optional custom desktop wallpaper `.png` path (`~/` expanded).
     pub wallpaper: Option<PathBuf>,
     /// Optional `XCursor` theme override (falls back to `XCURSOR_THEME` and system themes).
@@ -74,6 +89,8 @@ impl Default for UserConfig {
             reduced_motion: false,
             prefer_max_refresh: true,
             vrr_mode: VrrMode::Fullscreen,
+            display_scale: 1.0,
+            output_scales: BTreeMap::new(),
             wallpaper: None,
             cursor_theme: None,
             autostart: Vec::new(),
@@ -218,6 +235,25 @@ impl UserConfig {
                     self.vrr_mode = mode;
                 }
             }
+            ("display", "scale") => {
+                if let Ok(scale) = val.parse::<f64>() {
+                    self.display_scale = clamp_display_scale(scale);
+                }
+            }
+            ("display", "scales") => {
+                for (name, scale) in parse_toml_inline_scale_table(val) {
+                    self.output_scales.insert(name, clamp_display_scale(scale));
+                }
+            }
+            ("display.scales", _) => {
+                let output_name = key.trim().trim_matches('"').trim_matches('\'').trim();
+                if !output_name.is_empty()
+                    && let Ok(scale) = val.parse::<f64>()
+                {
+                    self.output_scales
+                        .insert(output_name.to_owned(), clamp_display_scale(scale));
+                }
+            }
             ("ui", "wallpaper") => {
                 if let Some(s) = parse_toml_string(val) {
                     self.wallpaper = expand_user_path(&s);
@@ -236,6 +272,29 @@ impl UserConfig {
             }
             _ => {}
         }
+    }
+
+    /// Returns the configured `HiDPI` scale factor for `connector` (or `self.display_scale` fallback).
+    #[must_use]
+    pub fn scale_for_output(&self, connector: &str) -> f64 {
+        self.output_scales
+            .get(connector)
+            .copied()
+            .or_else(|| {
+                self.output_scales
+                    .iter()
+                    .find(|(k, _)| k.eq_ignore_ascii_case(connector))
+                    .map(|(_, v)| *v)
+            })
+            .unwrap_or(self.display_scale)
+    }
+
+    /// Returns whether an explicit per-output scale override exists for `connector`.
+    #[must_use]
+    pub fn has_explicit_output_scale(&self, connector: &str) -> bool {
+        self.output_scales
+            .keys()
+            .any(|k| k.eq_ignore_ascii_case(connector))
     }
 
     /// Builds a Smithay [`XkbConfig`] referencing the configured layout, variant, and options.
@@ -411,6 +470,26 @@ fn parse_toml_string_array(raw: &str) -> Vec<String> {
     out
 }
 
+fn parse_toml_inline_scale_table(raw: &str) -> Vec<(String, f64)> {
+    let trimmed = raw.trim();
+    let Some(inner) = trimmed.strip_prefix('{').and_then(|s| s.strip_suffix('}')) else {
+        return Vec::new();
+    };
+    let mut entries = Vec::new();
+    for pair in inner.split(',') {
+        let Some((k, v)) = pair.split_once('=') else {
+            continue;
+        };
+        let key = k.trim().trim_matches('"').trim_matches('\'').trim();
+        if !key.is_empty()
+            && let Ok(scale) = v.trim().parse::<f64>()
+        {
+            entries.push((key.to_owned(), scale));
+        }
+    }
+    entries
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -501,5 +580,28 @@ mod tests {
             "#,
         );
         assert_eq!(cfg_off.vrr_mode, VrrMode::Off);
+    }
+
+    #[test]
+    fn parses_display_fractional_and_per_output_scales() {
+        let cfg = UserConfig::parse_toml(
+            r#"
+            [display]
+            scale = 1.25
+            scales = { "DP-1" = 2.0, "HDMI-A-1" = 8.0 }
+
+            [display.scales]
+            "eDP-1" = 1.5
+            dp-2 = 0.25
+            "#,
+        );
+        assert!((cfg.display_scale - 1.25).abs() < 1e-6);
+        assert!((cfg.scale_for_output("DP-1") - 2.0).abs() < 1e-6);
+        assert!((cfg.scale_for_output("HDMI-A-1") - 4.0).abs() < 1e-6);
+        assert!((cfg.scale_for_output("eDP-1") - 1.5).abs() < 1e-6);
+        assert!((cfg.scale_for_output("DP-2") - 0.5).abs() < 1e-6);
+        assert!((cfg.scale_for_output("DP-9") - 1.25).abs() < 1e-6);
+        assert!(cfg.has_explicit_output_scale("eDP-1"));
+        assert!(!cfg.has_explicit_output_scale("DP-9"));
     }
 }

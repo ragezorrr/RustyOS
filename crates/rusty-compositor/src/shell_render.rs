@@ -7,6 +7,7 @@ use smithay::backend::renderer::Color32F;
 use smithay::backend::renderer::element::memory::MemoryRenderBufferRenderElement;
 use smithay::backend::renderer::element::solid::SolidColorRenderElement;
 use smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement;
+use smithay::backend::renderer::element::utils::{RelocateRenderElement, RescaleRenderElement};
 use smithay::backend::renderer::element::{Id, Kind};
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::renderer::utils::CommitCounter;
@@ -19,8 +20,12 @@ smithay::backend::renderer::element::render_elements! {
     Surface = WaylandSurfaceRenderElement<GlesRenderer>,
     /// Solid or translucent colored rectangle.
     Solid = SolidColorRenderElement,
+    /// Scaled solid rectangle mapped from logical shell UI coordinates to HiDPI physical pixels.
+    ScaledSolid = RescaleRenderElement<SolidColorRenderElement>,
     /// CPU-rasterized, GPU-cached buffer (text glyphs, rounded SDF corners, circles, shadows).
     Memory = MemoryRenderBufferRenderElement<GlesRenderer>,
+    /// Relocated memory buffer aligned to HiDPI physical output coordinates.
+    ScaledMemory = RelocateRenderElement<MemoryRenderBufferRenderElement<GlesRenderer>>,
 }
 
 /// Resize grab border thickness in logical pixels (`RUSTYOS-022`).

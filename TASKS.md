@@ -594,6 +594,25 @@ hardware/software context и низкие накладные расходы.
 - Новые unit/integration тесты: `visible_windows_for_output_isolates_per_display_workspaces`, `parses_display_vrr_and_refresh_preferences`, `pointer_local_maps_coordinates_only_for_matching_output`, `mode_selector_prefers_highest_refresh_at_native_resolution`, `per_output_fullscreen_vrr_and_hotplug_isolation`.
 - **Risks:** Нулевые новые внешние зависимости; аппаратный multi-monitor `--drm`, live Udev hotplug и VRR-панель не запускались в headless-среде (по правилам `HARDWARE.md` требуется bare-metal проверка на реальных GPU/мониторах).
 
+## RUSTYOS-043 --- HiDPI & Fractional Scaling (`wp_fractional_scale_v1` + `wp_viewporter`)
+
+**Статус:** done **Фаза:** 34
+
+**Goal:** Реализовать сквозную поддержку HiDPI и дробного масштабирования для Wayland/layer клиентов, shell UI, SSD и смешанных DPI конфигураций (ADR-0012, `D-020`).
+
+**Scope (Approved Option A):**
+- `crates/rusty-compositor/src/config.rs`: добавлены `clamp_display_scale`, `UserConfig::display_scale`, `UserConfig::output_scales` (`[display]` `scale` / `scales` / `[display.scales]`), `scale_for_output` и `has_explicit_output_scale`.
+- `crates/rusty-compositor/src/outputs.rs`: добавлены `compute_logical_size`, `OutputMap::update_entry_geometry` и `relayout_adjacent` для беззахлёстной перекомпоновки mixed-DPI выходов.
+- `crates/rusty-compositor/src/shell_render.rs`: расширен `CompositorRenderElement` вариантами `ScaledSolid` (`RescaleRenderElement`) и `ScaledMemory` (`RelocateRenderElement`).
+- `crates/rusty-compositor/src/state.rs`: зарегистрированы `ViewporterState` (`wp_viewporter`) и `FractionalScaleManagerState`/`FractionalScaleHandler` (`wp_fractional_scale_v1`), добавлены `update_output_geometry`, `preferred_scale_for_surface` и `apply_surface_scale` (`preferred_scale` + integer `preferred_buffer_scale` в `new_fractional_scale`, `commit`, `sync_space_with_wm`).
+- `crates/rusty-compositor/src/winit_backend.rs`, `drm_backend.rs` & `screenshot.rs`: добавлен `scale_render_elements_for_output`, устранены хардкоды scale `1.0` при рендере слоёв/окон/курсора/DnD/скриптов скриншотов и в Winit `Resized`/DRM `run_drm_kms`/`attach_secondary_connector`.
+- `docs/adr/0012-hidpi-fractional-scaling.md` & `DECISIONS.md` (`D-020`): зафиксировано архитектурное решение Вариант A.
+
+**Verification:**
+- `cargo fmt --check`, `cargo clippy --workspace --all-targets --offline -- -D warnings` и `cargo test --workspace --offline` пройдены: `94/94` тестов passed (`4` `rusty_animation`, `69` `rusty_compositor`, `3` `rusty_ipc`, `6` `rusty_services`, `5` `rusty_shell`, `7` `rusty_wm`).
+- Новые unit/integration тесты: `parses_display_fractional_and_per_output_scales`, `update_entry_geometry_recomputes_logical_sizes_and_adjacent_origins`, `fractional_scale_viewporter_and_work_area_rescaling`.
+- **Risks:** Нулевые новые внешние зависимости; визуальная проверка дробного HiDPI (125%/150%/200%) на живых Wayland-приложениях и bare-metal `--drm` не проводилась в headless-среде.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

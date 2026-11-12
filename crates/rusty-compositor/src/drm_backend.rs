@@ -644,11 +644,12 @@ impl DrmRuntime {
             make: "DRM/KMS".to_owned(),
             model: setup.connector_name.clone(),
         };
+        let scale = state.user_config.scale_for_output(&setup.connector_name);
         let new_id = state.add_output(
             setup.connector_name.clone(),
             props,
             mode,
-            Scale::Integer(1),
+            Scale::Fractional(scale),
             next_loc,
         );
         let Some(smithay_output) = state.output_map.get(new_id).map(|e| e.output.clone()) else {
@@ -939,38 +940,22 @@ fn try_run_native_drm_session(
     )?;
 
     let refresh_milli_hz = i32::try_from(setup.vrefresh.saturating_mul(1000)).unwrap_or(60_000);
-    let output_mode = OutputMode {
-        size: setup.pixel_size,
-        refresh: refresh_milli_hz,
-    };
-    state.output.change_current_state(
-        Some(output_mode),
-        Some(Transform::Normal),
-        Some(Scale::Integer(1)),
-        Some((0, 0).into()),
-    );
-    state.output.set_preferred(output_mode);
-    {
-        let primary = state.output_map.primary_mut();
-        primary.name.clone_from(&setup.connector_name);
-        primary.physical_size = setup.pixel_size;
-        primary.refresh_milli_hz = refresh_milli_hz;
-    }
-    let work_area = crate::shell_render::usable_work_area(setup.pixel_size);
-    let full_area = rusty_wm::Rect::new(
-        0,
-        0,
-        setup.pixel_size.w.max(100),
-        setup.pixel_size.h.max(100),
-    );
+    let primary_scale = state.user_config.scale_for_output(&setup.connector_name);
     state
-        .wm
-        .upsert_output_with_full_area(PRIMARY_OUTPUT_ID, work_area, full_area);
-    let serial = smithay::utils::SERIAL_COUNTER.next_serial();
-    state.sync_space_with_wm(serial);
+        .output_map
+        .primary_mut()
+        .name
+        .clone_from(&setup.connector_name);
+    state.update_output_geometry(
+        PRIMARY_OUTPUT_ID,
+        setup.pixel_size,
+        primary_scale,
+        refresh_milli_hz,
+    );
+    let logical_size = state.output_map.primary().logical_geometry().size;
     state.pointer_location = Point::<f64, Logical>::from((
-        f64::from(setup.pixel_size.w) / 2.0,
-        f64::from(setup.pixel_size.h) / 2.0,
+        f64::from(logical_size.w) / 2.0,
+        f64::from(logical_size.h) / 2.0,
     ));
 
     state
@@ -1352,11 +1337,12 @@ pub fn rescan_drm_connectors(drm_device: &DrmDevice, state: &mut RustyCompositor
                 make: "DRM/KMS".to_owned(),
                 model: setup.connector_name.clone(),
             };
+            let scale = state.user_config.scale_for_output(&setup.connector_name);
             let new_id = state.add_output(
                 setup.connector_name.clone(),
                 props,
                 mode,
-                Scale::Integer(1),
+                Scale::Fractional(scale),
                 next_loc,
             );
             tracing::info!(

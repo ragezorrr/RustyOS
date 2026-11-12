@@ -17,8 +17,8 @@ use smithay::{
         renderer::utils::on_commit_buffer_handler,
     },
     delegate_compositor, delegate_data_control, delegate_data_device, delegate_dmabuf,
-    delegate_layer_shell, delegate_output, delegate_primary_selection, delegate_seat, delegate_shm,
-    delegate_xdg_decoration, delegate_xdg_shell,
+    delegate_fractional_scale, delegate_layer_shell, delegate_output, delegate_primary_selection,
+    delegate_seat, delegate_shm, delegate_viewporter, delegate_xdg_decoration, delegate_xdg_shell,
     desktop::{
         LayerSurface as DesktopLayerSurface, PopupKind, PopupManager, Space, Window,
         WindowSurfaceType, find_popup_root_surface, get_popup_toplevel_coords,
@@ -50,6 +50,7 @@ use smithay::{
             self, CompositorClientState, CompositorHandler, CompositorState, TraversalAction,
         },
         dmabuf::{DmabufFeedback, DmabufGlobal, DmabufHandler, DmabufState, ImportNotifier},
+        fractional_scale::{self, FractionalScaleHandler, FractionalScaleManagerState},
         output::{OutputHandler, OutputManagerState},
         seat::WaylandFocus,
         selection::{
@@ -75,6 +76,7 @@ use smithay::{
             },
         },
         shm::{ShmHandler, ShmState},
+        viewporter::ViewporterState,
         xwayland_shell::XWaylandShellState,
     },
     xwayland::{X11Surface, X11Wm, XWaylandClientData},
@@ -190,6 +192,10 @@ pub struct RustyCompositorState {
     pub active_kbd_layout: String,
     /// `wl_shm` shared-memory buffer state.
     pub shm_state: ShmState,
+    /// `wp_viewporter` surface crop/destination scaling state (`RUSTYOS-043`).
+    pub viewporter_state: ViewporterState,
+    /// `wp_fractional_scale_v1` manager state (`RUSTYOS-043`).
+    pub fractional_scale_manager_state: FractionalScaleManagerState,
     /// `zwp_linux_dmabuf_v1` client DMA-BUF import state (`RUSTYOS-041`).
     pub dmabuf_state: DmabufState,
     /// Active `zwp_linux_dmabuf_v1` global handle registered by the GPU backend (`RUSTYOS-041`).
@@ -321,6 +327,9 @@ impl RustyCompositorState {
         let wlr_layer_shell_state = WlrLayerShellState::new::<Self>(&display_handle);
         let xwayland_shell_state = XWaylandShellState::new::<Self>(&display_handle);
         let shm_state = ShmState::new::<Self>(&display_handle, Vec::new());
+        let viewporter_state = ViewporterState::new::<Self>(&display_handle);
+        let fractional_scale_manager_state =
+            FractionalScaleManagerState::new::<Self>(&display_handle);
         let dmabuf_state = DmabufState::new();
         let output_manager_state = OutputManagerState::new_with_xdg_output::<Self>(&display_handle);
         let data_device_state = DataDeviceState::new::<Self>(&display_handle);
@@ -332,19 +341,24 @@ impl RustyCompositorState {
         );
 
         let user_config = crate::config::UserConfig::load_default();
+        let initial_scale = user_config.scale_for_output("winit-0");
         let mut seat_state = SeatState::new();
         let mut seat = seat_state.new_wl_seat(&display_handle, "rusty-seat-0");
 
         let keyboard = Self::init_seat_keyboard(&mut seat, &user_config)?;
         let pointer = seat.add_pointer();
 
-        let (output, primary_global) = Self::create_initial_output(&display_handle, initial_size);
+        let (output, primary_global) =
+            Self::create_initial_output(&display_handle, initial_size, initial_scale);
 
         let mut space = Space::default();
         space.map_output(&output, (0, 0));
 
-        let work_area = crate::shell_render::usable_work_area(initial_size);
-        let full_area = Rect::new(0, 0, initial_size.w.max(100), initial_size.h.max(100));
+        let logical_size = crate::outputs::compute_logical_size(initial_size, initial_scale);
+        let logical_phys_typed =
+            Size::<i32, smithay::utils::Physical>::from((logical_size.w, logical_size.h));
+        let work_area = crate::shell_render::usable_work_area(logical_phys_typed);
+        let full_area = Rect::new(0, 0, logical_size.w.max(100), logical_size.h.max(100));
         let mut wm = WindowManager::new(work_area);
         wm.upsert_output_with_full_area(PRIMARY_OUTPUT_ID, work_area, full_area);
 
@@ -354,7 +368,7 @@ impl RustyCompositorState {
             output.clone(),
             (0, 0).into(),
             initial_size,
-            1.0,
+            initial_scale,
             60_000,
             true,
         );
@@ -389,6 +403,8 @@ impl RustyCompositorState {
             user_config,
             active_kbd_layout: "EN".to_owned(),
             shm_state,
+            viewporter_state,
+            fractional_scale_manager_state,
             dmabuf_state,
             dmabuf_global: None,
             output_manager_state,
@@ -438,6 +454,7 @@ impl RustyCompositorState {
     fn create_initial_output(
         display_handle: &DisplayHandle,
         initial_size: Size<i32, smithay::utils::Physical>,
+        initial_scale: f64,
     ) -> (
         Output,
         smithay::reexports::wayland_server::backend::GlobalId,
@@ -460,7 +477,9 @@ impl RustyCompositorState {
         output.change_current_state(
             Some(mode),
             Some(Transform::Flipped180),
-            Some(Scale::Integer(1)),
+            Some(Scale::Fractional(crate::config::clamp_display_scale(
+                initial_scale,
+            ))),
             Some((0, 0).into()),
         );
         output.set_preferred(mode);
@@ -468,7 +487,6 @@ impl RustyCompositorState {
     }
 
     /// Dynamically registers and maps a new display output into the compositor workspace (`RUSTYOS-040`).
-    #[allow(clippy::cast_possible_truncation)]
     pub fn add_output(
         &mut self,
         name: impl Into<String>,
@@ -491,15 +509,19 @@ impl RustyCompositorState {
 
         self.space.map_output(&output, location);
 
-        let scale_val = match scale {
+        let scale_val = crate::config::clamp_display_scale(match scale {
             Scale::Fractional(f) => f,
             Scale::Integer(i) => f64::from(i),
             Scale::Custom { .. } => 1.0,
-        };
-        let logical_w = (f64::from(mode.size.w) / scale_val.max(0.1)).round() as i32;
-        let logical_h = (f64::from(mode.size.h) / scale_val.max(0.1)).round() as i32;
+        });
+        let logical_size = crate::outputs::compute_logical_size(mode.size, scale_val);
 
-        let work_area = Rect::new(location.x, location.y, logical_w.max(1), logical_h.max(1));
+        let work_area = Rect::new(
+            location.x,
+            location.y,
+            logical_size.w.max(100),
+            logical_size.h.max(100),
+        );
         self.wm
             .upsert_output_with_full_area(new_id, work_area, work_area);
 
@@ -519,6 +541,146 @@ impl RustyCompositorState {
         let serial = smithay::utils::SERIAL_COUNTER.next_serial();
         self.sync_space_with_wm(serial);
         new_id
+    }
+
+    /// Updates pixel resolution, `HiDPI` scale factor, refresh rate, and logical work area for an
+    /// active display output (`RUSTYOS-043`).
+    pub fn update_output_geometry(
+        &mut self,
+        output_id: OutputId,
+        physical_size: Size<i32, smithay::utils::Physical>,
+        scale: f64,
+        refresh_milli_hz: i32,
+    ) -> bool {
+        let clamped_scale = crate::config::clamp_display_scale(scale);
+        if !self.output_map.update_entry_geometry(
+            output_id,
+            physical_size,
+            clamped_scale,
+            refresh_milli_hz,
+        ) {
+            return false;
+        }
+
+        if let Some(target_output) = self.output_map.get(output_id).map(|e| e.output.clone()) {
+            let mode = Mode {
+                size: physical_size,
+                refresh: refresh_milli_hz,
+            };
+            target_output.change_current_state(
+                Some(mode),
+                None,
+                Some(Scale::Fractional(clamped_scale)),
+                None,
+            );
+            target_output.set_preferred(mode);
+        }
+
+        let entries: Vec<_> = self.output_map.entries().to_vec();
+        for entry in entries {
+            entry
+                .output
+                .change_current_state(None, None, None, Some(entry.location));
+            self.space.map_output(&entry.output, entry.location);
+            let geo = entry.logical_geometry();
+            let logical_phys =
+                Size::<i32, smithay::utils::Physical>::from((geo.size.w, geo.size.h));
+            let full_area = Rect::new(
+                geo.loc.x,
+                geo.loc.y,
+                geo.size.w.max(100),
+                geo.size.h.max(100),
+            );
+            let work_area = if entry.is_primary {
+                let mut wa = crate::shell_render::usable_work_area(logical_phys);
+                wa.x += geo.loc.x;
+                wa.y += geo.loc.y;
+                wa
+            } else {
+                full_area
+            };
+            self.wm
+                .upsert_output_with_full_area(entry.id, work_area, full_area);
+            layer_map_for_output(&entry.output).arrange();
+        }
+
+        let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+        self.sync_space_with_wm(serial);
+        true
+    }
+
+    /// Resolves the active display scale factor for `surface` (`RUSTYOS-043`).
+    #[must_use]
+    pub fn preferred_scale_for_surface(&self, surface: &WlSurface) -> f64 {
+        let mut root = surface.clone();
+        while let Some(parent) = compositor::get_parent(&root) {
+            root = parent;
+        }
+        if let Some(PopupKind::Xdg(popup)) = self.popups.find_popup(&root)
+            && let Ok(popup_root) = find_popup_root_surface(&PopupKind::Xdg(popup))
+        {
+            root = popup_root;
+            while let Some(parent) = compositor::get_parent(&root) {
+                root = parent;
+            }
+        }
+
+        for (_, window) in &self.window_bindings {
+            if WaylandFocus::wl_surface(window).is_some_and(|ws| *ws == root) {
+                if let Some(win_id) = self.window_id_for_smithay(window)
+                    && let Some(wm_win) = self.wm.window(win_id)
+                {
+                    let center = Point::from((
+                        f64::from(wm_win.geometry.x) + f64::from(wm_win.geometry.width) * 0.5,
+                        f64::from(wm_win.geometry.y) + f64::from(wm_win.geometry.height) * 0.5,
+                    ));
+                    if let Some(entry) = self
+                        .output_map
+                        .output_under(center)
+                        .and_then(|id| self.output_map.get(id))
+                    {
+                        return entry.scale;
+                    }
+                }
+                if let Some(first_out) = self.space.outputs_for_element(window).into_iter().next()
+                    && let Some(entry) = self.output_map.find_by_output(&first_out)
+                {
+                    return entry.scale;
+                }
+            }
+        }
+
+        for entry in self.output_map.entries() {
+            let layer_map = layer_map_for_output(&entry.output);
+            if layer_map
+                .layer_for_surface(&root, WindowSurfaceType::ALL)
+                .is_some()
+            {
+                return entry.scale;
+            }
+        }
+
+        self.output_map.primary().scale
+    }
+
+    /// Propagates fractional (`wp_fractional_scale_v1`) and integer (`wl_surface.preferred_buffer_scale`)
+    /// scale hints across `surface` and all subsurfaces (`RUSTYOS-043`).
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn apply_surface_scale(surface: &WlSurface, scale: f64) {
+        let clamped = crate::config::clamp_display_scale(scale);
+        let int_scale = clamped.ceil().clamp(1.0, 4.0) as i32;
+        compositor::with_surface_tree_downward(
+            surface,
+            (),
+            |_, _, ()| TraversalAction::DoChildren(()),
+            |surf, states, ()| {
+                compositor::send_surface_state(surf, states, int_scale, Transform::Normal);
+                fractional_scale::with_fractional_scale(states, |fs| {
+                    fs.set_preferred_scale(clamped);
+                });
+            },
+            |_, _, ()| true,
+        );
     }
 
     /// Dynamically unmaps and removes a display output (`RUSTYOS-040`).
@@ -1883,6 +2045,15 @@ impl RustyCompositorState {
         // 2. Map/update visible windows in bottom-to-top z-order and send pending configures.
         for (win_id, rect, maximized, fullscreen) in visible {
             let is_focused = focused_id == Some(win_id);
+            let center = Point::from((
+                f64::from(rect.x) + f64::from(rect.width) * 0.5,
+                f64::from(rect.y) + f64::from(rect.height) * 0.5,
+            ));
+            let output_scale = self
+                .output_map
+                .output_under(center)
+                .and_then(|id| self.output_map.get(id))
+                .map_or_else(|| self.output_map.primary().scale, |e| e.scale);
             self.animations.set_window_target(
                 win_id.0,
                 LogicalRect::new(rect.x, rect.y, rect.width, rect.height),
@@ -1929,6 +2100,9 @@ impl RustyCompositorState {
                     let _ = x11.set_activated(is_focused);
                     let _ = x11.set_maximized(maximized && !fullscreen);
                     let _ = x11.set_fullscreen(fullscreen);
+                }
+                if let Some(root_ws) = WaylandFocus::wl_surface(&window) {
+                    Self::apply_surface_scale(&root_ws, output_scale);
                 }
                 self.space.map_element(window, client_origin, is_focused);
             }
@@ -2161,6 +2335,8 @@ impl CompositorHandler for RustyCompositorState {
 
     fn commit(&mut self, surface: &WlSurface) {
         on_commit_buffer_handler::<Self>(surface);
+        let surface_scale = self.preferred_scale_for_surface(surface);
+        Self::apply_surface_scale(surface, surface_scale);
 
         if let Some(window) = self.window_bindings.iter().find_map(|(_, w)| {
             WaylandFocus::wl_surface(w)
@@ -2251,11 +2427,15 @@ impl CompositorHandler for RustyCompositorState {
         };
 
         if let Some(wm_rect) = layer_work_area {
-            let full_area = self.output.current_mode().map_or(wm_rect, |m| {
-                Rect::new(0, 0, m.size.w.max(100), m.size.h.max(100))
-            });
+            let primary_geo = self.output_map.primary().logical_geometry();
+            let full_area = Rect::new(
+                primary_geo.loc.x,
+                primary_geo.loc.y,
+                primary_geo.size.w.max(100),
+                primary_geo.size.h.max(100),
+            );
             self.wm
-                .upsert_output_with_full_area(OutputId(1), wm_rect, full_area);
+                .upsert_output_with_full_area(PRIMARY_OUTPUT_ID, wm_rect, full_area);
             let serial = smithay::utils::SERIAL_COUNTER.next_serial();
             self.sync_space_with_wm(serial);
         }
@@ -2706,8 +2886,17 @@ impl DmabufHandler for RustyCompositorState {
     }
 }
 
+impl FractionalScaleHandler for RustyCompositorState {
+    fn new_fractional_scale(&mut self, surface: WlSurface) {
+        let scale = self.preferred_scale_for_surface(&surface);
+        Self::apply_surface_scale(&surface, scale);
+    }
+}
+
 delegate_compositor!(RustyCompositorState);
 delegate_shm!(RustyCompositorState);
+delegate_viewporter!(RustyCompositorState);
+delegate_fractional_scale!(RustyCompositorState);
 delegate_dmabuf!(RustyCompositorState);
 delegate_output!(RustyCompositorState);
 delegate_seat!(RustyCompositorState);

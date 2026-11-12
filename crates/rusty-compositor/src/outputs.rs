@@ -15,6 +15,16 @@ use smithay::{
 };
 use tracing::info;
 
+/// Computes the rounded logical size of a display output from hardware pixels and UI scale (`RUSTYOS-043`).
+#[must_use]
+#[allow(clippy::cast_possible_truncation)]
+pub fn compute_logical_size(physical_size: Size<i32, Physical>, scale: f64) -> Size<i32, Logical> {
+    let clamped = crate::config::clamp_display_scale(scale);
+    let logical_w = (f64::from(physical_size.w) / clamped).round() as i32;
+    let logical_h = (f64::from(physical_size.h) / clamped).round() as i32;
+    Size::from((logical_w.max(1), logical_h.max(1)))
+}
+
 /// Metadata and handle for an active display output in compositor space.
 #[derive(Debug, Clone)]
 pub struct OutputEntry {
@@ -58,7 +68,7 @@ impl OutputEntry {
             output,
             location,
             physical_size,
-            scale: if scale > 0.1 { scale } else { 1.0 },
+            scale: crate::config::clamp_display_scale(scale),
             refresh_milli_hz,
             is_primary,
             global_id: None,
@@ -67,11 +77,9 @@ impl OutputEntry {
 
     /// Computes the bounding rectangle of this output in compositor logical coordinates.
     #[must_use]
-    #[allow(clippy::cast_possible_truncation)]
     pub fn logical_geometry(&self) -> Rectangle<i32, Logical> {
-        let logical_w = (f64::from(self.physical_size.w) / self.scale).round() as i32;
-        let logical_h = (f64::from(self.physical_size.h) / self.scale).round() as i32;
-        Rectangle::new(self.location, (logical_w.max(1), logical_h.max(1)).into())
+        let logical_size = compute_logical_size(self.physical_size, self.scale);
+        Rectangle::new(self.location, logical_size)
     }
 
     /// Returns the window manager work area rectangle corresponding to this output.
@@ -147,6 +155,35 @@ impl OutputMap {
     #[must_use]
     pub fn find_by_output(&self, output: &Output) -> Option<&OutputEntry> {
         self.entries.iter().find(|e| &e.output == output)
+    }
+
+    /// Updates physical pixel size, UI scale, and refresh rate for `id`, then re-packs adjacent
+    /// horizontal origins so mixed-DPI outputs never overlap (`RUSTYOS-043`).
+    pub fn update_entry_geometry(
+        &mut self,
+        id: OutputId,
+        physical_size: Size<i32, Physical>,
+        scale: f64,
+        refresh_milli_hz: i32,
+    ) -> bool {
+        let Some(entry) = self.get_mut(id) else {
+            return false;
+        };
+        entry.physical_size = physical_size;
+        entry.scale = crate::config::clamp_display_scale(scale);
+        entry.refresh_milli_hz = refresh_milli_hz;
+        self.relayout_adjacent();
+        true
+    }
+
+    /// Places outputs sequentially left-to-right starting at `(0, 0)` using current logical widths.
+    pub fn relayout_adjacent(&mut self) {
+        let mut cursor_x = 0;
+        for entry in &mut self.entries {
+            entry.location = Point::from((cursor_x, 0));
+            let geo = entry.logical_geometry();
+            cursor_x += geo.size.w;
+        }
     }
 
     /// Allocates the next available [`OutputId`].
@@ -373,5 +410,40 @@ mod tests {
         // Cannot remove the last remaining output
         assert!(map.remove(OutputId(2)).is_none());
         assert_eq!(map.count(), 1);
+    }
+
+    #[test]
+    fn update_entry_geometry_recomputes_logical_sizes_and_adjacent_origins() {
+        let out1 = create_test_output("DP-1", (3840, 2160).into(), 144_000);
+        let entry1 = OutputEntry::new(
+            OutputId(1),
+            "DP-1",
+            out1,
+            (0, 0).into(),
+            (3840, 2160).into(),
+            1.0,
+            144_000,
+            true,
+        );
+        let mut map = OutputMap::new(entry1);
+
+        let out2_id = map.next_output_id();
+        let out2 = create_test_output("eDP-1", (2560, 1600).into(), 120_000);
+        let entry2 = OutputEntry::new(
+            out2_id,
+            "eDP-1",
+            out2,
+            map.next_adjacent_location(),
+            (2560, 1600).into(),
+            1.25,
+            120_000,
+            false,
+        );
+        map.add(entry2);
+
+        assert!(map.update_entry_geometry(OutputId(1), (3840, 2160).into(), 1.5, 144_000));
+        let p_geo = map.primary().logical_geometry();
+        assert_eq!(p_geo.size, (2560, 1440).into());
+        assert_eq!(map.get(out2_id).map(|e| e.location), Some((2560, 0).into()));
     }
 }

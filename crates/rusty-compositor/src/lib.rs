@@ -925,4 +925,67 @@ mod tests {
 
         Ok(())
     }
+
+    #[test]
+    fn fractional_scale_viewporter_and_work_area_rescaling() -> Result<(), Box<dyn Error>> {
+        use smithay::backend::renderer::Color32F;
+        use smithay::backend::renderer::element::solid::SolidColorRenderElement;
+        use smithay::backend::renderer::element::{Element, Id, Kind};
+        use smithay::backend::renderer::utils::CommitCounter;
+        use smithay::utils::Rectangle;
+
+        let display: Display<RustyCompositorState> = Display::new()?;
+        let event_loop: EventLoop<RustyCompositorState> = EventLoop::try_new()?;
+        let mut compositor = RustyCompositorState::new(
+            &display,
+            "rusty-test-hidpi".to_owned(),
+            event_loop.get_signal(),
+            (3840, 2160).into(),
+        )?;
+
+        assert!(compositor.update_output_geometry(
+            rusty_wm::OutputId(1),
+            (3840, 2160).into(),
+            1.5,
+            144_000,
+        ));
+        let geo = compositor.output_map.primary().logical_geometry();
+        assert_eq!(geo.size, (2560, 1440).into());
+        assert!(
+            (compositor.output.current_scale().fractional_scale() - 1.5).abs() < 1e-6,
+            "Smithay output scale must track 1.5x fractional scaling"
+        );
+
+        let w1 = compositor.wm.next_window_id();
+        let _ = compositor.wm.map_window(w1, None);
+        let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+        compositor.apply_wm_action(rusty_wm::WmAction::ToggleFullscreen, serial);
+        let fs_rect = compositor
+            .wm
+            .window(w1)
+            .map(|w| w.geometry)
+            .unwrap_or_default();
+        assert_eq!(fs_rect.width, 2560);
+        assert_eq!(fs_rect.height, 1440);
+
+        // Verify shell solid elements upscale cleanly into physical pixels at 1.5x
+        let solid = SolidColorRenderElement::new(
+            Id::new(),
+            Rectangle::new((10, 20).into(), (100, 40).into()),
+            CommitCounter::default(),
+            Color32F::BLACK,
+            Kind::Unspecified,
+        );
+        let scaled = winit_backend::scale_render_elements_for_output(
+            vec![shell_render::CompositorRenderElement::Solid(solid)],
+            1.5,
+        );
+        assert_eq!(scaled.len(), 1);
+        assert_eq!(
+            scaled[0].geometry(smithay::utils::Scale::from(1.5)),
+            Rectangle::new((15, 30).into(), (150, 60).into())
+        );
+
+        Ok(())
+    }
 }

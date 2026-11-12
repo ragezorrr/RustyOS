@@ -11,14 +11,15 @@ use smithay::{
             Color32F, ImportDma,
             damage::OutputDamageTracker,
             element::AsRenderElements,
+            element::Element,
             element::Kind,
             element::surface::{WaylandSurfaceRenderElement, render_elements_from_surface_tree},
+            element::utils::{Relocate, RelocateRenderElement, RescaleRenderElement},
             gles::GlesRenderer,
         },
         winit::{self, WinitEvent, WinitGraphicsBackend},
     },
     input::pointer::{CursorIcon, CursorImageStatus, CursorImageSurfaceData},
-    output::{Mode, Scale},
     reexports::{
         calloop::{
             EventLoop,
@@ -261,14 +262,14 @@ pub(crate) fn finalize_frame_timing(
 fn handle_winit_event(event: WinitEvent, app_state: &mut RustyCompositorState) {
     match event {
         WinitEvent::Resized { size, scale_factor } => {
-            update_output_size(&app_state.output, size, scale_factor);
-            let work_area = crate::shell_render::usable_work_area(size);
-            let full_area = rusty_wm::Rect::new(0, 0, size.w.max(100), size.h.max(100));
-            app_state
-                .wm
-                .upsert_output_with_full_area(PRIMARY_OUTPUT_ID, work_area, full_area);
-            let serial = smithay::utils::SERIAL_COUNTER.next_serial();
-            app_state.sync_space_with_wm(serial);
+            let effective_scale = if app_state.user_config.has_explicit_output_scale("winit-0")
+                || (app_state.user_config.display_scale - 1.0).abs() > 1e-4
+            {
+                app_state.user_config.scale_for_output("winit-0")
+            } else {
+                scale_factor
+            };
+            app_state.update_output_geometry(PRIMARY_OUTPUT_ID, size, effective_scale, 60_000);
         }
         WinitEvent::CloseRequested => {
             info!("Winit window close requested");
@@ -281,28 +282,12 @@ fn handle_winit_event(event: WinitEvent, app_state: &mut RustyCompositorState) {
     }
 }
 
-fn update_output_size(
-    output: &smithay::output::Output,
-    size: smithay::utils::Size<i32, smithay::utils::Physical>,
-    scale_factor: f64,
-) {
-    let mode = Mode {
-        size,
-        refresh: 60_000,
-    };
-    output.change_current_state(
-        Some(mode),
-        None,
-        Some(Scale::Fractional(scale_factor)),
-        None,
-    );
-}
-
 fn push_layer_elements(
     render_list: &mut Vec<CompositorRenderElement>,
     output: &smithay::output::Output,
     renderer: &mut GlesRenderer,
     layers: &[Layer],
+    output_scale: f64,
 ) -> bool {
     let layer_map = smithay::desktop::layer_map_for_output(output);
     let has_layers = layer_map.len() > 0;
@@ -310,7 +295,7 @@ fn push_layer_elements(
         for &layer in layers {
             for surface in layer_map.layers_on(layer) {
                 if let Some(geo) = layer_map.layer_geometry(surface) {
-                    let loc = geo.loc.to_physical_precise_round(1.0);
+                    let loc = geo.loc.to_physical_precise_round(output_scale);
                     render_list.extend(
                         AsRenderElements::<GlesRenderer>::render_elements::<
                             WaylandSurfaceRenderElement<GlesRenderer>,
@@ -318,7 +303,7 @@ fn push_layer_elements(
                             surface,
                             renderer,
                             loc,
-                            smithay::utils::Scale::from(1.0),
+                            smithay::utils::Scale::from(output_scale),
                             1.0,
                         )
                         .into_iter()
@@ -329,6 +314,43 @@ fn push_layer_elements(
         }
     }
     has_layers
+}
+
+/// Scales logical shell/SSD elements (`Solid`, `Memory`) into physical `HiDPI` coordinates for `scale`.
+pub(crate) fn scale_render_elements_for_output(
+    elements: Vec<CompositorRenderElement>,
+    scale: f64,
+) -> Vec<CompositorRenderElement> {
+    let clamped = crate::config::clamp_display_scale(scale);
+    if (clamped - 1.0).abs() <= 1e-4 {
+        return elements;
+    }
+    elements
+        .into_iter()
+        .map(|el| match el {
+            CompositorRenderElement::Solid(solid) => CompositorRenderElement::ScaledSolid(
+                RescaleRenderElement::from_element(solid, Point::from((0, 0)), clamped),
+            ),
+            CompositorRenderElement::Memory(mem) => {
+                let logical_loc = mem.geometry(smithay::utils::Scale::from(1.0)).loc;
+                let target_loc: Point<i32, smithay::utils::Physical> =
+                    Point::<i32, Logical>::from((logical_loc.x, logical_loc.y))
+                        .to_physical_precise_round(clamped);
+                let delta =
+                    Point::from((target_loc.x - logical_loc.x, target_loc.y - logical_loc.y));
+                if delta == Point::from((0, 0)) {
+                    CompositorRenderElement::Memory(mem)
+                } else {
+                    CompositorRenderElement::ScaledMemory(RelocateRenderElement::from_element(
+                        mem,
+                        delta,
+                        Relocate::Relative,
+                    ))
+                }
+            }
+            other => other,
+        })
+        .collect()
 }
 
 fn window_title(window: &smithay::desktop::Window, id: rusty_wm::WindowId) -> String {
@@ -410,6 +432,12 @@ pub(crate) fn build_frame_render_list_for_output(
         .unwrap_or_else(|| state.output_map.primary().clone());
     let output_loc = output_entry.location;
     let output_geo = output_entry.logical_geometry();
+    let output_scale = output_entry.scale;
+    let logical_size = Size::<i32, smithay::utils::Physical>::from((
+        output_geo.size.w.max(1),
+        output_geo.size.h.max(1),
+    ));
+    let _ = size;
     let smithay_output = output_entry.output;
     let is_primary = output_entry.is_primary;
 
@@ -445,7 +473,7 @@ pub(crate) fn build_frame_render_list_for_output(
         match &state.cursor_status {
             CursorImageStatus::Hidden => {}
             CursorImageStatus::Surface(surf) if surf.alive() => {
-                push_client_surface_cursor(&mut render_list, renderer, surf, ptr);
+                push_client_surface_cursor(&mut render_list, renderer, surf, ptr, output_scale);
             }
             CursorImageStatus::Surface(_) => {
                 if let Some(cursor_el) = shape_cache.named_cursor_element(
@@ -474,8 +502,8 @@ pub(crate) fn build_frame_render_list_for_output(
         && dnd_surface.alive()
         && let Some(ptr) = local_ptr
     {
-        let dnd_loc =
-            Point::<i32, Logical>::from((ptr.x + 10, ptr.y + 10)).to_physical_precise_round(1.0);
+        let dnd_loc = Point::<i32, Logical>::from((ptr.x + 10, ptr.y + 10))
+            .to_physical_precise_round(output_scale);
         render_list.extend(
             render_elements_from_surface_tree::<
                 GlesRenderer,
@@ -484,7 +512,7 @@ pub(crate) fn build_frame_render_list_for_output(
                 renderer,
                 dnd_surface,
                 dnd_loc,
-                smithay::utils::Scale::from(1.0),
+                smithay::utils::Scale::from(output_scale),
                 0.9,
                 Kind::Unspecified,
             )
@@ -509,7 +537,7 @@ pub(crate) fn build_frame_render_list_for_output(
             text_cache,
             shape_cache,
             renderer,
-            size,
+            logical_size,
             &lock_view,
         ));
     }
@@ -527,7 +555,7 @@ pub(crate) fn build_frame_render_list_for_output(
             text_cache,
             shape_cache,
             renderer,
-            size,
+            logical_size,
             &osd_view,
         ));
     }
@@ -537,6 +565,7 @@ pub(crate) fn build_frame_render_list_for_output(
         &smithay_output,
         renderer,
         &[Layer::Overlay, Layer::Top],
+        output_scale,
     );
     let fullscreen_win = if layer_surfaces_present {
         None
@@ -725,7 +754,7 @@ pub(crate) fn build_frame_render_list_for_output(
             text_cache,
             shape_cache,
             renderer,
-            size,
+            logical_size,
             active_ws,
             layout_str,
             &dock_view,
@@ -811,7 +840,7 @@ pub(crate) fn build_frame_render_list_for_output(
                 origin.0 - geo_loc.x,
                 origin.1 + titlebar_h - geo_loc.y,
             ))
-            .to_physical_precise_round(1.0);
+            .to_physical_precise_round(output_scale);
             render_list.extend(
                 <smithay::desktop::Window as AsRenderElements<GlesRenderer>>::render_elements::<
                     WaylandSurfaceRenderElement<GlesRenderer>,
@@ -819,7 +848,7 @@ pub(crate) fn build_frame_render_list_for_output(
                     sw,
                     renderer,
                     client_loc,
-                    smithay::utils::Scale::from(1.0),
+                    smithay::utils::Scale::from(output_scale),
                     1.0,
                 )
                 .into_iter()
@@ -858,20 +887,21 @@ pub(crate) fn build_frame_render_list_for_output(
             &smithay_output,
             renderer,
             &[Layer::Bottom, Layer::Background],
+            output_scale,
         );
     }
 
     if fullscreen_win.is_none()
         && let Some(wallpaper) = shape_cache.wallpaper_element(
             renderer,
-            Size::<i32, Logical>::from((size.w, size.h)),
+            Size::<i32, Logical>::from((output_geo.size.w.max(1), output_geo.size.h.max(1))),
             state.user_config.wallpaper.as_deref(),
         )
     {
         render_list.push(CompositorRenderElement::Memory(wallpaper));
     }
 
-    render_list
+    scale_render_elements_for_output(render_list, output_scale)
 }
 
 pub(crate) fn process_pending_screenshot(
@@ -883,6 +913,7 @@ pub(crate) fn process_pending_screenshot(
     let Some(req) = state.pending_screenshot.take() else {
         return;
     };
+    let output_scale = state.output_map.primary().scale;
     let crop = match req {
         crate::screenshot::ScreenshotRequest::FullScreen => None,
         crate::screenshot::ScreenshotRequest::FocusedWindow => state
@@ -891,7 +922,13 @@ pub(crate) fn process_pending_screenshot(
             .and_then(|id| state.wm.window(id))
             .map(|w| w.geometry),
     };
-    match crate::screenshot::capture_render_list_rgba(renderer, render_list, size, crop) {
+    match crate::screenshot::capture_render_list_rgba(
+        renderer,
+        render_list,
+        size,
+        output_scale,
+        crop,
+    ) {
         Ok((width, height, rgba)) => {
             crate::screenshot::spawn_save_screenshot(
                 width,
@@ -952,8 +989,15 @@ fn render_winit_frame(
                 state.pointer_location.x.round() as i32,
                 state.pointer_location.y.round() as i32,
             ));
+            let primary_scale = state.output_map.primary().scale;
             let mut cursor_elems = Vec::new();
-            push_client_surface_cursor(&mut cursor_elems, renderer, cursor_surf, ptr);
+            push_client_surface_cursor(
+                &mut cursor_elems,
+                renderer,
+                cursor_surf,
+                ptr,
+                primary_scale,
+            );
             if !cursor_elems.is_empty() {
                 cursor_elems.extend(render_list);
                 render_list = cursor_elems;
@@ -1064,6 +1108,7 @@ fn push_client_surface_cursor(
     renderer: &mut GlesRenderer,
     surface: &WlSurface,
     pointer_loc: Point<i32, Logical>,
+    output_scale: f64,
 ) {
     let hotspot = compositor::with_states(surface, |states| {
         states
@@ -1073,7 +1118,7 @@ fn push_client_surface_cursor(
             .map(|attrs| attrs.hotspot)
     })
     .unwrap_or_default();
-    let loc = (pointer_loc - hotspot).to_physical_precise_round(1.0);
+    let loc = (pointer_loc - hotspot).to_physical_precise_round(output_scale);
     render_list.extend(
         render_elements_from_surface_tree::<
             GlesRenderer,
@@ -1082,7 +1127,7 @@ fn push_client_surface_cursor(
             renderer,
             surface,
             loc,
-            smithay::utils::Scale::from(1.0),
+            smithay::utils::Scale::from(output_scale),
             1.0,
             Kind::Cursor,
         )

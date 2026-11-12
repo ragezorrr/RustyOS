@@ -76,12 +76,23 @@ pub fn clamp_capture_region(
 /// # Errors
 ///
 /// Returns an error string if offscreen allocation, rendering, or GPU readback fails.
+#[allow(clippy::cast_possible_truncation)]
 pub fn capture_render_list_rgba(
     renderer: &mut GlesRenderer,
     elements: &[CompositorRenderElement],
     output_size: Size<i32, Physical>,
+    output_scale: f64,
     crop: Option<Rect>,
 ) -> Result<(u32, u32, Vec<u8>), String> {
+    let scale = crate::config::clamp_display_scale(output_scale);
+    let phys_crop = crop.map(|r| {
+        Rect::new(
+            (f64::from(r.x) * scale).round() as i32,
+            (f64::from(r.y) * scale).round() as i32,
+            (f64::from(r.width) * scale).round() as i32,
+            (f64::from(r.height) * scale).round() as i32,
+        )
+    });
     let buf_size = Size::<i32, BufferCoord>::from((output_size.w.max(1), output_size.h.max(1)));
     let mut tex: GlesTexture = renderer
         .create_buffer(Fourcc::Abgr8888, buf_size)
@@ -90,13 +101,13 @@ pub fn capture_render_list_rgba(
         let mut fb = renderer
             .bind(&mut tex)
             .map_err(|err| format!("offscreen bind failed: {err}"))?;
-        let mut damage = OutputDamageTracker::new(output_size, 1.0, Transform::Normal);
+        let mut damage = OutputDamageTracker::new(output_size, scale, Transform::Normal);
         damage
             .render_output(renderer, &mut fb, 0, elements, BACKGROUND_COLOR)
             .map_err(|err| format!("offscreen render_output failed: {err}"))?;
     }
 
-    let region = clamp_capture_region(output_size, crop);
+    let region = clamp_capture_region(output_size, phys_crop);
     let mapping = renderer
         .copy_texture(&tex, region, Fourcc::Abgr8888)
         .map_err(|err| format!("GPU copy_texture failed: {err}"))?;
