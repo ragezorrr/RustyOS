@@ -10,6 +10,7 @@ description = "RustyOS independent desktop shell (TopBar, Dock, Launcher, Notifi
 [dependencies]
 rusty-animation.workspace = true
 rusty-ipc.workspace = true
+rusty-services.workspace = true
 
 [lints]
 workspace = true

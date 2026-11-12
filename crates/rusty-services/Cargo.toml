@@ -1,0 +1,13 @@
+[package]
+name = "rusty-services"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "RustyOS Linux system service adapters (audio, battery, network, session lifecycle)"
+
+[dependencies]
+
+[lints]
+workspace = true

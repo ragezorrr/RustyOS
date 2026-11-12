@@ -14,6 +14,7 @@ use rusty_ipc::{
     CompositorEvent, DesktopStateSnapshot, IpcClient, IpcError, ShellRequest, Urgency,
     WindowSummary,
 };
+use rusty_services::ServiceRegistry;
 
 /// Canonical design tokens from `DESIGN.md` (Section 3).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -326,6 +327,8 @@ pub struct DesktopShell {
     pub screen_locked: bool,
     /// Desktop wallpaper configuration.
     pub wallpaper: WallpaperConfig,
+    /// System service adapters registry.
+    pub services: ServiceRegistry,
 }
 
 impl Default for DesktopShell {
@@ -358,6 +361,7 @@ impl Default for DesktopShell {
             overview_progress: AnimatedValue::new_settled(0.0),
             screen_locked: false,
             wallpaper: WallpaperConfig::default(),
+            services: ServiceRegistry::new(),
         }
     }
 }
@@ -415,10 +419,21 @@ impl DesktopShell {
         }
     }
 
-    /// Advances shell animations and expires old notifications at monotonic timestamp `now`.
+    /// Advances shell animations, updates system service metrics, and expires old notifications.
     pub fn tick(&mut self, now: Duration) {
         let _ = self.overview_progress.tick(now);
         self.notifications.expire(now);
+
+        // Update system hardware status in TopBar and QuickSettings
+        let pwr = self.services.power.query_status();
+        self.top_bar.battery_percent = pwr.percentage;
+
+        let net = self.services.network.query_status();
+        self.top_bar.network_label = net.status_label;
+        self.quick_settings.wifi_enabled = net.connected;
+
+        let aud = self.services.audio.query_status();
+        self.quick_settings.volume_percent = aud.volume_percent;
     }
 
     /// Renders a structured text HUD summary of all Phase 6 shell surfaces.

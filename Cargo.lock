@@ -1353,11 +1353,16 @@ name = "rusty-ipc"
 version = "0.1.0"
 
 [[package]]
+name = "rusty-services"
+version = "0.1.0"
+
+[[package]]
 name = "rusty-shell"
 version = "0.1.0"
 dependencies = [
  "rusty-animation",
  "rusty-ipc",
+ "rusty-services",
 ]
 
 [[package]]

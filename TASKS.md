@@ -120,6 +120,16 @@ hardware/software context и низкие накладные расходы.
 - **Acceptance criteria:** `rusty-shell` работает в отдельном процессе, переживает собственный перезапуск и восстанавливает состояние (`active_workspace`, `overview_active`, окна в Dock) из `StateSnapshot` композитора.
 - **Risks:** Потеря синхронизации после перезапуска `rusty-shell` (решается немедленным запросом `GetStateSnapshot` при новом `Handshake`).
 
+## RUSTYOS-011 --- Linux System Services Integration (`crates/rusty-services`)
+
+**Статус:** done **Фаза:** 7
+
+- **Цель:** Безопасная интеграция с базовыми сервисами Linux (батарея, сеть, аудио, сессия) с минимальными привилегиями и гарантией мягкой деградации.
+- **Scope:** Крейт `crates/rusty-services` (`PowerService`, `NetworkService`, `AudioService`, `SessionService`, `ServiceRegistry`); интеграция с `apps/rusty-shell` для отображения реального состояния батареи, сети и громкости в `TopBar` и `QuickSettings`.
+- **Dependencies:** `RUSTYOS-009`, `RUSTYOS-010`.
+- **Acceptance criteria:** Сборка без внешних сетевых зависимостей, нулевые паники при отсутствии сервисов, тесты проходят.
+- **Risks:** Блокировка процесса на зависших внешних вызовах (минимизируется чтением sysfs и быстрыми status-вызовами).
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

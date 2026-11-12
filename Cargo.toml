@@ -5,6 +5,7 @@ members = [
     "crates/rusty-animation",
     "crates/rusty-compositor",
     "crates/rusty-ipc",
+    "crates/rusty-services",
     "crates/rusty-wm",
 ]
 
@@ -18,6 +19,7 @@ authors = ["RustyOS Contributors"]
 [workspace.dependencies]
 rusty-animation = { path = "crates/rusty-animation" }
 rusty-ipc = { path = "crates/rusty-ipc" }
+rusty-services = { path = "crates/rusty-services" }
 rusty-wm = { path = "crates/rusty-wm" }
 smithay = { version = "0.7.0", default-features = false, features = [
     "backend_drm",

@@ -79,6 +79,14 @@
                           независимый процесс     
                           `apps/rusty-shell`      
                           (ADR-0005)              
+
+  D-014                   Фаза 7 (RUSTYOS-011):   accepted
+                          адаптеры системных      
+                          сервисов Linux          
+                          `crates/rusty-services` 
+                          (sysfs, audio, network, 
+                          logind, fallback)       
+                          (ADR-0006)              
   -----------------------------------------------------------------------
 
 ## Открытые решения
