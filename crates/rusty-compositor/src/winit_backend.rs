@@ -358,16 +358,12 @@ pub(crate) fn build_frame_render_list(
     let mut render_list: Vec<CompositorRenderElement> = Vec::new();
     if include_software_cursor {
         #[allow(clippy::cast_possible_truncation)]
-        let cursor_x = state.pointer_location.x.round() as i32 - 6;
+        let cursor_x = state.pointer_location.x.round() as i32 - 2;
         #[allow(clippy::cast_possible_truncation)]
-        let cursor_y = state.pointer_location.y.round() as i32 - 6;
-        if let Some(cursor_el) = shape_cache.circle_element(
-            renderer,
-            14,
-            [244, 238, 255, 245],
-            Some([148, 87, 255, 255]),
-            Point::from((cursor_x, cursor_y)),
-        ) {
+        let cursor_y = state.pointer_location.y.round() as i32 - 2;
+        if let Some(cursor_el) =
+            shape_cache.cursor_arrow_element(renderer, Point::from((cursor_x, cursor_y)))
+        {
             render_list.push(CompositorRenderElement::Memory(cursor_el));
         }
     }

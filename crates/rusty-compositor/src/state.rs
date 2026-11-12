@@ -195,6 +195,8 @@ pub struct RustyCompositorState {
     pub notifications: Vec<CompositorNotification>,
     /// Non-blocking D-Bus `org.freedesktop.Notifications` bridge (`RUSTYOS-026`).
     pub dbus_notifications: crate::dbus_notifications::DbusNotificationHandle,
+    /// Pending TTY virtual terminal switch (`Ctrl+Alt+F1..F12` -> `libseat::change_vt`).
+    pub pending_vt_switch: Option<i32>,
     next_notification_id: u64,
 }
 
@@ -322,6 +324,7 @@ impl RustyCompositorState {
             notification_count: 0,
             notifications: Vec::new(),
             dbus_notifications: crate::dbus_notifications::DbusNotificationHandle::default(),
+            pending_vt_switch: None,
             next_notification_id: 0,
         })
     }

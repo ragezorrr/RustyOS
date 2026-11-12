@@ -39,6 +39,7 @@ enum KeyIntercept {
     LauncherClear,
     LauncherText(String),
     LauncherConsume,
+    SwitchVt(i32),
     Wm(WmAction),
 }
 
@@ -94,11 +95,16 @@ impl RustyCompositorState {
             serial,
             time,
             |state, modifiers, handle| {
+                let sym = handle.modified_sym();
+                if key_state == KeyState::Pressed
+                    && let Some(vt) = match_vt_switch_key(*modifiers, sym)
+                {
+                    return FilterResult::Intercept(KeyIntercept::SwitchVt(vt));
+                }
                 if state.screen_locked {
                     if key_state != KeyState::Pressed {
                         return FilterResult::Intercept(KeyIntercept::LockScreenConsume);
                     }
-                    let sym = handle.modified_sym();
                     return FilterResult::Intercept(match_lock_screen_key(sym));
                 }
                 if key_state != KeyState::Pressed {
@@ -108,7 +114,6 @@ impl RustyCompositorState {
                         FilterResult::Forward
                     };
                 }
-                let sym = handle.modified_sym();
                 if state.launcher_active {
                     let utf8 = sym.key_char().map(|ch| ch.to_string());
                     return FilterResult::Intercept(match_launcher_key(
@@ -218,6 +223,9 @@ impl RustyCompositorState {
             }
             KeyIntercept::LauncherText(text) => {
                 self.launcher.push_text(&text);
+            }
+            KeyIntercept::SwitchVt(vt) => {
+                self.pending_vt_switch = Some(vt);
             }
             KeyIntercept::Wm(wm_action) => {
                 self.apply_wm_action(wm_action, serial);
@@ -807,6 +815,36 @@ const fn match_shortcut(modifiers: ModifiersState, sym: Keysym) -> Option<KeyInt
     }
 }
 
+const fn match_vt_switch_key(modifiers: ModifiersState, sym: Keysym) -> Option<i32> {
+    match sym {
+        Keysym::XF86_Switch_VT_1 => Some(1),
+        Keysym::XF86_Switch_VT_2 => Some(2),
+        Keysym::XF86_Switch_VT_3 => Some(3),
+        Keysym::XF86_Switch_VT_4 => Some(4),
+        Keysym::XF86_Switch_VT_5 => Some(5),
+        Keysym::XF86_Switch_VT_6 => Some(6),
+        Keysym::XF86_Switch_VT_7 => Some(7),
+        Keysym::XF86_Switch_VT_8 => Some(8),
+        Keysym::XF86_Switch_VT_9 => Some(9),
+        Keysym::XF86_Switch_VT_10 => Some(10),
+        Keysym::XF86_Switch_VT_11 => Some(11),
+        Keysym::XF86_Switch_VT_12 => Some(12),
+        Keysym::F1 if modifiers.ctrl && modifiers.alt => Some(1),
+        Keysym::F2 if modifiers.ctrl && modifiers.alt => Some(2),
+        Keysym::F3 if modifiers.ctrl && modifiers.alt => Some(3),
+        Keysym::F4 if modifiers.ctrl && modifiers.alt => Some(4),
+        Keysym::F5 if modifiers.ctrl && modifiers.alt => Some(5),
+        Keysym::F6 if modifiers.ctrl && modifiers.alt => Some(6),
+        Keysym::F7 if modifiers.ctrl && modifiers.alt => Some(7),
+        Keysym::F8 if modifiers.ctrl && modifiers.alt => Some(8),
+        Keysym::F9 if modifiers.ctrl && modifiers.alt => Some(9),
+        Keysym::F10 if modifiers.ctrl && modifiers.alt => Some(10),
+        Keysym::F11 if modifiers.ctrl && modifiers.alt => Some(11),
+        Keysym::F12 if modifiers.ctrl && modifiers.alt => Some(12),
+        _ => None,
+    }
+}
+
 const fn match_lock_screen_key(sym: Keysym) -> KeyIntercept {
     match sym {
         Keysym::Return | Keysym::KP_Enter | Keysym::space | Keysym::Escape => {
@@ -1077,5 +1115,23 @@ mod tests {
         let p2 = clamp_relative_pointer((1900.0, 1060.0).into(), (100.0, 80.0).into(), bounds);
         assert!((p2.x - 1919.0).abs() < f64::EPSILON);
         assert!((p2.y - 1079.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn vt_switch_matching_covers_xf86_and_ctrl_alt_fn() {
+        let none = ModifiersState::default();
+        let ctrl_alt = ModifiersState {
+            ctrl: true,
+            alt: true,
+            ..ModifiersState::default()
+        };
+        assert_eq!(match_vt_switch_key(none, Keysym::XF86_Switch_VT_1), Some(1));
+        assert_eq!(
+            match_vt_switch_key(ctrl_alt, Keysym::XF86_Switch_VT_3),
+            Some(3)
+        );
+        assert_eq!(match_vt_switch_key(ctrl_alt, Keysym::F1), Some(1));
+        assert_eq!(match_vt_switch_key(ctrl_alt, Keysym::F12), Some(12));
+        assert_eq!(match_vt_switch_key(none, Keysym::F1), None);
     }
 }

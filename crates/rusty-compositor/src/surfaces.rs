@@ -55,6 +55,7 @@ pub struct UiShapeCache {
     corners: HashMap<CornerKey, (MemoryRenderBuffer, Size<i32, Logical>)>,
     shadow_corners: HashMap<ShadowCornerKey, (MemoryRenderBuffer, Size<i32, Logical>)>,
     wallpaper: Option<MemoryRenderBuffer>,
+    cursor_arrow: Option<MemoryRenderBuffer>,
 }
 
 impl UiShapeCache {
@@ -209,6 +210,27 @@ impl UiShapeCache {
             )))),
             Some(screen_size),
             Kind::Unspecified,
+        )
+        .ok()
+    }
+
+    /// Returns a GPU-cached anti-aliased desktop pointer arrow (24x24, hotspot at `(2, 2)`).
+    pub fn cursor_arrow_element(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        top_left: Point<i32, Logical>,
+    ) -> Option<MemoryRenderBufferRenderElement<GlesRenderer>> {
+        let buf = self
+            .cursor_arrow
+            .get_or_insert_with(rasterize_cursor_arrow_buffer);
+        MemoryRenderBufferRenderElement::from_buffer(
+            renderer,
+            top_left.to_f64().to_physical(1.0),
+            buf,
+            None,
+            None,
+            None,
+            Kind::Cursor,
         )
         .ok()
     }
@@ -555,6 +577,107 @@ fn rasterize_wallpaper_buffer(w: i32, h: i32) -> MemoryRenderBuffer {
     mem_buf
 }
 
+fn signed_distance_polygon(px: f32, py: f32, verts: &[(f32, f32)]) -> f32 {
+    let mut d = f32::MAX;
+    let mut s = 1.0_f32;
+    let len = verts.len();
+    for i in 0..len {
+        let j = if i == 0 { len - 1 } else { i - 1 };
+        let vi = verts[i];
+        let vj = verts[j];
+        let ex = vi.0 - vj.0;
+        let ey = vi.1 - vj.1;
+        let wx = px - vj.0;
+        let wy = py - vj.1;
+        let denom = ex * ex + ey * ey;
+        let t = if denom > 0.0 {
+            ((wx * ex + wy * ey) / denom).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let bx = wx - ex * t;
+        let by = wy - ey * t;
+        d = d.min(bx * bx + by * by);
+
+        let c1 = py >= vj.1;
+        let c2 = py < vi.1;
+        let c3 = ex * wy > ey * wx;
+        if (c1 && c2 && c3) || (!c1 && !c2 && !c3) {
+            s = -s;
+        }
+    }
+    s * d.sqrt()
+}
+
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
+)]
+fn sample_cursor_arrow_pixel(px: i32, py: i32) -> [u8; 4] {
+    const ARROW_VERTS: [(f32, f32); 7] = [
+        (2.5, 2.5),
+        (2.5, 18.2),
+        (6.4, 14.5),
+        (8.9, 20.3),
+        (11.1, 19.3),
+        (8.6, 13.5),
+        (13.8, 13.3),
+    ];
+    let x = px as f32 + 0.5;
+    let y = py as f32 + 0.5;
+    let sd = signed_distance_polygon(x, y, &ARROW_VERTS);
+    let shadow_sd = signed_distance_polygon(x - 0.7, y - 1.1, &ARROW_VERTS);
+
+    let shadow_alpha = ((3.1 - shadow_sd) / 2.2).clamp(0.0, 1.0) * 0.38;
+    let mut out = premul_pixel(8.0, 5.0, 18.0, shadow_alpha);
+
+    let rim_cov = (1.5 - sd).clamp(0.0, 1.0);
+    if rim_cov > 0.0 {
+        let rim = premul_pixel(250.0, 248.0, 255.0, rim_cov);
+        out = composite_over(rim, out);
+    }
+
+    let fill_cov = (0.35 - sd).clamp(0.0, 1.0);
+    if fill_cov > 0.0 {
+        let fill = premul_pixel(22.0, 16.0, 38.0, fill_cov);
+        out = composite_over(fill, out);
+    }
+
+    out
+}
+
+fn rasterize_cursor_arrow_buffer() -> MemoryRenderBuffer {
+    const CURSOR_DIM: i32 = 24;
+    let mut mem_buf = MemoryRenderBuffer::new(
+        Fourcc::Argb8888,
+        (CURSOR_DIM, CURSOR_DIM),
+        1,
+        Transform::Normal,
+        None,
+    );
+    {
+        let mut ctx = mem_buf.render();
+        let _ = ctx.draw(|pixels| {
+            let w_u = usize::try_from(CURSOR_DIM).unwrap_or(0);
+            for py in 0..CURSOR_DIM {
+                for px in 0..CURSOR_DIM {
+                    let row = usize::try_from(py).unwrap_or(0);
+                    let col = usize::try_from(px).unwrap_or(0);
+                    let idx = (row * w_u + col) * 4;
+                    if idx + 4 <= pixels.len() {
+                        pixels[idx..idx + 4].copy_from_slice(&sample_cursor_arrow_pixel(px, py));
+                    }
+                }
+            }
+            Ok::<_, std::convert::Infallible>(vec![smithay::utils::Rectangle::from_size(
+                Size::from((CURSOR_DIM, CURSOR_DIM)),
+            )])
+        });
+    }
+    mem_buf
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -601,5 +724,12 @@ mod tests {
         assert_eq!(glow_px[3], 255);
         assert_eq!(dark_px[3], 255);
         assert!(glow_px[0] > dark_px[0]);
+
+        // Desktop arrow cursor: opaque dark interior, bright rim, and transparent empty corner
+        let arrow_inside = sample_cursor_arrow_pixel(5, 9);
+        let arrow_outside = sample_cursor_arrow_pixel(22, 2);
+        assert_eq!(arrow_inside[3], 255);
+        assert!(arrow_inside[2] < 80);
+        assert_eq!(arrow_outside[3], 0);
     }
 }

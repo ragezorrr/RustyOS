@@ -245,6 +245,7 @@ struct DrmRuntime {
     total_output_pixels: u64,
     paused: bool,
     vblank_pending: bool,
+    vblank_queued_at: Option<Instant>,
     needs_redraw: bool,
     frame_start: Option<Instant>,
     rendered_frames: u64,
@@ -257,8 +258,21 @@ impl DrmRuntime {
             return;
         }
         if self.vblank_pending {
-            self.needs_redraw = true;
-            return;
+            let timed_out = self
+                .vblank_queued_at
+                .is_some_and(|queued| queued.elapsed() >= Duration::from_millis(500));
+            if timed_out {
+                warn!("DRM VBlank watchdog (>500ms); resetting compositor pipeline");
+                self.vblank_pending = false;
+                self.vblank_queued_at = None;
+                let _ = self.drm_compositor.clear();
+                let _ = self.drm_compositor.reset_state();
+                self.drm_compositor.reset_buffers();
+                self.drm_compositor.reset_buffer_ages();
+            } else {
+                self.needs_redraw = true;
+                return;
+            }
         }
 
         let render_start = Instant::now();
@@ -288,6 +302,7 @@ impl DrmRuntime {
                     self.needs_redraw = true;
                 } else {
                     self.vblank_pending = true;
+                    self.vblank_queued_at = Some(Instant::now());
                     self.needs_redraw = false;
                     self.frame_start = Some(render_start);
                 }
@@ -304,6 +319,7 @@ impl DrmRuntime {
             warn!(error = ?err, "Failed to mark DRM/KMS frame as submitted");
         }
         self.vblank_pending = false;
+        self.vblank_queued_at = None;
 
         let present_done = Instant::now();
         let frame_start = self.frame_start.take().unwrap_or(present_done);
@@ -576,6 +592,7 @@ fn try_run_native_drm_session(
         total_output_pixels,
         paused: false,
         vblank_pending: false,
+        vblank_queued_at: None,
         needs_redraw: true,
         frame_start: None,
         rendered_frames: 0,
@@ -596,6 +613,13 @@ fn try_run_native_drm_session(
     loop_handle
         .insert_source(libinput_backend, move |event, _metadata, app_state| {
             app_state.process_input_event(event);
+            if let Some(vt) = app_state.pending_vt_switch.take() {
+                info!(vt, "Switching virtual terminal via libseat");
+                if let Err(err) = session.change_vt(vt) {
+                    warn!(vt, error = ?err, "libseat change_vt failed");
+                }
+                return;
+            }
             let mut rt = rt_input.borrow_mut();
             rt.needs_redraw = true;
             if !rt.vblank_pending && !rt.paused {
@@ -613,19 +637,38 @@ fn try_run_native_drm_session(
                     info!("VT switched away; pausing DRM device and libinput");
                     rt.paused = true;
                     rt.vblank_pending = false;
+                    rt.vblank_queued_at = None;
+                    rt.frame_start = None;
+                    app_state.active_window_drag = None;
+                    app_state.active_window_resize = None;
                     rt.libinput.suspend();
+                    let _ = rt.libinput.dispatch();
                     rt.drm_device.pause();
                 }
                 SessionEvent::ActivateSession => {
-                    info!("VT activated; resuming DRM device and libinput");
-                    if let Err(err) = rt.drm_device.activate(false) {
-                        warn!(error = ?err, "Failed to re-activate DRM device");
+                    info!("VT activated; resuming DRM device, compositor, and libinput");
+                    if let Err(err) = rt.drm_device.activate(true) {
+                        warn!(error = ?err, "DrmDevice::activate(true) failed; retrying soft activate");
+                        if let Err(err2) = rt.drm_device.activate(false) {
+                            warn!(error = ?err2, "Failed to re-activate DRM device");
+                        }
                     }
                     if rt.libinput.resume().is_err() {
                         warn!("Failed to resume libinput context");
+                    } else {
+                        let _ = rt.libinput.dispatch();
+                    }
+                    if let Err(err) = rt.drm_compositor.clear() {
+                        warn!(error = ?err, "DrmCompositor::clear on VT activate failed");
+                    }
+                    if let Err(err) = rt.drm_compositor.reset_state() {
+                        warn!(error = ?err, "DrmCompositor::reset_state on VT activate failed");
                     }
                     rt.drm_compositor.reset_buffers();
+                    rt.drm_compositor.reset_buffer_ages();
                     rt.paused = false;
+                    rt.vblank_pending = false;
+                    rt.vblank_queued_at = None;
                     rt.needs_redraw = true;
                     rt.render_and_queue(app_state);
                 }
