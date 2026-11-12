@@ -498,4 +498,54 @@ mod tests {
 
         Ok(())
     }
+
+    #[test]
+    fn selection_protocols_register_and_update_clipboard_and_primary_state()
+    -> Result<(), Box<dyn Error>> {
+        use smithay::wayland::selection::{
+            data_device::{
+                clear_data_device_selection, current_data_device_selection_userdata,
+                set_data_device_focus, set_data_device_selection,
+            },
+            primary_selection::{
+                clear_primary_selection, current_primary_selection_userdata, set_primary_focus,
+                set_primary_selection,
+            },
+        };
+
+        let event_loop: EventLoop<'static, state::RustyCompositorState> = EventLoop::try_new()?;
+        let display: Display<state::RustyCompositorState> = Display::new()?;
+
+        let compositor = state::RustyCompositorState::new(
+            &display,
+            "wayland-sel-test-0".to_owned(),
+            event_loop.get_signal(),
+            (1280, 800).into(),
+        )?;
+
+        set_data_device_focus(&compositor.display_handle, &compositor.seat, None);
+        set_primary_focus(&compositor.display_handle, &compositor.seat, None);
+
+        set_data_device_selection(
+            &compositor.display_handle,
+            &compositor.seat,
+            vec!["text/plain;charset=utf-8".to_owned()],
+            (),
+        );
+        assert!(current_data_device_selection_userdata(&compositor.seat).is_some());
+        clear_data_device_selection(&compositor.display_handle, &compositor.seat);
+        assert!(current_data_device_selection_userdata(&compositor.seat).is_none());
+
+        set_primary_selection(
+            &compositor.display_handle,
+            &compositor.seat,
+            vec!["text/plain".to_owned()],
+            (),
+        );
+        assert!(current_primary_selection_userdata(&compositor.seat).is_some());
+        clear_primary_selection(&compositor.display_handle, &compositor.seat);
+        assert!(current_primary_selection_userdata(&compositor.seat).is_none());
+
+        Ok(())
+    }
 }

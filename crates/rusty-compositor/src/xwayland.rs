@@ -20,6 +20,9 @@ use smithay::wayland::selection::{
         clear_data_device_selection, request_data_device_client_selection,
         set_data_device_selection,
     },
+    primary_selection::{
+        clear_primary_selection, request_primary_client_selection, set_primary_selection,
+    },
 };
 use smithay::wayland::xwayland_shell::{XWaylandShellHandler, XWaylandShellState};
 use smithay::xwayland::xwm::{Reorder, ResizeEdge, X11Window, XwmId};
@@ -290,7 +293,11 @@ impl XwmHandler for RustyCompositorState {
     }
 
     fn allow_selection_access(&mut self, _xwm: XwmId, selection: SelectionTarget) -> bool {
-        !self.screen_locked && selection == SelectionTarget::Clipboard
+        !self.screen_locked
+            && matches!(
+                selection,
+                SelectionTarget::Clipboard | SelectionTarget::Primary
+            )
     }
 
     fn send_selection(
@@ -300,24 +307,55 @@ impl XwmHandler for RustyCompositorState {
         mime_type: String,
         fd: OwnedFd,
     ) {
-        if selection != SelectionTarget::Clipboard {
-            return;
-        }
-        if let Err(err) = request_data_device_client_selection(&self.seat, mime_type, fd) {
-            warn!(error = ?err, "Failed to transfer Wayland clipboard to XWayland");
+        let result = match selection {
+            SelectionTarget::Clipboard => {
+                request_data_device_client_selection(&self.seat, mime_type, fd)
+            }
+            SelectionTarget::Primary => request_primary_client_selection(&self.seat, mime_type, fd)
+                .map_err(|err| match err {
+                    smithay::wayland::selection::primary_selection::SelectionRequestError::InvalidMimetype => {
+                        smithay::wayland::selection::data_device::SelectionRequestError::InvalidMimetype
+                    }
+                    smithay::wayland::selection::primary_selection::SelectionRequestError::ServerSideSelection => {
+                        smithay::wayland::selection::data_device::SelectionRequestError::ServerSideSelection
+                    }
+                    smithay::wayland::selection::primary_selection::SelectionRequestError::NoSelection => {
+                        smithay::wayland::selection::data_device::SelectionRequestError::NoSelection
+                    }
+                }),
+        };
+        if let Err(err) = result {
+            warn!(?selection, error = ?err, "Failed to transfer Wayland selection to XWayland");
+        } else {
+            let _ = self.display_handle.flush_clients();
         }
     }
 
     fn new_selection(&mut self, _xwm: XwmId, selection: SelectionTarget, mime_types: Vec<String>) {
-        if selection == SelectionTarget::Clipboard {
-            set_data_device_selection(&self.display_handle, &self.seat, mime_types, ());
+        if self.screen_locked {
+            return;
         }
+        match selection {
+            SelectionTarget::Clipboard => {
+                set_data_device_selection(&self.display_handle, &self.seat, mime_types, ());
+            }
+            SelectionTarget::Primary => {
+                set_primary_selection(&self.display_handle, &self.seat, mime_types, ());
+            }
+        }
+        let _ = self.display_handle.flush_clients();
     }
 
     fn cleared_selection(&mut self, _xwm: XwmId, selection: SelectionTarget) {
-        if selection == SelectionTarget::Clipboard {
-            clear_data_device_selection(&self.display_handle, &self.seat);
+        match selection {
+            SelectionTarget::Clipboard => {
+                clear_data_device_selection(&self.display_handle, &self.seat);
+            }
+            SelectionTarget::Primary => {
+                clear_primary_selection(&self.display_handle, &self.seat);
+            }
         }
+        let _ = self.display_handle.flush_clients();
     }
 }
 

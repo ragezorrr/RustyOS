@@ -12,8 +12,9 @@ use rusty_ipc::{
 use rusty_wm::{LayoutMode, OutputId, Rect, WindowId, WindowManager, WmAction, WorkspaceId};
 use smithay::{
     backend::renderer::utils::on_commit_buffer_handler,
-    delegate_compositor, delegate_data_device, delegate_layer_shell, delegate_output,
-    delegate_seat, delegate_shm, delegate_xdg_decoration, delegate_xdg_shell,
+    delegate_compositor, delegate_data_control, delegate_data_device, delegate_layer_shell,
+    delegate_output, delegate_primary_selection, delegate_seat, delegate_shm,
+    delegate_xdg_decoration, delegate_xdg_shell,
     desktop::{
         LayerSurface as DesktopLayerSurface, PopupManager, Space, Window, WindowSurfaceType,
         layer_map_for_output,
@@ -29,7 +30,7 @@ use smithay::{
         wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode as DecorationMode,
         wayland_protocols::xdg::shell::server::xdg_toplevel,
         wayland_server::{
-            Client, Display, DisplayHandle,
+            Client, Display, DisplayHandle, Resource,
             backend::{ClientData, ClientId, DisconnectReason},
             protocol::{wl_buffer, wl_output::WlOutput, wl_seat, wl_surface::WlSurface},
         },
@@ -44,7 +45,12 @@ use smithay::{
             SelectionHandler, SelectionSource, SelectionTarget,
             data_device::{
                 ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler,
+                set_data_device_focus,
             },
+            primary_selection::{
+                PrimarySelectionHandler, PrimarySelectionState, set_primary_focus,
+            },
+            wlr_data_control::{DataControlHandler, DataControlState},
         },
         shell::{
             wlr_layer::{
@@ -157,6 +163,10 @@ pub struct RustyCompositorState {
     pub seat_state: SeatState<Self>,
     /// `wl_data_device` clipboard and drag-and-drop state.
     pub data_device_state: DataDeviceState,
+    /// `zwp_primary_selection_v1` middle-click / terminal selection state.
+    pub primary_selection_state: PrimarySelectionState,
+    /// `zwlr_data_control_manager_v1` CLI/manager clipboard access state.
+    pub data_control_state: DataControlState,
     /// Primary input seat (`winit` in Phase 1).
     pub seat: Seat<Self>,
     /// Keyboard handle attached to the primary seat.
@@ -248,6 +258,12 @@ impl RustyCompositorState {
         let shm_state = ShmState::new::<Self>(&display_handle, Vec::new());
         let output_manager_state = OutputManagerState::new_with_xdg_output::<Self>(&display_handle);
         let data_device_state = DataDeviceState::new::<Self>(&display_handle);
+        let primary_selection_state = PrimarySelectionState::new::<Self>(&display_handle);
+        let data_control_state = DataControlState::new::<Self, _>(
+            &display_handle,
+            Some(&primary_selection_state),
+            |_| true,
+        );
 
         let user_config = crate::config::UserConfig::load_default();
         let mut seat_state = SeatState::new();
@@ -256,28 +272,7 @@ impl RustyCompositorState {
         let keyboard = Self::init_seat_keyboard(&mut seat, &user_config)?;
         let pointer = seat.add_pointer();
 
-        let output = Output::new(
-            "winit-0".to_owned(),
-            PhysicalProperties {
-                size: (0, 0).into(),
-                subpixel: Subpixel::Unknown,
-                make: "RustyOS".to_owned(),
-                model: "Nested Winit Output".to_owned(),
-            },
-        );
-        let _output_global = output.create_global::<Self>(&display_handle);
-
-        let mode = Mode {
-            size: initial_size,
-            refresh: 60_000,
-        };
-        output.change_current_state(
-            Some(mode),
-            Some(Transform::Flipped180),
-            Some(Scale::Integer(1)),
-            Some((0, 0).into()),
-        );
-        output.set_preferred(mode);
+        let output = Self::create_initial_output(&display_handle, initial_size);
 
         let mut space = Space::default();
         space.map_output(&output, (0, 0));
@@ -310,6 +305,8 @@ impl RustyCompositorState {
             output_manager_state,
             seat_state,
             data_device_state,
+            primary_selection_state,
+            data_control_state,
             seat,
             keyboard,
             pointer,
@@ -340,6 +337,35 @@ impl RustyCompositorState {
             .set_reduced_motion(state.user_config.reduced_motion);
         state.refresh_keyboard_layout_label();
         Ok(state)
+    }
+
+    fn create_initial_output(
+        display_handle: &DisplayHandle,
+        initial_size: Size<i32, smithay::utils::Physical>,
+    ) -> Output {
+        let output = Output::new(
+            "winit-0".to_owned(),
+            PhysicalProperties {
+                size: (0, 0).into(),
+                subpixel: Subpixel::Unknown,
+                make: "RustyOS".to_owned(),
+                model: "Nested Winit Output".to_owned(),
+            },
+        );
+        let _output_global = output.create_global::<Self>(display_handle);
+
+        let mode = Mode {
+            size: initial_size,
+            refresh: 60_000,
+        };
+        output.change_current_state(
+            Some(mode),
+            Some(Transform::Flipped180),
+            Some(Scale::Integer(1)),
+            Some((0, 0).into()),
+        );
+        output.set_preferred(mode);
+        output
     }
 
     fn init_seat_keyboard(
@@ -1284,6 +1310,16 @@ impl CompositorHandler for RustyCompositorState {
                 );
                 let is_focused = self.wm.focused_window() == Some(win_id);
                 self.space.map_element(window, client_origin, is_focused);
+                if is_focused && !self.screen_locked {
+                    let keyboard = self.keyboard.clone();
+                    if keyboard.current_focus().as_ref() != Some(surface) {
+                        keyboard.set_focus(
+                            self,
+                            Some(surface.clone()),
+                            smithay::utils::SERIAL_COUNTER.next_serial(),
+                        );
+                    }
+                }
             }
         }
 
@@ -1347,7 +1383,11 @@ impl SeatHandler for RustyCompositorState {
         &mut self.seat_state
     }
 
-    fn focus_changed(&mut self, _seat: &Seat<Self>, focused: Option<&WlSurface>) {
+    fn focus_changed(&mut self, seat: &Seat<Self>, focused: Option<&WlSurface>) {
+        let client = focused.and_then(|s| self.display_handle.get_client(s.id()).ok());
+        set_data_device_focus(&self.display_handle, seat, client.clone());
+        set_primary_focus(&self.display_handle, seat, client);
+        let _ = self.display_handle.flush_clients();
         debug!(has_focus = focused.is_some(), "Keyboard focus changed");
     }
 
@@ -1363,10 +1403,14 @@ impl SelectionHandler for RustyCompositorState {
         source: Option<SelectionSource>,
         _seat: Seat<Self>,
     ) {
-        if let Some(xwm) = self.xwm.as_mut()
-            && let Err(err) = xwm.new_selection(ty, source.map(|s| s.mime_types()))
-        {
-            warn!(?ty, error = ?err, "Failed to mirror Wayland selection to XWayland");
+        if let Some(xwm) = self.xwm.as_mut() {
+            if let Err(err) = xwm.new_selection(ty, source.map(|s| s.mime_types())) {
+                warn!(?ty, error = ?err, "Failed to mirror Wayland selection to XWayland");
+            } else {
+                // `X11Wm::new_selection` buffers `SetSelectionOwner` in `x11rb` without flushing;
+                // perform a lightweight RandR query so `Xwayland` observes ownership immediately.
+                let _ = xwm.get_randr_primary_output();
+            }
         }
     }
 
@@ -1389,6 +1433,18 @@ impl SelectionHandler for RustyCompositorState {
 impl DataDeviceHandler for RustyCompositorState {
     fn data_device_state(&self) -> &DataDeviceState {
         &self.data_device_state
+    }
+}
+
+impl PrimarySelectionHandler for RustyCompositorState {
+    fn primary_selection_state(&self) -> &PrimarySelectionState {
+        &self.primary_selection_state
+    }
+}
+
+impl DataControlHandler for RustyCompositorState {
+    fn data_control_state(&self) -> &DataControlState {
+        &self.data_control_state
     }
 }
 
@@ -1527,6 +1583,8 @@ delegate_shm!(RustyCompositorState);
 delegate_output!(RustyCompositorState);
 delegate_seat!(RustyCompositorState);
 delegate_data_device!(RustyCompositorState);
+delegate_primary_selection!(RustyCompositorState);
+delegate_data_control!(RustyCompositorState);
 delegate_xdg_shell!(RustyCompositorState);
 delegate_xdg_decoration!(RustyCompositorState);
 delegate_layer_shell!(RustyCompositorState);
