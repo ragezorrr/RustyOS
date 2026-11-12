@@ -78,6 +78,14 @@ impl ClientData for ClientState {
     }
 }
 
+/// Active mouse-driven window drag state via SSD titlebar (`RUSTYOS-019`).
+#[derive(Debug, Clone, Copy)]
+pub struct WindowDragState {
+    pub window_id: WindowId,
+    pub start_pointer: Point<f64, Logical>,
+    pub start_origin: (i32, i32),
+}
+
 /// Primary state container for `rusty-compositor`.
 #[derive(Debug)]
 #[allow(clippy::struct_excessive_bools)]
@@ -124,6 +132,8 @@ pub struct RustyCompositorState {
     pub pointer: PointerHandle<Self>,
     /// Current logical pointer coordinates in the compositor space.
     pub pointer_location: Point<f64, Logical>,
+    /// Active interactive window drag via SSD titlebar (`RUSTYOS-019`).
+    pub active_window_drag: Option<WindowDragState>,
     /// Low-overhead frame timing and pacing collector (`RUSTYOS-003`).
     pub frame_timing: FrameTimingCollector,
     /// Refresh-rate independent animation engine (`RUSTYOS-008`, ADR-0004).
@@ -219,6 +229,7 @@ impl RustyCompositorState {
             keyboard,
             pointer,
             pointer_location: (0.0, 0.0).into(),
+            active_window_drag: None,
             frame_timing: FrameTimingCollector::new(DEFAULT_SAMPLE_CAPACITY, 60_000),
             animations: AnimationEngine::default(),
             overview_active: false,
@@ -332,6 +343,12 @@ impl RustyCompositorState {
         }
 
         for id in dead_ids {
+            if self
+                .active_window_drag
+                .is_some_and(|drag| drag.window_id == id)
+            {
+                self.active_window_drag = None;
+            }
             self.window_bindings.retain(|(wid, _)| *wid != id);
             self.wm.unmap_window(id);
             self.animations.remove_window(id.0);
@@ -411,9 +428,11 @@ impl RustyCompositorState {
                 .unwrap_or((rect.x, rect.y));
 
             if let Some(window) = self.smithay_window_for_id(win_id) {
+                let client_height = (rect.height - crate::shell_render::TITLEBAR_HEIGHT).max(64);
+                let client_origin = (origin.0, origin.1 + crate::shell_render::TITLEBAR_HEIGHT);
                 if let Some(toplevel) = window.toplevel() {
                     toplevel.with_pending_state(|state| {
-                        state.size = Some((rect.width, rect.height).into());
+                        state.size = Some((rect.width, client_height).into());
                         if is_focused {
                             state.states.set(xdg_toplevel::State::Activated);
                         } else {
@@ -427,7 +446,7 @@ impl RustyCompositorState {
                     });
                     toplevel.send_pending_configure();
                 }
-                self.space.map_element(window, origin, is_focused);
+                self.space.map_element(window, client_origin, is_focused);
             }
         }
 
@@ -460,7 +479,8 @@ impl RustyCompositorState {
                 && let Some(window) = self.smithay_window_for_id(win_id)
             {
                 let is_focused = focused_id == Some(win_id);
-                self.space.map_element(window, origin, is_focused);
+                let client_origin = (origin.0, origin.1 + crate::shell_render::TITLEBAR_HEIGHT);
+                self.space.map_element(window, client_origin, is_focused);
             }
         }
     }

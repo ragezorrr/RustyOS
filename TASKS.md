@@ -205,6 +205,20 @@ hardware/software context и низкие накладные расходы.
 - **Acceptance criteria:** Хоткеи `Super+Space` / `Alt+Space` переключают `launcher_active`; IPC синхронизирует состояние с `rusty-shell`; лаунчер рендерит окно поиска и результаты; 32 теста и clippy проходят без ошибок.
 - **Risks:** Минимальные (гибридный подход обеспечивает работу как с внешним шеллом, так и в автономном композиторе).
 
+## RUSTYOS-019 --- Server-Side Decorations (SSD Titlebar & macOS Traffic Lights)
+
+**Статус:** done **Фаза:** 15 (Window Decorations & Controls)
+
+- **Цель:** Добавить серверные декорации окон (верхняя планка заголовка `TITLEBAR_HEIGHT = 28`, 1px стеклянная рамка по контуру, кнопки управления «светофоры» Close/Minimize/Maximize) и перетаскивание окон мышью за заголовок.
+- **Scope:**
+  - `crates/rusty-compositor/src/shell_render.rs`: `generate_window_ssd_elements`, `check_window_ssd_hit`, `SsdHit`.
+  - `crates/rusty-compositor/src/winit_backend.rs`: единый Z-ordered рендеринг (`CompositorRenderElement`) поверх окон в правильном порядке перекрытия (TopBar/Spotlight -> [Окно + SSD] -> Bottom/Background).
+  - `crates/rusty-compositor/src/state.rs` и `crates/rusty-wm/src/lib.rs`: смещение клиентской поверхности на `TITLEBAR_HEIGHT`, метод `WindowManager::move_window` и `AnimationEngine::snap_window_immediate`.
+  - `crates/rusty-compositor/src/input.rs`: обработка кликов по «светофорам» и перетаскивание окон за шапку без задержек.
+- **Dependencies:** `RUSTYOS-015`, `RUSTYOS-018`.
+- **Acceptance criteria:** Каждое окно рендерится с заголовком, рамкой и кнопками управления; нажатие кнопок закрывает/центрирует/разворачивает окно; перетаскивание за заголовок перемещает окно в реальном времени; 34 теста и clippy проходят без ошибок.
+- **Risks:** Перекрытие соседних окон решено пооконной сортировкой элементов в `CompositorRenderElement`.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

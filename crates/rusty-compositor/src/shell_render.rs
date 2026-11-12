@@ -12,6 +12,9 @@ use smithay::utils::{Point, Rectangle, Size};
 /// `TopBar` height in logical pixels.
 pub const TOP_BAR_HEIGHT: i32 = 32;
 
+/// Server-Side Decoration (SSD) titlebar height in logical pixels (`RUSTYOS-019`).
+pub const TITLEBAR_HEIGHT: i32 = 28;
+
 /// Dock height in logical pixels.
 pub const DOCK_HEIGHT: i32 = 56;
 
@@ -407,6 +410,169 @@ pub fn check_top_bar_workspace_click(x: f64, y: f64) -> Option<u8> {
     }
 }
 
+/// Interactive hit zone on a window's Server-Side Decoration titlebar (`RUSTYOS-019`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SsdHit {
+    /// Red close button ("traffic light").
+    Close(rusty_wm::WindowId),
+    /// Amber minimize / snap-center button ("traffic light").
+    Minimize(rusty_wm::WindowId),
+    /// Green maximize / zoom button ("traffic light").
+    Maximize(rusty_wm::WindowId),
+    /// Remaining titlebar surface initiating window drag.
+    TitlebarDrag(rusty_wm::WindowId),
+}
+
+/// Hit-tests `(x, y)` against visible window titlebars in reverse (top-to-bottom) stacking order.
+#[must_use]
+pub fn check_window_ssd_hit(
+    windows_bottom_to_top: &[(rusty_wm::WindowId, rusty_wm::Rect)],
+    x: f64,
+    y: f64,
+) -> Option<SsdHit> {
+    for &(win_id, rect) in windows_bottom_to_top.iter().rev() {
+        let rx = f64::from(rect.x);
+        let ry = f64::from(rect.y);
+        let rw = f64::from(rect.width);
+        let th = f64::from(TITLEBAR_HEIGHT);
+
+        if x >= rx && x < rx + rw && y >= ry && y < ry + th {
+            // Traffic-light hitboxes on the left of titlebar
+            let rel_x = x - rx;
+            let rel_y = y - ry;
+            if (6.0..=22.0).contains(&rel_y) {
+                if (10.0..=26.0).contains(&rel_x) {
+                    return Some(SsdHit::Close(win_id));
+                }
+                if (28.0..=44.0).contains(&rel_x) {
+                    return Some(SsdHit::Minimize(win_id));
+                }
+                if (46.0..=62.0).contains(&rel_x) {
+                    return Some(SsdHit::Maximize(win_id));
+                }
+            }
+            return Some(SsdHit::TitlebarDrag(win_id));
+        }
+    }
+    None
+}
+
+/// Generates Server-Side Decoration elements (titlebar, macOS traffic lights, 1px glass border)
+/// for a managed window rectangle in Smithay front-to-back order (`RUSTYOS-019`).
+#[must_use]
+pub fn generate_window_ssd_elements(
+    rect: rusty_wm::Rect,
+    is_focused: bool,
+) -> Vec<SolidColorRenderElement> {
+    let mut elements = Vec::new();
+    let x = rect.x;
+    let y = rect.y;
+    let w = rect.width.max(64);
+    let h = rect.height.max(TITLEBAR_HEIGHT + 32);
+
+    let border_color = if is_focused {
+        COLOR_BORDER_HIGHLIGHT
+    } else {
+        COLOR_BORDER
+    };
+    let titlebar_bg = if is_focused {
+        COLOR_SURFACE_OVERLAY
+    } else {
+        COLOR_SURFACE_ELEVATED
+    };
+
+    // 1. Outer 1px glass rim around the whole window frame (4 edge strips)
+    elements.push(make_solid_element(
+        Rectangle::new(Point::from((x - 1, y - 1)), Size::from((w + 2, 1))),
+        border_color,
+    ));
+    elements.push(make_solid_element(
+        Rectangle::new(Point::from((x - 1, y + h)), Size::from((w + 2, 1))),
+        border_color,
+    ));
+    elements.push(make_solid_element(
+        Rectangle::new(Point::from((x - 1, y)), Size::from((1, h))),
+        border_color,
+    ));
+    elements.push(make_solid_element(
+        Rectangle::new(Point::from((x + w, y)), Size::from((1, h))),
+        border_color,
+    ));
+
+    // 2. Titlebar body & bottom divider line
+    elements.push(make_solid_element(
+        Rectangle::new(Point::from((x, y)), Size::from((w, TITLEBAR_HEIGHT))),
+        titlebar_bg,
+    ));
+    elements.push(make_solid_element(
+        Rectangle::new(
+            Point::from((x, y + TITLEBAR_HEIGHT - 1)),
+            Size::from((w, 1)),
+        ),
+        COLOR_BORDER,
+    ));
+
+    // 3. macOS-style traffic light buttons (Close, Minimize, Maximize)
+    let btn_y = y + 8;
+    let btn_size = 12;
+    let close_color = if is_focused {
+        COLOR_DANGER
+    } else {
+        COLOR_SUBTLE
+    };
+    let min_color = if is_focused {
+        COLOR_WARNING
+    } else {
+        COLOR_SUBTLE
+    };
+    let max_color = if is_focused {
+        COLOR_SUCCESS
+    } else {
+        COLOR_SUBTLE
+    };
+
+    elements.push(make_solid_element(
+        Rectangle::new(
+            Point::from((x + 12, btn_y)),
+            Size::from((btn_size, btn_size)),
+        ),
+        close_color,
+    ));
+    elements.push(make_solid_element(
+        Rectangle::new(
+            Point::from((x + 30, btn_y)),
+            Size::from((btn_size, btn_size)),
+        ),
+        min_color,
+    ));
+    elements.push(make_solid_element(
+        Rectangle::new(
+            Point::from((x + 48, btn_y)),
+            Size::from((btn_size, btn_size)),
+        ),
+        max_color,
+    ));
+
+    // 4. Centered title pill bar
+    let title_w = (w / 4).clamp(48, 160);
+    if w > 140 {
+        let title_x = x + (w - title_w) / 2;
+        let title_color = if is_focused {
+            COLOR_MUTED
+        } else {
+            COLOR_SUBTLE
+        };
+        elements.push(make_solid_element(
+            Rectangle::new(Point::from((title_x, y + 11)), Size::from((title_w, 6))),
+            title_color,
+        ));
+    }
+
+    // Smithay render_output expects front-to-back order.
+    elements.reverse();
+    elements
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -447,5 +613,45 @@ mod tests {
             None
         );
         assert_eq!(check_top_bar_workspace_click(2.0, 10.0), None);
+    }
+
+    #[test]
+    fn ssd_hit_testing_detects_traffic_lights_and_drag_in_top_to_bottom_order() {
+        let win1 = rusty_wm::WindowId(1);
+        let win2 = rusty_wm::WindowId(2);
+        let windows = vec![
+            (win1, rusty_wm::Rect::new(100, 100, 500, 400)),
+            (win2, rusty_wm::Rect::new(100, 100, 500, 400)),
+        ];
+
+        // Overlapping window win2 is topmost (last in bottom-to-top list)
+        assert_eq!(
+            check_window_ssd_hit(&windows, 118.0, 114.0),
+            Some(SsdHit::Close(win2))
+        );
+        assert_eq!(
+            check_window_ssd_hit(&windows, 136.0, 114.0),
+            Some(SsdHit::Minimize(win2))
+        );
+        assert_eq!(
+            check_window_ssd_hit(&windows, 154.0, 114.0),
+            Some(SsdHit::Maximize(win2))
+        );
+        assert_eq!(
+            check_window_ssd_hit(&windows, 300.0, 114.0),
+            Some(SsdHit::TitlebarDrag(win2))
+        );
+        // Click below titlebar inside client area returns None
+        assert_eq!(
+            check_window_ssd_hit(&windows, 300.0, f64::from(100 + TITLEBAR_HEIGHT + 20)),
+            None
+        );
+    }
+
+    #[test]
+    fn generate_window_ssd_elements_creates_titlebar_traffic_lights_and_borders() {
+        let elements = generate_window_ssd_elements(rusty_wm::Rect::new(40, 40, 600, 400), true);
+        // 4 border strips + titlebar bg + divider + 3 traffic lights + title pill = 10 elements
+        assert_eq!(elements.len(), 10);
     }
 }

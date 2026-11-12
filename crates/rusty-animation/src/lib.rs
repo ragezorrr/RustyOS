@@ -414,6 +414,12 @@ impl AnimationEngine {
         }
     }
 
+    /// Immediately snaps `window_id` to `target` without easing (e.g. during interactive mouse drag).
+    pub fn snap_window_immediate(&mut self, window_id: u64, target: LogicalRect) {
+        self.windows
+            .insert(window_id, AnimatedRect::new_settled(target));
+    }
+
     /// Removes animation state for a closed window.
     pub fn remove_window(&mut self, window_id: u64) {
         self.windows.remove(&window_id);

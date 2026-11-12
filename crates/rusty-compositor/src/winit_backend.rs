@@ -9,11 +9,11 @@ use smithay::{
     backend::{
         renderer::{
             Color32F, damage::OutputDamageTracker, element::AsRenderElements,
-            element::solid::SolidColorRenderElement, gles::GlesRenderer,
+            element::solid::SolidColorRenderElement, element::surface::WaylandSurfaceRenderElement,
+            gles::GlesRenderer,
         },
         winit::{self, WinitEvent, WinitGraphicsBackend},
     },
-    desktop::space::render_output,
     output::{Mode, Scale},
     reexports::{
         calloop::{
@@ -22,7 +22,8 @@ use smithay::{
         },
         wayland_server::Display,
     },
-    utils::Rectangle,
+    utils::{Logical, Point, Rectangle},
+    wayland::shell::wlr_layer::Layer,
     wayland::socket::ListeningSocketSource,
 };
 use tracing::{error, info, warn};
@@ -35,6 +36,12 @@ use crate::{
 /// Clear color for the nested compositor background (dark slate inspired by macOS dark desktop).
 /// Background clear color matching `background = "#0F0A19"` from `DESIGN.md` (Version 2.0).
 const BACKGROUND_COLOR: Color32F = Color32F::new(0.059, 0.039, 0.098, 1.0);
+
+smithay::backend::renderer::element::render_elements! {
+    CompositorRenderElement<=GlesRenderer>;
+    Surface = WaylandSurfaceRenderElement<GlesRenderer>,
+    Solid = SolidColorRenderElement,
+}
 
 /// Runs the nested Smithay + Winit compositor event loop.
 ///
@@ -260,6 +267,40 @@ fn update_output_size(
     );
 }
 
+fn push_layer_elements(
+    render_list: &mut Vec<CompositorRenderElement>,
+    output: &smithay::output::Output,
+    renderer: &mut GlesRenderer,
+    layers: &[Layer],
+) -> bool {
+    let layer_map = smithay::desktop::layer_map_for_output(output);
+    let has_layers = layer_map.len() > 0;
+    if has_layers {
+        for &layer in layers {
+            for surface in layer_map.layers_on(layer) {
+                if let Some(geo) = layer_map.layer_geometry(surface) {
+                    let loc = geo.loc.to_physical_precise_round(1.0);
+                    render_list.extend(
+                        AsRenderElements::<GlesRenderer>::render_elements::<
+                            WaylandSurfaceRenderElement<GlesRenderer>,
+                        >(
+                            surface,
+                            renderer,
+                            loc,
+                            smithay::utils::Scale::from(1.0),
+                            1.0,
+                        )
+                        .into_iter()
+                        .map(CompositorRenderElement::Surface),
+                    );
+                }
+            }
+        }
+    }
+    has_layers
+}
+
+#[allow(clippy::too_many_lines)]
 fn render_winit_frame(
     backend: &mut WinitGraphicsBackend<GlesRenderer>,
     damage_tracker: &mut OutputDamageTracker,
@@ -289,32 +330,90 @@ fn render_winit_frame(
             rusty_wm::LayoutMode::Floating => "floating",
             rusty_wm::LayoutMode::MasterStack => "master-stack",
         };
-        let window_count = state.wm.visible_windows().len();
-        let has_focused = state.wm.focused_window().is_some();
-        let has_layer_surfaces = smithay::desktop::layer_map_for_output(&state.output).len() > 0;
-        let shell_elements = if has_layer_surfaces {
-            Vec::new()
-        } else {
-            crate::shell_render::generate_shell_render_elements(
+        let visible_windows: Vec<(rusty_wm::WindowId, rusty_wm::Rect)> = state
+            .wm
+            .visible_windows()
+            .into_iter()
+            .map(|w| (w.id, w.geometry))
+            .collect();
+        let window_count = visible_windows.len();
+        let focused_win = state.wm.focused_window();
+        let has_focused = focused_win.is_some();
+
+        let mut render_list: Vec<CompositorRenderElement> = Vec::new();
+        let layer_surfaces_present = push_layer_elements(
+            &mut render_list,
+            &state.output,
+            renderer,
+            &[Layer::Overlay, Layer::Top],
+        );
+
+        if !layer_surfaces_present {
+            let shell_elements = crate::shell_render::generate_shell_render_elements(
                 size,
                 active_ws,
                 layout_str,
                 window_count,
                 has_focused,
                 state.launcher_active,
-            )
-        };
+            );
+            render_list.extend(
+                shell_elements
+                    .into_iter()
+                    .map(CompositorRenderElement::Solid),
+            );
+        }
 
-        let render_result =
-            render_output::<GlesRenderer, SolidColorRenderElement, smithay::desktop::Window, _>(
+        // Render managed windows and their SSD titlebars in top-to-bottom stacking order
+        for &(win_id, rect) in visible_windows.iter().rev() {
+            let origin = state
+                .animations
+                .animated_window_origin(win_id.0)
+                .unwrap_or((rect.x, rect.y));
+            let frame_rect = rusty_wm::Rect::new(origin.0, origin.1, rect.width, rect.height);
+            let is_focused = focused_win == Some(win_id);
+
+            if let Some(smithay_win) = state.smithay_window_for_id(win_id) {
+                let client_loc = Point::<i32, Logical>::from((
+                    origin.0,
+                    origin.1 + crate::shell_render::TITLEBAR_HEIGHT,
+                ))
+                .to_physical_precise_round(1.0);
+                render_list.extend(
+                    <smithay::desktop::Window as AsRenderElements<GlesRenderer>>::render_elements::<
+                        WaylandSurfaceRenderElement<GlesRenderer>,
+                    >(
+                        &smithay_win,
+                        renderer,
+                        client_loc,
+                        smithay::utils::Scale::from(1.0),
+                        1.0,
+                    )
+                    .into_iter()
+                    .map(CompositorRenderElement::Surface),
+                );
+            }
+
+            let ssd_elements =
+                crate::shell_render::generate_window_ssd_elements(frame_rect, is_focused);
+            render_list.extend(ssd_elements.into_iter().map(CompositorRenderElement::Solid));
+        }
+
+        if layer_surfaces_present {
+            push_layer_elements(
+                &mut render_list,
                 &state.output,
                 renderer,
+                &[Layer::Bottom, Layer::Background],
+            );
+        }
+
+        let render_result = damage_tracker
+            .render_output(
+                renderer,
                 &mut framebuffer,
-                1.0,
                 buffer_age,
-                [&state.space],
-                &shell_elements,
-                damage_tracker,
+                &render_list,
                 BACKGROUND_COLOR,
             )
             .map_err(|err| err.to_string())?;

@@ -127,6 +127,27 @@ impl RustyCompositorState {
         let pos: Point<f64, Logical> = event.position_transformed(output_geo);
         self.pointer_location = pos;
 
+        if let Some(drag) = self.active_window_drag {
+            #[allow(clippy::cast_possible_truncation)]
+            let dx = (pos.x - drag.start_pointer.x).round() as i32;
+            #[allow(clippy::cast_possible_truncation)]
+            let dy = (pos.y - drag.start_pointer.y).round() as i32;
+            let new_x = drag.start_origin.0 + dx;
+            let new_y = (drag.start_origin.1 + dy).max(crate::shell_render::TOP_BAR_HEIGHT);
+            if self.wm.move_window(drag.window_id, new_x, new_y)
+                && let Some(win) = self.wm.window(drag.window_id)
+            {
+                let rect = win.geometry;
+                self.animations.snap_window_immediate(
+                    drag.window_id.0,
+                    rusty_animation::LogicalRect::new(rect.x, rect.y, rect.width, rect.height),
+                );
+                let serial = SERIAL_COUNTER.next_serial();
+                self.sync_space_with_wm(serial);
+            }
+            return;
+        }
+
         let serial = SERIAL_COUNTER.next_serial();
         let time = Event::time_msec(event);
         let under = self
@@ -151,6 +172,10 @@ impl RustyCompositorState {
         let button = event.button_code();
         let button_state = event.state();
 
+        if button_state == ButtonState::Released {
+            self.active_window_drag = None;
+        }
+
         if button_state == ButtonState::Pressed {
             // Check for TopBar click to switch workspaces via mouse
             if let Some(target_ws) = crate::shell_render::check_top_bar_workspace_click(
@@ -160,6 +185,48 @@ impl RustyCompositorState {
                 let ws = WorkspaceId::new_clamped(target_ws);
                 self.apply_wm_action(WmAction::SwitchWorkspace(ws), serial);
                 return;
+            }
+
+            // Check for SSD titlebar & traffic-light button hits (RUSTYOS-019)
+            if !self.launcher_active {
+                let visible_rects: Vec<(rusty_wm::WindowId, rusty_wm::Rect)> = self
+                    .wm
+                    .visible_windows()
+                    .into_iter()
+                    .map(|w| (w.id, w.geometry))
+                    .collect();
+                if let Some(hit) = crate::shell_render::check_window_ssd_hit(
+                    &visible_rects,
+                    self.pointer_location.x,
+                    self.pointer_location.y,
+                ) {
+                    match hit {
+                        crate::shell_render::SsdHit::Close(win_id) => {
+                            self.wm.focus_and_raise(win_id);
+                            self.apply_wm_action(WmAction::CloseFocused, serial);
+                        }
+                        crate::shell_render::SsdHit::Minimize(win_id) => {
+                            self.wm.focus_and_raise(win_id);
+                            self.apply_wm_action(WmAction::SnapFocused(SnapTarget::Center), serial);
+                        }
+                        crate::shell_render::SsdHit::Maximize(win_id) => {
+                            self.wm.focus_and_raise(win_id);
+                            self.apply_wm_action(WmAction::ToggleMaximizeFocused, serial);
+                        }
+                        crate::shell_render::SsdHit::TitlebarDrag(win_id) => {
+                            self.wm.focus_and_raise(win_id);
+                            self.sync_space_with_wm(serial);
+                            if let Some(win) = self.wm.window(win_id) {
+                                self.active_window_drag = Some(crate::state::WindowDragState {
+                                    window_id: win_id,
+                                    start_pointer: self.pointer_location,
+                                    start_origin: (win.geometry.x, win.geometry.y),
+                                });
+                            }
+                        }
+                    }
+                    return;
+                }
             }
 
             if let Some((win_opt, _surface, _origin)) =

@@ -592,6 +592,23 @@ impl WindowManager {
         self.window(win_id).map(|w| w.geometry)
     }
 
+    /// Moves a window to `(x, y)` in logical space, clearing any maximized flag.
+    pub fn move_window(&mut self, id: WindowId, x: i32, y: i32) -> bool {
+        let Some(win) = self.windows.iter_mut().find(|w| w.id == id) else {
+            return false;
+        };
+        if win.maximized {
+            win.maximized = false;
+            win.geometry.width = win.saved_floating_geometry.width;
+            win.geometry.height = win.saved_floating_geometry.height;
+        }
+        win.geometry.x = x;
+        win.geometry.y = y;
+        win.saved_floating_geometry.x = x;
+        win.saved_floating_geometry.y = y;
+        true
+    }
+
     /// Applies a [`WmAction`] to the state machine.
     ///
     /// If the action requests closing a window (`WmAction::CloseFocused`), returns `Some(WindowId)`
