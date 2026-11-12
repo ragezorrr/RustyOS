@@ -613,6 +613,20 @@ hardware/software context и низкие накладные расходы.
 - Новые unit/integration тесты: `parses_display_fractional_and_per_output_scales`, `update_entry_geometry_recomputes_logical_sizes_and_adjacent_origins`, `fractional_scale_viewporter_and_work_area_rescaling`.
 - **Risks:** Нулевые новые внешние зависимости; визуальная проверка дробного HiDPI (125%/150%/200%) на живых Wayland-приложениях и bare-metal `--drm` не проводилась в headless-среде.
 
+## RUSTYOS-044 --- Low-Latency Input & Presentation (`zwp_relative_pointer_manager_v1` + `zwp_pointer_constraints_v1` + `wp_presentation`)
+
+- **Owner:** AI Agent + User
+- **Status:** done
+- **Priority:** P0
+- **Phase:** 6/8
+- **ADR / Decision:** ADR-0013 / D-021
+- **Acceptance Criteria:**
+  - В `state.rs` зарегистрированы `RelativePointerManagerState` (`zwp_relative_pointer_manager_v1`), `PointerConstraintsState` / `PointerConstraintsHandler` (`zwp_pointer_constraints_v1`) и `PresentationState` (`wp_presentation`, monotonic clock), добавлен `Clock<Monotonic>` и методы `has_blocking_shell_overlay`, `deactivate_active_pointer_constraint`, `take_presentation_feedback`.
+  - В `input.rs` `handle_pointer_motion` отправляет `PointerHandle::relative_motion` (`delta`, `delta_unaccel`, `utime`) и учитывает `LockedPointer` (с поддержкой `cursor_position_hint`) и `ConfinedPointer` (с проверкой region и helper `confine_pointer_to_rect`), а при открытии Launcher/Overview/LockScreen активный constraint безопасно деактивируется.
+  - В `drm_backend.rs` (`DrmOutputState::pending_presentation_feedback`, `vblank_seq`, `compute_drm_presentation_flags`, `compute_presentation_refresh`, `handle_vblank`, сброс на timeout/ошибке) и `winit_backend.rs` собирается и завершается `OutputPresentationFeedback` с флагами `Vsync`/`HwClock`/`ZeroCopy` и `Refresh::Variable`/`Fixed`.
+  - `cargo fmt --check` и `cargo clippy --workspace --all-targets --offline -- -D warnings` завершаются без предупреждений; 72/72 тестов `rusty-compositor` и 96/96 запущенных тестов workspace проходят (1 предсуществующий тест `rusty-services::tests::networkmanager_and_bluetooth_formatters_handle_all_states` пропущен из-за зависания `BluetoothService::query_status`/`bluetoothctl` >60s в sandbox-среде без BlueZ/D-Bus).
+- **Risks:** Нулевые новые внешние зависимости; проверка `wp_presentation` (`ZeroCopy`/`VRR`) и `PointerConstraint` с реальными играми/XWayland-клиентами на bare-metal `--drm` не проводилась в headless-среде.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

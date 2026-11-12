@@ -988,4 +988,57 @@ mod tests {
 
         Ok(())
     }
+
+    #[test]
+    fn relative_pointer_constraints_and_presentation_lifecycle() -> Result<(), Box<dyn Error>> {
+        let display: Display<RustyCompositorState> = Display::new()?;
+        let event_loop: EventLoop<RustyCompositorState> = EventLoop::try_new()?;
+        let mut compositor = RustyCompositorState::new(
+            &display,
+            "rusty-test-input-pres".to_owned(),
+            event_loop.get_signal(),
+            (1920, 1080).into(),
+        )?;
+
+        assert!(!compositor.has_blocking_shell_overlay());
+        let output = compositor.output_map.primary().output.clone();
+
+        // Launcher / Overview / LockScreen overlays must report blocking status for pointer constraints.
+        compositor.handle_ipc_request(rusty_ipc::ShellRequest::ToggleLauncher);
+        assert!(compositor.has_blocking_shell_overlay());
+        compositor.deactivate_active_pointer_constraint();
+        compositor.handle_ipc_request(rusty_ipc::ShellRequest::ToggleLauncher);
+        assert!(!compositor.has_blocking_shell_overlay());
+
+        compositor.overview_active = true;
+        assert!(compositor.has_blocking_shell_overlay());
+        compositor.overview_active = false;
+
+        compositor.handle_ipc_request(rusty_ipc::ShellRequest::SetLockScreen { locked: true });
+        assert!(compositor.has_blocking_shell_overlay());
+        compositor.handle_ipc_request(rusty_ipc::ShellRequest::SetLockScreen { locked: false });
+        assert!(!compositor.has_blocking_shell_overlay());
+
+        // Confined pointer helper must clamp coordinates within logical bounds.
+        let clamped = input::confine_pointer_to_rect(
+            smithay::utils::Point::from((500.0, 200.0)),
+            smithay::utils::Point::from((750.0, -250.0)),
+            smithay::utils::Rectangle::new((100.0, 100.0).into(), (800.0, 600.0).into()),
+        );
+        assert_eq!(clamped, smithay::utils::Point::from((899.0, 100.0)));
+
+        // Presentation feedback collection and completion should execute safely against empty states.
+        let render_states = smithay::backend::renderer::element::RenderElementStates::default();
+        let mut feedback = compositor.take_presentation_feedback(&output, &render_states);
+        feedback.presented(
+            compositor.clock.now(),
+            smithay::wayland::presentation::Refresh::fixed(
+                std::time::Duration::from_micros(16_667),
+            ),
+            1,
+            smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::Vsync,
+        );
+
+        Ok(())
+    }
 }

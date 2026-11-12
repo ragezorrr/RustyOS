@@ -42,6 +42,7 @@ use smithay::{
         session::{Event as SessionEvent, Session, libseat::LibSeatSession},
         udev::{UdevBackend, UdevEvent},
     },
+    desktop::utils::OutputPresentationFeedback,
     output::{Mode as OutputMode, Scale},
     reexports::{
         calloop::{
@@ -56,11 +57,16 @@ use smithay::{
         },
         input::Libinput,
         rustix::fs::OFlags,
-        wayland_protocols::wp::linux_dmabuf::zv1::server::zwp_linux_dmabuf_feedback_v1,
+        wayland_protocols::wp::{
+            linux_dmabuf::zv1::server::zwp_linux_dmabuf_feedback_v1,
+            presentation_time::server::wp_presentation_feedback,
+        },
         wayland_server::Display,
     },
     utils::{DeviceFd, Logical, Physical, Point, Rectangle, Size, Transform},
-    wayland::{dmabuf::DmabufFeedbackBuilder, socket::ListeningSocketSource},
+    wayland::{
+        dmabuf::DmabufFeedbackBuilder, presentation::Refresh, socket::ListeningSocketSource,
+    },
 };
 use tracing::{info, warn};
 
@@ -253,6 +259,8 @@ struct DrmOutputState {
     last_frame_direct_scanout: bool,
     frame_start: Option<Instant>,
     next_frame_at: Instant,
+    pending_presentation_feedback: Option<OutputPresentationFeedback>,
+    vblank_seq: u64,
 }
 
 struct DrmRuntime {
@@ -286,6 +294,29 @@ pub(crate) fn want_vrr_for_output(
             .active_unoccluded_fullscreen_window_on(output_id)
             .is_some(),
         crate::config::VrrMode::Always => true,
+    }
+}
+
+/// Computes `wp_presentation_feedback::Kind` flags for DRM `VBlank` completion (`RUSTYOS-044`).
+#[must_use]
+pub(crate) fn compute_drm_presentation_flags(
+    direct_scanout: bool,
+) -> wp_presentation_feedback::Kind {
+    let mut flags = wp_presentation_feedback::Kind::Vsync | wp_presentation_feedback::Kind::HwClock;
+    if direct_scanout {
+        flags |= wp_presentation_feedback::Kind::ZeroCopy;
+    }
+    flags
+}
+
+/// Computes `wp_presentation` [`Refresh`] metadata given runtime `VRR` state and panel refresh rate (`RUSTYOS-044`).
+#[must_use]
+pub(crate) fn compute_presentation_refresh(vrr_enabled: bool, vrefresh: u32) -> Refresh {
+    let interval = Duration::from_micros(mode_refresh_interval_us(vrefresh));
+    if vrr_enabled {
+        Refresh::variable(interval)
+    } else {
+        Refresh::fixed(interval)
     }
 }
 
@@ -352,6 +383,8 @@ fn build_drm_output_state(
         last_frame_direct_scanout: false,
         frame_start: None,
         next_frame_at: Instant::now(),
+        pending_presentation_feedback: None,
+        vblank_seq: 0,
     })
 }
 
@@ -370,6 +403,9 @@ impl DrmOutputState {
             );
             self.vblank_pending = false;
             self.vblank_queued_at = None;
+            if let Some(mut stale) = self.pending_presentation_feedback.take() {
+                stale.discarded();
+            }
             let _ = self.drm_compositor.clear();
             let _ = self.drm_compositor.reset_state();
             self.drm_compositor.reset_buffers();
@@ -441,6 +477,29 @@ impl DrmRuntime {
         }
     }
 
+    fn capture_primary_screenshot(
+        &mut self,
+        state: &mut RustyCompositorState,
+        output_id: rusty_wm::OutputId,
+        pixel_size: smithay::utils::Size<i32, smithay::utils::Physical>,
+    ) {
+        let snap_list = crate::winit_backend::build_frame_render_list_for_output(
+            &mut self.renderer,
+            &mut self.text_cache,
+            &mut self.shape_cache,
+            state,
+            output_id,
+            pixel_size,
+            false,
+        );
+        crate::winit_backend::process_pending_screenshot(
+            &mut self.renderer,
+            &snap_list,
+            state,
+            pixel_size,
+        );
+    }
+
     fn render_and_queue_output(&mut self, crtc: crtc::Handle, state: &mut RustyCompositorState) {
         if !state.running || self.paused {
             return;
@@ -469,21 +528,7 @@ impl DrmRuntime {
 
         let is_primary = state.output_map.primary().id == output_id;
         if is_primary && state.pending_screenshot.is_some() {
-            let snap_list = crate::winit_backend::build_frame_render_list_for_output(
-                &mut self.renderer,
-                &mut self.text_cache,
-                &mut self.shape_cache,
-                state,
-                output_id,
-                pixel_size,
-                false,
-            );
-            crate::winit_backend::process_pending_screenshot(
-                &mut self.renderer,
-                &snap_list,
-                state,
-                pixel_size,
-            );
+            self.capture_primary_screenshot(state, output_id, pixel_size);
         }
 
         let render_list = crate::winit_backend::build_frame_render_list_for_output(
@@ -495,6 +540,11 @@ impl DrmRuntime {
             pixel_size,
             true,
         );
+
+        let target_output = state
+            .output_map
+            .get(output_id)
+            .map_or_else(|| state.output.clone(), |entry| entry.output.clone());
 
         let Some(out) = self.outputs.get_mut(&crtc) else {
             return;
@@ -514,6 +564,7 @@ impl DrmRuntime {
                 } else {
                     let direct_scanout =
                         matches!(result.primary_element, PrimaryPlaneElement::Element(_));
+                    let render_states = result.states;
                     if let Err(err) = out.drm_compositor.queue_frame(()) {
                         warn!(
                             connector = %out.connector_name,
@@ -528,6 +579,11 @@ impl DrmRuntime {
                         out.needs_redraw = false;
                         out.frame_start = Some(render_start);
                         out.last_frame_direct_scanout = direct_scanout;
+                        if let Some(mut stale) = out.pending_presentation_feedback.take() {
+                            stale.discarded();
+                        }
+                        out.pending_presentation_feedback =
+                            Some(state.take_presentation_feedback(&target_output, &render_states));
                     }
                 }
             }
@@ -572,6 +628,13 @@ impl DrmRuntime {
 
         let output_id = out.output_id;
         let should_requeue = out.needs_redraw;
+        out.vblank_seq = out.vblank_seq.saturating_add(1);
+        let vblank_seq = out.vblank_seq;
+        let refresh = compute_presentation_refresh(out.vrr_enabled, out.vrefresh);
+        let flags = compute_drm_presentation_flags(out.last_frame_direct_scanout);
+        if let Some(mut feedback) = out.pending_presentation_feedback.take() {
+            feedback.presented(state.clock.now(), refresh, vblank_seq, flags);
+        }
         let target_output = state
             .output_map
             .get(output_id)
@@ -1690,5 +1753,30 @@ mod tests {
         assert_eq!(select_best_mode_index(&modes, false), Some(0));
         assert_eq!(select_best_mode_index(&modes, true), Some(2));
         assert_eq!(select_best_mode_index(&[], true), None);
+    }
+
+    #[test]
+    fn presentation_flags_and_vrr_refresh_metadata() {
+        use smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback;
+        use smithay::wayland::presentation::Refresh;
+
+        let regular = compute_drm_presentation_flags(false);
+        assert!(regular.contains(wp_presentation_feedback::Kind::Vsync));
+        assert!(regular.contains(wp_presentation_feedback::Kind::HwClock));
+        assert!(!regular.contains(wp_presentation_feedback::Kind::ZeroCopy));
+
+        let direct = compute_drm_presentation_flags(true);
+        assert!(direct.contains(wp_presentation_feedback::Kind::Vsync));
+        assert!(direct.contains(wp_presentation_feedback::Kind::HwClock));
+        assert!(direct.contains(wp_presentation_feedback::Kind::ZeroCopy));
+
+        assert!(matches!(
+            compute_presentation_refresh(true, 144),
+            Refresh::Variable(_)
+        ));
+        assert!(matches!(
+            compute_presentation_refresh(false, 144),
+            Refresh::Fixed(_)
+        ));
     }
 }

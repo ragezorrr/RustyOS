@@ -25,10 +25,13 @@ use smithay::{
             EventLoop,
             timer::{TimeoutAction, Timer},
         },
+        wayland_protocols::wp::presentation_time::server::wp_presentation_feedback,
         wayland_server::{Display, protocol::wl_surface::WlSurface},
     },
     utils::{IsAlive, Logical, Point, Rectangle, Size},
-    wayland::{compositor, shell::wlr_layer::Layer, socket::ListeningSocketSource},
+    wayland::{
+        compositor, presentation::Refresh, shell::wlr_layer::Layer, socket::ListeningSocketSource,
+    },
 };
 use tracing::{error, info, warn};
 
@@ -135,6 +138,7 @@ pub fn run_nested_winit(config: &CompositorConfig) -> Result<BootstrapReport, Co
                     &mut shape_cache,
                     app_state,
                     force_full_damage,
+                    rendered_frames,
                 ) {
                     warn!(error = %err, "Frame render error on Winit backend");
                 }
@@ -953,6 +957,7 @@ fn render_winit_frame(
     shape_cache: &mut crate::surfaces::UiShapeCache,
     state: &mut RustyCompositorState,
     force_full_damage: bool,
+    frame_seq: u64,
 ) -> Result<(), String> {
     let render_start = Instant::now();
     state.tick_animations();
@@ -964,6 +969,7 @@ fn render_winit_frame(
     let damage_rects: u32;
     let damaged_pixels: u64;
     let tracked_damage: Option<Vec<Rectangle<i32, smithay::utils::Physical>>>;
+    let render_states;
 
     if state.pending_screenshot.is_some() {
         let renderer = backend.renderer();
@@ -1013,6 +1019,7 @@ fn render_winit_frame(
                 BACKGROUND_COLOR,
             )
             .map_err(|err| err.to_string())?;
+        render_states = render_result.states;
 
         if force_full_damage {
             damage_rects = 1;
@@ -1036,6 +1043,7 @@ fn render_winit_frame(
         }
     }
 
+    let mut presentation_feedback = state.take_presentation_feedback(&state.output, &render_states);
     let elapsed = state.elapsed();
     for window in state.space.elements() {
         window.send_frame(&state.output, elapsed, Some(Duration::ZERO), |_, _| {
@@ -1045,12 +1053,18 @@ fn render_winit_frame(
 
     state.space.refresh();
     state.popups.cleanup();
-    let _ = state.display_handle.flush_clients();
 
     let submit_slice = tracked_damage.as_deref();
     backend
         .submit(submit_slice)
         .map_err(|err| err.to_string())?;
+    presentation_feedback.presented(
+        state.clock.now(),
+        Refresh::fixed(Duration::from_micros(16_667)),
+        frame_seq,
+        wp_presentation_feedback::Kind::Vsync,
+    );
+    let _ = state.display_handle.flush_clients();
 
     let present_done = Instant::now();
     state.frame_timing.record_frame(

@@ -11,9 +11,10 @@ use smithay::{
     },
     input::{
         keyboard::{FilterResult, Keysym, ModifiersState},
-        pointer::{AxisFrame, ButtonEvent, MotionEvent},
+        pointer::{AxisFrame, ButtonEvent, MotionEvent, RelativeMotionEvent},
     },
-    utils::{Logical, Point, SERIAL_COUNTER, Size},
+    utils::{Logical, Point, Rectangle, SERIAL_COUNTER, Size},
+    wayland::pointer_constraints::{PointerConstraint, with_pointer_constraint},
 };
 use tracing::info;
 
@@ -68,6 +69,9 @@ impl RustyCompositorState {
             InputEvent::PointerButton { event } => self.handle_pointer_button::<B>(&event),
             InputEvent::PointerAxis { event } => self.handle_pointer_axis::<B>(&event),
             _ => {}
+        }
+        if self.has_blocking_shell_overlay() {
+            self.deactivate_active_pointer_constraint();
         }
     }
 
@@ -321,9 +325,81 @@ impl RustyCompositorState {
     }
 
     fn handle_pointer_motion<B: InputBackend>(&mut self, event: &B::PointerMotionEvent) {
-        let bounds = self.total_output_bounds();
-        let pos = clamp_relative_pointer_rect(self.pointer_location, event.delta(), bounds);
+        let delta = event.delta();
+        let delta_unaccel = event.delta_unaccel();
+        let utime = Event::time(event);
         let time = Event::time_msec(event);
+
+        if self.has_blocking_shell_overlay() {
+            self.deactivate_active_pointer_constraint();
+            let bounds = self.total_output_bounds();
+            let pos = clamp_relative_pointer_rect(self.pointer_location, delta, bounds);
+            self.apply_pointer_position(pos, time);
+            return;
+        }
+
+        let under = self.target_surface_under(self.pointer_location);
+        let rel_focus = under
+            .as_ref()
+            .map(|(_, surface, origin)| (surface.clone(), *origin));
+        let pointer = self.pointer.clone();
+        pointer.relative_motion(
+            self,
+            rel_focus,
+            &RelativeMotionEvent {
+                delta,
+                delta_unaccel,
+                utime,
+            },
+        );
+
+        if let Some((_, ref surface, origin)) = under {
+            let local_pt = (self.pointer_location - origin).to_i32_round();
+            let mut action = None;
+            with_pointer_constraint(surface, &self.pointer, |constraint| {
+                let Some(c) = constraint else {
+                    return;
+                };
+                if !c.is_active() {
+                    if c.region().is_none_or(|r| r.contains(local_pt)) {
+                        c.activate();
+                    } else {
+                        return;
+                    }
+                }
+                action = Some(match &*c {
+                    PointerConstraint::Locked(_) => true,
+                    PointerConstraint::Confined(_) => false,
+                });
+            });
+
+            match action {
+                Some(true) => {
+                    pointer.frame(self);
+                    return;
+                }
+                Some(false) => {
+                    let surface_bounds =
+                        self.surface_logical_bounds(surface).unwrap_or_else(|| {
+                            let total = self.total_output_bounds();
+                            Rectangle::new(
+                                total.loc.to_f64(),
+                                Size::from((
+                                    f64::from(total.size.w.max(1)),
+                                    f64::from(total.size.h.max(1)),
+                                )),
+                            )
+                        });
+                    let pos = confine_pointer_to_rect(self.pointer_location, delta, surface_bounds);
+                    self.apply_pointer_position(pos, time);
+                    return;
+                }
+                None => {}
+            }
+        }
+
+        let bounds = self.total_output_bounds();
+        let pos = clamp_relative_pointer_rect(self.pointer_location, delta, bounds);
         self.apply_pointer_position(pos, time);
     }
 
@@ -1181,6 +1257,23 @@ pub fn clamp_relative_pointer_rect(
         .into()
 }
 
+/// Clamps relative pointer delta within a client surface's confined region (`RUSTYOS-044`).
+#[must_use]
+pub fn confine_pointer_to_rect(
+    current: Point<f64, Logical>,
+    delta: Point<f64, Logical>,
+    bounds: Rectangle<f64, Logical>,
+) -> Point<f64, Logical> {
+    let min_x = bounds.loc.x;
+    let max_x = bounds.loc.x + (bounds.size.w - 1.0).max(0.0);
+    let min_y = bounds.loc.y;
+    let max_y = bounds.loc.y + (bounds.size.h - 1.0).max(0.0);
+    Point::from((
+        (current.x + delta.x).clamp(min_x, max_x),
+        (current.y + delta.y).clamp(min_y, max_y),
+    ))
+}
+
 /// Clamps a relative pointer delta (`libinput` mice/trackpads) to `[0, output_geo - 1]`.
 #[must_use]
 pub fn clamp_relative_pointer(
@@ -1562,5 +1655,21 @@ mod tests {
             match_shortcut(alt, Keysym::F),
             Some(KeyIntercept::Wm(WmAction::ToggleFullscreen))
         );
+    }
+
+    #[test]
+    fn confine_pointer_to_rect_clamps_within_surface_bounds() {
+        let surface_rect = Rectangle::new((100.0, 50.0).into(), (800.0, 600.0).into());
+        let inside =
+            confine_pointer_to_rect((500.0, 300.0).into(), (20.0, -30.0).into(), surface_rect);
+        assert_eq!(inside, (520.0, 270.0).into());
+
+        let clamp_tl =
+            confine_pointer_to_rect((110.0, 60.0).into(), (-100.0, -100.0).into(), surface_rect);
+        assert_eq!(clamp_tl, (100.0, 50.0).into());
+
+        let clamp_br =
+            confine_pointer_to_rect((890.0, 640.0).into(), (100.0, 100.0).into(), surface_rect);
+        assert_eq!(clamp_br, (899.0, 649.0).into());
     }
 }

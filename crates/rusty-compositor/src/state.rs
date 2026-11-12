@@ -14,15 +14,17 @@ use rusty_wm::{LayoutMode, OutputId, Rect, WindowId, WindowManager, WmAction, Wo
 use smithay::{
     backend::{
         allocator::{Buffer as AllocatorBuffer, Format, dmabuf::Dmabuf},
-        renderer::utils::on_commit_buffer_handler,
+        renderer::{element::RenderElementStates, utils::on_commit_buffer_handler},
     },
     delegate_compositor, delegate_data_control, delegate_data_device, delegate_dmabuf,
-    delegate_fractional_scale, delegate_layer_shell, delegate_output, delegate_primary_selection,
-    delegate_seat, delegate_shm, delegate_viewporter, delegate_xdg_decoration, delegate_xdg_shell,
+    delegate_fractional_scale, delegate_layer_shell, delegate_output, delegate_pointer_constraints,
+    delegate_presentation, delegate_primary_selection, delegate_relative_pointer, delegate_seat,
+    delegate_shm, delegate_viewporter, delegate_xdg_decoration, delegate_xdg_shell,
     desktop::{
         LayerSurface as DesktopLayerSurface, PopupKind, PopupManager, Space, Window,
         WindowSurfaceType, find_popup_root_surface, get_popup_toplevel_coords,
         layer_map_for_output,
+        utils::{OutputPresentationFeedback, surface_presentation_feedback_flags_from_states},
     },
     input::{
         Seat, SeatHandler, SeatState,
@@ -43,7 +45,7 @@ use smithay::{
             },
         },
     },
-    utils::{IsAlive, Logical, Point, Rectangle, Serial, Size, Transform},
+    utils::{Clock, IsAlive, Logical, Monotonic, Point, Rectangle, Serial, Size, Transform},
     wayland::{
         buffer::BufferHandler,
         compositor::{
@@ -52,6 +54,12 @@ use smithay::{
         dmabuf::{DmabufFeedback, DmabufGlobal, DmabufHandler, DmabufState, ImportNotifier},
         fractional_scale::{self, FractionalScaleHandler, FractionalScaleManagerState},
         output::{OutputHandler, OutputManagerState},
+        pointer_constraints::{
+            PointerConstraint, PointerConstraintsHandler, PointerConstraintsState,
+            with_pointer_constraint,
+        },
+        presentation::PresentationState,
+        relative_pointer::RelativePointerManagerState,
         seat::WaylandFocus,
         selection::{
             SelectionHandler, SelectionSource, SelectionTarget,
@@ -196,6 +204,14 @@ pub struct RustyCompositorState {
     pub viewporter_state: ViewporterState,
     /// `wp_fractional_scale_v1` manager state (`RUSTYOS-043`).
     pub fractional_scale_manager_state: FractionalScaleManagerState,
+    /// Monotonic clock source shared with `wp_presentation` feedback (`RUSTYOS-044`).
+    pub clock: Clock<Monotonic>,
+    /// `zwp_relative_pointer_manager_v1` relative input global (`RUSTYOS-044`).
+    pub relative_pointer_manager_state: RelativePointerManagerState,
+    /// `zwp_pointer_constraints_v1` lock/confine global (`RUSTYOS-044`).
+    pub pointer_constraints_state: PointerConstraintsState,
+    /// `wp_presentation` frame presentation timing global (`RUSTYOS-044`).
+    pub presentation_state: PresentationState,
     /// `zwp_linux_dmabuf_v1` client DMA-BUF import state (`RUSTYOS-041`).
     pub dmabuf_state: DmabufState,
     /// Active `zwp_linux_dmabuf_v1` global handle registered by the GPU backend (`RUSTYOS-041`).
@@ -330,6 +346,11 @@ impl RustyCompositorState {
         let viewporter_state = ViewporterState::new::<Self>(&display_handle);
         let fractional_scale_manager_state =
             FractionalScaleManagerState::new::<Self>(&display_handle);
+        let clock = Clock::new();
+        let relative_pointer_manager_state =
+            RelativePointerManagerState::new::<Self>(&display_handle);
+        let pointer_constraints_state = PointerConstraintsState::new::<Self>(&display_handle);
+        let presentation_state = PresentationState::new::<Self>(&display_handle, 1);
         let dmabuf_state = DmabufState::new();
         let output_manager_state = OutputManagerState::new_with_xdg_output::<Self>(&display_handle);
         let data_device_state = DataDeviceState::new::<Self>(&display_handle);
@@ -405,6 +426,10 @@ impl RustyCompositorState {
             shm_state,
             viewporter_state,
             fractional_scale_manager_state,
+            clock,
+            relative_pointer_manager_state,
+            pointer_constraints_state,
+            presentation_state,
             dmabuf_state,
             dmabuf_global: None,
             output_manager_state,
@@ -681,6 +706,126 @@ impl RustyCompositorState {
             },
             |_, _, ()| true,
         );
+    }
+
+    /// Returns `true` when an interactive compositor overlay or lock screen should bypass any
+    /// client pointer lock/confinement (`RUSTYOS-044`).
+    #[must_use]
+    pub fn has_blocking_shell_overlay(&self) -> bool {
+        self.screen_locked
+            || self.launcher_active
+            || self.overview_active
+            || self.quick_settings_active
+            || self.window_switcher.is_some()
+            || self.active_window_drag.is_some()
+            || self.active_window_resize.is_some()
+    }
+
+    /// Computes global logical bounds for a mapped toplevel or layer `surface` (`RUSTYOS-044`).
+    #[must_use]
+    pub fn surface_logical_bounds(&self, surface: &WlSurface) -> Option<Rectangle<f64, Logical>> {
+        let mut root = surface.clone();
+        while let Some(parent) = compositor::get_parent(&root) {
+            root = parent;
+        }
+        for (_, window) in &self.window_bindings {
+            if WaylandFocus::wl_surface(window).is_some_and(|ws| *ws == root)
+                && let Some(win_id) = self.window_id_for_smithay(window)
+                && let Some(wm_win) = self.wm.window(win_id)
+            {
+                let rect = wm_win.geometry;
+                let titlebar_h = self.window_titlebar_height(win_id);
+                let (cw, ch) = self.effective_client_size(win_id, rect);
+                return Some(Rectangle::new(
+                    Point::from((f64::from(rect.x), f64::from(rect.y + titlebar_h))),
+                    Size::from((f64::from(cw.max(1)), f64::from(ch.max(1)))),
+                ));
+            }
+        }
+        for entry in self.output_map.entries() {
+            let layer_map = layer_map_for_output(&entry.output);
+            if let Some(layer) = layer_map.layer_for_surface(&root, WindowSurfaceType::ALL)
+                && let Some(geo) = layer_map.layer_geometry(layer)
+            {
+                return Some(Rectangle::new(
+                    (entry.location + geo.loc).to_f64(),
+                    geo.size.to_f64(),
+                ));
+            }
+        }
+        None
+    }
+
+    /// Deactivates any active pointer constraint on the current pointer focus, applying any
+    /// client `cursor_position_hint` when unlocking a [`LockedPointer`] (`RUSTYOS-044`).
+    pub fn deactivate_active_pointer_constraint(&mut self) {
+        let Some(focused) = self.pointer.current_focus() else {
+            return;
+        };
+        let mut warp_hint: Option<Point<f64, Logical>> = None;
+        with_pointer_constraint(&focused, &self.pointer, |constraint| {
+            if let Some(c) = constraint
+                && c.is_active()
+            {
+                if let PointerConstraint::Locked(locked) = &*c {
+                    warp_hint = locked.cursor_position_hint();
+                }
+                c.deactivate();
+            }
+        });
+        if let Some(hint) = warp_hint
+            && let Some(bounds) = self.surface_logical_bounds(&focused)
+        {
+            let total = self.total_output_bounds();
+            self.pointer_location = Point::from((
+                (bounds.loc.x + hint.x).clamp(
+                    f64::from(total.loc.x),
+                    f64::from(total.loc.x + total.size.w - 1).max(f64::from(total.loc.x)),
+                ),
+                (bounds.loc.y + hint.y).clamp(
+                    f64::from(total.loc.y),
+                    f64::from(total.loc.y + total.size.h - 1).max(f64::from(total.loc.y)),
+                ),
+            ));
+        }
+    }
+
+    /// Drains queued `wp_presentation_feedback` callbacks for surfaces displayed on `output`
+    /// (`RUSTYOS-044`).
+    #[must_use]
+    pub fn take_presentation_feedback(
+        &self,
+        output: &Output,
+        render_element_states: &RenderElementStates,
+    ) -> OutputPresentationFeedback {
+        let mut feedback = OutputPresentationFeedback::new(output);
+        for window in self.space.elements() {
+            if self
+                .space
+                .outputs_for_element(window)
+                .into_iter()
+                .any(|out| &out == output)
+            {
+                window.take_presentation_feedback(
+                    &mut feedback,
+                    |_, _| Some(output.clone()),
+                    |surf, _| {
+                        surface_presentation_feedback_flags_from_states(surf, render_element_states)
+                    },
+                );
+            }
+        }
+        let layer_map = layer_map_for_output(output);
+        for layer in layer_map.layers() {
+            layer.take_presentation_feedback(
+                &mut feedback,
+                |_, _| Some(output.clone()),
+                |surf, _| {
+                    surface_presentation_feedback_flags_from_states(surf, render_element_states)
+                },
+            );
+        }
+        feedback
     }
 
     /// Dynamically unmaps and removes a display output (`RUSTYOS-040`).
@@ -2893,10 +3038,58 @@ impl FractionalScaleHandler for RustyCompositorState {
     }
 }
 
+impl PointerConstraintsHandler for RustyCompositorState {
+    fn new_constraint(&mut self, surface: &WlSurface, pointer: &PointerHandle<Self>) {
+        if !self.has_blocking_shell_overlay() && pointer.current_focus().as_ref() == Some(surface) {
+            with_pointer_constraint(surface, pointer, |constraint| {
+                if let Some(c) = constraint
+                    && !c.is_active()
+                {
+                    c.activate();
+                }
+            });
+        }
+    }
+
+    fn cursor_position_hint(
+        &mut self,
+        surface: &WlSurface,
+        pointer: &PointerHandle<Self>,
+        location: Point<f64, Logical>,
+    ) {
+        let mut active_locked = false;
+        with_pointer_constraint(surface, pointer, |constraint| {
+            if let Some(c) = constraint
+                && c.is_active()
+                && matches!(&*c, PointerConstraint::Locked(_))
+            {
+                active_locked = true;
+            }
+        });
+        if active_locked && let Some(bounds) = self.surface_logical_bounds(surface) {
+            let total = self.total_output_bounds();
+            let warped = Point::from((
+                (bounds.loc.x + location.x).clamp(
+                    f64::from(total.loc.x),
+                    f64::from(total.loc.x + total.size.w - 1).max(f64::from(total.loc.x)),
+                ),
+                (bounds.loc.y + location.y).clamp(
+                    f64::from(total.loc.y),
+                    f64::from(total.loc.y + total.size.h - 1).max(f64::from(total.loc.y)),
+                ),
+            ));
+            self.pointer_location = warped;
+        }
+    }
+}
+
 delegate_compositor!(RustyCompositorState);
 delegate_shm!(RustyCompositorState);
 delegate_viewporter!(RustyCompositorState);
 delegate_fractional_scale!(RustyCompositorState);
+delegate_relative_pointer!(RustyCompositorState);
+delegate_pointer_constraints!(RustyCompositorState);
+delegate_presentation!(RustyCompositorState);
 delegate_dmabuf!(RustyCompositorState);
 delegate_output!(RustyCompositorState);
 delegate_seat!(RustyCompositorState);

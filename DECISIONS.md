@@ -134,6 +134,13 @@
                           + `wp_viewporter` +     
                           per-output `[display]`  
                           HiDPI scaling (ADR-0012)
+
+  D-021                   Фазы 6/8                accepted
+                          (RUSTYOS-044):          
+                          `zwp_relative_pointer_v1`
+                          + `zwp_pointer_constraints_v1`
+                          + `wp_presentation`     
+                          (ADR-0013)              
   -----------------------------------------------------------------------
 
 ## Открытые решения
