@@ -69,10 +69,13 @@ pub fn run_nested_winit(config: &CompositorConfig) -> Result<BootstrapReport, Co
     )?;
     state.animations.set_reduced_motion(config.reduced_motion);
     state.telemetry = crate::telemetry::SystemMetricsHandle::start_background();
+    state.dbus_notifications =
+        crate::dbus_notifications::DbusNotificationHandle::start_background();
     let mut damage_tracker = OutputDamageTracker::from_output(&state.output);
     let mut text_cache = crate::text::TextCache::new();
     let mut shape_cache = crate::surfaces::UiShapeCache::new();
     let loop_handle = event_loop.handle();
+    let _xwayland_started = crate::xwayland::spawn_xwayland_source(&display.handle(), &loop_handle);
 
     // 1. Register Wayland client connection listener.
     loop_handle
@@ -188,6 +191,7 @@ fn dispatch_and_refresh_clients(
     app_state: &mut RustyCompositorState,
 ) {
     let dispatch_start = Instant::now();
+    app_state.drain_dbus_notifications();
     if let Some(ipc) = ipc_server {
         ipc.poll_requests(|req| app_state.handle_ipc_request(req));
     }
@@ -313,6 +317,11 @@ fn window_title(window: &smithay::desktop::Window, id: rusty_wm::WindowId) -> St
             && !t.trim().is_empty()
         {
             return t;
+        }
+    } else if let Some(x11) = window.x11_surface() {
+        let title = x11.title();
+        if !title.trim().is_empty() {
+            return title;
         }
     }
     format!("Window #{}", id.0)

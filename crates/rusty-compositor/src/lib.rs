@@ -4,6 +4,7 @@
 //! (`wl_compositor`, `wl_shm`, `xdg_wm_base`, `wl_seat`, `wl_output`), and the Phase 1
 //! nested Smithay + Winit prototype (`RUSTYOS-002`).
 
+pub mod dbus_notifications;
 pub mod drm_backend;
 pub mod frame_timing;
 pub mod input;
@@ -14,6 +15,7 @@ pub mod surfaces;
 pub mod telemetry;
 pub mod text;
 pub mod winit_backend;
+pub mod xwayland;
 
 use std::error::Error;
 use std::fmt;
@@ -408,6 +410,32 @@ mod tests {
         compositor.handle_ipc_request(rusty_ipc::ShellRequest::SetLockScreen { locked: false });
         assert!(!compositor.screen_locked);
         assert!((compositor.lock_screen_anim.current() - 0.0).abs() < f64::EPSILON);
+
+        // Test XWayland display propagation and D-Bus notification replacement (`RUSTYOS-026`)
+        compositor.set_xwayland_display(Some(7));
+        assert_eq!(compositor.xwayland_display, Some(7));
+        assert_eq!(compositor.launcher.x11_display.as_deref(), Some(":7"));
+        compositor.push_dbus_notification(
+            42,
+            0,
+            rusty_ipc::Urgency::Normal,
+            "App: Hello".to_owned(),
+            "First".to_owned(),
+            None,
+        );
+        assert_eq!(compositor.notification_count, 1);
+        compositor.push_dbus_notification(
+            43,
+            42,
+            rusty_ipc::Urgency::Critical,
+            "App: Replaced".to_owned(),
+            "Updated".to_owned(),
+            None,
+        );
+        assert_eq!(compositor.notification_count, 1);
+        assert_eq!(compositor.notifications[0].dbus_id, Some(43));
+        assert_eq!(compositor.notifications[0].title, "App: Replaced");
+        compositor.clear_notifications();
 
         compositor.request_shutdown();
         assert!(!compositor.running);

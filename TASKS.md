@@ -316,6 +316,20 @@ hardware/software context и низкие накладные расходы.
 - **Acceptance criteria:** `Super+L`/`Ctrl+Alt+L` и IPC `SetLockScreen` переводят композитор в экран блокировки с изоляцией ввода клиентских окон; все shell-оверлеи анимируются и мгновенно переключаются при `reduced_motion`; на фоне отображаются кэшируемые аврора-обои; 49 тестов и `clippy -D warnings` проходят без предупреждений.
 - **Risks:** Минимальные (CPU-растеризация `256x160` обоев выполняется однократно при старте и масштабируется на GPU).
 
+## RUSTYOS-026 --- XWayland & D-Bus Notifications System Integration
+
+**Статус:** done **Фаза:** 23 (System Integration: XWayland & D-Bus)
+
+- **Цель:** Обеспечить совместимость с X11-приложениями через встроенный `XWayland` + `X11Wm` и принимать системные уведомления (`notify-send` / D-Bus) через сервер `org.freedesktop.Notifications` в наш Notification HUD без блокировки event loop композитора.
+- **Scope:**
+  - `Cargo.toml`, `Cargo.lock`, `crates/rusty-compositor/Cargo.toml`: включена фича `smithay/xwayland` и добавлен крейт `zbus` (`5.19`, async-io/blocking API).
+  - `crates/rusty-compositor/src/xwayland.rs`: асинхронный запуск `XWayland` через `calloop`, реализация `XWaylandShellHandler` и `XwmHandler` (`X11Wm`), маппинг X11-окон в `WindowManager` и `Space` с учётом высоты SSD-заголовка (`compute_x11_client_rect`), обработка `override_redirect` всплывающих окон, заголовков, максимизации, перетаскивания, ресайза и закрытия (`WM_DELETE_WINDOW`).
+  - `crates/rusty-compositor/src/dbus_notifications.rs`: фоновый поток `DbusNotificationHandle` с интерфейсом `org.freedesktop.Notifications` (и безопасным fallback на `org.rustyos.Notifications` при занятом имени в nested-сессиях), парсингом `urgency`, `expire_timeout` и `replaces_id`/`CloseNotification`.
+  - `crates/rusty-compositor/src/state.rs`, `launcher.rs`, `winit_backend.rs`, `lib.rs`: сквозная передача `DISPLAY=:<N>` дочерним приложениям Spotlight/Dock, синхронизация фокуса через `WaylandFocus`, дренаж D-Bus уведомлений в цикле диспетчеризации и 3 новых unit-теста.
+- **Dependencies:** `RUSTYOS-011`, `RUSTYOS-022`, `RUSTYOS-024`.
+- **Acceptance criteria:** При наличии `Xwayland` запускается X11 WM и X11-окна управляются `rusty-wm` наравне с Wayland-окнами; `LauncherState` передаёт `DISPLAY` запускаемым приложениям; фоновый D-Bus сервер принимает уведомления в HUD с поддержкой `replaces_id` и graceful fallback без падения при отсутствии шины; 52 теста и `clippy -D warnings` проходят без предупреждений.
+- **Risks:** При отсутствии бинарника `Xwayland` или сессионной шины D-Bus соответствующие подсистемы логируют предупреждение и отключаются без нарушения работы композитора.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

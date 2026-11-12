@@ -52,6 +52,8 @@ pub struct LauncherState {
     pub selected_index: usize,
     /// Application catalog populated from `.desktop` files plus built-in fallbacks.
     pub catalog: Vec<LauncherApp>,
+    /// Optional active `XWayland` `DISPLAY` string (e.g. `:0`) exported to child apps (`RUSTYOS-026`).
+    pub x11_display: Option<String>,
     /// Spawned child processes reaped non-blockingly via `try_wait`.
     children: Vec<Child>,
 }
@@ -73,6 +75,7 @@ impl LauncherState {
             query: String::new(),
             selected_index: 0,
             catalog,
+            x11_display: None,
             children: Vec::new(),
         }
     }
@@ -85,6 +88,7 @@ impl LauncherState {
             query: String::new(),
             selected_index: 0,
             catalog,
+            x11_display: None,
             children: Vec::new(),
         }
     }
@@ -290,13 +294,17 @@ impl LauncherState {
             return Err("empty application command".to_owned());
         };
 
-        let child = Command::new(program)
-            .args(args)
+        let mut cmd = Command::new(program);
+        cmd.args(args)
             .env("WAYLAND_DISPLAY", wayland_display)
             .env("RUSTYOS_IPC_SOCKET", ipc_socket)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::null());
+        if let Some(disp) = &self.x11_display {
+            cmd.env("DISPLAY", disp);
+        }
+        let child = cmd
             .spawn()
             .map_err(|err| format!("failed to launch '{program}': {err}"))?;
 

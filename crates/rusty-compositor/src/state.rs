@@ -39,6 +39,7 @@ use smithay::{
         buffer::BufferHandler,
         compositor::{self, CompositorClientState, CompositorHandler, CompositorState},
         output::{OutputHandler, OutputManagerState},
+        seat::WaylandFocus,
         selection::{
             SelectionHandler,
             data_device::{
@@ -56,7 +57,9 @@ use smithay::{
             },
         },
         shm::{ShmHandler, ShmState},
+        xwayland_shell::XWaylandShellState,
     },
+    xwayland::{X11Surface, X11Wm, XWaylandClientData},
 };
 use tracing::{debug, info, warn};
 
@@ -134,6 +137,12 @@ pub struct RustyCompositorState {
     pub xdg_decoration_state: XdgDecorationState,
     /// `zwlr_layer_shell_v1` desktop panel/dock shell protocol state (`RUSTYOS-016`).
     pub wlr_layer_shell_state: WlrLayerShellState,
+    /// `xwayland_shell_v1` surface-pairing protocol state (`RUSTYOS-026`).
+    pub xwayland_shell_state: XWaylandShellState,
+    /// Active `X11Wm` instance once `XWayland` has reported ready (`RUSTYOS-026`).
+    pub xwm: Option<X11Wm>,
+    /// Active `XWayland` display number (`:N`) if attached (`RUSTYOS-026`).
+    pub xwayland_display: Option<u32>,
     /// `wl_shm` shared-memory buffer state.
     pub shm_state: ShmState,
     /// `wl_output` and `xdg_output` manager state.
@@ -184,6 +193,8 @@ pub struct RustyCompositorState {
     pub notification_count: u32,
     /// Active desktop notification queue rendered in Notification HUD & exposed via IPC (`RUSTYOS-024`).
     pub notifications: Vec<CompositorNotification>,
+    /// Non-blocking D-Bus `org.freedesktop.Notifications` bridge (`RUSTYOS-026`).
+    pub dbus_notifications: crate::dbus_notifications::DbusNotificationHandle,
     next_notification_id: u64,
 }
 
@@ -192,6 +203,8 @@ pub struct RustyCompositorState {
 pub struct CompositorNotification {
     /// Unique monotonic identifier.
     pub id: u64,
+    /// Optional freedesktop D-Bus notification ID for `replaces_id` / `CloseNotification`.
+    pub dbus_id: Option<u32>,
     /// Notification urgency level.
     pub urgency: Urgency,
     /// Short notification title.
@@ -223,6 +236,7 @@ impl RustyCompositorState {
         let xdg_shell_state = XdgShellState::new::<Self>(&display_handle);
         let xdg_decoration_state = XdgDecorationState::new::<Self>(&display_handle);
         let wlr_layer_shell_state = WlrLayerShellState::new::<Self>(&display_handle);
+        let xwayland_shell_state = XWaylandShellState::new::<Self>(&display_handle);
         let shm_state = ShmState::new::<Self>(&display_handle, Vec::new());
         let output_manager_state = OutputManagerState::new_with_xdg_output::<Self>(&display_handle);
         let data_device_state = DataDeviceState::new::<Self>(&display_handle);
@@ -279,6 +293,9 @@ impl RustyCompositorState {
             xdg_shell_state,
             xdg_decoration_state,
             wlr_layer_shell_state,
+            xwayland_shell_state,
+            xwm: None,
+            xwayland_display: None,
             shm_state,
             output_manager_state,
             seat_state,
@@ -304,6 +321,7 @@ impl RustyCompositorState {
             lock_screen_anim: AnimatedValue::new_settled(0.0),
             notification_count: 0,
             notifications: Vec::new(),
+            dbus_notifications: crate::dbus_notifications::DbusNotificationHandle::default(),
             next_notification_id: 0,
         })
     }
@@ -449,6 +467,7 @@ impl RustyCompositorState {
         let id = self.next_notification_id;
         self.notifications.push(CompositorNotification {
             id,
+            dbus_id: None,
             urgency,
             title,
             body,
@@ -461,6 +480,94 @@ impl RustyCompositorState {
         }
         self.sync_notification_count();
         id
+    }
+
+    /// Updates the active `XWayland` `DISPLAY` number (`:N`) on state and launcher (`RUSTYOS-026`).
+    pub fn set_xwayland_display(&mut self, display_number: Option<u32>) {
+        self.xwayland_display = display_number;
+        self.launcher.x11_display = display_number.map(|num| format!(":{num}"));
+    }
+
+    /// Inserts or replaces a notification received from the D-Bus session server (`RUSTYOS-026`).
+    pub fn push_dbus_notification(
+        &mut self,
+        dbus_id: u32,
+        replaces_id: u32,
+        urgency: Urgency,
+        title: String,
+        body: String,
+        expire_after: Option<Duration>,
+    ) {
+        const MAX_QUEUE_LEN: usize = 12;
+        let now = self.start_time.elapsed();
+        let default_ttl = match urgency {
+            Urgency::Low => Duration::from_secs(4),
+            Urgency::Normal => Duration::from_secs(6),
+            Urgency::Critical => Duration::from_secs(12),
+        };
+        let ttl = expire_after.unwrap_or(default_ttl);
+
+        if replaces_id > 0
+            && let Some(existing) = self
+                .notifications
+                .iter_mut()
+                .find(|n| n.dbus_id == Some(replaces_id))
+        {
+            existing.dbus_id = Some(dbus_id);
+            existing.urgency = urgency;
+            existing.title = title;
+            existing.body = body;
+            existing.created_at = now;
+            existing.ttl = ttl;
+            self.sync_notification_count();
+            return;
+        }
+
+        self.next_notification_id = self.next_notification_id.saturating_add(1);
+        let id = self.next_notification_id;
+        self.notifications.push(CompositorNotification {
+            id,
+            dbus_id: Some(dbus_id),
+            urgency,
+            title,
+            body,
+            created_at: now,
+            ttl,
+        });
+        if self.notifications.len() > MAX_QUEUE_LEN {
+            let excess = self.notifications.len() - MAX_QUEUE_LEN;
+            self.notifications.drain(0..excess);
+        }
+        self.sync_notification_count();
+    }
+
+    /// Non-blockingly drains queued notifications from the D-Bus background thread (`RUSTYOS-026`).
+    pub fn drain_dbus_notifications(&mut self) {
+        for cmd in self.dbus_notifications.drain_commands() {
+            match cmd {
+                crate::dbus_notifications::DbusNotificationCommand::Notify {
+                    id,
+                    replaces_id,
+                    urgency,
+                    title,
+                    body,
+                    expire_after,
+                } => {
+                    self.push_dbus_notification(
+                        id,
+                        replaces_id,
+                        urgency,
+                        title,
+                        body,
+                        expire_after,
+                    );
+                }
+                crate::dbus_notifications::DbusNotificationCommand::Close { id } => {
+                    self.notifications.retain(|n| n.dbus_id != Some(id));
+                    self.sync_notification_count();
+                }
+            }
+        }
     }
 
     /// Removes notifications whose TTL has elapsed as of current uptime (`RUSTYOS-024`).
@@ -753,14 +860,21 @@ impl RustyCompositorState {
         info!(?action, "Applying window manager action");
         let prev_ws = self.wm.active_workspace_id();
         if let Some(close_id) = self.wm.apply_action(action) {
-            if let Some(win) = self.smithay_window_for_id(close_id)
-                && let Some(toplevel) = win.toplevel()
-            {
-                info!(
-                    window_id = close_id.0,
-                    "Sending xdg_toplevel::close to focused client"
-                );
-                toplevel.send_close();
+            if let Some(win) = self.smithay_window_for_id(close_id) {
+                if let Some(toplevel) = win.toplevel() {
+                    info!(
+                        window_id = close_id.0,
+                        "Sending xdg_toplevel::close to focused client"
+                    );
+                    toplevel.send_close();
+                } else if let Some(x11) = win.x11_surface() {
+                    info!(
+                        window_id = close_id.0,
+                        x11_id = x11.window_id(),
+                        "Sending WM_DELETE_WINDOW close to XWayland client"
+                    );
+                    let _ = x11.close();
+                }
             }
             return;
         }
@@ -792,9 +906,15 @@ impl RustyCompositorState {
             .collect();
         let focused_id = self.wm.focused_window();
 
-        // 1. Unmap windows that are no longer on an active workspace (e.g. moved/switched workspace).
+        // 1. Unmap managed windows that are no longer on an active workspace, preserving override-redirect X11 popups.
         let current_space_windows: Vec<Window> = self.space.elements().cloned().collect();
         for sw in current_space_windows {
+            if sw
+                .x11_surface()
+                .is_some_and(X11Surface::is_override_redirect)
+            {
+                continue;
+            }
             let still_visible = self
                 .window_id_for_smithay(&sw)
                 .is_some_and(|id| visible.iter().any(|(vid, _, _)| *vid == id));
@@ -803,7 +923,7 @@ impl RustyCompositorState {
             }
         }
 
-        // 2. Map/update visible windows in bottom-to-top z-order and send xdg_toplevel configures.
+        // 2. Map/update visible windows in bottom-to-top z-order and send pending configures.
         for (win_id, rect, maximized) in visible {
             let is_focused = focused_id == Some(win_id);
             self.animations.set_window_target(
@@ -838,15 +958,24 @@ impl RustyCompositorState {
                         }
                     });
                     toplevel.send_pending_configure();
+                } else if let Some(x11) = window.x11_surface() {
+                    let _ = x11.configure(crate::xwayland::compute_x11_client_rect(Rect::new(
+                        origin.0,
+                        origin.1,
+                        rect.width,
+                        rect.height,
+                    )));
+                    let _ = x11.set_activated(is_focused);
+                    let _ = x11.set_maximized(maximized);
                 }
                 self.space.map_element(window, client_origin, is_focused);
             }
         }
 
-        // 3. Update Wayland keyboard focus to match the WM's focused window.
+        // 3. Update Wayland keyboard focus to match the WM's focused window (native or XWayland).
         let focus_surface = focused_id
             .and_then(|id| self.smithay_window_for_id(id))
-            .and_then(|w| w.toplevel().map(|tl| tl.wl_surface().clone()));
+            .and_then(|w| WaylandFocus::wl_surface(&w).map(std::borrow::Cow::into_owned));
         let keyboard = self.keyboard.clone();
         keyboard.set_focus(self, focus_surface, serial);
     }
@@ -1053,6 +1182,11 @@ impl CompositorHandler for RustyCompositorState {
     fn client_compositor_state<'a>(&self, client: &'a Client) -> &'a CompositorClientState {
         if let Some(state) = client.get_data::<ClientState>() {
             &state.compositor_state
+        } else if let Some(xwayland_state) = client
+            .get_data::<XWaylandClientData>()
+            .and_then(|data| data.user_data().get::<ClientState>())
+        {
+            &xwayland_state.compositor_state
         } else {
             static DEFAULT_CLIENT_STATE: std::sync::LazyLock<CompositorClientState> =
                 std::sync::LazyLock::new(CompositorClientState::default);
@@ -1064,8 +1198,8 @@ impl CompositorHandler for RustyCompositorState {
         on_commit_buffer_handler::<Self>(surface);
 
         if let Some(window) = self.window_bindings.iter().find_map(|(_, w)| {
-            w.toplevel()
-                .is_some_and(|tl| tl.wl_surface() == surface)
+            WaylandFocus::wl_surface(w)
+                .is_some_and(|ws| &*ws == surface)
                 .then(|| w.clone())
         }) {
             window.on_commit();
