@@ -1,0 +1,44 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/rusty-compositor",
+    "crates/rusty-wm",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+license = "MIT OR Apache-2.0"
+authors = ["RustyOS Contributors"]
+
+[workspace.dependencies]
+rusty-wm = { path = "crates/rusty-wm" }
+smithay = { version = "0.7.0", default-features = false, features = [
+    "backend_drm",
+    "backend_gbm",
+    "backend_libinput",
+    "backend_session_libseat",
+    "backend_udev",
+    "backend_winit",
+    "renderer_gl",
+    "wayland_frontend",
+    "desktop",
+] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"

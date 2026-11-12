@@ -1,0 +1,12 @@
+/target
+/dist
+/build
+*.log
+*.core
+*.swp
+.DS_Store
+.env
+.env.*
+!.env.example
+.idea/
+.vscode/
