@@ -568,16 +568,20 @@ impl RustyCompositorState {
                 return;
             }
 
-            // Check for SSD titlebar & traffic-light button hits (RUSTYOS-019)
+            // Check for SSD titlebar, traffic-light buttons, or outer frame resize hits (RUSTYOS-019 / RUSTYOS-030)
             if !self.launcher_active {
-                let visible_rects: Vec<(rusty_wm::WindowId, rusty_wm::Rect)> = self
+                let hit_windows: Vec<crate::shell_render::SsdHitWindow> = self
                     .wm
                     .visible_windows()
                     .into_iter()
-                    .map(|w| (w.id, w.geometry))
+                    .map(|w| crate::shell_render::SsdHitWindow {
+                        id: w.id,
+                        rect: w.geometry,
+                        has_ssd: !self.window_uses_csd(w.id),
+                    })
                     .collect();
-                if let Some(hit) = crate::shell_render::check_window_ssd_hit(
-                    &visible_rects,
+                if let Some(hit) = crate::shell_render::check_window_frame_hit(
+                    &hit_windows,
                     self.pointer_location.x,
                     self.pointer_location.y,
                 ) {
@@ -619,6 +623,36 @@ impl RustyCompositorState {
                         }
                     }
                     return;
+                }
+
+                // Allow Alt+Left or Super+Left anywhere on a window (especially CSD windows) to drag it
+                let mods = self.keyboard.modifier_state();
+                if button == 272 && (mods.alt || mods.logo) {
+                    let target_id = self
+                        .target_surface_under(self.pointer_location)
+                        .and_then(|(win_opt, _, _)| {
+                            win_opt.and_then(|w| self.window_id_for_smithay(&w))
+                        })
+                        .or_else(|| {
+                            #[allow(clippy::cast_possible_truncation)]
+                            self.wm.window_under_point(
+                                self.pointer_location.x.round() as i32,
+                                self.pointer_location.y.round() as i32,
+                            )
+                        });
+                    if let Some(win_id) = target_id {
+                        self.wm.focus_and_raise(win_id);
+                        self.sync_space_with_wm(serial);
+                        if let Some(win) = self.wm.window(win_id) {
+                            self.active_window_resize = None;
+                            self.active_window_drag = Some(crate::state::WindowDragState {
+                                window_id: win_id,
+                                start_pointer: self.pointer_location,
+                                start_origin: (win.geometry.x, win.geometry.y),
+                            });
+                            return;
+                        }
+                    }
                 }
             }
 

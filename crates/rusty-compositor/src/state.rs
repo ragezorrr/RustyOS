@@ -1,5 +1,6 @@
 //! Core Wayland compositor state and protocol handler implementations.
 
+use std::collections::HashSet;
 use std::os::unix::io::OwnedFd;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -129,6 +130,10 @@ pub struct RustyCompositorState {
     pub wm: WindowManager,
     /// Mapping between `rusty-wm` [`WindowId`] and Smithay [`Window`] handles.
     pub window_bindings: Vec<(WindowId, Window)>,
+    /// Managed windows that bound `zxdg_toplevel_decoration_v1` (`RUSTYOS-030`).
+    pub xdg_decoration_requested: HashSet<WindowId>,
+    /// Managed windows using client-side decorations (CSD) without RustyOS SSD (`RUSTYOS-030`).
+    pub csd_window_ids: HashSet<WindowId>,
     /// Desktop space managing mapped windows and outputs for the active workspace.
     pub space: Space<Window>,
     /// Popup manager tracking `xdg_popup` surfaces.
@@ -288,6 +293,8 @@ impl RustyCompositorState {
             running: true,
             wm,
             window_bindings: Vec::new(),
+            xdg_decoration_requested: HashSet::new(),
+            csd_window_ids: HashSet::new(),
             space,
             popups: PopupManager::default(),
             output,
@@ -912,6 +919,216 @@ impl RustyCompositorState {
             .find_map(|(wid, w)| (*wid == id).then(|| w.clone()))
     }
 
+    /// Looks up the [`WindowId`] associated with a `ToplevelSurface`.
+    #[must_use]
+    pub fn window_id_for_toplevel(&self, surface: &ToplevelSurface) -> Option<WindowId> {
+        let target_wl = surface.wl_surface();
+        self.window_bindings.iter().find_map(|(win_id, sw)| {
+            sw.toplevel()
+                .is_some_and(|tl| tl.wl_surface() == target_wl)
+                .then_some(*win_id)
+        })
+    }
+
+    /// Clears decoration-negotiation tracking for a closed or unmapped window (`RUSTYOS-030`).
+    pub fn unregister_window_decoration(&mut self, win_id: WindowId) {
+        self.xdg_decoration_requested.remove(&win_id);
+        self.csd_window_ids.remove(&win_id);
+    }
+
+    /// Returns `true` if the window uses client-side decorations (CSD) and should not
+    /// be wrapped with a RustyOS SSD titlebar (`RUSTYOS-030`).
+    #[must_use]
+    pub fn window_uses_csd(&self, win_id: WindowId) -> bool {
+        if let Some(window) = self.smithay_window_for_id(win_id)
+            && let Some(x11) = window.x11_surface()
+        {
+            return x11.is_decorated();
+        }
+        self.csd_window_ids.contains(&win_id)
+    }
+
+    /// Returns the SSD titlebar height reserved above the client area (`0` for CSD windows).
+    #[must_use]
+    pub fn window_titlebar_height(&self, win_id: WindowId) -> i32 {
+        if self.window_uses_csd(win_id) {
+            0
+        } else {
+            crate::shell_render::TITLEBAR_HEIGHT
+        }
+    }
+
+    /// Computes `(client_width, client_height)` inside the WM frame box (`RUSTYOS-030`).
+    #[must_use]
+    pub fn effective_client_size(&self, win_id: WindowId, rect: Rect) -> (i32, i32) {
+        let titlebar_h = self.window_titlebar_height(win_id);
+        (rect.width.max(64), (rect.height - titlebar_h).max(64))
+    }
+
+    /// Returns any client-declared minimum `(width, height)` in logical coordinates (`RUSTYOS-030`).
+    #[must_use]
+    pub fn window_min_size(&self, win_id: WindowId) -> Option<(i32, i32)> {
+        let window = self.smithay_window_for_id(win_id)?;
+        if let Some(x11) = window.x11_surface() {
+            return x11.min_size().and_then(|s| {
+                let w = s.w.max(0);
+                let h = s.h.max(0);
+                (w > 0 || h > 0).then_some((w, h))
+            });
+        }
+        if let Some(toplevel) = window.toplevel() {
+            let min = compositor::with_states(toplevel.wl_surface(), |states| {
+                let mut guard = states
+                    .cached_state
+                    .get::<smithay::wayland::shell::xdg::SurfaceCachedState>();
+                guard.current().min_size
+            });
+            let w = min.w.max(0);
+            let h = min.h.max(0);
+            return (w > 0 || h > 0).then_some((w, h));
+        }
+        None
+    }
+
+    /// Expands a non-maximized floating window if client `min_size` exceeds its current box (`RUSTYOS-030`).
+    pub fn ensure_floating_min_size(&mut self, win_id: WindowId) -> bool {
+        if self.wm.active_layout_mode() != LayoutMode::Floating
+            || self
+                .active_window_resize
+                .is_some_and(|resize| resize.window_id == win_id)
+        {
+            return false;
+        }
+        let Some(wm_win) = self.wm.window(win_id) else {
+            return false;
+        };
+        if wm_win.maximized {
+            return false;
+        }
+        let current = wm_win.geometry;
+        let Some((min_w, min_h)) = self.window_min_size(win_id) else {
+            return false;
+        };
+        let titlebar_h = self.window_titlebar_height(win_id);
+        let work_area = self.space.output_geometry(&self.output).map_or_else(
+            || Rect::new(0, crate::shell_render::TOP_BAR_HEIGHT, 1280, 744),
+            |geo| crate::shell_render::usable_work_area(geo.size.to_physical(1)),
+        );
+        let desired_w = min_w.min(work_area.width);
+        let desired_h = min_h.saturating_add(titlebar_h).min(work_area.height);
+        if desired_w <= current.width && desired_h <= current.height {
+            return false;
+        }
+        let new_w = current.width.max(desired_w);
+        let new_h = current.height.max(desired_h);
+        let max_x = work_area.x + (work_area.width - new_w).max(0);
+        let max_y = work_area.y + (work_area.height - new_h).max(0);
+        let target = Rect::new(
+            current.x.clamp(work_area.x, max_x),
+            current.y.clamp(work_area.y, max_y),
+            new_w,
+            new_h,
+        );
+        if self.wm.resize_window(win_id, target) {
+            self.animations.snap_window_immediate(
+                win_id.0,
+                LogicalRect::new(target.x, target.y, target.width, target.height),
+            );
+            return true;
+        }
+        false
+    }
+
+    /// Flushes initial `xdg_toplevel` configure events once per dispatch turn after
+    /// `zxdg_toplevel_decoration_v1` requests in the same batch have been processed (`RUSTYOS-030`).
+    pub fn flush_pending_toplevel_configures(&mut self) {
+        let focused_id = self.wm.focused_window();
+        let pending_wins: Vec<(WindowId, ToplevelSurface)> = self
+            .window_bindings
+            .iter()
+            .filter_map(|(win_id, sw)| {
+                let toplevel = sw.toplevel()?.clone();
+                (!toplevel.is_initial_configure_sent()).then_some((*win_id, toplevel))
+            })
+            .collect();
+
+        if pending_wins.is_empty() {
+            return;
+        }
+
+        for (win_id, toplevel) in pending_wins {
+            if !self.xdg_decoration_requested.contains(&win_id) {
+                self.csd_window_ids.insert(win_id);
+            }
+            if let Some(wm_win) = self.wm.window(win_id) {
+                let rect = wm_win.geometry;
+                let maximized = wm_win.maximized;
+                let (client_w, client_h) = self.effective_client_size(win_id, rect);
+                let is_focused = focused_id == Some(win_id);
+                let dec_mode = if self.csd_window_ids.contains(&win_id) {
+                    DecorationMode::ClientSide
+                } else {
+                    DecorationMode::ServerSide
+                };
+                toplevel.with_pending_state(|state| {
+                    state.size = Some((client_w, client_h).into());
+                    state.decoration_mode = Some(dec_mode);
+                    if is_focused {
+                        state.states.set(xdg_toplevel::State::Activated);
+                    } else {
+                        state.states.unset(xdg_toplevel::State::Activated);
+                    }
+                    if maximized {
+                        state.states.set(xdg_toplevel::State::Maximized);
+                    } else {
+                        state.states.unset(xdg_toplevel::State::Maximized);
+                    }
+                });
+            }
+            toplevel.send_configure();
+        }
+        let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+        self.sync_space_with_wm(serial);
+    }
+
+    fn apply_xdg_decoration_mode(&mut self, toplevel: &ToplevelSurface, use_csd: bool) {
+        let dec_mode = if use_csd {
+            DecorationMode::ClientSide
+        } else {
+            DecorationMode::ServerSide
+        };
+        if let Some(win_id) = self.window_id_for_toplevel(toplevel) {
+            self.xdg_decoration_requested.insert(win_id);
+            if use_csd {
+                self.csd_window_ids.insert(win_id);
+            } else {
+                self.csd_window_ids.remove(&win_id);
+            }
+            let client_size = self
+                .wm
+                .window(win_id)
+                .map(|w| self.effective_client_size(win_id, w.geometry));
+            toplevel.with_pending_state(|state| {
+                state.decoration_mode = Some(dec_mode);
+                if let Some((w, h)) = client_size {
+                    state.size = Some((w, h).into());
+                }
+            });
+            if toplevel.is_initial_configure_sent() {
+                let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+                self.sync_space_with_wm(serial);
+                toplevel.send_configure();
+            }
+        } else {
+            toplevel.with_pending_state(|state| {
+                state.decoration_mode = Some(dec_mode);
+            });
+            if toplevel.is_initial_configure_sent() {
+                toplevel.send_configure();
+            }
+        }
+    }
+
     /// Removes dead/closed client windows from `window_bindings` and [`WindowManager`],
     /// then synchronizes [`Space`] if any window disappeared.
     pub fn prune_dead_windows(&mut self) {
@@ -939,6 +1156,7 @@ impl RustyCompositorState {
                 self.active_window_resize = None;
             }
             self.window_bindings.retain(|(wid, _)| *wid != id);
+            self.unregister_window_decoration(id);
             self.wm.unmap_window(id);
             self.animations.remove_window(id.0);
             info!(window_id = id.0, "Pruned closed Wayland window from WM");
@@ -1030,15 +1248,14 @@ impl RustyCompositorState {
                 .unwrap_or((rect.x, rect.y));
 
             if let Some(window) = self.smithay_window_for_id(win_id) {
-                let client_height = (rect.height - crate::shell_render::TITLEBAR_HEIGHT).max(64);
+                let has_ssd = !self.window_uses_csd(win_id);
+                let titlebar_h = self.window_titlebar_height(win_id);
+                let (client_width, client_height) = self.effective_client_size(win_id, rect);
                 let geo_loc = window.geometry().loc;
-                let client_origin = (
-                    origin.0 - geo_loc.x,
-                    origin.1 + crate::shell_render::TITLEBAR_HEIGHT - geo_loc.y,
-                );
+                let client_origin = (origin.0 - geo_loc.x, origin.1 + titlebar_h - geo_loc.y);
                 if let Some(toplevel) = window.toplevel() {
                     toplevel.with_pending_state(|state| {
-                        state.size = Some((rect.width, client_height).into());
+                        state.size = Some((client_width, client_height).into());
                         if is_focused {
                             state.states.set(xdg_toplevel::State::Activated);
                         } else {
@@ -1050,14 +1267,14 @@ impl RustyCompositorState {
                             state.states.unset(xdg_toplevel::State::Maximized);
                         }
                     });
-                    toplevel.send_pending_configure();
+                    if toplevel.is_initial_configure_sent() {
+                        toplevel.send_pending_configure();
+                    }
                 } else if let Some(x11) = window.x11_surface() {
-                    let _ = x11.configure(crate::xwayland::compute_x11_client_rect(Rect::new(
-                        origin.0,
-                        origin.1,
-                        rect.width,
-                        rect.height,
-                    )));
+                    let _ = x11.configure(crate::xwayland::compute_x11_client_rect_for_decoration(
+                        Rect::new(origin.0, origin.1, rect.width, rect.height),
+                        has_ssd,
+                    ));
                     let _ = x11.set_activated(is_focused);
                     let _ = x11.set_maximized(maximized);
                 }
@@ -1099,11 +1316,9 @@ impl RustyCompositorState {
                 && let Some(window) = self.smithay_window_for_id(win_id)
             {
                 let is_focused = focused_id == Some(win_id);
+                let titlebar_h = self.window_titlebar_height(win_id);
                 let geo_loc = window.geometry().loc;
-                let client_origin = (
-                    origin.0 - geo_loc.x,
-                    origin.1 + crate::shell_render::TITLEBAR_HEIGHT - geo_loc.y,
-                );
+                let client_origin = (origin.0 - geo_loc.x, origin.1 + titlebar_h - geo_loc.y);
                 self.space.map_element(window, client_origin, is_focused);
             }
         }
@@ -1296,28 +1511,30 @@ impl CompositorHandler for RustyCompositorState {
                 .then(|| w.clone())
         }) {
             window.on_commit();
-            if let Some(win_id) = self.window_id_for_smithay(&window)
-                && let Some(wm_win) = self.wm.window(win_id)
-            {
-                let origin = self
-                    .animations
-                    .animated_window_origin(win_id.0)
-                    .unwrap_or((wm_win.geometry.x, wm_win.geometry.y));
-                let geo_loc = window.geometry().loc;
-                let client_origin = (
-                    origin.0 - geo_loc.x,
-                    origin.1 + crate::shell_render::TITLEBAR_HEIGHT - geo_loc.y,
-                );
-                let is_focused = self.wm.focused_window() == Some(win_id);
-                self.space.map_element(window, client_origin, is_focused);
-                if is_focused && !self.screen_locked {
-                    let keyboard = self.keyboard.clone();
-                    if keyboard.current_focus().as_ref() != Some(surface) {
-                        keyboard.set_focus(
-                            self,
-                            Some(surface.clone()),
-                            smithay::utils::SERIAL_COUNTER.next_serial(),
-                        );
+            if let Some(win_id) = self.window_id_for_smithay(&window) {
+                if self.ensure_floating_min_size(win_id) {
+                    let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+                    self.sync_space_with_wm(serial);
+                }
+                if let Some(wm_win) = self.wm.window(win_id) {
+                    let origin = self
+                        .animations
+                        .animated_window_origin(win_id.0)
+                        .unwrap_or((wm_win.geometry.x, wm_win.geometry.y));
+                    let titlebar_h = self.window_titlebar_height(win_id);
+                    let geo_loc = window.geometry().loc;
+                    let client_origin = (origin.0 - geo_loc.x, origin.1 + titlebar_h - geo_loc.y);
+                    let is_focused = self.wm.focused_window() == Some(win_id);
+                    self.space.map_element(window, client_origin, is_focused);
+                    if is_focused && !self.screen_locked {
+                        let keyboard = self.keyboard.clone();
+                        if keyboard.current_focus().as_ref() != Some(surface) {
+                            keyboard.set_focus(
+                                self,
+                                Some(surface.clone()),
+                                smithay::utils::SERIAL_COUNTER.next_serial(),
+                            );
+                        }
                     }
                 }
             }
@@ -1461,7 +1678,17 @@ impl XdgShellHandler for RustyCompositorState {
 
     fn new_toplevel(&mut self, surface: ToplevelSurface) {
         let win_id = self.wm.next_window_id();
-        let rect = self.wm.map_window(win_id, None);
+        let min = compositor::with_states(surface.wl_surface(), |states| {
+            let mut guard = states
+                .cached_state
+                .get::<smithay::wayland::shell::xdg::SurfaceCachedState>();
+            guard.current().min_size
+        });
+        let preferred_size = (min.w >= 64 && min.h >= 64).then_some((
+            min.w,
+            min.h.saturating_add(crate::shell_render::TITLEBAR_HEIGHT),
+        ));
+        let rect = self.wm.map_window(win_id, preferred_size);
 
         let client_height = (rect.height - crate::shell_render::TITLEBAR_HEIGHT).max(64);
         surface.with_pending_state(|state| {
@@ -1469,7 +1696,6 @@ impl XdgShellHandler for RustyCompositorState {
             state.size = Some((rect.width, client_height).into());
             state.decoration_mode = Some(DecorationMode::ServerSide);
         });
-        surface.send_configure();
 
         let window = Window::new_wayland_window(surface);
         self.window_bindings.push((win_id, window));
@@ -1481,7 +1707,7 @@ impl XdgShellHandler for RustyCompositorState {
             window_id = win_id.0,
             workspace = self.wm.active_workspace_id().0,
             ?rect,
-            "Mapped new xdg_toplevel window via WindowManager"
+            "Mapped new xdg_toplevel window via WindowManager (awaiting decoration negotiation)"
         );
     }
 
@@ -1494,7 +1720,76 @@ impl XdgShellHandler for RustyCompositorState {
         }
     }
 
+    fn move_request(&mut self, surface: ToplevelSurface, _seat: wl_seat::WlSeat, serial: Serial) {
+        if let Some(win_id) = self.window_id_for_toplevel(&surface) {
+            self.wm.focus_and_raise(win_id);
+            self.sync_space_with_wm(serial);
+            if let Some(wm_win) = self.wm.window(win_id) {
+                self.active_window_resize = None;
+                self.active_window_drag = Some(WindowDragState {
+                    window_id: win_id,
+                    start_pointer: self.pointer_location,
+                    start_origin: (wm_win.geometry.x, wm_win.geometry.y),
+                });
+            }
+        }
+    }
+
+    fn resize_request(
+        &mut self,
+        surface: ToplevelSurface,
+        _seat: wl_seat::WlSeat,
+        serial: Serial,
+        edges: xdg_toplevel::ResizeEdge,
+    ) {
+        let Some(mapped_edges) = map_xdg_resize_edge(edges) else {
+            return;
+        };
+        if let Some(win_id) = self.window_id_for_toplevel(&surface) {
+            self.wm.focus_and_raise(win_id);
+            self.sync_space_with_wm(serial);
+            if let Some(wm_win) = self.wm.window(win_id) {
+                self.active_window_drag = None;
+                self.active_window_resize = Some(WindowResizeState {
+                    window_id: win_id,
+                    edges: mapped_edges,
+                    start_pointer: self.pointer_location,
+                    start_rect: wm_win.geometry,
+                });
+            }
+        }
+    }
+
     fn grab(&mut self, _surface: PopupSurface, _seat: wl_seat::WlSeat, _serial: Serial) {}
+
+    fn maximize_request(&mut self, surface: ToplevelSurface) {
+        if let Some(win_id) = self.window_id_for_toplevel(&surface) {
+            self.wm.focus_and_raise(win_id);
+            if !self.wm.window(win_id).is_some_and(|w| w.maximized) {
+                let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+                self.apply_wm_action(WmAction::ToggleMaximizeFocused, serial);
+            }
+        }
+    }
+
+    fn unmaximize_request(&mut self, surface: ToplevelSurface) {
+        if let Some(win_id) = self.window_id_for_toplevel(&surface) {
+            self.wm.focus_and_raise(win_id);
+            if self.wm.window(win_id).is_some_and(|w| w.maximized) {
+                let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+                self.apply_wm_action(WmAction::ToggleMaximizeFocused, serial);
+            }
+        }
+    }
+
+    fn minimize_request(&mut self, surface: ToplevelSurface) {
+        if let Some(win_id) = self.window_id_for_toplevel(&surface) {
+            debug!(
+                window_id = win_id.0,
+                "Received xdg_toplevel::minimize_request (ignored; minimize tray not implemented)"
+            );
+        }
+    }
 
     fn reposition_request(
         &mut self,
@@ -1507,6 +1802,93 @@ impl XdgShellHandler for RustyCompositorState {
             state.positioner = positioner;
         });
         surface.send_repositioned(token);
+    }
+
+    fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
+        if let Some(win_id) = self.window_id_for_toplevel(&surface) {
+            if self
+                .active_window_drag
+                .is_some_and(|drag| drag.window_id == win_id)
+            {
+                self.active_window_drag = None;
+            }
+            if self
+                .active_window_resize
+                .is_some_and(|resize| resize.window_id == win_id)
+            {
+                self.active_window_resize = None;
+            }
+            if let Some((_, sw)) = self.window_bindings.iter().find(|(id, _)| *id == win_id) {
+                let sw_clone = sw.clone();
+                self.space.unmap_elem(&sw_clone);
+            }
+            self.window_bindings.retain(|(wid, _)| *wid != win_id);
+            self.unregister_window_decoration(win_id);
+            self.wm.unmap_window(win_id);
+            self.animations.remove_window(win_id.0);
+            let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+            self.sync_space_with_wm(serial);
+            info!(
+                window_id = win_id.0,
+                "Removed destroyed xdg_toplevel window"
+            );
+        }
+    }
+}
+
+const fn map_xdg_resize_edge(
+    edge: xdg_toplevel::ResizeEdge,
+) -> Option<crate::shell_render::ResizeEdges> {
+    match edge {
+        xdg_toplevel::ResizeEdge::Top => Some(crate::shell_render::ResizeEdges {
+            left: false,
+            right: false,
+            top: true,
+            bottom: false,
+        }),
+        xdg_toplevel::ResizeEdge::Bottom => Some(crate::shell_render::ResizeEdges {
+            left: false,
+            right: false,
+            top: false,
+            bottom: true,
+        }),
+        xdg_toplevel::ResizeEdge::Left => Some(crate::shell_render::ResizeEdges {
+            left: true,
+            right: false,
+            top: false,
+            bottom: false,
+        }),
+        xdg_toplevel::ResizeEdge::Right => Some(crate::shell_render::ResizeEdges {
+            left: false,
+            right: true,
+            top: false,
+            bottom: false,
+        }),
+        xdg_toplevel::ResizeEdge::TopLeft => Some(crate::shell_render::ResizeEdges {
+            left: true,
+            right: false,
+            top: true,
+            bottom: false,
+        }),
+        xdg_toplevel::ResizeEdge::TopRight => Some(crate::shell_render::ResizeEdges {
+            left: false,
+            right: true,
+            top: true,
+            bottom: false,
+        }),
+        xdg_toplevel::ResizeEdge::BottomLeft => Some(crate::shell_render::ResizeEdges {
+            left: true,
+            right: false,
+            top: false,
+            bottom: true,
+        }),
+        xdg_toplevel::ResizeEdge::BottomRight => Some(crate::shell_render::ResizeEdges {
+            left: false,
+            right: true,
+            top: false,
+            bottom: true,
+        }),
+        _ => None,
     }
 }
 
@@ -1557,24 +1939,15 @@ impl WlrLayerShellHandler for RustyCompositorState {
 
 impl XdgDecorationHandler for RustyCompositorState {
     fn new_decoration(&mut self, toplevel: ToplevelSurface) {
-        toplevel.with_pending_state(|state| {
-            state.decoration_mode = Some(DecorationMode::ServerSide);
-        });
-        toplevel.send_configure();
+        self.apply_xdg_decoration_mode(&toplevel, false);
     }
 
-    fn request_mode(&mut self, toplevel: ToplevelSurface, _mode: DecorationMode) {
-        toplevel.with_pending_state(|state| {
-            state.decoration_mode = Some(DecorationMode::ServerSide);
-        });
-        toplevel.send_configure();
+    fn request_mode(&mut self, toplevel: ToplevelSurface, mode: DecorationMode) {
+        self.apply_xdg_decoration_mode(&toplevel, mode == DecorationMode::ClientSide);
     }
 
     fn unset_mode(&mut self, toplevel: ToplevelSurface) {
-        toplevel.with_pending_state(|state| {
-            state.decoration_mode = Some(DecorationMode::ServerSide);
-        });
-        toplevel.send_configure();
+        self.apply_xdg_decoration_mode(&toplevel, false);
     }
 }
 

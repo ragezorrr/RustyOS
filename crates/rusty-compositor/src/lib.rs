@@ -548,4 +548,46 @@ mod tests {
 
         Ok(())
     }
+
+    #[test]
+    fn csd_decoration_state_adjusts_titlebar_height_and_client_size() -> Result<(), Box<dyn Error>>
+    {
+        let event_loop: EventLoop<'static, state::RustyCompositorState> = EventLoop::try_new()?;
+        let display: Display<state::RustyCompositorState> = Display::new()?;
+
+        let mut compositor = state::RustyCompositorState::new(
+            &display,
+            "wayland-csd-test-0".to_owned(),
+            event_loop.get_signal(),
+            (1280, 800).into(),
+        )?;
+
+        let win_id = rusty_wm::WindowId(42);
+        let rect = rusty_wm::Rect::new(100, 80, 800, 600);
+
+        // Default Wayland window without CSD marker uses SSD titlebar.
+        assert!(!compositor.window_uses_csd(win_id));
+        assert_eq!(
+            compositor.window_titlebar_height(win_id),
+            shell_render::TITLEBAR_HEIGHT
+        );
+        assert_eq!(
+            compositor.effective_client_size(win_id, rect),
+            (800, 600 - shell_render::TITLEBAR_HEIGHT)
+        );
+
+        // Once negotiated as CSD, titlebar reserve drops to 0 and full height goes to client.
+        compositor.xdg_decoration_requested.insert(win_id);
+        compositor.csd_window_ids.insert(win_id);
+        assert!(compositor.window_uses_csd(win_id));
+        assert_eq!(compositor.window_titlebar_height(win_id), 0);
+        assert_eq!(compositor.effective_client_size(win_id, rect), (800, 600));
+
+        // Cleanup removes tracking state cleanly.
+        compositor.unregister_window_decoration(win_id);
+        assert!(!compositor.window_uses_csd(win_id));
+        assert!(!compositor.xdg_decoration_requested.contains(&win_id));
+
+        Ok(())
+    }
 }

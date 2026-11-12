@@ -1371,19 +1371,32 @@ pub enum SsdHit {
     Resize(rusty_wm::WindowId, ResizeEdges),
 }
 
-/// Hit-tests `(x, y)` against visible window frames in reverse (top-to-bottom) stacking order.
+/// Window frame metadata used for SSD/CSD-aware pointer hit-testing (`RUSTYOS-030`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SsdHitWindow {
+    /// Window manager identifier.
+    pub id: rusty_wm::WindowId,
+    /// Visual outer frame bounds.
+    pub rect: rusty_wm::Rect,
+    /// `true` when the compositor renders an SSD titlebar (`TITLEBAR_HEIGHT`);
+    /// `false` when the client owns its own header/buttons (CSD).
+    pub has_ssd: bool,
+}
+
+/// Hit-tests `(x, y)` against visible window frames in reverse (top-to-bottom) stacking order,
+/// respecting CSD windows by forwarding top header / corner button clicks directly to the client.
 #[must_use]
-pub fn check_window_ssd_hit(
-    windows_bottom_to_top: &[(rusty_wm::WindowId, rusty_wm::Rect)],
+pub fn check_window_frame_hit(
+    windows_bottom_to_top: &[SsdHitWindow],
     x: f64,
     y: f64,
 ) -> Option<SsdHit> {
     let pad = RESIZE_GRAB_BORDER;
-    for &(win_id, rect) in windows_bottom_to_top.iter().rev() {
-        let rx = f64::from(rect.x);
-        let ry = f64::from(rect.y);
-        let rw = f64::from(rect.width);
-        let rh = f64::from(rect.height);
+    for &win in windows_bottom_to_top.iter().rev() {
+        let rx = f64::from(win.rect.x);
+        let ry = f64::from(win.rect.y);
+        let rw = f64::from(win.rect.width);
+        let rh = f64::from(win.rect.height);
         let th = f64::from(TITLEBAR_HEIGHT);
 
         if x < rx - pad || x >= rx + rw + pad || y < ry - pad || y >= ry + rh + pad {
@@ -1393,39 +1406,60 @@ pub fn check_window_ssd_hit(
         let rel_x = x - rx;
         let rel_y = y - ry;
 
-        // 1. Traffic-light buttons take priority inside titlebar
-        if (6.0..=22.0).contains(&rel_y) {
+        // 1. Traffic-light buttons take priority inside SSD titlebars only.
+        if win.has_ssd && (6.0..=22.0).contains(&rel_y) {
             if (10.0..=26.0).contains(&rel_x) {
-                return Some(SsdHit::Close(win_id));
+                return Some(SsdHit::Close(win.id));
             }
             if (28.0..=44.0).contains(&rel_x) {
-                return Some(SsdHit::Minimize(win_id));
+                return Some(SsdHit::Minimize(win.id));
             }
             if (46.0..=62.0).contains(&rel_x) {
-                return Some(SsdHit::Maximize(win_id));
+                return Some(SsdHit::Maximize(win.id));
             }
         }
 
-        // 2. Outer frame edges & corners trigger interactive resize
+        // 2. Outer frame edges & corners trigger interactive resize.
+        // For CSD windows keep resize grabs outside the client surface (plus a 1px hairlip)
+        // so interior header controls (such as corner `_ [] X` buttons) stay clickable.
+        let inner_inset = if win.has_ssd { pad } else { 1.5 };
         let edges = ResizeEdges {
-            left: rel_x < pad,
-            right: rel_x >= rw - pad,
-            top: rel_y < pad - 1.0,
-            bottom: rel_y >= rh - pad,
+            left: rel_x < inner_inset,
+            right: rel_x >= rw - inner_inset,
+            top: rel_y < if win.has_ssd { pad - 1.0 } else { 1.5 },
+            bottom: rel_y >= rh - inner_inset,
         };
         if edges.any() {
-            return Some(SsdHit::Resize(win_id, edges));
+            return Some(SsdHit::Resize(win.id, edges));
         }
 
-        // 3. Remaining titlebar interior triggers move drag
-        if rel_x >= 0.0 && rel_x < rw && rel_y >= 0.0 && rel_y < th {
-            return Some(SsdHit::TitlebarDrag(win_id));
+        // 3. Remaining SSD titlebar interior triggers move drag.
+        if win.has_ssd && rel_x >= 0.0 && rel_x < rw && rel_y >= 0.0 && rel_y < th {
+            return Some(SsdHit::TitlebarDrag(win.id));
         }
 
         // Click landed inside this foreground window's client surface; stop checking windows underneath.
         return None;
     }
     None
+}
+
+/// Hit-tests `(x, y)` against visible SSD window frames in reverse (top-to-bottom) stacking order.
+#[must_use]
+pub fn check_window_ssd_hit(
+    windows_bottom_to_top: &[(rusty_wm::WindowId, rusty_wm::Rect)],
+    x: f64,
+    y: f64,
+) -> Option<SsdHit> {
+    let targets: Vec<SsdHitWindow> = windows_bottom_to_top
+        .iter()
+        .map(|&(id, rect)| SsdHitWindow {
+            id,
+            rect,
+            has_ssd: true,
+        })
+        .collect();
+    check_window_frame_hit(&targets, x, y)
 }
 
 /// Generates Server-Side Decoration elements (titlebar, macOS traffic lights, 1px glass border)
@@ -3306,6 +3340,46 @@ pub fn generate_window_ssd_composite_elements(
     out
 }
 
+/// Generates a crisp 1px outer frame border strictly outside a client-side decorated (CSD) window (`RUSTYOS-030`).
+#[must_use]
+pub fn generate_window_csd_border_elements(
+    rect: rusty_wm::Rect,
+    is_focused: bool,
+) -> Vec<CompositorRenderElement> {
+    let w = rect.width.max(64);
+    let h = rect.height.max(64);
+    let border_rgba = if is_focused {
+        RGBA_BORDER_HIGHLIGHT
+    } else {
+        RGBA_BORDER
+    };
+    let border_col = rgba_to_premul_color32f(border_rgba);
+    vec![
+        CompositorRenderElement::Solid(make_solid_element(
+            Rectangle::new(
+                Point::from((rect.x - 1, rect.y - 1)),
+                Size::from((w + 2, 1)),
+            ),
+            border_col,
+        )),
+        CompositorRenderElement::Solid(make_solid_element(
+            Rectangle::new(
+                Point::from((rect.x - 1, rect.y + h)),
+                Size::from((w + 2, 1)),
+            ),
+            border_col,
+        )),
+        CompositorRenderElement::Solid(make_solid_element(
+            Rectangle::new(Point::from((rect.x - 1, rect.y)), Size::from((1, h))),
+            border_col,
+        )),
+        CompositorRenderElement::Solid(make_solid_element(
+            Rectangle::new(Point::from((rect.x + w, rect.y)), Size::from((1, h))),
+            border_col,
+        )),
+    ]
+}
+
 /// Generates soft radial drop shadow elements strictly outside a managed window rectangle (`RUSTYOS-022`).
 pub fn generate_window_shadow_elements(
     shape_cache: &mut crate::surfaces::UiShapeCache,
@@ -3694,5 +3768,35 @@ mod tests {
 
         assert_eq!(anim_offset(1.0, -22.0), 0);
         assert_eq!(anim_offset(0.0, -22.0), -22);
+    }
+
+    #[test]
+    fn csd_frame_hit_testing_ignores_client_header_and_preserves_outer_resize() {
+        let win = SsdHitWindow {
+            id: rusty_wm::WindowId(42),
+            rect: rusty_wm::Rect::new(100, 80, 600, 420),
+            has_ssd: false,
+        };
+        let list = [win];
+
+        // Interior header spots (macOS traffic-light zone, titlebar interior, corner close button)
+        // must pass through to the CSD application.
+        assert_eq!(check_window_frame_hit(&list, 118.0, 94.0), None);
+        assert_eq!(check_window_frame_hit(&list, 350.0, 94.0), None);
+        assert_eq!(check_window_frame_hit(&list, 692.0, 94.0), None);
+
+        // Outer border band outside the client surface still triggers resize.
+        assert_eq!(
+            check_window_frame_hit(&list, 97.0, 200.0),
+            Some(SsdHit::Resize(
+                rusty_wm::WindowId(42),
+                ResizeEdges {
+                    left: true,
+                    right: false,
+                    top: false,
+                    bottom: false,
+                }
+            ))
+        );
     }
 }

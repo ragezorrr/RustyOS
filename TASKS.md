@@ -370,6 +370,19 @@ hardware/software context и низкие накладные расходы.
 - **Acceptance criteria:** Отсутствующий или частично заполненный `config.toml` не ломает запуск и применяет безопасные значения по умолчанию; `Alt+Shift` и клик по бейджу `EN`/`RU` в `TopBar` переключают раскладку с синхронным обновлением текста бейджа; копирование/вставка (`Clipboard` и `Primary`) работает в обе стороны между Wayland и X11 (`XWayland`); `autostart` запускает команды без блокировки композитора; 61 тест и `clippy -D warnings` проходят без предупреждений.
 - **Risks:** Для сложных многострочных структур за пределами поддерживаемого подмножества TOML (таблицы в одну строку и т. п.) рекомендуется использовать стандартный синтаксис секций `[section]` + `key = value` / `commands = [...]`.
 
+## RUSTYOS-030 --- Убрать двойные заголовки CSD-окон и выровнять геометрию X11/Wayland
+
+**Статус:** done **Фаза:** 27 (CSD/SSD Negotiation & Geometry Alignment)
+
+- **Цель:** Устранить двойные заголовки у CSD-окон (Electron / Cursor / GTK4 / XWayland `_MOTIF_WM_HINTS` и Wayland `zxdg_decoration_manager_v1`), убрать гонку инициализации Qt (`Konsole`) и выровнять внешнюю рамку окна с фактической геометрией клиента.
+- **Scope:**
+  - `crates/rusty-compositor/src/state.rs` и `winit_backend.rs`: отложенная отправка первичного `xdg_toplevel::configure` в `flush_pending_toplevel_configures` после завершения батча запросов `zxdg_toplevel_decoration_v1` (`new_decoration`/`request_mode`), учёт `DecorationMode::ClientSide` и клиентов без `xdg-decoration` (`csd_window_ids`), динамическая высота заголовка (`window_titlebar_height`), авторасширение плавающих окон под `min_size` (`ensure_floating_min_size`) и обработчики `move_request`, `resize_request`, `maximize_request`, `unmaximize_request`, `toplevel_destroyed`.
+  - `crates/rusty-compositor/src/xwayland.rs`: добавлена `compute_x11_client_rect_for_decoration`, учёт `!window.is_decorated()` (`_MOTIF_WM_HINTS` CSD), передача `preferred_size` из геометрии/`min_size` при маппинге и обработка `WmWindowProperty::MotifHints`/`NormalHints` в `property_notify`.
+  - `crates/rusty-compositor/src/shell_render.rs`, `input.rs`, `winit_backend.rs`: добавлены `check_window_frame_hit`, `generate_window_csd_border_elements` (внешняя рамка `1px` без перекрытия CSD-кнопок), выравнивание `frame_rect` по `committed_size` в режиме `Floating` и перетаскивание любых/CSD-окон через `Alt+LMB` / `Super+LMB`.
+- **Dependencies:** `RUSTYOS-019`, `RUSTYOS-022`, `RUSTYOS-026`, `RUSTYOS-028`.
+- **Acceptance criteria:** `Konsole` и `Dolphin` стабильно получают `ServerSide` SSD-шапку RustyOS без Breeze `_ □ ×`; `Cursor Agents` / Electron и GTK4 CSD-окна рендерятся с одной шапкой, внешней `1px`-рамкой и кликабельными кнопками в углах; внешние границы не режут содержимое клиента; перетаскивание (`Alt+LMB`/`Super+LMB` и client `move_request`) и ресайз по краям работают на CSD-окнах; 63 теста и `clippy -D warnings` проходят без предупреждений.
+- **Risks:** Требуется визуальная проверка в живой сессии на `--winit` / `--drm` с Electron (`Cursor Agents`) и Qt (`Konsole`, `Dolphin`).
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

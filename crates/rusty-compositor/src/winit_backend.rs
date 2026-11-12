@@ -204,6 +204,7 @@ pub(crate) fn dispatch_and_refresh_clients(
     if let Err(err) = display.dispatch_clients(app_state) {
         error!(error = %err, "Failed to dispatch Wayland client events");
     }
+    app_state.flush_pending_toplevel_configures();
     app_state.prune_dead_windows();
     app_state.launcher.reap_children();
     app_state.space.refresh();
@@ -523,35 +524,63 @@ pub(crate) fn build_frame_render_list(
         ));
     }
 
-    // Render managed windows and their SSD titlebars in top-to-bottom stacking order
+    // Render managed windows and their SSD titlebars (or clean CSD rim) in top-to-bottom stacking order
     for &(win_id, rect) in visible_windows.iter().rev() {
         let origin = state
             .animations
             .animated_window_origin(win_id.0)
             .unwrap_or((rect.x, rect.y));
-        let frame_rect = rusty_wm::Rect::new(origin.0, origin.1, rect.width, rect.height);
         let is_focused = focused_win == Some(win_id);
+        let has_ssd = !state.window_uses_csd(win_id);
+        let titlebar_h = if has_ssd {
+            crate::shell_render::TITLEBAR_HEIGHT
+        } else {
+            0
+        };
+        let actively_resizing = state
+            .active_window_resize
+            .is_some_and(|resize| resize.window_id == win_id);
 
         let smithay_win = state.smithay_window_for_id(win_id);
-        let title_text = smithay_win.as_ref().map_or_else(
-            || format!("Window #{}", win_id.0),
-            |win| window_title(win, win_id),
-        );
+        let committed_size = smithay_win.as_ref().map(|w| w.geometry().size);
+        let frame_rect = match (state.wm.active_layout_mode(), committed_size) {
+            (rusty_wm::LayoutMode::Floating, Some(sz))
+                if !actively_resizing && sz.w >= 64 && sz.h >= 64 =>
+            {
+                rusty_wm::Rect::new(
+                    origin.0,
+                    origin.1,
+                    rect.width.max(sz.w),
+                    rect.height.max(sz.h + titlebar_h),
+                )
+            }
+            _ => rusty_wm::Rect::new(origin.0, origin.1, rect.width, rect.height),
+        };
 
-        render_list.extend(crate::shell_render::generate_window_ssd_composite_elements(
-            text_cache,
-            shape_cache,
-            renderer,
-            frame_rect,
-            &title_text,
-            is_focused,
-        ));
+        if has_ssd {
+            let title_text = smithay_win.as_ref().map_or_else(
+                || format!("Window #{}", win_id.0),
+                |win| window_title(win, win_id),
+            );
+            render_list.extend(crate::shell_render::generate_window_ssd_composite_elements(
+                text_cache,
+                shape_cache,
+                renderer,
+                frame_rect,
+                &title_text,
+                is_focused,
+            ));
+        } else {
+            render_list.extend(crate::shell_render::generate_window_csd_border_elements(
+                frame_rect, is_focused,
+            ));
+        }
 
         if let Some(smithay_win) = smithay_win {
             let geo_loc = smithay_win.geometry().loc;
             let client_loc = Point::<i32, Logical>::from((
                 origin.0 - geo_loc.x,
-                origin.1 + crate::shell_render::TITLEBAR_HEIGHT - geo_loc.y,
+                origin.1 + titlebar_h - geo_loc.y,
             ))
             .to_physical_precise_round(1.0);
             render_list.extend(

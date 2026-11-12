@@ -25,7 +25,7 @@ use smithay::wayland::selection::{
     },
 };
 use smithay::wayland::xwayland_shell::{XWaylandShellHandler, XWaylandShellState};
-use smithay::xwayland::xwm::{Reorder, ResizeEdge, X11Window, XwmId};
+use smithay::xwayland::xwm::{Reorder, ResizeEdge, WmWindowProperty, X11Window, XwmId};
 use smithay::xwayland::{X11Surface, X11Wm, XWayland, XWaylandEvent, XwmHandler};
 use tracing::{debug, info, warn};
 
@@ -37,9 +37,20 @@ delegate_xwayland_shell!(RustyCompositorState);
 /// Computes the inner client rectangle assigned to an X11 window below RustyOS's SSD titlebar.
 #[must_use]
 pub fn compute_x11_client_rect(wm_rect: Rect) -> Rectangle<i32, Logical> {
-    let client_h = (wm_rect.height - TITLEBAR_HEIGHT).max(64);
+    compute_x11_client_rect_for_decoration(wm_rect, true)
+}
+
+/// Computes the inner client rectangle assigned to an X11 window, reserving RustyOS's
+/// SSD titlebar only when `has_ssd` is `true` (`RUSTYOS-030`).
+#[must_use]
+pub fn compute_x11_client_rect_for_decoration(
+    wm_rect: Rect,
+    has_ssd: bool,
+) -> Rectangle<i32, Logical> {
+    let top_reserve = if has_ssd { TITLEBAR_HEIGHT } else { 0 };
+    let client_h = (wm_rect.height - top_reserve).max(64);
     Rectangle::new(
-        Point::from((wm_rect.x, wm_rect.y + TITLEBAR_HEIGHT)),
+        Point::from((wm_rect.x, wm_rect.y + top_reserve)),
         Size::from((wm_rect.width.max(64), client_h)),
     )
 }
@@ -135,9 +146,13 @@ impl XwmHandler for RustyCompositorState {
             return;
         }
         let x11_id = window.window_id();
+        let has_ssd = !window.is_decorated();
         if let Some(existing_id) = find_bound_window_id(self, x11_id) {
             if let Some(wm_win) = self.wm.window(existing_id) {
-                let _ = window.configure(compute_x11_client_rect(wm_win.geometry));
+                let _ = window.configure(compute_x11_client_rect_for_decoration(
+                    wm_win.geometry,
+                    has_ssd,
+                ));
             }
             let _ = window.set_mapped(true);
             let serial = SERIAL_COUNTER.next_serial();
@@ -145,14 +160,24 @@ impl XwmHandler for RustyCompositorState {
             return;
         }
 
+        let extra_h = if has_ssd { TITLEBAR_HEIGHT } else { 0 };
+        let geo_size = window.geometry().size;
+        let min_size = window.min_size();
+        let min_w = min_size.map_or(0, |m| m.w);
+        let min_h = min_size.map_or(0, |m| m.h);
+        let pref_w = geo_size.w.max(min_w);
+        let pref_h_raw = geo_size.h.max(min_h);
+        let preferred_size = (pref_w >= 64 && pref_h_raw >= 64)
+            .then_some((pref_w, pref_h_raw.saturating_add(extra_h)));
+
         let win_id = self.wm.next_window_id();
-        let rect = self.wm.map_window(win_id, None);
+        let rect = self.wm.map_window(win_id, preferred_size);
         if let Err(err) = window.set_mapped(true) {
             warn!(x11_id, error = %err, "Failed to mark X11 window mapped");
             self.wm.unmap_window(win_id);
             return;
         }
-        if let Err(err) = window.configure(compute_x11_client_rect(rect)) {
+        if let Err(err) = window.configure(compute_x11_client_rect_for_decoration(rect, has_ssd)) {
             warn!(x11_id, error = %err, "Failed to configure mapped X11 window");
         }
         let title = window.title();
@@ -166,6 +191,7 @@ impl XwmHandler for RustyCompositorState {
             window_id = win_id.0,
             x11_id,
             title = %title,
+            csd = !has_ssd,
             workspace = self.wm.active_workspace_id().0,
             ?rect,
             "Mapped new XWayland window via WindowManager"
@@ -201,7 +227,11 @@ impl XwmHandler for RustyCompositorState {
         if let Some(win_id) = find_bound_window_id(self, window.window_id())
             && let Some(wm_win) = self.wm.window(win_id)
         {
-            let _ = window.configure(compute_x11_client_rect(wm_win.geometry));
+            let has_ssd = !window.is_decorated();
+            let _ = window.configure(compute_x11_client_rect_for_decoration(
+                wm_win.geometry,
+                has_ssd,
+            ));
             return;
         }
         let mut geo = window.geometry();
@@ -236,6 +266,18 @@ impl XwmHandler for RustyCompositorState {
             if let Some(el) = existing {
                 self.space.map_element(el, geometry.loc, false);
             }
+        }
+    }
+
+    fn property_notify(&mut self, _xwm: XwmId, window: X11Surface, property: WmWindowProperty) {
+        if matches!(
+            property,
+            WmWindowProperty::MotifHints | WmWindowProperty::NormalHints
+        ) && let Some(win_id) = find_bound_window_id(self, window.window_id())
+        {
+            self.ensure_floating_min_size(win_id);
+            let serial = SERIAL_COUNTER.next_serial();
+            self.sync_space_with_wm(serial);
         }
     }
 
@@ -386,6 +428,7 @@ fn remove_x11_window(state: &mut RustyCompositorState, x11_id: X11Window, reason
             state.space.unmap_elem(&sw_clone);
         }
         state.window_bindings.retain(|(id, _)| *id != win_id);
+        state.unregister_window_decoration(win_id);
         state.wm.unmap_window(win_id);
         state.animations.remove_window(win_id.0);
         let serial = SERIAL_COUNTER.next_serial();
@@ -476,5 +519,11 @@ mod tests {
         let tiny = compute_x11_client_rect(Rect::new(0, 0, 20, 20));
         assert_eq!(tiny.size.w, 64);
         assert_eq!(tiny.size.h, 64);
+
+        let csd = compute_x11_client_rect_for_decoration(Rect::new(100, 80, 800, 600), false);
+        assert_eq!(csd.loc.x, 100);
+        assert_eq!(csd.loc.y, 80);
+        assert_eq!(csd.size.w, 800);
+        assert_eq!(csd.size.h, 600);
     }
 }
