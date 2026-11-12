@@ -24,11 +24,16 @@ pub const WS_BTN_GAP: i32 = 4;
 pub const WS_BTN_STRIDE: i32 = WS_BTN_WIDTH + WS_BTN_GAP;
 pub const WS_START_X: i32 = 12;
 
+const fn premul(r: f32, g: f32, b: f32, a: f32) -> Color32F {
+    Color32F::new(r * a, g * a, b * a, a)
+}
+
 // Design tokens from `DESIGN.md` (Version 2.0 "RustyOS Purple Glass")
+// Smithay Color32F requires premultiplied RGBA components.
 pub const COLOR_BACKGROUND: Color32F = Color32F::new(0.059, 0.039, 0.098, 1.0); // #0F0A19
 pub const COLOR_SURFACE: Color32F = Color32F::new(0.086, 0.063, 0.137, 1.0); // #161023
-pub const COLOR_SURFACE_ELEVATED: Color32F = Color32F::new(0.125, 0.094, 0.180, 0.96); // #20182E
-pub const COLOR_SURFACE_OVERLAY: Color32F = Color32F::new(0.161, 0.125, 0.216, 0.98); // #292037
+pub const COLOR_SURFACE_ELEVATED: Color32F = premul(0.125, 0.094, 0.180, 0.96); // #20182E
+pub const COLOR_SURFACE_OVERLAY: Color32F = premul(0.161, 0.125, 0.216, 0.98); // #292037
 
 pub const COLOR_ACCENT: Color32F = Color32F::new(0.647, 0.431, 1.0, 1.0); // #A56EFF
 pub const COLOR_ACCENT_HOVER: Color32F = Color32F::new(0.725, 0.541, 1.0, 1.0); // #B98AFF
@@ -42,8 +47,8 @@ pub const COLOR_DANGER: Color32F = Color32F::new(0.898, 0.420, 0.459, 1.0); // #
 pub const COLOR_SUCCESS: Color32F = Color32F::new(0.514, 0.839, 0.627, 1.0); // #83D6A0
 pub const COLOR_WARNING: Color32F = Color32F::new(0.910, 0.769, 0.467, 1.0); // #E8C477
 
-pub const COLOR_BORDER: Color32F = Color32F::new(1.0, 1.0, 1.0, 0.12); // #FFFFFF12 border
-pub const COLOR_BORDER_HIGHLIGHT: Color32F = Color32F::new(1.0, 1.0, 1.0, 0.22); // outer glass rim
+pub const COLOR_BORDER: Color32F = premul(1.0, 1.0, 1.0, 0.12); // #FFFFFF12 border
+pub const COLOR_BORDER_HIGHLIGHT: Color32F = premul(1.0, 1.0, 1.0, 0.22); // outer glass rim
 
 /// Computes the usable work area rectangle for client windows, reserving space for `TopBar` and `Dock`.
 #[must_use]
@@ -375,6 +380,8 @@ pub fn generate_shell_render_elements(
         render_spotlight_modal(&mut elements, width, height);
     }
 
+    // Smithay's render_output expects elements in front-to-back order.
+    elements.reverse();
     elements
 }
 

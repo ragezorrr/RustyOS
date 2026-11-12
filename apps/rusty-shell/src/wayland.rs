@@ -94,13 +94,13 @@ impl From<WaylandError> for WaylandClientError {
     }
 }
 
-/// ARGB8888 design token colors (`DESIGN.md` v2.0 "RustyOS Purple Glass").
+/// Premultiplied ARGB8888 design token colors (`DESIGN.md` v2.0 "RustyOS Purple Glass").
 pub mod colors {
-    // 0xAARRGGBB in little-endian byte representation: [B, G, R, A]
-    pub const SURFACE_ELEVATED: [u8; 4] = [0x2E, 0x18, 0x20, 0xF5]; // #20182E
-    pub const SURFACE_OVERLAY: [u8; 4] = [0x37, 0x20, 0x29, 0xFA]; // #292037
-    pub const BORDER_HIGHLIGHT: [u8; 4] = [0xFF, 0xFF, 0xFF, 0x38]; // 22% white glass rim
-    pub const BORDER_SUBTLE: [u8; 4] = [0xFF, 0xFF, 0xFF, 0x1F]; // 12% white
+    // 0xAARRGGBB in little-endian premultiplied byte representation: [B, G, R, A]
+    pub const SURFACE_ELEVATED: [u8; 4] = [0x2C, 0x17, 0x1E, 0xF5]; // #20182E @ 96%
+    pub const SURFACE_OVERLAY: [u8; 4] = [0x36, 0x1F, 0x28, 0xFA]; // #292037 @ 98%
+    pub const BORDER_HIGHLIGHT: [u8; 4] = [0x38, 0x38, 0x38, 0x38]; // 22% white glass rim
+    pub const BORDER_SUBTLE: [u8; 4] = [0x1F, 0x1F, 0x1F, 0x1F]; // 12% white
     pub const ACCENT_NEON: [u8; 4] = [0xFF, 0x6E, 0xA5, 0xFF]; // #A56EFF
     pub const ACCENT_MUTED: [u8; 4] = [0xB5, 0x50, 0x76, 0xFF]; // #7650B5
     pub const TEXT_BRIGHT: [u8; 4] = [0xFA, 0xF0, 0xF4, 0xFF]; // #F4F0FA
