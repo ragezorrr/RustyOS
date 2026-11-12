@@ -33,7 +33,8 @@ use crate::{
 };
 
 /// Clear color for the nested compositor background (dark slate inspired by macOS dark desktop).
-const BACKGROUND_COLOR: Color32F = Color32F::new(0.11, 0.13, 0.17, 1.0);
+/// Background clear color matching `background = "#0F0A19"` from `DESIGN.md` (Version 2.0).
+const BACKGROUND_COLOR: Color32F = Color32F::new(0.059, 0.039, 0.098, 1.0);
 
 /// Runs the nested Smithay + Winit compositor event loop.
 ///

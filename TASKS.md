@@ -160,6 +160,16 @@ hardware/software context и низкие накладные расходы.
 - **Acceptance criteria:** `rustyos-session` находит и запускает композитор и оболочку; `rustyos.desktop` валиден по стандарту Freedesktop; сборка и тесты проходят без ошибок.
 - **Risks:** Отсутствие прав при установке (решено дефолтным префиксом `~/.local`).
 
+## RUSTYOS-015 --- High-Contrast Visual Styling & Design System 2.0 (RustyOS Purple Glass)
+
+**Статус:** done **Фаза:** 11 (Product Evolution)
+
+- **Цель:** Приведение оверлеев оболочки (`TopBar`, `Dock`, фон) в полное соответствие с дизайн-системой Version 2.0 ("RustyOS Purple Glass") с высоким контрастом и читаемостью.
+- **Scope:** Обновление дизайн-токенов в `crates/rusty-compositor/src/shell_render.rs` (`COLOR_SURFACE_ELEVATED`, `COLOR_SURFACE_OVERLAY`, `COLOR_ACCENT`, `COLOR_BORDER`, `COLOR_SUCCESS`); 1px внешняя полупрозрачная рамка (glass rim) для Dock и нижняя разделительная полоса для TopBar; яркие контрастные индикаторы воркспейсов и статусный апплет; обновление `BACKGROUND_COLOR` в `winit_backend.rs` на `#0F0A19`; модульное разделение на `render_top_bar` и `render_dock`; фиксация спецификации в `DESIGN.md` и референсов в `docs/design/references/`.
+- **Dependencies:** `RUSTYOS-012`, `RUSTYOS-014`.
+- **Acceptance criteria:** Элементы интерфейса не сливаются с темным фоном; TopBar и Dock четко выделены контрастными рамками и подложками; активные воркспейсы и окна имеют яркую неоновую индикацию; все 28 юнит-тестов проходят; clippy и rustfmt проходят без ошибок.
+- **Risks:** Нулевые (локальное обновление визуальных констант и геометрии элементов оверлея).
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance
