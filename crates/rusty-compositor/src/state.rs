@@ -1117,7 +1117,7 @@ impl RustyCompositorState {
 
     /// Launches the Spotlight candidate at visible row offset `row_offset` and closes the overlay.
     pub fn launch_spotlight_row(&mut self, row_offset: usize) {
-        if let Some(cmd) = self.launcher.exec_at_visible_row(3, row_offset) {
+        if let Some(cmd) = self.launcher.exec_at_visible_row(5, row_offset) {
             let ipc_path = rusty_ipc::default_ipc_socket_path(&self.socket_name);
             let _ = self
                 .launcher

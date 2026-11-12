@@ -604,7 +604,7 @@ pub(crate) fn build_frame_render_list(
         let launcher_progress = state.launcher_anim.current();
         let show_launcher = state.launcher_active || launcher_progress > 0.01;
         let (win_start, visible_items) = if show_launcher {
-            state.launcher.visible_window(3)
+            state.launcher.visible_window(5)
         } else {
             (0, Vec::new())
         };

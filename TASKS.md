@@ -497,6 +497,23 @@ hardware/software context и низкие накладные расходы.
 - **Acceptance criteria:** Все 78 тестов воркспейса проходят; `clippy -D warnings` и `cargo fmt` без замечаний; hit-testing меню и рабочих столов точно соответствует визуальной разметке; левая панель полностью соответствует `DESIGN.md` §12.1.
 - **Risks:** Нулевые новые зависимости; на экранах любой ширины (от 1024 до 4K) меню и воркспейсы умещаются с достаточным запасом свободного пространства до системного трея.
 
+## RUSTYOS-039 --- Spotlight Launcher в стиле macOS 27 Liquid Glass (DESIGN.md §12.3)
+
+**Статус:** done **Фаза:** 32 (macOS 27 Visual Alignment)
+
+- **Цель:** Обновить модальный лаунчер Spotlight по `DESIGN.md` §12.3: центрированная в верхней трети экрана Liquid Glass карточка `600x350` с радиусом `20` (`large`) и широкой мягкой тенью (`spread: 28`, `max_alpha: 115`), высокая поисковая панель `52 px` со стильной лупой и плейсхолдером, расширенный список результатов до 5 строк со скруглением `12 px`, акцентной подсветкой выбранной строки и тегами категорий (`Application`/`Command`) справа.
+- **Scope:**
+  - `crates/rusty-compositor/src/shell_render.rs`:
+    - `spotlight_modal_rect`: размер `600x350`, центрирование по X и привязка к верхней четверти экрана (`(height - modal_height) / 4`), внешний радиус `20`, тень `inner_radius: 20`, `spread: 28`, `max_alpha: 115`.
+    - Поисковая панель: высота `52 px`, радиус `14`, иконка лупы, плейсхолдер `"Spotlight Search"`.
+    - Результаты поиска: до 5 видимых строк высотой `46 px` с радиусом `12` (`medium`), выделенная строка с акцентным фоном `RGBA_ACCENT_MUTED` и левым индикатором `COLOR_ACCENT`, иконки `28x28`, правые теги категорий (`Application` / `Command`).
+    - `check_spotlight_click`: поддержка hit-testing до 5 строк результатов.
+  - `crates/rusty-compositor/src/state.rs` и `winit_backend.rs`:
+    - Увеличение окна видимых результатов лаунчера с 3 до 5 (`state.launcher.visible_window(5)`, `self.launcher.exec_at_visible_row(5, row_offset)`).
+- **Dependencies:** `RUSTYOS-018b`, `RUSTYOS-037`, `RUSTYOS-038`.
+- **Acceptance criteria:** Все 78 тестов воркспейса проходят; `clippy -D warnings` и `cargo fmt` без замечаний; Spotlight отображает до 5 результатов с правильными тегами, корректным hit-testing и плавной анимацией появления.
+- **Risks:** Нулевые новые зависимости; сохранена полная клавиатурная навигация (стрелки вверх/вниз, Enter, Escape).
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

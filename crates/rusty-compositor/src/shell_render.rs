@@ -1282,14 +1282,14 @@ pub enum SpotlightHit {
 
 #[must_use]
 fn spotlight_modal_rect(width: i32, height: i32) -> (i32, i32, i32, i32) {
-    let modal_width = 560.min(width - 40).max(280);
-    let modal_height = 240.min(height - 80).max(140);
+    let modal_width = 600.min(width - 48).max(320);
+    let modal_height = 350.min(height - 100).max(180);
     let modal_x = (width - modal_width) / 2;
-    let modal_y = (height - modal_height) / 3;
+    let modal_y = (height - modal_height) / 4;
     (modal_x, modal_y, modal_width, modal_height)
 }
 
-/// Hit-tests `(x, y)` against the open Spotlight modal and its up to 3 visible rows (`RUSTYOS-018b`).
+/// Hit-tests `(x, y)` against the open Spotlight modal and its up to 5 visible rows (`RUSTYOS-018b`, `RUSTYOS-039`).
 #[must_use]
 pub fn check_spotlight_click(
     screen_size: Size<i32, smithay::utils::Physical>,
@@ -1307,12 +1307,12 @@ pub fn check_spotlight_click(
         return SpotlightHit::OutsideModal;
     }
 
-    let row_h = 44;
+    let row_h = 46;
     let start_row_y = modal_y + 80;
     let row_x_min = f64::from(modal_x + 16);
     let row_x_max = f64::from(modal_x + modal_width - 16);
     if x >= row_x_min && x < row_x_max {
-        for i in 0..3_i32 {
+        for i in 0..5_i32 {
             let ry = f64::from(start_row_y + i * (row_h + 4));
             if y >= ry && y < ry + f64::from(row_h) {
                 return SpotlightHit::Row(usize::try_from(i).unwrap_or(0));
@@ -1346,46 +1346,46 @@ fn render_spotlight_modal(
     );
     elements.push(make_solid_element(modal_geo, COLOR_SURFACE_ELEVATED));
 
-    // 7b. Search input bar plate
-    let search_bar_h = 44;
+    // 7b. Search input bar plate (macOS 27 Liquid Glass style, RUSTYOS-039)
+    let search_bar_h = 52;
     let search_bar_geo = Rectangle::new(
-        Point::from((modal_x + 16, modal_y + 16)),
+        Point::from((modal_x + 16, modal_y + 14)),
         Size::from((modal_width - 32, search_bar_h)),
     );
     elements.push(make_solid_element(search_bar_geo, COLOR_SURFACE_OVERLAY));
 
     // 7c. Search bar accent indicator
     let search_icon_geo = Rectangle::new(
-        Point::from((modal_x + 28, modal_y + 26)),
+        Point::from((modal_x + 28, modal_y + 28)),
         Size::from((24, 24)),
     );
     elements.push(make_solid_element(search_icon_geo, COLOR_ACCENT));
 
     // 7d. Dynamic text input cursor placed after typed query
-    let cursor_x = (modal_x + 64 + spotlight.cursor_offset_x).min(modal_x + modal_width - 28);
-    let cursor_geo = Rectangle::new(Point::from((cursor_x, modal_y + 26)), Size::from((2, 24)));
+    let cursor_x = (modal_x + 60 + spotlight.cursor_offset_x).min(modal_x + modal_width - 28);
+    let cursor_geo = Rectangle::new(Point::from((cursor_x, modal_y + 28)), Size::from((2, 24)));
     elements.push(make_solid_element(cursor_geo, COLOR_TEXT));
 
     if !has_text {
         // 7e. Placeholder text indicator when no font renderer is active
         let placeholder_geo = Rectangle::new(
-            Point::from((modal_x + 70, modal_y + 34)),
-            Size::from((140, 8)),
+            Point::from((modal_x + 64, modal_y + 36)),
+            Size::from((160, 8)),
         );
         elements.push(make_solid_element(placeholder_geo, COLOR_MUTED));
     }
 
     // 7f. Search divider
     let divider_geo = Rectangle::new(
-        Point::from((modal_x + 16, modal_y + 70)),
+        Point::from((modal_x + 16, modal_y + 72)),
         Size::from((modal_width - 32, 1)),
     );
     elements.push(make_solid_element(divider_geo, COLOR_BORDER));
 
-    // 7g. Search results (up to 3 visible matching applications)
-    let row_h = 44;
+    // 7g. Search results (up to 5 visible matching applications/commands)
+    let row_h = 46;
     let start_row_y = modal_y + 80;
-    let row_count = spotlight.items.len().min(3);
+    let row_count = spotlight.items.len().min(5);
     for idx in 0..row_count {
         let i = i32::try_from(idx).unwrap_or(0);
         let row_y = start_row_y + i * (row_h + 4);
@@ -1396,23 +1396,22 @@ fn render_spotlight_modal(
             Size::from((modal_width - 32, row_h)),
         );
         let bg_color = if is_selected {
-            COLOR_SURFACE_OVERLAY
+            COLOR_ACCENT_MUTED
         } else {
             COLOR_SURFACE
         };
         elements.push(make_solid_element(row_bg, bg_color));
 
         if is_selected {
-            let select_indicator =
-                Rectangle::new(Point::from((modal_x + 16, row_y)), Size::from((3, row_h)));
+            let select_indicator = Rectangle::new(
+                Point::from((modal_x + 18, row_y + 8)),
+                Size::from((3, row_h - 16)),
+            );
             elements.push(make_solid_element(select_indicator, COLOR_ACCENT));
         }
 
         // App icon badge
-        let app_icon = Rectangle::new(
-            Point::from((modal_x + 28, row_y + 10)),
-            Size::from((24, 24)),
-        );
+        let app_icon = Rectangle::new(Point::from((modal_x + 28, row_y + 9)), Size::from((28, 28)));
         let icon_color = if is_selected {
             COLOR_ACCENT
         } else if idx == 1 {
@@ -1425,14 +1424,14 @@ fn render_spotlight_modal(
         if !has_text {
             // App title bar fallback
             let title_bar = Rectangle::new(
-                Point::from((modal_x + 62, row_y + 12)),
+                Point::from((modal_x + 66, row_y + 12)),
                 Size::from((120 + i * 20, 8)),
             );
             elements.push(make_solid_element(title_bar, COLOR_TEXT));
 
             // App subtitle bar fallback
             let sub_bar = Rectangle::new(
-                Point::from((modal_x + 62, row_y + 26)),
+                Point::from((modal_x + 66, row_y + 26)),
                 Size::from((80 + i * 15, 6)),
             );
             elements.push(make_solid_element(sub_bar, COLOR_MUTED));
@@ -1929,19 +1928,19 @@ pub fn generate_shell_text_elements(
     match overlay {
         ShellOverlayView::None => {}
         ShellOverlayView::Spotlight(spot) => {
-            let (modal_x, base_modal_y, _modal_width, _modal_height) =
+            let (modal_x, base_modal_y, modal_width, _modal_height) =
                 spotlight_modal_rect(width, height);
             let modal_y = base_modal_y + anim_offset(spot.progress, -22.0);
 
             // Search icon glyph centered inside accent plate
             let search_icon_bounds = Rectangle::new(
-                Point::from((modal_x + 28, modal_y + 26)),
+                Point::from((modal_x + 28, modal_y + 28)),
                 Size::from((24, 24)),
             );
             if let Some(el) = text_cache.render_label_centered(
                 renderer,
-                "/",
-                13.0,
+                "🔍",
+                12.0,
                 text_bright,
                 search_icon_bounds,
             ) {
@@ -1951,10 +1950,10 @@ pub fn generate_shell_text_elements(
             if spot.query.is_empty() {
                 if let Some(el) = text_cache.render_label(
                     renderer,
-                    "Search RustyOS...",
+                    "Spotlight Search",
                     14.5,
                     text_muted,
-                    Point::from((modal_x + 70, modal_y + 28)),
+                    Point::from((modal_x + 60, modal_y + 30)),
                 ) {
                     elements.push(el);
                 }
@@ -1963,30 +1962,31 @@ pub fn generate_shell_text_elements(
                 spot.query,
                 14.5,
                 text_bright,
-                Point::from((modal_x + 64, modal_y + 28)),
+                Point::from((modal_x + 60, modal_y + 30)),
             ) {
                 elements.push(el);
             }
 
             let start_row_y = modal_y + 80;
-            let row_h = 44;
-            for (i, item) in spot.items.iter().take(3).enumerate() {
+            let row_h = 46;
+            for (i, item) in spot.items.iter().take(5).enumerate() {
                 #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
                 let row_y = start_row_y + (i as i32) * (row_h + 4);
+                let is_sel = i == spot.selected_in_window;
 
                 let has_icon = item
                     .icon
                     .as_deref()
-                    .is_some_and(|name| shape_cache.icons.has_named_icon(name, 24));
+                    .is_some_and(|name| shape_cache.icons.has_named_icon(name, 28));
                 if !has_icon {
                     let badge_bounds = Rectangle::new(
-                        Point::from((modal_x + 28, row_y + 10)),
-                        Size::from((24, 24)),
+                        Point::from((modal_x + 28, row_y + 9)),
+                        Size::from((28, 28)),
                     );
                     if let Some(el) = text_cache.render_label_centered(
                         renderer,
                         &item.badge,
-                        10.5,
+                        11.0,
                         text_bright,
                         badge_bounds,
                     ) {
@@ -1999,7 +1999,7 @@ pub fn generate_shell_text_elements(
                     &item.name,
                     13.5,
                     text_bright,
-                    Point::from((modal_x + 62, row_y + 6)),
+                    Point::from((modal_x + 68, row_y + 7)),
                 ) {
                     elements.push(el);
                 }
@@ -2008,8 +2008,29 @@ pub fn generate_shell_text_elements(
                     &item.subtitle,
                     10.5,
                     text_muted,
-                    Point::from((modal_x + 62, row_y + 24)),
+                    Point::from((modal_x + 68, row_y + 26)),
                 ) {
+                    elements.push(el);
+                }
+
+                // macOS Spotlight Category Tag on the right (RUSTYOS-039)
+                let cat_label = if item.is_custom_command {
+                    "Command"
+                } else {
+                    "Application"
+                };
+                let cat_bounds = Rectangle::new(
+                    Point::from((modal_x + modal_width - 104, row_y + 14)),
+                    Size::from((80, 18)),
+                );
+                let cat_color = if is_sel {
+                    [230, 220, 245, 255]
+                } else {
+                    text_muted
+                };
+                if let Some(el) = text_cache
+                    .render_label_centered(renderer, cat_label, 10.0, cat_color, cat_bounds)
+                {
                     elements.push(el);
                 }
             }
@@ -3023,43 +3044,36 @@ pub fn generate_shell_composite_elements(
             let my = base_my + anim_offset(spot.progress, -22.0);
 
             // Search cursor + rounded search bar + rounded result rows (above modal base)
-            let cursor_x = (mx + 64 + spot.cursor_offset_x).min(mx + mw - 28);
+            let cursor_x = (mx + 60 + spot.cursor_offset_x).min(mx + mw - 28);
             out.push(CompositorRenderElement::Solid(make_solid_element(
-                Rectangle::new(Point::from((cursor_x, my + 26)), Size::from((2, 24))),
-                COLOR_TEXT,
+                Rectangle::new(Point::from((cursor_x, my + 28)), Size::from((2, 24))),
+                COLOR_ACCENT,
             )));
             if !has_text {
                 out.push(CompositorRenderElement::Solid(make_solid_element(
-                    Rectangle::new(Point::from((mx + 70, my + 34)), Size::from((140, 8))),
+                    Rectangle::new(Point::from((mx + 64, my + 36)), Size::from((160, 8))),
                     COLOR_MUTED,
                 )));
             }
+
+            // Search input bar plate (macOS 27 Liquid Glass style, RUSTYOS-039)
             push_rounded_glass_box(
                 &mut out,
                 shape_cache,
                 renderer,
-                Rectangle::new(Point::from((mx + 28, my + 26)), Size::from((24, 24))),
-                6,
-                RGBA_ACCENT,
-                None,
-            );
-            push_rounded_glass_box(
-                &mut out,
-                shape_cache,
-                renderer,
-                Rectangle::new(Point::from((mx + 16, my + 16)), Size::from((mw - 32, 44))),
-                8,
+                Rectangle::new(Point::from((mx + 16, my + 14)), Size::from((mw - 32, 52))),
+                14,
                 RGBA_SURFACE_OVERLAY,
                 Some(RGBA_BORDER),
             );
             out.push(CompositorRenderElement::Solid(make_solid_element(
-                Rectangle::new(Point::from((mx + 16, my + 70)), Size::from((mw - 32, 1))),
+                Rectangle::new(Point::from((mx + 16, my + 72)), Size::from((mw - 32, 1))),
                 COLOR_BORDER,
             )));
 
-            let row_h = 44;
+            let row_h = 46;
             let start_row_y = my + 80;
-            for idx in 0..spot.items.len().min(3) {
+            for idx in 0..spot.items.len().min(5) {
                 let i = i32::try_from(idx).unwrap_or(0);
                 let row_y = start_row_y + i * (row_h + 4);
                 let is_sel = idx == spot.selected_in_window;
@@ -3067,8 +3081,8 @@ pub fn generate_shell_composite_elements(
                 if is_sel {
                     out.push(CompositorRenderElement::Solid(make_solid_element(
                         Rectangle::new(
-                            Point::from((mx + 16, row_y + 6)),
-                            Size::from((3, row_h - 12)),
+                            Point::from((mx + 18, row_y + 8)),
+                            Size::from((3, row_h - 16)),
                         ),
                         COLOR_ACCENT,
                     )));
@@ -3081,8 +3095,8 @@ pub fn generate_shell_composite_elements(
                         shape_cache.icons.icon_element_by_name(
                             renderer,
                             icon_name,
-                            24,
-                            Point::from((mx + 28, row_y + 10)),
+                            28,
+                            Point::from((mx + 28, row_y + 9)),
                         )
                     });
                 if let Some(el) = icon_el {
@@ -3099,8 +3113,8 @@ pub fn generate_shell_composite_elements(
                         &mut out,
                         shape_cache,
                         renderer,
-                        Rectangle::new(Point::from((mx + 28, row_y + 10)), Size::from((24, 24))),
-                        6,
+                        Rectangle::new(Point::from((mx + 28, row_y + 9)), Size::from((28, 28))),
+                        7,
                         icon_rgba,
                         None,
                     );
@@ -3108,14 +3122,14 @@ pub fn generate_shell_composite_elements(
                 if !has_text {
                     out.push(CompositorRenderElement::Solid(make_solid_element(
                         Rectangle::new(
-                            Point::from((mx + 62, row_y + 12)),
+                            Point::from((mx + 66, row_y + 12)),
                             Size::from((120 + i * 20, 8)),
                         ),
                         COLOR_TEXT,
                     )));
                 }
                 let row_rgba = if is_sel {
-                    RGBA_SURFACE_OVERLAY
+                    RGBA_ACCENT_MUTED
                 } else {
                     RGBA_SURFACE
                 };
@@ -3124,9 +3138,9 @@ pub fn generate_shell_composite_elements(
                     shape_cache,
                     renderer,
                     Rectangle::new(Point::from((mx + 16, row_y)), Size::from((mw - 32, row_h))),
-                    8,
+                    12,
                     row_rgba,
-                    None,
+                    if is_sel { Some(RGBA_ACCENT) } else { None },
                 );
             }
 
@@ -3136,11 +3150,11 @@ pub fn generate_shell_composite_elements(
                 shape_cache,
                 renderer,
                 modal_rect,
-                12,
+                20,
                 RGBA_SURFACE_ELEVATED,
                 Some(RGBA_BORDER_HIGHLIGHT),
             );
-            push_soft_shadow(&mut out, shape_cache, renderer, modal_rect, 12, 16, 105);
+            push_soft_shadow(&mut out, shape_cache, renderer, modal_rect, 20, 28, 115);
         }
         ShellOverlayView::QuickSettings(qs) => {
             let (px, base_py, pw, ph) = quick_settings_rect(width, height);
