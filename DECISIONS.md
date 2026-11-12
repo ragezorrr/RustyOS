@@ -61,6 +61,24 @@
                           capability discovery    
                           (`--drm-probe` /        
                           `--drm`) (ADR-0003)     
+
+  D-012                   Фаза 5 (RUSTYOS-008):   accepted
+                          чистый `std`-only крейт 
+                          `crates/rusty-animation`
+                          (monotonic clock,       
+                          easing, retarget,       
+                          reduced-motion) +       
+                          интеграция в композитор 
+                          (ADR-0004)              
+
+  D-013                   Фаза 6                  accepted
+                          (RUSTYOS-009/010):      
+                          версионированный IPC    
+                          `crates/rusty-ipc` (UDS 
+                          `0600`, `v1`) +         
+                          независимый процесс     
+                          `apps/rusty-shell`      
+                          (ADR-0005)              
   -----------------------------------------------------------------------
 
 ## Открытые решения

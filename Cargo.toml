@@ -1,7 +1,10 @@
 [workspace]
 resolver = "2"
 members = [
+    "apps/rusty-shell",
+    "crates/rusty-animation",
     "crates/rusty-compositor",
+    "crates/rusty-ipc",
     "crates/rusty-wm",
 ]
 
@@ -13,6 +16,8 @@ license = "MIT OR Apache-2.0"
 authors = ["RustyOS Contributors"]
 
 [workspace.dependencies]
+rusty-animation = { path = "crates/rusty-animation" }
+rusty-ipc = { path = "crates/rusty-ipc" }
 rusty-wm = { path = "crates/rusty-wm" }
 smithay = { version = "0.7.0", default-features = false, features = [
     "backend_drm",

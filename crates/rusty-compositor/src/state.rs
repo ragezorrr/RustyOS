@@ -4,7 +4,9 @@ use std::os::unix::io::OwnedFd;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use rusty_wm::{OutputId, Rect, WindowId, WindowManager, WmAction};
+use rusty_animation::{AnimationEngine, LogicalRect};
+use rusty_ipc::{CompositorEvent, DesktopStateSnapshot, ShellRequest, WindowSummary};
+use rusty_wm::{LayoutMode, OutputId, Rect, WindowId, WindowManager, WmAction, WorkspaceId};
 use smithay::{
     backend::renderer::utils::on_commit_buffer_handler,
     delegate_compositor, delegate_data_device, delegate_output, delegate_seat, delegate_shm,
@@ -114,6 +116,14 @@ pub struct RustyCompositorState {
     pub pointer_location: Point<f64, Logical>,
     /// Low-overhead frame timing and pacing collector (`RUSTYOS-003`).
     pub frame_timing: FrameTimingCollector,
+    /// Refresh-rate independent animation engine (`RUSTYOS-008`, ADR-0004).
+    pub animations: AnimationEngine,
+    /// Whether the workspace overview mode is active (`RUSTYOS-009`/`010`).
+    pub overview_active: bool,
+    /// Whether the session lock screen is active (`RUSTYOS-009`/`010`).
+    pub screen_locked: bool,
+    /// Count of notifications received via shell IPC (`RUSTYOS-009`/`010`).
+    pub notification_count: u32,
 }
 
 impl RustyCompositorState {
@@ -195,6 +205,10 @@ impl RustyCompositorState {
             pointer,
             pointer_location: (0.0, 0.0).into(),
             frame_timing: FrameTimingCollector::new(DEFAULT_SAMPLE_CAPACITY, 60_000),
+            animations: AnimationEngine::default(),
+            overview_active: false,
+            screen_locked: false,
+            notification_count: 0,
         })
     }
 
@@ -259,6 +273,7 @@ impl RustyCompositorState {
         for id in dead_ids {
             self.window_bindings.retain(|(wid, _)| *wid != id);
             self.wm.unmap_window(id);
+            self.animations.remove_window(id.0);
             info!(window_id = id.0, "Pruned closed Wayland window from WM");
         }
         let serial = smithay::utils::SERIAL_COUNTER.next_serial();
@@ -269,6 +284,7 @@ impl RustyCompositorState {
     /// states, and keyboard focus.
     pub fn apply_wm_action(&mut self, action: WmAction, serial: Serial) {
         info!(?action, "Applying window manager action");
+        let prev_ws = self.wm.active_workspace_id();
         if let Some(close_id) = self.wm.apply_action(action) {
             if let Some(win) = self.smithay_window_for_id(close_id)
                 && let Some(toplevel) = win.toplevel()
@@ -282,12 +298,25 @@ impl RustyCompositorState {
             return;
         }
 
+        if let WmAction::SwitchWorkspace(target_ws) = action
+            && prev_ws != target_ws
+        {
+            let output_width = self.output.current_mode().map_or(1280, |m| m.size.w);
+            self.animations.trigger_workspace_slide(
+                prev_ws.0,
+                target_ws.0,
+                output_width,
+                self.elapsed(),
+            );
+        }
+
         self.sync_space_with_wm(serial);
     }
 
     /// Synchronizes Smithay's [`Space<Window>`], `xdg_toplevel` pending configure geometry/states,
     /// and Wayland keyboard focus with the deterministic state in [`WindowManager`].
     pub fn sync_space_with_wm(&mut self, serial: Serial) {
+        let now = self.elapsed();
         let visible: Vec<(WindowId, Rect, bool)> = self
             .wm
             .visible_windows()
@@ -310,6 +339,16 @@ impl RustyCompositorState {
         // 2. Map/update visible windows in bottom-to-top z-order and send xdg_toplevel configures.
         for (win_id, rect, maximized) in visible {
             let is_focused = focused_id == Some(win_id);
+            self.animations.set_window_target(
+                win_id.0,
+                LogicalRect::new(rect.x, rect.y, rect.width, rect.height),
+                now,
+            );
+            let origin = self
+                .animations
+                .animated_window_origin(win_id.0)
+                .unwrap_or((rect.x, rect.y));
+
             if let Some(window) = self.smithay_window_for_id(win_id) {
                 if let Some(toplevel) = window.toplevel() {
                     toplevel.with_pending_state(|state| {
@@ -327,7 +366,7 @@ impl RustyCompositorState {
                     });
                     toplevel.send_pending_configure();
                 }
-                self.space.map_element(window, (rect.x, rect.y), is_focused);
+                self.space.map_element(window, origin, is_focused);
             }
         }
 
@@ -339,6 +378,32 @@ impl RustyCompositorState {
         keyboard.set_focus(self, focus_surface, serial);
     }
 
+    /// Advances active window and workspace transitions to the current monotonic timestamp
+    /// and updates window positions in [`Space<Window>`].
+    pub fn tick_animations(&mut self) {
+        if !self.animations.has_active_animations() {
+            return;
+        }
+        let now = self.elapsed();
+        let _ = self.animations.tick(now);
+
+        let focused_id = self.wm.focused_window();
+        let visible_ids: Vec<WindowId> = self
+            .wm
+            .visible_windows()
+            .into_iter()
+            .map(|w| w.id)
+            .collect();
+        for win_id in visible_ids {
+            if let Some(origin) = self.animations.animated_window_origin(win_id.0)
+                && let Some(window) = self.smithay_window_for_id(win_id)
+            {
+                let is_focused = focused_id == Some(win_id);
+                self.space.map_element(window, origin, is_focused);
+            }
+        }
+    }
+
     /// Inserts a newly accepted Unix client stream into the Wayland display.
     pub fn insert_client_stream(&mut self, stream: std::os::unix::net::UnixStream) {
         if let Err(err) = self
@@ -347,6 +412,108 @@ impl RustyCompositorState {
         {
             warn!(error = %err, "Failed to insert Wayland client into display");
         }
+    }
+
+    /// Builds a [`DesktopStateSnapshot`] reflecting the current WM, animation, and frame-timing state.
+    #[must_use]
+    pub fn build_ipc_snapshot(&self) -> DesktopStateSnapshot {
+        let active_ws = self.wm.active_workspace_id();
+        let layout_str = match self.wm.active_layout_mode() {
+            LayoutMode::Floating => "floating",
+            LayoutMode::MasterStack => "master-stack",
+        };
+        let focused_id = self.wm.focused_window();
+        let windows = self
+            .wm
+            .visible_windows()
+            .into_iter()
+            .map(|w| WindowSummary {
+                id: w.id.0,
+                workspace: w.workspace.0,
+                focused: focused_id == Some(w.id),
+                maximized: w.maximized,
+            })
+            .collect();
+
+        let timing = self.frame_timing.summary();
+        DesktopStateSnapshot {
+            active_workspace: active_ws.0,
+            layout_mode: layout_str.to_owned(),
+            reduced_motion: self.animations.reduced_motion(),
+            overview_active: self.overview_active,
+            screen_locked: self.screen_locked,
+            notification_count: self.notification_count,
+            frame_interval_p50_us: timing.interval_p50_us,
+            input_latency_p95_us: timing.input_p95_us,
+            windows,
+        }
+    }
+
+    /// Processes a single [`ShellRequest`] over the versioned local IPC bus and returns a [`CompositorEvent`].
+    pub fn handle_ipc_request(&mut self, request: ShellRequest) -> CompositorEvent {
+        let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+        match request {
+            ShellRequest::Handshake {
+                protocol_version,
+                client_name,
+            } => {
+                info!(
+                    protocol_version,
+                    client = %client_name,
+                    "Accepted IPC handshake from desktop shell component"
+                );
+                return CompositorEvent::HandshakeAck {
+                    protocol_version,
+                    server_version: env!("CARGO_PKG_VERSION").to_owned(),
+                };
+            }
+            ShellRequest::GetStateSnapshot => {}
+            ShellRequest::SwitchWorkspace { workspace } => {
+                let ws = WorkspaceId::new_clamped(workspace);
+                self.apply_wm_action(WmAction::SwitchWorkspace(ws), serial);
+            }
+            ShellRequest::FocusWindow { window_id } => {
+                if self.wm.focus_and_raise(WindowId(window_id)) {
+                    self.sync_space_with_wm(serial);
+                }
+            }
+            ShellRequest::ToggleLayoutMode => {
+                self.apply_wm_action(WmAction::ToggleLayoutMode, serial);
+            }
+            ShellRequest::ToggleOverview => {
+                self.overview_active = !self.overview_active;
+                info!(
+                    overview_active = self.overview_active,
+                    "Toggled workspace overview via IPC"
+                );
+            }
+            ShellRequest::SetReducedMotion { enabled } => {
+                self.animations.set_reduced_motion(enabled);
+                info!(reduced_motion = enabled, "Updated reduced-motion via IPC");
+            }
+            ShellRequest::SetLockScreen { locked } => {
+                self.screen_locked = locked;
+                info!(
+                    screen_locked = locked,
+                    "Updated session lock screen state via IPC"
+                );
+            }
+            ShellRequest::Notify {
+                urgency,
+                title,
+                body,
+            } => {
+                self.notification_count = self.notification_count.saturating_add(1);
+                info!(
+                    urgency = urgency.as_str(),
+                    title = %title,
+                    body = %body,
+                    count = self.notification_count,
+                    "Received desktop notification via IPC"
+                );
+            }
+        }
+        CompositorEvent::StateSnapshot(self.build_ipc_snapshot())
     }
 }
 

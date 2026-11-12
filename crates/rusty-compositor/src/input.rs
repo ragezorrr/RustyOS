@@ -21,6 +21,7 @@ use crate::state::RustyCompositorState;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum KeyIntercept {
     ExitCompositor,
+    ToggleReducedMotion,
     Wm(WmAction),
 }
 
@@ -91,6 +92,13 @@ impl RustyCompositorState {
             Some(KeyIntercept::ExitCompositor) => {
                 info!("Exit shortcut pressed; shutting down nested compositor");
                 self.request_shutdown();
+            }
+            Some(KeyIntercept::ToggleReducedMotion) => {
+                let reduced = self.animations.toggle_reduced_motion();
+                info!(
+                    reduced_motion = reduced,
+                    "Toggled reduced-motion preference"
+                );
             }
             Some(KeyIntercept::Wm(action)) => {
                 self.apply_wm_action(action, serial);
@@ -258,6 +266,7 @@ const fn match_shortcut(modifiers: ModifiersState, sym: Keysym) -> Option<KeyInt
         ))),
         Keysym::c | Keysym::C => Some(KeyIntercept::Wm(WmAction::SnapFocused(SnapTarget::Center))),
         Keysym::o | Keysym::O => Some(KeyIntercept::Wm(WmAction::MoveFocusedToNextOutput)),
+        Keysym::r | Keysym::R => Some(KeyIntercept::ToggleReducedMotion),
         _ => None,
     }
 }

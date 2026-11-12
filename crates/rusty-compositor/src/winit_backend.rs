@@ -4,6 +4,7 @@ use std::fs;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
+use rusty_ipc::{IpcServer, default_ipc_socket_path};
 use smithay::{
     backend::{
         renderer::{
@@ -39,6 +40,7 @@ const BACKGROUND_COLOR: Color32F = Color32F::new(0.11, 0.13, 0.17, 1.0);
 ///
 /// Returns [`CompositorError`] if the event loop, Wayland display, listening socket,
 /// or Winit EGL/GLES backend cannot be initialized.
+#[allow(clippy::too_many_lines)]
 pub fn run_nested_winit(config: &CompositorConfig) -> Result<BootstrapReport, CompositorError> {
     let mut event_loop: EventLoop<'static, RustyCompositorState> =
         EventLoop::try_new().map_err(|err| CompositorError::EventLoop(err.to_string()))?;
@@ -62,6 +64,7 @@ pub fn run_nested_winit(config: &CompositorConfig) -> Result<BootstrapReport, Co
         event_loop.get_signal(),
         initial_size,
     )?;
+    state.animations.set_reduced_motion(config.reduced_motion);
     let mut damage_tracker = OutputDamageTracker::from_output(&state.output);
     let loop_handle = event_loop.handle();
 
@@ -130,20 +133,24 @@ pub fn run_nested_winit(config: &CompositorConfig) -> Result<BootstrapReport, Co
         )
         .map_err(|err| CompositorError::EventLoop(err.to_string()))?;
 
+    let ipc_socket_path = default_ipc_socket_path(&socket_name);
+    let mut ipc_server = IpcServer::bind(ipc_socket_path.clone()).ok();
+
     info!(
         wayland_display = %socket_name,
+        ipc_socket = %ipc_socket_path.display(),
         width = initial_size.w,
         height = initial_size.h,
         "RustyOS nested Winit compositor listening"
     );
 
     for cmd in &config.spawn_clients {
-        spawn_test_client(cmd, &socket_name);
+        spawn_test_client(cmd, &socket_name, &ipc_socket_path);
     }
 
     event_loop
         .run(Some(Duration::from_millis(4)), &mut state, |app_state| {
-            dispatch_and_refresh_clients(&mut display, app_state);
+            dispatch_and_refresh_clients(&mut display, ipc_server.as_mut(), app_state);
         })
         .map_err(|err| CompositorError::EventLoop(err.to_string()))?;
 
@@ -169,9 +176,13 @@ fn inject_bench_pointer_step(app_state: &mut RustyCompositorState, rendered_fram
 
 fn dispatch_and_refresh_clients(
     display: &mut Display<RustyCompositorState>,
+    ipc_server: Option<&mut IpcServer>,
     app_state: &mut RustyCompositorState,
 ) {
     let dispatch_start = Instant::now();
+    if let Some(ipc) = ipc_server {
+        ipc.poll_requests(|req| app_state.handle_ipc_request(req));
+    }
     if let Err(err) = display.dispatch_clients(app_state) {
         error!(error = %err, "Failed to dispatch Wayland client events");
     }
@@ -255,6 +266,7 @@ fn render_winit_frame(
     force_full_damage: bool,
 ) -> Result<(), String> {
     let render_start = Instant::now();
+    state.tick_animations();
     let size = backend.window_size();
     let full_damage = Rectangle::from_size(size);
     let total_output_pixels =
@@ -347,7 +359,7 @@ fn render_winit_frame(
     Ok(())
 }
 
-fn spawn_test_client(command: &str, socket_name: &str) {
+fn spawn_test_client(command: &str, socket_name: &str, ipc_socket_path: &std::path::Path) {
     let mut parts = command.split_whitespace();
     let Some(program) = parts.next() else {
         return;
@@ -357,6 +369,7 @@ fn spawn_test_client(command: &str, socket_name: &str) {
     match Command::new(program)
         .args(&args)
         .env("WAYLAND_DISPLAY", socket_name)
+        .env("RUSTYOS_IPC_SOCKET", ipc_socket_path)
         .spawn()
     {
         Ok(child) => {

@@ -1333,13 +1333,31 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
+name = "rusty-animation"
+version = "0.1.0"
+
+[[package]]
 name = "rusty-compositor"
 version = "0.1.0"
 dependencies = [
+ "rusty-animation",
+ "rusty-ipc",
  "rusty-wm",
  "smithay",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "rusty-ipc"
+version = "0.1.0"
+
+[[package]]
+name = "rusty-shell"
+version = "0.1.0"
+dependencies = [
+ "rusty-animation",
+ "rusty-ipc",
 ]
 
 [[package]]

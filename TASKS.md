@@ -90,6 +90,36 @@ hardware/software context и низкие накладные расходы.
 - **Acceptance criteria:** Нулевые аллокации в горячем цикле сбора метрик, проходят unit-тесты и реальный A/B-бенчмарк на оборудовании Intel Raptor Lake-U (`i915`), зафиксировано снижение площади повреждений и `p95` input-to-present latency в `PERFORMANCE.md`.
 - **Risks:** Артефакты частичного обновления буфера при неверном `buffer_age` (минимизируется запросом `backend.buffer_age().unwrap_or(0)` после `bind()`).
 
+## RUSTYOS-008 --- Refresh-Rate Independent Animation Engine (`crates/rusty-animation`)
+
+**Статус:** done **Фаза:** 5
+
+- **Цель:** Плавные, прерываемые переходы окон и рабочих столов на базе монотонного времени (`Duration`), независимые от частоты обновления монитора (`60/120/144/240 Hz`), с поддержкой `reduced-motion`.
+- **Scope:** Создание `std`-only крейта `crates/rusty-animation` (`MotionTokens`, `Easing`, `AnimatedValue`, `AnimatedRect`, `AnimationEngine`); интеграция в `crates/rusty-compositor` (`state.rs`, `input.rs`, `winit_backend.rs`, флаг `--reduced-motion`, хоткей `Alt+R`); unit-тесты кривых easing, независимости от герцовки (`60/120/144/240 Hz`), пропусков кадров, `retarget`/`reverse` и `reduced_motion`.
+- **Dependencies:** `RUSTYOS-004`, `RUSTYOS-005`, `RUSTYOS-007`.
+- **Acceptance criteria:** Анимации не привязаны к фиксированным 60 FPS, корректно прерываются/разворачиваются без скачков, режим `reduced_motion` мгновенно фиксирует целевую геометрию, все тесты и линтеры проходят.
+- **Risks:** Лишние `xdg_toplevel::configure` при анимации (минимизируется отправкой клиенту сразу целевого размера `rect.width x rect.height` и интерполяцией позиции в `Space<Window>`).
+
+## RUSTYOS-009 --- Versioned Local IPC Protocol & Server (`crates/rusty-ipc`)
+
+**Статус:** done **Фаза:** 6
+
+- **Цель:** Безопасный версионированный локальный IPC между `rusty-compositor` и `rusty-shell` по Unix Domain Socket (`0600`).
+- **Scope:** Крейт `crates/rusty-ipc` (`IPC_PROTOCOL_VERSION = 1`, `MAX_IPC_MESSAGE_BYTES = 8192`, `ShellRequest`, `CompositorEvent`, `DesktopStateSnapshot`, `IpcServer`, `IpcClient`); интеграция неблокирующего опроса `IpcServer` в `rusty-compositor` (`state.rs`, `winit_backend.rs`).
+- **Dependencies:** `RUSTYOS-005`, `RUSTYOS-008`.
+- **Acceptance criteria:** Сокет создаётся с правами `0600`, отклоняются неверные версии и сообщения `> 8 KiB`, отключение/падение IPC-клиента не роняет и не блокирует композитор.
+- **Risks:** Блокировка event loop на медленном клиенте (исключена переводом `UnixListener` и `UnixStream` в `set_nonblocking(true)`).
+
+## RUSTYOS-010 --- Independent Desktop Shell (`apps/rusty-shell`)
+
+**Статус:** done **Фаза:** 6
+
+- **Цель:** Реализация самостоятельного процесса оболочки рабочего стола с независимым lifecycle.
+- **Scope:** Приложение `apps/rusty-shell` (`DesignTokens`, `TopBarState`, `DockItem`, `AppLauncher`, `NotificationCenter`, `QuickSettingsState`, `WallpaperConfig`, `DesktopShell`); синхронизация состояния с `rusty-compositor` по `rusty-ipc`, проверка сценария перезапуска `rusty-shell` без перезапуска композитора.
+- **Dependencies:** `RUSTYOS-008`, `RUSTYOS-009`.
+- **Acceptance criteria:** `rusty-shell` работает в отдельном процессе, переживает собственный перезапуск и восстанавливает состояние (`active_workspace`, `overview_active`, окна в Dock) из `StateSnapshot` композитора.
+- **Risks:** Потеря синхронизации после перезапуска `rusty-shell` (решается немедленным запросом `GetStateSnapshot` при новом `Handshake`).
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

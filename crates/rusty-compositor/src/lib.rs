@@ -58,6 +58,8 @@ pub struct CompositorConfig {
     pub bench_input: bool,
     /// Force full-output damage submission instead of tracked damage rectangles (`RUSTYOS-007`).
     pub force_full_damage: bool,
+    /// Enable accessibility reduced-motion mode (`RUSTYOS-008`).
+    pub reduced_motion: bool,
 }
 
 impl CompositorConfig {
@@ -71,6 +73,7 @@ impl CompositorConfig {
             metrics_out: None,
             bench_input: false,
             force_full_damage: false,
+            reduced_motion: false,
         }
     }
 }
@@ -212,6 +215,7 @@ where
             }
             "--bench-input" => config.bench_input = true,
             "--force-full-damage" => config.force_full_damage = true,
+            "--reduced-motion" => config.reduced_motion = true,
             other => return Err(CompositorError::InvalidArgument(other.to_owned())),
         }
     }
@@ -304,6 +308,7 @@ mod tests {
             "/tmp/metrics.json",
             "--bench-input",
             "--force-full-damage",
+            "--reduced-motion",
         ]);
         assert_eq!(
             nested,
@@ -314,6 +319,7 @@ mod tests {
                 metrics_out: Some("/tmp/metrics.json".to_owned()),
                 bench_input: true,
                 force_full_damage: true,
+                reduced_motion: true,
             })
         );
 
