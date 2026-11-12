@@ -1,113 +1,117 @@
-# RustyOS --- Gemini / Antigravity Engineering Kit
+# RustyOS
 
-Полный стартовый комплект документации для разработки RustyOS с **Gemini
-в Google Antigravity**.
+**RustyOS** --- самостоятельная Linux Desktop Environment на Rust с
+собственным Wayland-композитором, оконным менеджером, animation engine,
+рендерером и оболочкой рабочего стола (визуальное направление вдохновлено
+macOS / Liquid Glass при оригинальной реализации).
 
-RustyOS --- самостоятельная Linux Desktop Environment на Rust:
-собственный Wayland compositor, window management, renderer, animation
-engine и desktop shell. Визуальное направление вдохновлено macOS, но
-интерфейс и реализация должны быть оригинальными.
+> **Текущий статус (`RUSTYOS-001` -- `RUSTYOS-045`):** ядро композитора,
+> WM, animation engine, shell-оверлеи, multi-monitor DRM/KMS, VRR,
+> Direct Scanout (`DMA-BUF`), дробное HiDPI-масштабирование, low-latency
+> input/presentation, `cursor-shape`, `xdg-activation`, `idle` и
+> `ext_session_lock` реализованы и покрыты автотестами.
+> Проверка live bare-metal `--drm` на реальных GPU AMD/NVIDIA и финальная
+> упаковка дистрибутива (Фазы 7/9/10) находятся в работе.
 
-> Архив содержит план, правила агента, skills, workflows и шаблоны. Это
-> не готовая ОС и не реализованный compositor.
+## Структура Cargo Workspace (`MSRV 1.99`, `edition = "2024"`)
 
-## Сборка и проверка (Фаза 0 --- Project Foundation)
+- `crates/rusty-compositor` --- Wayland-композитор на базе Smithay `0.7`
+  (`--winit` nested и `--drm` native DRM/KMS/GBM/EGL/libinput, `XWayland`,
+  multi-monitor/VRR/HiDPI, input/shortcuts, frame timing, конфиг и рендер-оверлеи).
+- `crates/rusty-wm` --- детерминированная модель окон, рабочих столов
+  (`1..=9`), фокуса, стекинга и раскладок (`Floating`, `Snap`, `MasterStack`).
+- `crates/rusty-animation` --- refresh-independent движок анимаций
+  (`60/120/144/240` Hz, easing, отмена/реверс, `reduced_motion`).
+- `crates/rusty-ipc` --- версионируемый Unix socket IPC-протокол между
+  композитором и внешним shell.
+- `crates/rusty-services` --- неблокирующие системные адаптеры (`BlueZ`,
+  `NetworkManager`, аудио/`wpctl`, питание/`UPower`, подсветка `sysfs`).
+- `apps/rusty-shell` --- внешний процесс оболочки (`wlr-layer-shell` + IPC).
+- `bin/rustyos-session`, `packaging/`, `scripts/install.sh` --- заготовка
+  системной сессии и локальной установки.
 
-Текущий Cargo workspace (`MSRV 1.99`, `edition = "2024"`) содержит:
-- `crates/rusty-wm` — детерминированная модель управления окнами, рабочими столами (`1..=9`), фокусом, стекингом и раскладками (`Floating`, `Snap`, `MasterStack` tiling).
-- `crates/rusty-compositor` — Wayland композитор (Smithay + Winit nested prototype, frame timing instrumentation, интеграция с `rusty-wm`).
+## Сборка, проверки и запуск
 
 ```bash
-# Проверка форматирования
+# Форматирование и статический анализ
 cargo fmt --all -- --check
-
-# Проверка компиляции workspace
 cargo check --workspace
-
-# Статический анализ Clippy
 cargo clippy --workspace --all-targets -- -D warnings
 
-# Запуск тестов
+# Тесты workspace (флаг --skip полезен в headless/sandbox без BlueZ D-Bus)
 cargo test --workspace
+cargo test --workspace -- --skip networkmanager_and_bluetooth_formatters_handle_all_states
 
-# Запуск композитора в режиме bootstrap-проверки
+# Bootstrap-проверка без окна
 cargo run -p rusty-compositor -- --check
 
-# Запуск nested Wayland композитора (Smithay + Winit, Фаза 1)
+# Nested Wayland-композитор (Smithay + Winit)
 cargo run -p rusty-compositor -- --winit
 
-# Автоматизированный smoke-тест с запуском Wayland-клиента на 30 кадров
-cargo run -p rusty-compositor -- --winit --max-frames 30 --spawn es2gears_wayland
-
-# Замер frame pacing и экспорт JSON-отчёта (RUSTYOS-003)
+# Smoke-тест с клиентом и экспортом метрик frame pacing
 cargo run -p rusty-compositor -- --winit --max-frames 120 --spawn es2gears_wayland --metrics-out /tmp/rustyos-frame-metrics.json
 
-# Мультиоконный тест Фазы 2 (RUSTYOS-004 / RUSTYOS-005)
-cargo run -p rusty-compositor -- --winit --max-frames 60 --spawn es2gears_wayland --spawn es2gears_wayland
-
-# Аппаратная проверка Native DRM/KMS, GBM, EGL и DMA-BUF (Фаза 3, RUSTYOS-006)
+# Диагностика возможностей DRM/KMS, GBM, EGL и DMA-BUF (без захвата DRM Master)
 cargo run -p rusty-compositor -- --drm-probe --metrics-out /tmp/rustyos-drm-report.json
+
+# Нативный запуск на реальном TTY (DRM/KMS + libinput + libseat)
+cargo run -p rusty-compositor -- --drm
 ```
 
-### Клавиатурные сочетания в композиторе (Фаза 2)
-- `Alt + Tab` / `Alt + J` / `Alt + K` — переключение фокуса между окнами активного рабочего стола
-- `Alt + 1..9` — переключение активного рабочего стола (`Workspace 1..9`)
-- `Alt + Shift + 1..9` — перенос активного окна на рабочий стол `1..9`
-- `Alt + L` / `Alt + Space` — переключение режима раскладки (`Floating` <-> `Master-Stack Tiling`)
-- `Alt + M` — развернуть / восстановить активное окно (`Maximize`)
-- `Alt + Left` / `Alt + Right` / `Alt + C` — быстрая привязка окна (`Left Half`, `Right Half`, `Center`)
-- `Alt + O` — перенос активного окна на следующий монитор (`Output`)
-- `Alt + W` / `Alt + Q` — закрыть активное окно (`xdg_toplevel::close`)
-- `Escape` / `Ctrl + Alt + Backspace` — выход из nested-композитора
+### Основные клавиши и управление
 
-Описание проверенного dev-окружения и доступных системных библиотек зафиксировано в `docs/DEVELOPMENT_ENVIRONMENT.md`.
+- `Alt + Space` / `Super + Space` --- Spotlight Application Launcher
+- `Super + Tab` / `Alt + E` --- Workspace Overview (Mission Control)
+- `Alt + Tab` / `Alt + J` / `Alt + K` --- переключение фокуса окон
+- `Alt + 1..9` / `Alt + Shift + 1..9` --- переключение рабочего стола / перенос окна (`1..9`)
+- `Alt + L` --- переключение раскладки (`Floating` <-> `MasterStack`)
+- `Alt + M` / `Alt + F` --- Maximize / Fullscreen (включая Direct Scanout и VRR)
+- `Alt + Left` / `Alt + Right` / `Alt + C` --- быстрая привязка (`LeftHalf`, `RightHalf`, `Center`)
+- `Alt + O` --- перенос активного окна на следующий монитор
+- `Alt + H` --- свернуть активное окно в Dock
+- `Alt + W` / `Alt + Q` --- закрыть активное окно
+- `Alt + S` / `Alt + R` --- Quick Settings / переключение `reduced_motion`
+- `Alt + N` / `Alt + Shift + N` --- тестовое уведомление / очистка уведомлений
+- `Super + L` / `Ctrl + Alt + L` --- встроенный Lock Screen (также поддерживается `ext_session_lock_v1`)
+- `Print` --- скриншот экрана (c `Shift`/`Alt` для области/буфера)
+- `Ctrl + Alt + F1..F12` --- переключение TTY VT
+- `Escape` / `Ctrl + Alt + Backspace` --- выход из композитора
 
-## Быстрый старт
+### Пользовательский конфиг (`~/.config/rustyos/config.toml`)
 
-1.  Распакуй архив в корень нового Git-репозитория `RustyOS`.
-2.  Открой корневую папку репозитория в Antigravity.
-3.  Проверь, что среда обнаруживает `.agents/rules/`, `.agents/skills/`
-    и `.agents/workflows/`.
-4.  Прочитай `AGENTS.md` и `docs/GETTING_STARTED.md`.
-5.  Начинай с `RUSTYOS-001`. Сначала только read-only аудит, затем план
-    и согласование.
+Поддерживаются секции `[keyboard]` (`layout`, `variant`, `options`,
+`repeat_delay`, `repeat_rate`), `[display]` (`vrr_mode`,
+`prefer_max_refresh`, `scale`, `[display.scales]`), `[ui]`
+(`reduced_motion`, `wallpaper`, `cursor_theme`) и `[autostart]` (`commands`).
+
+Подробности среды сборки зафиксированы в [docs/DEVELOPMENT_ENVIRONMENT.md](docs/DEVELOPMENT_ENVIRONMENT.md).
 
 ## Главные документы
 
-  Файл                   Назначение
-  ---------------------- --------------------------------------
-  `AGENTS.md`            Компактные постоянные правила агента
-  `ROADMAP.md`           Фазы разработки и критерии выхода
-  `ARCHITECTURE.md`      Архитектура и границы компонентов
-  `PERFORMANCE.md`       Плавность, frame pacing и latency
-  `HARDWARE.md`          GPU, драйверы и совместимость
-  `DESIGN.md`            UX и дизайн-система
-  `SECURITY.md`          Безопасность
-  `DECISIONS.md`         Принятые решения и открытые вопросы
-  `TASKS.md`             Ближайшие задачи
-  `docs/`                Запуск, hardware matrix, ADR
-  `.agents/rules/`       Правила Antigravity
-  `.agents/skills/`      14 специализированных навыков
-  `.agents/workflows/`   Повторяемые workflows `/...`
+  Файл                         Назначение
+  ---------------------------- ------------------------------------------
+  `AGENTS.md`                  Постоянные правила разработки и approval gates
+  `ROADMAP.md`                 Фазы разработки (0..10) и критерии выхода
+  `ARCHITECTURE.md`            Актуальная архитектура и структура workspace
+  `PERFORMANCE.md`             Цели по latency, frame pacing и benchmark-протоколы
+  `HARDWARE.md`                Требования совместимости AMD, Intel и NVIDIA
+  `DESIGN.md`                  Визуальный язык и дизайн-система macOS / Liquid Glass
+  `SECURITY.md`                Правила безопасности, IPC и системных изменений
+  `DECISIONS.md`               Реестр принятых решений (`D-001` .. `D-022`)
+  `TASKS.md`                   Журнал выполненных и текущих задач (`RUSTYOS-001` .. `RUSTYOS-045`)
+  `FILE_INVENTORY.md`          Инвентарь файлов репозитория
+  `docs/`                      ADR (`0001`..`0014`), hardware matrix и гайды
+  `.agents/rules/`             Правила Antigravity
+  `.agents/skills/`            14 специализированных навыков
+  `.agents/workflows/`         Повторяемые workflows
 
 ## Принципы проекта
 
-- Пользователь --- главный архитектор RustyOS.
-- Агент автономно выполняет задачи в пределах утверждённой архитектуры.
-- Существенные архитектурные, технологические, API и системные изменения
-  --- только после явного согласования.
-- Экономия токенов обязательна, но не за счёт качества, тестирования,
-  безопасности и измерений.
-- Поддержка GPU/VRR/zero-copy заявляется только после реальных проверок.
-- KDE, GNOME и Hyprland не используются как основа RustyOS; изучать их
-  реализацию и UX можно.
-
-## Antigravity
-
-Комплект использует корневой `AGENTS.md` и workspace customization в
-`.agents/`: - `.agents/rules/*.md` -
-`.agents/skills/<skill-name>/SKILL.md` - `.agents/workflows/*.md`
-
-Не дублируй целиком `AGENTS.md` в `GEMINI.md`: повторная загрузка одних
-и тех же правил расходует контекст. После распаковки проверь обнаружение
-файлов в используемой версии Antigravity.
+- Пользователь --- главный архитектор RustyOS; новые фичи `RUSTYOS-NNN` и
+  архитектурные изменения внедряются только после предложения и явного
+  `APPROVE:`.
+- Экономия контекста обязательна, но не за счёт качества, безопасности,
+  тестов и замеров производительности.
+- Поддержка GPU/VRR/zero-copy заявляется только после реальных проверок и
+  фиксации в [docs/HARDWARE_MATRIX.md](docs/HARDWARE_MATRIX.md).
+- KDE, GNOME и Hyprland не используются как основа RustyOS.

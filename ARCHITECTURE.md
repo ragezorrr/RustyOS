@@ -1,135 +1,134 @@
 # RustyOS --- Architecture
 
-Статус: целевая архитектура. Не является разрешением реализовать все
-компоненты сразу.
+Статус: **актуально для реализации до `RUSTYOS-045`** (развитие новых
+границ и протоколов по-прежнему требует ADR и `APPROVE:` по `AGENTS.md`).
 
 ## 1. Архитектурная модель
 
-RustyOS состоит из собственного Wayland compositor и независимых
-пользовательских компонентов. Compositor отвечает за display, input
-routing, поверхности, управление окнами, рендеринг и presentation. Shell
-отвечает за пользовательские интерфейсы и системные affordances.
+RustyOS состоит из собственного Wayland-композитора (`rusty-compositor`)
+на базе Smithay `0.7` (`calloop`, EGL/GLES, DRM/KMS/GBM/libinput/udev),
+модулей управления окнами/анимациями/сервисами и внешнего процесса
+оболочки (`rusty-shell`), взаимодействующего через версионируемый Unix
+socket IPC (`rusty-ipc`) и `zwlr_layer_shell_v1`.
 
 ## 2. Компоненты
 
-### Compositor
+### Compositor (`crates/rusty-compositor`)
 
-- Wayland display/server lifecycle;
-- clients, surfaces, outputs;
-- input routing и focus;
-- интеграция window management;
-- rendering/presentation;
-- frame scheduling;
-- native DRM/KMS backend.
+- Wayland display/server lifecycle и клиентский input routing (`input.rs`);
+- multi-output раскладка (`outputs.rs`) и интеграция с `rusty-wm`;
+- nested Winit backend (`winit_backend.rs`) и native DRM/KMS per-CRTC
+  render loop с mixed refresh, hotplug и VRR (`drm_backend.rs`);
+- direct scanout (`zwp_linux_dmabuf_v1`), `wp_fractional_scale_v1` +
+  `wp_viewporter`, `zwp_relative_pointer_manager_v1` +
+  `zwp_pointer_constraints_v1`, `wp_presentation` (`Vsync`/`HwClock`/`ZeroCopy`
+  и `Refresh::Variable`/`Fixed`), `wp_cursor_shape_v1`, `xdg_activation_v1`,
+  `ext_idle_notify_v1` + `zwp_idle_inhibit_manager_v1`, `ext_session_lock_v1`;
+- `XWayland` интеграция и синхронизация clipboard (`xwayland.rs`);
+- рендер-инструментация (`frame_timing.rs`), конфигурация
+  (`~/.config/rustyos/config.toml` в `config.rs`), скриншоты, лончер,
+  OSD/уведомления и `StatusNotifierItem` трей.
 
-Не должен содержать всю бизнес-логику shell или блокироваться на
-медленных системных сервисах.
+Event loop не должен блокироваться тяжёлыми операциями и внешним D-Bus IO.
 
-### Window Manager
+### Window Manager (`crates/rusty-wm`)
 
-Логическая модель: - outputs; - workspaces; - windows; - focus; -
-layout/placement; - stacking; - shortcuts/actions.
+Чистая детерминированная модель (без системного IO):
+- outputs и per-output workspaces (`1..=9`);
+- `Floating`, `Snap` (`LeftHalf`, `RightHalf`, `Center`) и `MasterStack`
+  tiling;
+- focus/stacking, maximize/fullscreen (unbordered для direct scanout) и
+  действия `WmAction`.
 
-На раннем этапе может быть crate внутри compositor process. Выделение в
-отдельный процесс требует ADR и approval.
+Выделение в отдельный процесс требует отдельного ADR и approval.
 
-### Renderer
+### Renderer (`winit_backend.rs`, `drm_backend.rs`, `shell_render.rs`, `surfaces.rs`)
 
-Абстрагирует: - GPU/device capabilities; - rendering context; -
-surfaces/textures; - damage; - presentation; - fallback paths.
+- EGL + OpenGL ES (`GlesRenderer`) + GBM/DMA-BUF без Vulkan/wgpu;
+- tracking damage (`OutputDamageTracker`), Direct Scanout при полноэкранном
+  DMA-BUF клиенте;
+- 2D shell/SSD рендеринг через `UiShapeCache` (SDF-примитивы и XCursor) и
+  `TextCache` (`fontdue`).
 
-Начальный кандидат --- инфраструктура Smithay + EGL/OpenGL ES, после
-проверки API и драйверов. Vulkan/wgpu не добавлять без измеримого
-требования и approval.
+### Animation Engine (`crates/rusty-animation`)
 
-### Animation Engine
+- единая монотонная временная шкала, независимая от `60/120/144/240` Hz;
+- easing-кривые (`EaseOutQuart`, spring/smooth переходы);
+- прерывание/реверс на лету и режим `reduced_motion`.
 
-- единая временная шкала;
-- monotonic clock;
-- easing;
-- interrupt/reverse/cancel;
-- reduced motion;
-- независимость от fixed FPS;
-- отсутствие блокирующей работы в event loop.
+### Shell и IPC (`apps/rusty-shell`, `crates/rusty-ipc`)
 
-### Shell
+- `rusty-ipc`: версионируемый протокол (`ShellRequest`, `CompositorEvent`,
+  `DesktopStateSnapshot`) поверх Unix domain socket с защитой от битых/oversized
+  сообщений;
+- `apps/rusty-shell`: внешний процесс shell-панели/дока/лончера, устойчивый
+  к независимому перезапуску, плюс встроенные композиторные оверлеи
+  (`shell_render.rs`) для low-latency взаимодействия (TopBar, Dock, Spotlight
+  Launcher, Overview, Quick Settings, Lock Screen, Notifications, Alt+Tab HUD).
 
-- panel;
-- dock;
-- launcher;
-- notifications;
-- quick settings;
-- overview;
-- lock screen.
+### System Services (`crates/rusty-services`)
 
-Shell должен иметь независимый lifecycle и не завершать compositor при
-собственном падении. IPC должен быть версионируемым. Transport ---
-открытый вопрос для ADR.
+Переиспользует штатную инфраструктуру Linux без переписывания демонов:
+- `systemd/logind` (`libseat`) — VT switch и управление DRM-устройствами;
+- `NetworkManager` / `BlueZ` (`zbus` D-Bus) — сеть и Bluetooth;
+- `PipeWire` / `wpctl` / `pactl` — громкость и mute;
+- `UPower` / `sysfs` — питание, батарея и подсветка экрана;
+- `XWayland` — X11-приложения и общий буфер обмена;
+- целевой этап Фазы 7: XDG Desktop Portal / PipeWire ScreenCast, Polkit UI,
+  `zwp_text_input_v3`.
 
-### System Services
+## 3. Текущая структура Cargo workspace и сессии
 
-Предпочитать существующую инфраструктуру: - PipeWire --- audio/media; -
-NetworkManager --- networking; - BlueZ --- Bluetooth; - Polkit ---
-authorization; - XDG Desktop Portal --- desktop integration; - XWayland
---- X11 compatibility; - systemd/logind --- session/device lifecycle; -
-UPower --- power/battery.
-
-Не переписывать эти сервисы без доказанной необходимости.
-
-## 3. Предлагаемая структура Cargo workspace
-
-``` text
-rustyos/
-├── Cargo.toml
+```text
+RustyOS/
+├── Cargo.toml                 # workspace (edition = 2024, MSRV 1.99, unsafe_code = "deny")
 ├── rust-toolchain.toml
 ├── crates/
-│   ├── rusty-compositor/
-│   ├── rusty-wm/
-│   ├── rusty-renderer/
-│   ├── rusty-animation/
-│   ├── rusty-ipc/
-│   ├── rusty-config/
-│   ├── rusty-services/
-│   └── rusty-diagnostics/
+│   ├── rusty-compositor/      # Wayland compositor, Winit & DRM/KMS backends, input, shell_render
+│   ├── rusty-wm/              # Детерминированная модель WM и workspace 1..9
+│   ├── rusty-animation/       # Refresh-rate independent animation engine
+│   ├── rusty-ipc/             # Версионируемый IPC-протокол compositor <-> shell
+│   └── rusty-services/        # Адаптеры NetworkManager, BlueZ, PipeWire, UPower, sysfs
 ├── apps/
-│   ├── rusty-shell/
-│   ├── rusty-panel/
-│   ├── rusty-dock/
-│   └── rusty-settings/
-├── tests/
-├── docs/
-└── packaging/
+│   └── rusty-shell/           # Внешний процесс shell поверх Wayland layer-shell + IPC
+├── bin/
+│   └── rustyos-session        # Лаунчер пользовательской сессии
+├── packaging/
+│   └── wayland-sessions/      # rustyos.desktop
+├── scripts/
+│   └── install.sh
+└── docs/
+    ├── adr/                   # ADR-0001 .. ADR-0014
+    ├── DEVELOPMENT_ENVIRONMENT.md
+    ├── GETTING_STARTED.md
+    └── HARDWARE_MATRIX.md
 ```
 
-Это целевая карта, не обязательный список для немедленного создания.
-Добавляй crate только при реальной границе и потребителе.
+## 4. Фактический стек
 
-## 4. Начальный стек-кандидат
-
-  Область                Кандидат                           Условие
+  Область                Реализация                         Примечание
   ---------------------- ---------------------------------- --------------------------------
-  Язык                   Rust stable                        Зафиксировать MSRV
-  Display protocol       Wayland                            Основной протокол
-  Compositor framework   Smithay                            Проверить актуальные API
-  Nested prototype       Smithay Winit                      Первый runnable milestone
-  Native output          DRM/KMS                            После nested prototype
-  Graphics               EGL + GLES                         Проверить драйверный путь
-  Input                  libinput                           Проверить permissions
-  Event loop             calloop или совместимый механизм   Не блокировать
-  Audio                  PipeWire                           Интегрировать, не переписывать
-  Config                 TOML-кандидат                      Схема и миграции явные
-  Session                systemd/logind                     Не заменять без причины
+  Язык                   Rust stable (`1.99`, ed. 2024)     `unsafe_code = "deny"` в workspace
+  Display protocol       Wayland + `XWayland`               Smithay `0.7.0`
+  Nested backend         Smithay `WinitGraphicsBackend`     Для разработки и CI/smoke
+  Native output          `DRM/KMS` + `GBM` + `libseat`      Per-CRTC loop, VRR, hotplug
+  Graphics               `EGL` + `OpenGL ES` (`GlesRenderer`) DMA-BUF + Direct Scanout
+  Input                  `libinput` / `winit` + `XKB`       Relative pointer + constraints
+  Event loop             `calloop`                          Без блокировок presentation path
+  Text / Geometry        `fontdue` + SDF/pixel caches       Независимо от host GUI toolkits
+  Services               `zbus` (D-Bus), `wpctl`, `sysfs`   BlueZ, NM, notifications, SNI
+  Config                 TOML (`~/.config/rustyos/config.toml`) Display scales, VRR, XKB, UI
+  Session                `systemd/logind` + `rustyos-session` В разработке Фаза 10 (packaging)
 
 ## 5. Потоки и ошибки
 
-- Event loop выполняет короткие операции.
-- IO и тяжёлые вычисления не блокируют presentation path.
-- Потоки создаются под измеренную потребность.
-- Shared state и synchronization документируются.
-- Ошибка optional feature не должна рушить весь desktop.
-- Отсутствующая capability приводит к fallback и диагностике.
+- Event loop выполняет только короткие неблокирующие операции.
+- Фоновый сбор телеметрии, D-Bus уведомления, трей и PNG-скриншоты вынесены
+  из render/presentation path.
+- Отсутствующие аппаратные capabilities (VRR, DMA-BUF modifiers, direct
+  scanout) переводят вывод на безопасный композитный fallback с диагностикой.
 
 ## 6. Архитектурные решения
 
-Крупные решения фиксировать в `docs/adr/NNNN-title.md`. До approval
-агент может подготовить proposal, но не внедрять спорное изменение.
+Существенные архитектурные изменения фиксируются в `docs/adr/NNNN-title.md`
+и `DECISIONS.md` до реализации только после явного `APPROVE:` пользователя.
