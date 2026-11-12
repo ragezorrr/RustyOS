@@ -274,6 +274,19 @@ hardware/software context и низкие накладные расходы.
 - **Acceptance criteria:** Все скругления, тени и круглые traffic lights кэшируются на GPU; ресайз за любой край/угол работает без перекрытия TopBar; 46 тестов и `clippy -D warnings` проходят без предупреждений.
 - **Risks:** Минимальные (CPU-растеризация выполняется однократно на уникальный размер/радиус/цвет с кэшированием `MemoryRenderBuffer`).
 
+## RUSTYOS-023 --- Interactive Dock & Workspace Overview
+
+**Статус:** done **Фаза:** 20 (Interactive Dock & Expose Overview)
+
+- **Цель:** Сделать нижний Dock интерактивным (запуск терминала/файлов, переключение Workspace Overview, фокусировка открытых окон по плиткам с hover-подсветкой) и реализовать режим Workspace Overview (Expose-сетка карточек окон с выбором мышью и закрытием по `Esc`).
+- **Scope:**
+  - `crates/rusty-compositor/src/launcher.rs`: `LauncherState::launch_preferred` с проверкой наличия бинарника в `PATH` без блокирующего запуска подпроцессов и fallback в Spotlight.
+  - `crates/rusty-compositor/src/shell_render.rs` и `winit_backend.rs`: единая геометрия `dock_slot_rect` / `overview_card_rects`, структуры `DockWindowEntry`, `DockViewState`, `DockHit`, `OverviewRenderState`, `OverviewHit`, `ShellOverlayView::Overview`, рендер Overview-сетки ниже `TopBar`/`Dock` для сохранения их кликабельности и unit-тесты hit-testing.
+  - `crates/rusty-compositor/src/state.rs` и `input.rs`: отслеживание `dock_hover_slot`, стабильная сортировка окон `ordered_visible_window_ids`, `handle_dock_hit`, `focus_ordered_window`, горячие клавиши `Super+Tab` / `Alt+E` / `Escape` и обработка кликов по Dock и карточкам Overview.
+- **Dependencies:** `RUSTYOS-018b`, `RUSTYOS-020`, `RUSTYOS-022`.
+- **Acceptance criteria:** Клик по слотам Dock (`>_`, `Fs`, `Ov`, открытые окна) запускает/фокусирует соответствующие окна или переключает Overview; Overview отображает сетку превью-карточек активного рабочего стола без перекрытия TopBar/Dock; 47 тестов и `clippy -D warnings` проходят без предупреждений.
+- **Risks:** Минимальные (при отсутствии установленного терминала/файлового менеджера клик открывает Spotlight).
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

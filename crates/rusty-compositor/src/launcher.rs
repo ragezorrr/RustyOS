@@ -236,6 +236,37 @@ impl LauncherState {
         visible.get(row_offset).map(|item| item.exec.clone())
     }
 
+    /// Finds and spawns the first available application matching `preferred_bins` or `keywords` (`RUSTYOS-023`).
+    pub fn launch_preferred(
+        &mut self,
+        preferred_bins: &[&str],
+        wayland_display: &str,
+        ipc_socket: &Path,
+    ) -> bool {
+        if let Some(cmd) = self.find_available_command(preferred_bins) {
+            return self
+                .launch_command(&cmd, wayland_display, ipc_socket)
+                .is_ok();
+        }
+        false
+    }
+
+    #[must_use]
+    fn find_available_command(&self, preferred_bins: &[&str]) -> Option<String> {
+        for app in &self.catalog {
+            let bin = exec_basename(&app.exec);
+            if preferred_bins.iter().any(|p| p.eq_ignore_ascii_case(&bin))
+                && command_exists_on_path(&app.exec)
+            {
+                return Some(app.exec.clone());
+            }
+        }
+        preferred_bins
+            .iter()
+            .find(|bin| command_exists_on_path(bin))
+            .map(|bin| (*bin).to_owned())
+    }
+
     /// Non-blockingly reaps any exited child processes spawned from Spotlight.
     pub fn reap_children(&mut self) {
         self.children
@@ -364,6 +395,18 @@ fn exec_basename(exec: &str) -> String {
         .and_then(|s| s.to_str())
         .unwrap_or(&first)
         .to_ascii_lowercase()
+}
+
+fn command_exists_on_path(exec: &str) -> bool {
+    let Some(program) = parse_exec_argv(exec).into_iter().next() else {
+        return false;
+    };
+    let path = Path::new(&program);
+    if path.is_absolute() || program.contains('/') {
+        return path.is_file();
+    }
+    env::var_os("PATH")
+        .is_some_and(|paths| env::split_paths(&paths).any(|dir| dir.join(path).is_file()))
 }
 
 fn discover_desktop_apps() -> Vec<LauncherApp> {

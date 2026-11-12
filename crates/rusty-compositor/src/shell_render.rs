@@ -154,6 +154,88 @@ pub struct QuickSettingsRenderState<'a> {
     pub window_count: usize,
 }
 
+/// Metadata for a single managed window entry rendered in Dock and Workspace Overview (`RUSTYOS-023`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DockWindowEntry {
+    /// Window manager identifier.
+    pub id: rusty_wm::WindowId,
+    /// Human-readable title displayed in Overview cards.
+    pub title: String,
+    /// Compact 1-2 character monogram displayed inside the Dock tile.
+    pub badge: String,
+    /// Dimensions label (e.g. `"800x600"`).
+    pub dimensions: String,
+    /// Whether this window is currently focused.
+    pub focused: bool,
+}
+
+/// Computes a concise 2-character badge from a window title (`RUSTYOS-023`).
+#[must_use]
+pub fn make_window_badge(title: &str) -> String {
+    let trimmed = title.trim();
+    if trimmed.is_empty() {
+        return "Wn".to_owned();
+    }
+    let words: Vec<&str> = trimmed.split_whitespace().collect();
+    if words.len() >= 2 {
+        let mut badge = String::new();
+        if let Some(c1) = words[0].chars().next() {
+            badge.push(c1.to_ascii_uppercase());
+        }
+        if let Some(c2) = words[1].chars().next() {
+            badge.push(c2.to_ascii_uppercase());
+        }
+        if !badge.is_empty() {
+            return badge;
+        }
+    }
+    trimmed.chars().take(2).collect()
+}
+
+/// Dock view state describing open window tiles, hovered slot, and overview toggle highlight (`RUSTYOS-023`).
+#[derive(Debug, Clone, Copy)]
+pub struct DockViewState<'a> {
+    /// Open visible windows on the active workspace in stable slot order.
+    pub windows: &'a [DockWindowEntry],
+    /// Currently hovered Dock slot index (`0..3 + windows.len()`), if any.
+    pub hover_slot: Option<usize>,
+    /// Whether Workspace Overview is active (highlights Dock `"Ov"` toggle tile).
+    pub overview_active: bool,
+}
+
+/// Interactive click target inside the bottom floating Dock (`RUSTYOS-023`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DockHit {
+    /// Pinned Terminal launcher (`>_`).
+    PinnedTerminal,
+    /// Pinned Files launcher (`Fs`).
+    PinnedFiles,
+    /// Workspace Overview toggle button (`Ov`).
+    ToggleOverview,
+    /// Running window tile at `index` inside `ordered_visible_windows`.
+    WindowSlot(usize),
+}
+
+/// Live data for the Workspace Overview / Expose card grid (`RUSTYOS-023`).
+#[derive(Debug, Clone)]
+pub struct OverviewRenderState<'a> {
+    /// Active workspace number (`1..=9`).
+    pub active_workspace: u8,
+    /// Active layout mode string (`"floating"` or `"master-stack"`).
+    pub layout_mode: &'a str,
+    /// Open visible windows on the active workspace in stable order.
+    pub windows: &'a [DockWindowEntry],
+}
+
+/// Interactive click target while Workspace Overview is open (`RUSTYOS-023`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OverviewHit {
+    /// Focus and raise the window at card index `usize`.
+    Card(usize),
+    /// Dismiss Overview without changing window focus.
+    Dismiss,
+}
+
 /// Active modal/popover overlay rendered on top of the compositor shell.
 #[derive(Debug, Clone, Copy)]
 pub enum ShellOverlayView<'a> {
@@ -163,6 +245,8 @@ pub enum ShellOverlayView<'a> {
     Spotlight(&'a SpotlightRenderState<'a>),
     /// Quick Settings Control Center popover (`RUSTYOS-021`).
     QuickSettings(&'a QuickSettingsRenderState<'a>),
+    /// Workspace Overview / Expose window grid (`RUSTYOS-023`).
+    Overview(&'a OverviewRenderState<'a>),
 }
 
 /// Interactive click target inside or outside the Quick Settings popover (`RUSTYOS-021`).
@@ -200,6 +284,158 @@ fn quick_settings_rect(width: i32, height: i32) -> (i32, i32, i32, i32) {
     let pop_x = width - pop_w - 12;
     let pop_y = TOP_BAR_HEIGHT + 8;
     (pop_x, pop_y, pop_w, pop_h)
+}
+
+#[must_use]
+fn dock_layout_bounds(width: i32, height: i32, window_count: usize) -> (i32, i32, i32, usize) {
+    let items_count = (3 + window_count).max(3);
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let dock_width = ((items_count as i32) * 52 + 16).min((width - 48).max(172));
+    let dock_x = (width - dock_width) / 2;
+    let dock_y = height - DOCK_HEIGHT - DOCK_MARGIN_BOTTOM;
+    (dock_x, dock_y, dock_width, items_count)
+}
+
+#[must_use]
+fn dock_slot_rect(
+    width: i32,
+    height: i32,
+    window_count: usize,
+    slot_idx: usize,
+) -> Option<Rectangle<i32, smithay::utils::Physical>> {
+    let (dock_x, dock_y, dock_width, items_count) = dock_layout_bounds(width, height, window_count);
+    if slot_idx >= items_count {
+        return None;
+    }
+    let item_size = 40;
+    let slot_i32 = i32::try_from(slot_idx).ok()?;
+    let item_x = dock_x + 8 + slot_i32 * (item_size + 12);
+    if item_x + item_size > dock_x + dock_width {
+        return None;
+    }
+    Some(Rectangle::new(
+        Point::from((item_x, dock_y + 8)),
+        Size::from((item_size, item_size)),
+    ))
+}
+
+/// Hit-tests `(x, y)` against Dock slots and returns the hovered/clicked slot index (`RUSTYOS-023`).
+#[must_use]
+pub fn check_dock_slot(
+    screen_size: Size<i32, smithay::utils::Physical>,
+    window_count: usize,
+    x: f64,
+    y: f64,
+) -> Option<usize> {
+    let items_count = (3 + window_count).max(3);
+    for idx in 0..items_count {
+        if let Some(rect) = dock_slot_rect(screen_size.w, screen_size.h, window_count, idx) {
+            let rx = f64::from(rect.loc.x);
+            let ry = f64::from(rect.loc.y);
+            let rw = f64::from(rect.size.w);
+            let rh = f64::from(rect.size.h);
+            if x >= rx && x < rx + rw && y >= ry && y < ry + rh {
+                return Some(idx);
+            }
+        }
+    }
+    None
+}
+
+/// Hit-tests a pointer click at `(x, y)` against the bottom Dock (`RUSTYOS-023`).
+#[must_use]
+pub fn check_dock_click(
+    screen_size: Size<i32, smithay::utils::Physical>,
+    window_count: usize,
+    x: f64,
+    y: f64,
+) -> Option<DockHit> {
+    let slot = check_dock_slot(screen_size, window_count, x, y)?;
+    match slot {
+        0 => Some(DockHit::PinnedTerminal),
+        1 => Some(DockHit::PinnedFiles),
+        2 => Some(DockHit::ToggleOverview),
+        n => {
+            let win_idx = n - 3;
+            (win_idx < window_count).then_some(DockHit::WindowSlot(win_idx))
+        }
+    }
+}
+
+/// Computes centered Workspace Overview preview card rectangles for `count` windows (`RUSTYOS-023`).
+#[must_use]
+pub fn overview_card_rects(
+    screen_size: Size<i32, smithay::utils::Physical>,
+    count: usize,
+) -> Vec<Rectangle<i32, smithay::utils::Physical>> {
+    if count == 0 {
+        return Vec::new();
+    }
+    let width = screen_size.w.max(320);
+    let height = screen_size.h.max(240);
+    let area_top = TOP_BAR_HEIGHT + 70;
+    let area_bottom = (height - DOCK_HEIGHT - DOCK_MARGIN_BOTTOM - 22).max(area_top + 120);
+    let avail_w = (width - 64).max(200);
+    let avail_h = (area_bottom - area_top).max(120);
+
+    let cols = match count {
+        1 => 1,
+        2..=4 => 2,
+        _ => 3,
+    };
+    let rows = count.div_ceil(cols);
+    let gap = 18;
+    let cols_i32 = i32::try_from(cols).unwrap_or(1);
+    let rows_i32 = i32::try_from(rows).unwrap_or(1);
+
+    let card_w = ((avail_w - gap * (cols_i32 - 1)) / cols_i32).clamp(140, 340);
+    let card_h = ((avail_h - gap * (rows_i32 - 1)) / rows_i32).clamp(96, 210);
+
+    let total_grid_h = rows_i32 * card_h + (rows_i32 - 1) * gap;
+    let start_y = area_top + ((avail_h - total_grid_h) / 2).max(0);
+
+    let mut rects = Vec::with_capacity(count);
+    for idx in 0..count {
+        let row = idx / cols;
+        let col = idx % cols;
+        let items_in_row = if row + 1 == rows {
+            count - row * cols
+        } else {
+            cols
+        };
+        let row_cols_i32 = i32::try_from(items_in_row).unwrap_or(1);
+        let row_w = row_cols_i32 * card_w + (row_cols_i32 - 1) * gap;
+        let row_start_x = (width - row_w) / 2;
+
+        let cx = row_start_x + i32::try_from(col).unwrap_or(0) * (card_w + gap);
+        let cy = start_y + i32::try_from(row).unwrap_or(0) * (card_h + gap);
+        rects.push(Rectangle::new(
+            Point::from((cx, cy)),
+            Size::from((card_w, card_h)),
+        ));
+    }
+    rects
+}
+
+/// Hit-tests `(x, y)` inside Workspace Overview (`RUSTYOS-023`).
+#[must_use]
+pub fn check_overview_click(
+    screen_size: Size<i32, smithay::utils::Physical>,
+    window_count: usize,
+    x: f64,
+    y: f64,
+) -> OverviewHit {
+    let cards = overview_card_rects(screen_size, window_count);
+    for (idx, rect) in cards.into_iter().enumerate() {
+        let rx = f64::from(rect.loc.x);
+        let ry = f64::from(rect.loc.y);
+        let rw = f64::from(rect.size.w);
+        let rh = f64::from(rect.size.h);
+        if x >= rx && x < rx + rw && y >= ry && y < ry + rh {
+            return OverviewHit::Card(idx);
+        }
+    }
+    OverviewHit::Dismiss
 }
 
 /// Checks if `(x, y)` clicked the `TopBar` Layout badge (`Float` / `Tile`).
@@ -858,7 +1094,7 @@ pub fn generate_shell_render_elements(
     );
 
     match overlay {
-        ShellOverlayView::None => {}
+        ShellOverlayView::None | ShellOverlayView::Overview(_) => {}
         ShellOverlayView::Spotlight(spot) => {
             render_spotlight_modal(&mut elements, width, height, spot, has_text);
         }
@@ -1105,7 +1341,8 @@ pub fn generate_window_ssd_elements(
     elements
 }
 
-/// Generates GPU-cached real font text labels for `TopBar`, `Dock`, `Spotlight`, and `QuickSettings` (`RUSTYOS-020`/`021`).
+/// Generates GPU-cached real font text labels for `TopBar`, `Dock`, `Spotlight`, `QuickSettings`,
+/// and `Workspace Overview` (`RUSTYOS-020`/`021`/`023`).
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 pub fn generate_shell_text_elements(
     text_cache: &mut crate::text::TextCache,
@@ -1113,7 +1350,7 @@ pub fn generate_shell_text_elements(
     screen_size: Size<i32, smithay::utils::Physical>,
     active_workspace: u8,
     layout_mode: &str,
-    window_count: usize,
+    dock_view: &DockViewState<'_>,
     top_telemetry: &TopBarTelemetry<'_>,
     overlay: ShellOverlayView<'_>,
 ) -> Vec<MemoryRenderBufferRenderElement<GlesRenderer>> {
@@ -1213,6 +1450,9 @@ pub fn generate_shell_text_elements(
         ShellOverlayView::QuickSettings(qs) => {
             render_quick_settings_text(text_cache, renderer, width, height, qs, &mut elements);
         }
+        ShellOverlayView::Overview(ov) => {
+            render_overview_text(text_cache, renderer, screen_size, ov, &mut elements);
+        }
     }
 
     // 2. TopBar workspace digits (1..=9)
@@ -1266,35 +1506,140 @@ pub fn generate_shell_text_elements(
         elements.push(el);
     }
 
-    // 5. Dock app initials
-    let dock_items_count = (3 + window_count).max(3);
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    let dock_width = ((dock_items_count as i32) * 52 + 16).min(width - 48);
-    let dock_x = (width - dock_width) / 2;
-    let dock_y = height - DOCK_HEIGHT - DOCK_MARGIN_BOTTOM;
-    let mut item_x = dock_x + 8;
-    let item_y = dock_y + 8;
-    let item_size = 40;
-
-    for i in 0..dock_items_count {
-        let label = match i {
-            0 => ">_",
-            1 => "Fs",
-            2 => "GL",
-            _ => "App",
+    // 5. Dock app initials & open window badges (`RUSTYOS-023`)
+    let dock_items_count = (3 + dock_view.windows.len()).max(3);
+    for idx in 0..dock_items_count {
+        let Some(bounds) = dock_slot_rect(width, height, dock_view.windows.len(), idx) else {
+            continue;
         };
-        let bounds = Rectangle::new(
-            Point::from((item_x, item_y)),
-            Size::from((item_size, item_size)),
+        let (label, color) = match idx {
+            0 => (">_", text_bright),
+            1 => ("Fs", text_subtle),
+            2 => (
+                "Ov",
+                if dock_view.overview_active {
+                    text_bright
+                } else {
+                    text_subtle
+                },
+            ),
+            n => {
+                let win = dock_view.windows.get(n - 3);
+                let badge = win.map_or("Wn", |entry| entry.badge.as_str());
+                let col = if win.is_some_and(|entry| entry.focused) {
+                    text_bright
+                } else {
+                    text_muted
+                };
+                (badge, col)
+            }
+        };
+        let bounds_logical = Rectangle::new(
+            Point::from((bounds.loc.x, bounds.loc.y)),
+            Size::from((bounds.size.w, bounds.size.h)),
         );
-        let color = if i == 0 { text_bright } else { text_subtle };
-        if let Some(el) = text_cache.render_label_centered(renderer, label, 12.5, color, bounds) {
+        if let Some(el) =
+            text_cache.render_label_centered(renderer, label, 12.5, color, bounds_logical)
+        {
             elements.push(el);
         }
-        item_x += item_size + 12;
     }
 
     elements
+}
+
+fn render_overview_text(
+    text_cache: &mut crate::text::TextCache,
+    renderer: &mut GlesRenderer,
+    screen_size: Size<i32, smithay::utils::Physical>,
+    ov: &OverviewRenderState<'_>,
+    elements: &mut Vec<MemoryRenderBufferRenderElement<GlesRenderer>>,
+) {
+    let text_bright = [244, 240, 250, 255];
+    let text_muted = [166, 155, 181, 255];
+    let width = screen_size.w;
+
+    let heading = format!(
+        "Workspace {}  •  {} windows  ({})",
+        ov.active_workspace,
+        ov.windows.len(),
+        ov.layout_mode
+    );
+    if let Some(el) = text_cache.render_label_centered(
+        renderer,
+        &heading,
+        15.0,
+        text_bright,
+        Rectangle::new(
+            Point::from((0, TOP_BAR_HEIGHT + 14)),
+            Size::from((width, 24)),
+        ),
+    ) {
+        elements.push(el);
+    }
+    if let Some(el) = text_cache.render_label_centered(
+        renderer,
+        "Click a window card to focus  •  Esc or Dock Ov to close",
+        11.0,
+        text_muted,
+        Rectangle::new(
+            Point::from((0, TOP_BAR_HEIGHT + 38)),
+            Size::from((width, 18)),
+        ),
+    ) {
+        elements.push(el);
+    }
+
+    if ov.windows.is_empty() {
+        let empty_msg = format!(
+            "Workspace {} is empty — launch an app from Dock >_ or Alt+Space",
+            ov.active_workspace
+        );
+        if let Some(el) = text_cache.render_label_centered(
+            renderer,
+            &empty_msg,
+            13.0,
+            text_muted,
+            Rectangle::new(
+                Point::from((32, screen_size.h / 2 - 20)),
+                Size::from((width - 64, 28)),
+            ),
+        ) {
+            elements.push(el);
+        }
+        return;
+    }
+
+    let cards = overview_card_rects(screen_size, ov.windows.len());
+    for (win, card) in ov.windows.iter().zip(cards) {
+        let header_bounds = Rectangle::new(
+            Point::from((card.loc.x + 10, card.loc.y + 4)),
+            Size::from((card.size.w - 20, 24)),
+        );
+        if let Some(el) = text_cache.render_label_centered(
+            renderer,
+            &win.title,
+            12.0,
+            if win.focused { text_bright } else { text_muted },
+            header_bounds,
+        ) {
+            elements.push(el);
+        }
+        let body_bounds = Rectangle::new(
+            Point::from((card.loc.x + 14, card.loc.y + 34)),
+            Size::from((card.size.w - 28, card.size.h - 46)),
+        );
+        let center_badge = format!("{}  •  {}", win.badge, win.dimensions);
+        if let Some(el) = text_cache.render_label_centered(
+            renderer,
+            &center_badge,
+            12.0,
+            text_bright,
+            body_bounds,
+        ) {
+            elements.push(el);
+        }
+    }
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1743,7 +2088,7 @@ fn push_soft_shadow(
 }
 
 /// Generates unified front-to-back shell elements with rounded corners, circular status dots,
-/// soft shadows, and GPU-cached typography (`RUSTYOS-022`).
+/// soft shadows, interactive Dock badges, Overview cards, and GPU-cached typography (`RUSTYOS-022`/`023`).
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub fn generate_shell_composite_elements(
     text_cache: &mut crate::text::TextCache,
@@ -1752,8 +2097,7 @@ pub fn generate_shell_composite_elements(
     screen_size: Size<i32, smithay::utils::Physical>,
     active_workspace: u8,
     layout_mode: &str,
-    window_count: usize,
-    has_focused_window: bool,
+    dock_view: &DockViewState<'_>,
     top_telemetry: &TopBarTelemetry<'_>,
     overlay: ShellOverlayView<'_>,
 ) -> Vec<CompositorRenderElement> {
@@ -1769,7 +2113,7 @@ pub fn generate_shell_composite_elements(
         screen_size,
         active_workspace,
         layout_mode,
-        window_count,
+        dock_view,
         top_telemetry,
         overlay,
     );
@@ -1777,9 +2121,9 @@ pub fn generate_shell_composite_elements(
         out.push(CompositorRenderElement::Memory(el));
     }
 
-    // 2. Active Overlay (Spotlight or QuickSettings) with rounded corners & soft shadow
+    // 2. Active modal Overlay (Spotlight or QuickSettings) above TopBar/Dock/windows
     match overlay {
-        ShellOverlayView::None => {}
+        ShellOverlayView::None | ShellOverlayView::Overview(_) => {}
         ShellOverlayView::Spotlight(spot) => {
             let (mx, my, mw, mh) = spotlight_modal_rect(width, height);
 
@@ -2168,35 +2512,48 @@ pub fn generate_shell_composite_elements(
         COLOR_SURFACE_ELEVATED,
     )));
 
-    // 4. Dock rounded app tiles, rounded glass pill, and soft drop shadow
-    let dock_items_count = (3 + window_count).max(3);
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-    let dock_width = ((dock_items_count as i32) * 52 + 16).min(width - 48);
-    let dock_x = (width - dock_width) / 2;
-    let dock_y = height - DOCK_HEIGHT - DOCK_MARGIN_BOTTOM;
-    let mut item_x = dock_x + 8;
-    let item_y = dock_y + 8;
-    let item_size = 40;
+    // 4. Dock rounded app tiles, hover/active states, rounded glass pill, and soft drop shadow (`RUSTYOS-023`)
+    let (dock_x, dock_y, dock_width, dock_items_count) =
+        dock_layout_bounds(width, height, dock_view.windows.len());
 
     for i in 0..dock_items_count {
-        let is_running_window = i >= 3;
-        let is_focused = is_running_window && has_focused_window;
-        if is_running_window || i == 0 {
+        let Some(slot_rect) = dock_slot_rect(width, height, dock_view.windows.len(), i) else {
+            continue;
+        };
+        let item_x = slot_rect.loc.x;
+        let item_y = slot_rect.loc.y;
+        let item_size = slot_rect.size.w;
+        let hovered = dock_view.hover_slot == Some(i);
+
+        let win_entry = (i >= 3).then(|| dock_view.windows.get(i - 3)).flatten();
+        let is_active = match i {
+            2 => dock_view.overview_active,
+            n if n >= 3 => win_entry.is_some_and(|w| w.focused),
+            _ => false,
+        };
+        let has_running_dot = win_entry.is_some() || (i == 2 && dock_view.overview_active);
+        if has_running_dot {
             out.push(CompositorRenderElement::Solid(make_solid_element(
                 Rectangle::new(
                     Point::from((item_x + (item_size - 8) / 2, dock_y + DOCK_HEIGHT - 5)),
                     Size::from((8, 2)),
                 ),
-                COLOR_ACCENT,
+                if is_active {
+                    COLOR_ACCENT
+                } else {
+                    COLOR_ACCENT_MUTED
+                },
             )));
         }
+
         let inner_size = 28;
         let inner_offset = (item_size - inner_size) / 2;
         let inner_rgba = match i {
             0 => RGBA_ACCENT,
             1 => RGBA_ACCENT_MUTED,
+            2 if dock_view.overview_active => RGBA_ACCENT_HOVER,
             2 => RGBA_SUBTLE,
-            _ if is_focused => RGBA_ACCENT_HOVER,
+            _ if is_active => RGBA_ACCENT_HOVER,
             _ => RGBA_MUTED,
         };
         push_rounded_glass_box(
@@ -2211,19 +2568,22 @@ pub fn generate_shell_composite_elements(
             inner_rgba,
             None,
         );
+        let tile_border = if is_active {
+            Some(RGBA_ACCENT)
+        } else if hovered {
+            Some(RGBA_BORDER_HIGHLIGHT)
+        } else {
+            None
+        };
         push_rounded_glass_box(
             &mut out,
             shape_cache,
             renderer,
-            Rectangle::new(
-                Point::from((item_x, item_y)),
-                Size::from((item_size, item_size)),
-            ),
+            slot_rect,
             8,
             RGBA_SURFACE_OVERLAY,
-            None,
+            tile_border,
         );
-        item_x += item_size + 12;
     }
 
     let dock_rect = Rectangle::new(
@@ -2240,6 +2600,51 @@ pub fn generate_shell_composite_elements(
         Some(RGBA_BORDER_HIGHLIGHT),
     );
     push_soft_shadow(&mut out, shape_cache, renderer, dock_rect, 12, 14, 96);
+
+    // 5. Workspace Overview cards & scrim rendered below TopBar & Dock so both stay crisp and clickable (`RUSTYOS-023`)
+    if let ShellOverlayView::Overview(ov) = overlay {
+        let cards = overview_card_rects(screen_size, ov.windows.len());
+        for (win, card) in ov.windows.iter().zip(cards) {
+            let preview_rect = Rectangle::new(
+                Point::from((card.loc.x + 12, card.loc.y + 32)),
+                Size::from((card.size.w - 24, card.size.h - 44)),
+            );
+            push_rounded_glass_box(
+                &mut out,
+                shape_cache,
+                renderer,
+                preview_rect,
+                8,
+                if win.focused {
+                    RGBA_ACCENT_MUTED
+                } else {
+                    RGBA_SURFACE_OVERLAY
+                },
+                Some(RGBA_BORDER),
+            );
+            push_rounded_glass_box(
+                &mut out,
+                shape_cache,
+                renderer,
+                card,
+                12,
+                RGBA_SURFACE_ELEVATED,
+                Some(if win.focused {
+                    RGBA_ACCENT
+                } else {
+                    RGBA_BORDER_HIGHLIGHT
+                }),
+            );
+            push_soft_shadow(&mut out, shape_cache, renderer, card, 12, 14, 96);
+        }
+        out.push(CompositorRenderElement::Solid(make_solid_element(
+            Rectangle::new(
+                Point::from((0, TOP_BAR_HEIGHT)),
+                Size::from((width, (height - TOP_BAR_HEIGHT).max(0))),
+            ),
+            premul(0.059, 0.039, 0.098, 0.88),
+        )));
+    }
 
     out
 }
@@ -2641,5 +3046,45 @@ mod tests {
             generate_window_ssd_elements(rusty_wm::Rect::new(40, 40, 600, 400), true, false);
         // 4 border strips + titlebar bg + divider + 3 traffic lights + title pill = 10 elements
         assert_eq!(elements.len(), 10);
+    }
+
+    #[test]
+    fn dock_and_overview_hit_testing_match_rendered_slots_and_cards() {
+        let size = Size::from((1280, 800));
+        let win_count = 2;
+
+        for (slot_idx, expected) in [
+            (0, DockHit::PinnedTerminal),
+            (1, DockHit::PinnedFiles),
+            (2, DockHit::ToggleOverview),
+            (3, DockHit::WindowSlot(0)),
+            (4, DockHit::WindowSlot(1)),
+        ] {
+            let slot_rect = dock_slot_rect(size.w, size.h, win_count, slot_idx)
+                .unwrap_or_else(|| Rectangle::from_size(Size::from((0, 0))));
+            let cx = f64::from(slot_rect.loc.x + slot_rect.size.w / 2);
+            let cy = f64::from(slot_rect.loc.y + slot_rect.size.h / 2);
+            assert_eq!(check_dock_slot(size, win_count, cx, cy), Some(slot_idx));
+            assert_eq!(check_dock_click(size, win_count, cx, cy), Some(expected));
+        }
+
+        // Above Dock returns None
+        assert_eq!(check_dock_click(size, win_count, 640.0, 200.0), None);
+
+        // Overview cards
+        let cards = overview_card_rects(size, 3);
+        assert_eq!(cards.len(), 3);
+        for (idx, card) in cards.iter().enumerate() {
+            let cx = f64::from(card.loc.x + card.size.w / 2);
+            let cy = f64::from(card.loc.y + card.size.h / 2);
+            assert_eq!(
+                check_overview_click(size, 3, cx, cy),
+                OverviewHit::Card(idx)
+            );
+        }
+        assert_eq!(
+            check_overview_click(size, 3, 10.0, 100.0),
+            OverviewHit::Dismiss
+        );
     }
 }

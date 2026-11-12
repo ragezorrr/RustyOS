@@ -24,6 +24,8 @@ enum KeyIntercept {
     ToggleReducedMotion,
     ToggleLauncher,
     ToggleQuickSettings,
+    ToggleOverview,
+    OverviewClose,
     QuickSettingsClose,
     LauncherClose,
     LauncherActivate,
@@ -105,6 +107,9 @@ impl RustyCompositorState {
                 if state.quick_settings_active && sym.raw() == Keysym::Escape.raw() {
                     return FilterResult::Intercept(KeyIntercept::QuickSettingsClose);
                 }
+                if state.overview_active && sym.raw() == Keysym::Escape.raw() {
+                    return FilterResult::Intercept(KeyIntercept::OverviewClose);
+                }
                 if let Some(action) = match_shortcut(*modifiers, sym) {
                     FilterResult::Intercept(action)
                 } else {
@@ -113,58 +118,75 @@ impl RustyCompositorState {
             },
         );
 
-        match intercepted {
-            Some(KeyIntercept::ExitCompositor) => {
+        if let Some(action) = intercepted {
+            self.dispatch_key_intercept(action, serial);
+        }
+    }
+
+    fn dispatch_key_intercept(&mut self, action: KeyIntercept, serial: smithay::utils::Serial) {
+        match action {
+            KeyIntercept::ExitCompositor => {
                 info!("Exit shortcut pressed; shutting down nested compositor");
                 self.request_shutdown();
             }
-            Some(KeyIntercept::ToggleReducedMotion) => {
+            KeyIntercept::ToggleReducedMotion => {
                 let reduced = self.animations.toggle_reduced_motion();
                 info!(
                     reduced_motion = reduced,
                     "Toggled reduced-motion preference"
                 );
             }
-            Some(KeyIntercept::ToggleLauncher) => {
+            KeyIntercept::ToggleLauncher => {
                 self.toggle_launcher();
                 info!(
                     launcher_active = self.launcher_active,
                     "Toggled Spotlight application launcher overlay"
                 );
             }
-            Some(KeyIntercept::ToggleQuickSettings) => {
+            KeyIntercept::ToggleQuickSettings => {
                 self.toggle_quick_settings();
                 info!(
                     quick_settings_active = self.quick_settings_active,
                     "Toggled Quick Settings popover"
                 );
             }
-            Some(KeyIntercept::QuickSettingsClose) => {
+            KeyIntercept::ToggleOverview => {
+                self.toggle_overview();
+                info!(
+                    overview_active = self.overview_active,
+                    "Toggled Workspace Overview"
+                );
+            }
+            KeyIntercept::OverviewClose => {
+                self.close_overview();
+                info!("Closed Workspace Overview");
+            }
+            KeyIntercept::QuickSettingsClose => {
                 self.close_quick_settings();
                 info!("Closed Quick Settings popover");
             }
-            Some(KeyIntercept::LauncherClose) => {
+            KeyIntercept::LauncherClose => {
                 self.close_launcher();
                 info!("Closed Spotlight application launcher");
             }
-            Some(KeyIntercept::LauncherActivate) => {
+            KeyIntercept::LauncherActivate => {
                 self.launch_spotlight_selected();
             }
-            Some(KeyIntercept::LauncherMove(delta)) => {
+            KeyIntercept::LauncherMove(delta) => {
                 self.launcher.move_selection(delta);
             }
-            Some(KeyIntercept::LauncherBackspace) => {
+            KeyIntercept::LauncherBackspace => {
                 self.launcher.pop_char();
             }
-            Some(KeyIntercept::LauncherClear) => {
+            KeyIntercept::LauncherClear => {
                 self.launcher.reset();
             }
-            Some(KeyIntercept::LauncherText(text)) => {
+            KeyIntercept::LauncherText(text) => {
                 self.launcher.push_text(&text);
             }
-            Some(KeyIntercept::LauncherConsume) | None => {}
-            Some(KeyIntercept::Wm(action)) => {
-                self.apply_wm_action(action, serial);
+            KeyIntercept::LauncherConsume => {}
+            KeyIntercept::Wm(wm_action) => {
+                self.apply_wm_action(wm_action, serial);
             }
         }
     }
@@ -180,6 +202,17 @@ impl RustyCompositorState {
 
         let pos: Point<f64, Logical> = event.position_transformed(output_geo);
         self.pointer_location = pos;
+
+        self.dock_hover_slot = if !self.launcher_active && !self.quick_settings_active {
+            crate::shell_render::check_dock_slot(
+                output_geo.to_physical(1),
+                self.wm.visible_windows().len(),
+                pos.x,
+                pos.y,
+            )
+        } else {
+            None
+        };
 
         if let Some(drag) = self.active_window_drag {
             #[allow(clippy::cast_possible_truncation)]
@@ -358,6 +391,41 @@ impl RustyCompositorState {
             // Handle Quick Settings popover clicks exclusively while open (RUSTYOS-021)
             if self.quick_settings_active {
                 self.handle_quick_settings_pointer_click(serial);
+                return;
+            }
+
+            // Handle bottom Dock clicks (`RUSTYOS-023`) before Overview/windows
+            let output_phys = self
+                .space
+                .output_geometry(&self.output)
+                .map_or_else(|| Size::from((1280, 800)), |geo| geo.size)
+                .to_physical(1);
+            let ordered_ids = self.ordered_visible_window_ids();
+            if let Some(dock_hit) = crate::shell_render::check_dock_click(
+                output_phys,
+                ordered_ids.len(),
+                self.pointer_location.x,
+                self.pointer_location.y,
+            ) {
+                self.handle_dock_hit(dock_hit, serial);
+                return;
+            }
+
+            // Handle Workspace Overview card clicks & backdrop dismissal (`RUSTYOS-023`)
+            if self.overview_active {
+                match crate::shell_render::check_overview_click(
+                    output_phys,
+                    ordered_ids.len(),
+                    self.pointer_location.x,
+                    self.pointer_location.y,
+                ) {
+                    crate::shell_render::OverviewHit::Card(idx) => {
+                        self.focus_ordered_window(idx, serial);
+                    }
+                    crate::shell_render::OverviewHit::Dismiss => {
+                        self.close_overview();
+                    }
+                }
                 return;
             }
 
@@ -558,6 +626,11 @@ const fn match_shortcut(modifiers: ModifiersState, sym: Keysym) -> Option<KeyInt
         return Some(KeyIntercept::ToggleLauncher);
     }
 
+    // Super + Tab toggles Workspace Overview (`RUSTYOS-023`)
+    if modifiers.logo && sym.raw() == Keysym::Tab.raw() {
+        return Some(KeyIntercept::ToggleOverview);
+    }
+
     if !modifiers.alt {
         return None;
     }
@@ -595,6 +668,7 @@ const fn match_shortcut(modifiers: ModifiersState, sym: Keysym) -> Option<KeyInt
         Keysym::o | Keysym::O => Some(KeyIntercept::Wm(WmAction::MoveFocusedToNextOutput)),
         Keysym::r | Keysym::R => Some(KeyIntercept::ToggleReducedMotion),
         Keysym::s | Keysym::S => Some(KeyIntercept::ToggleQuickSettings),
+        Keysym::e | Keysym::E => Some(KeyIntercept::ToggleOverview),
         _ => None,
     }
 }
@@ -710,6 +784,14 @@ mod tests {
         assert_eq!(
             match_shortcut(ModifiersState::default(), Keysym::Escape),
             Some(KeyIntercept::ExitCompositor)
+        );
+        assert_eq!(
+            match_shortcut(logo, Keysym::Tab),
+            Some(KeyIntercept::ToggleOverview)
+        );
+        assert_eq!(
+            match_shortcut(alt, Keysym::e),
+            Some(KeyIntercept::ToggleOverview)
         );
     }
 

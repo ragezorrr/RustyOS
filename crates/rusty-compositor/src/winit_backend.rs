@@ -358,7 +358,6 @@ fn render_winit_frame(
             .collect();
         let window_count = visible_windows.len();
         let focused_win = state.wm.focused_window();
-        let has_focused = focused_win.is_some();
 
         let mut render_list: Vec<CompositorRenderElement> = Vec::new();
         let layer_surfaces_present = push_layer_elements(
@@ -379,6 +378,31 @@ fn render_winit_frame(
                 volume_percent: tel.audio.volume_percent,
                 audio_muted: tel.audio.muted,
                 quick_settings_open: state.quick_settings_active,
+            };
+
+            let mut dock_windows: Vec<crate::shell_render::DockWindowEntry> = visible_windows
+                .iter()
+                .map(|&(win_id, rect)| {
+                    let title = state.smithay_window_for_id(win_id).map_or_else(
+                        || format!("Window #{}", win_id.0),
+                        |win| window_title(&win, win_id),
+                    );
+                    let badge = crate::shell_render::make_window_badge(&title);
+                    crate::shell_render::DockWindowEntry {
+                        id: win_id,
+                        title,
+                        badge,
+                        dimensions: format!("{}x{}", rect.width, rect.height),
+                        focused: focused_win == Some(win_id),
+                    }
+                })
+                .collect();
+            dock_windows.sort_by_key(|entry| entry.id.0);
+
+            let dock_view = crate::shell_render::DockViewState {
+                windows: &dock_windows,
+                hover_slot: state.dock_hover_slot,
+                overview_active: state.overview_active,
             };
 
             let (win_start, visible_items) = if state.launcher_active {
@@ -417,10 +441,20 @@ fn render_winit_frame(
                 },
             );
 
+            let ov_view =
+                (!state.launcher_active && !state.quick_settings_active && state.overview_active)
+                    .then_some(crate::shell_render::OverviewRenderState {
+                        active_workspace: active_ws,
+                        layout_mode: layout_str,
+                        windows: &dock_windows,
+                    });
+
             let overlay = if let Some(spot) = spotlight_view.as_ref() {
                 crate::shell_render::ShellOverlayView::Spotlight(spot)
             } else if let Some(qs) = qs_view.as_ref() {
                 crate::shell_render::ShellOverlayView::QuickSettings(qs)
+            } else if let Some(ov) = ov_view.as_ref() {
+                crate::shell_render::ShellOverlayView::Overview(ov)
             } else {
                 crate::shell_render::ShellOverlayView::None
             };
@@ -432,8 +466,7 @@ fn render_winit_frame(
                 size,
                 active_ws,
                 layout_str,
-                window_count,
-                has_focused,
+                &dock_view,
                 &top_telemetry,
                 overlay,
             ));

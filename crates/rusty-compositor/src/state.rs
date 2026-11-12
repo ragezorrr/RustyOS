@@ -149,8 +149,10 @@ pub struct RustyCompositorState {
     pub frame_timing: FrameTimingCollector,
     /// Refresh-rate independent animation engine (`RUSTYOS-008`, ADR-0004).
     pub animations: AnimationEngine,
-    /// Whether the workspace overview mode is active (`RUSTYOS-009`/`010`).
+    /// Whether the workspace overview mode is active (`RUSTYOS-009`/`010`/`023`).
     pub overview_active: bool,
+    /// Currently hovered Dock slot index (`0..3 + windows.len()`) (`RUSTYOS-023`).
+    pub dock_hover_slot: Option<usize>,
     /// Whether the Spotlight application launcher overlay is open (`RUSTYOS-018`).
     pub launcher_active: bool,
     /// Interactive Spotlight query, catalog, and selection state (`RUSTYOS-018b`).
@@ -251,6 +253,7 @@ impl RustyCompositorState {
             frame_timing: FrameTimingCollector::new(DEFAULT_SAMPLE_CAPACITY, 60_000),
             animations: AnimationEngine::default(),
             overview_active: false,
+            dock_hover_slot: None,
             launcher_active: false,
             launcher: crate::launcher::LauncherState::new(),
             quick_settings_active: false,
@@ -274,6 +277,7 @@ impl RustyCompositorState {
         self.launcher_active = !self.launcher_active;
         if self.launcher_active {
             self.quick_settings_active = false;
+            self.overview_active = false;
         }
         self.launcher.reset();
     }
@@ -289,6 +293,7 @@ impl RustyCompositorState {
         self.quick_settings_active = !self.quick_settings_active;
         if self.quick_settings_active {
             self.close_launcher();
+            self.overview_active = false;
             self.telemetry.request_refresh();
         }
     }
@@ -296,6 +301,90 @@ impl RustyCompositorState {
     /// Closes the Quick Settings popover.
     pub fn close_quick_settings(&mut self) {
         self.quick_settings_active = false;
+    }
+
+    /// Toggles Workspace Overview / Expose mode (`RUSTYOS-023`).
+    pub fn toggle_overview(&mut self) {
+        self.overview_active = !self.overview_active;
+        if self.overview_active {
+            self.close_launcher();
+            self.close_quick_settings();
+            self.active_window_drag = None;
+            self.active_window_resize = None;
+        }
+    }
+
+    /// Exits Workspace Overview mode (`RUSTYOS-023`).
+    pub fn close_overview(&mut self) {
+        self.overview_active = false;
+    }
+
+    /// Returns visible window IDs on the active workspace in stable ascending `WindowId` order (`RUSTYOS-023`).
+    #[must_use]
+    pub fn ordered_visible_window_ids(&self) -> Vec<WindowId> {
+        let mut ids: Vec<WindowId> = self
+            .wm
+            .visible_windows()
+            .into_iter()
+            .map(|w| w.id)
+            .collect();
+        ids.sort_by_key(|id| id.0);
+        ids
+    }
+
+    /// Focuses and raises the `idx`-th window in [`Self::ordered_visible_window_ids`] (`RUSTYOS-023`).
+    pub fn focus_ordered_window(&mut self, idx: usize, serial: Serial) {
+        let ids = self.ordered_visible_window_ids();
+        if let Some(&win_id) = ids.get(idx) {
+            self.wm.focus_and_raise(win_id);
+            self.sync_space_with_wm(serial);
+            self.overview_active = false;
+        }
+    }
+
+    /// Executes an interactive Dock click action (`RUSTYOS-023`).
+    pub fn handle_dock_hit(&mut self, hit: crate::shell_render::DockHit, serial: Serial) {
+        let ipc_path = rusty_ipc::default_ipc_socket_path(&self.socket_name);
+        match hit {
+            crate::shell_render::DockHit::PinnedTerminal => {
+                self.overview_active = false;
+                let launched = self.launcher.launch_preferred(
+                    &[
+                        "foot",
+                        "kitty",
+                        "alacritty",
+                        "wezterm",
+                        "ghostty",
+                        "weston-terminal",
+                        "gnome-terminal",
+                        "konsole",
+                        "xfce4-terminal",
+                    ],
+                    &self.socket_name,
+                    &ipc_path,
+                );
+                if !launched {
+                    self.toggle_launcher();
+                }
+            }
+            crate::shell_render::DockHit::PinnedFiles => {
+                self.overview_active = false;
+                let launched = self.launcher.launch_preferred(
+                    &["nautilus", "dolphin", "thunar", "nemo", "pcmanfm"],
+                    &self.socket_name,
+                    &ipc_path,
+                );
+                if !launched {
+                    self.toggle_launcher();
+                }
+            }
+            crate::shell_render::DockHit::ToggleOverview => {
+                self.toggle_overview();
+            }
+            crate::shell_render::DockHit::WindowSlot(idx) => {
+                self.focus_ordered_window(idx, serial);
+            }
+        }
     }
 
     /// Launches the currently highlighted candidate from Spotlight and closes the overlay.
@@ -638,7 +727,7 @@ impl RustyCompositorState {
                 self.apply_wm_action(WmAction::ToggleLayoutMode, serial);
             }
             ShellRequest::ToggleOverview => {
-                self.overview_active = !self.overview_active;
+                self.toggle_overview();
                 info!(
                     overview_active = self.overview_active,
                     "Toggled workspace overview via IPC"
