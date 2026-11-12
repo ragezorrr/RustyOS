@@ -561,6 +561,26 @@ impl RustyCompositorState {
                 self.apply_wm_action(WmAction::ToggleLayoutMode, serial);
                 return;
             }
+            if let Some(menu_hit) = crate::shell_render::check_top_bar_menu_click(
+                self.pointer_location.x,
+                self.pointer_location.y,
+            ) {
+                match menu_hit {
+                    crate::shell_render::TopBarMenuHit::SystemLogo => {
+                        self.toggle_launcher();
+                    }
+                    crate::shell_render::TopBarMenuHit::ActiveApp => {
+                        self.toggle_overview();
+                    }
+                    crate::shell_render::TopBarMenuHit::Window => {
+                        self.apply_wm_action(WmAction::ToggleLayoutMode, serial);
+                    }
+                    crate::shell_render::TopBarMenuHit::File
+                    | crate::shell_render::TopBarMenuHit::Edit
+                    | crate::shell_render::TopBarMenuHit::View => {}
+                }
+                return;
+            }
             if crate::shell_render::check_top_bar_status_click(
                 output_width,
                 self.pointer_location.x,

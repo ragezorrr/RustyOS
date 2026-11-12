@@ -62,11 +62,24 @@ pub const DOCK_ICON_SIZE: i32 = 48;
 /// SSD window frame corner radius in logical pixels (`RUSTYOS-035`).
 pub const WINDOW_RADIUS: i32 = 12;
 
-/// Workspace button width and stride for topbar indicators and click handling.
-pub const WS_BTN_WIDTH: i32 = 26;
-pub const WS_BTN_GAP: i32 = 4;
+/// `TopBar` Left Menu metrics (macOS 27 Active App & Global Menus) (`RUSTYOS-038`).
+pub const TOP_BAR_LOGO_X: i32 = 12;
+pub const TOP_BAR_LOGO_W: i32 = 18;
+pub const TOP_BAR_APP_X: i32 = 34;
+pub const TOP_BAR_APP_MAX_W: i32 = 78;
+pub const TOP_BAR_MENUS_START_X: i32 = 118;
+pub const TOP_BAR_MENU_FILE_W: i32 = 28;
+pub const TOP_BAR_MENU_EDIT_W: i32 = 28;
+pub const TOP_BAR_MENU_VIEW_W: i32 = 32;
+pub const TOP_BAR_MENU_WINDOW_W: i32 = 50;
+pub const TOP_BAR_MENUS_GAP: i32 = 10;
+pub const TOP_BAR_SEPARATOR_X: i32 = 296;
+
+/// Workspace button width, stride, and start position for compact indicators (`RUSTYOS-038`).
+pub const WS_BTN_WIDTH: i32 = 18;
+pub const WS_BTN_GAP: i32 = 3;
 pub const WS_BTN_STRIDE: i32 = WS_BTN_WIDTH + WS_BTN_GAP;
-pub const WS_START_X: i32 = 12;
+pub const WS_START_X: i32 = 308;
 
 const fn premul(r: f32, g: f32, b: f32, a: f32) -> Color32F {
     Color32F::new(r * a, g * a, b * a, a)
@@ -268,6 +281,46 @@ pub fn make_window_badge(title: &str) -> String {
         }
     }
     trimmed.chars().take(2).collect()
+}
+
+/// Extracts a clean application name from a window title (`RUSTYOS-038`).
+#[must_use]
+pub fn extract_app_name(title: &str) -> String {
+    let trimmed = title.trim();
+    if trimmed.is_empty() {
+        return "RustyOS".to_owned();
+    }
+    // Check for standard XDG window title delimiters " — " or " - "
+    if let Some((_doc, app)) = trimmed.rsplit_once(" — ") {
+        let app_trimmed = app.trim();
+        if !app_trimmed.is_empty() {
+            return truncate_ascii(app_trimmed, 14);
+        }
+    }
+    if let Some((_doc, app)) = trimmed.rsplit_once(" - ") {
+        let app_trimmed = app.trim();
+        if !app_trimmed.is_empty() {
+            return truncate_ascii(app_trimmed, 14);
+        }
+    }
+    truncate_ascii(trimmed, 14)
+}
+
+/// Interactive click target inside the `TopBar` Left Menu area (`RUSTYOS-038`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TopBarMenuHit {
+    /// System logo ("✦").
+    SystemLogo,
+    /// Active application name menu.
+    ActiveApp,
+    /// Global File menu.
+    File,
+    /// Global Edit menu.
+    Edit,
+    /// Global View menu.
+    View,
+    /// Global Window menu.
+    Window,
 }
 
 /// Dock view state describing open window tiles, hovered slot, and overview toggle highlight (`RUSTYOS-023`).
@@ -852,6 +905,37 @@ pub fn check_switcher_click(
     None
 }
 
+/// Checks if `(x, y)` clicked any item in the `TopBar` Left Menu area (`RUSTYOS-038`).
+#[must_use]
+pub fn check_top_bar_menu_click(x: f64, y: f64) -> Option<TopBarMenuHit> {
+    if y > f64::from(TOP_BAR_HEIGHT) {
+        return None;
+    }
+    if x >= f64::from(TOP_BAR_LOGO_X) && x < f64::from(TOP_BAR_LOGO_X + TOP_BAR_LOGO_W) {
+        return Some(TopBarMenuHit::SystemLogo);
+    }
+    if x >= f64::from(TOP_BAR_APP_X) && x < f64::from(TOP_BAR_APP_X + TOP_BAR_APP_MAX_W) {
+        return Some(TopBarMenuHit::ActiveApp);
+    }
+    let file_x = f64::from(TOP_BAR_MENUS_START_X);
+    if x >= file_x && x < file_x + f64::from(TOP_BAR_MENU_FILE_W) {
+        return Some(TopBarMenuHit::File);
+    }
+    let edit_x = file_x + f64::from(TOP_BAR_MENU_FILE_W + TOP_BAR_MENUS_GAP);
+    if x >= edit_x && x < edit_x + f64::from(TOP_BAR_MENU_EDIT_W) {
+        return Some(TopBarMenuHit::Edit);
+    }
+    let view_x = edit_x + f64::from(TOP_BAR_MENU_EDIT_W + TOP_BAR_MENUS_GAP);
+    if x >= view_x && x < view_x + f64::from(TOP_BAR_MENU_VIEW_W) {
+        return Some(TopBarMenuHit::View);
+    }
+    let win_x = view_x + f64::from(TOP_BAR_MENU_VIEW_W + TOP_BAR_MENUS_GAP);
+    if x >= win_x && x < win_x + f64::from(TOP_BAR_MENU_WINDOW_W) {
+        return Some(TopBarMenuHit::Window);
+    }
+    None
+}
+
 /// Checks if `(x, y)` clicked the `TopBar` Layout badge (`Float` / `Tile`).
 #[must_use]
 pub fn check_top_bar_layout_click(x: f64, y: f64) -> bool {
@@ -859,7 +943,7 @@ pub fn check_top_bar_layout_click(x: f64, y: f64) -> bool {
         return false;
     }
     let layout_x = f64::from(WS_START_X + 9 * WS_BTN_STRIDE + 8);
-    x >= layout_x && x < layout_x + 56.0
+    x >= layout_x && x < layout_x + 52.0
 }
 
 /// Checks if `(x, y)` clicked the right `TopBar` telemetry status pill.
@@ -978,7 +1062,30 @@ fn render_top_bar(
         Rectangle::new(Point::from((0, TOP_BAR_HEIGHT - 1)), Size::from((width, 1)));
     elements.push(make_solid_element(top_bar_border, COLOR_BORDER));
 
-    // 2. Workspaces indicators in TopBar (1..=9)
+    // 2. Active App Menu & Global Menus in TopBar (macOS 27 style, RUSTYOS-038)
+    elements.push(make_solid_element(
+        Rectangle::new(
+            Point::from((TOP_BAR_LOGO_X, TOP_BAR_ITEM_Y)),
+            Size::from((TOP_BAR_LOGO_W, TOP_BAR_ITEM_H)),
+        ),
+        COLOR_ACCENT_MUTED,
+    ));
+    if !has_text {
+        elements.push(make_solid_element(
+            Rectangle::new(
+                Point::from((TOP_BAR_APP_X, TOP_BAR_ITEM_Y)),
+                Size::from((TOP_BAR_APP_MAX_W, TOP_BAR_ITEM_H)),
+            ),
+            COLOR_SURFACE_OVERLAY,
+        ));
+    }
+    // Hairline divider before workspace indicators
+    elements.push(make_solid_element(
+        Rectangle::new(Point::from((TOP_BAR_SEPARATOR_X, 7)), Size::from((1, 12))),
+        COLOR_BORDER,
+    ));
+
+    // 3. Compact Workspaces indicators in TopBar (1..=9) (RUSTYOS-038)
     let ws_btn_height = TOP_BAR_ITEM_H;
     let ws_y = TOP_BAR_ITEM_Y;
     let mut start_x = WS_START_X;
@@ -991,15 +1098,8 @@ fn render_top_bar(
         );
 
         if is_active {
-            // Bright neon violet pill with bottom highlight pip
             elements.push(make_solid_element(ws_geo, COLOR_ACCENT));
-            let pip_geo = Rectangle::new(
-                Point::from((start_x + (WS_BTN_WIDTH - 8) / 2, ws_y + ws_btn_height - 2)),
-                Size::from((8, 2)),
-            );
-            elements.push(make_solid_element(pip_geo, COLOR_TEXT));
         } else {
-            // Contrast elevated overlay pill
             elements.push(make_solid_element(ws_geo, COLOR_SURFACE_OVERLAY));
             if !has_text {
                 let pip_geo = Rectangle::new(
@@ -1015,10 +1115,10 @@ fn render_top_bar(
         start_x += WS_BTN_STRIDE;
     }
 
-    // 3. Layout indicator in TopBar
+    // 4. Layout indicator in TopBar
     let layout_bg = Rectangle::new(
         Point::from((start_x + 8, ws_y)),
-        Size::from((56, ws_btn_height)),
+        Size::from((52, ws_btn_height)),
     );
     elements.push(make_solid_element(layout_bg, COLOR_SURFACE_OVERLAY));
 
@@ -1932,13 +2032,65 @@ pub fn generate_shell_text_elements(
         }
     }
 
-    // 2. TopBar workspace digits (1..=9)
+    // 1b. TopBar Left Active App & Global Menus (macOS 27 style, RUSTYOS-038)
     let ws_btn_height = TOP_BAR_ITEM_H;
     let ws_y = TOP_BAR_ITEM_Y;
+
+    // System logo ("✦")
+    if let Some(el) = text_cache.render_label_centered(
+        renderer,
+        "✦",
+        12.5,
+        [185, 138, 255, 255],
+        Rectangle::new(
+            Point::from((TOP_BAR_LOGO_X, ws_y)),
+            Size::from((TOP_BAR_LOGO_W, ws_btn_height)),
+        ),
+    ) {
+        elements.push(el);
+    }
+
+    // Focused application name (bold)
+    let active_app_name = dock_view
+        .windows
+        .iter()
+        .find(|w| w.focused)
+        .map_or_else(|| "RustyOS".to_owned(), |w| extract_app_name(&w.title));
+    if let Some(el) = text_cache.render_label(
+        renderer,
+        &active_app_name,
+        12.5,
+        text_bright,
+        Point::from((TOP_BAR_APP_X, ws_y + 1)),
+    ) {
+        elements.push(el);
+    }
+
+    // Global Menubar items
+    let file_x = TOP_BAR_MENUS_START_X;
+    let edit_x = file_x + TOP_BAR_MENU_FILE_W + TOP_BAR_MENUS_GAP;
+    let view_x = edit_x + TOP_BAR_MENU_EDIT_W + TOP_BAR_MENUS_GAP;
+    let win_x = view_x + TOP_BAR_MENU_VIEW_W + TOP_BAR_MENUS_GAP;
+    let text_menu = [215, 205, 230, 230];
+
+    for (name, x, w) in [
+        ("File", file_x, TOP_BAR_MENU_FILE_W),
+        ("Edit", edit_x, TOP_BAR_MENU_EDIT_W),
+        ("View", view_x, TOP_BAR_MENU_VIEW_W),
+        ("Window", win_x, TOP_BAR_MENU_WINDOW_W),
+    ] {
+        let bounds = Rectangle::new(Point::from((x, ws_y)), Size::from((w, ws_btn_height)));
+        if let Some(el) = text_cache.render_label_centered(renderer, name, 11.5, text_menu, bounds)
+        {
+            elements.push(el);
+        }
+    }
+
+    // 2. TopBar compact workspace digits (1..=9)
     let mut start_x = WS_START_X;
     for ws in 1..=9 {
         let color = if ws == active_workspace {
-            text_bright
+            [255, 255, 255, 255]
         } else {
             text_muted
         };
@@ -1947,7 +2099,7 @@ pub fn generate_shell_text_elements(
             Size::from((WS_BTN_WIDTH, ws_btn_height)),
         );
         if let Some(el) =
-            text_cache.render_label_centered(renderer, &ws.to_string(), 12.0, color, bounds)
+            text_cache.render_label_centered(renderer, &ws.to_string(), 10.5, color, bounds)
         {
             elements.push(el);
         }
@@ -1961,11 +2113,11 @@ pub fn generate_shell_text_elements(
         "Float"
     };
     let layout_bounds = Rectangle::new(
-        Point::from((start_x + 11, ws_y)),
-        Size::from((53, ws_btn_height)),
+        Point::from((start_x + 8, ws_y)),
+        Size::from((52, ws_btn_height)),
     );
     if let Some(el) =
-        text_cache.render_label_centered(renderer, layout_label, 11.5, text_bright, layout_bounds)
+        text_cache.render_label_centered(renderer, layout_label, 11.0, text_bright, layout_bounds)
     {
         elements.push(el);
     }
@@ -3477,6 +3629,12 @@ pub fn generate_shell_composite_elements(
         );
     }
 
+    // Hairline divider before compact workspace indicators (`RUSTYOS-038`)
+    out.push(CompositorRenderElement::Solid(make_solid_element(
+        Rectangle::new(Point::from((TOP_BAR_SEPARATOR_X, 7)), Size::from((1, 12))),
+        COLOR_BORDER,
+    )));
+
     let ws_y = TOP_BAR_ITEM_Y;
     let ws_h = TOP_BAR_ITEM_H;
     let mut start_x = WS_START_X;
@@ -3486,19 +3644,12 @@ pub fn generate_shell_composite_elements(
             Size::from((WS_BTN_WIDTH, ws_h)),
         );
         if ws == active_workspace {
-            out.push(CompositorRenderElement::Solid(make_solid_element(
-                Rectangle::new(
-                    Point::from((start_x + (WS_BTN_WIDTH - 8) / 2, ws_y + ws_h - 2)),
-                    Size::from((8, 2)),
-                ),
-                COLOR_TEXT,
-            )));
             push_rounded_glass_box(
                 &mut out,
                 shape_cache,
                 renderer,
                 ws_rect,
-                10,
+                9,
                 RGBA_ACCENT,
                 None,
             );
@@ -3508,8 +3659,8 @@ pub fn generate_shell_composite_elements(
                 shape_cache,
                 renderer,
                 ws_rect,
-                10,
-                [255, 255, 255, 16],
+                9,
+                [255, 255, 255, 14],
                 None,
             );
         }
@@ -3520,8 +3671,8 @@ pub fn generate_shell_composite_elements(
         &mut out,
         shape_cache,
         renderer,
-        Rectangle::new(Point::from((start_x + 8, ws_y)), Size::from((56, ws_h))),
-        10,
+        Rectangle::new(Point::from((start_x + 8, ws_y)), Size::from((52, ws_h))),
+        8,
         [255, 255, 255, 16],
         (layout_mode == "master-stack").then_some(RGBA_ACCENT),
     );
@@ -4181,8 +4332,37 @@ mod tests {
         let size = Size::from((1280, 800));
         assert!(check_top_bar_status_click(size.w, 1200.0, 14.0));
         assert!(!check_top_bar_status_click(size.w, 100.0, 14.0));
-        assert!(check_top_bar_layout_click(300.0, 14.0));
+        assert!(check_top_bar_layout_click(515.0, 14.0));
         assert!(!check_top_bar_layout_click(50.0, 14.0));
+        assert!(!check_top_bar_layout_click(300.0, 14.0));
+
+        // Test TopBar Left Menu hits (RUSTYOS-038)
+        assert_eq!(
+            check_top_bar_menu_click(15.0, 14.0),
+            Some(TopBarMenuHit::SystemLogo)
+        );
+        assert_eq!(
+            check_top_bar_menu_click(50.0, 14.0),
+            Some(TopBarMenuHit::ActiveApp)
+        );
+        assert_eq!(
+            check_top_bar_menu_click(130.0, 14.0),
+            Some(TopBarMenuHit::File)
+        );
+        assert_eq!(
+            check_top_bar_menu_click(165.0, 14.0),
+            Some(TopBarMenuHit::Edit)
+        );
+        assert_eq!(
+            check_top_bar_menu_click(205.0, 14.0),
+            Some(TopBarMenuHit::View)
+        );
+        assert_eq!(
+            check_top_bar_menu_click(250.0, 14.0),
+            Some(TopBarMenuHit::Window)
+        );
+        assert_eq!(check_top_bar_menu_click(300.0, 14.0), None);
+        assert_eq!(check_top_bar_menu_click(15.0, 30.0), None);
 
         let (px, py, pw, _ph) = quick_settings_rect(size.w, size.h);
         assert_eq!(
@@ -4388,6 +4568,17 @@ mod tests {
         );
         assert_eq!(make_window_badge("RustyOS_Main : bash — Konsole"), "RM");
         assert_eq!(make_window_badge("Cursor Agents"), "CA");
+        assert_eq!(extract_app_name("RustyOS_Main : bash — Konsole"), "Konsole");
+        assert_eq!(
+            extract_app_name("Document.txt — Text Editor"),
+            "Text Editor"
+        );
+        assert_eq!(
+            extract_app_name("Inbox - Mozilla Thunderbird"),
+            "Mozilla Thund…"
+        );
+        assert_eq!(extract_app_name("Alacritty"), "Alacritty");
+        assert_eq!(extract_app_name(""), "RustyOS");
     }
 
     #[test]

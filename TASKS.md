@@ -478,6 +478,25 @@ hardware/software context и низкие накладные расходы.
 - **Acceptance criteria:** Hit-testing Quick Settings совпадает с новой геометрией (все 55 тестов `rusty-compositor` и 78 тестов воркспейса проходят); `clippy -D warnings` и `cargo fmt` чистые; внешний вид полностью соответствует `DESIGN.md` §12.4.
 - **Risks:** Нулевые новые зависимости; переключение Bluetooth и Lock Session сохранены в третьем ряду.
 
+## RUSTYOS-038 --- Active App Menu и глобальный Menubar в TopBar (DESIGN.md §12.1)
+
+**Статус:** done **Фаза:** 32 (macOS 27 Visual Alignment)
+
+- **Цель:** Привести левую часть `TopBar` к архитектуре и стилю macOS 27 согласно `DESIGN.md` §12.1: логотип RustyOS (`✦`), имя текущего сфокусированного приложения полужирным шрифтом (`Terminal`, `Files`, `RustyOS`), глобальные пункты меню (`File`, `Edit`, `View`, `Window`), тонкий вертикальный разделитель и компактные круглые пилюли рабочих столов `18x18 px` с радиусом `9 px`.
+- **Scope:**
+  - `crates/rusty-compositor/src/shell_render.rs`:
+    - Константы `TOP_BAR_LOGO_X = 12`, `TOP_BAR_LOGO_W = 18`, `TOP_BAR_APP_X = 34`, `TOP_BAR_APP_MAX_W = 78`, `TOP_BAR_MENUS_START_X = 118`, ширины меню `File` (28), `Edit` (28), `View` (32), `Window` (50), `TOP_BAR_SEPARATOR_X = 296`.
+    - Компактные индикаторы воркспейсов: `WS_START_X = 308`, `WS_BTN_WIDTH = 18`, `WS_BTN_GAP = 3`, `WS_BTN_STRIDE = 21`, высота `18 px` с радиусом `9` (круглые пилюли, активный — акцентный фиолетовый `RGBA_ACCENT`, неактивные — полупрозрачные белые `[255, 255, 255, 14]`).
+    - Функция `extract_app_name`: извлекает чистое имя приложения из заголовка окна XDG (с разделением по ` — ` и ` - ` и fallback на `RustyOS`).
+    - Тип `TopBarMenuHit` и функция `check_top_bar_menu_click` для точного hit-testing меню (`SystemLogo`, `ActiveApp`, `File`, `Edit`, `View`, `Window`).
+    - Обновление `check_top_bar_layout_click` для работы с компактным положением индикатора раскладки (`505..557 px`).
+    - Отрисовка текста (`generate_shell_text_elements`) и GLES-композиция (`generate_shell_composite_elements`) с жирным именем активного приложения, меню и вертикальным разделителем.
+  - `crates/rusty-compositor/src/input.rs`:
+    - Интеграция `check_top_bar_menu_click` в обработчик кликов `TopBar`: клик по логотипу `✦` открывает Spotlight-лаунчер, клик по `ActiveApp` переключает Overview, клик по `Window` переключает режим раскладки (`Tile`/`Float`).
+- **Dependencies:** `RUSTYOS-036`, `RUSTYOS-037`.
+- **Acceptance criteria:** Все 78 тестов воркспейса проходят; `clippy -D warnings` и `cargo fmt` без замечаний; hit-testing меню и рабочих столов точно соответствует визуальной разметке; левая панель полностью соответствует `DESIGN.md` §12.1.
+- **Risks:** Нулевые новые зависимости; на экранах любой ширины (от 1024 до 4K) меню и воркспейсы умещаются с достаточным запасом свободного пространства до системного трея.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance
