@@ -8,7 +8,8 @@ use rusty_ipc::{IpcServer, default_ipc_socket_path};
 use smithay::{
     backend::{
         renderer::{
-            Color32F, damage::OutputDamageTracker, element::AsRenderElements, gles::GlesRenderer,
+            Color32F, damage::OutputDamageTracker, element::AsRenderElements,
+            element::solid::SolidColorRenderElement, gles::GlesRenderer,
         },
         winit::{self, WinitEvent, WinitGraphicsBackend},
     },
@@ -225,9 +226,8 @@ fn handle_winit_event(event: WinitEvent, app_state: &mut RustyCompositorState) {
     match event {
         WinitEvent::Resized { size, scale_factor } => {
             update_output_size(&app_state.output, size, scale_factor);
-            app_state
-                .wm
-                .upsert_output(PRIMARY_OUTPUT_ID, rusty_wm::Rect::new(0, 0, size.w, size.h));
+            let work_area = crate::shell_render::usable_work_area(size);
+            app_state.wm.upsert_output(PRIMARY_OUTPUT_ID, work_area);
             let serial = smithay::utils::SERIAL_COUNTER.next_serial();
             app_state.sync_space_with_wm(serial);
         }
@@ -282,27 +282,35 @@ fn render_winit_frame(
             backend.buffer_age().unwrap_or(0)
         };
         let (renderer, mut framebuffer) = backend.bind().map_err(|err| err.to_string())?;
-        let custom_elements: [&smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement<GlesRenderer>; 0] = [];
 
-        let render_result = render_output::<
-            GlesRenderer,
-            &smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement<
-                GlesRenderer,
-            >,
-            smithay::desktop::Window,
-            _,
-        >(
-            &state.output,
-            renderer,
-            &mut framebuffer,
-            1.0,
-            buffer_age,
-            [&state.space],
-            &custom_elements,
-            damage_tracker,
-            BACKGROUND_COLOR,
-        )
-        .map_err(|err| err.to_string())?;
+        let active_ws = state.wm.active_workspace_id().0;
+        let layout_str = match state.wm.active_layout_mode() {
+            rusty_wm::LayoutMode::Floating => "floating",
+            rusty_wm::LayoutMode::MasterStack => "master-stack",
+        };
+        let window_count = state.wm.visible_windows().len();
+        let has_focused = state.wm.focused_window().is_some();
+        let shell_elements = crate::shell_render::generate_shell_render_elements(
+            size,
+            active_ws,
+            layout_str,
+            window_count,
+            has_focused,
+        );
+
+        let render_result =
+            render_output::<GlesRenderer, SolidColorRenderElement, smithay::desktop::Window, _>(
+                &state.output,
+                renderer,
+                &mut framebuffer,
+                1.0,
+                buffer_age,
+                [&state.space],
+                &shell_elements,
+                damage_tracker,
+                BACKGROUND_COLOR,
+            )
+            .map_err(|err| err.to_string())?;
 
         if force_full_damage {
             damage_rects = 1;

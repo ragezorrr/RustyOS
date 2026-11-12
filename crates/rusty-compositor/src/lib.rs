@@ -7,6 +7,7 @@
 pub mod drm_backend;
 pub mod frame_timing;
 pub mod input;
+pub mod shell_render;
 pub mod state;
 pub mod winit_backend;
 

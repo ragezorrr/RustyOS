@@ -181,7 +181,8 @@ impl RustyCompositorState {
         let mut space = Space::default();
         space.map_output(&output, (0, 0));
 
-        let wm = WindowManager::new(Rect::new(0, 0, initial_size.w, initial_size.h));
+        let work_area = crate::shell_render::usable_work_area(initial_size);
+        let wm = WindowManager::new(work_area);
 
         Ok(Self {
             start_time: Instant::now(),

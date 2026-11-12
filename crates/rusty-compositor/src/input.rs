@@ -144,6 +144,16 @@ impl RustyCompositorState {
         let button_state = event.state();
 
         if button_state == ButtonState::Pressed {
+            // Check for TopBar click to switch workspaces via mouse
+            if let Some(target_ws) = crate::shell_render::check_top_bar_workspace_click(
+                self.pointer_location.x,
+                self.pointer_location.y,
+            ) {
+                let ws = WorkspaceId::new_clamped(target_ws);
+                self.apply_wm_action(WmAction::SwitchWorkspace(ws), serial);
+                return;
+            }
+
             if let Some((window, _surface, _origin)) =
                 self.surface_under_pointer(self.pointer_location)
             {
