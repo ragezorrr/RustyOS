@@ -72,6 +72,7 @@ pub fn run_nested_winit(config: &CompositorConfig) -> Result<BootstrapReport, Co
     state.telemetry = crate::telemetry::SystemMetricsHandle::start_background();
     state.dbus_notifications =
         crate::dbus_notifications::DbusNotificationHandle::start_background();
+    state.tray = crate::tray::TrayWatcherHandle::start_background();
     let mut damage_tracker = OutputDamageTracker::from_output(&state.output);
     let mut text_cache = crate::text::TextCache::new();
     let mut shape_cache = crate::surfaces::UiShapeCache::new();
@@ -198,6 +199,7 @@ pub(crate) fn dispatch_and_refresh_clients(
 ) {
     let dispatch_start = Instant::now();
     app_state.drain_dbus_notifications();
+    app_state.drain_tray_updates();
     app_state.drain_screenshot_results();
     if let Some(ipc) = ipc_server {
         ipc.poll_requests(|req| app_state.handle_ipc_request(req));
@@ -357,8 +359,14 @@ pub(crate) fn build_frame_render_list(
         .into_iter()
         .map(|w| (w.id, w.geometry))
         .collect();
-    let window_count = visible_windows.len();
-    let focused_win = state.wm.focused_window();
+    let window_count = visible_windows
+        .iter()
+        .filter(|(id, _)| !state.is_window_minimized(*id))
+        .count();
+    let focused_win = state
+        .wm
+        .focused_window()
+        .filter(|id| !state.is_window_minimized(*id));
 
     let mut render_list: Vec<CompositorRenderElement> = Vec::new();
     if include_software_cursor {
@@ -419,6 +427,17 @@ pub(crate) fn build_frame_render_list(
     );
 
     if !layer_surfaces_present {
+        let tray_views: Vec<crate::shell_render::TopBarTrayItem<'_>> = state
+            .tray_items
+            .iter()
+            .take(crate::shell_render::MAX_TOP_BAR_TRAY_ITEMS)
+            .map(|item| crate::shell_render::TopBarTrayItem {
+                key: &item.key,
+                label: &item.badge,
+                attention: item.status == crate::tray::TrayStatus::NeedsAttention,
+                passive: item.status == crate::tray::TrayStatus::Passive,
+            })
+            .collect();
         let top_telemetry = crate::shell_render::TopBarTelemetry {
             clock_hhmm: &tel.clock_hhmm,
             battery_percent: tel.power.percentage,
@@ -429,6 +448,7 @@ pub(crate) fn build_frame_render_list(
             quick_settings_open: state.quick_settings_active,
             notification_count: state.notification_count,
             kbd_layout: &state.active_kbd_layout,
+            tray_items: &tray_views,
         };
 
         let toast_views: Vec<crate::shell_render::NotificationToastView<'_>> = state
@@ -447,6 +467,7 @@ pub(crate) fn build_frame_render_list(
         let mut dock_windows: Vec<crate::shell_render::DockWindowEntry> = visible_windows
             .iter()
             .map(|&(win_id, rect)| {
+                let minimized = state.is_window_minimized(win_id);
                 let title = state.smithay_window_for_id(win_id).map_or_else(
                     || format!("Window #{}", win_id.0),
                     |win| window_title(&win, win_id),
@@ -457,7 +478,8 @@ pub(crate) fn build_frame_render_list(
                     title,
                     badge,
                     dimensions: format!("{}x{}", rect.width, rect.height),
-                    focused: focused_win == Some(win_id),
+                    focused: !minimized && focused_win == Some(win_id),
+                    minimized,
                 }
             })
             .collect();
@@ -544,6 +566,9 @@ pub(crate) fn build_frame_render_list(
 
     // Render managed windows and their SSD titlebars (or clean CSD rim) in top-to-bottom stacking order
     for &(win_id, rect) in visible_windows.iter().rev() {
+        if state.is_window_minimized(win_id) {
+            continue;
+        }
         let origin = state
             .animations
             .animated_window_origin(win_id.0)

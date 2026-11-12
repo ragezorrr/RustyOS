@@ -26,6 +26,7 @@ enum KeyIntercept {
     ToggleLauncher,
     ToggleQuickSettings,
     ToggleOverview,
+    MinimizeFocused,
     TriggerNotification,
     ClearNotifications,
     OverviewClose,
@@ -188,6 +189,15 @@ impl RustyCompositorState {
                     overview_active = self.overview_active,
                     "Toggled Workspace Overview"
                 );
+            }
+            KeyIntercept::MinimizeFocused => {
+                if let Some(win_id) = self
+                    .wm
+                    .focused_window()
+                    .filter(|id| !self.is_window_minimized(*id))
+                {
+                    self.minimize_window(win_id, serial);
+                }
             }
             KeyIntercept::TriggerNotification => {
                 let id = self.trigger_demo_notification();
@@ -546,6 +556,26 @@ impl RustyCompositorState {
                 self.cycle_keyboard_layout();
                 return;
             }
+            if let Some(tray_idx) = crate::shell_render::check_top_bar_tray_click(
+                output_width,
+                self.notification_count,
+                self.tray_items.len(),
+                self.pointer_location.x,
+                self.pointer_location.y,
+            ) && let Some(item) = self.tray_items.get(tray_idx)
+            {
+                #[allow(clippy::cast_possible_truncation)]
+                let click_x = self.pointer_location.x.round() as i32;
+                #[allow(clippy::cast_possible_truncation)]
+                let click_y = self.pointer_location.y.round() as i32;
+                match button {
+                    272 => self.tray.activate(&item.key, click_x, click_y),
+                    273 => self.tray.context_menu(&item.key, click_x, click_y),
+                    274 => self.tray.secondary_activate(&item.key, click_x, click_y),
+                    _ => {}
+                }
+                return;
+            }
 
             // Handle Spotlight clicks exclusively while launcher overlay is open (RUSTYOS-018b)
             if self.launcher_active {
@@ -619,6 +649,7 @@ impl RustyCompositorState {
                     .wm
                     .visible_windows()
                     .into_iter()
+                    .filter(|w| !self.is_window_minimized(w.id))
                     .map(|w| crate::shell_render::SsdHitWindow {
                         id: w.id,
                         rect: w.geometry,
@@ -636,8 +667,7 @@ impl RustyCompositorState {
                             self.apply_wm_action(WmAction::CloseFocused, serial);
                         }
                         crate::shell_render::SsdHit::Minimize(win_id) => {
-                            self.wm.focus_and_raise(win_id);
-                            self.apply_wm_action(WmAction::SnapFocused(SnapTarget::Center), serial);
+                            self.minimize_window(win_id, serial);
                         }
                         crate::shell_render::SsdHit::Maximize(win_id) => {
                             self.wm.focus_and_raise(win_id);
@@ -680,10 +710,12 @@ impl RustyCompositorState {
                         })
                         .or_else(|| {
                             #[allow(clippy::cast_possible_truncation)]
-                            self.wm.window_under_point(
-                                self.pointer_location.x.round() as i32,
-                                self.pointer_location.y.round() as i32,
-                            )
+                            self.wm
+                                .window_under_point(
+                                    self.pointer_location.x.round() as i32,
+                                    self.pointer_location.y.round() as i32,
+                                )
+                                .filter(|id| !self.is_window_minimized(*id))
                         });
                     if let Some(win_id) = target_id {
                         self.wm.focus_and_raise(win_id);
@@ -897,6 +929,7 @@ fn match_shortcut(modifiers: ModifiersState, sym: Keysym) -> Option<KeyIntercept
         Keysym::r | Keysym::R => Some(KeyIntercept::ToggleReducedMotion),
         Keysym::s | Keysym::S => Some(KeyIntercept::ToggleQuickSettings),
         Keysym::e | Keysym::E => Some(KeyIntercept::ToggleOverview),
+        Keysym::h | Keysym::H => Some(KeyIntercept::MinimizeFocused),
         Keysym::n | Keysym::N => {
             if modifiers.shift {
                 Some(KeyIntercept::ClearNotifications)
@@ -1118,6 +1151,10 @@ mod tests {
         assert_eq!(
             match_shortcut(alt, Keysym::e),
             Some(KeyIntercept::ToggleOverview)
+        );
+        assert_eq!(
+            match_shortcut(alt, Keysym::h),
+            Some(KeyIntercept::MinimizeFocused)
         );
         assert_eq!(
             match_shortcut(alt, Keysym::n),

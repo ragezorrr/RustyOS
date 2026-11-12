@@ -572,6 +572,7 @@ fn try_run_native_drm_session(
     state.telemetry = crate::telemetry::SystemMetricsHandle::start_background();
     state.dbus_notifications =
         crate::dbus_notifications::DbusNotificationHandle::start_background();
+    state.tray = crate::tray::TrayWatcherHandle::start_background();
 
     let gbm_allocator = GbmAllocator::new(
         gbm_device.clone(),

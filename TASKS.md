@@ -397,6 +397,19 @@ hardware/software context и низкие накладные расходы.
 - **Acceptance criteria:** Нажатие клавиш громкости/яркости/медиа мгновенно показывает стеклянный OSD над Dock и применяет изменения в фоне без блокировки event loop; `Print` сохраняет PNG всего экрана, `Alt+Print` / `Super+Shift+S` — активного окна, копирует в Wayland clipboard (`wl-copy`) и показывает уведомление; 68 тестов и `clippy -D warnings` проходят без предупреждений.
 - **Risks:** На стационарных ПК без `/sys/class/backlight` клавиши яркости безопасно показывают `No Backlight` без ошибок; копирование картинки в clipboard использует опциональный `wl-copy`, если установлен в системе.
 
+## RUSTYOS-032 --- Системный трей (`StatusNotifierItem`) в TopBar и сворачивание/восстановление окон из Dock
+
+**Статус:** done **Фаза:** 29 (System Tray & Window Minimize/Restore)
+
+- **Цель:** Добавить неблокирующий D-Bus сервер системного трея (`org.kde.StatusNotifierWatcher` / `StatusNotifierItem`) с интерактивными значками в `TopBar` (ЛКМ/ПКМ без блокировки event loop) и полноценное сворачивание/восстановление окон через жёлтую кнопку traffic-light, `Alt+H`, запросы клиентов (`xdg_toplevel::minimize_request` / XWayland `XwmHandler::minimize_request`) и переключение через `Dock`.
+- **Scope:**
+  - `crates/rusty-compositor/src/tray.rs`: фоновый поток `TrayWatcherHandle` с D-Bus-сервером `org.kde.StatusNotifierWatcher` (fallback `org.rustyos.StatusNotifierWatcher` и синхронизация существующих элементов в nested `--winit` режиме), парсер `parse_sni_service_and_path`, чтение `Id`/`Title`/`IconName`/`Status`/`ItemIsMenu`, автоочистка завершившихся апплетов и асинхронный вызов `Activate`/`ContextMenu`/`SecondaryActivate`.
+  - `crates/rusty-compositor/src/state.rs` и `xwayland.rs`: отслеживание `minimized_window_ids`, методы `minimize_window`, `restore_window`, `is_window_minimized`, `drain_tray_updates`, обработка `xdg_toplevel::minimize_request` и X11 `minimize_request`/`unminimize_request`, автоматический перевод клавиатурного фокуса на следующее видимое окно и защита `commit`/`Alt+Tab`/`CloseFocused` от работы с уже свёрнутым окном.
+  - `crates/rusty-compositor/src/shell_render.rs`, `input.rs`, `winit_backend.rs`, `drm_backend.rs`: компактные кликабельные бейджи `TopBarTrayItem` левее индикатора раскладки `EN`/`RU` (ЛКМ `Activate`, ПКМ `ContextMenu`, СКМ `SecondaryActivate`), переключение свёрнутых плиток в `Dock` (`minimized` индикатор 4px янтарной точкой, клик сворачивает активное окно или разворачивает свёрнутое), хоткей `Alt+H` и обход свёрнутых окон в `check_window_frame_hit`/`build_frame_render_list`.
+- **Dependencies:** `RUSTYOS-023`, `RUSTYOS-026`, `RUSTYOS-029`, `RUSTYOS-030`.
+- **Acceptance criteria:** Апплеты `StatusNotifierItem` регистрируются на шине D-Bus и отображаются компактными бейджами в `TopBar` с реакцией на ЛКМ/ПКМ без задержки кадров; нажатие жёлтой кнопки заголовка, `Alt+H` или клик по активному окну в `Dock` скрывает окно со сцены и фокусирует следующее видимое окно, а повторный клик по плитке в `Dock` или карточке `Overview` восстанавливает его; 71 тест и `clippy -D warnings` проходят без предупреждений.
+- **Risks:** Настройка внешнего D-Bus трея внутри `--winit` сессии с уже активным системным треем хоста опирается на best-effort синхронизацию с хостовым `org.kde.StatusNotifierWatcher` (отдельная изолированная сессия `--drm` или `dbus-run-session` держит первичное имя напрямую).
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

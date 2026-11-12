@@ -134,6 +134,8 @@ pub struct RustyCompositorState {
     pub xdg_decoration_requested: HashSet<WindowId>,
     /// Managed windows using client-side decorations (CSD) without RustyOS SSD (`RUSTYOS-030`).
     pub csd_window_ids: HashSet<WindowId>,
+    /// Managed windows currently minimized to the Dock (`RUSTYOS-032`).
+    pub minimized_window_ids: HashSet<WindowId>,
     /// Desktop space managing mapped windows and outputs for the active workspace.
     pub space: Space<Window>,
     /// Popup manager tracking `xdg_popup` surfaces.
@@ -216,6 +218,10 @@ pub struct RustyCompositorState {
     pub notifications: Vec<CompositorNotification>,
     /// Non-blocking D-Bus `org.freedesktop.Notifications` bridge (`RUSTYOS-026`).
     pub dbus_notifications: crate::dbus_notifications::DbusNotificationHandle,
+    /// Non-blocking D-Bus `org.kde.StatusNotifierWatcher` system tray bridge (`RUSTYOS-032`).
+    pub tray: crate::tray::TrayWatcherHandle,
+    /// Active system tray items rendered in `TopBar` (`RUSTYOS-032`).
+    pub tray_items: Vec<crate::tray::TrayItemView>,
     /// Transient On-Screen Display (OSD) indicator banner (`RUSTYOS-031`).
     pub osd: Option<OsdBanner>,
     /// Queued on-demand screenshot capture mode executed on the next render pass (`RUSTYOS-031`).
@@ -314,6 +320,7 @@ impl RustyCompositorState {
             window_bindings: Vec::new(),
             xdg_decoration_requested: HashSet::new(),
             csd_window_ids: HashSet::new(),
+            minimized_window_ids: HashSet::new(),
             space,
             popups: PopupManager::default(),
             output,
@@ -355,6 +362,8 @@ impl RustyCompositorState {
             notification_count: 0,
             notifications: Vec::new(),
             dbus_notifications: crate::dbus_notifications::DbusNotificationHandle::default(),
+            tray: crate::tray::TrayWatcherHandle::default(),
+            tray_items: Vec::new(),
             osd: None,
             pending_screenshot: None,
             screenshot_results: crate::screenshot::ScreenshotResultQueue::default(),
@@ -692,6 +701,62 @@ impl RustyCompositorState {
         }
     }
 
+    /// Non-blockingly drains system tray updates from the background SNI watcher (`RUSTYOS-032`).
+    pub fn drain_tray_updates(&mut self) {
+        if let Some(items) = self.tray.drain_latest() {
+            self.tray_items = items;
+        }
+    }
+
+    /// Returns `true` if `win_id` is currently minimized to the Dock (`RUSTYOS-032`).
+    #[must_use]
+    pub fn is_window_minimized(&self, win_id: WindowId) -> bool {
+        self.minimized_window_ids.contains(&win_id)
+    }
+
+    /// Minimizes `win_id` to the Dock, shifting focus to the next topmost visible window (`RUSTYOS-032`).
+    pub fn minimize_window(&mut self, win_id: WindowId, serial: Serial) {
+        if self.wm.window(win_id).is_none() {
+            return;
+        }
+        if self
+            .active_window_drag
+            .is_some_and(|drag| drag.window_id == win_id)
+        {
+            self.active_window_drag = None;
+        }
+        if self
+            .active_window_resize
+            .is_some_and(|resize| resize.window_id == win_id)
+        {
+            self.active_window_resize = None;
+        }
+        self.minimized_window_ids.insert(win_id);
+        if self.wm.focused_window() == Some(win_id) {
+            let next_visible = self
+                .wm
+                .visible_windows()
+                .into_iter()
+                .rev()
+                .find(|w| w.id != win_id && !self.is_window_minimized(w.id))
+                .map(|w| w.id);
+            if let Some(next_id) = next_visible {
+                self.wm.focus_and_raise(next_id);
+            }
+        }
+        self.sync_space_with_wm(serial);
+    }
+
+    /// Restores a minimized window from the Dock, focusing and raising it (`RUSTYOS-032`).
+    pub fn restore_window(&mut self, win_id: WindowId, serial: Serial) {
+        if self.wm.window(win_id).is_none() {
+            return;
+        }
+        self.minimized_window_ids.remove(&win_id);
+        self.wm.focus_and_raise(win_id);
+        self.sync_space_with_wm(serial);
+    }
+
     /// Removes notifications whose TTL has elapsed as of current uptime (`RUSTYOS-024`).
     pub fn expire_notifications(&mut self) {
         let now = self.start_time.elapsed();
@@ -831,17 +896,17 @@ impl RustyCompositorState {
         ids
     }
 
-    /// Focuses and raises the `idx`-th window in [`Self::ordered_visible_window_ids`] (`RUSTYOS-023`).
+    /// Focuses and raises the `idx`-th window in [`Self::ordered_visible_window_ids`],
+    /// restoring it if minimized (`RUSTYOS-023` / `RUSTYOS-032`).
     pub fn focus_ordered_window(&mut self, idx: usize, serial: Serial) {
         let ids = self.ordered_visible_window_ids();
         if let Some(&win_id) = ids.get(idx) {
-            self.wm.focus_and_raise(win_id);
-            self.sync_space_with_wm(serial);
+            self.restore_window(win_id, serial);
             self.close_overview();
         }
     }
 
-    /// Executes an interactive Dock click action (`RUSTYOS-023`).
+    /// Executes an interactive Dock click action (`RUSTYOS-023` / `RUSTYOS-032`).
     pub fn handle_dock_hit(&mut self, hit: crate::shell_render::DockHit, serial: Serial) {
         let ipc_path = rusty_ipc::default_ipc_socket_path(&self.socket_name);
         match hit {
@@ -881,7 +946,19 @@ impl RustyCompositorState {
                 self.toggle_overview();
             }
             crate::shell_render::DockHit::WindowSlot(idx) => {
-                self.focus_ordered_window(idx, serial);
+                let ids = self.ordered_visible_window_ids();
+                if let Some(&win_id) = ids.get(idx) {
+                    if self.is_window_minimized(win_id) {
+                        self.restore_window(win_id, serial);
+                        self.close_overview();
+                    } else if !self.overview_active && self.wm.focused_window() == Some(win_id) {
+                        self.minimize_window(win_id, serial);
+                    } else {
+                        self.wm.focus_and_raise(win_id);
+                        self.sync_space_with_wm(serial);
+                        self.close_overview();
+                    }
+                }
             }
         }
     }
@@ -1223,6 +1300,7 @@ impl RustyCompositorState {
             }
             self.window_bindings.retain(|(wid, _)| *wid != id);
             self.unregister_window_decoration(id);
+            self.minimized_window_ids.remove(&id);
             self.wm.unmap_window(id);
             self.animations.remove_window(id.0);
             info!(window_id = id.0, "Pruned closed Wayland window from WM");
@@ -1235,6 +1313,19 @@ impl RustyCompositorState {
     /// states, and keyboard focus.
     pub fn apply_wm_action(&mut self, action: WmAction, serial: Serial) {
         info!(?action, "Applying window manager action");
+        let focused_is_minimized = self
+            .wm
+            .focused_window()
+            .is_some_and(|id| self.is_window_minimized(id));
+        if focused_is_minimized
+            && matches!(
+                action,
+                WmAction::CloseFocused | WmAction::ToggleMaximizeFocused | WmAction::SnapFocused(_)
+            )
+        {
+            return;
+        }
+
         let prev_ws = self.wm.active_workspace_id();
         if let Some(close_id) = self.wm.apply_action(action) {
             if let Some(win) = self.smithay_window_for_id(close_id) {
@@ -1254,6 +1345,27 @@ impl RustyCompositorState {
                 }
             }
             return;
+        }
+
+        if matches!(action, WmAction::FocusNext | WmAction::FocusPrev) {
+            let visible_count = self.wm.visible_windows().len();
+            let has_unminimized = self
+                .wm
+                .visible_windows()
+                .into_iter()
+                .any(|w| !self.is_window_minimized(w.id));
+            if has_unminimized {
+                for _ in 0..visible_count {
+                    if !self
+                        .wm
+                        .focused_window()
+                        .is_some_and(|id| self.is_window_minimized(id))
+                    {
+                        break;
+                    }
+                    let _ = self.wm.apply_action(action);
+                }
+            }
         }
 
         if let WmAction::SwitchWorkspace(target_ws) = action
@@ -1279,9 +1391,13 @@ impl RustyCompositorState {
             .wm
             .visible_windows()
             .into_iter()
+            .filter(|w| !self.is_window_minimized(w.id))
             .map(|w| (w.id, w.geometry, w.maximized))
             .collect();
-        let focused_id = self.wm.focused_window();
+        let focused_id = self
+            .wm
+            .focused_window()
+            .filter(|id| !self.is_window_minimized(*id));
 
         // 1. Unmap managed windows that are no longer on an active workspace, preserving override-redirect X11 popups.
         let current_space_windows: Vec<Window> = self.space.elements().cloned().collect();
@@ -1370,11 +1486,15 @@ impl RustyCompositorState {
         }
         let _ = self.animations.tick(now);
 
-        let focused_id = self.wm.focused_window();
+        let focused_id = self
+            .wm
+            .focused_window()
+            .filter(|id| !self.is_window_minimized(*id));
         let visible_ids: Vec<WindowId> = self
             .wm
             .visible_windows()
             .into_iter()
+            .filter(|w| !self.is_window_minimized(w.id))
             .map(|w| w.id)
             .collect();
         for win_id in visible_ids {
@@ -1472,6 +1592,7 @@ impl RustyCompositorState {
                 self.apply_wm_action(WmAction::SwitchWorkspace(ws), serial);
             }
             ShellRequest::FocusWindow { window_id } => {
+                self.minimized_window_ids.remove(&WindowId(window_id));
                 if self.wm.focus_and_raise(WindowId(window_id)) {
                     self.sync_space_with_wm(serial);
                 }
@@ -1582,7 +1703,10 @@ impl CompositorHandler for RustyCompositorState {
                     let serial = smithay::utils::SERIAL_COUNTER.next_serial();
                     self.sync_space_with_wm(serial);
                 }
-                if let Some(wm_win) = self.wm.window(win_id) {
+                if !self.is_window_minimized(win_id)
+                    && let Some(wm_win) = self.wm.window(win_id)
+                    && wm_win.workspace == self.wm.active_workspace_id()
+                {
                     let origin = self
                         .animations
                         .animated_window_origin(win_id.0)
@@ -1850,10 +1974,8 @@ impl XdgShellHandler for RustyCompositorState {
 
     fn minimize_request(&mut self, surface: ToplevelSurface) {
         if let Some(win_id) = self.window_id_for_toplevel(&surface) {
-            debug!(
-                window_id = win_id.0,
-                "Received xdg_toplevel::minimize_request (ignored; minimize tray not implemented)"
-            );
+            let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+            self.minimize_window(win_id, serial);
         }
     }
 
@@ -1890,6 +2012,7 @@ impl XdgShellHandler for RustyCompositorState {
             }
             self.window_bindings.retain(|(wid, _)| *wid != win_id);
             self.unregister_window_decoration(win_id);
+            self.minimized_window_ids.remove(&win_id);
             self.wm.unmap_window(win_id);
             self.animations.remove_window(win_id.0);
             let serial = smithay::utils::SERIAL_COUNTER.next_serial();

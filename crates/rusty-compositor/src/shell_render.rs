@@ -92,6 +92,19 @@ fn make_solid_element(
     )
 }
 
+/// Compact system tray item metadata rendered inside `TopBar` (`RUSTYOS-032`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TopBarTrayItem<'a> {
+    /// Unique identifier (`<bus><path>`).
+    pub key: &'a str,
+    /// Short 1-2 char monogram (`"NM"`, `"TG"`, etc.).
+    pub label: &'a str,
+    /// Attention alert requested by applet (`NeedsAttention`).
+    pub attention: bool,
+    /// Passive/idle state (`Passive`).
+    pub passive: bool,
+}
+
 /// Live hardware/session telemetry displayed inside `TopBar` (`RUSTYOS-021`).
 #[derive(Debug, Clone)]
 #[allow(clippy::struct_excessive_bools)]
@@ -114,6 +127,8 @@ pub struct TopBarTelemetry<'a> {
     pub notification_count: u32,
     /// Active keyboard layout badge code (`"EN"`, `"RU"`, etc.) (`RUSTYOS-029`).
     pub kbd_layout: &'a str,
+    /// Registered `StatusNotifierItem` tray badges rendered left of the keyboard indicator (`RUSTYOS-032`).
+    pub tray_items: &'a [TopBarTrayItem<'a>],
 }
 
 impl Default for TopBarTelemetry<'static> {
@@ -128,6 +143,7 @@ impl Default for TopBarTelemetry<'static> {
             quick_settings_open: false,
             notification_count: 0,
             kbd_layout: "EN",
+            tray_items: &[],
         }
     }
 }
@@ -194,6 +210,8 @@ pub struct DockWindowEntry {
     pub dimensions: String,
     /// Whether this window is currently focused.
     pub focused: bool,
+    /// Whether this window is currently minimized to the Dock (`RUSTYOS-032`).
+    pub minimized: bool,
 }
 
 /// Computes a concise 2-character badge from a window title (`RUSTYOS-023`).
@@ -400,6 +418,42 @@ fn kbd_badge_rect(screen_width: i32, notification_count: u32) -> (i32, i32, i32,
     (badge_x, 6, badge_w, 20)
 }
 
+/// Maximum number of system tray applets displayed simultaneously in `TopBar` (`RUSTYOS-032`).
+pub const MAX_TOP_BAR_TRAY_ITEMS: usize = 6;
+
+/// Computes `TopBar` tray pill rectangles positioned immediately left of the keyboard indicator (`RUSTYOS-032`).
+#[must_use]
+pub fn tray_slot_rects(
+    screen_width: i32,
+    notification_count: u32,
+    tray_count: usize,
+) -> Vec<(i32, i32, i32, i32)> {
+    if tray_count == 0 {
+        return Vec::new();
+    }
+    let min_left_x = WS_START_X + 9 * WS_BTN_STRIDE + 8 + 56 + 10;
+    let (kbd_x, _, _, _) = kbd_badge_rect(screen_width, notification_count);
+    let avail = (kbd_x - 8 - min_left_x).max(0);
+    let slot_w = 26;
+    let gap = 6;
+    let stride = slot_w + gap;
+    let max_fit = usize::try_from((avail + gap) / stride)
+        .unwrap_or(0)
+        .min(MAX_TOP_BAR_TRAY_ITEMS);
+    let count = tray_count.min(max_fit);
+    if count == 0 {
+        return Vec::new();
+    }
+    let count_i32 = i32::try_from(count).unwrap_or(0);
+    let first_x = kbd_x - 8 - (count_i32 * stride - gap);
+    (0..count)
+        .map(|idx| {
+            let idx_i32 = i32::try_from(idx).unwrap_or(0);
+            (first_x + idx_i32 * stride, 6, slot_w, 20)
+        })
+        .collect()
+}
+
 /// Maximum number of floating notification toasts shown simultaneously (`RUSTYOS-024`).
 pub const MAX_VISIBLE_NOTIFICATIONS: usize = 4;
 
@@ -476,6 +530,29 @@ pub fn check_top_bar_kbd_click(screen_width: i32, notification_count: u32, x: f6
     }
     let (bx, _by, bw, _bh) = kbd_badge_rect(screen_width, notification_count);
     x >= f64::from(bx) && x < f64::from(bx + bw)
+}
+
+/// Checks if `(x, y)` clicked one of the `TopBar` system tray pills and returns its visible index (`RUSTYOS-032`).
+#[must_use]
+pub fn check_top_bar_tray_click(
+    screen_width: i32,
+    notification_count: u32,
+    tray_count: usize,
+    x: f64,
+    y: f64,
+) -> Option<usize> {
+    if y < 0.0 || y > f64::from(TOP_BAR_HEIGHT) {
+        return None;
+    }
+    for (idx, (bx, _by, bw, _bh)) in tray_slot_rects(screen_width, notification_count, tray_count)
+        .into_iter()
+        .enumerate()
+    {
+        if x >= f64::from(bx) && x < f64::from(bx + bw) {
+            return Some(idx);
+        }
+    }
+    None
 }
 
 fn quick_settings_rect(width: i32, height: i32) -> (i32, i32, i32, i32) {
@@ -1788,6 +1865,28 @@ pub fn generate_shell_text_elements(
         }
     }
 
+    // 4aa. System tray badges (`StatusNotifierItem`) left of keyboard layout (`RUSTYOS-032`)
+    let tray_rects = tray_slot_rects(
+        width,
+        top_telemetry.notification_count,
+        top_telemetry.tray_items.len(),
+    );
+    for (item, (tx, _ty, tw, _th)) in top_telemetry.tray_items.iter().zip(tray_rects) {
+        let label_color = if item.attention {
+            [255, 210, 214, 255]
+        } else if item.passive {
+            text_muted
+        } else {
+            text_bright
+        };
+        let tray_bounds = Rectangle::new(Point::from((tx, ws_y)), Size::from((tw, ws_btn_height)));
+        if let Some(el) =
+            text_cache.render_label_centered(renderer, item.label, 9.5, label_color, tray_bounds)
+        {
+            elements.push(el);
+        }
+    }
+
     // 4b. Floating top-right Notification HUD toast labels (`RUSTYOS-024`)
     if !matches!(
         overlay,
@@ -1847,6 +1946,8 @@ pub fn generate_shell_text_elements(
                 let badge = win.map_or("Wn", |entry| entry.badge.as_str());
                 let col = if win.is_some_and(|entry| entry.focused) {
                     text_bright
+                } else if win.is_some_and(|entry| entry.minimized) {
+                    [158, 148, 174, 255]
                 } else {
                     [224, 216, 236, 255]
                 };
@@ -2838,6 +2939,41 @@ pub fn generate_shell_composite_elements(
     }
 
     // 3. TopBar circular dot, rounded pills & background bar
+    let tray_rects = tray_slot_rects(
+        width,
+        top_telemetry.notification_count,
+        top_telemetry.tray_items.len(),
+    );
+    for (item, (tx, ty, tw, th)) in top_telemetry.tray_items.iter().zip(tray_rects) {
+        if item.attention || !item.passive {
+            let dot_color = if item.attention {
+                COLOR_DANGER
+            } else {
+                COLOR_ACCENT
+            };
+            out.push(CompositorRenderElement::Solid(make_solid_element(
+                Rectangle::new(Point::from((tx + tw - 5, ty + 2)), Size::from((3, 3))),
+                dot_color,
+            )));
+        }
+        let border = if item.attention {
+            Some(RGBA_DANGER)
+        } else if item.passive {
+            Some(RGBA_BORDER)
+        } else {
+            Some(RGBA_BORDER_HIGHLIGHT)
+        };
+        push_rounded_glass_box(
+            &mut out,
+            shape_cache,
+            renderer,
+            Rectangle::new(Point::from((tx, ty)), Size::from((tw, th))),
+            6,
+            RGBA_SURFACE_OVERLAY,
+            border,
+        );
+    }
+
     let (kx, ky, kw, kh) = kbd_badge_rect(width, top_telemetry.notification_count);
     push_rounded_glass_box(
         &mut out,
@@ -2967,23 +3103,27 @@ pub fn generate_shell_composite_elements(
         let hovered = dock_view.hover_slot == Some(i);
 
         let win_entry = (i >= 3).then(|| dock_view.windows.get(i - 3)).flatten();
+        let is_minimized = win_entry.is_some_and(|w| w.minimized);
         let is_active = match i {
             2 => dock_view.overview_active,
-            n if n >= 3 => win_entry.is_some_and(|w| w.focused),
+            n if n >= 3 => win_entry.is_some_and(|w| w.focused && !w.minimized),
             _ => false,
         };
         let has_running_dot = win_entry.is_some() || (i == 2 && dock_view.overview_active);
         if has_running_dot {
+            let (pip_w, pip_color) = if is_minimized {
+                (4, COLOR_WARNING)
+            } else if is_active {
+                (8, COLOR_ACCENT)
+            } else {
+                (8, COLOR_ACCENT_MUTED)
+            };
             out.push(CompositorRenderElement::Solid(make_solid_element(
                 Rectangle::new(
-                    Point::from((item_x + (item_size - 8) / 2, dock_y + DOCK_HEIGHT - 5)),
-                    Size::from((8, 2)),
+                    Point::from((item_x + (item_size - pip_w) / 2, dock_y + DOCK_HEIGHT - 5)),
+                    Size::from((pip_w, 2)),
                 ),
-                if is_active {
-                    COLOR_ACCENT
-                } else {
-                    COLOR_ACCENT_MUTED
-                },
+                pip_color,
             )));
         }
 
@@ -2995,6 +3135,7 @@ pub fn generate_shell_composite_elements(
             2 if dock_view.overview_active => RGBA_ACCENT_HOVER,
             2 => [56, 44, 86, 255],
             _ if is_active => RGBA_ACCENT_HOVER,
+            _ if is_minimized => [32, 26, 46, 255],
             _ => [48, 36, 72, 255],
         };
         push_rounded_glass_box(
@@ -3823,6 +3964,24 @@ mod tests {
             f64::from(notif_kbd_x + notif_kbd_w / 2),
             f64::from(notif_kbd_y + notif_kbd_h / 2)
         ));
+
+        // TopBar system tray pills (`RUSTYOS-032`) sit cleanly left of keyboard badge
+        let tray_rects = tray_slot_rects(size.w, 2, 3);
+        assert_eq!(tray_rects.len(), 3);
+        assert!(tray_rects[2].0 + tray_rects[2].2 <= notif_kbd_x);
+        for (idx, (tx, ty, tw, th)) in tray_rects.into_iter().enumerate() {
+            assert_eq!(
+                check_top_bar_tray_click(
+                    size.w,
+                    2,
+                    3,
+                    f64::from(tx + tw / 2),
+                    f64::from(ty + th / 2)
+                ),
+                Some(idx)
+            );
+        }
+        assert_eq!(check_top_bar_tray_click(size.w, 2, 3, 20.0, 14.0), None);
     }
 
     #[test]

@@ -301,6 +301,20 @@ impl XwmHandler for RustyCompositorState {
         }
     }
 
+    fn minimize_request(&mut self, _xwm: XwmId, window: X11Surface) {
+        if let Some(win_id) = find_bound_window_id(self, window.window_id()) {
+            let serial = SERIAL_COUNTER.next_serial();
+            self.minimize_window(win_id, serial);
+        }
+    }
+
+    fn unminimize_request(&mut self, _xwm: XwmId, window: X11Surface) {
+        if let Some(win_id) = find_bound_window_id(self, window.window_id()) {
+            let serial = SERIAL_COUNTER.next_serial();
+            self.restore_window(win_id, serial);
+        }
+    }
+
     fn resize_request(
         &mut self,
         _xwm: XwmId,
@@ -429,6 +443,7 @@ fn remove_x11_window(state: &mut RustyCompositorState, x11_id: X11Window, reason
         }
         state.window_bindings.retain(|(id, _)| *id != win_id);
         state.unregister_window_decoration(win_id);
+        state.minimized_window_ids.remove(&win_id);
         state.wm.unmap_window(win_id);
         state.animations.remove_window(win_id.0);
         let serial = SERIAL_COUNTER.next_serial();

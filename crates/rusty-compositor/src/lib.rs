@@ -16,6 +16,7 @@ pub mod state;
 pub mod surfaces;
 pub mod telemetry;
 pub mod text;
+pub mod tray;
 pub mod winit_backend;
 pub mod xwayland;
 
@@ -588,6 +589,47 @@ mod tests {
         compositor.unregister_window_decoration(win_id);
         assert!(!compositor.window_uses_csd(win_id));
         assert!(!compositor.xdg_decoration_requested.contains(&win_id));
+
+        Ok(())
+    }
+
+    #[test]
+    fn minimize_and_dock_restore_manage_focus_and_visibility() -> Result<(), Box<dyn Error>> {
+        let event_loop: EventLoop<'static, state::RustyCompositorState> = EventLoop::try_new()?;
+        let display: Display<state::RustyCompositorState> = Display::new()?;
+
+        let mut compositor = state::RustyCompositorState::new(
+            &display,
+            "wayland-min-test-0".to_owned(),
+            event_loop.get_signal(),
+            (1280, 800).into(),
+        )?;
+
+        let w1 = compositor.wm.next_window_id();
+        let _ = compositor.wm.map_window(w1, Some((600, 400)));
+        let w2 = compositor.wm.next_window_id();
+        let _ = compositor.wm.map_window(w2, Some((600, 400)));
+        assert_eq!(compositor.wm.focused_window(), Some(w2));
+
+        let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+        compositor.minimize_window(w2, serial);
+        assert!(compositor.is_window_minimized(w2));
+        assert!(!compositor.is_window_minimized(w1));
+        // Focus automatically falls back to the remaining visible window (w1).
+        assert_eq!(compositor.wm.focused_window(), Some(w1));
+
+        // Both windows remain in Dock order (`ordered_visible_window_ids`), with w2 at slot 1.
+        assert_eq!(compositor.ordered_visible_window_ids(), vec![w1, w2]);
+
+        // Clicking Dock slot for minimized w2 restores and refocuses it.
+        compositor.handle_dock_hit(shell_render::DockHit::WindowSlot(1), serial);
+        assert!(!compositor.is_window_minimized(w2));
+        assert_eq!(compositor.wm.focused_window(), Some(w2));
+
+        // Clicking Dock slot for already-focused w2 minimizes it again.
+        compositor.handle_dock_hit(shell_render::DockHit::WindowSlot(1), serial);
+        assert!(compositor.is_window_minimized(w2));
+        assert_eq!(compositor.wm.focused_window(), Some(w1));
 
         Ok(())
     }
