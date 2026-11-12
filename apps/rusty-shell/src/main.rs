@@ -11,6 +11,7 @@ use rusty_shell::DesktopShell;
 fn main() -> ExitCode {
     let mut ipc_socket: Option<PathBuf> = env::var("RUSTYOS_IPC_SOCKET").ok().map(PathBuf::from);
     let mut commands: Vec<ShellRequest> = Vec::new();
+    let mut run_wayland_daemon = false;
     let mut shell = DesktopShell::default();
 
     let mut args = env::args().skip(1);
@@ -57,6 +58,7 @@ fn main() -> ExitCode {
                 });
             }
             "--status-hud" => {}
+            "--wayland" | "--daemon" => run_wayland_daemon = true,
             other => {
                 eprintln!("rusty-shell error: unknown argument '{other}'");
                 return ExitCode::from(2);
@@ -64,11 +66,35 @@ fn main() -> ExitCode {
         }
     }
 
-    if let Some(socket_path) = ipc_socket {
-        match shell.sync_with_compositor(&socket_path, &commands, Duration::from_millis(16)) {
+    if let Some(socket_path) = &ipc_socket {
+        match shell.sync_with_compositor(socket_path, &commands, Duration::from_millis(16)) {
             Ok(_) => {}
             Err(err) => {
                 eprintln!("rusty-shell IPC error: {err}");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+
+    if run_wayland_daemon {
+        match rusty_shell::wayland::ShellWaylandClient::connect(shell.clone()) {
+            Ok(mut client) => {
+                let _ = client.draw_surfaces();
+                println!("rusty-shell: connected to Wayland display, Layer-Shell surfaces mapped");
+                while client.data.running {
+                    if let Some(socket_path) = &ipc_socket {
+                        let _ =
+                            shell.sync_with_compositor(socket_path, &[], Duration::from_millis(50));
+                        client.update_state(shell.clone());
+                    }
+                    let _ = client.dispatch_pending();
+                    let _ = client.draw_surfaces();
+                    std::thread::sleep(Duration::from_millis(16));
+                }
+                return ExitCode::SUCCESS;
+            }
+            Err(err) => {
+                eprintln!("rusty-shell error: failed to connect to Wayland: {err}");
                 return ExitCode::FAILURE;
             }
         }

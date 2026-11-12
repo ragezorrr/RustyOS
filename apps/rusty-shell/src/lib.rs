@@ -16,6 +16,8 @@ use rusty_ipc::{
 };
 use rusty_services::ServiceRegistry;
 
+pub mod wayland;
+
 /// Canonical design tokens from `DESIGN.md` (Section 3).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DesignTokens {

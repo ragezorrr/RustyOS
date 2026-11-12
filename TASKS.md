@@ -180,6 +180,16 @@ hardware/software context и низкие накладные расходы.
 - **Acceptance criteria:** Глобал `zwlr_layer_shell_v1` регистрируется на Wayland display; клиенты layer-shell успешно маппятся на `LayerMap`; рабочая область окон динамически адаптируется под exclusive zone; юнит-тесты и clippy проходят.
 - **Risks:** Коллизия событий ввода между окнами и панелями (решено строгой иерархией слоёв в `target_surface_under`).
 
+## RUSTYOS-017 --- Native Layer-Shell Client in `rusty-shell`
+
+**Статус:** done **Фаза:** 13 (Product Evolution)
+
+- **Цель:** Реализовать клиентскую привязку к протоколу `zwlr_layer_shell_v1` в `apps/rusty-shell`, превратив процесс шелла в полноценное графическое Wayland-приложение.
+- **Scope:** Модуль `apps/rusty-shell/src/wayland.rs` (`ShellWaylandClient`, `ShellClientData`, `render_top_bar_pixels`, `render_dock_pixels`); создание поверхностей слоёв `Top` (TopBar) и `Bottom` (Dock); выделение SHM буферов (`SlotPool`, `wl_shm::Format::Argb8888`); высококонтрастный рендеринг пикселей по токенам `DESIGN.md` v2.0 Purple Glass; флаги `--wayland` и `--daemon` в `main.rs` для запуска постоянного цикла синхронизации с композитором по IPC; юнит-тесты рендеринга буферов.
+- **Dependencies:** `RUSTYOS-010`, `RUSTYOS-016`.
+- **Acceptance criteria:** `rusty-shell` успешно соединяется с Wayland сервером по протоколу `zwlr_layer_shell_v1`; выделяет и коммитит ARGB8888 буферы; корректно рисует TopBar и Dock с активными воркспейсами и иконками; clippy и все 31 юнит-тест проходят без ошибок.
+- **Risks:** Нулевые (клиент мягко деградирует в CLI/HUD режим, если Wayland-дисплей недоступен).
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

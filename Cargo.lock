@@ -1363,6 +1363,8 @@ dependencies = [
  "rusty-animation",
  "rusty-ipc",
  "rusty-services",
+ "smithay-client-toolkit",
+ "wayland-client",
 ]
 
 [[package]]

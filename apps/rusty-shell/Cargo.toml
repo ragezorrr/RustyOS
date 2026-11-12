@@ -11,6 +11,8 @@ description = "RustyOS independent desktop shell (TopBar, Dock, Launcher, Notifi
 rusty-animation.workspace = true
 rusty-ipc.workspace = true
 rusty-services.workspace = true
+smithay-client-toolkit = { version = "0.19.2", default-features = false, features = ["calloop"] }
+wayland-client = "0.31.15"
 
 [lints]
 workspace = true
