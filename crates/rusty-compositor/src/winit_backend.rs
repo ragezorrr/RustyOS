@@ -570,10 +570,6 @@ pub(crate) fn build_frame_render_list(
                 &title_text,
                 is_focused,
             ));
-        } else {
-            render_list.extend(crate::shell_render::generate_window_csd_border_elements(
-                frame_rect, is_focused,
-            ));
         }
 
         if let Some(smithay_win) = smithay_win {

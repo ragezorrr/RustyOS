@@ -3340,46 +3340,6 @@ pub fn generate_window_ssd_composite_elements(
     out
 }
 
-/// Generates a crisp 1px outer frame border strictly outside a client-side decorated (CSD) window (`RUSTYOS-030`).
-#[must_use]
-pub fn generate_window_csd_border_elements(
-    rect: rusty_wm::Rect,
-    is_focused: bool,
-) -> Vec<CompositorRenderElement> {
-    let w = rect.width.max(64);
-    let h = rect.height.max(64);
-    let border_rgba = if is_focused {
-        RGBA_BORDER_HIGHLIGHT
-    } else {
-        RGBA_BORDER
-    };
-    let border_col = rgba_to_premul_color32f(border_rgba);
-    vec![
-        CompositorRenderElement::Solid(make_solid_element(
-            Rectangle::new(
-                Point::from((rect.x - 1, rect.y - 1)),
-                Size::from((w + 2, 1)),
-            ),
-            border_col,
-        )),
-        CompositorRenderElement::Solid(make_solid_element(
-            Rectangle::new(
-                Point::from((rect.x - 1, rect.y + h)),
-                Size::from((w + 2, 1)),
-            ),
-            border_col,
-        )),
-        CompositorRenderElement::Solid(make_solid_element(
-            Rectangle::new(Point::from((rect.x - 1, rect.y)), Size::from((1, h))),
-            border_col,
-        )),
-        CompositorRenderElement::Solid(make_solid_element(
-            Rectangle::new(Point::from((rect.x + w, rect.y)), Size::from((1, h))),
-            border_col,
-        )),
-    ]
-}
-
 /// Generates soft radial drop shadow elements strictly outside a managed window rectangle (`RUSTYOS-022`).
 pub fn generate_window_shadow_elements(
     shape_cache: &mut crate::surfaces::UiShapeCache,
