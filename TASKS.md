@@ -424,6 +424,21 @@ hardware/software context и низкие накладные расходы.
 - **Acceptance criteria:** Приложения с PNG-иконками XDG и апплеты `IconPixmap` отображают реальные иконки с GPU-кэшированием и корректно откатываются на бейджи при отсутствии PNG; `Alt+Tab` / `Alt+Shift+Tab` открывают центрированную стеклянную панель окон с MRU-порядком и свёрнутыми окнами, подтверждение по отпусканию `Alt` / `Enter` / клику фокусирует и разворачивает окно, `Escape` отменяет; перетаскивание (`wl_data_device`) рисует `dnd_icon` под курсором на Winit и DRM; 76 тестов и `clippy -D warnings` проходят без предупреждений.
 - **Risks:** Для иконок, доступных только в `.svg` без PNG-растров в темах системы, срабатывает чистый текстовый fallback (рендер SVG намеренно не добавлен ради сохранения нулевых внешних зависимостей).
 
+## RUSTYOS-034 --- `xdg_popup` меню, клиентские/`XCursor` курсоры и кастомные обои из `config.toml`
+
+**Статус:** done **Фаза:** 31 (Wayland Popups, Dynamic Cursor Themes & Custom Wallpaper)
+
+- **Цель:** Починить позиционирование, первичную конфигурацию и ввод для `xdg_popup` меню и выпадающих списков, поддержать клиентские (`wl_pointer.set_cursor`), скрытые (`Hidden`) и системные (`XCursor`) курсоры в DRM/KMS и Winit, а также загрузку пользовательских `.png`-обоев из `~/.config/rustyos/config.toml` без добавления внешних зависимостей.
+- **Scope:**
+  - `crates/rusty-compositor/src/config.rs`: в `[ui]` добавлены опции `wallpaper` (с раскрытием `~/` в домашний каталог) и `cursor_theme` с unit-тестами.
+  - `crates/rusty-compositor/src/icons.rs`: обобщён декодер PNG (`decode_png_rgba_limited`) и добавлен `load_png_wallpaper_bgra` с aspect-preserving center-crop (`cover`) билинейным масштабированием до 4K PNG в `Argb8888`.
+  - `crates/rusty-compositor/src/surfaces.rs`: добавлен чистый Rust-парсер бинарных курсоров `XCursor` (`parse_xcursor_bytes`, поддержка `Inherits=` и алиасов `CursorIcon`, GPU-кэш `named_cursor_element` со смещением по hotspot и fallback на векторную стрелку), а также кэширование кастомных обоев по `(PathBuf, Size)` в `UiShapeCache::wallpaper_element` с fallback на аврора-градиент.
+  - `crates/rusty-compositor/src/state.rs` и `input.rs`: трекинг `cursor_status` через `SeatHandler::cursor_image`, настройка ограничений геометрии `xdg_popup` (`popup_parent_target_rect` + `get_unconstrained_geometry`), отправка первичного `send_configure` и безусловный `popups.commit(surface)` (включая дочерние popup от layer-shell), трекинг `xdg_popup.grab` со сбросом по клику вне меню и по `Escape`, а также обход перехвата SSD-рамок/заголовков при клике по открытому `xdg_popup`.
+  - `crates/rusty-compositor/src/winit_backend.rs`: синхронизация `Winit` курсора (`Hidden`, `Named(CursorIcon)`, клиентский `Surface` с hotspot) и полная отрисовка всех состояний `CursorImageStatus` для DRM/KMS (`include_software_cursor`), порядок слоя открытых popup поверх SSD-шапок окон и передача `user_config.wallpaper` в `wallpaper_element`.
+- **Dependencies:** `RUSTYOS-016`, `RUSTYOS-025`, `RUSTYOS-028`, `RUSTYOS-029`, `RUSTYOS-033`.
+- **Acceptance criteria:** Клиентские `xdg_popup` (контекстные меню, тултипы, выпадающие списки GTK/Qt/Electron) корректно конфигурируются в пределах экрана, перекрывают SSD-заголовки, реагируют на клики и закрываются по клику вне меню или `Escape`; `CursorImageStatus` (`Hidden`, клиентский `Surface`, системные `XCursor` формы) работает в DRM/KMS и Winit; при указании `[ui] wallpaper = "~/.../bg.png"` обои масштабируются по `cover` и кэшируются на GPU, при ошибке/отсутствии срабатывает fallback; 78 тестов и `clippy -D warnings` проходят без предупреждений.
+- **Risks:** Для обоев поддерживается формат PNG (`.jpg`/`.webp` намеренно не добавлены для сохранения нулевых внешних зависимостей); для курсоров на хосте без установленных `XCursor`-тем используется встроенная векторная стрелка.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

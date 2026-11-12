@@ -26,6 +26,10 @@ pub struct UserConfig {
     pub repeat_rate: i32,
     /// Prefer instant transitions (`reduced_motion`).
     pub reduced_motion: bool,
+    /// Optional custom desktop wallpaper `.png` path (`~/` expanded).
+    pub wallpaper: Option<PathBuf>,
+    /// Optional `XCursor` theme override (falls back to `XCURSOR_THEME` and system themes).
+    pub cursor_theme: Option<String>,
     /// Commands launched automatically once the Wayland socket is ready.
     pub autostart: Vec<String>,
 }
@@ -39,6 +43,8 @@ impl Default for UserConfig {
             repeat_delay: 200,
             repeat_rate: 25,
             reduced_motion: false,
+            wallpaper: None,
+            cursor_theme: None,
             autostart: Vec::new(),
         }
     }
@@ -162,6 +168,19 @@ impl UserConfig {
                         cfg.reduced_motion = b;
                     }
                 }
+                ("ui", "wallpaper") => {
+                    if let Some(s) = parse_toml_string(val) {
+                        cfg.wallpaper = expand_user_path(&s);
+                    }
+                }
+                ("ui", "cursor_theme") => {
+                    if let Some(s) = parse_toml_string(val) {
+                        let trimmed = s.trim();
+                        if !trimmed.is_empty() {
+                            cfg.cursor_theme = Some(trimmed.to_owned());
+                        }
+                    }
+                }
                 ("autostart", "commands") => {
                     cfg.autostart = parse_toml_string_array(val);
                 }
@@ -201,6 +220,23 @@ pub fn default_user_config_path() -> Option<PathBuf> {
             .join("rustyos")
             .join("config.toml")
     })
+}
+
+fn expand_user_path(raw: &str) -> Option<PathBuf> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Some(rest) = trimmed.strip_prefix("~/") {
+        if let Some(home) = env::var_os("HOME") {
+            return Some(PathBuf::from(home).join(rest));
+        }
+    } else if trimmed == "~"
+        && let Some(home) = env::var_os("HOME")
+    {
+        return Some(PathBuf::from(home));
+    }
+    Some(PathBuf::from(trimmed))
 }
 
 /// Formats a compact 2-letter uppercase `TopBar` indicator (`"EN"`, `"RU"`, etc.) from XKB layout info.
@@ -345,6 +381,8 @@ mod tests {
 
             [ui]
             reduced_motion = true
+            wallpaper = "/usr/share/backgrounds/rustyos.png"
+            cursor_theme = "Adwaita"
 
             [autostart]
             commands = [
@@ -360,6 +398,11 @@ mod tests {
         assert_eq!(cfg.repeat_delay, 280);
         assert_eq!(cfg.repeat_rate, 40);
         assert!(cfg.reduced_motion);
+        assert_eq!(
+            cfg.wallpaper,
+            Some(PathBuf::from("/usr/share/backgrounds/rustyos.png"))
+        );
+        assert_eq!(cfg.cursor_theme.as_deref(), Some("Adwaita"));
         assert_eq!(cfg.autostart, vec!["konsole", "nm-applet --indicator"]);
     }
 
@@ -376,6 +419,8 @@ mod tests {
         assert_eq!(cfg.repeat_delay, 50);
         assert_eq!(cfg.repeat_rate, 120);
         assert!(!cfg.reduced_motion);
+        assert_eq!(cfg.wallpaper, None);
+        assert_eq!(cfg.cursor_theme, None);
         assert_eq!(cfg.autostart, Vec::<String>::new());
     }
 

@@ -2,6 +2,9 @@
 //! anti-aliased circles, and soft drop shadows (`RUSTYOS-022`).
 
 use std::collections::HashMap;
+use std::env;
+use std::fs;
+use std::path::{Path, PathBuf};
 
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::renderer::element::Kind;
@@ -9,6 +12,7 @@ use smithay::backend::renderer::element::memory::{
     MemoryRenderBuffer, MemoryRenderBufferRenderElement,
 };
 use smithay::backend::renderer::gles::GlesRenderer;
+use smithay::input::pointer::CursorIcon;
 use smithay::utils::{Logical, Point, Rectangle, Size, Transform};
 
 /// Corner quadrant identifier for 9-slice rounded boxes and shadows.
@@ -48,14 +52,28 @@ struct ShadowCornerKey {
     max_alpha: u8,
 }
 
-/// CPU-rasterized, GPU-cached cache of SDF rounded corners, circles, shadow patches, and wallpaper.
+#[derive(Debug)]
+struct CachedCursor {
+    buffer: MemoryRenderBuffer,
+    hotspot: Point<i32, Logical>,
+}
+
+#[derive(Debug, Default)]
+struct CachedWallpaper {
+    custom_key: Option<(PathBuf, Size<i32, Logical>)>,
+    custom_buffer: Option<MemoryRenderBuffer>,
+    fallback_buffer: Option<MemoryRenderBuffer>,
+}
+
+/// CPU-rasterized, GPU-cached cache of SDF rounded corners, circles, shadow patches, cursors, and wallpaper.
 #[derive(Debug, Default)]
 pub struct UiShapeCache {
     circles: HashMap<CircleKey, (MemoryRenderBuffer, Size<i32, Logical>)>,
     corners: HashMap<CornerKey, (MemoryRenderBuffer, Size<i32, Logical>)>,
     shadow_corners: HashMap<ShadowCornerKey, (MemoryRenderBuffer, Size<i32, Logical>)>,
-    wallpaper: Option<MemoryRenderBuffer>,
+    wallpaper: CachedWallpaper,
     cursor_arrow: Option<MemoryRenderBuffer>,
+    xcursors: HashMap<(Option<String>, &'static str), Option<CachedCursor>>,
     /// Decoded & GPU-cached application and tray icon textures (`RUSTYOS-033`).
     pub icons: crate::icons::IconCache,
 }
@@ -187,19 +205,57 @@ impl UiShapeCache {
         .ok()
     }
 
-    /// Returns a GPU-cached ambient Purple Glass wallpaper scaled smoothly to `screen_size` (`RUSTYOS-025`).
+    /// Returns a GPU-cached wallpaper scaled cleanly to `screen_size`, preferring `custom_path` (`.png`)
+    /// from `[ui] wallpaper` and falling back to the ambient Purple Glass gradient (`RUSTYOS-034`).
     pub fn wallpaper_element(
         &mut self,
         renderer: &mut GlesRenderer,
         screen_size: Size<i32, Logical>,
+        custom_path: Option<&Path>,
     ) -> Option<MemoryRenderBufferRenderElement<GlesRenderer>> {
         const WALLPAPER_W: i32 = 256;
         const WALLPAPER_H: i32 = 160;
         if screen_size.w <= 0 || screen_size.h <= 0 {
             return None;
         }
+
+        if let Some(path) = custom_path {
+            let desired_key = (path.to_path_buf(), screen_size);
+            if self.wallpaper.custom_key.as_ref() != Some(&desired_key) {
+                let loaded = usize::try_from(screen_size.w)
+                    .ok()
+                    .zip(usize::try_from(screen_size.h).ok())
+                    .and_then(|(w, h)| crate::icons::load_png_wallpaper_bgra(path, w, h))
+                    .map(|bgra| {
+                        MemoryRenderBuffer::from_slice(
+                            &bgra,
+                            Fourcc::Argb8888,
+                            (screen_size.w, screen_size.h),
+                            1,
+                            Transform::Normal,
+                            None,
+                        )
+                    });
+                self.wallpaper.custom_buffer = loaded;
+                self.wallpaper.custom_key = Some(desired_key);
+            }
+            if let Some(buf) = self.wallpaper.custom_buffer.as_ref() {
+                return MemoryRenderBufferRenderElement::from_buffer(
+                    renderer,
+                    Point::<f64, smithay::utils::Physical>::from((0.0, 0.0)),
+                    buf,
+                    None,
+                    None,
+                    None,
+                    Kind::Unspecified,
+                )
+                .ok();
+            }
+        }
+
         let buf = self
             .wallpaper
+            .fallback_buffer
             .get_or_insert_with(|| rasterize_wallpaper_buffer(WALLPAPER_W, WALLPAPER_H));
         MemoryRenderBufferRenderElement::from_buffer(
             renderer,
@@ -214,6 +270,40 @@ impl UiShapeCache {
             Kind::Unspecified,
         )
         .ok()
+    }
+
+    /// Returns a GPU-cached cursor element for `icon` positioned with its hotspot aligned to `pointer_loc`,
+    /// using system/configured `XCursor` themes when available or the built-in crisp arrow fallback (`RUSTYOS-034`).
+    pub fn named_cursor_element(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        icon: CursorIcon,
+        theme_override: Option<&str>,
+        pointer_loc: Point<i32, Logical>,
+    ) -> Option<MemoryRenderBufferRenderElement<GlesRenderer>> {
+        let icon_name = icon.name();
+        let cache_key = (theme_override.map(str::to_owned), icon_name);
+        if !self.xcursors.contains_key(&cache_key) {
+            let loaded = load_xcursor_for_icon(icon, theme_override);
+            self.xcursors.insert(cache_key.clone(), loaded);
+        }
+        if let Some(Some(cursor)) = self.xcursors.get(&cache_key) {
+            let top_left = pointer_loc - cursor.hotspot;
+            return MemoryRenderBufferRenderElement::from_buffer(
+                renderer,
+                top_left.to_f64().to_physical(1.0),
+                &cursor.buffer,
+                None,
+                None,
+                None,
+                Kind::Cursor,
+            )
+            .ok();
+        }
+        self.cursor_arrow_element(
+            renderer,
+            Point::from((pointer_loc.x - 2, pointer_loc.y - 2)),
+        )
     }
 
     /// Returns a GPU-cached anti-aliased desktop pointer arrow (24x24, hotspot at `(2, 2)`).
@@ -680,6 +770,278 @@ fn rasterize_cursor_arrow_buffer() -> MemoryRenderBuffer {
     mem_buf
 }
 
+fn xcursor_target_size() -> u32 {
+    env::var("XCURSOR_SIZE")
+        .ok()
+        .and_then(|s| s.parse::<u32>().ok())
+        .filter(|&n| (8..=128).contains(&n))
+        .unwrap_or(24)
+}
+
+fn xcursor_search_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Ok(home) = env::var("HOME")
+        && !home.trim().is_empty()
+    {
+        roots.push(PathBuf::from(&home).join(".icons"));
+        roots.push(PathBuf::from(&home).join(".local/share/icons"));
+    }
+    if let Ok(xdg_dirs) = env::var("XDG_DATA_DIRS") {
+        for dir in xdg_dirs.split(':').filter(|s| !s.trim().is_empty()) {
+            roots.push(PathBuf::from(dir).join("icons"));
+        }
+    } else {
+        roots.push(PathBuf::from("/usr/local/share/icons"));
+        roots.push(PathBuf::from("/usr/share/icons"));
+    }
+    roots
+}
+
+fn read_theme_inherits(theme_dir: &Path) -> Vec<String> {
+    for file in ["cursor.theme", "index.theme"] {
+        let path = theme_dir.join(file);
+        if let Ok(text) = fs::read_to_string(path) {
+            for line in text.lines() {
+                if let Some(rest) = line.trim().strip_prefix("Inherits=") {
+                    return rest
+                        .split([',', ';'])
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_owned)
+                        .collect();
+                }
+            }
+        }
+    }
+    Vec::new()
+}
+
+fn xcursor_candidate_names(icon: CursorIcon) -> Vec<&'static str> {
+    let mut names = vec![icon.name()];
+    let aliases: &[&str] = match icon {
+        CursorIcon::Default => &["left_ptr", "arrow", "top_left_arrow"],
+        CursorIcon::ContextMenu => &["context-menu", "left_ptr"],
+        CursorIcon::Help => &["question_arrow", "help", "left_ptr"],
+        CursorIcon::Pointer => &["hand2", "hand1", "pointing_hand", "hand"],
+        CursorIcon::Progress => &["left_ptr_watch", "half-busy", "watch"],
+        CursorIcon::Wait => &["watch", "clock"],
+        CursorIcon::Cell => &["plus", "crosshair"],
+        CursorIcon::Crosshair => &["tcross", "cross", "plus"],
+        CursorIcon::Text => &["xterm", "ibeam", "text"],
+        CursorIcon::VerticalText => &["vertical-text", "xterm"],
+        CursorIcon::Alias => &["link", "dnd-link"],
+        CursorIcon::Copy => &["copy", "dnd-copy", "plus"],
+        CursorIcon::Move => &["fleur", "size_all", "all-scroll"],
+        CursorIcon::NoDrop => &["no-drop", "dnd-no-drop", "crossed_circle"],
+        CursorIcon::NotAllowed => &["crossed_circle", "forbidden", "circle"],
+        CursorIcon::Grab => &["openhand", "hand1", "hand2"],
+        CursorIcon::Grabbing => &["closedhand", "grabbing", "fleur"],
+        CursorIcon::EResize => &["right_side", "sb_right_arrow", "ew-resize"],
+        CursorIcon::NResize => &["top_side", "sb_up_arrow", "ns-resize"],
+        CursorIcon::NeResize => &["top_right_corner", "nesw-resize"],
+        CursorIcon::NwResize => &["top_left_corner", "nwse-resize"],
+        CursorIcon::SResize => &["bottom_side", "sb_down_arrow", "ns-resize"],
+        CursorIcon::SeResize => &["bottom_right_corner", "nwse-resize"],
+        CursorIcon::SwResize => &["bottom_left_corner", "nesw-resize"],
+        CursorIcon::WResize => &["left_side", "sb_left_arrow", "ew-resize"],
+        CursorIcon::EwResize | CursorIcon::ColResize => {
+            &["sb_h_double_arrow", "h_double_arrow", "size_hor"]
+        }
+        CursorIcon::NsResize | CursorIcon::RowResize => {
+            &["sb_v_double_arrow", "v_double_arrow", "size_ver"]
+        }
+        CursorIcon::NeswResize => &["fd_double_arrow", "size_bdiag", "top_right_corner"],
+        CursorIcon::NwseResize => &["bd_double_arrow", "size_fdiag", "top_left_corner"],
+        CursorIcon::AllScroll => &["fleur", "size_all", "move"],
+        CursorIcon::ZoomIn => &["zoom-in"],
+        CursorIcon::ZoomOut => &["zoom-out"],
+        _ => &["left_ptr"],
+    };
+    for &alias in aliases {
+        if !names.contains(&alias) {
+            names.push(alias);
+        }
+    }
+    if !names.contains(&"left_ptr") {
+        names.push("left_ptr");
+    }
+    names
+}
+
+fn load_xcursor_for_icon(icon: CursorIcon, theme_override: Option<&str>) -> Option<CachedCursor> {
+    let mut themes: Vec<String> = Vec::new();
+    if let Some(t) = theme_override.map(str::trim).filter(|t| !t.is_empty()) {
+        themes.push(t.to_owned());
+    }
+    if let Ok(env_theme) = env::var("XCURSOR_THEME")
+        && !env_theme.trim().is_empty()
+        && !themes.iter().any(|t| t == env_theme.trim())
+    {
+        themes.push(env_theme.trim().to_owned());
+    }
+    for fallback in [
+        "default",
+        "Adwaita",
+        "breeze_cursors",
+        "Breeze",
+        "DMZ-White",
+    ] {
+        if !themes.iter().any(|t| t == fallback) {
+            themes.push(fallback.to_owned());
+        }
+    }
+
+    let roots = xcursor_search_roots();
+    // Expand 1-level `Inherits=` (important on distros where `default/index.theme` points to active theme).
+    let mut expanded_themes = Vec::new();
+    for theme in themes {
+        if !expanded_themes.contains(&theme) {
+            expanded_themes.push(theme.clone());
+        }
+        for root in &roots {
+            for inh in read_theme_inherits(&root.join(&theme)) {
+                if !expanded_themes.contains(&inh) {
+                    expanded_themes.push(inh);
+                }
+            }
+        }
+    }
+
+    let names = xcursor_candidate_names(icon);
+    let target_size = xcursor_target_size();
+
+    for theme in &expanded_themes {
+        for root in &roots {
+            let cursors_dir = root.join(theme).join("cursors");
+            if !cursors_dir.is_dir() {
+                continue;
+            }
+            for &name in &names {
+                let candidate = cursors_dir.join(name);
+                if let Ok(bytes) = fs::read(&candidate)
+                    && let Some((w, h, xhot, yhot, bgra)) = parse_xcursor_bytes(&bytes, target_size)
+                {
+                    let buffer = MemoryRenderBuffer::from_slice(
+                        &bgra,
+                        Fourcc::Argb8888,
+                        (w, h),
+                        1,
+                        Transform::Normal,
+                        None,
+                    );
+                    return Some(CachedCursor {
+                        buffer,
+                        hotspot: Point::from((xhot, yhot)),
+                    });
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Parses a freedesktop/X11 binary `Xcur` cursor file, choosing the frame closest to `target_size`
+/// and returning `(width, height, xhot, yhot, premul_bgra_bytes)` (`RUSTYOS-034`).
+pub(crate) fn parse_xcursor_bytes(
+    data: &[u8],
+    target_size: u32,
+) -> Option<(i32, i32, i32, i32, Vec<u8>)> {
+    const XCURSOR_MAGIC: &[u8; 4] = b"Xcur";
+    const XCURSOR_IMAGE_TYPE: u32 = 0xfffd_0002;
+
+    if data.len() < 16 || &data[0..4] != XCURSOR_MAGIC {
+        return None;
+    }
+    let header_size = u32::from_le_bytes([data[4], data[5], data[6], data[7]]) as usize;
+    let ntoc = u32::from_le_bytes([data[12], data[13], data[14], data[15]]) as usize;
+    if header_size < 16 || ntoc == 0 || ntoc > 4096 {
+        return None;
+    }
+    let toc_end = header_size.checked_add(ntoc.checked_mul(12)?)?;
+    if toc_end > data.len() {
+        return None;
+    }
+
+    let mut best_pos: Option<(u32, bool, usize)> = None;
+    for i in 0..ntoc {
+        let off = header_size + i * 12;
+        let chunk_type =
+            u32::from_le_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]]);
+        if chunk_type != XCURSOR_IMAGE_TYPE {
+            continue;
+        }
+        let subtype =
+            u32::from_le_bytes([data[off + 4], data[off + 5], data[off + 6], data[off + 7]]);
+        let pos = u32::from_le_bytes([data[off + 8], data[off + 9], data[off + 10], data[off + 11]])
+            as usize;
+        let diff = subtype.abs_diff(target_size);
+        let prefer_ge = subtype >= target_size;
+        let replace = match best_pos {
+            None => true,
+            Some((best_diff, best_ge, _)) => {
+                diff < best_diff || (diff == best_diff && prefer_ge && !best_ge)
+            }
+        };
+        if replace {
+            best_pos = Some((diff, prefer_ge, pos));
+        }
+    }
+
+    let (_, _, pos) = best_pos?;
+    let chunk_hdr_end = pos.checked_add(36)?;
+    if chunk_hdr_end > data.len() {
+        return None;
+    }
+    let c_type = u32::from_le_bytes([data[pos + 4], data[pos + 5], data[pos + 6], data[pos + 7]]);
+    if c_type != XCURSOR_IMAGE_TYPE {
+        return None;
+    }
+    let width = u32::from_le_bytes([
+        data[pos + 16],
+        data[pos + 17],
+        data[pos + 18],
+        data[pos + 19],
+    ]);
+    let height = u32::from_le_bytes([
+        data[pos + 20],
+        data[pos + 21],
+        data[pos + 22],
+        data[pos + 23],
+    ]);
+    let xhot = u32::from_le_bytes([
+        data[pos + 24],
+        data[pos + 25],
+        data[pos + 26],
+        data[pos + 27],
+    ]);
+    let yhot = u32::from_le_bytes([
+        data[pos + 28],
+        data[pos + 29],
+        data[pos + 30],
+        data[pos + 31],
+    ]);
+    if width == 0 || height == 0 || width > 512 || height > 512 {
+        return None;
+    }
+    let pixel_count = usize::try_from(width)
+        .ok()?
+        .checked_mul(usize::try_from(height).ok()?)?;
+    let pixel_bytes = pixel_count.checked_mul(4)?;
+    let pixels_end = chunk_hdr_end.checked_add(pixel_bytes)?;
+    if pixels_end > data.len() {
+        return None;
+    }
+
+    // XCursor pixels are already premultiplied LE u32 ARGB `(A<<24)|(R<<16)|(G<<8)|B`, which in LE bytes
+    // is `[B, G, R, A]` — exact byte layout for `Fourcc::Argb8888`!
+    let bgra = data[chunk_hdr_end..pixels_end].to_vec();
+    let w_i32 = i32::try_from(width).ok()?;
+    let h_i32 = i32::try_from(height).ok()?;
+    let xh_i32 = i32::try_from(xhot.min(width.saturating_sub(1))).ok()?;
+    let yh_i32 = i32::try_from(yhot.min(height.saturating_sub(1))).ok()?;
+    Some((w_i32, h_i32, xh_i32, yh_i32, bgra))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -733,5 +1095,53 @@ mod tests {
         assert_eq!(arrow_inside[3], 255);
         assert!(arrow_inside[2] < 80);
         assert_eq!(arrow_outside[3], 0);
+    }
+
+    #[test]
+    fn parses_binary_xcursor_chunk_and_selects_closest_size() -> Result<(), String> {
+        let mut blob = Vec::new();
+        // Header: magic "Xcur", header_size=16, version=0x10000, ntoc=2
+        blob.extend_from_slice(b"Xcur");
+        blob.extend_from_slice(&16_u32.to_le_bytes());
+        blob.extend_from_slice(&0x0001_0000_u32.to_le_bytes());
+        blob.extend_from_slice(&2_u32.to_le_bytes());
+        // TOC 0: size 16 at offset 40
+        blob.extend_from_slice(&0xfffd_0002_u32.to_le_bytes());
+        blob.extend_from_slice(&16_u32.to_le_bytes());
+        blob.extend_from_slice(&40_u32.to_le_bytes());
+        // TOC 1: size 24 at offset 80
+        blob.extend_from_slice(&0xfffd_0002_u32.to_le_bytes());
+        blob.extend_from_slice(&24_u32.to_le_bytes());
+        blob.extend_from_slice(&80_u32.to_le_bytes());
+
+        // Chunk 0 (1x1 at offset 40, total 40 bytes)
+        blob.extend_from_slice(&36_u32.to_le_bytes());
+        blob.extend_from_slice(&0xfffd_0002_u32.to_le_bytes());
+        blob.extend_from_slice(&16_u32.to_le_bytes());
+        blob.extend_from_slice(&1_u32.to_le_bytes());
+        blob.extend_from_slice(&1_u32.to_le_bytes());
+        blob.extend_from_slice(&1_u32.to_le_bytes());
+        blob.extend_from_slice(&0_u32.to_le_bytes());
+        blob.extend_from_slice(&0_u32.to_le_bytes());
+        blob.extend_from_slice(&0_u32.to_le_bytes());
+        blob.extend_from_slice(&0xFFFF_0000_u32.to_le_bytes()); // opaque red
+
+        // Chunk 1 (1x1 at offset 80: blue pixel, hotspot (0,0), width=1, height=1)
+        blob.extend_from_slice(&36_u32.to_le_bytes());
+        blob.extend_from_slice(&0xfffd_0002_u32.to_le_bytes());
+        blob.extend_from_slice(&24_u32.to_le_bytes());
+        blob.extend_from_slice(&1_u32.to_le_bytes());
+        blob.extend_from_slice(&1_u32.to_le_bytes());
+        blob.extend_from_slice(&1_u32.to_le_bytes());
+        blob.extend_from_slice(&0_u32.to_le_bytes());
+        blob.extend_from_slice(&0_u32.to_le_bytes());
+        blob.extend_from_slice(&0_u32.to_le_bytes());
+        blob.extend_from_slice(&0xFF00_00FF_u32.to_le_bytes()); // ARGB opaque blue
+
+        let (w, h, xhot, yhot, bgra) =
+            parse_xcursor_bytes(&blob, 24).ok_or_else(|| "Xcur decode failed".to_owned())?;
+        assert_eq!((w, h, xhot, yhot), (1, 1, 0, 0));
+        assert_eq!(bgra, vec![0xFF, 0x00, 0x00, 0xFF]);
+        Ok(())
     }
 }

@@ -17,17 +17,17 @@ use smithay::{
         },
         winit::{self, WinitEvent, WinitGraphicsBackend},
     },
+    input::pointer::{CursorIcon, CursorImageStatus, CursorImageSurfaceData},
     output::{Mode, Scale},
     reexports::{
         calloop::{
             EventLoop,
             timer::{TimeoutAction, Timer},
         },
-        wayland_server::Display,
+        wayland_server::{Display, protocol::wl_surface::WlSurface},
     },
     utils::{IsAlive, Logical, Point, Rectangle, Size},
-    wayland::shell::wlr_layer::Layer,
-    wayland::socket::ListeningSocketSource,
+    wayland::{compositor, shell::wlr_layer::Layer, socket::ListeningSocketSource},
 };
 use tracing::{error, info, warn};
 
@@ -104,6 +104,7 @@ pub fn run_nested_winit(config: &CompositorConfig) -> Result<BootstrapReport, Co
     let bench_input = config.bench_input;
     let force_full_damage = config.force_full_damage;
     let mut rendered_frames: u64 = 0;
+    let mut last_winit_cursor: Option<WinitCursorSync> = None;
 
     loop_handle
         .insert_source(
@@ -116,6 +117,12 @@ pub fn run_nested_winit(config: &CompositorConfig) -> Result<BootstrapReport, Co
                 if bench_input {
                     inject_bench_pointer_step(app_state, rendered_frames);
                 }
+
+                sync_winit_window_cursor(
+                    &backend,
+                    &app_state.cursor_status,
+                    &mut last_winit_cursor,
+                );
 
                 let tick_start = Instant::now();
                 if let Err(err) = render_winit_frame(
@@ -375,13 +382,35 @@ pub(crate) fn build_frame_render_list(
     let mut render_list: Vec<CompositorRenderElement> = Vec::new();
     if include_software_cursor {
         #[allow(clippy::cast_possible_truncation)]
-        let cursor_x = state.pointer_location.x.round() as i32 - 2;
-        #[allow(clippy::cast_possible_truncation)]
-        let cursor_y = state.pointer_location.y.round() as i32 - 2;
-        if let Some(cursor_el) =
-            shape_cache.cursor_arrow_element(renderer, Point::from((cursor_x, cursor_y)))
-        {
-            render_list.push(CompositorRenderElement::Memory(cursor_el));
+        let ptr = Point::from((
+            state.pointer_location.x.round() as i32,
+            state.pointer_location.y.round() as i32,
+        ));
+        match &state.cursor_status {
+            CursorImageStatus::Hidden => {}
+            CursorImageStatus::Surface(surf) if surf.alive() => {
+                push_client_surface_cursor(&mut render_list, renderer, surf, ptr);
+            }
+            CursorImageStatus::Surface(_) => {
+                if let Some(cursor_el) = shape_cache.named_cursor_element(
+                    renderer,
+                    CursorIcon::Default,
+                    state.user_config.cursor_theme.as_deref(),
+                    ptr,
+                ) {
+                    render_list.push(CompositorRenderElement::Memory(cursor_el));
+                }
+            }
+            CursorImageStatus::Named(icon) => {
+                if let Some(cursor_el) = shape_cache.named_cursor_element(
+                    renderer,
+                    *icon,
+                    state.user_config.cursor_theme.as_deref(),
+                    ptr,
+                ) {
+                    render_list.push(CompositorRenderElement::Memory(cursor_el));
+                }
+            }
         }
     }
 
@@ -683,7 +712,16 @@ pub(crate) fn build_frame_render_list(
             _ => rusty_wm::Rect::new(origin.0, origin.1, rect.width, rect.height),
         };
 
-        if has_ssd {
+        let has_open_popup = smithay_win
+            .as_ref()
+            .and_then(smithay::wayland::seat::WaylandFocus::wl_surface)
+            .is_some_and(|root| {
+                smithay::desktop::PopupManager::popups_for_surface(&root)
+                    .next()
+                    .is_some()
+            });
+
+        if has_ssd && !has_open_popup {
             let title_text = smithay_win.as_ref().map_or_else(
                 || format!("Window #{}", win_id.0),
                 |win| window_title(win, win_id),
@@ -698,8 +736,8 @@ pub(crate) fn build_frame_render_list(
             ));
         }
 
-        if let Some(smithay_win) = smithay_win {
-            let geo_loc = smithay_win.geometry().loc;
+        if let Some(ref sw) = smithay_win {
+            let geo_loc = sw.geometry().loc;
             let client_loc = Point::<i32, Logical>::from((
                 origin.0 - geo_loc.x,
                 origin.1 + titlebar_h - geo_loc.y,
@@ -709,7 +747,7 @@ pub(crate) fn build_frame_render_list(
                 <smithay::desktop::Window as AsRenderElements<GlesRenderer>>::render_elements::<
                     WaylandSurfaceRenderElement<GlesRenderer>,
                 >(
-                    &smithay_win,
+                    sw,
                     renderer,
                     client_loc,
                     smithay::utils::Scale::from(1.0),
@@ -718,6 +756,21 @@ pub(crate) fn build_frame_render_list(
                 .into_iter()
                 .map(CompositorRenderElement::Surface),
             );
+        }
+
+        if has_ssd && has_open_popup {
+            let title_text = smithay_win.as_ref().map_or_else(
+                || format!("Window #{}", win_id.0),
+                |win| window_title(win, win_id),
+            );
+            render_list.extend(crate::shell_render::generate_window_ssd_composite_elements(
+                text_cache,
+                shape_cache,
+                renderer,
+                frame_rect,
+                &title_text,
+                is_focused,
+            ));
         }
 
         render_list.extend(crate::shell_render::generate_window_shadow_elements(
@@ -737,9 +790,11 @@ pub(crate) fn build_frame_render_list(
         );
     }
 
-    if let Some(wallpaper) =
-        shape_cache.wallpaper_element(renderer, Size::<i32, Logical>::from((size.w, size.h)))
-    {
+    if let Some(wallpaper) = shape_cache.wallpaper_element(
+        renderer,
+        Size::<i32, Logical>::from((size.w, size.h)),
+        state.user_config.wallpaper.as_deref(),
+    ) {
         render_list.push(CompositorRenderElement::Memory(wallpaper));
     }
 
@@ -814,8 +869,23 @@ fn render_winit_frame(
             backend.buffer_age().unwrap_or(0)
         };
         let (renderer, mut framebuffer) = backend.bind().map_err(|err| err.to_string())?;
-        let render_list =
+        let mut render_list =
             build_frame_render_list(renderer, text_cache, shape_cache, state, size, false);
+        if let CursorImageStatus::Surface(ref cursor_surf) = state.cursor_status
+            && cursor_surf.alive()
+        {
+            #[allow(clippy::cast_possible_truncation)]
+            let ptr = Point::from((
+                state.pointer_location.x.round() as i32,
+                state.pointer_location.y.round() as i32,
+            ));
+            let mut cursor_elems = Vec::new();
+            push_client_surface_cursor(&mut cursor_elems, renderer, cursor_surf, ptr);
+            if !cursor_elems.is_empty() {
+                cursor_elems.extend(render_list);
+                render_list = cursor_elems;
+            }
+        }
 
         let render_result = damage_tracker
             .render_output(
@@ -880,6 +950,72 @@ fn render_winit_frame(
     >;
 
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WinitCursorSync {
+    Hidden,
+    ClientSurface,
+    Named(CursorIcon),
+}
+
+fn sync_winit_window_cursor(
+    backend: &WinitGraphicsBackend<GlesRenderer>,
+    status: &CursorImageStatus,
+    last: &mut Option<WinitCursorSync>,
+) {
+    let target = match status {
+        CursorImageStatus::Hidden => WinitCursorSync::Hidden,
+        CursorImageStatus::Surface(s) if s.alive() => WinitCursorSync::ClientSurface,
+        CursorImageStatus::Surface(_) => WinitCursorSync::Named(CursorIcon::Default),
+        CursorImageStatus::Named(icon) => WinitCursorSync::Named(*icon),
+    };
+    if *last == Some(target) {
+        return;
+    }
+    *last = Some(target);
+    let win = backend.window();
+    match target {
+        WinitCursorSync::Hidden | WinitCursorSync::ClientSurface => {
+            win.set_cursor_visible(false);
+        }
+        WinitCursorSync::Named(icon) => {
+            win.set_cursor(icon);
+            win.set_cursor_visible(true);
+        }
+    }
+}
+
+fn push_client_surface_cursor(
+    render_list: &mut Vec<CompositorRenderElement>,
+    renderer: &mut GlesRenderer,
+    surface: &WlSurface,
+    pointer_loc: Point<i32, Logical>,
+) {
+    let hotspot = compositor::with_states(surface, |states| {
+        states
+            .data_map
+            .get::<CursorImageSurfaceData>()
+            .and_then(|data| data.lock().ok())
+            .map(|attrs| attrs.hotspot)
+    })
+    .unwrap_or_default();
+    let loc = (pointer_loc - hotspot).to_physical_precise_round(1.0);
+    render_list.extend(
+        render_elements_from_surface_tree::<
+            GlesRenderer,
+            WaylandSurfaceRenderElement<GlesRenderer>,
+        >(
+            renderer,
+            surface,
+            loc,
+            smithay::utils::Scale::from(1.0),
+            1.0,
+            Kind::Cursor,
+        )
+        .into_iter()
+        .map(CompositorRenderElement::Surface),
+    );
 }
 
 pub(crate) fn spawn_test_client(

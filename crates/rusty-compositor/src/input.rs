@@ -45,6 +45,7 @@ enum KeyIntercept {
     CommitSwitcher,
     SwitcherCancel,
     SwitcherConsume,
+    DismissPopups,
     SwitchVt(i32),
     VolumeStep(i8),
     VolumeMute,
@@ -153,6 +154,9 @@ impl RustyCompositorState {
                 if state.overview_active && sym.raw() == Keysym::Escape.raw() {
                     return FilterResult::Intercept(KeyIntercept::OverviewClose);
                 }
+                if !state.active_popup_grabs.is_empty() && sym.raw() == Keysym::Escape.raw() {
+                    return FilterResult::Intercept(KeyIntercept::DismissPopups);
+                }
                 if let Some(action) = match_shortcut(*modifiers, sym) {
                     FilterResult::Intercept(action)
                 } else {
@@ -227,6 +231,9 @@ impl RustyCompositorState {
             KeyIntercept::OverviewClose => {
                 self.close_overview();
                 info!("Closed Workspace Overview");
+            }
+            KeyIntercept::DismissPopups => {
+                self.dismiss_active_popup_grabs();
             }
             KeyIntercept::LockScreen => {
                 self.set_screen_locked(true, serial);
@@ -687,8 +694,26 @@ impl RustyCompositorState {
                 return;
             }
 
+            // Dismiss grabbed `xdg_popup` menus on outside clicks and route popup clicks directly (`RUSTYOS-034`).
+            let target_hit = self.target_surface_under(self.pointer_location);
+            if self
+                .active_popup_grabs
+                .iter()
+                .any(smithay::wayland::shell::xdg::PopupSurface::alive)
+            {
+                let inside_grab = target_hit
+                    .as_ref()
+                    .is_some_and(|(_, surf, _)| self.is_surface_in_active_popup_grab(surf));
+                if !inside_grab {
+                    self.dismiss_active_popup_grabs();
+                }
+            }
+            let hits_popup = target_hit
+                .as_ref()
+                .is_some_and(|(_, surf, _)| self.is_surface_in_popup(surf));
+
             // Check for SSD titlebar, traffic-light buttons, or outer frame resize hits (RUSTYOS-019 / RUSTYOS-030)
-            if !self.launcher_active {
+            if !self.launcher_active && !hits_popup {
                 let hit_windows: Vec<crate::shell_render::SsdHitWindow> = self
                     .wm
                     .visible_windows()

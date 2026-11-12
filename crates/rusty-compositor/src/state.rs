@@ -17,7 +17,8 @@ use smithay::{
     delegate_output, delegate_primary_selection, delegate_seat, delegate_shm,
     delegate_xdg_decoration, delegate_xdg_shell,
     desktop::{
-        LayerSurface as DesktopLayerSurface, PopupManager, Space, Window, WindowSurfaceType,
+        LayerSurface as DesktopLayerSurface, PopupKind, PopupManager, Space, Window,
+        WindowSurfaceType, find_popup_root_surface, get_popup_toplevel_coords,
         layer_map_for_output,
     },
     input::{
@@ -39,10 +40,12 @@ use smithay::{
             },
         },
     },
-    utils::{IsAlive, Logical, Point, Serial, Size, Transform},
+    utils::{IsAlive, Logical, Point, Rectangle, Serial, Size, Transform},
     wayland::{
         buffer::BufferHandler,
-        compositor::{self, CompositorClientState, CompositorHandler, CompositorState},
+        compositor::{
+            self, CompositorClientState, CompositorHandler, CompositorState, TraversalAction,
+        },
         output::{OutputHandler, OutputManagerState},
         seat::WaylandFocus,
         selection::{
@@ -153,6 +156,10 @@ pub struct RustyCompositorState {
     pub space: Space<Window>,
     /// Popup manager tracking `xdg_popup` surfaces.
     pub popups: PopupManager,
+    /// Grabbed `xdg_popup` surfaces awaiting outside-click or Escape dismissal (`RUSTYOS-034`).
+    pub active_popup_grabs: Vec<PopupSurface>,
+    /// Active cursor image state requested by focused Wayland clients (`RUSTYOS-034`).
+    pub cursor_status: CursorImageStatus,
     /// Active virtual or physical output.
     pub output: Output,
     /// Core `wl_compositor` protocol state.
@@ -340,6 +347,8 @@ impl RustyCompositorState {
             minimized_window_ids: HashSet::new(),
             space,
             popups: PopupManager::default(),
+            active_popup_grabs: Vec::new(),
+            cursor_status: CursorImageStatus::default_named(),
             output,
             compositor_state,
             xdg_shell_state,
@@ -1146,11 +1155,14 @@ impl RustyCompositorState {
     ) -> Option<(Option<Window>, WlSurface, Point<f64, Logical>)> {
         let layer_map = layer_map_for_output(&self.output);
 
-        // 1. Overlay & Top layers
+        // 1. Overlay & Top layers (including overflowing layer popups)
         for layer in layer_map.layers().rev() {
             if matches!(layer.layer(), Layer::Overlay | Layer::Top)
                 && let Some(geo) = layer_map.layer_geometry(layer)
-                && geo.to_f64().contains(point)
+                && (geo.to_f64().contains(point)
+                    || PopupManager::popups_for_surface(layer.wl_surface())
+                        .next()
+                        .is_some())
             {
                 let rel = point - geo.loc.to_f64();
                 if let Some((surf, offset)) = layer.surface_under(rel, WindowSurfaceType::ALL) {
@@ -1160,16 +1172,19 @@ impl RustyCompositorState {
             }
         }
 
-        // 2. Windows in desktop space
+        // 2. Windows in desktop space (Window::bbox includes popups via bbox_with_popups)
         if let Some((window, surface, origin)) = self.surface_under_pointer(point) {
             return Some((Some(window), surface, origin));
         }
 
-        // 3. Bottom & Background layers
+        // 3. Bottom & Background layers (including overflowing layer popups)
         for layer in layer_map.layers().rev() {
             if matches!(layer.layer(), Layer::Bottom | Layer::Background)
                 && let Some(geo) = layer_map.layer_geometry(layer)
-                && geo.to_f64().contains(point)
+                && (geo.to_f64().contains(point)
+                    || PopupManager::popups_for_surface(layer.wl_surface())
+                        .next()
+                        .is_some())
             {
                 let rel = point - geo.loc.to_f64();
                 if let Some((surf, offset)) = layer.surface_under(rel, WindowSurfaceType::ALL) {
@@ -1180,6 +1195,109 @@ impl RustyCompositorState {
         }
 
         None
+    }
+
+    /// Returns `true` if `surface` belongs to a tracked `xdg_popup` surface tree (`RUSTYOS-034`).
+    #[must_use]
+    pub fn is_surface_in_popup(&self, surface: &WlSurface) -> bool {
+        if self.popups.find_popup(surface).is_some() {
+            return true;
+        }
+        for (_, win) in &self.window_bindings {
+            if let Some(root) = win.wl_surface() {
+                for (popup, _) in PopupManager::popups_for_surface(&root) {
+                    if Self::surface_in_tree(popup.wl_surface(), surface) {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// Returns `true` if `surface` is inside any currently grabbed popup's surface tree (`RUSTYOS-034`).
+    #[must_use]
+    pub fn is_surface_in_active_popup_grab(&self, surface: &WlSurface) -> bool {
+        self.active_popup_grabs
+            .iter()
+            .filter(|popup| popup.alive())
+            .any(|popup| Self::surface_in_tree(popup.wl_surface(), surface))
+    }
+
+    /// Dismisses all active grabbed `xdg_popup` surfaces (`xdg_popup.popup_done`) (`RUSTYOS-034`).
+    pub fn dismiss_active_popup_grabs(&mut self) {
+        let grabs = std::mem::take(&mut self.active_popup_grabs);
+        for popup in grabs.into_iter().rev() {
+            if !popup.alive() {
+                continue;
+            }
+            let kind = PopupKind::from(popup);
+            if let Ok(root) = find_popup_root_surface(&kind) {
+                let _ = PopupManager::dismiss_popup(&root, &kind);
+            }
+        }
+    }
+
+    fn popup_parent_target_rect(&self, surface: &PopupSurface) -> Option<Rectangle<i32, Logical>> {
+        let output_geo = self.space.output_geometry(&self.output)?;
+        let kind = PopupKind::from(surface.clone());
+        let root = find_popup_root_surface(&kind).ok()?;
+
+        // Locate the root surface origin in global logical coordinates (window or layer surface).
+        let root_origin = self
+            .window_bindings
+            .iter()
+            .find_map(|(_, win)| {
+                let matches = win.toplevel().is_some_and(|tl| tl.wl_surface() == &root);
+                if matches {
+                    self.space
+                        .element_location(win)
+                        .map(|loc| loc + win.geometry().loc)
+                } else {
+                    None
+                }
+            })
+            .or_else(|| {
+                let layer_map = layer_map_for_output(&self.output);
+                layer_map
+                    .layers()
+                    .find(|l| l.wl_surface() == &root)
+                    .and_then(|l| layer_map.layer_geometry(l).map(|g| g.loc))
+            })?;
+
+        let parent_offset = if surface.get_parent_surface().as_ref() == Some(&root) {
+            Point::from((0, 0))
+        } else {
+            get_popup_toplevel_coords(&kind)
+        };
+        let mut target = output_geo;
+        target.loc -= root_origin + parent_offset;
+        Some(target)
+    }
+
+    fn surface_in_tree(root: &WlSurface, target: &WlSurface) -> bool {
+        if root == target {
+            return true;
+        }
+        let found = std::cell::Cell::new(false);
+        compositor::with_surface_tree_downward(
+            root,
+            (),
+            |_, _, ()| {
+                if found.get() {
+                    TraversalAction::SkipChildren
+                } else {
+                    TraversalAction::DoChildren(())
+                }
+            },
+            |node, _, ()| {
+                if node == target {
+                    found.set(true);
+                }
+            },
+            |_, _, ()| !found.get(),
+        );
+        found.get()
     }
 
     /// Looks up the [`WindowId`] associated with a Smithay [`Window`].
@@ -1414,6 +1532,10 @@ impl RustyCompositorState {
         if self.dnd_icon.as_ref().is_some_and(|surf| !surf.alive()) {
             self.dnd_icon = None;
         }
+        if matches!(&self.cursor_status, CursorImageStatus::Surface(surf) if !surf.alive()) {
+            self.cursor_status = CursorImageStatus::default_named();
+        }
+        self.active_popup_grabs.retain(PopupSurface::alive);
         let mut dead_ids = Vec::new();
         for (id, win) in &self.window_bindings {
             if !win.alive() {
@@ -1871,6 +1993,24 @@ impl CompositorHandler for RustyCompositorState {
             }
         }
 
+        if let Some(PopupKind::Xdg(xdg)) = self.popups.find_popup(surface) {
+            if !xdg.is_initial_configure_sent()
+                && let Err(err) = xdg.send_configure()
+            {
+                warn!(error = %err, "Failed to send initial configure to xdg_popup");
+            }
+            if let Ok(root) = find_popup_root_surface(&PopupKind::Xdg(xdg))
+                && let Some(parent_win) = self.window_bindings.iter().find_map(|(_, w)| {
+                    WaylandFocus::wl_surface(w)
+                        .is_some_and(|ws| *ws == root)
+                        .then(|| w.clone())
+                })
+            {
+                parent_win.on_commit();
+            }
+        }
+        self.popups.commit(surface);
+
         // Handle zwlr_layer_surface_v1 commits and arrange
         let layer_work_area = {
             let mut layer_map = layer_map_for_output(&self.output);
@@ -1907,10 +2047,7 @@ impl CompositorHandler for RustyCompositorState {
             self.wm.upsert_output(OutputId(1), wm_rect);
             let serial = smithay::utils::SERIAL_COUNTER.next_serial();
             self.sync_space_with_wm(serial);
-            return;
         }
-
-        self.popups.commit(surface);
     }
 }
 
@@ -1939,7 +2076,9 @@ impl SeatHandler for RustyCompositorState {
         debug!(has_focus = focused.is_some(), "Keyboard focus changed");
     }
 
-    fn cursor_image(&mut self, _seat: &Seat<Self>, _image: CursorImageStatus) {}
+    fn cursor_image(&mut self, _seat: &Seat<Self>, image: CursorImageStatus) {
+        self.cursor_status = image;
+    }
 }
 
 impl SelectionHandler for RustyCompositorState {
@@ -2055,11 +2194,16 @@ impl XdgShellHandler for RustyCompositorState {
         );
     }
 
-    fn new_popup(&mut self, surface: PopupSurface, _positioner: PositionerState) {
-        if let Err(err) = self
-            .popups
-            .track_popup(smithay::desktop::PopupKind::from(surface))
-        {
+    fn new_popup(&mut self, surface: PopupSurface, positioner: PositionerState) {
+        let constrained = self.popup_parent_target_rect(&surface).map_or_else(
+            || positioner.get_geometry(),
+            |target| positioner.get_unconstrained_geometry(target),
+        );
+        surface.with_pending_state(|state| {
+            state.geometry = constrained;
+            state.positioner = positioner;
+        });
+        if let Err(err) = self.popups.track_popup(PopupKind::from(surface)) {
             warn!(error = %err, "Failed to track xdg_popup");
         }
     }
@@ -2104,7 +2248,17 @@ impl XdgShellHandler for RustyCompositorState {
         }
     }
 
-    fn grab(&mut self, _surface: PopupSurface, _seat: wl_seat::WlSeat, _serial: Serial) {}
+    fn grab(&mut self, surface: PopupSurface, _seat: wl_seat::WlSeat, _serial: Serial) {
+        self.active_popup_grabs.retain(PopupSurface::alive);
+        if surface.alive()
+            && !self
+                .active_popup_grabs
+                .iter()
+                .any(|existing| existing.wl_surface() == surface.wl_surface())
+        {
+            self.active_popup_grabs.push(surface);
+        }
+    }
 
     fn maximize_request(&mut self, surface: ToplevelSurface) {
         if let Some(win_id) = self.window_id_for_toplevel(&surface) {
@@ -2139,11 +2293,20 @@ impl XdgShellHandler for RustyCompositorState {
         positioner: PositionerState,
         token: u32,
     ) {
+        let constrained = self.popup_parent_target_rect(&surface).map_or_else(
+            || positioner.get_geometry(),
+            |target| positioner.get_unconstrained_geometry(target),
+        );
         surface.with_pending_state(|state| {
-            state.geometry = positioner.get_geometry();
+            state.geometry = constrained;
             state.positioner = positioner;
         });
         surface.send_repositioned(token);
+    }
+
+    fn popup_destroyed(&mut self, surface: PopupSurface) {
+        self.active_popup_grabs
+            .retain(|existing| existing.wl_surface() != surface.wl_surface() && existing.alive());
     }
 
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {

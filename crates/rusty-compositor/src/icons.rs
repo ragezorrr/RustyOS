@@ -21,6 +21,9 @@ const PNG_SIGNATURE: [u8; 8] = [137, 80, 78, 71, 13, 10, 26, 10];
 const MAX_ICON_DIM: u32 = 512;
 const MAX_PNG_FILE_BYTES: usize = 2 * 1024 * 1024;
 const MAX_INFLATE_BYTES: usize = 4 * 1024 * 1024;
+const MAX_WALLPAPER_DIM: u32 = 4096;
+const MAX_WALLPAPER_FILE_BYTES: usize = 32 * 1024 * 1024;
+const MAX_WALLPAPER_INFLATE_BYTES: usize = 80 * 1024 * 1024;
 
 /// Raw D-Bus `StatusNotifierItem.IconPixmap` frame in network byte order (`ARGB32`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -396,9 +399,109 @@ fn sample_rgba_premul(rgba: &[u8], width: usize, x: usize, y: usize) -> [f32; 4]
     ]
 }
 
+/// Loads a user `.png` wallpaper and scales it with aspect-preserving center-crop ("cover")
+/// into opaque premultiplied `Argb8888` (`[B, G, R, 255]`) pixels (`RUSTYOS-034`).
+pub(crate) fn load_png_wallpaper_bgra(path: &Path, dst_w: usize, dst_h: usize) -> Option<Vec<u8>> {
+    if dst_w == 0 || dst_h == 0 || dst_w > 4096 || dst_h > 4096 {
+        return None;
+    }
+    let meta = fs::metadata(path).ok()?;
+    if usize::try_from(meta.len()).unwrap_or(usize::MAX) > MAX_WALLPAPER_FILE_BYTES {
+        return None;
+    }
+    let bytes = fs::read(path).ok()?;
+    let (w, h, rgba) =
+        decode_png_rgba_limited(&bytes, MAX_WALLPAPER_DIM, MAX_WALLPAPER_INFLATE_BYTES)?;
+    scale_cover_rgba_to_premul_bgra(w, h, &rgba, dst_w, dst_h)
+}
+
+/// Scales straight `RGBA` pixels into `dst_w x dst_h` opaque `Argb8888` (`[B, G, R, 255]`)
+/// using aspect-preserving center-crop ("cover") bilinear sampling.
+#[must_use]
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::similar_names
+)]
+pub(crate) fn scale_cover_rgba_to_premul_bgra(
+    src_w: usize,
+    src_h: usize,
+    rgba: &[u8],
+    dst_w: usize,
+    dst_h: usize,
+) -> Option<Vec<u8>> {
+    if src_w == 0 || src_h == 0 || dst_w == 0 || dst_h == 0 {
+        return None;
+    }
+    if rgba.len() != src_w.checked_mul(src_h)?.checked_mul(4)? {
+        return None;
+    }
+
+    let sw = src_w as f32;
+    let sh = src_h as f32;
+    let dw = dst_w as f32;
+    let dh = dst_h as f32;
+    let scale = (dw / sw).max(dh / sh);
+    let crop_w = dw / scale;
+    let crop_h = dh / scale;
+    let crop_x0 = (sw - crop_w) * 0.5;
+    let crop_y0 = (sh - crop_h) * 0.5;
+
+    let total_bytes = dst_w.checked_mul(dst_h)?.checked_mul(4)?;
+    let mut out = vec![0_u8; total_bytes];
+    for dy in 0..dst_h {
+        let src_yf = crop_y0 + ((dy as f32) + 0.5) * crop_h / dh - 0.5;
+        let y0 = (src_yf.floor().max(0.0) as usize).min(src_h - 1);
+        let y1 = (y0 + 1).min(src_h - 1);
+        let fy = (src_yf - y0 as f32).clamp(0.0, 1.0);
+
+        for dx in 0..dst_w {
+            let src_xf = crop_x0 + ((dx as f32) + 0.5) * crop_w / dw - 0.5;
+            let x0 = (src_xf.floor().max(0.0) as usize).min(src_w - 1);
+            let x1 = (x0 + 1).min(src_w - 1);
+            let fx = (src_xf - x0 as f32).clamp(0.0, 1.0);
+
+            let p00 = sample_rgba_premul(rgba, src_w, x0, y0);
+            let p10 = sample_rgba_premul(rgba, src_w, x1, y0);
+            let p01 = sample_rgba_premul(rgba, src_w, x0, y1);
+            let p11 = sample_rgba_premul(rgba, src_w, x1, y1);
+
+            let dst_off = (dy * dst_w + dx) * 4;
+            // Alpha-composite over deep plum backdrop (#0F0A19) in case the wallpaper PNG has alpha.
+            let alpha = ((p00[3] + (p10[3] - p00[3]) * fx)
+                + ((p01[3] + (p11[3] - p01[3]) * fx) - (p00[3] + (p10[3] - p00[3]) * fx)) * fy)
+                / 255.0;
+            let inv = (1.0 - alpha).clamp(0.0, 1.0);
+            let bg_rgb = [15.0_f32, 10.0_f32, 25.0_f32];
+            for ch in 0..3 {
+                let top = p00[ch] + (p10[ch] - p00[ch]) * fx;
+                let bot = p01[ch] + (p11[ch] - p01[ch]) * fx;
+                let val = top + (bot - top) * fy + bg_rgb[ch] * inv;
+                let out_ch = match ch {
+                    0 => 2,
+                    1 => 1,
+                    _ => 0,
+                };
+                out[dst_off + out_ch] = val.round().clamp(0.0, 255.0) as u8;
+            }
+            out[dst_off + 3] = 255;
+        }
+    }
+    Some(out)
+}
+
 /// Decodes a standard non-interlaced PNG byte buffer into `(width, height, straight_rgba)`.
 #[must_use]
 pub fn decode_png_rgba(data: &[u8]) -> Option<(usize, usize, Vec<u8>)> {
+    decode_png_rgba_limited(data, MAX_ICON_DIM, MAX_INFLATE_BYTES)
+}
+
+pub(crate) fn decode_png_rgba_limited(
+    data: &[u8],
+    max_dim: u32,
+    max_inflate_bytes: usize,
+) -> Option<(usize, usize, Vec<u8>)> {
     if data.len() < 8 || data[..8] != PNG_SIGNATURE {
         return None;
     }
@@ -439,8 +542,8 @@ pub fn decode_png_rgba(data: &[u8]) -> Option<(usize, usize, Vec<u8>)> {
                 let interlace = payload[12];
                 if width == 0
                     || height == 0
-                    || width > MAX_ICON_DIM
-                    || height > MAX_ICON_DIM
+                    || width > max_dim
+                    || height > max_dim
                     || compression != 0
                     || filter != 0
                     || interlace != 0
@@ -479,7 +582,7 @@ pub fn decode_png_rgba(data: &[u8]) -> Option<(usize, usize, Vec<u8>)> {
     let bpp = bits_per_pixel.div_ceil(8);
     let expected_raw = h.checked_mul(stride.checked_add(1)?)?;
 
-    let raw = zlib_decompress(&idat, expected_raw)?;
+    let raw = zlib_decompress(&idat, expected_raw, max_inflate_bytes)?;
     if raw.len() < expected_raw {
         return None;
     }
@@ -848,6 +951,7 @@ fn decode_huffman_block(
     litlen: &HuffTable,
     dist: &HuffTable,
     out: &mut Vec<u8>,
+    max_inflate_bytes: usize,
 ) -> Option<()> {
     const LEN_BASE: [usize; 29] = [
         3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115,
@@ -869,7 +973,7 @@ fn decode_huffman_block(
         let sym = usize::from(litlen.decode(reader)?);
         match sym.cmp(&256) {
             std::cmp::Ordering::Less => {
-                if out.len() >= MAX_INFLATE_BYTES {
+                if out.len() >= max_inflate_bytes {
                     return None;
                 }
                 out.push(u8::try_from(sym).ok()?);
@@ -890,7 +994,7 @@ fn decode_huffman_block(
                 }
                 let distance = DIST_BASE[d_sym]
                     + usize::try_from(reader.read_bits(DIST_EXTRA[d_sym])?).ok()?;
-                if distance == 0 || distance > out.len() || out.len() + length > MAX_INFLATE_BYTES {
+                if distance == 0 || distance > out.len() || out.len() + length > max_inflate_bytes {
                     return None;
                 }
                 for _ in 0..length {
@@ -902,7 +1006,7 @@ fn decode_huffman_block(
     }
 }
 
-fn zlib_decompress(data: &[u8], expected_hint: usize) -> Option<Vec<u8>> {
+fn zlib_decompress(data: &[u8], expected_hint: usize, max_inflate_bytes: usize) -> Option<Vec<u8>> {
     if data.len() < 6 {
         return None;
     }
@@ -913,7 +1017,7 @@ fn zlib_decompress(data: &[u8], expected_hint: usize) -> Option<Vec<u8>> {
     }
 
     let mut reader = BitReader::new(&data[2..]);
-    let mut out = Vec::with_capacity(expected_hint.min(MAX_INFLATE_BYTES));
+    let mut out = Vec::with_capacity(expected_hint.min(max_inflate_bytes));
 
     loop {
         let bfinal = reader.read_bits(1)?;
@@ -931,18 +1035,18 @@ fn zlib_decompress(data: &[u8], expected_hint: usize) -> Option<Vec<u8>> {
                 if len != !nlen {
                     return None;
                 }
-                if out.len() + usize::from(len) > MAX_INFLATE_BYTES {
+                if out.len() + usize::from(len) > max_inflate_bytes {
                     return None;
                 }
                 reader.copy_aligned_bytes(usize::from(len), &mut out)?;
             }
             1 => {
                 let (litlen, dist) = fixed_huffman_tables()?;
-                decode_huffman_block(&mut reader, &litlen, &dist, &mut out)?;
+                decode_huffman_block(&mut reader, &litlen, &dist, &mut out, max_inflate_bytes)?;
             }
             2 => {
                 let (litlen, dist) = dynamic_huffman_tables(&mut reader)?;
-                decode_huffman_block(&mut reader, &litlen, &dist, &mut out)?;
+                decode_huffman_block(&mut reader, &litlen, &dist, &mut out, max_inflate_bytes)?;
             }
             _ => return None,
         }
@@ -1012,6 +1116,24 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&base);
+        Ok(())
+    }
+
+    #[test]
+    fn center_crop_wallpaper_cover_preserves_opaque_center_color() -> Result<(), String> {
+        // 4x2 source: left column red, middle two columns blue, right column green.
+        // Center-cropping into a 2x2 square should pick the central blue pixels.
+        let mut rgba = Vec::new();
+        for _y in 0..2 {
+            rgba.extend_from_slice(&[255, 0, 0, 255]);
+            rgba.extend_from_slice(&[0, 0, 255, 255]);
+            rgba.extend_from_slice(&[0, 0, 255, 255]);
+            rgba.extend_from_slice(&[0, 255, 0, 255]);
+        }
+        let bgra = scale_cover_rgba_to_premul_bgra(4, 2, &rgba, 2, 2)
+            .ok_or_else(|| "cover scale must succeed".to_owned())?;
+        assert_eq!(bgra.len(), 16);
+        assert_eq!(&bgra[0..4], &[255, 0, 0, 255]);
         Ok(())
     }
 }
