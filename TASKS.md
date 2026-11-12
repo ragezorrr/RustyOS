@@ -302,6 +302,20 @@ hardware/software context и низкие накладные расходы.
 - **Acceptance criteria:** `Alt+N` и IPC `Notify` создают тост в правом верхнем углу с цветовым акцентом urgency; тосты автоматически истекают по TTL или закрываются кликом / `Alt+Shift+N`; `rusty-shell` синхронизирует очередь по `DesktopStateSnapshot`; 48 тестов и `clippy -D warnings` проходят без предупреждений.
 - **Risks:** Минимальные (размер снимка IPC ограничен до `MAX_IPC_MESSAGE_BYTES` с усечением до 8 видимых уведомлений).
 
+## RUSTYOS-025 --- Lock Screen UI, Ambient Aurora Wallpaper & Animated Shell Transitions
+
+**Статус:** done **Фаза:** 22 (Lock Screen, Wallpaper & Shell Motion)
+
+- **Цель:** Добавить интерактивный Lock Screen (`Super+L` / `Ctrl+Alt+L` / IPC `SetLockScreen`), GPU-кэшируемые обои в стиле `Purple Glass` (аврора-градиент вместо плоского фона) и монотонные анимированные переходы shell-оверлеев (`Overview`, `Spotlight`, `Quick Settings`, `Lock Screen`) с поддержкой `reduced_motion`.
+- **Scope:**
+  - `crates/rusty-compositor/src/surfaces.rs`: кэшируемый `MemoryRenderBuffer` аврора-обоев (`wallpaper_element`, `sample_wallpaper_pixel`, `rasterize_wallpaper_buffer`) и unit-проверка пикселей обоев.
+  - `crates/rusty-compositor/src/state.rs` и `lib.rs`: каналы `overview_anim`, `launcher_anim`, `quick_settings_anim`, `lock_screen_anim` на базе `AnimatedValue`, методы `set_screen_locked` и `set_reduced_motion_pref` с изоляцией клавиатуры/указателя при блокировке и обработкой IPC `SetLockScreen`/`SetReducedMotion`.
+  - `crates/rusty-compositor/src/shell_render.rs` и `winit_backend.rs`: `LockScreenRenderState`, `generate_lock_screen_elements` поверх всех слоёв, `check_lock_screen_unlock_click`, плавное появление/скрытие `Spotlight`, `QuickSettings`, `Overview` и `LockScreen` с единым смещением и фейдом фона, вывод обоев задним слоем.
+  - `crates/rusty-compositor/src/input.rs`: перехват `Super+L`/`Ctrl+Alt+L` для блокировки, разблокировка по `Enter`/`Space`/`Escape` или клику `Unlock Session`, подавление клиентского ввода и ховера в состоянии блокировки, тесты горячих клавиш и hit-testing.
+- **Dependencies:** `RUSTYOS-008`, `RUSTYOS-021`, `RUSTYOS-022`, `RUSTYOS-023`.
+- **Acceptance criteria:** `Super+L`/`Ctrl+Alt+L` и IPC `SetLockScreen` переводят композитор в экран блокировки с изоляцией ввода клиентских окон; все shell-оверлеи анимируются и мгновенно переключаются при `reduced_motion`; на фоне отображаются кэшируемые аврора-обои; 49 тестов и `clippy -D warnings` проходят без предупреждений.
+- **Risks:** Минимальные (CPU-растеризация `256x160` обоев выполняется однократно при старте и масштабируется на GPU).
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

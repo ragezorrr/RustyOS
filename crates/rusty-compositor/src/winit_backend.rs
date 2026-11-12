@@ -21,7 +21,7 @@ use smithay::{
         },
         wayland_server::Display,
     },
-    utils::{Logical, Point, Rectangle},
+    utils::{Logical, Point, Rectangle, Size},
     wayland::shell::wlr_layer::Layer,
     wayland::socket::ListeningSocketSource,
 };
@@ -361,6 +361,27 @@ fn render_winit_frame(
         let focused_win = state.wm.focused_window();
 
         let mut render_list: Vec<CompositorRenderElement> = Vec::new();
+        let tel = state.telemetry.snapshot();
+        let timing = state.frame_timing.summary();
+        let lock_progress = state.lock_screen_anim.current();
+        if state.screen_locked || lock_progress > 0.01 {
+            let lock_view = crate::shell_render::LockScreenRenderState {
+                clock_hhmm: &tel.clock_hhmm,
+                network_label: &tel.network.status_label,
+                battery_percent: tel.power.percentage,
+                has_battery: tel.power.has_battery,
+                window_count,
+                progress: lock_progress,
+            };
+            render_list.extend(crate::shell_render::generate_lock_screen_elements(
+                text_cache,
+                shape_cache,
+                renderer,
+                size,
+                &lock_view,
+            ));
+        }
+
         let layer_surfaces_present = push_layer_elements(
             &mut render_list,
             &state.output,
@@ -369,8 +390,6 @@ fn render_winit_frame(
         );
 
         if !layer_surfaces_present {
-            let tel = state.telemetry.snapshot();
-            let timing = state.frame_timing.summary();
             let top_telemetry = crate::shell_render::TopBarTelemetry {
                 clock_hhmm: &tel.clock_hhmm,
                 battery_percent: tel.power.percentage,
@@ -420,49 +439,53 @@ fn render_winit_frame(
                 overview_active: state.overview_active,
             };
 
-            let (win_start, visible_items) = if state.launcher_active {
+            let launcher_progress = state.launcher_anim.current();
+            let show_launcher = state.launcher_active || launcher_progress > 0.01;
+            let (win_start, visible_items) = if show_launcher {
                 state.launcher.visible_window(3)
             } else {
                 (0, Vec::new())
             };
-            let cursor_offset_x = if state.launcher_active && !state.launcher.query.is_empty() {
+            let cursor_offset_x = if show_launcher && !state.launcher.query.is_empty() {
                 text_cache.measure_text(&state.launcher.query, 14.5).0
             } else {
                 0
             };
             let spotlight_view =
-                state
-                    .launcher_active
-                    .then_some(crate::shell_render::SpotlightRenderState {
-                        query: &state.launcher.query,
-                        selected_in_window: state.launcher.selected_index.saturating_sub(win_start),
-                        cursor_offset_x,
-                        items: &visible_items,
-                    });
+                show_launcher.then_some(crate::shell_render::SpotlightRenderState {
+                    query: &state.launcher.query,
+                    selected_in_window: state.launcher.selected_index.saturating_sub(win_start),
+                    cursor_offset_x,
+                    items: &visible_items,
+                    progress: launcher_progress,
+                });
 
-            let qs_view = (!state.launcher_active && state.quick_settings_active).then_some(
-                crate::shell_render::QuickSettingsRenderState {
-                    layout_mode: layout_str,
-                    reduced_motion: state.animations.reduced_motion(),
-                    network_label: &tel.network.status_label,
-                    net_connected: tel.network.connected,
-                    battery_percent: tel.power.percentage,
-                    has_battery: tel.power.has_battery,
-                    ac_online: tel.power.ac_online,
-                    volume_percent: tel.audio.volume_percent,
-                    audio_muted: tel.audio.muted,
-                    frame_p50_us: timing.interval_p50_us,
-                    window_count,
-                },
-            );
+            let qs_progress = state.quick_settings_anim.current();
+            let show_qs = !show_launcher && (state.quick_settings_active || qs_progress > 0.01);
+            let qs_view = show_qs.then_some(crate::shell_render::QuickSettingsRenderState {
+                layout_mode: layout_str,
+                reduced_motion: state.animations.reduced_motion(),
+                network_label: &tel.network.status_label,
+                net_connected: tel.network.connected,
+                battery_percent: tel.power.percentage,
+                has_battery: tel.power.has_battery,
+                ac_online: tel.power.ac_online,
+                volume_percent: tel.audio.volume_percent,
+                audio_muted: tel.audio.muted,
+                frame_p50_us: timing.interval_p50_us,
+                window_count,
+                progress: qs_progress,
+            });
 
-            let ov_view =
-                (!state.launcher_active && !state.quick_settings_active && state.overview_active)
-                    .then_some(crate::shell_render::OverviewRenderState {
-                        active_workspace: active_ws,
-                        layout_mode: layout_str,
-                        windows: &dock_windows,
-                    });
+            let ov_progress = state.overview_anim.current();
+            let show_ov =
+                !show_launcher && !show_qs && (state.overview_active || ov_progress > 0.01);
+            let ov_view = show_ov.then_some(crate::shell_render::OverviewRenderState {
+                active_workspace: active_ws,
+                layout_mode: layout_str,
+                windows: &dock_windows,
+                progress: ov_progress,
+            });
 
             let overlay = if let Some(spot) = spotlight_view.as_ref() {
                 crate::shell_render::ShellOverlayView::Spotlight(spot)
@@ -549,6 +572,12 @@ fn render_winit_frame(
                 renderer,
                 &[Layer::Bottom, Layer::Background],
             );
+        }
+
+        if let Some(wallpaper) =
+            shape_cache.wallpaper_element(renderer, Size::<i32, Logical>::from((size.w, size.h)))
+        {
+            render_list.push(CompositorRenderElement::Memory(wallpaper));
         }
 
         let render_result = damage_tracker

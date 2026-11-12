@@ -168,6 +168,8 @@ pub struct QuickSettingsRenderState<'a> {
     pub frame_p50_us: u64,
     /// Number of visible windows on active workspace.
     pub window_count: usize,
+    /// Animated reveal progress (`0.0` closed -> `1.0` open) (`RUSTYOS-025`).
+    pub progress: f64,
 }
 
 /// Metadata for a single managed window entry rendered in Dock and Workspace Overview (`RUSTYOS-023`).
@@ -244,6 +246,25 @@ pub struct OverviewRenderState<'a> {
     pub layout_mode: &'a str,
     /// Open visible windows on the active workspace in stable order.
     pub windows: &'a [DockWindowEntry],
+    /// Animated reveal progress (`0.0` closed -> `1.0` open) (`RUSTYOS-025`).
+    pub progress: f64,
+}
+
+/// Live data for the interactive Lock Screen curtain & card (`RUSTYOS-025`).
+#[derive(Debug, Clone)]
+pub struct LockScreenRenderState<'a> {
+    /// Local wall-clock time (`HH:MM`).
+    pub clock_hhmm: &'a str,
+    /// Network status label.
+    pub network_label: &'a str,
+    /// Battery charge percentage (`0..=100`).
+    pub battery_percent: u8,
+    /// Whether hardware battery is present.
+    pub has_battery: bool,
+    /// Number of user windows paused behind the lock curtain.
+    pub window_count: usize,
+    /// Animated reveal progress (`0.0` unlocked -> `1.0` locked).
+    pub progress: f64,
 }
 
 /// Interactive click target while Workspace Overview is open (`RUSTYOS-023`).
@@ -289,6 +310,46 @@ pub enum QuickSettingsHit {
     InsidePopover,
     /// Click outside popover (dismiss Quick Settings).
     OutsidePopover,
+}
+
+#[allow(clippy::cast_possible_truncation)]
+fn anim_offset(progress: f64, max_offset: f64) -> i32 {
+    ((1.0 - progress.clamp(0.0, 1.0)) * max_offset).round() as i32
+}
+
+fn lock_screen_card_rect(screen_size: Size<i32, smithay::utils::Physical>) -> (i32, i32, i32, i32) {
+    let w = 360.min((screen_size.w - 40).max(260));
+    let h = 216.min((screen_size.h - 60).max(160));
+    let x = (screen_size.w - w) / 2;
+    let y = (screen_size.h - h) / 2;
+    (x, y, w, h)
+}
+
+fn lock_screen_unlock_button_rect(
+    screen_size: Size<i32, smithay::utils::Physical>,
+    card_dy: i32,
+) -> Rectangle<i32, smithay::utils::Physical> {
+    let (cx, cy, cw, ch) = lock_screen_card_rect(screen_size);
+    let btn_w = 188.min(cw - 48);
+    let btn_h = 36;
+    let btn_x = cx + (cw - btn_w) / 2;
+    let btn_y = cy + card_dy + ch - 68;
+    Rectangle::new(Point::from((btn_x, btn_y)), Size::from((btn_w, btn_h)))
+}
+
+/// Hit-tests `(x, y)` against the interactive Lock Screen `"Unlock Session"` pill button (`RUSTYOS-025`).
+#[must_use]
+pub fn check_lock_screen_unlock_click(
+    screen_size: Size<i32, smithay::utils::Physical>,
+    x: f64,
+    y: f64,
+) -> bool {
+    let btn = lock_screen_unlock_button_rect(screen_size, 0);
+    let bx = f64::from(btn.loc.x);
+    let by = f64::from(btn.loc.y);
+    let bw = f64::from(btn.size.w);
+    let bh = f64::from(btn.size.h);
+    x >= bx && x < bx + bw && y >= by && y < by + bh
 }
 
 fn status_pill_rect(screen_width: i32) -> (i32, i32, i32, i32) {
@@ -850,6 +911,8 @@ pub struct SpotlightRenderState<'a> {
     pub cursor_offset_x: i32,
     /// Up to 3 visible filtered candidates to render.
     pub items: &'a [crate::launcher::LauncherCandidate],
+    /// Animated reveal progress (`0.0` closed -> `1.0` open) (`RUSTYOS-025`).
+    pub progress: f64,
 }
 
 /// Interactive click target inside or outside the Spotlight modal (`RUSTYOS-018b`).
@@ -1465,8 +1528,9 @@ pub fn generate_shell_text_elements(
     match overlay {
         ShellOverlayView::None => {}
         ShellOverlayView::Spotlight(spot) => {
-            let (modal_x, modal_y, _modal_width, _modal_height) =
+            let (modal_x, base_modal_y, _modal_width, _modal_height) =
                 spotlight_modal_rect(width, height);
+            let modal_y = base_modal_y + anim_offset(spot.progress, -22.0);
 
             // Search icon glyph centered inside accent plate
             let search_icon_bounds = Rectangle::new(
@@ -1712,6 +1776,7 @@ fn render_overview_text(
     let text_muted = [166, 155, 181, 255];
     let width = screen_size.w;
 
+    let heading_dy = anim_offset(ov.progress, 14.0);
     let heading = format!(
         "Workspace {}  •  {} windows  ({})",
         ov.active_workspace,
@@ -1724,7 +1789,7 @@ fn render_overview_text(
         15.0,
         text_bright,
         Rectangle::new(
-            Point::from((0, TOP_BAR_HEIGHT + 14)),
+            Point::from((0, TOP_BAR_HEIGHT + 14 + heading_dy)),
             Size::from((width, 24)),
         ),
     ) {
@@ -1736,7 +1801,7 @@ fn render_overview_text(
         11.0,
         text_muted,
         Rectangle::new(
-            Point::from((0, TOP_BAR_HEIGHT + 38)),
+            Point::from((0, TOP_BAR_HEIGHT + 38 + heading_dy)),
             Size::from((width, 18)),
         ),
     ) {
@@ -1754,7 +1819,7 @@ fn render_overview_text(
             13.0,
             text_muted,
             Rectangle::new(
-                Point::from((32, screen_size.h / 2 - 20)),
+                Point::from((32, screen_size.h / 2 - 20 + heading_dy)),
                 Size::from((width - 64, 28)),
             ),
         ) {
@@ -1763,10 +1828,11 @@ fn render_overview_text(
         return;
     }
 
+    let card_dy = anim_offset(ov.progress, 22.0);
     let cards = overview_card_rects(screen_size, ov.windows.len());
     for (win, card) in ov.windows.iter().zip(cards) {
         let header_bounds = Rectangle::new(
-            Point::from((card.loc.x + 10, card.loc.y + 4)),
+            Point::from((card.loc.x + 10, card.loc.y + 4 + card_dy)),
             Size::from((card.size.w - 20, 24)),
         );
         if let Some(el) = text_cache.render_label_centered(
@@ -1779,7 +1845,7 @@ fn render_overview_text(
             elements.push(el);
         }
         let body_bounds = Rectangle::new(
-            Point::from((card.loc.x + 14, card.loc.y + 34)),
+            Point::from((card.loc.x + 14, card.loc.y + 34 + card_dy)),
             Size::from((card.size.w - 28, card.size.h - 46)),
         );
         let center_badge = format!("{}  •  {}", win.badge, win.dimensions);
@@ -1804,7 +1870,8 @@ fn render_quick_settings_text(
     qs: &QuickSettingsRenderState<'_>,
     elements: &mut Vec<MemoryRenderBufferRenderElement<GlesRenderer>>,
 ) {
-    let (px, py, pw, _ph) = quick_settings_rect(width, height);
+    let (px, base_py, pw, _ph) = quick_settings_rect(width, height);
+    let py = base_py + anim_offset(qs.progress, -16.0);
     let pad = 14;
     let inner_w = pw - pad * 2;
     let half_w = (inner_w - 8) / 2;
@@ -2279,7 +2346,8 @@ pub fn generate_shell_composite_elements(
     match overlay {
         ShellOverlayView::None | ShellOverlayView::Overview(_) => {}
         ShellOverlayView::Spotlight(spot) => {
-            let (mx, my, mw, mh) = spotlight_modal_rect(width, height);
+            let (mx, base_my, mw, mh) = spotlight_modal_rect(width, height);
+            let my = base_my + anim_offset(spot.progress, -22.0);
 
             // Search cursor + rounded search bar + rounded result rows (above modal base)
             let cursor_x = (mx + 64 + spot.cursor_offset_x).min(mx + mw - 28);
@@ -2386,7 +2454,8 @@ pub fn generate_shell_composite_elements(
             push_soft_shadow(&mut out, shape_cache, renderer, modal_rect, 12, 16, 105);
         }
         ShellOverlayView::QuickSettings(qs) => {
-            let (px, py, pw, ph) = quick_settings_rect(width, height);
+            let (px, base_py, pw, ph) = quick_settings_rect(width, height);
+            let py = base_py + anim_offset(qs.progress, -16.0);
             let pad = 14;
             let inner_w = pw - pad * 2;
             let half_w = (inner_w - 8) / 2;
@@ -2816,10 +2885,15 @@ pub fn generate_shell_composite_elements(
     );
     push_soft_shadow(&mut out, shape_cache, renderer, dock_rect, 12, 14, 96);
 
-    // 5. Workspace Overview cards & scrim rendered below TopBar & Dock so both stay crisp and clickable (`RUSTYOS-023`)
+    // 5. Workspace Overview cards & scrim rendered below TopBar & Dock so both stay crisp and clickable (`RUSTYOS-023`/`025`)
     if let ShellOverlayView::Overview(ov) = overlay {
+        let card_dy = anim_offset(ov.progress, 22.0);
         let cards = overview_card_rects(screen_size, ov.windows.len());
-        for (win, card) in ov.windows.iter().zip(cards) {
+        for (win, base_card) in ov.windows.iter().zip(cards) {
+            let card = Rectangle::new(
+                Point::from((base_card.loc.x, base_card.loc.y + card_dy)),
+                base_card.size,
+            );
             let preview_rect = Rectangle::new(
                 Point::from((card.loc.x + 12, card.loc.y + 32)),
                 Size::from((card.size.w - 24, card.size.h - 44)),
@@ -2852,14 +2926,141 @@ pub fn generate_shell_composite_elements(
             );
             push_soft_shadow(&mut out, shape_cache, renderer, card, 12, 14, 96);
         }
+        #[allow(clippy::cast_possible_truncation)]
+        let scrim_a = 0.88 * (ov.progress.clamp(0.0, 1.0) as f32);
         out.push(CompositorRenderElement::Solid(make_solid_element(
             Rectangle::new(
                 Point::from((0, TOP_BAR_HEIGHT)),
                 Size::from((width, (height - TOP_BAR_HEIGHT).max(0))),
             ),
-            premul(0.059, 0.039, 0.098, 0.88),
+            premul(0.059, 0.039, 0.098, scrim_a),
         )));
     }
+
+    out
+}
+
+/// Generates topmost front-to-back Lock Screen curtain, clock, and unlock button (`RUSTYOS-025`).
+#[allow(clippy::cast_possible_truncation, clippy::too_many_lines)]
+pub fn generate_lock_screen_elements(
+    text_cache: &mut crate::text::TextCache,
+    shape_cache: &mut crate::surfaces::UiShapeCache,
+    renderer: &mut GlesRenderer,
+    screen_size: Size<i32, smithay::utils::Physical>,
+    lock: &LockScreenRenderState<'_>,
+) -> Vec<CompositorRenderElement> {
+    let mut out = Vec::new();
+    let p = lock.progress.clamp(0.0, 1.0);
+    if p <= 0.01 {
+        return out;
+    }
+
+    let width = screen_size.w;
+    let height = screen_size.h;
+    let (cx, base_cy, cw, ch) = lock_screen_card_rect(screen_size);
+    let card_dy = anim_offset(p, 24.0);
+    let cy = base_cy + card_dy;
+    let btn_rect = lock_screen_unlock_button_rect(screen_size, card_dy);
+
+    let text_bright = [244, 240, 250, 255];
+    let text_muted = [166, 155, 181, 255];
+
+    if p > 0.2 && text_cache.has_font() {
+        if let Some(el) = text_cache.render_label_centered(
+            renderer,
+            lock.clock_hhmm,
+            34.0,
+            text_bright,
+            Rectangle::new(Point::from((cx + 16, cy + 20)), Size::from((cw - 32, 46))),
+        ) {
+            out.push(CompositorRenderElement::Memory(el));
+        }
+        if let Some(el) = text_cache.render_label_centered(
+            renderer,
+            "RustyOS Session Locked",
+            12.5,
+            text_bright,
+            Rectangle::new(Point::from((cx + 16, cy + 72)), Size::from((cw - 32, 22))),
+        ) {
+            out.push(CompositorRenderElement::Memory(el));
+        }
+        let status = if lock.has_battery {
+            format!(
+                "{} • {}% • {} win",
+                truncate_ascii(lock.network_label, 14),
+                lock.battery_percent,
+                lock.window_count
+            )
+        } else {
+            format!(
+                "{} • {} windows paused",
+                truncate_ascii(lock.network_label, 16),
+                lock.window_count
+            )
+        };
+        if let Some(el) = text_cache.render_label_centered(
+            renderer,
+            &status,
+            10.5,
+            text_muted,
+            Rectangle::new(Point::from((cx + 16, cy + 96)), Size::from((cw - 32, 20))),
+        ) {
+            out.push(CompositorRenderElement::Memory(el));
+        }
+        let btn_logical = Rectangle::new(
+            Point::from((btn_rect.loc.x, btn_rect.loc.y)),
+            Size::from((btn_rect.size.w, btn_rect.size.h)),
+        );
+        if let Some(el) = text_cache.render_label_centered(
+            renderer,
+            "Unlock Session",
+            12.5,
+            text_bright,
+            btn_logical,
+        ) {
+            out.push(CompositorRenderElement::Memory(el));
+        }
+        if let Some(el) = text_cache.render_label_centered(
+            renderer,
+            "Press Enter, Space, or click Unlock",
+            10.0,
+            text_muted,
+            Rectangle::new(
+                Point::from((cx + 16, cy + ch - 26)),
+                Size::from((cw - 32, 18)),
+            ),
+        ) {
+            out.push(CompositorRenderElement::Memory(el));
+        }
+    }
+
+    push_rounded_glass_box(
+        &mut out,
+        shape_cache,
+        renderer,
+        btn_rect,
+        8,
+        RGBA_ACCENT,
+        Some(RGBA_BORDER_HIGHLIGHT),
+    );
+
+    let card_rect = Rectangle::new(Point::from((cx, cy)), Size::from((cw, ch)));
+    push_rounded_glass_box(
+        &mut out,
+        shape_cache,
+        renderer,
+        card_rect,
+        16,
+        RGBA_SURFACE_ELEVATED,
+        Some(RGBA_BORDER_HIGHLIGHT),
+    );
+    push_soft_shadow(&mut out, shape_cache, renderer, card_rect, 16, 18, 115);
+
+    let curtain_a = 0.92 * (p as f32);
+    out.push(CompositorRenderElement::Solid(make_solid_element(
+        Rectangle::new(Point::from((0, 0)), Size::from((width, height))),
+        premul(0.059, 0.039, 0.098, curtain_a),
+    )));
 
     out
 }
@@ -3060,6 +3261,7 @@ mod tests {
             selected_in_window: 0,
             cursor_offset_x: 32,
             items: &sample_items,
+            progress: 1.0,
         };
         let elements_with_launcher = generate_shell_render_elements(
             size,
@@ -3085,6 +3287,7 @@ mod tests {
             audio_muted: false,
             frame_p50_us: 16_667,
             window_count: 2,
+            progress: 1.0,
         };
         let elements_with_qs = generate_shell_render_elements(
             size,
@@ -3336,5 +3539,20 @@ mod tests {
             f64::from(bx + bw / 2),
             f64::from(by + bh / 2)
         ));
+    }
+
+    #[test]
+    fn lock_screen_hit_testing_and_animation_offsets_match_bounds() {
+        let size = Size::from((1280, 800));
+        let btn = lock_screen_unlock_button_rect(size, 0);
+        assert!(check_lock_screen_unlock_click(
+            size,
+            f64::from(btn.loc.x + btn.size.w / 2),
+            f64::from(btn.loc.y + btn.size.h / 2)
+        ));
+        assert!(!check_lock_screen_unlock_click(size, 40.0, 40.0));
+
+        assert_eq!(anim_offset(1.0, -22.0), 0);
+        assert_eq!(anim_offset(0.0, -22.0), -22);
     }
 }

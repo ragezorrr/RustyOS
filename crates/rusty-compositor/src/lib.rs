@@ -394,6 +394,21 @@ mod tests {
         assert_eq!(compositor.notification_count, 0);
         assert_eq!(compositor.notifications, Vec::new());
 
+        // Test Lock Screen IPC transitions, overlay isolation & reduced-motion snap (`RUSTYOS-025`)
+        compositor.handle_ipc_request(rusty_ipc::ShellRequest::ToggleLauncher);
+        assert!(compositor.launcher_active);
+        compositor.handle_ipc_request(rusty_ipc::ShellRequest::SetLockScreen { locked: true });
+        assert!(compositor.screen_locked);
+        assert!(!compositor.launcher_active);
+        assert!((compositor.lock_screen_anim.target() - 1.0).abs() < f64::EPSILON);
+
+        compositor.handle_ipc_request(rusty_ipc::ShellRequest::SetReducedMotion { enabled: true });
+        assert!((compositor.lock_screen_anim.current() - 1.0).abs() < f64::EPSILON);
+
+        compositor.handle_ipc_request(rusty_ipc::ShellRequest::SetLockScreen { locked: false });
+        assert!(!compositor.screen_locked);
+        assert!((compositor.lock_screen_anim.current() - 0.0).abs() < f64::EPSILON);
+
         compositor.request_shutdown();
         assert!(!compositor.running);
         Ok(())

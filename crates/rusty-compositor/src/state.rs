@@ -4,7 +4,7 @@ use std::os::unix::io::OwnedFd;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use rusty_animation::{AnimationEngine, LogicalRect};
+use rusty_animation::{AnimatedValue, AnimationEngine, Easing, LogicalRect, MotionTokens};
 use rusty_ipc::{
     CompositorEvent, DesktopStateSnapshot, NotificationSummary, ShellRequest, Urgency,
     WindowSummary,
@@ -160,18 +160,26 @@ pub struct RustyCompositorState {
     pub animations: AnimationEngine,
     /// Whether the workspace overview mode is active (`RUSTYOS-009`/`010`/`023`).
     pub overview_active: bool,
+    /// Animated Overview transition progress (`0.0` closed -> `1.0` open) (`RUSTYOS-025`).
+    pub overview_anim: AnimatedValue,
     /// Currently hovered Dock slot index (`0..3 + windows.len()`) (`RUSTYOS-023`).
     pub dock_hover_slot: Option<usize>,
     /// Whether the Spotlight application launcher overlay is open (`RUSTYOS-018`).
     pub launcher_active: bool,
+    /// Animated Spotlight transition progress (`0.0` closed -> `1.0` open) (`RUSTYOS-025`).
+    pub launcher_anim: AnimatedValue,
     /// Interactive Spotlight query, catalog, and selection state (`RUSTYOS-018b`).
     pub launcher: crate::launcher::LauncherState,
     /// Whether the Quick Settings Control Center popover is open (`RUSTYOS-021`).
     pub quick_settings_active: bool,
+    /// Animated Quick Settings transition progress (`0.0` closed -> `1.0` open) (`RUSTYOS-025`).
+    pub quick_settings_anim: AnimatedValue,
     /// Non-blocking system telemetry & quick audio controls (`RUSTYOS-021`).
     pub telemetry: crate::telemetry::SystemMetricsHandle,
-    /// Whether the session lock screen is active (`RUSTYOS-009`/`010`).
+    /// Whether the session lock screen is active (`RUSTYOS-009`/`010`/`025`).
     pub screen_locked: bool,
+    /// Animated Lock Screen transition progress (`0.0` unlocked -> `1.0` locked) (`RUSTYOS-025`).
+    pub lock_screen_anim: AnimatedValue,
     /// Count of active notifications held in compositor HUD queue (`RUSTYOS-009`/`010`/`024`).
     pub notification_count: u32,
     /// Active desktop notification queue rendered in Notification HUD & exposed via IPC (`RUSTYOS-024`).
@@ -284,12 +292,16 @@ impl RustyCompositorState {
             frame_timing: FrameTimingCollector::new(DEFAULT_SAMPLE_CAPACITY, 60_000),
             animations: AnimationEngine::default(),
             overview_active: false,
+            overview_anim: AnimatedValue::new_settled(0.0),
             dock_hover_slot: None,
             launcher_active: false,
+            launcher_anim: AnimatedValue::new_settled(0.0),
             launcher: crate::launcher::LauncherState::new(),
             quick_settings_active: false,
+            quick_settings_anim: AnimatedValue::new_settled(0.0),
             telemetry: crate::telemetry::SystemMetricsHandle::static_default(),
             screen_locked: false,
+            lock_screen_anim: AnimatedValue::new_settled(0.0),
             notification_count: 0,
             notifications: Vec::new(),
             next_notification_id: 0,
@@ -309,16 +321,18 @@ impl RustyCompositorState {
     pub fn toggle_launcher(&mut self) {
         self.launcher_active = !self.launcher_active;
         if self.launcher_active {
-            self.quick_settings_active = false;
-            self.overview_active = false;
+            self.close_quick_settings();
+            self.close_overview();
         }
         self.launcher.reset();
+        self.retarget_launcher_anim();
     }
 
     /// Closes the Spotlight overlay and clears its active search query.
     pub fn close_launcher(&mut self) {
         self.launcher_active = false;
         self.launcher.reset();
+        self.retarget_launcher_anim();
     }
 
     /// Toggles the `TopBar` Quick Settings popover and triggers an async telemetry refresh when opened.
@@ -326,14 +340,89 @@ impl RustyCompositorState {
         self.quick_settings_active = !self.quick_settings_active;
         if self.quick_settings_active {
             self.close_launcher();
-            self.overview_active = false;
+            self.close_overview();
             self.telemetry.request_refresh();
         }
+        self.retarget_quick_settings_anim();
     }
 
     /// Closes the Quick Settings popover.
     pub fn close_quick_settings(&mut self) {
         self.quick_settings_active = false;
+        self.retarget_quick_settings_anim();
+    }
+
+    /// Engages or disengages the interactive session Lock Screen with smooth transition (`RUSTYOS-025`).
+    pub fn set_screen_locked(&mut self, locked: bool, serial: Serial) {
+        self.screen_locked = locked;
+        if locked {
+            self.close_launcher();
+            self.close_quick_settings();
+            self.close_overview();
+            self.active_window_drag = None;
+            self.active_window_resize = None;
+            self.dock_hover_slot = None;
+            let keyboard = self.keyboard.clone();
+            keyboard.set_focus(self, None, serial);
+        } else {
+            self.sync_space_with_wm(serial);
+        }
+        let now = self.elapsed();
+        let tokens = MotionTokens::default();
+        self.lock_screen_anim.retarget(
+            if locked { 1.0 } else { 0.0 },
+            now,
+            tokens.standard_duration,
+            Easing::EaseOutQuart,
+            self.animations.reduced_motion(),
+        );
+    }
+
+    /// Updates accessibility `reduced_motion` and snaps in-flight shell transitions if enabled (`RUSTYOS-025`).
+    pub fn set_reduced_motion_pref(&mut self, enabled: bool) {
+        self.animations.set_reduced_motion(enabled);
+        if enabled {
+            self.overview_anim.snap_to_target();
+            self.launcher_anim.snap_to_target();
+            self.quick_settings_anim.snap_to_target();
+            self.lock_screen_anim.snap_to_target();
+        }
+    }
+
+    fn retarget_launcher_anim(&mut self) {
+        let now = self.elapsed();
+        let tokens = MotionTokens::default();
+        self.launcher_anim.retarget(
+            if self.launcher_active { 1.0 } else { 0.0 },
+            now,
+            tokens.short_duration,
+            Easing::EaseOutQuart,
+            self.animations.reduced_motion(),
+        );
+    }
+
+    fn retarget_quick_settings_anim(&mut self) {
+        let now = self.elapsed();
+        let tokens = MotionTokens::default();
+        self.quick_settings_anim.retarget(
+            if self.quick_settings_active { 1.0 } else { 0.0 },
+            now,
+            tokens.short_duration,
+            Easing::EaseOutCubic,
+            self.animations.reduced_motion(),
+        );
+    }
+
+    fn retarget_overview_anim(&mut self) {
+        let now = self.elapsed();
+        let tokens = MotionTokens::default();
+        self.overview_anim.retarget(
+            if self.overview_active { 1.0 } else { 0.0 },
+            now,
+            tokens.long_duration,
+            Easing::EaseOutCubic,
+            self.animations.reduced_motion(),
+        );
     }
 
     /// Pushes a notification into the compositor HUD queue using current monotonic uptime (`RUSTYOS-024`).
@@ -447,11 +536,13 @@ impl RustyCompositorState {
             self.active_window_drag = None;
             self.active_window_resize = None;
         }
+        self.retarget_overview_anim();
     }
 
     /// Exits Workspace Overview mode (`RUSTYOS-023`).
     pub fn close_overview(&mut self) {
         self.overview_active = false;
+        self.retarget_overview_anim();
     }
 
     /// Returns visible window IDs on the active workspace in stable ascending `WindowId` order (`RUSTYOS-023`).
@@ -473,7 +564,7 @@ impl RustyCompositorState {
         if let Some(&win_id) = ids.get(idx) {
             self.wm.focus_and_raise(win_id);
             self.sync_space_with_wm(serial);
-            self.overview_active = false;
+            self.close_overview();
         }
     }
 
@@ -482,7 +573,7 @@ impl RustyCompositorState {
         let ipc_path = rusty_ipc::default_ipc_socket_path(&self.socket_name);
         match hit {
             crate::shell_render::DockHit::PinnedTerminal => {
-                self.overview_active = false;
+                self.close_overview();
                 let launched = self.launcher.launch_preferred(
                     &[
                         "foot",
@@ -503,7 +594,7 @@ impl RustyCompositorState {
                 }
             }
             crate::shell_render::DockHit::PinnedFiles => {
-                self.overview_active = false;
+                self.close_overview();
                 let launched = self.launcher.launch_preferred(
                     &["nautilus", "dolphin", "thunar", "nemo", "pcmanfm"],
                     &self.socket_name,
@@ -760,13 +851,18 @@ impl RustyCompositorState {
         keyboard.set_focus(self, focus_surface, serial);
     }
 
-    /// Advances active window and workspace transitions to the current monotonic timestamp
+    /// Advances active window, workspace, and shell overlay transitions to the current monotonic timestamp
     /// and updates window positions in [`Space<Window>`].
     pub fn tick_animations(&mut self) {
+        let now = self.elapsed();
+        let _ = self.overview_anim.tick(now);
+        let _ = self.launcher_anim.tick(now);
+        let _ = self.quick_settings_anim.tick(now);
+        let _ = self.lock_screen_anim.tick(now);
+
         if !self.animations.has_active_animations() {
             return;
         }
-        let now = self.elapsed();
         let _ = self.animations.tick(now);
 
         let focused_id = self.wm.focused_window();
@@ -902,11 +998,11 @@ impl RustyCompositorState {
                 self.close_launcher();
             }
             ShellRequest::SetReducedMotion { enabled } => {
-                self.animations.set_reduced_motion(enabled);
+                self.set_reduced_motion_pref(enabled);
                 info!(reduced_motion = enabled, "Updated reduced-motion via IPC");
             }
             ShellRequest::SetLockScreen { locked } => {
-                self.screen_locked = locked;
+                self.set_screen_locked(locked, serial);
                 info!(
                     screen_locked = locked,
                     "Updated session lock screen state via IPC"

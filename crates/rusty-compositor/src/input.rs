@@ -28,6 +28,9 @@ enum KeyIntercept {
     TriggerNotification,
     ClearNotifications,
     OverviewClose,
+    LockScreen,
+    UnlockScreen,
+    LockScreenConsume,
     QuickSettingsClose,
     LauncherClose,
     LauncherActivate,
@@ -90,6 +93,13 @@ impl RustyCompositorState {
             serial,
             time,
             |state, modifiers, handle| {
+                if state.screen_locked {
+                    if key_state != KeyState::Pressed {
+                        return FilterResult::Intercept(KeyIntercept::LockScreenConsume);
+                    }
+                    let sym = handle.modified_sym();
+                    return FilterResult::Intercept(match_lock_screen_key(sym));
+                }
                 if key_state != KeyState::Pressed {
                     return if state.launcher_active {
                         FilterResult::Intercept(KeyIntercept::LauncherConsume)
@@ -132,7 +142,8 @@ impl RustyCompositorState {
                 self.request_shutdown();
             }
             KeyIntercept::ToggleReducedMotion => {
-                let reduced = self.animations.toggle_reduced_motion();
+                let reduced = !self.animations.reduced_motion();
+                self.set_reduced_motion_pref(reduced);
                 info!(
                     reduced_motion = reduced,
                     "Toggled reduced-motion preference"
@@ -175,6 +186,15 @@ impl RustyCompositorState {
                 self.close_overview();
                 info!("Closed Workspace Overview");
             }
+            KeyIntercept::LockScreen => {
+                self.set_screen_locked(true, serial);
+                info!("Engaged desktop session Lock Screen");
+            }
+            KeyIntercept::UnlockScreen => {
+                self.set_screen_locked(false, serial);
+                info!("Unlocked desktop session Lock Screen");
+            }
+            KeyIntercept::LockScreenConsume | KeyIntercept::LauncherConsume => {}
             KeyIntercept::QuickSettingsClose => {
                 self.close_quick_settings();
                 info!("Closed Quick Settings popover");
@@ -198,7 +218,6 @@ impl RustyCompositorState {
             KeyIntercept::LauncherText(text) => {
                 self.launcher.push_text(&text);
             }
-            KeyIntercept::LauncherConsume => {}
             KeyIntercept::Wm(wm_action) => {
                 self.apply_wm_action(wm_action, serial);
             }
@@ -216,6 +235,24 @@ impl RustyCompositorState {
 
         let pos: Point<f64, Logical> = event.position_transformed(output_geo);
         self.pointer_location = pos;
+
+        if self.screen_locked {
+            self.dock_hover_slot = None;
+            let serial = SERIAL_COUNTER.next_serial();
+            let time = Event::time_msec(event);
+            let pointer = self.pointer.clone();
+            pointer.motion(
+                self,
+                None,
+                &MotionEvent {
+                    location: pos,
+                    serial,
+                    time,
+                },
+            );
+            pointer.frame(self);
+            return;
+        }
 
         self.dock_hover_slot = if !self.launcher_active && !self.quick_settings_active {
             crate::shell_render::check_dock_slot(
@@ -339,7 +376,8 @@ impl RustyCompositorState {
                 self.apply_wm_action(WmAction::ToggleLayoutMode, serial);
             }
             crate::shell_render::QuickSettingsHit::ToggleReducedMotion => {
-                let _ = self.animations.toggle_reduced_motion();
+                let reduced = !self.animations.reduced_motion();
+                self.set_reduced_motion_pref(reduced);
             }
             crate::shell_render::QuickSettingsHit::OpenSpotlight => {
                 self.toggle_launcher();
@@ -366,6 +404,22 @@ impl RustyCompositorState {
         }
 
         if button_state == ButtonState::Pressed {
+            if self.screen_locked {
+                let output_phys = self
+                    .space
+                    .output_geometry(&self.output)
+                    .map_or_else(|| Size::from((1280, 800)), |geo| geo.size)
+                    .to_physical(1);
+                if crate::shell_render::check_lock_screen_unlock_click(
+                    output_phys,
+                    self.pointer_location.x,
+                    self.pointer_location.y,
+                ) {
+                    self.set_screen_locked(false, serial);
+                }
+                return;
+            }
+
             let output_width = self
                 .space
                 .output_geometry(&self.output)
@@ -673,6 +727,12 @@ const fn match_shortcut(modifiers: ModifiersState, sym: Keysym) -> Option<KeyInt
         return Some(KeyIntercept::ToggleOverview);
     }
 
+    // Super + L or Ctrl + Alt + L engages session Lock Screen (`RUSTYOS-025`)
+    if (modifiers.logo || (modifiers.ctrl && modifiers.alt)) && matches!(sym, Keysym::l | Keysym::L)
+    {
+        return Some(KeyIntercept::LockScreen);
+    }
+
     if !modifiers.alt {
         return None;
     }
@@ -719,6 +779,15 @@ const fn match_shortcut(modifiers: ModifiersState, sym: Keysym) -> Option<KeyInt
             }
         }
         _ => None,
+    }
+}
+
+const fn match_lock_screen_key(sym: Keysym) -> KeyIntercept {
+    match sym {
+        Keysym::Return | Keysym::KP_Enter | Keysym::space | Keysym::Escape => {
+            KeyIntercept::UnlockScreen
+        }
+        _ => KeyIntercept::LockScreenConsume,
     }
 }
 
@@ -849,6 +918,27 @@ mod tests {
         assert_eq!(
             match_shortcut(alt_shift, Keysym::n),
             Some(KeyIntercept::ClearNotifications)
+        );
+        assert_eq!(
+            match_shortcut(logo, Keysym::l),
+            Some(KeyIntercept::LockScreen)
+        );
+        let ctrl_alt = ModifiersState {
+            ctrl: true,
+            alt: true,
+            ..ModifiersState::default()
+        };
+        assert_eq!(
+            match_shortcut(ctrl_alt, Keysym::l),
+            Some(KeyIntercept::LockScreen)
+        );
+        assert_eq!(
+            match_lock_screen_key(Keysym::Return),
+            KeyIntercept::UnlockScreen
+        );
+        assert_eq!(
+            match_lock_screen_key(Keysym::a),
+            KeyIntercept::LockScreenConsume
         );
     }
 

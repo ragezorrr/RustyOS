@@ -9,7 +9,7 @@ use smithay::backend::renderer::element::memory::{
     MemoryRenderBuffer, MemoryRenderBufferRenderElement,
 };
 use smithay::backend::renderer::gles::GlesRenderer;
-use smithay::utils::{Logical, Point, Size, Transform};
+use smithay::utils::{Logical, Point, Rectangle, Size, Transform};
 
 /// Corner quadrant identifier for 9-slice rounded boxes and shadows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -48,12 +48,13 @@ struct ShadowCornerKey {
     max_alpha: u8,
 }
 
-/// CPU-rasterized, GPU-cached cache of SDF rounded corners, circles, and shadow patches.
+/// CPU-rasterized, GPU-cached cache of SDF rounded corners, circles, shadow patches, and wallpaper.
 #[derive(Debug, Default)]
 pub struct UiShapeCache {
     circles: HashMap<CircleKey, (MemoryRenderBuffer, Size<i32, Logical>)>,
     corners: HashMap<CornerKey, (MemoryRenderBuffer, Size<i32, Logical>)>,
     shadow_corners: HashMap<ShadowCornerKey, (MemoryRenderBuffer, Size<i32, Logical>)>,
+    wallpaper: Option<MemoryRenderBuffer>,
 }
 
 impl UiShapeCache {
@@ -178,6 +179,35 @@ impl UiShapeCache {
             None,
             None,
             None,
+            Kind::Unspecified,
+        )
+        .ok()
+    }
+
+    /// Returns a GPU-cached ambient Purple Glass wallpaper scaled smoothly to `screen_size` (`RUSTYOS-025`).
+    pub fn wallpaper_element(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        screen_size: Size<i32, Logical>,
+    ) -> Option<MemoryRenderBufferRenderElement<GlesRenderer>> {
+        const WALLPAPER_W: i32 = 256;
+        const WALLPAPER_H: i32 = 160;
+        if screen_size.w <= 0 || screen_size.h <= 0 {
+            return None;
+        }
+        let buf = self
+            .wallpaper
+            .get_or_insert_with(|| rasterize_wallpaper_buffer(WALLPAPER_W, WALLPAPER_H));
+        MemoryRenderBufferRenderElement::from_buffer(
+            renderer,
+            Point::<f64, smithay::utils::Physical>::from((0.0, 0.0)),
+            buf,
+            None,
+            Some(Rectangle::<f64, Logical>::from_size(Size::from((
+                f64::from(WALLPAPER_W),
+                f64::from(WALLPAPER_H),
+            )))),
+            Some(screen_size),
             Kind::Unspecified,
         )
         .ok()
@@ -471,6 +501,60 @@ fn rasterize_shadow_corner_buffer(
     mem_buf
 }
 
+#[allow(clippy::cast_precision_loss)]
+fn sample_wallpaper_pixel(px: i32, py: i32, width: i32, height: i32) -> [u8; 4] {
+    let norm_x = (px as f32 + 0.5) / width.max(1) as f32;
+    let norm_y = (py as f32 + 0.5) / height.max(1) as f32;
+
+    // Deep Purple Glass base vertical gradient (#0F0A19 -> #181128)
+    let mut red = 15.0 + 9.0 * norm_y;
+    let mut green = 10.0 + 7.0 * norm_y;
+    let mut blue = 25.0 + 16.0 * norm_y;
+
+    // Primary upper-left neon violet aurora glow
+    let dist1 = (norm_x - 0.24).hypot((norm_y - 0.22) * 0.85);
+    let glow1 = (1.0 - (dist1 / 0.55)).clamp(0.0, 1.0);
+    let amp1 = glow1 * glow1 * 0.22;
+    red += 165.0 * amp1;
+    green += 110.0 * amp1;
+    blue += 255.0 * amp1;
+
+    // Secondary bottom-right deep amethyst glow
+    let dist2 = (norm_x - 0.78).hypot((norm_y - 0.76) * 0.9);
+    let glow2 = (1.0 - (dist2 / 0.62)).clamp(0.0, 1.0);
+    let amp2 = glow2 * glow2 * 0.26;
+    red += 95.0 * amp2;
+    green += 54.0 * amp2;
+    blue += 178.0 * amp2;
+
+    premul_pixel(red, green, blue, 1.0)
+}
+
+fn rasterize_wallpaper_buffer(w: i32, h: i32) -> MemoryRenderBuffer {
+    let mut mem_buf = MemoryRenderBuffer::new(Fourcc::Argb8888, (w, h), 1, Transform::Normal, None);
+    {
+        let mut ctx = mem_buf.render();
+        let _ = ctx.draw(|pixels| {
+            let w_u = usize::try_from(w).unwrap_or(0);
+            for py in 0..h {
+                for px in 0..w {
+                    let row = usize::try_from(py).unwrap_or(0);
+                    let col = usize::try_from(px).unwrap_or(0);
+                    let idx = (row * w_u + col) * 4;
+                    if idx + 4 <= pixels.len() {
+                        let p = sample_wallpaper_pixel(px, py, w, h);
+                        pixels[idx..idx + 4].copy_from_slice(&p);
+                    }
+                }
+            }
+            Ok::<_, std::convert::Infallible>(vec![smithay::utils::Rectangle::from_size(
+                Size::from((w, h)),
+            )])
+        });
+    }
+    mem_buf
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -510,5 +594,12 @@ mod tests {
             sample_shadow_corner_pixel(12, 12, 10, 14, CornerQuadrant::TopLeft, [5, 2, 12], 96);
         assert_eq!(inside_glass[3], 0);
         assert!(outside_halo[3] > 0 && outside_halo[3] <= 96);
+
+        // Ambient wallpaper gradient is opaque and modulated smoothly around aurora glow
+        let glow_px = sample_wallpaper_pixel(62, 35, 256, 160);
+        let dark_px = sample_wallpaper_pixel(250, 10, 256, 160);
+        assert_eq!(glow_px[3], 255);
+        assert_eq!(dark_px[3], 255);
+        assert!(glow_px[0] > dark_px[0]);
     }
 }
