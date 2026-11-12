@@ -5,6 +5,10 @@
 
 use std::error::Error;
 use std::fmt;
+use std::path::Path;
+use std::sync::OnceLock;
+
+use fontdue::{Font, FontSettings};
 
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
@@ -161,6 +165,126 @@ fn fill_rect(
     }
 }
 
+fn system_font() -> Option<&'static Font> {
+    static FONT: OnceLock<Option<Font>> = OnceLock::new();
+    FONT.get_or_init(|| {
+        const CANDIDATES: &[&str] = &[
+            "/usr/share/fonts/Adwaita/AdwaitaSans-Regular.ttf",
+            "/usr/share/fonts/noto/NotoSans-Regular.ttf",
+            "/usr/share/fonts/TTF/DejaVuSans.ttf",
+            "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/liberation/LiberationSans-Regular.ttf",
+        ];
+        if let Ok(env_path) = std::env::var("RUSTYOS_FONT_PATH")
+            && let Ok(bytes) = std::fs::read(env_path)
+            && let Ok(font) = Font::from_bytes(bytes, FontSettings::default())
+        {
+            return Some(font);
+        }
+        for path in CANDIDATES {
+            if Path::new(path).exists()
+                && let Ok(bytes) = std::fs::read(path)
+                && let Ok(font) = Font::from_bytes(bytes, FontSettings::default())
+            {
+                return Some(font);
+            }
+        }
+        None
+    })
+    .as_ref()
+}
+
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss,
+    clippy::cast_possible_wrap,
+    clippy::too_many_arguments
+)]
+fn draw_text_argb8888(
+    canvas: &mut [u8],
+    stride: usize,
+    canvas_w: usize,
+    canvas_h: usize,
+    text: &str,
+    size_px: f32,
+    rgba: [u8; 4],
+    origin_x: i32,
+    origin_y: i32,
+    centered_in_box: Option<(usize, usize)>,
+) {
+    let Some(font) = system_font() else {
+        return;
+    };
+    if text.is_empty() {
+        return;
+    }
+
+    let line_metrics = font.horizontal_line_metrics(size_px);
+    let ascent = line_metrics.map_or(size_px * 0.8, |m| m.ascent);
+    let descent = line_metrics.map_or(-size_px * 0.2, |m| m.descent);
+    let line_h = (ascent - descent).ceil().max(size_px);
+
+    let mut glyphs = Vec::with_capacity(text.len());
+    let mut total_w = 0.0f32;
+    for ch in text.chars() {
+        let (metrics, bitmap) = font.rasterize(ch, size_px);
+        glyphs.push((total_w, metrics, bitmap));
+        total_w += metrics.advance_width;
+    }
+
+    let (base_x, base_y) = if let Some((bw, bh)) = centered_in_box {
+        let bx = origin_x as f32 + ((bw as f32 - total_w) * 0.5);
+        let by = origin_y as f32 + ((bh as f32 - line_h) * 0.5) + ascent;
+        (bx, by)
+    } else {
+        (origin_x as f32, origin_y as f32 + ascent)
+    };
+
+    let [r, g, b, a] = rgba;
+    for (adv_x, metrics, bitmap) in &glyphs {
+        if metrics.width == 0 || metrics.height == 0 {
+            continue;
+        }
+        let gx = (base_x + adv_x + metrics.xmin as f32).round() as i32;
+        let gy = (base_y - metrics.ymin as f32 - metrics.height as f32).round() as i32;
+
+        for row in 0..metrics.height {
+            let dst_y = gy + row as i32;
+            if dst_y < 0 || dst_y >= canvas_h as i32 {
+                continue;
+            }
+            for col in 0..metrics.width {
+                let dst_x = gx + col as i32;
+                if dst_x < 0 || dst_x >= canvas_w as i32 {
+                    continue;
+                }
+                let cov = bitmap[row * metrics.width + col];
+                if cov == 0 {
+                    continue;
+                }
+                let idx = (dst_y as usize) * stride + (dst_x as usize) * 4;
+                if idx + 4 > canvas.len() {
+                    continue;
+                }
+                let alpha = (u16::from(cov) * u16::from(a)) / 255;
+                let src_b = ((u16::from(b) * alpha) / 255) as u8;
+                let src_g = ((u16::from(g) * alpha) / 255) as u8;
+                let src_r = ((u16::from(r) * alpha) / 255) as u8;
+                let inv_a = 255 - alpha;
+
+                canvas[idx] = src_b.saturating_add(((u16::from(canvas[idx]) * inv_a) / 255) as u8);
+                canvas[idx + 1] =
+                    src_g.saturating_add(((u16::from(canvas[idx + 1]) * inv_a) / 255) as u8);
+                canvas[idx + 2] =
+                    src_r.saturating_add(((u16::from(canvas[idx + 2]) * inv_a) / 255) as u8);
+                canvas[idx + 3] = (alpha as u8)
+                    .saturating_add(((u16::from(canvas[idx + 3]) * inv_a) / 255) as u8);
+            }
+        }
+    }
+}
+
 /// Renders `TopBar` into an ARGB8888 buffer slice according to `TopBarState`.
 #[allow(clippy::too_many_lines)]
 pub fn render_top_bar_pixels(
@@ -180,6 +304,8 @@ pub fn render_top_bar_pixels(
     if h > 1 {
         fill_rect(canvas, stride, 0, h - 1, w, 1, colors::BORDER_SUBTLE);
     }
+
+    let has_font = system_font().is_some();
 
     // Workspace pills (1..=9)
     let active_ws = top_bar.active_workspace;
@@ -204,7 +330,7 @@ pub fn render_top_bar_pixels(
                 canvas,
                 stride,
                 x + (pill_w - 8) / 2,
-                pill_y + pill_h - 3,
+                pill_y + pill_h - 2,
                 8,
                 2,
                 colors::TEXT_BRIGHT,
@@ -219,16 +345,36 @@ pub fn render_top_bar_pixels(
                 pill_h,
                 colors::SURFACE_OVERLAY,
             );
-            fill_rect(
-                canvas,
-                stride,
-                x + (pill_w - 6) / 2,
-                pill_y + (pill_h - 2) / 2,
-                6,
-                2,
-                colors::TEXT_SUBTLE,
-            );
+            if !has_font {
+                fill_rect(
+                    canvas,
+                    stride,
+                    x + (pill_w - 6) / 2,
+                    pill_y + (pill_h - 2) / 2,
+                    6,
+                    2,
+                    colors::TEXT_SUBTLE,
+                );
+            }
         }
+        let text_rgba = if ws == active_ws {
+            [244, 240, 250, 255]
+        } else {
+            [166, 155, 181, 255]
+        };
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        draw_text_argb8888(
+            canvas,
+            stride,
+            w,
+            h,
+            &ws.to_string(),
+            12.0,
+            text_rgba,
+            x as i32,
+            pill_y as i32,
+            Some((pill_w, pill_h)),
+        );
         x += pill_w + 4;
     }
 
@@ -248,6 +394,24 @@ pub fn render_top_bar_pixels(
         colors::TEXT_SUBTLE
     };
     fill_rect(canvas, stride, x + 8, pill_y, 3, pill_h, layout_accent);
+    let layout_label = if top_bar.layout_mode == "master-stack" {
+        "Tile"
+    } else {
+        "Float"
+    };
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    draw_text_argb8888(
+        canvas,
+        stride,
+        w,
+        h,
+        layout_label,
+        11.5,
+        [244, 240, 250, 255],
+        (x + 11) as i32,
+        pill_y as i32,
+        Some((53, pill_h)),
+    );
 
     // Status pill on the right
     if w > 150 {
@@ -281,25 +445,42 @@ pub fn render_top_bar_pixels(
             8,
             colors::SUCCESS_GREEN,
         );
-        // Status bars
-        fill_rect(
-            canvas,
-            stride,
-            status_x + 24,
-            pill_y + 8,
-            40,
-            4,
-            colors::TEXT_MUTED,
-        );
-        fill_rect(
-            canvas,
-            stride,
-            status_x + 72,
-            pill_y + 6,
-            46,
-            8,
-            colors::ACCENT_MUTED,
-        );
+        if has_font {
+            let status_text = format!("{}  {}%", top_bar.clock_label, top_bar.battery_percent);
+            #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+            draw_text_argb8888(
+                canvas,
+                stride,
+                w,
+                h,
+                &status_text,
+                11.0,
+                [244, 240, 250, 255],
+                (status_x + 18) as i32,
+                pill_y as i32,
+                Some((status_w - 22, pill_h)),
+            );
+        } else {
+            // Status bars fallback
+            fill_rect(
+                canvas,
+                stride,
+                status_x + 24,
+                pill_y + 8,
+                40,
+                4,
+                colors::TEXT_MUTED,
+            );
+            fill_rect(
+                canvas,
+                stride,
+                status_x + 72,
+                pill_y + 6,
+                46,
+                8,
+                colors::ACCENT_MUTED,
+            );
+        }
     }
 }
 
@@ -415,6 +596,32 @@ pub fn render_launcher_pixels(
     // Cursor indicator
     fill_rect(canvas, stride, 62, 26, 2, 24, colors::TEXT_BRIGHT);
 
+    let has_font = system_font().is_some();
+    if has_font {
+        let prompt_text = if launcher.query.is_empty() {
+            "Search RustyOS..."
+        } else {
+            &launcher.query
+        };
+        let prompt_color = if launcher.query.is_empty() {
+            [166, 155, 181, 255]
+        } else {
+            [244, 240, 250, 255]
+        };
+        draw_text_argb8888(
+            canvas,
+            stride,
+            w,
+            h,
+            prompt_text,
+            14.5,
+            prompt_color,
+            70,
+            28,
+            None,
+        );
+    }
+
     // Divider line
     fill_rect(
         canvas,
@@ -462,18 +669,47 @@ pub fn render_launcher_pixels(
         };
         fill_rect(canvas, stride, 28, row_y + 10, 24, 24, icon_color);
 
-        // App title and subtitle indicators
-        let title_w = (entry.name.len() * 8).clamp(60, 180);
-        fill_rect(
-            canvas,
-            stride,
-            62,
-            row_y + 12,
-            title_w,
-            8,
-            colors::TEXT_BRIGHT,
-        );
-        fill_rect(canvas, stride, 62, row_y + 26, 90, 6, colors::TEXT_MUTED);
+        if has_font {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+            let ry = row_y as i32;
+            draw_text_argb8888(
+                canvas,
+                stride,
+                w,
+                h,
+                &entry.name,
+                13.5,
+                [244, 240, 250, 255],
+                62,
+                ry + 6,
+                None,
+            );
+            draw_text_argb8888(
+                canvas,
+                stride,
+                w,
+                h,
+                &entry.exec,
+                10.5,
+                [166, 155, 181, 255],
+                62,
+                ry + 24,
+                None,
+            );
+        } else {
+            // App title and subtitle indicators fallback
+            let title_w = (entry.name.len() * 8).clamp(60, 180);
+            fill_rect(
+                canvas,
+                stride,
+                62,
+                row_y + 12,
+                title_w,
+                8,
+                colors::TEXT_BRIGHT,
+            );
+            fill_rect(canvas, stride, 62, row_y + 26, 90, 6, colors::TEXT_MUTED);
+        }
     }
 }
 

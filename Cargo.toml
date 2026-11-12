@@ -17,6 +17,7 @@ license = "MIT OR Apache-2.0"
 authors = ["RustyOS Contributors"]
 
 [workspace.dependencies]
+fontdue = "0.9.5"
 rusty-animation = { path = "crates/rusty-animation" }
 rusty-ipc = { path = "crates/rusty-ipc" }
 rusty-services = { path = "crates/rusty-services" }

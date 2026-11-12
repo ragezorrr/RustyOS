@@ -4,8 +4,10 @@
 //! solid color render elements, adhering to design tokens in `DESIGN.md` (Version 2.0 "RustyOS Purple Glass").
 
 use smithay::backend::renderer::Color32F;
+use smithay::backend::renderer::element::memory::MemoryRenderBufferRenderElement;
 use smithay::backend::renderer::element::solid::SolidColorRenderElement;
 use smithay::backend::renderer::element::{Id, Kind};
+use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::renderer::utils::CommitCounter;
 use smithay::utils::{Point, Rectangle, Size};
 
@@ -80,6 +82,7 @@ fn render_top_bar(
     width: i32,
     active_workspace: u8,
     layout_mode: &str,
+    has_text: bool,
 ) {
     // 1. TopBar Background (full width, height 32, elevated surface)
     let top_bar_geo = Rectangle::new(Point::from((0, 0)), Size::from((width, TOP_BAR_HEIGHT)));
@@ -103,24 +106,26 @@ fn render_top_bar(
         );
 
         if is_active {
-            // Bright neon violet pill with a text-colored highlight pip
+            // Bright neon violet pill with bottom highlight pip
             elements.push(make_solid_element(ws_geo, COLOR_ACCENT));
             let pip_geo = Rectangle::new(
-                Point::from((start_x + (WS_BTN_WIDTH - 8) / 2, ws_y + ws_btn_height - 3)),
+                Point::from((start_x + (WS_BTN_WIDTH - 8) / 2, ws_y + ws_btn_height - 2)),
                 Size::from((8, 2)),
             );
             elements.push(make_solid_element(pip_geo, COLOR_TEXT));
         } else {
-            // Contrast elevated overlay pill with subtle inner indicator
+            // Contrast elevated overlay pill
             elements.push(make_solid_element(ws_geo, COLOR_SURFACE_OVERLAY));
-            let pip_geo = Rectangle::new(
-                Point::from((
-                    start_x + (WS_BTN_WIDTH - 6) / 2,
-                    ws_y + (ws_btn_height - 2) / 2,
-                )),
-                Size::from((6, 2)),
-            );
-            elements.push(make_solid_element(pip_geo, COLOR_SUBTLE));
+            if !has_text {
+                let pip_geo = Rectangle::new(
+                    Point::from((
+                        start_x + (WS_BTN_WIDTH - 6) / 2,
+                        ws_y + (ws_btn_height - 2) / 2,
+                    )),
+                    Size::from((6, 2)),
+                );
+                elements.push(make_solid_element(pip_geo, COLOR_SUBTLE));
+            }
         }
         start_x += WS_BTN_STRIDE;
     }
@@ -164,11 +169,13 @@ fn render_top_bar(
     let dot_geo = Rectangle::new(Point::from((status_x + 8, ws_y + 6)), Size::from((8, 8)));
     elements.push(make_solid_element(dot_geo, COLOR_SUCCESS));
 
-    // Accent status bars (simulating clock and controls)
-    let bar1_geo = Rectangle::new(Point::from((status_x + 24, ws_y + 8)), Size::from((40, 4)));
-    elements.push(make_solid_element(bar1_geo, COLOR_MUTED));
-    let bar2_geo = Rectangle::new(Point::from((status_x + 72, ws_y + 6)), Size::from((46, 8)));
-    elements.push(make_solid_element(bar2_geo, COLOR_ACCENT_MUTED));
+    if !has_text {
+        // Accent status bars fallback when no font is available
+        let bar1_geo = Rectangle::new(Point::from((status_x + 24, ws_y + 8)), Size::from((40, 4)));
+        elements.push(make_solid_element(bar1_geo, COLOR_MUTED));
+        let bar2_geo = Rectangle::new(Point::from((status_x + 72, ws_y + 6)), Size::from((46, 8)));
+        elements.push(make_solid_element(bar2_geo, COLOR_ACCENT_MUTED));
+    }
 }
 
 fn render_dock(
@@ -248,7 +255,12 @@ fn render_dock(
     }
 }
 
-fn render_spotlight_modal(elements: &mut Vec<SolidColorRenderElement>, width: i32, height: i32) {
+fn render_spotlight_modal(
+    elements: &mut Vec<SolidColorRenderElement>,
+    width: i32,
+    height: i32,
+    has_text: bool,
+) {
     let modal_width = 560.min(width - 40);
     let modal_height = 240.min(height - 80);
     let modal_x = (width - modal_width) / 2;
@@ -290,12 +302,14 @@ fn render_spotlight_modal(elements: &mut Vec<SolidColorRenderElement>, width: i3
     );
     elements.push(make_solid_element(cursor_geo, COLOR_TEXT));
 
-    // 7e. Placeholder text indicator
-    let placeholder_geo = Rectangle::new(
-        Point::from((modal_x + 70, modal_y + 34)),
-        Size::from((140, 8)),
-    );
-    elements.push(make_solid_element(placeholder_geo, COLOR_MUTED));
+    if !has_text {
+        // 7e. Placeholder text indicator when no font renderer is active
+        let placeholder_geo = Rectangle::new(
+            Point::from((modal_x + 70, modal_y + 34)),
+            Size::from((140, 8)),
+        );
+        elements.push(make_solid_element(placeholder_geo, COLOR_MUTED));
+    }
 
     // 7f. Search divider
     let divider_geo = Rectangle::new(
@@ -340,19 +354,21 @@ fn render_spotlight_modal(elements: &mut Vec<SolidColorRenderElement>, width: i3
         };
         elements.push(make_solid_element(app_icon, icon_color));
 
-        // App title bar
-        let title_bar = Rectangle::new(
-            Point::from((modal_x + 62, row_y + 12)),
-            Size::from((120 + i * 20, 8)),
-        );
-        elements.push(make_solid_element(title_bar, COLOR_TEXT));
+        if !has_text {
+            // App title bar fallback
+            let title_bar = Rectangle::new(
+                Point::from((modal_x + 62, row_y + 12)),
+                Size::from((120 + i * 20, 8)),
+            );
+            elements.push(make_solid_element(title_bar, COLOR_TEXT));
 
-        // App subtitle bar
-        let sub_bar = Rectangle::new(
-            Point::from((modal_x + 62, row_y + 26)),
-            Size::from((80 + i * 15, 6)),
-        );
-        elements.push(make_solid_element(sub_bar, COLOR_MUTED));
+            // App subtitle bar fallback
+            let sub_bar = Rectangle::new(
+                Point::from((modal_x + 62, row_y + 26)),
+                Size::from((80 + i * 15, 6)),
+            );
+            elements.push(make_solid_element(sub_bar, COLOR_MUTED));
+        }
     }
 }
 
@@ -365,12 +381,19 @@ pub fn generate_shell_render_elements(
     window_count: usize,
     has_focused_window: bool,
     launcher_active: bool,
+    has_text: bool,
 ) -> Vec<SolidColorRenderElement> {
     let mut elements = Vec::new();
     let width = screen_size.w;
     let height = screen_size.h;
 
-    render_top_bar(&mut elements, width, active_workspace, layout_mode);
+    render_top_bar(
+        &mut elements,
+        width,
+        active_workspace,
+        layout_mode,
+        has_text,
+    );
     render_dock(
         &mut elements,
         width,
@@ -380,7 +403,7 @@ pub fn generate_shell_render_elements(
     );
 
     if launcher_active {
-        render_spotlight_modal(&mut elements, width, height);
+        render_spotlight_modal(&mut elements, width, height, has_text);
     }
 
     // Smithay's render_output expects elements in front-to-back order.
@@ -463,6 +486,7 @@ pub fn check_window_ssd_hit(
 pub fn generate_window_ssd_elements(
     rect: rusty_wm::Rect,
     is_focused: bool,
+    has_text: bool,
 ) -> Vec<SolidColorRenderElement> {
     let mut elements = Vec::new();
     let x = rect.x;
@@ -553,9 +577,9 @@ pub fn generate_window_ssd_elements(
         max_color,
     ));
 
-    // 4. Centered title pill bar
+    // 4. Centered title pill bar (when no font renderer is active)
     let title_w = (w / 4).clamp(48, 160);
-    if w > 140 {
+    if !has_text && w > 140 {
         let title_x = x + (w - title_w) / 2;
         let title_color = if is_focused {
             COLOR_MUTED
@@ -571,6 +595,185 @@ pub fn generate_window_ssd_elements(
     // Smithay render_output expects front-to-back order.
     elements.reverse();
     elements
+}
+
+/// Generates GPU-cached real font text labels for `TopBar`, `Dock`, and `Spotlight` (`RUSTYOS-020`).
+#[allow(clippy::too_many_lines)]
+pub fn generate_shell_text_elements(
+    text_cache: &mut crate::text::TextCache,
+    renderer: &mut GlesRenderer,
+    screen_size: Size<i32, smithay::utils::Physical>,
+    active_workspace: u8,
+    layout_mode: &str,
+    window_count: usize,
+    launcher_active: bool,
+) -> Vec<MemoryRenderBufferRenderElement<GlesRenderer>> {
+    let mut elements = Vec::new();
+    if !text_cache.has_font() {
+        return elements;
+    }
+
+    let width = screen_size.w;
+    let height = screen_size.h;
+    let text_bright = [244, 240, 250, 255]; // #F4F0FA
+    let text_muted = [166, 155, 181, 255]; // #A69BB5
+    let text_subtle = [118, 107, 133, 255]; // #766B85
+
+    // 1. Spotlight labels (topmost when active)
+    if launcher_active {
+        let modal_width = 560.min(width - 40);
+        let modal_height = 240.min(height - 80);
+        let modal_x = (width - modal_width) / 2;
+        let modal_y = (height - modal_height) / 3;
+
+        if let Some(el) = text_cache.render_label(
+            renderer,
+            "Search RustyOS...",
+            14.5,
+            text_muted,
+            Point::from((modal_x + 70, modal_y + 28)),
+        ) {
+            elements.push(el);
+        }
+
+        let entries = [
+            ("Terminal", "Command line shell (foot)"),
+            ("Files", "Browse folders & documents"),
+            ("ES2 Gears Demo", "OpenGL ES Wayland benchmark"),
+        ];
+        let start_row_y = modal_y + 80;
+        let row_h = 44;
+        for (i, (title, sub)) in entries.iter().enumerate() {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+            let row_y = start_row_y + (i as i32) * (row_h + 4);
+            if let Some(el) = text_cache.render_label(
+                renderer,
+                title,
+                13.5,
+                text_bright,
+                Point::from((modal_x + 62, row_y + 6)),
+            ) {
+                elements.push(el);
+            }
+            if let Some(el) = text_cache.render_label(
+                renderer,
+                sub,
+                10.5,
+                text_muted,
+                Point::from((modal_x + 62, row_y + 24)),
+            ) {
+                elements.push(el);
+            }
+        }
+    }
+
+    // 2. TopBar workspace digits (1..=9)
+    let ws_btn_height = 20;
+    let ws_y = 6;
+    let mut start_x = WS_START_X;
+    for ws in 1..=9 {
+        let color = if ws == active_workspace {
+            text_bright
+        } else {
+            text_muted
+        };
+        let bounds = Rectangle::new(
+            Point::from((start_x, ws_y)),
+            Size::from((WS_BTN_WIDTH, ws_btn_height)),
+        );
+        if let Some(el) =
+            text_cache.render_label_centered(renderer, &ws.to_string(), 12.0, color, bounds)
+        {
+            elements.push(el);
+        }
+        start_x += WS_BTN_STRIDE;
+    }
+
+    // 3. Layout mode label
+    let layout_label = if layout_mode == "master-stack" {
+        "Tile"
+    } else {
+        "Float"
+    };
+    let layout_bounds = Rectangle::new(
+        Point::from((start_x + 11, ws_y)),
+        Size::from((53, ws_btn_height)),
+    );
+    if let Some(el) =
+        text_cache.render_label_centered(renderer, layout_label, 11.5, text_bright, layout_bounds)
+    {
+        elements.push(el);
+    }
+
+    // 4. Right status pill text
+    let status_pill_width = 130;
+    let status_x = width - status_pill_width - 12;
+    let status_bounds = Rectangle::new(
+        Point::from((status_x + 18, ws_y)),
+        Size::from((status_pill_width - 22, ws_btn_height)),
+    );
+    if let Some(el) = text_cache.render_label_centered(
+        renderer,
+        "RustyOS • Live",
+        11.0,
+        text_bright,
+        status_bounds,
+    ) {
+        elements.push(el);
+    }
+
+    // 5. Dock app initials
+    let dock_items_count = (3 + window_count).max(3);
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let dock_width = ((dock_items_count as i32) * 52 + 16).min(width - 48);
+    let dock_x = (width - dock_width) / 2;
+    let dock_y = height - DOCK_HEIGHT - DOCK_MARGIN_BOTTOM;
+    let mut item_x = dock_x + 8;
+    let item_y = dock_y + 8;
+    let item_size = 40;
+
+    for i in 0..dock_items_count {
+        let label = match i {
+            0 => ">_",
+            1 => "Fs",
+            2 => "GL",
+            _ => "App",
+        };
+        let bounds = Rectangle::new(
+            Point::from((item_x, item_y)),
+            Size::from((item_size, item_size)),
+        );
+        let color = if i == 0 { text_bright } else { text_subtle };
+        if let Some(el) = text_cache.render_label_centered(renderer, label, 12.5, color, bounds) {
+            elements.push(el);
+        }
+        item_x += item_size + 12;
+    }
+
+    elements
+}
+
+/// Generates centered title text element for a window's SSD titlebar (`RUSTYOS-020`).
+pub fn generate_ssd_title_element(
+    text_cache: &mut crate::text::TextCache,
+    renderer: &mut GlesRenderer,
+    rect: rusty_wm::Rect,
+    title: &str,
+    is_focused: bool,
+) -> Option<MemoryRenderBufferRenderElement<GlesRenderer>> {
+    if !text_cache.has_font() || rect.width < 120 {
+        return None;
+    }
+    let color = if is_focused {
+        [244, 240, 250, 255] // #F4F0FA
+    } else {
+        [166, 155, 181, 255] // #A69BB5
+    };
+    let bounds = Rectangle::new(
+        Point::from((rect.x + 70, rect.y)),
+        Size::from((rect.width - 140, TITLEBAR_HEIGHT)),
+    );
+    text_cache.render_label_centered(renderer, title, 12.0, color, bounds)
 }
 
 #[cfg(test)]
@@ -591,11 +794,12 @@ mod tests {
     #[test]
     fn generate_shell_render_elements_produces_non_empty_layout() {
         let size = Size::from((1280, 800));
-        let elements = generate_shell_render_elements(size, 1, "master-stack", 2, true, false);
+        let elements =
+            generate_shell_render_elements(size, 1, "master-stack", 2, true, false, false);
         assert!(!elements.is_empty());
 
         let elements_with_launcher =
-            generate_shell_render_elements(size, 1, "master-stack", 2, true, true);
+            generate_shell_render_elements(size, 1, "master-stack", 2, true, true, false);
         assert!(elements_with_launcher.len() > elements.len());
     }
 
@@ -650,7 +854,8 @@ mod tests {
 
     #[test]
     fn generate_window_ssd_elements_creates_titlebar_traffic_lights_and_borders() {
-        let elements = generate_window_ssd_elements(rusty_wm::Rect::new(40, 40, 600, 400), true);
+        let elements =
+            generate_window_ssd_elements(rusty_wm::Rect::new(40, 40, 600, 400), true, false);
         // 4 border strips + titlebar bg + divider + 3 traffic lights + title pill = 10 elements
         assert_eq!(elements.len(), 10);
     }

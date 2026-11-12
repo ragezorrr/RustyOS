@@ -219,6 +219,20 @@ hardware/software context и низкие накладные расходы.
 - **Acceptance criteria:** Каждое окно рендерится с заголовком, рамкой и кнопками управления; нажатие кнопок закрывает/центрирует/разворачивает окно; перетаскивание за заголовок перемещает окно в реальном времени; 34 теста и clippy проходят без ошибок.
 - **Risks:** Перекрытие соседних окон решено пооконной сортировкой элементов в `CompositorRenderElement`.
 
+## RUSTYOS-020 --- Font & Text Rendering (`fontdue`)
+
+**Статус:** done **Фаза:** 16 (Typography & Readability)
+
+- **Цель:** Добавить настоящий чёткий рендеринг шрифтов и UTF-8 типографики (включая кириллицу и латиницу) в `TopBar`, `Dock`, `Spotlight` и заголовки SSD-окон.
+- **Scope:**
+  - `Cargo.toml` / `Cargo.lock`: подключение `fontdue = "0.9.5"`.
+  - `crates/rusty-compositor/src/text.rs`: `TextCache` для CPU-растеризации глифов в premultiplied `Argb8888` и кэширования GPU-текстур через `MemoryRenderBuffer`.
+  - `crates/rusty-compositor/src/shell_render.rs` и `crates/rusty-compositor/src/winit_backend.rs`: текстовые элементы для рабочих столов `1..9`, бейджа режима (`Float`/`Tile`), статусной пилюли, инициалов Dock, строки поиска/элементов Spotlight и заголовков SSD-окон; скрытие прямоугольных заглушек при активном шрифте.
+  - `apps/rusty-shell/src/wayland.rs`: отрисовка реального текста поверх SHM-буферов `TopBar` и `Launcher`.
+- **Dependencies:** `RUSTYOS-018`, `RUSTYOS-019`.
+- **Acceptance criteria:** При наличии системного шрифта (или `RUSTYOS_FONT_PATH`) отображаются чёткие подписи вместо заглушек; без шрифта происходит безопасный fallback; 35 тестов и clippy проходят без предупреждений.
+- **Risks:** Минимальные (текстуры кэшируются по ключу `(text, size_tenths, rgba)` без аллокаций на каждый кадр).
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

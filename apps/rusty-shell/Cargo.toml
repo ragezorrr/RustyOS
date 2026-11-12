@@ -8,6 +8,7 @@ authors.workspace = true
 description = "RustyOS independent desktop shell (TopBar, Dock, Launcher, Notifications, QuickSettings, Overview, LockScreen)"
 
 [dependencies]
+fontdue.workspace = true
 rusty-animation.workspace = true
 rusty-ipc.workspace = true
 rusty-services.workspace = true

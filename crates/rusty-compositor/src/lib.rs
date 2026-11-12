@@ -9,6 +9,7 @@ pub mod frame_timing;
 pub mod input;
 pub mod shell_render;
 pub mod state;
+pub mod text;
 pub mod winit_backend;
 
 use std::error::Error;
