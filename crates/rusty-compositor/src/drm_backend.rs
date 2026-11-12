@@ -13,6 +13,7 @@
 //!    capability probing when invoked inside an active graphical session where DRM Master is held.
 
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::fs::{self, File};
 use std::os::unix::io::OwnedFd;
@@ -220,13 +221,13 @@ type RustyDrmCompositor =
     DrmCompositor<GbmAllocator<DrmDeviceFd>, GbmFramebufferExporter<DrmDeviceFd>, (), DrmDeviceFd>;
 
 #[derive(Debug, Clone)]
-struct PrimaryConnectorSetup {
-    connector: connector::Handle,
-    crtc: crtc::Handle,
-    mode: ControlMode,
-    connector_name: String,
-    pixel_size: Size<i32, Physical>,
-    vrefresh: u32,
+pub struct PrimaryConnectorSetup {
+    pub connector: connector::Handle,
+    pub crtc: crtc::Handle,
+    pub mode: ControlMode,
+    pub connector_name: String,
+    pub pixel_size: Size<i32, Physical>,
+    pub vrefresh: u32,
 }
 
 enum SessionStartOutcome {
@@ -557,6 +558,12 @@ fn try_run_native_drm_session(
         Some((0, 0).into()),
     );
     state.output.set_preferred(output_mode);
+    {
+        let primary = state.output_map.primary_mut();
+        primary.name.clone_from(&setup.connector_name);
+        primary.physical_size = setup.pixel_size;
+        primary.refresh_milli_hz = refresh_milli_hz;
+    }
     let work_area = crate::shell_render::usable_work_area(setup.pixel_size);
     state.wm.upsert_output(PRIMARY_OUTPUT_ID, work_area);
     let serial = smithay::utils::SERIAL_COUNTER.next_serial();
@@ -815,6 +822,134 @@ fn find_primary_connector_setup(drm_device: &DrmDevice) -> Result<PrimaryConnect
     }
 
     Err("no connected DRM connector with a compatible CRTC and mode".to_owned())
+}
+
+/// Discovers all connected KMS connectors and their candidate CRTC/modes (`RUSTYOS-040`).
+#[must_use]
+pub fn find_all_connected_connectors(drm_device: &DrmDevice) -> Vec<PrimaryConnectorSetup> {
+    let Ok(resources) = drm_device.resource_handles() else {
+        return Vec::new();
+    };
+
+    let mut setups = Vec::new();
+    let mut claimed_crtcs = HashSet::new();
+
+    for &conn_handle in resources.connectors() {
+        let Ok(info) = drm_device.get_connector(conn_handle, false) else {
+            continue;
+        };
+        if info.state() != connector::State::Connected {
+            continue;
+        }
+        let Some(mode) = select_preferred_drm_mode(info.modes()) else {
+            continue;
+        };
+
+        let candidate_crtc = info
+            .current_encoder()
+            .into_iter()
+            .chain(info.encoders().iter().copied())
+            .find_map(|enc_handle| {
+                let enc = drm_device.get_encoder(enc_handle).ok()?;
+                enc.crtc()
+                    .filter(|c| !claimed_crtcs.contains(c))
+                    .or_else(|| {
+                        resources
+                            .filter_crtcs(enc.possible_crtcs())
+                            .into_iter()
+                            .find(|c| !claimed_crtcs.contains(c))
+                    })
+            });
+
+        if let Some(crtc) = candidate_crtc {
+            claimed_crtcs.insert(crtc);
+            let (w, h) = mode.size();
+            let vrefresh = mode.vrefresh().max(1);
+            let connector_name = format!("{:?}-{}", info.interface(), info.interface_id());
+            setups.push(PrimaryConnectorSetup {
+                connector: conn_handle,
+                crtc,
+                mode,
+                connector_name,
+                pixel_size: Size::from((i32::from(w), i32::from(h))),
+                vrefresh,
+            });
+        }
+    }
+
+    setups
+}
+
+/// Dynamically rescans DRM connectors and updates compositor outputs (`RUSTYOS-040`).
+///
+/// Discovers newly plugged in displays and registers them via [`RustyCompositorState::add_output`],
+/// and removes disconnected displays via [`RustyCompositorState::remove_output`] while
+/// safely migrating windows to remaining displays.
+pub fn rescan_drm_connectors(drm_device: &DrmDevice, state: &mut RustyCompositorState) -> usize {
+    let connected = find_all_connected_connectors(drm_device);
+    let mut changes = 0;
+
+    // Detect new connectors not yet in state.output_map
+    for setup in &connected {
+        let already_present = state
+            .output_map
+            .entries()
+            .iter()
+            .any(|e| e.name == setup.connector_name);
+        if !already_present {
+            let next_loc = state.output_map.next_adjacent_location();
+            let refresh_milli_hz =
+                i32::try_from(setup.vrefresh.saturating_mul(1000)).unwrap_or(60_000);
+            let mode = OutputMode {
+                size: setup.pixel_size,
+                refresh: refresh_milli_hz,
+            };
+            let props = smithay::output::PhysicalProperties {
+                size: (0, 0).into(),
+                subpixel: smithay::output::Subpixel::Unknown,
+                make: "DRM/KMS".to_owned(),
+                model: setup.connector_name.clone(),
+            };
+            let new_id = state.add_output(
+                setup.connector_name.clone(),
+                props,
+                mode,
+                Scale::Integer(1),
+                next_loc,
+            );
+            tracing::info!(
+                id = new_id.0,
+                name = %setup.connector_name,
+                loc = ?next_loc,
+                "Hotplug: Attached new DRM display"
+            );
+            changes += 1;
+        }
+    }
+
+    // Detect disconnected connectors that are currently mapped
+    let to_remove: Vec<rusty_wm::OutputId> = state
+        .output_map
+        .entries()
+        .iter()
+        .filter(|e| {
+            e.name.starts_with("DP-")
+                || e.name.starts_with("HDMI-")
+                || e.name.starts_with("eDP-")
+                || e.name.starts_with("DVI-")
+        })
+        .filter(|e| !connected.iter().any(|c| c.connector_name == e.name))
+        .map(|e| e.id)
+        .collect();
+
+    for id in to_remove {
+        if state.remove_output(id) {
+            tracing::info!(id = id.0, "Hotplug: Detached disconnected DRM display");
+            changes += 1;
+        }
+    }
+
+    changes
 }
 
 fn probe_primary_drm_device(kms_master_status: &str) -> Result<DrmHardwareReport, CompositorError> {

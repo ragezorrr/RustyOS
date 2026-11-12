@@ -255,6 +255,9 @@ impl WindowManager {
     }
 
     /// Removes an output (never removes the last remaining output).
+    ///
+    /// Migrates any windows that were assigned to the disconnected output's workspace
+    /// onto the remaining active output's workspace.
     pub fn remove_output(&mut self, id: OutputId) -> bool {
         if self.outputs.len() <= 1 {
             return false;
@@ -266,7 +269,21 @@ impl WindowManager {
         if self.focused_output == removed.id {
             self.focused_output = self.outputs[0].id;
         }
-        self.relayout_workspace(removed.active_workspace);
+
+        let target_ws = self.outputs[0].active_workspace;
+        let work_area = self.outputs[0].work_area;
+
+        // Migrate all windows from the disconnected output to the primary/active workspace
+        for win in &mut self.windows {
+            if win.workspace == removed.active_workspace {
+                win.workspace = target_ws;
+                win.geometry.x = work_area.x + 32;
+                win.geometry.y = work_area.y + 32;
+                win.saved_floating_geometry = win.geometry;
+            }
+        }
+
+        self.relayout_workspace(target_ws);
         true
     }
 

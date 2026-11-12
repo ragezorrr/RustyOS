@@ -321,36 +321,32 @@ impl RustyCompositorState {
     }
 
     fn handle_pointer_motion<B: InputBackend>(&mut self, event: &B::PointerMotionEvent) {
-        let output_geo = self
-            .space
-            .output_geometry(&self.output)
-            .map_or_else(|| Size::from((1280, 800)), |geo| geo.size);
-        let pos = clamp_relative_pointer(self.pointer_location, event.delta(), output_geo);
+        let bounds = self.total_output_bounds();
+        let pos = clamp_relative_pointer_rect(self.pointer_location, event.delta(), bounds);
         let time = Event::time_msec(event);
-        self.apply_pointer_position(pos, time, output_geo);
+        self.apply_pointer_position(pos, time);
     }
 
     fn handle_pointer_motion_absolute<B: InputBackend>(
         &mut self,
         event: &B::PointerMotionAbsoluteEvent,
     ) {
-        let output_geo = self
-            .space
-            .output_geometry(&self.output)
-            .map_or_else(|| Size::from((1280, 800)), |geo| geo.size);
-
-        let pos: Point<f64, Logical> = event.position_transformed(output_geo);
+        let bounds = self.total_output_bounds();
+        let normalized: Point<f64, Logical> = event.position_transformed(bounds.size);
+        let pos = Point::from((
+            normalized.x + f64::from(bounds.loc.x),
+            normalized.y + f64::from(bounds.loc.y),
+        ));
         let time = Event::time_msec(event);
-        self.apply_pointer_position(pos, time, output_geo);
+        self.apply_pointer_position(pos, time);
     }
 
-    fn apply_pointer_position(
-        &mut self,
-        pos: Point<f64, Logical>,
-        time: u32,
-        output_geo: Size<i32, Logical>,
-    ) {
+    fn apply_pointer_position(&mut self, pos: Point<f64, Logical>, time: u32) {
         self.pointer_location = pos;
+
+        if let Some(out_id) = self.output_under(pos) {
+            self.wm.set_focused_output(out_id);
+        }
 
         if self.screen_locked {
             self.dock_hover_slot = None;
@@ -369,16 +365,25 @@ impl RustyCompositorState {
             return;
         }
 
-        self.dock_hover_slot = if !self.launcher_active && !self.quick_settings_active {
-            crate::shell_render::check_dock_slot(
-                output_geo.to_physical(1),
-                self.wm.visible_windows().len(),
-                pos.x,
-                pos.y,
-            )
-        } else {
-            None
-        };
+        let primary_entry = self.output_map.primary();
+        let primary_geo = primary_entry.logical_geometry();
+        #[allow(clippy::cast_possible_truncation)]
+        let px = pos.x.round() as i32;
+        #[allow(clippy::cast_possible_truncation)]
+        let py = pos.y.round() as i32;
+        let is_on_primary = primary_geo.contains((px, py));
+
+        self.dock_hover_slot =
+            if is_on_primary && !self.launcher_active && !self.quick_settings_active {
+                crate::shell_render::check_dock_slot(
+                    primary_entry.physical_size,
+                    self.wm.visible_windows().len(),
+                    pos.x,
+                    pos.y,
+                )
+            } else {
+                None
+            };
 
         if let Some(drag) = self.active_window_drag {
             #[allow(clippy::cast_possible_truncation)]
@@ -1144,6 +1149,24 @@ const fn keysym_to_workspace_index(sym: Keysym) -> Option<u8> {
     }
 }
 
+/// Clamps a relative pointer delta (`libinput` mice/trackpads) within a multi-monitor bounding rectangle (`RUSTYOS-040`).
+#[must_use]
+pub fn clamp_relative_pointer_rect(
+    current: Point<f64, Logical>,
+    delta: Point<f64, Logical>,
+    bounds: smithay::utils::Rectangle<i32, Logical>,
+) -> Point<f64, Logical> {
+    let min_x = f64::from(bounds.loc.x);
+    let max_x = f64::from(bounds.loc.x + (bounds.size.w - 1).max(0));
+    let min_y = f64::from(bounds.loc.y);
+    let max_y = f64::from(bounds.loc.y + (bounds.size.h - 1).max(0));
+    (
+        (current.x + delta.x).clamp(min_x, max_x),
+        (current.y + delta.y).clamp(min_y, max_y),
+    )
+        .into()
+}
+
 /// Clamps a relative pointer delta (`libinput` mice/trackpads) to `[0, output_geo - 1]`.
 #[must_use]
 pub fn clamp_relative_pointer(
@@ -1151,13 +1174,11 @@ pub fn clamp_relative_pointer(
     delta: Point<f64, Logical>,
     output_geo: Size<i32, Logical>,
 ) -> Point<f64, Logical> {
-    let max_x = f64::from((output_geo.w - 1).max(0));
-    let max_y = f64::from((output_geo.h - 1).max(0));
-    (
-        (current.x + delta.x).clamp(0.0, max_x),
-        (current.y + delta.y).clamp(0.0, max_y),
+    clamp_relative_pointer_rect(
+        current,
+        delta,
+        smithay::utils::Rectangle::new((0, 0).into(), output_geo),
     )
-        .into()
 }
 
 fn compute_resized_rect(
@@ -1490,5 +1511,26 @@ mod tests {
                 crate::screenshot::ScreenshotRequest::FocusedWindow
             ))
         );
+    }
+
+    #[test]
+    fn clamp_relative_pointer_rect_allows_multi_monitor_crossing() {
+        // Dual monitor layout: Monitor 1 (0, 0, 1920, 1080) + Monitor 2 (1920, 0, 1920, 1080)
+        let bounds = smithay::utils::Rectangle::new((0, 0).into(), (3840, 1080).into());
+
+        // Moving right from monitor 1 into monitor 2
+        let p = clamp_relative_pointer_rect((1900.0, 500.0).into(), (100.0, 0.0).into(), bounds);
+        assert_eq!(p.x, 2000.0);
+        assert_eq!(p.y, 500.0);
+
+        // Moving left back into monitor 1
+        let p2 = clamp_relative_pointer_rect((2000.0, 500.0).into(), (-200.0, 0.0).into(), bounds);
+        assert_eq!(p2.x, 1800.0);
+        assert_eq!(p2.y, 500.0);
+
+        // Clamping at rightmost edge of monitor 2
+        let p3 = clamp_relative_pointer_rect((3800.0, 500.0).into(), (200.0, 0.0).into(), bounds);
+        assert_eq!(p3.x, 3839.0);
+        assert_eq!(p3.y, 500.0);
     }
 }

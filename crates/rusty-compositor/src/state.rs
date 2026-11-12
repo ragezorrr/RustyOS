@@ -160,8 +160,10 @@ pub struct RustyCompositorState {
     pub active_popup_grabs: Vec<PopupSurface>,
     /// Active cursor image state requested by focused Wayland clients (`RUSTYOS-034`).
     pub cursor_status: CursorImageStatus,
-    /// Active virtual or physical output.
+    /// Active virtual or physical primary output.
     pub output: Output,
+    /// Multi-monitor coordinate layout and output registry (`RUSTYOS-040`).
+    pub output_map: crate::outputs::OutputMap,
     /// Core `wl_compositor` protocol state.
     pub compositor_state: CompositorState,
     /// `xdg_wm_base` shell protocol state.
@@ -296,6 +298,7 @@ impl RustyCompositorState {
     ///
     /// Returns [`CompositorError::SeatInitialization`] if the XKB keyboard or pointer cannot
     /// be initialized on the seat.
+    #[allow(clippy::too_many_lines)]
     pub fn new(
         display: &Display<Self>,
         socket_name: String,
@@ -334,6 +337,18 @@ impl RustyCompositorState {
         let work_area = crate::shell_render::usable_work_area(initial_size);
         let wm = WindowManager::new(work_area);
 
+        let primary_entry = crate::outputs::OutputEntry::new(
+            PRIMARY_OUTPUT_ID,
+            "winit-0",
+            output.clone(),
+            (0, 0).into(),
+            initial_size,
+            1.0,
+            60_000,
+            true,
+        );
+        let output_map = crate::outputs::OutputMap::new(primary_entry);
+
         let mut state = Self {
             start_time: Instant::now(),
             display_handle,
@@ -350,6 +365,7 @@ impl RustyCompositorState {
             active_popup_grabs: Vec::new(),
             cursor_status: CursorImageStatus::default_named(),
             output,
+            output_map,
             compositor_state,
             xdg_shell_state,
             xdg_decoration_state,
@@ -432,6 +448,98 @@ impl RustyCompositorState {
         );
         output.set_preferred(mode);
         output
+    }
+
+    /// Dynamically registers and maps a new display output into the compositor workspace (`RUSTYOS-040`).
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn add_output(
+        &mut self,
+        name: impl Into<String>,
+        physical_props: PhysicalProperties,
+        mode: Mode,
+        scale: Scale,
+        location: Point<i32, Logical>,
+    ) -> OutputId {
+        let name_str = name.into();
+        let new_id = self.output_map.next_output_id();
+        let output = Output::new(name_str.clone(), physical_props);
+        let _output_global = output.create_global::<Self>(&self.display_handle);
+        output.change_current_state(
+            Some(mode),
+            Some(Transform::Normal),
+            Some(scale),
+            Some(location),
+        );
+        output.set_preferred(mode);
+
+        self.space.map_output(&output, location);
+
+        let scale_val = match scale {
+            Scale::Fractional(f) => f,
+            Scale::Integer(i) => f64::from(i),
+            Scale::Custom { .. } => 1.0,
+        };
+        let logical_w = (f64::from(mode.size.w) / scale_val.max(0.1)).round() as i32;
+        let logical_h = (f64::from(mode.size.h) / scale_val.max(0.1)).round() as i32;
+
+        let work_area = Rect::new(location.x, location.y, logical_w.max(1), logical_h.max(1));
+        self.wm.upsert_output(new_id, work_area);
+
+        let entry = crate::outputs::OutputEntry::new(
+            new_id,
+            name_str,
+            output,
+            location,
+            mode.size,
+            scale_val,
+            mode.refresh,
+            false,
+        );
+        self.output_map.add(entry);
+
+        let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+        self.sync_space_with_wm(serial);
+        new_id
+    }
+
+    /// Dynamically unmaps and removes a display output (`RUSTYOS-040`).
+    ///
+    /// Preserves desktop invariants by migrating any windows on the removed output
+    /// to the primary output and designating a new primary if needed.
+    pub fn remove_output(&mut self, id: OutputId) -> bool {
+        let Some(removed) = self.output_map.remove(id) else {
+            return false;
+        };
+
+        self.space.unmap_output(&removed.output);
+        self.wm.remove_output(id);
+
+        if removed.is_primary {
+            self.output = self.output_map.primary().output.clone();
+        }
+
+        let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+        self.sync_space_with_wm(serial);
+        true
+    }
+
+    /// Computes the total bounding rectangle enclosing all connected outputs (`RUSTYOS-040`).
+    #[must_use]
+    pub fn total_output_bounds(&self) -> Rectangle<i32, Logical> {
+        self.output_map.total_bounds()
+    }
+
+    /// Returns the [`OutputId`] under the given logical coordinate, if any (`RUSTYOS-040`).
+    #[must_use]
+    pub fn output_under(&self, point: Point<f64, Logical>) -> Option<OutputId> {
+        self.output_map.output_under(point)
+    }
+
+    /// Moves the focused window to the next connected output and synchronizes space (`RUSTYOS-040`).
+    pub fn move_focused_to_next_output(&mut self, serial: Serial) -> Option<WindowId> {
+        let moved = self.wm.move_focused_to_next_output()?;
+        self.sync_space_with_wm(serial);
+        Some(moved)
     }
 
     fn init_seat_keyboard(

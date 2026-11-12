@@ -514,6 +514,35 @@ hardware/software context и низкие накладные расходы.
 - **Acceptance criteria:** Все 78 тестов воркспейса проходят; `clippy -D warnings` и `cargo fmt` без замечаний; Spotlight отображает до 5 результатов с правильными тегами, корректным hit-testing и плавной анимацией появления.
 - **Risks:** Нулевые новые зависимости; сохранена полная клавиатурная навигация (стрелки вверх/вниз, Enter, Escape).
 
+## RUSTYOS-040 --- Multi-Monitor & Dynamic Hotplug Support
+
+**Статус:** done **Фаза:** 33 (Hardware & Multi-Monitor)
+
+- **Цель:** Реализовать полноценную поддержку нескольких мониторов (HDMI, DisplayPort, eDP) и динамического подключения/отключения дисплеев (Hotplug) в композиторе RustyOS: независимые координаты выходов, hit-testing, динамическое объединение границ (bounding bounds) для курсора мыши, перемещение окон между мониторами (`Super+Shift+O` / `Alt+O`) и безопасная миграция окон на оставшийся экран при отключении монитора.
+- **Scope:**
+  - `crates/rusty-compositor/src/outputs.rs`:
+    - Модуль multi-monitor: структура `OutputEntry` (`id`, `name`, `output`, `location`, `physical_size`, `scale`, `refresh_milli_hz`, `is_primary`) с вычислением логической геометрии и `rusty_wm::Rect`.
+    - Коллекция `OutputMap` с методами `add`, `remove`, `get`, `primary`, `output_under`, `total_bounds`, `next_adjacent_location` и `smithay_outputs`.
+  - `crates/rusty-compositor/src/state.rs`:
+    - Поле `output_map: OutputMap` в `RustyCompositorState`.
+    - Методы `add_output(...)`, `remove_output(...)`, `total_output_bounds()`, `output_under(...)` и `move_focused_to_next_output(...)`.
+  - `crates/rusty-compositor/src/input.rs`:
+    - Функция `clamp_relative_pointer_rect` для корректного перемещения курсора мыши между соседними экранами в глобальном пространстве координат.
+    - Автоматическая фокусировка активного экрана под указателем мыши (`self.wm.set_focused_output(out_id)`).
+    - Ограничение взаимодействия с Dock только областью первичного экрана.
+  - `crates/rusty-compositor/src/drm_backend.rs`:
+    - Функции `find_all_connected_connectors` и `rescan_drm_connectors` для динамического обнаружения и обработки hotplug-событий в KMS сессии.
+  - `crates/rusty-wm/src/lib.rs`:
+    - Обновление `remove_output` с автоматической миграцией окон отключённого монитора в рабочую область активного воркспейса оставшегося монитора.
+  - Тесты:
+    - `outputs::tests::output_entry_geometry_scales_correctly`.
+    - `outputs::tests::output_map_placement_and_hit_testing`.
+    - `input::tests::clamp_relative_pointer_rect_allows_multi_monitor_crossing`.
+    - Интеграционный тест `tests::multi_monitor_hotplug_window_migration_and_layout`.
+- **Dependencies:** `RUSTYOS-006`, `RUSTYOS-028`.
+- **Acceptance criteria:** Все 82 теста воркспейса проходят; `clippy -D warnings` и `cargo fmt` без замечаний; корректное масштабирование геометрии, hit-testing курсора по экранам, миграция окон при hotplug disconnect.
+- **Risks:** Нулевые новые зависимости; сохранена 100% обратная совместимость со всеми существующими одиночными вызовами через `state.output`.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

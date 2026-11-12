@@ -11,6 +11,7 @@ pub mod frame_timing;
 pub mod icons;
 pub mod input;
 pub mod launcher;
+pub mod outputs;
 pub mod screenshot;
 pub mod shell_render;
 pub mod state;
@@ -273,6 +274,7 @@ pub fn run_bootstrap(config: &CompositorConfig) -> Result<BootstrapReport, Compo
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::RustyCompositorState;
     use smithay::reexports::{calloop::EventLoop, wayland_server::Display};
 
     #[test]
@@ -685,6 +687,92 @@ mod tests {
         assert!(compositor.window_switcher.is_none());
         assert!(!compositor.is_window_minimized(w1));
         assert_eq!(compositor.wm.focused_window(), Some(w1));
+
+        Ok(())
+    }
+
+    #[test]
+    fn multi_monitor_hotplug_window_migration_and_layout() -> Result<(), Box<dyn Error>> {
+        let display: Display<RustyCompositorState> = Display::new()?;
+        let event_loop: EventLoop<RustyCompositorState> = EventLoop::try_new()?;
+        let mut compositor = RustyCompositorState::new(
+            &display,
+            "rusty-test-multi-output".to_owned(),
+            event_loop.get_signal(),
+            (1920, 1080).into(),
+        )?;
+
+        assert_eq!(compositor.output_map.count(), 1);
+        assert_eq!(compositor.output_map.primary().id, rusty_wm::OutputId(1));
+
+        // Add a secondary 144 Hz display via hotplug
+        let next_loc = compositor.output_map.next_adjacent_location();
+        assert_eq!(next_loc, (1920, 0).into());
+
+        let out2_mode = smithay::output::Mode {
+            size: (2560, 1440).into(),
+            refresh: 144_000,
+        };
+        let out2_props = smithay::output::PhysicalProperties {
+            size: (0, 0).into(),
+            subpixel: smithay::output::Subpixel::Unknown,
+            make: "RustyOS".to_owned(),
+            model: "HDMI-A-1 Display".to_owned(),
+        };
+        let out2_id = compositor.add_output(
+            "HDMI-A-1",
+            out2_props,
+            out2_mode,
+            smithay::output::Scale::Integer(1),
+            next_loc,
+        );
+
+        assert_eq!(compositor.output_map.count(), 2);
+        assert_eq!(out2_id, rusty_wm::OutputId(2));
+
+        // Total bounding geometry covers both monitors: 1920 + 2560 = 4480 width
+        let total = compositor.total_output_bounds();
+        assert_eq!(total.loc, (0, 0).into());
+        assert_eq!(total.size, (4480, 1440).into());
+
+        // Hit testing identifies monitor correctly
+        assert_eq!(
+            compositor.output_under((500.0, 500.0).into()),
+            Some(rusty_wm::OutputId(1))
+        );
+        assert_eq!(
+            compositor.output_under((2500.0, 500.0).into()),
+            Some(rusty_wm::OutputId(2))
+        );
+
+        // Map window w1 on primary monitor (workspace 1)
+        let w1 = compositor.wm.next_window_id();
+        let _ = compositor.wm.map_window(w1, Some((800, 600)));
+        assert_eq!(
+            compositor.wm.window(w1).map(|w| w.workspace),
+            Some(rusty_wm::WorkspaceId(1))
+        );
+
+        // Move window to next output (monitor 2)
+        let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+        let moved = compositor.move_focused_to_next_output(serial);
+        assert_eq!(moved, Some(w1));
+        assert_eq!(compositor.wm.focused_output(), rusty_wm::OutputId(2));
+        let win_geom = compositor
+            .wm
+            .window(w1)
+            .map(|w| w.geometry)
+            .unwrap_or_default();
+        assert!(win_geom.x >= 1920);
+
+        // Hotplug unplug of monitor 2: window migrates back to remaining monitor 1
+        assert!(compositor.remove_output(out2_id));
+        assert_eq!(compositor.output_map.count(), 1);
+        assert_eq!(compositor.output_map.primary().id, rusty_wm::OutputId(1));
+        assert_eq!(
+            compositor.wm.window(w1).map(|w| w.workspace),
+            Some(rusty_wm::WorkspaceId(1))
+        );
 
         Ok(())
     }
