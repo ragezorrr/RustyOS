@@ -198,6 +198,7 @@ pub(crate) fn dispatch_and_refresh_clients(
 ) {
     let dispatch_start = Instant::now();
     app_state.drain_dbus_notifications();
+    app_state.drain_screenshot_results();
     if let Some(ipc) = ipc_server {
         ipc.poll_requests(|req| app_state.handle_ipc_request(req));
     }
@@ -390,6 +391,23 @@ pub(crate) fn build_frame_render_list(
             renderer,
             size,
             &lock_view,
+        ));
+    }
+
+    if !state.screen_locked
+        && let Some(osd) = state.osd.as_ref()
+    {
+        let osd_view = crate::shell_render::OsdRenderState {
+            label: &osd.label,
+            value_percent: osd.value_percent,
+            muted: osd.muted,
+        };
+        render_list.extend(crate::shell_render::generate_osd_elements(
+            text_cache,
+            shape_cache,
+            renderer,
+            size,
+            &osd_view,
         ));
     }
 
@@ -620,6 +638,40 @@ pub(crate) fn build_frame_render_list(
     render_list
 }
 
+pub(crate) fn process_pending_screenshot(
+    renderer: &mut GlesRenderer,
+    render_list: &[CompositorRenderElement],
+    state: &mut RustyCompositorState,
+    size: smithay::utils::Size<i32, smithay::utils::Physical>,
+) {
+    let Some(req) = state.pending_screenshot.take() else {
+        return;
+    };
+    let crop = match req {
+        crate::screenshot::ScreenshotRequest::FullScreen => None,
+        crate::screenshot::ScreenshotRequest::FocusedWindow => state
+            .wm
+            .focused_window()
+            .and_then(|id| state.wm.window(id))
+            .map(|w| w.geometry),
+    };
+    match crate::screenshot::capture_render_list_rgba(renderer, render_list, size, crop) {
+        Ok((width, height, rgba)) => {
+            crate::screenshot::spawn_save_screenshot(
+                width,
+                height,
+                rgba,
+                state.socket_name.clone(),
+                &state.screenshot_results,
+            );
+        }
+        Err(err) => {
+            warn!(error = %err, "Failed to capture compositor screenshot");
+            state.show_osd("Screenshot Failed", None, false);
+        }
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 fn render_winit_frame(
     backend: &mut WinitGraphicsBackend<GlesRenderer>,
@@ -639,6 +691,13 @@ fn render_winit_frame(
     let damage_rects: u32;
     let damaged_pixels: u64;
     let tracked_damage: Option<Vec<Rectangle<i32, smithay::utils::Physical>>>;
+
+    if state.pending_screenshot.is_some() {
+        let renderer = backend.renderer();
+        let snap_list =
+            build_frame_render_list(renderer, text_cache, shape_cache, state, size, false);
+        process_pending_screenshot(renderer, &snap_list, state, size);
+    }
 
     {
         let buffer_age = if force_full_damage {

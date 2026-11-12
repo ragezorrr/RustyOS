@@ -383,6 +383,20 @@ hardware/software context и низкие накладные расходы.
 - **Acceptance criteria:** `Konsole` и `Dolphin` стабильно получают `ServerSide` SSD-шапку RustyOS без Breeze `_ □ ×`; `Cursor Agents` / Electron и GTK4 CSD-окна рендерятся с одной шапкой без внешней рамки композитора и с кликабельными кнопками в углах; перетаскивание (`Alt+LMB`/`Super+LMB` и client `move_request`) и ресайз по краям работают на CSD-окнах; 63 теста и `clippy -D warnings` проходят без предупреждений.
 - **Risks:** Требуется визуальная проверка в живой сессии на `--winit` / `--drm` с Electron (`Cursor Agents`) и Qt (`Konsole`, `Dolphin`).
 
+## RUSTYOS-031 --- Медиа-клавиши, яркость экрана (Backlight), скриншоты и OSD-индикатор
+
+**Статус:** done **Фаза:** 28 (Hardware Keys, Backlight, Screenshots & OSD)
+
+- **Цель:** Добавить неблокирующую поддержку аппаратных клавиш громкости/mute, яркости экрана (backlight), медиа-клавиш (MPRIS2/`playerctl`), быстрых скриншотов (весь экран и активное окно) с автосохранением в PNG и буфер обмена, а также компактный стеклянный OSD-индикатор над Dock.
+- **Scope:**
+  - `crates/rusty-services/src/lib.rs`: добавлены `BrightnessStatus`, `BrightnessService` (`/sys/class/backlight` чтение/запись + `systemd-logind` D-Bus `SetBrightness` + `brightnessctl` fallback) и `MediaService` (`org.mpris.MediaPlayer2.Player` over Session D-Bus + `playerctl` fallback).
+  - `crates/rusty-compositor/src/telemetry.rs` и `state.rs`: асинхронные команды `step_volume_with_osd`, `toggle_mute_with_osd`, `step_brightness_with_osd`, `dispatch_media`, состояние `OsdBanner` (TTL `1.6s`) и очередь `ScreenshotResultQueue`.
+  - `crates/rusty-compositor/src/screenshot.rs`: zero-dependency захват кадра через offscreen `GlesTexture` (`ExportMem::copy_texture`), чистый PNG-кодер RGBA в фоновом потоке (`~/Pictures/Screenshots/RustyOS_*.png`) и копирование в буфер через `wl-copy --type image/png`.
+  - `crates/rusty-compositor/src/shell_render.rs`, `input.rs`, `winit_backend.rs`, `drm_backend.rs`: стеклянный OSD-виджет (`generate_osd_elements`), обработка `XF86_Audio*`, `XF86_MonBrightness*` (с `Shift` для точного шага `2%`), `Print` / `Alt+Print` / `Super+Shift+S` и общий рендер/захват для Winit и DRM/KMS.
+- **Dependencies:** `RUSTYOS-011`, `RUSTYOS-021`, `RUSTYOS-024`, `RUSTYOS-028`.
+- **Acceptance criteria:** Нажатие клавиш громкости/яркости/медиа мгновенно показывает стеклянный OSD над Dock и применяет изменения в фоне без блокировки event loop; `Print` сохраняет PNG всего экрана, `Alt+Print` / `Super+Shift+S` — активного окна, копирует в Wayland clipboard (`wl-copy`) и показывает уведомление; 68 тестов и `clippy -D warnings` проходят без предупреждений.
+- **Risks:** На стационарных ПК без `/sys/class/backlight` клавиши яркости безопасно показывают `No Backlight` без ошибок; копирование картинки в clipboard использует опциональный `wl-copy`, если установлен в системе.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

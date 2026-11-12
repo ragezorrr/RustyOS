@@ -216,9 +216,28 @@ pub struct RustyCompositorState {
     pub notifications: Vec<CompositorNotification>,
     /// Non-blocking D-Bus `org.freedesktop.Notifications` bridge (`RUSTYOS-026`).
     pub dbus_notifications: crate::dbus_notifications::DbusNotificationHandle,
+    /// Transient On-Screen Display (OSD) indicator banner (`RUSTYOS-031`).
+    pub osd: Option<OsdBanner>,
+    /// Queued on-demand screenshot capture mode executed on the next render pass (`RUSTYOS-031`).
+    pub pending_screenshot: Option<crate::screenshot::ScreenshotRequest>,
+    /// Async background PNG/clipboard completion queue (`RUSTYOS-031`).
+    pub screenshot_results: crate::screenshot::ScreenshotResultQueue,
     /// Pending TTY virtual terminal switch (`Ctrl+Alt+F1..F12` -> `libseat::change_vt`).
     pub pending_vt_switch: Option<i32>,
     next_notification_id: u64,
+}
+
+/// Active transient On-Screen Display (OSD) banner (`RUSTYOS-031`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OsdBanner {
+    /// Short OSD title (`"Volume"`, `"Brightness"`, `"Play / Pause"`, etc.).
+    pub label: String,
+    /// Optional bar percentage (`0..=100`).
+    pub value_percent: Option<u8>,
+    /// True when audio is muted.
+    pub muted: bool,
+    /// Monotonic expiry offset from `start_time`.
+    pub expires_at: Duration,
 }
 
 /// Active notification banner tracked by the compositor (`RUSTYOS-024`).
@@ -336,6 +355,9 @@ impl RustyCompositorState {
             notification_count: 0,
             notifications: Vec::new(),
             dbus_notifications: crate::dbus_notifications::DbusNotificationHandle::default(),
+            osd: None,
+            pending_screenshot: None,
+            screenshot_results: crate::screenshot::ScreenshotResultQueue::default(),
             pending_vt_switch: None,
             next_notification_id: 0,
         };
@@ -676,11 +698,55 @@ impl RustyCompositorState {
         self.expire_notifications_at(now);
     }
 
-    /// Removes notifications whose TTL has elapsed at explicit monotonic timestamp `now` (`RUSTYOS-024`).
+    /// Removes notifications and transient OSD banners whose TTL has elapsed at `now` (`RUSTYOS-024`/`031`).
     pub fn expire_notifications_at(&mut self, now: Duration) {
         self.notifications
             .retain(|n| now.saturating_sub(n.created_at) < n.ttl);
         self.sync_notification_count();
+        if self.osd.as_ref().is_some_and(|osd| now >= osd.expires_at) {
+            self.osd = None;
+        }
+    }
+
+    /// Displays a transient glass OSD indicator pill above the Dock (`RUSTYOS-031`).
+    pub fn show_osd(&mut self, label: impl Into<String>, value_percent: Option<u8>, muted: bool) {
+        let expires_at = self.start_time.elapsed() + Duration::from_millis(1600);
+        self.osd = Some(OsdBanner {
+            label: label.into(),
+            value_percent,
+            muted,
+            expires_at,
+        });
+    }
+
+    /// Polls background screenshot encoding/saving results without blocking (`RUSTYOS-031`).
+    pub fn drain_screenshot_results(&mut self) {
+        while let Some(res) = self.screenshot_results.try_pop() {
+            match res {
+                Ok(path) => {
+                    let filename = path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("screenshot.png")
+                        .to_owned();
+                    let _ = self.push_notification(
+                        Urgency::Low,
+                        "Screenshot Saved".to_owned(),
+                        format!("{filename} (copied to clipboard)"),
+                    );
+                    self.show_osd("Screenshot Saved", None, false);
+                }
+                Err(err) => {
+                    warn!(error = %err, "Failed to save screenshot");
+                    let _ = self.push_notification(
+                        Urgency::Critical,
+                        "Screenshot Failed".to_owned(),
+                        err,
+                    );
+                    self.show_osd("Screenshot Failed", None, false);
+                }
+            }
+        }
     }
 
     /// Dismisses a single active notification by ID (`RUSTYOS-024`).

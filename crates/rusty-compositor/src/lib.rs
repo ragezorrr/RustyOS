@@ -10,6 +10,7 @@ pub mod drm_backend;
 pub mod frame_timing;
 pub mod input;
 pub mod launcher;
+pub mod screenshot;
 pub mod shell_render;
 pub mod state;
 pub mod surfaces;

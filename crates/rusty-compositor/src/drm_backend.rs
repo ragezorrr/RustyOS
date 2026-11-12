@@ -279,6 +279,23 @@ impl DrmRuntime {
         state.tick_animations();
         state.expire_notifications();
 
+        if state.pending_screenshot.is_some() {
+            let snap_list = crate::winit_backend::build_frame_render_list(
+                &mut self.renderer,
+                &mut self.text_cache,
+                &mut self.shape_cache,
+                state,
+                self.pixel_size,
+                false,
+            );
+            crate::winit_backend::process_pending_screenshot(
+                &mut self.renderer,
+                &snap_list,
+                state,
+                self.pixel_size,
+            );
+        }
+
         let render_list = crate::winit_backend::build_frame_render_list(
             &mut self.renderer,
             &mut self.text_cache,

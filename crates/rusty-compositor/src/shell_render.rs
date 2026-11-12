@@ -298,6 +298,17 @@ pub enum ShellOverlayView<'a> {
     Overview(&'a OverviewRenderState<'a>),
 }
 
+/// Active transient On-Screen Display (OSD) indicator pill (`RUSTYOS-031`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OsdRenderState<'a> {
+    /// Primary label (e.g., `"Volume"`, `"Brightness"`, `"Play / Pause"`, `"Screenshot"`).
+    pub label: &'a str,
+    /// Optional numeric percentage (`0..=100`) rendered as a progress bar.
+    pub value_percent: Option<u8>,
+    /// True when audio is muted (grays out the bar fill).
+    pub muted: bool,
+}
+
 /// Interactive click target inside or outside the Quick Settings popover (`RUSTYOS-021`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QuickSettingsHit {
@@ -3340,6 +3351,105 @@ pub fn generate_window_ssd_composite_elements(
     out
 }
 
+/// Computes the centered floating OSD pill bounds right above the bottom Dock (`RUSTYOS-031`).
+#[must_use]
+pub fn osd_pill_rect(
+    screen_size: Size<i32, smithay::utils::Physical>,
+    has_bar: bool,
+) -> Rectangle<i32, smithay::utils::Physical> {
+    let w = 256.min((screen_size.w - 40).max(180));
+    let h = if has_bar { 56 } else { 40 };
+    let x = (screen_size.w - w) / 2;
+    let y = (screen_size.h - DOCK_HEIGHT - DOCK_MARGIN_BOTTOM - 22 - h).max(TOP_BAR_HEIGHT + 12);
+    Rectangle::new(Point::from((x, y)), Size::from((w, h)))
+}
+
+/// Generates glass OSD indicator elements (`Volume`, `Brightness`, `Media`, `Screenshot`) (`RUSTYOS-031`).
+pub fn generate_osd_elements(
+    text_cache: &mut crate::text::TextCache,
+    shape_cache: &mut crate::surfaces::UiShapeCache,
+    renderer: &mut GlesRenderer,
+    screen_size: Size<i32, smithay::utils::Physical>,
+    osd: &OsdRenderState<'_>,
+) -> Vec<CompositorRenderElement> {
+    let mut out = Vec::new();
+    let pill = osd_pill_rect(screen_size, osd.value_percent.is_some());
+    let px = pill.loc.x;
+    let py = pill.loc.y;
+    let pw = pill.size.w;
+
+    let text_bright = [244, 240, 250, 255];
+    let text_muted = [166, 155, 181, 255];
+
+    if let Some(pct) = osd.value_percent {
+        if let Some(el) = text_cache.render_label(
+            renderer,
+            osd.label,
+            12.0,
+            text_bright,
+            Point::from((px + 16, py + 11)),
+        ) {
+            out.push(CompositorRenderElement::Memory(el));
+        }
+        let val_text = if osd.muted {
+            "Muted".to_owned()
+        } else {
+            format!("{pct}%")
+        };
+        let (vw, _) = text_cache.measure_text(&val_text, 12.0);
+        if let Some(el) = text_cache.render_label(
+            renderer,
+            &val_text,
+            12.0,
+            if osd.muted { text_muted } else { text_bright },
+            Point::from((px + pw - 16 - vw, py + 11)),
+        ) {
+            out.push(CompositorRenderElement::Memory(el));
+        }
+
+        let bar_x = px + 16;
+        let bar_y = py + 36;
+        let bar_w = (pw - 32).max(24);
+        let bar_h = 6;
+        let fill_w = (bar_w * i32::from(pct.min(100))) / 100;
+        if fill_w > 0 {
+            let fill_col = if osd.muted {
+                COLOR_SUBTLE
+            } else {
+                COLOR_ACCENT
+            };
+            out.push(CompositorRenderElement::Solid(make_solid_element(
+                Rectangle::new(Point::from((bar_x, bar_y)), Size::from((fill_w, bar_h))),
+                fill_col,
+            )));
+        }
+        out.push(CompositorRenderElement::Solid(make_solid_element(
+            Rectangle::new(Point::from((bar_x, bar_y)), Size::from((bar_w, bar_h))),
+            COLOR_SURFACE,
+        )));
+    } else if let Some(el) = text_cache.render_label_centered(
+        renderer,
+        osd.label,
+        12.5,
+        text_bright,
+        Rectangle::new(Point::from((px, py)), Size::from((pw, pill.size.h))),
+    ) {
+        out.push(CompositorRenderElement::Memory(el));
+    }
+
+    push_rounded_glass_box(
+        &mut out,
+        shape_cache,
+        renderer,
+        pill,
+        14,
+        RGBA_SURFACE_OVERLAY,
+        Some(RGBA_BORDER_HIGHLIGHT),
+    );
+    push_soft_shadow(&mut out, shape_cache, renderer, pill, 14, 12, 84);
+    out
+}
+
 /// Generates soft radial drop shadow elements strictly outside a managed window rectangle (`RUSTYOS-022`).
 pub fn generate_window_shadow_elements(
     shape_cache: &mut crate::surfaces::UiShapeCache,
@@ -3758,5 +3868,17 @@ mod tests {
                 }
             ))
         );
+    }
+
+    #[test]
+    fn osd_pill_bounds_center_above_dock() {
+        let out = Size::from((1280, 800));
+        let bar_pill = osd_pill_rect(out, true);
+        let msg_pill = osd_pill_rect(out, false);
+        assert_eq!(bar_pill.size.w, 256);
+        assert_eq!(bar_pill.size.h, 56);
+        assert_eq!(msg_pill.size.h, 40);
+        assert_eq!(bar_pill.loc.x, (1280 - 256) / 2);
+        assert!(bar_pill.loc.y + bar_pill.size.h < 800 - DOCK_HEIGHT - DOCK_MARGIN_BOTTOM);
     }
 }

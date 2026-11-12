@@ -2,6 +2,7 @@
 
 use std::time::Instant;
 
+use rusty_services::MediaAction;
 use rusty_wm::{SnapTarget, WmAction, WorkspaceId};
 use smithay::{
     backend::input::{
@@ -40,6 +41,11 @@ enum KeyIntercept {
     LauncherText(String),
     LauncherConsume,
     SwitchVt(i32),
+    VolumeStep(i8),
+    VolumeMute,
+    BrightnessStep(i8),
+    Media(MediaAction),
+    TakeScreenshot(crate::screenshot::ScreenshotRequest),
     Wm(WmAction),
 }
 
@@ -107,6 +113,11 @@ impl RustyCompositorState {
                     }
                     return FilterResult::Intercept(match_lock_screen_key(sym));
                 }
+                if key_state == KeyState::Pressed
+                    && let Some(hw) = match_hardware_shortcut(*modifiers, sym)
+                {
+                    return FilterResult::Intercept(hw);
+                }
                 if key_state != KeyState::Pressed {
                     return if state.launcher_active {
                         FilterResult::Intercept(KeyIntercept::LauncherConsume)
@@ -142,6 +153,7 @@ impl RustyCompositorState {
         self.refresh_keyboard_layout_label();
     }
 
+    #[allow(clippy::too_many_lines)]
     fn dispatch_key_intercept(&mut self, action: KeyIntercept, serial: smithay::utils::Serial) {
         match action {
             KeyIntercept::ExitCompositor => {
@@ -227,6 +239,39 @@ impl RustyCompositorState {
             }
             KeyIntercept::SwitchVt(vt) => {
                 self.pending_vt_switch = Some(vt);
+            }
+            KeyIntercept::VolumeStep(delta) => {
+                let (pct, muted) = self.telemetry.step_volume_with_osd(delta);
+                self.show_osd("Volume", Some(pct), muted);
+            }
+            KeyIntercept::VolumeMute => {
+                let (pct, muted) = self.telemetry.toggle_mute_with_osd();
+                self.show_osd(
+                    if muted { "Audio Muted" } else { "Volume" },
+                    Some(pct),
+                    muted,
+                );
+            }
+            KeyIntercept::BrightnessStep(delta) => {
+                let (available, pct) = self.telemetry.step_brightness_with_osd(delta);
+                if available {
+                    self.show_osd("Brightness", Some(pct), false);
+                } else {
+                    self.show_osd("No Backlight", None, false);
+                }
+            }
+            KeyIntercept::Media(media_action) => {
+                self.telemetry.dispatch_media(media_action);
+                let label = match media_action {
+                    MediaAction::PlayPause => "Play / Pause",
+                    MediaAction::Next => "Next Track",
+                    MediaAction::Previous => "Previous Track",
+                    MediaAction::Stop => "Stop Media",
+                };
+                self.show_osd(label, None, false);
+            }
+            KeyIntercept::TakeScreenshot(req) => {
+                self.pending_screenshot = Some(req);
             }
             KeyIntercept::Wm(wm_action) => {
                 self.apply_wm_action(wm_action, serial);
@@ -787,7 +832,7 @@ fn match_launcher_key(modifiers: ModifiersState, sym: Keysym, utf8: Option<&str>
 }
 
 /// Maps keyboard modifiers and keysyms to compositor / window manager actions.
-const fn match_shortcut(modifiers: ModifiersState, sym: Keysym) -> Option<KeyIntercept> {
+fn match_shortcut(modifiers: ModifiersState, sym: Keysym) -> Option<KeyIntercept> {
     if sym.raw() == Keysym::Escape.raw()
         || (modifiers.ctrl && modifiers.alt && sym.raw() == Keysym::BackSpace.raw())
     {
@@ -808,6 +853,10 @@ const fn match_shortcut(modifiers: ModifiersState, sym: Keysym) -> Option<KeyInt
     if (modifiers.logo || (modifiers.ctrl && modifiers.alt)) && matches!(sym, Keysym::l | Keysym::L)
     {
         return Some(KeyIntercept::LockScreen);
+    }
+
+    if let Some(hw) = match_hardware_shortcut(modifiers, sym) {
+        return Some(hw);
     }
 
     if !modifiers.alt {
@@ -895,6 +944,42 @@ const fn match_lock_screen_key(sym: Keysym) -> KeyIntercept {
             KeyIntercept::UnlockScreen
         }
         _ => KeyIntercept::LockScreenConsume,
+    }
+}
+
+/// Maps dedicated media/volume/brightness and `PrintScreen` keys (`RUSTYOS-031`).
+const fn match_hardware_shortcut(modifiers: ModifiersState, sym: Keysym) -> Option<KeyIntercept> {
+    let step = if modifiers.shift { 2 } else { 5 };
+    match sym {
+        Keysym::XF86_AudioRaiseVolume => Some(KeyIntercept::VolumeStep(step)),
+        Keysym::XF86_AudioLowerVolume => Some(KeyIntercept::VolumeStep(-step)),
+        Keysym::XF86_AudioMute => Some(KeyIntercept::VolumeMute),
+        Keysym::XF86_MonBrightnessUp => Some(KeyIntercept::BrightnessStep(step)),
+        Keysym::XF86_MonBrightnessDown => Some(KeyIntercept::BrightnessStep(-step)),
+        Keysym::XF86_AudioPlay | Keysym::XF86_AudioPause => {
+            Some(KeyIntercept::Media(MediaAction::PlayPause))
+        }
+        Keysym::XF86_AudioNext => Some(KeyIntercept::Media(MediaAction::Next)),
+        Keysym::XF86_AudioPrev => Some(KeyIntercept::Media(MediaAction::Previous)),
+        Keysym::XF86_AudioStop => Some(KeyIntercept::Media(MediaAction::Stop)),
+        Keysym::Print => {
+            if modifiers.alt {
+                Some(KeyIntercept::TakeScreenshot(
+                    crate::screenshot::ScreenshotRequest::FocusedWindow,
+                ))
+            } else {
+                Some(KeyIntercept::TakeScreenshot(
+                    crate::screenshot::ScreenshotRequest::FullScreen,
+                ))
+            }
+        }
+        Keysym::Sys_Req => Some(KeyIntercept::TakeScreenshot(
+            crate::screenshot::ScreenshotRequest::FocusedWindow,
+        )),
+        Keysym::s | Keysym::S if modifiers.logo && modifiers.shift => Some(
+            KeyIntercept::TakeScreenshot(crate::screenshot::ScreenshotRequest::FocusedWindow),
+        ),
+        _ => None,
     }
 }
 
@@ -1177,5 +1262,70 @@ mod tests {
         assert_eq!(match_vt_switch_key(ctrl_alt, Keysym::F1), Some(1));
         assert_eq!(match_vt_switch_key(ctrl_alt, Keysym::F12), Some(12));
         assert_eq!(match_vt_switch_key(none, Keysym::F1), None);
+    }
+
+    #[test]
+    fn hardware_media_brightness_and_screenshot_shortcuts() {
+        let none = ModifiersState::default();
+        let shift = ModifiersState {
+            shift: true,
+            ..ModifiersState::default()
+        };
+        let alt = ModifiersState {
+            alt: true,
+            ..ModifiersState::default()
+        };
+        let super_shift = ModifiersState {
+            logo: true,
+            shift: true,
+            ..ModifiersState::default()
+        };
+
+        assert_eq!(
+            match_hardware_shortcut(none, Keysym::XF86_AudioRaiseVolume),
+            Some(KeyIntercept::VolumeStep(5))
+        );
+        assert_eq!(
+            match_hardware_shortcut(shift, Keysym::XF86_AudioLowerVolume),
+            Some(KeyIntercept::VolumeStep(-2))
+        );
+        assert_eq!(
+            match_hardware_shortcut(none, Keysym::XF86_AudioMute),
+            Some(KeyIntercept::VolumeMute)
+        );
+        assert_eq!(
+            match_hardware_shortcut(none, Keysym::XF86_MonBrightnessUp),
+            Some(KeyIntercept::BrightnessStep(5))
+        );
+        assert_eq!(
+            match_hardware_shortcut(shift, Keysym::XF86_MonBrightnessDown),
+            Some(KeyIntercept::BrightnessStep(-2))
+        );
+        assert_eq!(
+            match_hardware_shortcut(none, Keysym::XF86_AudioPlay),
+            Some(KeyIntercept::Media(MediaAction::PlayPause))
+        );
+        assert_eq!(
+            match_hardware_shortcut(none, Keysym::XF86_AudioNext),
+            Some(KeyIntercept::Media(MediaAction::Next))
+        );
+        assert_eq!(
+            match_hardware_shortcut(none, Keysym::Print),
+            Some(KeyIntercept::TakeScreenshot(
+                crate::screenshot::ScreenshotRequest::FullScreen
+            ))
+        );
+        assert_eq!(
+            match_hardware_shortcut(alt, Keysym::Print),
+            Some(KeyIntercept::TakeScreenshot(
+                crate::screenshot::ScreenshotRequest::FocusedWindow
+            ))
+        );
+        assert_eq!(
+            match_hardware_shortcut(super_shift, Keysym::S),
+            Some(KeyIntercept::TakeScreenshot(
+                crate::screenshot::ScreenshotRequest::FocusedWindow
+            ))
+        );
     }
 }

@@ -116,6 +116,40 @@ impl Default for AudioStatus {
     }
 }
 
+/// Display backlight brightness status (`RUSTYOS-031`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BrightnessStatus {
+    /// True if at least one sysfs backlight device was detected.
+    pub available: bool,
+    /// Current backlight brightness percentage (0..=100).
+    pub percentage: u8,
+    /// Sysfs device name (e.g. `"intel_backlight"`, `"amdgpu_bl1"`).
+    pub device: Option<String>,
+}
+
+impl Default for BrightnessStatus {
+    fn default() -> Self {
+        Self {
+            available: false,
+            percentage: 100,
+            device: None,
+        }
+    }
+}
+
+/// Media playback control command dispatched via MPRIS2 / `playerctl` (`RUSTYOS-031`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MediaAction {
+    /// Toggle play/pause on the active player.
+    PlayPause,
+    /// Skip to next track.
+    Next,
+    /// Return to previous track.
+    Previous,
+    /// Stop playback.
+    Stop,
+}
+
 /// Power/battery service reading from Linux sysfs (`/sys/class/power_supply`).
 #[derive(Debug, Default, Clone)]
 pub struct PowerService {
@@ -580,6 +614,206 @@ impl AudioService {
     }
 }
 
+/// Display backlight service using `/sys/class/backlight`, `systemd-logind` D-Bus, and `brightnessctl` (`RUSTYOS-031`).
+#[derive(Debug, Clone)]
+pub struct BrightnessService {
+    base_path: String,
+}
+
+impl Default for BrightnessService {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl BrightnessService {
+    /// Creates a new backlight service targeting `/sys/class/backlight`.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            base_path: "/sys/class/backlight".to_owned(),
+        }
+    }
+
+    fn select_device(&self) -> Option<(String, std::path::PathBuf, u64, u64)> {
+        let p = Path::new(&self.base_path);
+        let entries = fs::read_dir(p).ok()?;
+        let mut candidates: Vec<(String, std::path::PathBuf, u64, u64)> = entries
+            .flatten()
+            .filter_map(|entry| {
+                let path = entry.path();
+                let name = path.file_name()?.to_string_lossy().into_owned();
+                let cur: u64 = fs::read_to_string(path.join("brightness"))
+                    .ok()?
+                    .trim()
+                    .parse()
+                    .ok()?;
+                let max: u64 = fs::read_to_string(path.join("max_brightness"))
+                    .ok()?
+                    .trim()
+                    .parse()
+                    .ok()?;
+                (max > 0).then_some((name, path, cur, max))
+            })
+            .collect();
+        if candidates.is_empty() {
+            return None;
+        }
+        candidates.sort_by_key(|(name, _, _, _)| {
+            let prio = if name.contains("intel") || name.contains("amdgpu") {
+                0
+            } else if name.contains("nvidia") || name.contains("gmux") {
+                1
+            } else {
+                2
+            };
+            (prio, name.clone())
+        });
+        candidates.into_iter().next()
+    }
+
+    /// Queries the current primary backlight percentage.
+    #[must_use]
+    pub fn query_status(&self) -> BrightnessStatus {
+        let Some((name, _path, cur, max)) = self.select_device() else {
+            return BrightnessStatus::default();
+        };
+        let pct = calc_backlight_percent(cur, max);
+        BrightnessStatus {
+            available: true,
+            percentage: pct,
+            device: Some(name),
+        }
+    }
+
+    /// Sets primary backlight brightness (`1..=100`% if positive, clamped to `0..=100`).
+    #[must_use]
+    pub fn set_percent(&self, percent: u8) -> bool {
+        let clamped = percent.min(100);
+        let Some((name, path, _cur, max)) = self.select_device() else {
+            return false;
+        };
+        let raw = calc_backlight_raw(clamped, max);
+
+        // 1. Direct sysfs write (when permissions allow).
+        if fs::write(path.join("brightness"), format!("{raw}\n")).is_ok() {
+            return true;
+        }
+
+        // 2. systemd-logind Session.SetBrightness over System D-Bus (no root needed).
+        if set_backlight_via_logind_dbus(&name, raw) {
+            return true;
+        }
+
+        // 3. Fallback to `brightnessctl`.
+        let pct_arg = format!("{clamped}%");
+        Command::new("brightnessctl")
+            .args(["-d", &name, "set", &pct_arg])
+            .status()
+            .is_ok_and(|s| s.success())
+    }
+}
+
+/// Converts raw `(current, max)` sysfs brightness values to a `0..=100` percentage.
+#[must_use]
+pub fn calc_backlight_percent(current: u64, max: u64) -> u8 {
+    if max == 0 {
+        return 100;
+    }
+    let rounded = (current.saturating_mul(100).saturating_add(max / 2)) / max;
+    u8::try_from(rounded.min(100)).unwrap_or(100)
+}
+
+/// Converts a `0..=100` percentage to a raw hardware brightness value in `0..=max`.
+#[must_use]
+pub fn calc_backlight_raw(percent: u8, max: u64) -> u64 {
+    if max == 0 {
+        return 0;
+    }
+    let p = u64::from(percent.min(100));
+    let raw = (max.saturating_mul(p).saturating_add(50)) / 100;
+    if p > 0 { raw.max(1).min(max) } else { 0 }
+}
+
+fn set_backlight_via_logind_dbus(device: &str, raw_value: u64) -> bool {
+    let Ok(raw_u32) = u32::try_from(raw_value) else {
+        return false;
+    };
+    let Ok(conn) = zbus::blocking::Connection::system() else {
+        return false;
+    };
+    conn.call_method(
+        Some("org.freedesktop.login1"),
+        "/org/freedesktop/login1/session/auto",
+        Some("org.freedesktop.login1.Session"),
+        "SetBrightness",
+        &("backlight", device, raw_u32),
+    )
+    .is_ok()
+}
+
+/// Media player control service interacting with MPRIS2 over Session D-Bus and `playerctl` (`RUSTYOS-031`).
+#[derive(Debug, Default, Clone)]
+pub struct MediaService;
+
+impl MediaService {
+    /// Creates a new MPRIS2/playerctl media service.
+    #[must_use]
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Sends a media playback control action to the first active MPRIS2 player (or `playerctl`).
+    #[must_use]
+    pub fn dispatch(&self, action: MediaAction) -> bool {
+        if dispatch_mpris_via_dbus(action) {
+            return true;
+        }
+        let arg = match action {
+            MediaAction::PlayPause => "play-pause",
+            MediaAction::Next => "next",
+            MediaAction::Previous => "previous",
+            MediaAction::Stop => "stop",
+        };
+        Command::new("playerctl")
+            .arg(arg)
+            .status()
+            .is_ok_and(|s| s.success())
+    }
+}
+
+fn dispatch_mpris_via_dbus(action: MediaAction) -> bool {
+    let Ok(conn) = zbus::blocking::Connection::session() else {
+        return false;
+    };
+    let Ok(dbus) = zbus::blocking::fdo::DBusProxy::new(&conn) else {
+        return false;
+    };
+    let Ok(names) = dbus.list_names() else {
+        return false;
+    };
+    let Some(player_bus) = names
+        .into_iter()
+        .find(|n| n.as_str().starts_with("org.mpris.MediaPlayer2."))
+    else {
+        return false;
+    };
+    let method = match action {
+        MediaAction::PlayPause => "PlayPause",
+        MediaAction::Next => "Next",
+        MediaAction::Previous => "Previous",
+        MediaAction::Stop => "Stop",
+    };
+    conn.call_method(
+        Some(player_bus.as_str()),
+        "/org/mpris/MediaPlayer2",
+        Some("org.mpris.MediaPlayer2.Player"),
+        method,
+        &(),
+    )
+    .is_ok()
+}
+
 /// Formats `percent` (`0..=100`) into `wpctl` scalar volume string (e.g. `"0.75"`).
 #[must_use]
 pub fn format_wpctl_volume(percent: u8) -> String {
@@ -657,6 +891,10 @@ pub struct ServiceRegistry {
     pub bluetooth: BluetoothService,
     /// Audio volume service.
     pub audio: AudioService,
+    /// Display backlight brightness service (`RUSTYOS-031`).
+    pub brightness: BrightnessService,
+    /// MPRIS2 media control service (`RUSTYOS-031`).
+    pub media: MediaService,
     /// Session power/lifecycle service.
     pub session: SessionService,
 }
@@ -670,6 +908,8 @@ impl ServiceRegistry {
             network: NetworkService::new(),
             bluetooth: BluetoothService::new(),
             audio: AudioService::new(),
+            brightness: BrightnessService::new(),
+            media: MediaService::new(),
             session: SessionService::new(),
         }
     }
@@ -737,5 +977,29 @@ mod tests {
 
         let bt = BluetoothService::new().query_status();
         assert_ne!(bt.status_label, "");
+    }
+
+    #[test]
+    fn brightness_service_reads_sysfs_values_and_computes_raw_levels() {
+        let base = std::env::temp_dir().join(format!("rustyos_backlight_{}", std::process::id()));
+        let dev_dir = base.join("intel_backlight");
+        let _ = fs::create_dir_all(&dev_dir);
+        let _ = fs::write(dev_dir.join("brightness"), "250\n");
+        let _ = fs::write(dev_dir.join("max_brightness"), "500\n");
+
+        let svc = BrightnessService {
+            base_path: base.to_string_lossy().into_owned(),
+        };
+        let status = svc.query_status();
+        assert!(status.available);
+        assert_eq!(status.percentage, 50);
+        assert_eq!(status.device.as_deref(), Some("intel_backlight"));
+
+        assert_eq!(calc_backlight_percent(1, 500), 0);
+        assert_eq!(calc_backlight_raw(1, 500), 5);
+        assert_eq!(calc_backlight_raw(1, 10), 1);
+        assert_eq!(calc_backlight_raw(0, 500), 0);
+
+        let _ = fs::remove_dir_all(&base);
     }
 }

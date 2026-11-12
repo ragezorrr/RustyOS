@@ -13,7 +13,8 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use rusty_services::{
-    AudioStatus, BluetoothStatus, NetworkStatus, PowerStatus, ServiceRegistry, local_clock_hhmm,
+    AudioStatus, BluetoothStatus, BrightnessStatus, MediaAction, NetworkStatus, PowerStatus,
+    ServiceRegistry, local_clock_hhmm,
 };
 
 const POLL_INTERVAL: Duration = Duration::from_secs(3);
@@ -29,6 +30,8 @@ pub struct SystemTelemetry {
     pub bluetooth: BluetoothStatus,
     /// Output volume percentage and mute flag.
     pub audio: AudioStatus,
+    /// Display backlight brightness status (`RUSTYOS-031`).
+    pub brightness: BrightnessStatus,
     /// Local wall-clock time formatted as `HH:MM`.
     pub clock_hhmm: String,
 }
@@ -40,6 +43,7 @@ impl Default for SystemTelemetry {
             network: NetworkStatus::default(),
             bluetooth: BluetoothStatus::default(),
             audio: AudioStatus::default(),
+            brightness: BrightnessStatus::default(),
             clock_hhmm: "12:00".to_owned(),
         }
     }
@@ -51,6 +55,8 @@ enum TelemetryCmd {
     SetVolume(u8),
     ToggleMute,
     SetBluetoothPowered(bool),
+    SetBrightness(u8),
+    MediaControl(MediaAction),
 }
 
 struct SharedState {
@@ -170,6 +176,50 @@ impl SystemMetricsHandle {
         self.push_cmd(TelemetryCmd::ToggleMute);
     }
 
+    /// Adjusts master output volume by `delta` and returns `(volume_percent, muted)` for OSD display.
+    #[must_use]
+    pub fn step_volume_with_osd(&self, delta: i8) -> (u8, bool) {
+        self.step_volume(delta);
+        let snap = self.snapshot();
+        (snap.audio.volume_percent, snap.audio.muted)
+    }
+
+    /// Toggles master mute and returns `(volume_percent, muted)` for OSD display.
+    #[must_use]
+    pub fn toggle_mute_with_osd(&self) -> (u8, bool) {
+        self.toggle_mute();
+        let snap = self.snapshot();
+        (snap.audio.volume_percent, snap.audio.muted)
+    }
+
+    /// Adjusts display backlight brightness by `delta` (`1..=100`) optimistically and returns `(available, percentage)`.
+    #[must_use]
+    pub fn step_brightness_with_osd(&self, delta: i8) -> (bool, u8) {
+        let mut target_to_apply = None;
+        let result = if let Ok(mut guard) = self.shared.latest.lock() {
+            if guard.brightness.available {
+                let cur = i16::from(guard.brightness.percentage);
+                let next = u8::try_from((cur + i16::from(delta)).clamp(1, 100)).unwrap_or(100);
+                guard.brightness.percentage = next;
+                target_to_apply = Some(next);
+                (true, next)
+            } else {
+                (false, guard.brightness.percentage)
+            }
+        } else {
+            (false, 100)
+        };
+        if let Some(pct) = target_to_apply {
+            self.push_cmd(TelemetryCmd::SetBrightness(pct));
+        }
+        result
+    }
+
+    /// Dispatches an MPRIS2 / `playerctl` media control action asynchronously (`RUSTYOS-031`).
+    pub fn dispatch_media(&self, action: MediaAction) {
+        self.push_cmd(TelemetryCmd::MediaControl(action));
+    }
+
     /// Toggles Bluetooth adapter power optimistically and applies via BlueZ asynchronously (`RUSTYOS-027`).
     pub fn toggle_bluetooth(&self) {
         let next_powered = if let Ok(mut guard) = self.shared.latest.lock() {
@@ -207,6 +257,7 @@ fn poll_once(services: &ServiceRegistry) -> SystemTelemetry {
         network: services.network.query_status(),
         bluetooth: services.bluetooth.query_status(),
         audio: services.audio.query_status(),
+        brightness: services.brightness.query_status(),
         clock_hhmm: local_clock_hhmm(),
     }
 }
@@ -250,6 +301,12 @@ fn telemetry_worker_loop(shared: &SharedState) {
                 }
                 TelemetryCmd::SetBluetoothPowered(enabled) => {
                     let _ = services.bluetooth.set_powered(enabled);
+                }
+                TelemetryCmd::SetBrightness(pct) => {
+                    let _ = services.brightness.set_percent(pct);
+                }
+                TelemetryCmd::MediaControl(action) => {
+                    let _ = services.media.dispatch(action);
                 }
             }
         }
@@ -296,5 +353,16 @@ mod tests {
         bt_handle.toggle_bluetooth();
         assert!(bt_handle.snapshot().bluetooth.powered);
         assert_eq!(bt_handle.snapshot().bluetooth.status_label, "BT: On");
+
+        let bright_handle = SystemMetricsHandle::with_initial(SystemTelemetry {
+            brightness: BrightnessStatus {
+                available: true,
+                percentage: 40,
+                device: Some("intel_backlight".to_owned()),
+            },
+            ..SystemTelemetry::default()
+        });
+        assert_eq!(bright_handle.step_brightness_with_osd(10), (true, 50));
+        assert_eq!(bright_handle.step_brightness_with_osd(-90), (true, 1));
     }
 }
