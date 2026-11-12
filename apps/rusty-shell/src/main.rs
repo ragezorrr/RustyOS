@@ -36,6 +36,7 @@ fn main() -> ExitCode {
                 commands.push(ShellRequest::SwitchWorkspace { workspace });
             }
             "--toggle-overview" => commands.push(ShellRequest::ToggleOverview),
+            "--toggle-launcher" => commands.push(ShellRequest::ToggleLauncher),
             "--toggle-layout" => commands.push(ShellRequest::ToggleLayoutMode),
             "--reduced-motion" => commands.push(ShellRequest::SetReducedMotion { enabled: true }),
             "--lock" => commands.push(ShellRequest::SetLockScreen { locked: true }),

@@ -354,6 +354,19 @@ mod tests {
         display.flush_clients()?;
 
         assert!(compositor.running);
+        assert!(!compositor.launcher_active);
+
+        // Test Spotlight launcher IPC toggle cycle
+        compositor.handle_ipc_request(rusty_ipc::ShellRequest::ToggleLauncher);
+        assert!(compositor.launcher_active);
+        let snap_open = compositor.build_ipc_snapshot();
+        assert!(snap_open.launcher_active);
+
+        compositor.handle_ipc_request(rusty_ipc::ShellRequest::ToggleLauncher);
+        assert!(!compositor.launcher_active);
+        let snap_closed = compositor.build_ipc_snapshot();
+        assert!(!snap_closed.launcher_active);
+
         compositor.request_shutdown();
         assert!(!compositor.running);
         Ok(())
