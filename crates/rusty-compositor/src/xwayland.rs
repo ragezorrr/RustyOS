@@ -444,6 +444,7 @@ fn remove_x11_window(state: &mut RustyCompositorState, x11_id: X11Window, reason
         state.window_bindings.retain(|(id, _)| *id != win_id);
         state.unregister_window_decoration(win_id);
         state.minimized_window_ids.remove(&win_id);
+        state.remove_from_switcher(win_id);
         state.wm.unmap_window(win_id);
         state.animations.remove_window(win_id.0);
         let serial = SERIAL_COUNTER.next_serial();

@@ -56,6 +56,8 @@ pub struct UiShapeCache {
     shadow_corners: HashMap<ShadowCornerKey, (MemoryRenderBuffer, Size<i32, Logical>)>,
     wallpaper: Option<MemoryRenderBuffer>,
     cursor_arrow: Option<MemoryRenderBuffer>,
+    /// Decoded & GPU-cached application and tray icon textures (`RUSTYOS-033`).
+    pub icons: crate::icons::IconCache,
 }
 
 impl UiShapeCache {

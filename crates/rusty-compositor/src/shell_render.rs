@@ -99,6 +99,10 @@ pub struct TopBarTrayItem<'a> {
     pub key: &'a str,
     /// Short 1-2 char monogram (`"NM"`, `"TG"`, etc.).
     pub label: &'a str,
+    /// Optional XDG / filesystem icon name (`RUSTYOS-033`).
+    pub icon_name: &'a str,
+    /// Optional decoded SNI ARGB32 icon pixmap (`RUSTYOS-033`).
+    pub icon_pixmap: Option<&'a crate::icons::TrayPixmap>,
     /// Attention alert requested by applet (`NeedsAttention`).
     pub attention: bool,
     /// Passive/idle state (`Passive`).
@@ -206,6 +210,8 @@ pub struct DockWindowEntry {
     pub title: String,
     /// Compact 1-2 character monogram displayed inside the Dock tile.
     pub badge: String,
+    /// Optional resolved XDG icon name or PNG path (`RUSTYOS-033`).
+    pub icon_name: Option<String>,
     /// Dimensions label (e.g. `"800x600"`).
     pub dimensions: String,
     /// Whether this window is currently focused.
@@ -243,6 +249,8 @@ pub fn make_window_badge(title: &str) -> String {
 /// Dock view state describing open window tiles, hovered slot, and overview toggle highlight (`RUSTYOS-023`).
 #[derive(Debug, Clone, Copy)]
 pub struct DockViewState<'a> {
+    /// Optional XDG icon names for pinned `[Terminal, Files]` Dock slots (`RUSTYOS-033`).
+    pub pinned_icons: [Option<&'a str>; 2],
     /// Open visible windows on the active workspace in stable slot order.
     pub windows: &'a [DockWindowEntry],
     /// Currently hovered Dock slot index (`0..3 + windows.len()`), if any.
@@ -303,6 +311,28 @@ pub enum OverviewHit {
     Dismiss,
 }
 
+/// Single window card inside the `Alt+Tab` window switcher HUD (`RUSTYOS-033`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WindowSwitcherCard<'a> {
+    /// Window title displayed at card bottom.
+    pub title: &'a str,
+    /// Fallback 1-2 char monogram if no PNG icon resolves.
+    pub badge: &'a str,
+    /// Optional resolved XDG icon name / PNG path.
+    pub icon_name: Option<&'a str>,
+    /// True if minimized to the Dock.
+    pub minimized: bool,
+}
+
+/// Active `Alt+Tab` window switcher HUD render state (`RUSTYOS-033`).
+#[derive(Debug, Clone, Copy)]
+pub struct WindowSwitcherRenderState<'a> {
+    /// Candidate window cards in presentation order.
+    pub cards: &'a [WindowSwitcherCard<'a>],
+    /// Currently highlighted card index.
+    pub selected: usize,
+}
+
 /// Active modal/popover overlay rendered on top of the compositor shell.
 #[derive(Debug, Clone, Copy)]
 pub enum ShellOverlayView<'a> {
@@ -314,6 +344,8 @@ pub enum ShellOverlayView<'a> {
     QuickSettings(&'a QuickSettingsRenderState<'a>),
     /// Workspace Overview / Expose window grid (`RUSTYOS-023`).
     Overview(&'a OverviewRenderState<'a>),
+    /// Interactive `Alt+Tab` window switcher HUD (`RUSTYOS-033`).
+    Switcher(&'a WindowSwitcherRenderState<'a>),
 }
 
 /// Active transient On-Screen Display (OSD) indicator pill (`RUSTYOS-031`).
@@ -715,6 +747,77 @@ pub fn check_overview_click(
         }
     }
     OverviewHit::Dismiss
+}
+
+/// Computes `(panel_rect, card_rects)` for the centered `Alt+Tab` window switcher HUD (`RUSTYOS-033`).
+#[must_use]
+pub fn switcher_layout(
+    screen_size: Size<i32, smithay::utils::Physical>,
+    count: usize,
+) -> (
+    Rectangle<i32, smithay::utils::Physical>,
+    Vec<Rectangle<i32, smithay::utils::Physical>>,
+) {
+    let width = screen_size.w.max(320);
+    let height = screen_size.h.max(240);
+    if count == 0 {
+        let rect = Rectangle::new(Point::from((width / 2, height / 2)), Size::from((0, 0)));
+        return (rect, Vec::new());
+    }
+
+    let pad = 16;
+    let gap = 12;
+    let count_i32 = i32::try_from(count).unwrap_or(1);
+    let max_panel_w = (width - 48).max(200);
+    let raw_card_w = (max_panel_w - pad * 2 - gap * (count_i32 - 1)) / count_i32;
+    let card_w = raw_card_w.clamp(76, 128);
+    let card_h = 104;
+    let panel_w = (pad * 2 + count_i32 * card_w + (count_i32 - 1) * gap).min(max_panel_w);
+    let panel_h = card_h + pad * 2;
+    let panel_x = (width - panel_w) / 2;
+    let panel_y = ((height - panel_h) / 2).max(TOP_BAR_HEIGHT + 16);
+
+    let mut cards = Vec::with_capacity(count);
+    for idx in 0..count {
+        let i = i32::try_from(idx).unwrap_or(0);
+        let cx = panel_x + pad + i * (card_w + gap);
+        if cx + card_w > panel_x + panel_w - pad + 2 {
+            break;
+        }
+        cards.push(Rectangle::new(
+            Point::from((cx, panel_y + pad)),
+            Size::from((card_w, card_h)),
+        ));
+    }
+
+    (
+        Rectangle::new(
+            Point::from((panel_x, panel_y)),
+            Size::from((panel_w, panel_h)),
+        ),
+        cards,
+    )
+}
+
+/// Hit-tests `(x, y)` against visible `Alt+Tab` window switcher cards (`RUSTYOS-033`).
+#[must_use]
+pub fn check_switcher_click(
+    screen_size: Size<i32, smithay::utils::Physical>,
+    count: usize,
+    x: f64,
+    y: f64,
+) -> Option<usize> {
+    let (_panel, cards) = switcher_layout(screen_size, count);
+    for (idx, rect) in cards.into_iter().enumerate() {
+        let rx = f64::from(rect.loc.x);
+        let ry = f64::from(rect.loc.y);
+        let rw = f64::from(rect.size.w);
+        let rh = f64::from(rect.size.h);
+        if x >= rx && x < rx + rw && y >= ry && y < ry + rh {
+            return Some(idx);
+        }
+    }
+    None
 }
 
 /// Checks if `(x, y)` clicked the `TopBar` Layout badge (`Float` / `Tile`).
@@ -1386,7 +1489,7 @@ pub fn generate_shell_render_elements(
     );
 
     match overlay {
-        ShellOverlayView::None | ShellOverlayView::Overview(_) => {}
+        ShellOverlayView::None | ShellOverlayView::Overview(_) | ShellOverlayView::Switcher(_) => {}
         ShellOverlayView::Spotlight(spot) => {
             render_spotlight_modal(&mut elements, width, height, spot, has_text);
         }
@@ -1672,6 +1775,7 @@ pub fn generate_window_ssd_elements(
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 pub fn generate_shell_text_elements(
     text_cache: &mut crate::text::TextCache,
+    shape_cache: &mut crate::surfaces::UiShapeCache,
     renderer: &mut GlesRenderer,
     screen_size: Size<i32, smithay::utils::Physical>,
     active_workspace: u8,
@@ -1740,18 +1844,24 @@ pub fn generate_shell_text_elements(
                 #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
                 let row_y = start_row_y + (i as i32) * (row_h + 4);
 
-                let badge_bounds = Rectangle::new(
-                    Point::from((modal_x + 28, row_y + 10)),
-                    Size::from((24, 24)),
-                );
-                if let Some(el) = text_cache.render_label_centered(
-                    renderer,
-                    &item.badge,
-                    10.5,
-                    text_bright,
-                    badge_bounds,
-                ) {
-                    elements.push(el);
+                let has_icon = item
+                    .icon
+                    .as_deref()
+                    .is_some_and(|name| shape_cache.icons.has_named_icon(name, 24));
+                if !has_icon {
+                    let badge_bounds = Rectangle::new(
+                        Point::from((modal_x + 28, row_y + 10)),
+                        Size::from((24, 24)),
+                    );
+                    if let Some(el) = text_cache.render_label_centered(
+                        renderer,
+                        &item.badge,
+                        10.5,
+                        text_bright,
+                        badge_bounds,
+                    ) {
+                        elements.push(el);
+                    }
                 }
 
                 if let Some(el) = text_cache.render_label(
@@ -1779,6 +1889,16 @@ pub fn generate_shell_text_elements(
         }
         ShellOverlayView::Overview(ov) => {
             render_overview_text(text_cache, renderer, screen_size, ov, &mut elements);
+        }
+        ShellOverlayView::Switcher(sw) => {
+            render_switcher_text(
+                text_cache,
+                shape_cache,
+                renderer,
+                screen_size,
+                sw,
+                &mut elements,
+            );
         }
     }
 
@@ -1872,6 +1992,11 @@ pub fn generate_shell_text_elements(
         top_telemetry.tray_items.len(),
     );
     for (item, (tx, _ty, tw, _th)) in top_telemetry.tray_items.iter().zip(tray_rects) {
+        let has_tray_icon = item.icon_pixmap.is_some()
+            || (!item.icon_name.is_empty() && shape_cache.icons.has_named_icon(item.icon_name, 16));
+        if has_tray_icon {
+            continue;
+        }
         let label_color = if item.attention {
             [255, 210, 214, 255]
         } else if item.passive {
@@ -1937,6 +2062,18 @@ pub fn generate_shell_text_elements(
         let Some(bounds) = dock_slot_rect(width, height, dock_view.windows.len(), idx) else {
             continue;
         };
+        let slot_icon = match idx {
+            0 => dock_view.pinned_icons[0],
+            1 => dock_view.pinned_icons[1],
+            n if n >= 3 => dock_view
+                .windows
+                .get(n - 3)
+                .and_then(|entry| entry.icon_name.as_deref()),
+            _ => None,
+        };
+        if slot_icon.is_some_and(|name| shape_cache.icons.has_named_icon(name, 28)) {
+            continue;
+        }
         let (label, color) = match idx {
             0 => (">_", text_bright),
             1 => ("Fs", text_bright),
@@ -1966,6 +2103,55 @@ pub fn generate_shell_text_elements(
     }
 
     elements
+}
+
+fn render_switcher_text(
+    text_cache: &mut crate::text::TextCache,
+    shape_cache: &mut crate::surfaces::UiShapeCache,
+    renderer: &mut GlesRenderer,
+    screen_size: Size<i32, smithay::utils::Physical>,
+    sw: &WindowSwitcherRenderState<'_>,
+    elements: &mut Vec<MemoryRenderBufferRenderElement<GlesRenderer>>,
+) {
+    let text_bright = [244, 240, 250, 255];
+    let text_muted = [166, 155, 181, 255];
+    let (_panel, cards) = switcher_layout(screen_size, sw.cards.len());
+    for (idx, (card, rect)) in sw.cards.iter().zip(cards).enumerate() {
+        let is_sel = idx == sw.selected;
+        let has_icon = card
+            .icon_name
+            .is_some_and(|name| shape_cache.icons.has_named_icon(name, 36));
+        if !has_icon {
+            let icon_box = Rectangle::new(
+                Point::from((rect.loc.x + (rect.size.w - 44) / 2, rect.loc.y + 14)),
+                Size::from((44, 44)),
+            );
+            if let Some(el) =
+                text_cache.render_label_centered(renderer, card.badge, 14.5, text_bright, icon_box)
+            {
+                elements.push(el);
+            }
+        }
+        let raw_title = if card.minimized {
+            format!("Min: {}", card.title)
+        } else {
+            card.title.to_owned()
+        };
+        let title_str = truncate_ascii(&raw_title, 13);
+        let title_bounds = Rectangle::new(
+            Point::from((rect.loc.x + 6, rect.loc.y + rect.size.h - 30)),
+            Size::from((rect.size.w - 12, 22)),
+        );
+        if let Some(el) = text_cache.render_label_centered(
+            renderer,
+            &title_str,
+            10.5,
+            if is_sel { text_bright } else { text_muted },
+            title_bounds,
+        ) {
+            elements.push(el);
+        }
+    }
 }
 
 fn render_overview_text(
@@ -2555,6 +2741,7 @@ pub fn generate_shell_composite_elements(
     // 1. All shell text labels on the topmost plane
     let all_text = generate_shell_text_elements(
         text_cache,
+        shape_cache,
         renderer,
         screen_size,
         active_workspace,
@@ -2626,22 +2813,38 @@ pub fn generate_shell_composite_elements(
                         COLOR_ACCENT,
                     )));
                 }
-                let icon_rgba = if is_sel {
-                    RGBA_ACCENT
-                } else if idx == 1 {
-                    RGBA_ACCENT_MUTED
+                let icon_el = spot
+                    .items
+                    .get(idx)
+                    .and_then(|item| item.icon.as_deref())
+                    .and_then(|icon_name| {
+                        shape_cache.icons.icon_element_by_name(
+                            renderer,
+                            icon_name,
+                            24,
+                            Point::from((mx + 28, row_y + 10)),
+                        )
+                    });
+                if let Some(el) = icon_el {
+                    out.push(CompositorRenderElement::Memory(el));
                 } else {
-                    RGBA_SUBTLE
-                };
-                push_rounded_glass_box(
-                    &mut out,
-                    shape_cache,
-                    renderer,
-                    Rectangle::new(Point::from((mx + 28, row_y + 10)), Size::from((24, 24))),
-                    6,
-                    icon_rgba,
-                    None,
-                );
+                    let icon_rgba = if is_sel {
+                        RGBA_ACCENT
+                    } else if idx == 1 {
+                        RGBA_ACCENT_MUTED
+                    } else {
+                        RGBA_SUBTLE
+                    };
+                    push_rounded_glass_box(
+                        &mut out,
+                        shape_cache,
+                        renderer,
+                        Rectangle::new(Point::from((mx + 28, row_y + 10)), Size::from((24, 24))),
+                        6,
+                        icon_rgba,
+                        None,
+                    );
+                }
                 if !has_text {
                     out.push(CompositorRenderElement::Solid(make_solid_element(
                         Rectangle::new(
@@ -2887,6 +3090,78 @@ pub fn generate_shell_composite_elements(
             );
             push_soft_shadow(&mut out, shape_cache, renderer, qs_rect, 12, 16, 105);
         }
+        ShellOverlayView::Switcher(sw) => {
+            let (panel_rect, cards) = switcher_layout(screen_size, sw.cards.len());
+            for (idx, (card_view, card)) in sw.cards.iter().zip(cards).enumerate() {
+                let is_sel = idx == sw.selected;
+                let icon_loc = Point::from((card.loc.x + (card.size.w - 36) / 2, card.loc.y + 18));
+                if let Some(icon_name) = card_view.icon_name
+                    && let Some(icon_el) = shape_cache
+                        .icons
+                        .icon_element_by_name(renderer, icon_name, 36, icon_loc)
+                {
+                    out.push(CompositorRenderElement::Memory(icon_el));
+                } else {
+                    let well_rect = Rectangle::new(
+                        Point::from((card.loc.x + (card.size.w - 44) / 2, card.loc.y + 14)),
+                        Size::from((44, 44)),
+                    );
+                    push_rounded_glass_box(
+                        &mut out,
+                        shape_cache,
+                        renderer,
+                        well_rect,
+                        10,
+                        if is_sel {
+                            RGBA_ACCENT
+                        } else {
+                            RGBA_ACCENT_MUTED
+                        },
+                        None,
+                    );
+                }
+
+                if card_view.minimized {
+                    out.push(CompositorRenderElement::Solid(make_solid_element(
+                        Rectangle::new(
+                            Point::from((
+                                card.loc.x + (card.size.w - 16) / 2,
+                                card.loc.y + card.size.h - 6,
+                            )),
+                            Size::from((16, 2)),
+                        ),
+                        COLOR_WARNING,
+                    )));
+                }
+
+                push_rounded_glass_box(
+                    &mut out,
+                    shape_cache,
+                    renderer,
+                    card,
+                    10,
+                    if is_sel {
+                        RGBA_SURFACE_OVERLAY
+                    } else {
+                        RGBA_SURFACE
+                    },
+                    Some(if is_sel { RGBA_ACCENT } else { RGBA_BORDER }),
+                );
+            }
+
+            if panel_rect.size.w > 0 {
+                push_rounded_glass_box(
+                    &mut out,
+                    shape_cache,
+                    renderer,
+                    panel_rect,
+                    14,
+                    RGBA_SURFACE_ELEVATED,
+                    Some(RGBA_BORDER_HIGHLIGHT),
+                );
+                push_soft_shadow(&mut out, shape_cache, renderer, panel_rect, 14, 18, 110);
+            }
+        }
     }
 
     // 2b. Floating top-right Notification HUD toasts (`RUSTYOS-024`)
@@ -2955,6 +3230,24 @@ pub fn generate_shell_composite_elements(
                 Rectangle::new(Point::from((tx + tw - 5, ty + 2)), Size::from((3, 3))),
                 dot_color,
             )));
+        }
+        let icon_loc = Point::from((tx + (tw - 16) / 2, ty + (th - 16) / 2));
+        let tray_icon_el = item
+            .icon_pixmap
+            .and_then(|pm| {
+                shape_cache
+                    .icons
+                    .icon_element_from_pixmap(renderer, item.key, pm, 16, icon_loc)
+            })
+            .or_else(|| {
+                (!item.icon_name.is_empty()).then(|| {
+                    shape_cache
+                        .icons
+                        .icon_element_by_name(renderer, item.icon_name, 16, icon_loc)
+                })?
+            });
+        if let Some(el) = tray_icon_el {
+            out.push(CompositorRenderElement::Memory(el));
         }
         let border = if item.attention {
             Some(RGBA_DANGER)
@@ -3129,27 +3422,45 @@ pub fn generate_shell_composite_elements(
 
         let inner_size = 28;
         let inner_offset = (item_size - inner_size) / 2;
-        let inner_rgba = match i {
-            0 => RGBA_ACCENT,
-            1 => [76, 54, 122, 255],
-            2 if dock_view.overview_active => RGBA_ACCENT_HOVER,
-            2 => [56, 44, 86, 255],
-            _ if is_active => RGBA_ACCENT_HOVER,
-            _ if is_minimized => [32, 26, 46, 255],
-            _ => [48, 36, 72, 255],
+        let slot_icon_name = match i {
+            0 => dock_view.pinned_icons[0],
+            1 => dock_view.pinned_icons[1],
+            n if n >= 3 => win_entry.and_then(|w| w.icon_name.as_deref()),
+            _ => None,
         };
-        push_rounded_glass_box(
-            &mut out,
-            shape_cache,
-            renderer,
-            Rectangle::new(
+        let slot_icon_el = slot_icon_name.and_then(|name| {
+            shape_cache.icons.icon_element_by_name(
+                renderer,
+                name,
+                inner_size,
                 Point::from((item_x + inner_offset, item_y + inner_offset)),
-                Size::from((inner_size, inner_size)),
-            ),
-            6,
-            inner_rgba,
-            None,
-        );
+            )
+        });
+        if let Some(el) = slot_icon_el {
+            out.push(CompositorRenderElement::Memory(el));
+        } else {
+            let inner_rgba = match i {
+                0 => RGBA_ACCENT,
+                1 => [76, 54, 122, 255],
+                2 if dock_view.overview_active => RGBA_ACCENT_HOVER,
+                2 => [56, 44, 86, 255],
+                _ if is_active => RGBA_ACCENT_HOVER,
+                _ if is_minimized => [32, 26, 46, 255],
+                _ => [48, 36, 72, 255],
+            };
+            push_rounded_glass_box(
+                &mut out,
+                shape_cache,
+                renderer,
+                Rectangle::new(
+                    Point::from((item_x + inner_offset, item_y + inner_offset)),
+                    Size::from((inner_size, inner_size)),
+                ),
+                6,
+                inner_rgba,
+                None,
+            );
+        }
         let tile_border = if is_active {
             Some(RGBA_ACCENT)
         } else if hovered {
@@ -3651,6 +3962,7 @@ mod tests {
             subtitle: "foot".to_owned(),
             exec: "foot".to_owned(),
             badge: ">_".to_owned(),
+            icon: Some("utilities-terminal".to_owned()),
             is_custom_command: false,
         }];
         let spot = SpotlightRenderState {
@@ -4039,5 +4351,26 @@ mod tests {
         assert_eq!(msg_pill.size.h, 40);
         assert_eq!(bar_pill.loc.x, (1280 - 256) / 2);
         assert!(bar_pill.loc.y + bar_pill.size.h < 800 - DOCK_HEIGHT - DOCK_MARGIN_BOTTOM);
+    }
+
+    #[test]
+    fn switcher_layout_and_click_hit_testing_match_bounds() {
+        let out = Size::from((1280, 800));
+        let (panel, cards) = switcher_layout(out, 3);
+        assert_eq!(cards.len(), 3);
+        assert!(panel.size.w > cards[2].size.w * 3);
+        assert_eq!(panel.loc.x + panel.size.w / 2, 640);
+        for (idx, rect) in cards.iter().enumerate() {
+            assert_eq!(
+                check_switcher_click(
+                    out,
+                    3,
+                    f64::from(rect.loc.x + rect.size.w / 2),
+                    f64::from(rect.loc.y + rect.size.h / 2)
+                ),
+                Some(idx)
+            );
+        }
+        assert_eq!(check_switcher_click(out, 3, 20.0, 20.0), None);
     }
 }

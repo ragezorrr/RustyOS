@@ -410,6 +410,20 @@ hardware/software context и низкие накладные расходы.
 - **Acceptance criteria:** Апплеты `StatusNotifierItem` регистрируются на шине D-Bus и отображаются компактными бейджами в `TopBar` с реакцией на ЛКМ/ПКМ без задержки кадров; нажатие жёлтой кнопки заголовка, `Alt+H` или клик по активному окну в `Dock` скрывает окно со сцены и фокусирует следующее видимое окно, а повторный клик по плитке в `Dock` или карточке `Overview` восстанавливает его; 71 тест и `clippy -D warnings` проходят без предупреждений.
 - **Risks:** Настройка внешнего D-Bus трея внутри `--winit` сессии с уже активным системным треем хоста опирается на best-effort синхронизацию с хостовым `org.kde.StatusNotifierWatcher` (отдельная изолированная сессия `--drm` или `dbus-run-session` держит первичное имя напрямую).
 
+## RUSTYOS-033 --- Визуальный Alt+Tab HUD, реальные иконки приложений и Drag-and-Drop
+
+**Статус:** done **Фаза:** 30 (Visual Window Switcher, Real App Icons & Wayland DnD)
+
+- **Цель:** Добавить чистый Rust-декодер и GPU-кэш реальных PNG- и SNI-иконок приложений (без новых зависимостей в `Cargo.toml`) для `Dock`, `Spotlight`, `TopBar` трея и переключателя окон, реализовать визуальный `Alt+Tab` Window Switcher HUD в стиле RustyOS Purple Glass, а также отрисовку Wayland Drag-and-Drop поверхности-иконки (`wl_data_device.start_drag`).
+- **Scope:**
+  - `crates/rusty-compositor/src/icons.rs`, `surfaces.rs`, `lib.rs`: нулезависимый декодер PNG (`IHDR`/`PLTE`/`tRNS`/`IDAT`, zlib/DEFLATE RFC 1951, фильтры `0..=4`), конвертер `TrayPixmap` (`ARGB32` BE -> premultiplied `Argb8888`), билинейный ресайзер, поиск XDG PNG-иконок по темам (`hicolor`/`Papirus`/`Adwaita`/`breeze`/`Yaru`/`pixmaps`) и GPU-кэш `IconCache` внутри `UiShapeCache`.
+  - `crates/rusty-compositor/src/launcher.rs` и `tray.rs`: чтение `Icon=` из `.desktop`, сопоставление `icon_for_app_hints` по `app_id`/`WM_CLASS`/заголовку, выбор закреплённых иконок `preferred_icon` для Dock, чтение `IconPixmap` (`a(iiay)`) и `IconName` из D-Bus `StatusNotifierItem`.
+  - `crates/rusty-compositor/src/state.rs`, `input.rs`, `xwayland.rs`: состояние `WindowSwitcherState` (`switcher_step`/`switcher_commit`/`switcher_commit_index`/`switcher_cancel`), отпуск `Alt` / `Enter` / клик по карточке подтверждают выбор и разворачивают свёрнутые окна, `Escape` отменяет без смены фокуса (`Alt+J`/`Alt+K` сохранены для быстрого переключения); трекинг `dnd_icon` через `ClientDndGrabHandler::started`/`dropped` с очисткой при закрытии или блокировке экрана.
+  - `crates/rusty-compositor/src/shell_render.rs` и `winit_backend.rs`: рендер реальных иконок в `Dock` (`28x28`), `Spotlight` (`24x24`), `TopBar` трее (`16x16`) и `Alt+Tab` Switcher HUD (`36x36`) с сохранением 2-символьных монограмм при отсутствии PNG; рендер `dnd_icon` под курсором для Winit и DRM/KMS.
+- **Dependencies:** `RUSTYOS-018b`, `RUSTYOS-023`, `RUSTYOS-026`, `RUSTYOS-032`.
+- **Acceptance criteria:** Приложения с PNG-иконками XDG и апплеты `IconPixmap` отображают реальные иконки с GPU-кэшированием и корректно откатываются на бейджи при отсутствии PNG; `Alt+Tab` / `Alt+Shift+Tab` открывают центрированную стеклянную панель окон с MRU-порядком и свёрнутыми окнами, подтверждение по отпусканию `Alt` / `Enter` / клику фокусирует и разворачивает окно, `Escape` отменяет; перетаскивание (`wl_data_device`) рисует `dnd_icon` под курсором на Winit и DRM; 76 тестов и `clippy -D warnings` проходят без предупреждений.
+- **Risks:** Для иконок, доступных только в `.svg` без PNG-растров в темах системы, срабатывает чистый текстовый fallback (рендер SVG намеренно не добавлен ради сохранения нулевых внешних зависимостей).
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

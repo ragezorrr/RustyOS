@@ -8,6 +8,7 @@ pub mod config;
 pub mod dbus_notifications;
 pub mod drm_backend;
 pub mod frame_timing;
+pub mod icons;
 pub mod input;
 pub mod launcher;
 pub mod screenshot;
@@ -629,6 +630,60 @@ mod tests {
         // Clicking Dock slot for already-focused w2 minimizes it again.
         compositor.handle_dock_hit(shell_render::DockHit::WindowSlot(1), serial);
         assert!(compositor.is_window_minimized(w2));
+        assert_eq!(compositor.wm.focused_window(), Some(w1));
+
+        Ok(())
+    }
+
+    #[test]
+    fn alt_tab_switcher_steps_wraps_restores_minimized_and_cancels() -> Result<(), Box<dyn Error>> {
+        let event_loop: EventLoop<'static, state::RustyCompositorState> = EventLoop::try_new()?;
+        let display: Display<state::RustyCompositorState> = Display::new()?;
+
+        let mut compositor = state::RustyCompositorState::new(
+            &display,
+            "wayland-switcher-test-0".to_owned(),
+            event_loop.get_signal(),
+            (1280, 800).into(),
+        )?;
+
+        let w1 = compositor.wm.next_window_id();
+        let _ = compositor.wm.map_window(w1, Some((600, 400)));
+        let w2 = compositor.wm.next_window_id();
+        let _ = compositor.wm.map_window(w2, Some((600, 400)));
+        let w3 = compositor.wm.next_window_id();
+        let _ = compositor.wm.map_window(w3, Some((600, 400)));
+
+        let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+        compositor.minimize_window(w1, serial);
+        // Active unminimized order (top-to-bottom): [w3, w2], then minimized [w1]
+        assert_eq!(compositor.wm.focused_window(), Some(w3));
+
+        // First Alt+Tab opens switcher highlighting second item (w2)
+        compositor.switcher_step(1);
+        let sw = compositor
+            .window_switcher
+            .as_ref()
+            .ok_or("switcher should be open")?;
+        assert_eq!(sw.window_ids, vec![w3, w2, w1]);
+        assert_eq!(sw.selected, 1);
+
+        // Escape cancels without changing focus or restoring minimized window
+        compositor.switcher_cancel();
+        assert!(compositor.window_switcher.is_none());
+        assert_eq!(compositor.wm.focused_window(), Some(w3));
+        assert!(compositor.is_window_minimized(w1));
+
+        // Re-open and step forward twice to reach minimized w1, then commit to restore & focus
+        compositor.switcher_step(1);
+        compositor.switcher_step(1);
+        assert_eq!(
+            compositor.window_switcher.as_ref().map(|s| s.selected),
+            Some(2)
+        );
+        compositor.switcher_commit(serial);
+        assert!(compositor.window_switcher.is_none());
+        assert!(!compositor.is_window_minimized(w1));
         assert_eq!(compositor.wm.focused_window(), Some(w1));
 
         Ok(())

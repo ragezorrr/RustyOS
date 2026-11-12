@@ -8,8 +8,12 @@ use rusty_ipc::{IpcServer, default_ipc_socket_path};
 use smithay::{
     backend::{
         renderer::{
-            Color32F, damage::OutputDamageTracker, element::AsRenderElements,
-            element::surface::WaylandSurfaceRenderElement, gles::GlesRenderer,
+            Color32F,
+            damage::OutputDamageTracker,
+            element::AsRenderElements,
+            element::Kind,
+            element::surface::{WaylandSurfaceRenderElement, render_elements_from_surface_tree},
+            gles::GlesRenderer,
         },
         winit::{self, WinitEvent, WinitGraphicsBackend},
     },
@@ -21,7 +25,7 @@ use smithay::{
         },
         wayland_server::Display,
     },
-    utils::{Logical, Point, Rectangle, Size},
+    utils::{IsAlive, Logical, Point, Rectangle, Size},
     wayland::shell::wlr_layer::Layer,
     wayland::socket::ListeningSocketSource,
 };
@@ -381,6 +385,32 @@ pub(crate) fn build_frame_render_list(
         }
     }
 
+    if let Some(ref dnd_surface) = state.dnd_icon
+        && dnd_surface.alive()
+    {
+        #[allow(clippy::cast_possible_truncation)]
+        let dnd_loc = Point::<i32, Logical>::from((
+            state.pointer_location.x.round() as i32 + 10,
+            state.pointer_location.y.round() as i32 + 10,
+        ))
+        .to_physical_precise_round(1.0);
+        render_list.extend(
+            render_elements_from_surface_tree::<
+                GlesRenderer,
+                WaylandSurfaceRenderElement<GlesRenderer>,
+            >(
+                renderer,
+                dnd_surface,
+                dnd_loc,
+                smithay::utils::Scale::from(1.0),
+                0.9,
+                Kind::Unspecified,
+            )
+            .into_iter()
+            .map(CompositorRenderElement::Surface),
+        );
+    }
+
     let tel = state.telemetry.snapshot();
     let timing = state.frame_timing.summary();
     let lock_progress = state.lock_screen_anim.current();
@@ -434,6 +464,8 @@ pub(crate) fn build_frame_render_list(
             .map(|item| crate::shell_render::TopBarTrayItem {
                 key: &item.key,
                 label: &item.badge,
+                icon_name: &item.icon_name,
+                icon_pixmap: item.icon_pixmap.as_ref(),
                 attention: item.status == crate::tray::TrayStatus::NeedsAttention,
                 passive: item.status == crate::tray::TrayStatus::Passive,
             })
@@ -473,10 +505,13 @@ pub(crate) fn build_frame_render_list(
                     |win| window_title(&win, win_id),
                 );
                 let badge = crate::shell_render::make_window_badge(&title);
+                let app_id = state.window_app_id(win_id);
+                let icon_name = state.launcher.icon_for_app_hints(app_id.as_deref(), &title);
                 crate::shell_render::DockWindowEntry {
                     id: win_id,
                     title,
                     badge,
+                    icon_name,
                     dimensions: format!("{}x{}", rect.width, rect.height),
                     focused: !minimized && focused_win == Some(win_id),
                     minimized,
@@ -485,11 +520,57 @@ pub(crate) fn build_frame_render_list(
             .collect();
         dock_windows.sort_by_key(|entry| entry.id.0);
 
+        let terminal_icon = state.launcher.preferred_icon(
+            &[
+                "foot",
+                "kitty",
+                "alacritty",
+                "wezterm",
+                "ghostty",
+                "weston-terminal",
+                "gnome-terminal",
+                "konsole",
+                "xfce4-terminal",
+            ],
+            "utilities-terminal",
+        );
+        let files_icon = state.launcher.preferred_icon(
+            &["nautilus", "dolphin", "thunar", "nemo", "pcmanfm"],
+            "system-file-manager",
+        );
         let dock_view = crate::shell_render::DockViewState {
+            pinned_icons: [Some(terminal_icon), Some(files_icon)],
             windows: &dock_windows,
             hover_slot: state.dock_hover_slot,
             overview_active: state.overview_active,
         };
+
+        let switcher_cards: Vec<crate::shell_render::WindowSwitcherCard<'_>> = state
+            .window_switcher
+            .as_ref()
+            .map(|sw| {
+                sw.window_ids
+                    .iter()
+                    .filter_map(|&win_id| {
+                        dock_windows
+                            .iter()
+                            .find(|entry| entry.id == win_id)
+                            .map(|entry| crate::shell_render::WindowSwitcherCard {
+                                title: &entry.title,
+                                badge: &entry.badge,
+                                icon_name: entry.icon_name.as_deref(),
+                                minimized: entry.minimized,
+                            })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let switcher_view = state.window_switcher.as_ref().and_then(|sw| {
+            (!switcher_cards.is_empty()).then_some(crate::shell_render::WindowSwitcherRenderState {
+                cards: &switcher_cards,
+                selected: sw.selected.min(switcher_cards.len() - 1),
+            })
+        });
 
         let launcher_progress = state.launcher_anim.current();
         let show_launcher = state.launcher_active || launcher_progress > 0.01;
@@ -540,7 +621,9 @@ pub(crate) fn build_frame_render_list(
             progress: ov_progress,
         });
 
-        let overlay = if let Some(spot) = spotlight_view.as_ref() {
+        let overlay = if let Some(sw) = switcher_view.as_ref() {
+            crate::shell_render::ShellOverlayView::Switcher(sw)
+        } else if let Some(spot) = spotlight_view.as_ref() {
             crate::shell_render::ShellOverlayView::Spotlight(spot)
         } else if let Some(qs) = qs_view.as_ref() {
             crate::shell_render::ShellOverlayView::QuickSettings(qs)

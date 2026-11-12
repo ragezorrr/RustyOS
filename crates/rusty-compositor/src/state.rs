@@ -33,7 +33,10 @@ use smithay::{
         wayland_server::{
             Client, Display, DisplayHandle, Resource,
             backend::{ClientData, ClientId, DisconnectReason},
-            protocol::{wl_buffer, wl_output::WlOutput, wl_seat, wl_surface::WlSurface},
+            protocol::{
+                wl_buffer, wl_data_source::WlDataSource, wl_output::WlOutput, wl_seat,
+                wl_surface::WlSurface,
+            },
         },
     },
     utils::{IsAlive, Logical, Point, Serial, Size, Transform},
@@ -60,6 +63,7 @@ use smithay::{
             },
             xdg::{
                 PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
+                XdgToplevelSurfaceData,
                 decoration::{XdgDecorationHandler, XdgDecorationState},
             },
         },
@@ -110,6 +114,15 @@ pub struct WindowResizeState {
     pub edges: crate::shell_render::ResizeEdges,
     pub start_pointer: Point<f64, Logical>,
     pub start_rect: Rect,
+}
+
+/// Active `Alt+Tab` window switcher HUD state (`RUSTYOS-033`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowSwitcherState {
+    /// Active workspace window IDs in presentation order (unminimized MRU first, then minimized).
+    pub window_ids: Vec<WindowId>,
+    /// Currently highlighted entry index inside `window_ids`.
+    pub selected: usize,
 }
 
 /// Primary state container for `rusty-compositor`.
@@ -230,6 +243,10 @@ pub struct RustyCompositorState {
     pub screenshot_results: crate::screenshot::ScreenshotResultQueue,
     /// Pending TTY virtual terminal switch (`Ctrl+Alt+F1..F12` -> `libseat::change_vt`).
     pub pending_vt_switch: Option<i32>,
+    /// Active `Alt+Tab` window switcher HUD state (`RUSTYOS-033`).
+    pub window_switcher: Option<WindowSwitcherState>,
+    /// Active client Drag-and-Drop icon surface attached during `wl_data_device.start_drag` (`RUSTYOS-033`).
+    pub dnd_icon: Option<WlSurface>,
     next_notification_id: u64,
 }
 
@@ -368,6 +385,8 @@ impl RustyCompositorState {
             pending_screenshot: None,
             screenshot_results: crate::screenshot::ScreenshotResultQueue::default(),
             pending_vt_switch: None,
+            window_switcher: None,
+            dnd_icon: None,
             next_notification_id: 0,
         };
         state
@@ -470,6 +489,7 @@ impl RustyCompositorState {
     pub fn toggle_launcher(&mut self) {
         self.launcher_active = !self.launcher_active;
         if self.launcher_active {
+            self.window_switcher = None;
             self.close_quick_settings();
             self.close_overview();
         }
@@ -488,6 +508,7 @@ impl RustyCompositorState {
     pub fn toggle_quick_settings(&mut self) {
         self.quick_settings_active = !self.quick_settings_active;
         if self.quick_settings_active {
+            self.window_switcher = None;
             self.close_launcher();
             self.close_overview();
             self.telemetry.request_refresh();
@@ -505,6 +526,8 @@ impl RustyCompositorState {
     pub fn set_screen_locked(&mut self, locked: bool, serial: Serial) {
         self.screen_locked = locked;
         if locked {
+            self.window_switcher = None;
+            self.dnd_icon = None;
             self.close_launcher();
             self.close_quick_settings();
             self.close_overview();
@@ -755,6 +778,119 @@ impl RustyCompositorState {
         self.minimized_window_ids.remove(&win_id);
         self.wm.focus_and_raise(win_id);
         self.sync_space_with_wm(serial);
+    }
+
+    /// Returns the Wayland `app_id` or `XWayland` `WM_CLASS` identifier for `win_id`, if set (`RUSTYOS-033`).
+    #[must_use]
+    pub fn window_app_id(&self, win_id: WindowId) -> Option<String> {
+        let win = self.smithay_window_for_id(win_id)?;
+        if let Some(tl) = win.toplevel() {
+            let app_id = compositor::with_states(tl.wl_surface(), |states| {
+                states
+                    .data_map
+                    .get::<XdgToplevelSurfaceData>()
+                    .and_then(|d| d.lock().ok())
+                    .and_then(|d| d.app_id.clone())
+            });
+            return app_id.filter(|s| !s.trim().is_empty());
+        }
+        if let Some(x11) = win.x11_surface() {
+            let class = x11.class();
+            if !class.trim().is_empty() {
+                return Some(class);
+            }
+            let instance = x11.instance();
+            if !instance.trim().is_empty() {
+                return Some(instance);
+            }
+        }
+        None
+    }
+
+    /// Opens (if closed) or steps the `Alt+Tab` window switcher HUD selection by `delta` (`RUSTYOS-033`).
+    pub fn switcher_step(&mut self, delta: isize) {
+        if let Some(ref mut switcher) = self.window_switcher {
+            if switcher.window_ids.is_empty() {
+                self.window_switcher = None;
+                return;
+            }
+            let len = isize::try_from(switcher.window_ids.len()).unwrap_or(1);
+            let cur = isize::try_from(switcher.selected).unwrap_or(0);
+            let next = (cur + delta).rem_euclid(len);
+            switcher.selected = usize::try_from(next).unwrap_or(0);
+            return;
+        }
+
+        // Order: active workspace top-to-bottom unminimized MRU windows first, then minimized ones.
+        let mut ordered = Vec::new();
+        let mut minimized = Vec::new();
+        for w in self.wm.visible_windows().into_iter().rev() {
+            if self.is_window_minimized(w.id) {
+                minimized.push(w.id);
+            } else {
+                ordered.push(w.id);
+            }
+        }
+        ordered.extend(minimized);
+
+        if ordered.is_empty() {
+            return;
+        }
+        self.close_launcher();
+        self.close_quick_settings();
+        self.close_overview();
+
+        let len = ordered.len();
+        let selected = if len == 1 {
+            0
+        } else if delta >= 0 {
+            let step = usize::try_from(delta).unwrap_or(1);
+            step.rem_euclid(len)
+        } else {
+            let len_i = isize::try_from(len).unwrap_or(1);
+            usize::try_from(delta.rem_euclid(len_i)).unwrap_or(0)
+        };
+        self.window_switcher = Some(WindowSwitcherState {
+            window_ids: ordered,
+            selected,
+        });
+    }
+
+    /// Confirms the currently highlighted `Alt+Tab` window, restoring if minimized and focusing it (`RUSTYOS-033`).
+    pub fn switcher_commit(&mut self, serial: Serial) {
+        let Some(switcher) = self.window_switcher.take() else {
+            return;
+        };
+        if let Some(&win_id) = switcher.window_ids.get(switcher.selected) {
+            self.restore_window(win_id, serial);
+        }
+    }
+
+    /// Confirms a clicked `Alt+Tab` card at index `idx`, restoring and focusing it (`RUSTYOS-033`).
+    pub fn switcher_commit_index(&mut self, idx: usize, serial: Serial) {
+        let Some(switcher) = self.window_switcher.take() else {
+            return;
+        };
+        if let Some(&win_id) = switcher.window_ids.get(idx) {
+            self.restore_window(win_id, serial);
+        }
+    }
+
+    /// Cancels the `Alt+Tab` switcher HUD without changing focus or window state (`RUSTYOS-033`).
+    pub fn switcher_cancel(&mut self) {
+        self.window_switcher = None;
+    }
+
+    /// Removes `win_id` from an active `Alt+Tab` switcher if that window closed while open (`RUSTYOS-033`).
+    pub fn remove_from_switcher(&mut self, win_id: WindowId) {
+        if let Some(ref mut switcher) = self.window_switcher {
+            switcher.window_ids.retain(|id| *id != win_id);
+            if switcher.window_ids.is_empty() {
+                self.window_switcher = None;
+            } else {
+                switcher.selected = switcher.selected.min(switcher.window_ids.len() - 1);
+            }
+        }
     }
 
     /// Removes notifications whose TTL has elapsed as of current uptime (`RUSTYOS-024`).
@@ -1275,6 +1411,9 @@ impl RustyCompositorState {
     /// Removes dead/closed client windows from `window_bindings` and [`WindowManager`],
     /// then synchronizes [`Space`] if any window disappeared.
     pub fn prune_dead_windows(&mut self) {
+        if self.dnd_icon.as_ref().is_some_and(|surf| !surf.alive()) {
+            self.dnd_icon = None;
+        }
         let mut dead_ids = Vec::new();
         for (id, win) in &self.window_bindings {
             if !win.alive() {
@@ -1301,6 +1440,7 @@ impl RustyCompositorState {
             self.window_bindings.retain(|(wid, _)| *wid != id);
             self.unregister_window_decoration(id);
             self.minimized_window_ids.remove(&id);
+            self.remove_from_switcher(id);
             self.wm.unmap_window(id);
             self.animations.remove_window(id.0);
             info!(window_id = id.0, "Pruned closed Wayland window from WM");
@@ -1371,6 +1511,7 @@ impl RustyCompositorState {
         if let WmAction::SwitchWorkspace(target_ws) = action
             && prev_ws != target_ws
         {
+            self.window_switcher = None;
             let output_width = self.output.current_mode().map_or(1280, |m| m.size.w);
             self.animations.trigger_workspace_slide(
                 prev_ws.0,
@@ -1855,7 +1996,20 @@ impl DataControlHandler for RustyCompositorState {
     }
 }
 
-impl ClientDndGrabHandler for RustyCompositorState {}
+impl ClientDndGrabHandler for RustyCompositorState {
+    fn started(
+        &mut self,
+        _source: Option<WlDataSource>,
+        icon: Option<WlSurface>,
+        _seat: Seat<Self>,
+    ) {
+        self.dnd_icon = icon;
+    }
+
+    fn dropped(&mut self, _target: Option<WlSurface>, _validated: bool, _seat: Seat<Self>) {
+        self.dnd_icon = None;
+    }
+}
 
 impl ServerDndGrabHandler for RustyCompositorState {
     fn send(&mut self, _mime_type: String, _fd: OwnedFd, _seat: Seat<Self>) {}
@@ -2013,6 +2167,7 @@ impl XdgShellHandler for RustyCompositorState {
             self.window_bindings.retain(|(wid, _)| *wid != win_id);
             self.unregister_window_decoration(win_id);
             self.minimized_window_ids.remove(&win_id);
+            self.remove_from_switcher(win_id);
             self.wm.unmap_window(win_id);
             self.animations.remove_window(win_id.0);
             let serial = smithay::utils::SERIAL_COUNTER.next_serial();

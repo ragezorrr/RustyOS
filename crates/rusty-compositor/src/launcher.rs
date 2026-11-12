@@ -26,6 +26,8 @@ pub struct LauncherApp {
     pub keywords: Vec<String>,
     /// Short 1-2 character monogram rendered inside the icon tile.
     pub badge: String,
+    /// Optional XDG icon name or filesystem path from `Icon=`.
+    pub icon: Option<String>,
 }
 
 /// Filtered candidate ready for rendering or launching in Spotlight.
@@ -39,6 +41,8 @@ pub struct LauncherCandidate {
     pub exec: String,
     /// Short 1-2 char monogram badge.
     pub badge: String,
+    /// Optional XDG icon name or filesystem path from `.desktop` `Icon=`.
+    pub icon: Option<String>,
     /// `true` when this candidate executes the raw typed command rather than a catalog app.
     pub is_custom_command: bool,
 }
@@ -137,6 +141,7 @@ impl LauncherState {
                     subtitle: app.subtitle.clone(),
                     exec: app.exec.clone(),
                     badge: app.badge.clone(),
+                    icon: app.icon.clone(),
                     is_custom_command: false,
                 })
                 .collect();
@@ -167,6 +172,7 @@ impl LauncherState {
                 subtitle: app.subtitle.clone(),
                 exec: app.exec.clone(),
                 badge: app.badge.clone(),
+                icon: app.icon.clone(),
                 is_custom_command: false,
             })
             .collect();
@@ -179,6 +185,7 @@ impl LauncherState {
                     subtitle: "Execute command in RustyOS session".to_owned(),
                     exec: trimmed.to_owned(),
                     badge: ">_".to_owned(),
+                    icon: None,
                     is_custom_command: true,
                 });
             }
@@ -253,6 +260,63 @@ impl LauncherState {
                 .is_ok();
         }
         false
+    }
+
+    /// Resolves the best XDG icon name/path for a window using its `app_id`/`WM_CLASS` and title (`RUSTYOS-033`).
+    #[must_use]
+    pub fn icon_for_app_hints(&self, app_id: Option<&str>, title: &str) -> Option<String> {
+        let hint = app_id.map(str::trim).filter(|s| !s.is_empty());
+        if let Some(raw_hint) = hint {
+            let lower = raw_hint.to_ascii_lowercase();
+            let short = lower.rsplit('.').next().unwrap_or(&lower);
+            for app in &self.catalog {
+                let id_stem = app
+                    .id
+                    .strip_suffix(".desktop")
+                    .unwrap_or(&app.id)
+                    .to_ascii_lowercase();
+                let bin = exec_basename(&app.exec);
+                let name_lower = app.name.to_ascii_lowercase();
+                if (id_stem == lower
+                    || id_stem == short
+                    || bin == lower
+                    || bin == short
+                    || name_lower == lower)
+                    && let Some(ref icon) = app.icon
+                {
+                    return Some(icon.clone());
+                }
+            }
+            return Some(raw_hint.to_owned());
+        }
+
+        let title_lower = title.trim().to_ascii_lowercase();
+        if !title_lower.is_empty() {
+            for app in &self.catalog {
+                if app.name.to_ascii_lowercase() == title_lower
+                    && let Some(ref icon) = app.icon
+                {
+                    return Some(icon.clone());
+                }
+            }
+        }
+        None
+    }
+
+    /// Resolves the icon name for the first matching installed preferred binary (used by pinned Dock slots).
+    #[must_use]
+    pub fn preferred_icon<'a>(&'a self, preferred_bins: &[&str], fallback: &'a str) -> &'a str {
+        for bin in preferred_bins {
+            let needle = bin.to_ascii_lowercase();
+            for app in &self.catalog {
+                if exec_basename(&app.exec) == needle
+                    && let Some(ref icon) = app.icon
+                {
+                    return icon.as_str();
+                }
+            }
+        }
+        fallback
     }
 
     #[must_use]
@@ -482,6 +546,7 @@ fn merge_builtin_fallbacks(catalog: &mut Vec<LauncherApp>) {
             exec: "foot".to_owned(),
             keywords: vec!["shell".to_owned(), "console".to_owned(), "cli".to_owned()],
             badge: ">_".to_owned(),
+            icon: Some("utilities-terminal".to_owned()),
         },
         LauncherApp {
             id: "org.rustyos.files".to_owned(),
@@ -490,6 +555,7 @@ fn merge_builtin_fallbacks(catalog: &mut Vec<LauncherApp>) {
             exec: "nautilus".to_owned(),
             keywords: vec!["folder".to_owned(), "manager".to_owned()],
             badge: "Fi".to_owned(),
+            icon: Some("system-file-manager".to_owned()),
         },
         LauncherApp {
             id: "org.rustyos.gears".to_owned(),
@@ -498,6 +564,7 @@ fn merge_builtin_fallbacks(catalog: &mut Vec<LauncherApp>) {
             exec: "es2gears_wayland".to_owned(),
             keywords: vec!["opengl".to_owned(), "gl".to_owned(), "benchmark".to_owned()],
             badge: "GL".to_owned(),
+            icon: Some("glxgears".to_owned()),
         },
     ];
 
@@ -517,6 +584,7 @@ pub fn parse_desktop_entry(contents: &str, id: &str) -> Option<LauncherApp> {
     let mut comment: Option<String> = None;
     let mut generic_name: Option<String> = None;
     let mut exec: Option<String> = None;
+    let mut icon: Option<String> = None;
     let mut keywords: Vec<String> = Vec::new();
     let mut no_display = false;
     let mut hidden = false;
@@ -547,6 +615,7 @@ pub fn parse_desktop_entry(contents: &str, id: &str) -> Option<LauncherApp> {
             "Comment" => comment = Some(val.to_owned()),
             "GenericName" => generic_name = Some(val.to_owned()),
             "Exec" => exec = Some(val.to_owned()),
+            "Icon" => icon = (!val.is_empty()).then(|| val.to_owned()),
             "Keywords" => {
                 keywords = val
                     .split(';')
@@ -582,6 +651,7 @@ pub fn parse_desktop_entry(contents: &str, id: &str) -> Option<LauncherApp> {
         exec,
         keywords,
         badge,
+        icon,
     })
 }
 
@@ -694,6 +764,7 @@ Type=Application
 Name=Firefox Web Browser
 Comment=Browse the World Wide Web
 Exec=/usr/lib/firefox/firefox --new-window %U
+Icon=firefox
 Keywords=Internet;WWW;Browser;
 NoDisplay=false
 
@@ -705,6 +776,7 @@ Exec=firefox --private-window
             .ok_or_else(|| "valid desktop entry should parse".to_owned())?;
         assert_eq!(app.name, "Firefox Web Browser");
         assert_eq!(app.subtitle, "Browse the World Wide Web");
+        assert_eq!(app.icon.as_deref(), Some("firefox"));
         assert_eq!(app.keywords, vec!["Internet", "WWW", "Browser"]);
         assert_eq!(
             parse_exec_argv(&app.exec),
@@ -732,6 +804,7 @@ Exec=firefox --private-window
                 exec: "nautilus".to_owned(),
                 keywords: vec!["folder".to_owned()],
                 badge: "Fi".to_owned(),
+                icon: Some("system-file-manager".to_owned()),
             },
             LauncherApp {
                 id: "2".to_owned(),
@@ -740,6 +813,7 @@ Exec=firefox --private-window
                 exec: "foot".to_owned(),
                 keywords: vec!["console".to_owned()],
                 badge: ">_".to_owned(),
+                icon: Some("utilities-terminal".to_owned()),
             },
             LauncherApp {
                 id: "3".to_owned(),
@@ -748,6 +822,7 @@ Exec=firefox --private-window
                 exec: "es2gears_wayland".to_owned(),
                 keywords: vec!["opengl".to_owned()],
                 badge: "EG".to_owned(),
+                icon: None,
             },
             LauncherApp {
                 id: "4".to_owned(),
@@ -756,6 +831,7 @@ Exec=firefox --private-window
                 exec: "pavucontrol".to_owned(),
                 keywords: vec!["sound".to_owned()],
                 badge: "AM".to_owned(),
+                icon: None,
             },
         ]);
 

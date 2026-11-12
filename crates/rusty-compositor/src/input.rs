@@ -41,6 +41,10 @@ enum KeyIntercept {
     LauncherClear,
     LauncherText(String),
     LauncherConsume,
+    SwitcherStep(isize),
+    CommitSwitcher,
+    SwitcherCancel,
+    SwitcherConsume,
     SwitchVt(i32),
     VolumeStep(i8),
     VolumeMute,
@@ -120,11 +124,20 @@ impl RustyCompositorState {
                     return FilterResult::Intercept(hw);
                 }
                 if key_state != KeyState::Pressed {
-                    return if state.launcher_active {
+                    return if state.window_switcher.is_some() {
+                        if modifiers.alt {
+                            FilterResult::Intercept(KeyIntercept::SwitcherConsume)
+                        } else {
+                            FilterResult::Intercept(KeyIntercept::CommitSwitcher)
+                        }
+                    } else if state.launcher_active {
                         FilterResult::Intercept(KeyIntercept::LauncherConsume)
                     } else {
                         FilterResult::Forward
                     };
+                }
+                if state.window_switcher.is_some() {
+                    return FilterResult::Intercept(match_switcher_key(*modifiers, sym));
                 }
                 if state.launcher_active {
                     let utf8 = sym.key_char().map(|ch| ch.to_string());
@@ -223,7 +236,9 @@ impl RustyCompositorState {
                 self.set_screen_locked(false, serial);
                 info!("Unlocked desktop session Lock Screen");
             }
-            KeyIntercept::LockScreenConsume | KeyIntercept::LauncherConsume => {}
+            KeyIntercept::LockScreenConsume
+            | KeyIntercept::LauncherConsume
+            | KeyIntercept::SwitcherConsume => {}
             KeyIntercept::QuickSettingsClose => {
                 self.close_quick_settings();
                 info!("Closed Quick Settings popover");
@@ -246,6 +261,15 @@ impl RustyCompositorState {
             }
             KeyIntercept::LauncherText(text) => {
                 self.launcher.push_text(&text);
+            }
+            KeyIntercept::SwitcherStep(delta) => {
+                self.switcher_step(delta);
+            }
+            KeyIntercept::CommitSwitcher => {
+                self.switcher_commit(serial);
+            }
+            KeyIntercept::SwitcherCancel => {
+                self.switcher_cancel();
             }
             KeyIntercept::SwitchVt(vt) => {
                 self.pending_vt_switch = Some(vt);
@@ -583,6 +607,26 @@ impl RustyCompositorState {
                 return;
             }
 
+            // Handle Alt+Tab window switcher HUD clicks (`RUSTYOS-033`)
+            if let Some(ref sw) = self.window_switcher {
+                let output_phys = self
+                    .space
+                    .output_geometry(&self.output)
+                    .map_or_else(|| Size::from((1280, 800)), |geo| geo.size)
+                    .to_physical(1);
+                if let Some(idx) = crate::shell_render::check_switcher_click(
+                    output_phys,
+                    sw.window_ids.len(),
+                    self.pointer_location.x,
+                    self.pointer_location.y,
+                ) {
+                    self.switcher_commit_index(idx, serial);
+                } else {
+                    self.switcher_cancel();
+                }
+                return;
+            }
+
             // Handle Quick Settings popover clicks exclusively while open (RUSTYOS-021)
             if self.quick_settings_active {
                 self.handle_quick_settings_pointer_click(serial);
@@ -814,6 +858,22 @@ impl RustyCompositorState {
     }
 }
 
+fn match_switcher_key(modifiers: ModifiersState, sym: Keysym) -> KeyIntercept {
+    if modifiers.ctrl && modifiers.alt && sym.raw() == Keysym::BackSpace.raw() {
+        return KeyIntercept::ExitCompositor;
+    }
+    match sym {
+        Keysym::Escape => KeyIntercept::SwitcherCancel,
+        Keysym::Return | Keysym::KP_Enter | Keysym::space => KeyIntercept::CommitSwitcher,
+        Keysym::ISO_Left_Tab | Keysym::Left | Keysym::k | Keysym::K => {
+            KeyIntercept::SwitcherStep(-1)
+        }
+        Keysym::Tab => KeyIntercept::SwitcherStep(if modifiers.shift { -1 } else { 1 }),
+        Keysym::Right | Keysym::j | Keysym::J => KeyIntercept::SwitcherStep(1),
+        _ => KeyIntercept::SwitcherConsume,
+    }
+}
+
 fn match_launcher_key(modifiers: ModifiersState, sym: Keysym, utf8: Option<&str>) -> KeyIntercept {
     if modifiers.ctrl && modifiers.alt && sym.raw() == Keysym::BackSpace.raw() {
         return KeyIntercept::ExitCompositor;
@@ -905,7 +965,15 @@ fn match_shortcut(modifiers: ModifiersState, sym: Keysym) -> Option<KeyIntercept
     }
 
     match sym {
-        Keysym::Tab | Keysym::j | Keysym::J => {
+        Keysym::Tab => {
+            if modifiers.shift {
+                Some(KeyIntercept::SwitcherStep(-1))
+            } else {
+                Some(KeyIntercept::SwitcherStep(1))
+            }
+        }
+        Keysym::ISO_Left_Tab => Some(KeyIntercept::SwitcherStep(-1)),
+        Keysym::j | Keysym::J => {
             if modifiers.shift {
                 Some(KeyIntercept::Wm(WmAction::FocusPrev))
             } else {
@@ -1089,6 +1157,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn shortcut_mapping_covers_focus_workspaces_and_layouts() {
         let alt = ModifiersState {
             alt: true,
@@ -1102,10 +1171,22 @@ mod tests {
 
         assert_eq!(
             match_shortcut(alt, Keysym::Tab),
-            Some(KeyIntercept::Wm(WmAction::FocusNext))
+            Some(KeyIntercept::SwitcherStep(1))
         );
         assert_eq!(
             match_shortcut(alt_shift, Keysym::Tab),
+            Some(KeyIntercept::SwitcherStep(-1))
+        );
+        assert_eq!(
+            match_shortcut(alt, Keysym::ISO_Left_Tab),
+            Some(KeyIntercept::SwitcherStep(-1))
+        );
+        assert_eq!(
+            match_shortcut(alt, Keysym::j),
+            Some(KeyIntercept::Wm(WmAction::FocusNext))
+        );
+        assert_eq!(
+            match_shortcut(alt_shift, Keysym::j),
             Some(KeyIntercept::Wm(WmAction::FocusPrev))
         );
         assert_eq!(

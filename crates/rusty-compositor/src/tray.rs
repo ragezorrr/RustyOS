@@ -55,6 +55,10 @@ pub struct TrayItemView {
     pub title: String,
     /// Compact 1-2 character badge displayed inside the `TopBar` tray pill.
     pub badge: String,
+    /// Optional freedesktop icon theme name (`StatusNotifierItem.IconName`).
+    pub icon_name: String,
+    /// Optional decoded SNI ARGB32 icon pixmap (`StatusNotifierItem.IconPixmap`).
+    pub icon_pixmap: Option<crate::icons::TrayPixmap>,
     /// Current attention / active / passive state.
     pub status: TrayStatus,
 }
@@ -67,6 +71,8 @@ struct TrackedTrayItem {
     id: String,
     title: String,
     badge: String,
+    icon_name: String,
+    icon_pixmap: Option<crate::icons::TrayPixmap>,
     status: TrayStatus,
     item_is_menu: bool,
 }
@@ -78,6 +84,8 @@ impl TrackedTrayItem {
             id: self.id.clone(),
             title: self.title.clone(),
             badge: self.badge.clone(),
+            icon_name: self.icon_name.clone(),
+            icon_pixmap: self.icon_pixmap.clone(),
             status: self.status,
         }
     }
@@ -432,7 +440,7 @@ fn handle_worker_cmd(
             if let Some(item) = query_sni_item(conn, &bus_name, &object_path) {
                 let inserted = items
                     .get(&key)
-                    .is_none_or(|prev| prev.title != item.title || prev.status != item.status);
+                    .is_none_or(|prev| sni_item_changed(prev, &item));
                 items.insert(key.clone(), item);
                 emit_watcher_signal(conn, &key, true);
                 debug!(service = %key, "Registered StatusNotifierItem");
@@ -504,9 +512,7 @@ fn invoke_item_click(
     }
 
     if let Some(refreshed) = query_sni_item(conn, &existing.bus_name, &existing.object_path) {
-        let changed = refreshed.title != existing.title
-            || refreshed.badge != existing.badge
-            || refreshed.status != existing.status;
+        let changed = sni_item_changed(&existing, &refreshed);
         items.insert(key.to_owned(), refreshed);
         return changed;
     }
@@ -532,16 +538,23 @@ fn prune_and_refresh_items(
         }
         if let Some(updated) = query_sni_item(conn, &bus_name, &object_path)
             && let Some(prev) = items.get(&key)
-            && (prev.title != updated.title
-                || prev.badge != updated.badge
-                || prev.status != updated.status
-                || prev.item_is_menu != updated.item_is_menu)
+            && sni_item_changed(prev, &updated)
         {
             items.insert(key, updated);
             changed = true;
         }
     }
     changed
+}
+
+fn sni_item_changed(prev: &TrackedTrayItem, next: &TrackedTrayItem) -> bool {
+    prev.title != next.title
+        || prev.badge != next.badge
+        || prev.icon_name != next.icon_name
+        || prev.icon_pixmap.as_ref().map(|p| p.fingerprint)
+            != next.icon_pixmap.as_ref().map(|p| p.fingerprint)
+        || prev.status != next.status
+        || prev.item_is_menu != next.item_is_menu
 }
 
 fn bus_name_alive(conn: &zbus::blocking::Connection, bus_name: &str) -> bool {
@@ -587,6 +600,7 @@ fn query_sni_item(
         icon_name.clone()
     };
     let badge = make_tray_badge(&id, &display_title, &icon_name);
+    let icon_pixmap = parse_sni_icon_pixmap(&all);
 
     Some(TrackedTrayItem {
         key,
@@ -595,9 +609,25 @@ fn query_sni_item(
         id,
         title: display_title,
         badge,
+        icon_name,
+        icon_pixmap,
         status: TrayStatus::from_sni_str(&status_str),
         item_is_menu,
     })
+}
+
+fn parse_sni_icon_pixmap(
+    map: &std::collections::HashMap<String, OwnedValue>,
+) -> Option<crate::icons::TrayPixmap> {
+    let entries = Vec::<(i32, i32, Vec<u8>)>::try_from(map.get("IconPixmap")?.clone()).ok()?;
+    let (w, h, bytes) = entries
+        .into_iter()
+        .filter(|(w, h, _)| *w > 0 && *h > 0)
+        .min_by_key(|(w, h, _)| {
+            let prefer_ge16 = i32::from(*w < 16 || *h < 16) * 1000;
+            prefer_ge16 + (*w - 24).abs() + (*h - 24).abs()
+        })?;
+    crate::icons::TrayPixmap::from_argb_be(w, h, bytes)
 }
 
 fn prop_string(map: &std::collections::HashMap<String, OwnedValue>, key: &str) -> Option<String> {
