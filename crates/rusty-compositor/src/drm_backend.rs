@@ -35,6 +35,7 @@ use smithay::{
             exporter::gbm::GbmFramebufferExporter,
         },
         egl::{EGLContext, EGLDevice, EGLDisplay},
+        input::InputEvent,
         libinput::{LibinputInputBackend, LibinputSessionInterface},
         renderer::{
             Bind, Color32F, Frame, ImportDma, Renderer, gles::GlesRenderer, sync::SyncPoint,
@@ -52,7 +53,8 @@ use smithay::{
         drm::{
             ClientCapability, Device as BasicDevice, DriverCapability,
             control::{
-                Device as ControlDevice, Mode as ControlMode, ModeTypeFlags, connector, crtc,
+                Device as ControlDevice, Mode as ControlMode, ModeTypeFlags, PlaneType, connector,
+                crtc,
             },
         },
         input::Libinput,
@@ -65,7 +67,8 @@ use smithay::{
     },
     utils::{DeviceFd, Logical, Physical, Point, Rectangle, Size, Transform},
     wayland::{
-        dmabuf::DmabufFeedbackBuilder, presentation::Refresh, socket::ListeningSocketSource,
+        dmabuf::DmabufFeedbackBuilder, drm_syncobj::supports_syncobj_eventfd,
+        presentation::Refresh, socket::ListeningSocketSource,
     },
 };
 use tracing::{info, warn};
@@ -104,12 +107,16 @@ pub struct DrmHardwareReport {
     pub monotonic_timestamps: bool,
     /// Whether async page-flip is supported by the driver.
     pub async_page_flip: bool,
+    /// Whether DRM timeline syncobj eventfd signaling is supported (`wp_linux_drm_syncobj_v1`, `RUSTYOS-046`).
+    pub syncobj_eventfd: bool,
     /// Recommended hardware cursor dimensions `(width, height)`.
     pub cursor_size: (u64, u64),
     /// Number of CRTC scanout engines on the GPU.
     pub crtc_count: usize,
     /// Total number of DRM planes exposed by the device.
     pub plane_count: usize,
+    /// Number of DRM `PlaneType::Cursor` hardware planes discovered under universal planes (`RUSTYOS-046`).
+    pub cursor_plane_count: usize,
     /// Discovered display connectors and their preferred modes.
     pub connectors: Vec<ConnectorReport>,
     /// Number of `DMA-BUF` render formats advertised by `EGLDisplay`.
@@ -149,6 +156,7 @@ impl DrmHardwareReport {
             self.monotonic_timestamps
         );
         let _ = writeln!(out, "  \"async_page_flip\": {},", self.async_page_flip);
+        let _ = writeln!(out, "  \"syncobj_eventfd\": {},", self.syncobj_eventfd);
         let _ = writeln!(
             out,
             "  \"cursor_size\": [{}, {}],",
@@ -156,6 +164,11 @@ impl DrmHardwareReport {
         );
         let _ = writeln!(out, "  \"crtc_count\": {},", self.crtc_count);
         let _ = writeln!(out, "  \"plane_count\": {},", self.plane_count);
+        let _ = writeln!(
+            out,
+            "  \"cursor_plane_count\": {},",
+            self.cursor_plane_count
+        );
         let _ = writeln!(
             out,
             "  \"dmabuf_render_format_count\": {},",
@@ -257,6 +270,9 @@ struct DrmOutputState {
     vblank_queued_at: Option<Instant>,
     needs_redraw: bool,
     last_frame_direct_scanout: bool,
+    cursor_plane_count: usize,
+    hw_cursor_enabled: bool,
+    last_frame_hw_cursor: bool,
     frame_start: Option<Instant>,
     next_frame_at: Instant,
     pending_presentation_feedback: Option<OutputPresentationFeedback>,
@@ -271,6 +287,7 @@ struct DrmRuntime {
     renderer: GlesRenderer,
     render_formats: Vec<Format>,
     cursor_size: Size<u32, smithay::utils::Buffer>,
+    hw_cursor_disabled: bool,
     text_cache: crate::text::TextCache,
     shape_cache: crate::surfaces::UiShapeCache,
     outputs: HashMap<crtc::Handle, DrmOutputState>,
@@ -325,6 +342,7 @@ struct DrmOutputContext<'a> {
     gbm_device: &'a GbmDevice<DrmDeviceFd>,
     render_formats: &'a [Format],
     cursor_size: Size<u32, smithay::utils::Buffer>,
+    hw_cursor_disabled: bool,
 }
 
 fn build_drm_output_state(
@@ -334,6 +352,8 @@ fn build_drm_output_state(
     output_id: rusty_wm::OutputId,
     drm_surface: DrmSurface,
 ) -> Result<DrmOutputState, CompositorError> {
+    let cursor_plane_count = drm_surface.planes().cursor.len();
+    let hw_cursor_enabled = cursor_plane_count > 0 && !ctx.hw_cursor_disabled;
     let gbm_allocator = GbmAllocator::new(
         ctx.gbm_device.clone(),
         GbmBufferFlags::RENDERING | GbmBufferFlags::SCANOUT,
@@ -364,6 +384,8 @@ fn build_drm_output_state(
         height = setup.pixel_size.h,
         refresh_hz = setup.vrefresh,
         vrr_support = ?vrr_support,
+        cursor_planes = cursor_plane_count,
+        hw_cursor = hw_cursor_enabled,
         "Initialized KMS DrmCompositor output"
     );
 
@@ -381,6 +403,9 @@ fn build_drm_output_state(
         vblank_queued_at: None,
         needs_redraw: true,
         last_frame_direct_scanout: false,
+        cursor_plane_count,
+        hw_cursor_enabled,
+        last_frame_hw_cursor: false,
         frame_start: None,
         next_frame_at: Instant::now(),
         pending_presentation_feedback: None,
@@ -441,6 +466,94 @@ impl DrmOutputState {
             }
         }
     }
+
+    fn submit_rendered_frame(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        render_list: &[crate::shell_render::CompositorRenderElement],
+        state: &mut RustyCompositorState,
+        target_output: &smithay::output::Output,
+        render_start: Instant,
+    ) {
+        match self.drm_compositor.render_frame(
+            renderer,
+            render_list,
+            crate::winit_backend::BACKGROUND_COLOR,
+            FrameFlags::DEFAULT,
+        ) {
+            Ok(result) => {
+                if result.is_empty {
+                    self.needs_redraw = false;
+                    self.last_frame_direct_scanout = false;
+                    self.last_frame_hw_cursor = false;
+                    if state.ext_session_locked {
+                        state.confirm_pending_session_lock();
+                    }
+                    return;
+                }
+                if result.needs_sync()
+                    && let PrimaryPlaneElement::Swapchain(ref element) = result.primary_element
+                {
+                    let _ = element.sync.wait();
+                }
+                let direct_scanout =
+                    matches!(result.primary_element, PrimaryPlaneElement::Element(_));
+                let hw_cursor = result.cursor_element.is_some();
+                let render_states = result.states;
+                if let Err(err) = self.drm_compositor.queue_frame(()) {
+                    warn!(
+                        connector = %self.connector_name,
+                        error = ?err,
+                        "Failed to queue DRM/KMS page flip"
+                    );
+                    self.needs_redraw = true;
+                    self.last_frame_direct_scanout = false;
+                    self.last_frame_hw_cursor = false;
+                } else {
+                    self.vblank_pending = true;
+                    self.vblank_queued_at = Some(Instant::now());
+                    self.needs_redraw = false;
+                    self.frame_start = Some(render_start);
+                    self.last_frame_direct_scanout = direct_scanout;
+                    self.last_frame_hw_cursor = hw_cursor;
+                    if let Some(mut stale) = self.pending_presentation_feedback.take() {
+                        stale.discarded();
+                    }
+                    self.pending_presentation_feedback =
+                        Some(state.take_presentation_feedback(target_output, &render_states));
+                }
+            }
+            Err(err) => {
+                warn!(
+                    connector = %self.connector_name,
+                    error = ?err,
+                    "DRM/KMS render_frame error"
+                );
+                self.needs_redraw = true;
+                self.last_frame_direct_scanout = false;
+                self.last_frame_hw_cursor = false;
+            }
+        }
+    }
+}
+
+/// Computes output IDs whose cursor overlay region overlaps `prev_ptr` or `next_ptr` (`RUSTYOS-046`).
+#[must_use]
+pub(crate) fn output_ids_affected_by_pointer_motion(
+    output_map: &crate::outputs::OutputMap,
+    prev_ptr: Point<f64, Logical>,
+    next_ptr: Point<f64, Logical>,
+) -> Vec<rusty_wm::OutputId> {
+    let mut ids = Vec::new();
+    for entry in output_map.entries() {
+        let geo = entry.logical_geometry();
+        if crate::winit_backend::pointer_local_if_on_output(prev_ptr, geo).is_some()
+            || crate::winit_backend::pointer_local_if_on_output(next_ptr, geo).is_some()
+        {
+            ids.push(entry.id);
+        }
+    }
+    ids
 }
 
 impl DrmRuntime {
@@ -457,6 +570,23 @@ impl DrmRuntime {
     fn mark_all_dirty(&mut self) {
         for out in self.outputs.values_mut() {
             out.needs_redraw = true;
+        }
+    }
+
+    fn mark_outputs_dirty(&mut self, output_ids: &[rusty_wm::OutputId]) {
+        if output_ids.is_empty() {
+            self.mark_all_dirty();
+            return;
+        }
+        let mut marked_any = false;
+        for out in self.outputs.values_mut() {
+            if output_ids.contains(&out.output_id) {
+                out.needs_redraw = true;
+                marked_any = true;
+            }
+        }
+        if !marked_any {
+            self.mark_all_dirty();
         }
     }
 
@@ -508,6 +638,7 @@ impl DrmRuntime {
         let output_id;
         let pixel_size;
         let interval;
+        let hw_cursor_allowed;
         {
             let Some(out) = self.outputs.get_mut(&crtc) else {
                 return;
@@ -518,6 +649,7 @@ impl DrmRuntime {
             output_id = out.output_id;
             pixel_size = out.pixel_size;
             interval = Duration::from_micros(mode_refresh_interval_us(out.vrefresh));
+            hw_cursor_allowed = out.hw_cursor_enabled && !self.hw_cursor_disabled;
             want_vrr = want_vrr_for_output(state.user_config.vrr_mode, state, output_id);
             out.apply_runtime_vrr(want_vrr);
         }
@@ -531,14 +663,21 @@ impl DrmRuntime {
             self.capture_primary_screenshot(state, output_id, pixel_size);
         }
 
-        let render_list = crate::winit_backend::build_frame_render_list_for_output(
+        let cursor_mode = if hw_cursor_allowed {
+            crate::winit_backend::CursorRenderMode::HardwarePlane {
+                max_size: self.cursor_size,
+            }
+        } else {
+            crate::winit_backend::CursorRenderMode::SoftwareComposited
+        };
+        let render_list = crate::winit_backend::build_frame_render_list_for_output_with_cursor(
             &mut self.renderer,
             &mut self.text_cache,
             &mut self.shape_cache,
             state,
             output_id,
             pixel_size,
-            true,
+            cursor_mode,
         );
 
         let target_output = state
@@ -550,56 +689,13 @@ impl DrmRuntime {
             return;
         };
         out.next_frame_at = Instant::now() + interval;
-
-        match out.drm_compositor.render_frame(
+        out.submit_rendered_frame(
             &mut self.renderer,
             &render_list,
-            crate::winit_backend::BACKGROUND_COLOR,
-            FrameFlags::DEFAULT,
-        ) {
-            Ok(result) => {
-                if result.is_empty {
-                    out.needs_redraw = false;
-                    out.last_frame_direct_scanout = false;
-                    if state.ext_session_locked {
-                        state.confirm_pending_session_lock();
-                    }
-                } else {
-                    let direct_scanout =
-                        matches!(result.primary_element, PrimaryPlaneElement::Element(_));
-                    let render_states = result.states;
-                    if let Err(err) = out.drm_compositor.queue_frame(()) {
-                        warn!(
-                            connector = %out.connector_name,
-                            error = ?err,
-                            "Failed to queue DRM/KMS page flip"
-                        );
-                        out.needs_redraw = true;
-                        out.last_frame_direct_scanout = false;
-                    } else {
-                        out.vblank_pending = true;
-                        out.vblank_queued_at = Some(Instant::now());
-                        out.needs_redraw = false;
-                        out.frame_start = Some(render_start);
-                        out.last_frame_direct_scanout = direct_scanout;
-                        if let Some(mut stale) = out.pending_presentation_feedback.take() {
-                            stale.discarded();
-                        }
-                        out.pending_presentation_feedback =
-                            Some(state.take_presentation_feedback(&target_output, &render_states));
-                    }
-                }
-            }
-            Err(err) => {
-                warn!(
-                    connector = %out.connector_name,
-                    error = ?err,
-                    "DRM/KMS render_frame error"
-                );
-                out.needs_redraw = true;
-                out.last_frame_direct_scanout = false;
-            }
-        }
+            state,
+            &target_output,
+            render_start,
+        );
     }
 
     fn handle_vblank(&mut self, crtc: crtc::Handle, state: &mut RustyCompositorState) {
@@ -628,6 +724,9 @@ impl DrmRuntime {
         state
             .frame_timing
             .record_direct_scanout(out.last_frame_direct_scanout);
+        state
+            .frame_timing
+            .record_hw_cursor(out.last_frame_hw_cursor);
 
         let output_id = out.output_id;
         let should_requeue = out.needs_redraw;
@@ -740,6 +839,7 @@ impl DrmRuntime {
             gbm_device: &self.gbm_device,
             render_formats: &self.render_formats,
             cursor_size: self.cursor_size,
+            hw_cursor_disabled: self.hw_cursor_disabled,
         };
         match build_drm_output_state(&ctx, setup, &smithay_output, new_id, drm_surface) {
             Ok(out_state) => {
@@ -1076,6 +1176,7 @@ fn try_run_native_drm_session(
             state.init_dmabuf_formats(client_dmabuf_formats);
         }
     }
+    let explicit_sync_active = state.init_drm_syncobj(drm_device.device_fd());
 
     let render_formats: Vec<_> = renderer
         .egl_context()
@@ -1084,11 +1185,13 @@ fn try_run_native_drm_session(
         .copied()
         .collect();
     let cursor_size = drm_device.cursor_size();
+    let hw_cursor_disabled = RustyCompositorState::hw_cursor_disabled_by_env();
     let primary_ctx = DrmOutputContext {
         primary_node,
         gbm_device: &gbm_device,
         render_formats: &render_formats,
         cursor_size,
+        hw_cursor_disabled,
     };
     let primary_out_state = build_drm_output_state(
         &primary_ctx,
@@ -1110,6 +1213,7 @@ fn try_run_native_drm_session(
         renderer,
         render_formats,
         cursor_size,
+        hw_cursor_disabled,
         text_cache: crate::text::TextCache::new(),
         shape_cache: crate::surfaces::UiShapeCache::new(),
         outputs,
@@ -1140,6 +1244,11 @@ fn try_run_native_drm_session(
     let rt_input = Rc::clone(&runtime);
     loop_handle
         .insert_source(libinput_backend, move |event, _metadata, app_state| {
+            let is_pointer_motion = matches!(
+                event,
+                InputEvent::PointerMotion { .. } | InputEvent::PointerMotionAbsolute { .. }
+            );
+            let prev_ptr = app_state.pointer_location;
             app_state.process_input_event(event);
             if let Some(vt) = app_state.pending_vt_switch.take() {
                 info!(vt, "Switching virtual terminal via libseat");
@@ -1149,7 +1258,19 @@ fn try_run_native_drm_session(
                 return;
             }
             let mut rt = rt_input.borrow_mut();
-            rt.mark_all_dirty();
+            if is_pointer_motion
+                && app_state.active_window_drag.is_none()
+                && app_state.active_window_resize.is_none()
+            {
+                let dirty_ids = output_ids_affected_by_pointer_motion(
+                    &app_state.output_map,
+                    prev_ptr,
+                    app_state.pointer_location,
+                );
+                rt.mark_outputs_dirty(&dirty_ids);
+            } else {
+                rt.mark_all_dirty();
+            }
             rt.render_ready_outputs(app_state, false);
         })
         .map_err(|err| CompositorError::EventLoop(err.to_string()))?;
@@ -1261,12 +1382,22 @@ fn try_run_native_drm_session(
     let ipc_socket_path = default_ipc_socket_path(&socket_name);
     let mut ipc_server = IpcServer::bind(ipc_socket_path.clone()).ok();
 
+    let total_cursor_planes: usize = runtime
+        .borrow()
+        .outputs
+        .values()
+        .map(|o| o.cursor_plane_count)
+        .sum();
     info!(
         connector = %setup.connector_name,
         width = setup.pixel_size.w,
         height = setup.pixel_size.h,
         refresh_hz = setup.vrefresh,
         active_outputs = runtime.borrow().outputs.len(),
+        explicit_sync = explicit_sync_active,
+        cursor_planes = total_cursor_planes,
+        hw_cursor_disabled,
+        cursor_size = ?cursor_size,
         seat = %seat_name,
         wayland_display = %socket_name,
         ipc_socket = %ipc_socket_path.display(),
@@ -1280,6 +1411,7 @@ fn try_run_native_drm_session(
 
     runtime.borrow_mut().render_ready_outputs(&mut state, true);
 
+    let rt_dispatch = Rc::clone(&runtime);
     event_loop
         .run(Some(Duration::from_millis(4)), &mut state, |app_state| {
             crate::winit_backend::dispatch_and_refresh_clients(
@@ -1287,6 +1419,11 @@ fn try_run_native_drm_session(
                 ipc_server.as_mut(),
                 app_state,
             );
+            if app_state.take_syncobj_unblocked() {
+                let mut rt = rt_dispatch.borrow_mut();
+                rt.mark_all_dirty();
+                rt.render_ready_outputs(app_state, false);
+            }
         })
         .map_err(|err| CompositorError::EventLoop(err.to_string()))?;
 
@@ -1486,6 +1623,7 @@ fn probe_primary_drm_device(kms_master_status: &str) -> Result<DrmHardwareReport
         .get_driver_capability(DriverCapability::ASyncPageFlip)
         .unwrap_or(0)
         == 1;
+    let syncobj_eventfd = supports_syncobj_eventfd(&drm_fd);
     let cursor_w = drm_fd
         .get_driver_capability(DriverCapability::CursorWidth)
         .unwrap_or(64);
@@ -1498,6 +1636,7 @@ fn probe_primary_drm_device(kms_master_status: &str) -> Result<DrmHardwareReport
     })?;
     let crtc_count = resources.crtcs().len();
     let plane_count = drm_fd.plane_handles().map_or(0, |planes| planes.len());
+    let cursor_plane_count = count_drm_cursor_planes(&drm_fd, universal_planes);
 
     let mut connectors = Vec::new();
     for &conn_handle in resources.connectors() {
@@ -1534,15 +1673,41 @@ fn probe_primary_drm_device(kms_master_status: &str) -> Result<DrmHardwareReport
         universal_planes,
         monotonic_timestamps,
         async_page_flip,
+        syncobj_eventfd,
         cursor_size: (cursor_w, cursor_h),
         crtc_count,
         plane_count,
+        cursor_plane_count,
         connectors,
         dmabuf_render_format_count,
         dmabuf_texture_format_count,
         gbm_egl_dmabuf_test_passed,
         kms_master_status: kms_master_status.to_owned(),
     })
+}
+
+fn count_drm_cursor_planes(drm_fd: &DrmDeviceFd, universal_planes: bool) -> usize {
+    if !universal_planes {
+        return 0;
+    }
+    let Ok(planes) = drm_fd.plane_handles() else {
+        return 0;
+    };
+    let cursor_val = PlaneType::Cursor as u64;
+    planes
+        .into_iter()
+        .filter(|&plane| {
+            let Ok(props) = drm_fd.get_properties(plane) else {
+                return false;
+            };
+            let (ids, vals) = props.as_props_and_values();
+            ids.iter().zip(vals.iter()).any(|(&id, &val)| {
+                drm_fd
+                    .get_property(id)
+                    .is_ok_and(|info| info.name().to_str() == Ok("type") && val == cursor_val)
+            })
+        })
+        .count()
 }
 
 fn discover_primary_drm_path() -> Result<PathBuf, CompositorError> {
@@ -1672,9 +1837,11 @@ fn log_hardware_report(report: &DrmHardwareReport) {
         atomic = report.atomic_modesetting,
         universal_planes = report.universal_planes,
         monotonic_ts = report.monotonic_timestamps,
+        syncobj_eventfd = report.syncobj_eventfd,
         cursor_size = ?report.cursor_size,
         crtcs = report.crtc_count,
         planes = report.plane_count,
+        cursor_planes = report.cursor_plane_count,
         dmabuf_render_formats = report.dmabuf_render_format_count,
         dmabuf_texture_formats = report.dmabuf_texture_format_count,
         gbm_egl_dmabuf_ok = report.gbm_egl_dmabuf_test_passed,
@@ -1705,9 +1872,11 @@ mod tests {
             universal_planes: true,
             monotonic_timestamps: true,
             async_page_flip: true,
+            syncobj_eventfd: true,
             cursor_size: (256, 256),
             crtc_count: 4,
             plane_count: 31,
+            cursor_plane_count: 4,
             connectors: vec![ConnectorReport {
                 name: "eDP-1".to_owned(),
                 status: "Connected".to_owned(),
@@ -1723,8 +1892,78 @@ mod tests {
         let json = sample.to_json();
         assert!(json.contains("\"primary_node\": \"/dev/dri/card1\""));
         assert!(json.contains("\"atomic_modesetting\": true"));
+        assert!(json.contains("\"syncobj_eventfd\": true"));
+        assert!(json.contains("\"cursor_plane_count\": 4"));
         assert!(json.contains("\"preferred_mode\": \"1920x1080@60Hz\""));
         assert!(json.contains("\"gbm_egl_dmabuf_test_passed\": true"));
+    }
+
+    #[test]
+    fn scoped_pointer_dirtying_limits_redraw_to_crossed_outputs() {
+        use smithay::output::{Output, PhysicalProperties, Subpixel};
+
+        let out1 = Output::new(
+            "eDP-1".to_owned(),
+            PhysicalProperties {
+                size: (0, 0).into(),
+                subpixel: Subpixel::Unknown,
+                make: "Test".to_owned(),
+                model: "Primary".to_owned(),
+            },
+        );
+        let mut map = crate::outputs::OutputMap::new(crate::outputs::OutputEntry::new(
+            rusty_wm::OutputId(1),
+            "eDP-1",
+            out1,
+            (0, 0).into(),
+            (1920, 1080).into(),
+            1.0,
+            60_000,
+            true,
+        ));
+        let out2 = Output::new(
+            "DP-1".to_owned(),
+            PhysicalProperties {
+                size: (0, 0).into(),
+                subpixel: Subpixel::Unknown,
+                make: "Test".to_owned(),
+                model: "Secondary".to_owned(),
+            },
+        );
+        map.add(crate::outputs::OutputEntry::new(
+            rusty_wm::OutputId(2),
+            "DP-1",
+            out2,
+            (1920, 0).into(),
+            (1920, 1080).into(),
+            1.0,
+            144_000,
+            false,
+        ));
+
+        // Motion completely inside display 1 should only dirty display 1.
+        let inside_primary = output_ids_affected_by_pointer_motion(
+            &map,
+            (200.0, 200.0).into(),
+            (400.0, 300.0).into(),
+        );
+        assert_eq!(inside_primary, vec![rusty_wm::OutputId(1)]);
+
+        // Motion completely inside display 2 should only dirty display 2.
+        let inside_secondary = output_ids_affected_by_pointer_motion(
+            &map,
+            (2500.0, 200.0).into(),
+            (2700.0, 350.0).into(),
+        );
+        assert_eq!(inside_secondary, vec![rusty_wm::OutputId(2)]);
+
+        // Motion crossing from display 1 into display 2 must dirty both so the old cursor disappears cleanly.
+        let crossing = output_ids_affected_by_pointer_motion(
+            &map,
+            (1800.0, 500.0).into(),
+            (2100.0, 500.0).into(),
+        );
+        assert_eq!(crossing, vec![rusty_wm::OutputId(1), rusty_wm::OutputId(2)]);
     }
 
     #[test]

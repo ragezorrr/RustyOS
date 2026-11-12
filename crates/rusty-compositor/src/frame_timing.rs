@@ -54,6 +54,8 @@ pub struct FrameTimingSummary {
     pub zero_damage_frames: u64,
     /// Count of frames presented via zero-copy KMS direct primary-plane scanout (`RUSTYOS-041`).
     pub direct_scanout_frames: u64,
+    /// Count of frames whose cursor element was assigned to a DRM hardware cursor plane (`RUSTYOS-046`).
+    pub hw_cursor_frames: u64,
     /// Average damaged area ratio in permille (`0..=1000`).
     pub damage_ratio_avg_permille: u16,
     /// 95th percentile damaged area ratio in permille (`0..=1000`).
@@ -101,7 +103,7 @@ impl FrameTimingSummary {
     #[must_use]
     pub fn to_log_line(&self) -> String {
         format!(
-            "frames={} target_us={} interval_us(p50/p95/p99/max)={}/{}/{}/{} render_us(p50/p95/p99/max)={}/{}/{}/{} input_us(n={}:p50/p95/max)={}/{}/{} dispatch_us(p95/max)={}/{} damage_permille(avg/p95/zero)={}/{}/{} late={} missed={} stalls={}/{} scanout={}",
+            "frames={} target_us={} interval_us(p50/p95/p99/max)={}/{}/{}/{} render_us(p50/p95/p99/max)={}/{}/{}/{} input_us(n={}:p50/p95/max)={}/{}/{} dispatch_us(p95/max)={}/{} damage_permille(avg/p95/zero)={}/{}/{} late={} missed={} stalls={}/{} scanout={} hw_cursor={}",
             self.total_frames,
             self.target_interval_us,
             self.interval_p50_us,
@@ -126,6 +128,7 @@ impl FrameTimingSummary {
             self.render_stalls,
             self.dispatch_stalls,
             self.direct_scanout_frames,
+            self.hw_cursor_frames,
         )
     }
 
@@ -166,6 +169,7 @@ impl FrameTimingSummary {
             "  \"direct_scanout_frames\": {},",
             self.direct_scanout_frames
         );
+        let _ = writeln!(out, "  \"hw_cursor_frames\": {},", self.hw_cursor_frames);
         let _ = writeln!(out, "  \"damage_ratio_permille\": {{");
         let _ = writeln!(out, "    \"avg\": {},", self.damage_ratio_avg_permille);
         let _ = writeln!(out, "    \"p95\": {}", self.damage_ratio_p95_permille);
@@ -222,6 +226,7 @@ pub struct FrameTimingCollector {
     dispatch_stalls: u64,
     zero_damage_frames: u64,
     direct_scanout_frames: u64,
+    hw_cursor_frames: u64,
     last_present_instant: Option<Instant>,
     pending_input_instant: Option<Instant>,
 }
@@ -256,6 +261,7 @@ impl FrameTimingCollector {
             dispatch_stalls: 0,
             zero_damage_frames: 0,
             direct_scanout_frames: 0,
+            hw_cursor_frames: 0,
             last_present_instant: None,
             pending_input_instant: None,
         }
@@ -414,6 +420,14 @@ impl FrameTimingCollector {
         }
     }
 
+    /// Records whether the just-presented frame used a DRM hardware cursor plane (`RUSTYOS-046`).
+    /// Performs zero heap allocations.
+    pub fn record_hw_cursor(&mut self, hw_cursor: bool) {
+        if hw_cursor {
+            self.hw_cursor_frames = self.hw_cursor_frames.saturating_add(1);
+        }
+    }
+
     /// Computes percentile statistics (`p50`, `p95`, `p99`, `max`) over the retained window.
     #[must_use]
     pub fn summary(&self) -> FrameTimingSummary {
@@ -461,6 +475,7 @@ impl FrameTimingCollector {
             dispatch_stalls: self.dispatch_stalls,
             zero_damage_frames: self.zero_damage_frames,
             direct_scanout_frames: self.direct_scanout_frames,
+            hw_cursor_frames: self.hw_cursor_frames,
             damage_ratio_avg_permille: damage_avg,
             damage_ratio_p95_permille: damage_p95,
             interval_min_us: intervals.first().copied().unwrap_or(0),
@@ -610,27 +625,30 @@ mod tests {
         let mut collector = FrameTimingCollector::new(16, 60_000);
         collector.record_durations(Duration::from_micros(300), None, 1);
         collector.record_direct_scanout(false);
+        collector.record_hw_cursor(false);
         collector.record_durations(
             Duration::from_micros(250),
             Some(Duration::from_micros(16_667)),
             1,
         );
         collector.record_direct_scanout(true);
+        collector.record_hw_cursor(true);
         collector.record_durations(
             Duration::from_micros(240),
             Some(Duration::from_micros(16_667)),
             1,
         );
         collector.record_direct_scanout(true);
+        collector.record_hw_cursor(true);
 
         let summary = collector.summary();
         assert_eq!(summary.total_frames, 3);
         assert_eq!(summary.direct_scanout_frames, 2);
+        assert_eq!(summary.hw_cursor_frames, 2);
         assert!(summary.to_log_line().contains("scanout=2"));
-        assert!(
-            summary
-                .to_json("native-drm-kms", (1920, 1080))
-                .contains("\"direct_scanout_frames\": 2")
-        );
+        assert!(summary.to_log_line().contains("hw_cursor=2"));
+        let json = summary.to_json("native-drm-kms", (1920, 1080));
+        assert!(json.contains("\"direct_scanout_frames\": 2"));
+        assert!(json.contains("\"hw_cursor_frames\": 2"));
     }
 }

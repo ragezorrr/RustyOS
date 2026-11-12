@@ -13,7 +13,7 @@ use smithay::backend::renderer::element::memory::{
 };
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::input::pointer::CursorIcon;
-use smithay::utils::{Logical, Point, Rectangle, Size, Transform};
+use smithay::utils::{Buffer as BufferCoord, Logical, Physical, Point, Rectangle, Size, Transform};
 
 /// Corner quadrant identifier for 9-slice rounded boxes and shadows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -55,7 +55,9 @@ struct ShadowCornerKey {
 #[derive(Debug)]
 struct CachedCursor {
     buffer: MemoryRenderBuffer,
-    hotspot: Point<i32, Logical>,
+    logical_size: Size<i32, Logical>,
+    raw_size: Size<f64, Logical>,
+    hotspot: Point<f64, Logical>,
 }
 
 #[derive(Debug, Default)]
@@ -73,7 +75,7 @@ pub struct UiShapeCache {
     shadow_corners: HashMap<ShadowCornerKey, (MemoryRenderBuffer, Size<i32, Logical>)>,
     wallpaper: CachedWallpaper,
     cursor_arrow: Option<MemoryRenderBuffer>,
-    xcursors: HashMap<(Option<String>, &'static str), Option<CachedCursor>>,
+    xcursors: HashMap<(Option<String>, &'static str, u32), Option<CachedCursor>>,
     /// Decoded & GPU-cached application and tray icon textures (`RUSTYOS-033`).
     pub icons: crate::icons::IconCache,
 }
@@ -272,8 +274,8 @@ impl UiShapeCache {
         .ok()
     }
 
-    /// Returns a GPU-cached cursor element for `icon` positioned with its hotspot aligned to `pointer_loc`,
-    /// using system/configured `XCursor` themes when available or the built-in crisp arrow fallback (`RUSTYOS-034`).
+    /// Returns a GPU-cached cursor element for `icon` positioned with its hotspot aligned to `pointer_loc`
+    /// at scale `1.0`, using system/configured `XCursor` themes or the built-in crisp arrow fallback (`RUSTYOS-034`).
     pub fn named_cursor_element(
         &mut self,
         renderer: &mut GlesRenderer,
@@ -281,28 +283,63 @@ impl UiShapeCache {
         theme_override: Option<&str>,
         pointer_loc: Point<i32, Logical>,
     ) -> Option<MemoryRenderBufferRenderElement<GlesRenderer>> {
+        self.named_cursor_element_for_output(
+            renderer,
+            icon,
+            theme_override,
+            pointer_loc,
+            1.0,
+            None,
+            Kind::Cursor,
+        )
+    }
+
+    /// Returns a HiDPI-aware GPU-cached cursor element for `icon` scaled by `output_scale`,
+    /// automatically falling back to `Kind::Unspecified` when `plane_limit` would be exceeded (`RUSTYOS-046`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn named_cursor_element_for_output(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        icon: CursorIcon,
+        theme_override: Option<&str>,
+        pointer_loc: Point<i32, Logical>,
+        output_scale: f64,
+        plane_limit: Option<Size<u32, BufferCoord>>,
+        kind: Kind,
+    ) -> Option<MemoryRenderBufferRenderElement<GlesRenderer>> {
+        let clamped_scale = crate::config::clamp_display_scale(output_scale);
+        let target_px = xcursor_target_pixel_size(clamped_scale);
         let icon_name = icon.name();
-        let cache_key = (theme_override.map(str::to_owned), icon_name);
+        let cache_key = (theme_override.map(str::to_owned), icon_name, target_px);
         if !self.xcursors.contains_key(&cache_key) {
-            let loaded = load_xcursor_for_icon(icon, theme_override);
+            let loaded = load_xcursor_for_icon(icon, theme_override, target_px, clamped_scale);
             self.xcursors.insert(cache_key.clone(), loaded);
         }
         if let Some(Some(cursor)) = self.xcursors.get(&cache_key) {
-            let top_left = pointer_loc - cursor.hotspot;
+            let resolved_kind = resolve_cursor_element_kind(
+                kind == Kind::Cursor,
+                cursor.logical_size,
+                clamped_scale,
+                plane_limit,
+            );
+            let origin = scaled_cursor_physical_origin(pointer_loc, cursor.hotspot, clamped_scale);
             return MemoryRenderBufferRenderElement::from_buffer(
                 renderer,
-                top_left.to_f64().to_physical(1.0),
+                origin,
                 &cursor.buffer,
                 None,
-                None,
-                None,
-                Kind::Cursor,
+                Some(Rectangle::from_size(cursor.raw_size)),
+                Some(cursor.logical_size),
+                resolved_kind,
             )
             .ok();
         }
-        self.cursor_arrow_element(
+        self.cursor_arrow_element_for_output(
             renderer,
-            Point::from((pointer_loc.x - 2, pointer_loc.y - 2)),
+            pointer_loc,
+            clamped_scale,
+            plane_limit,
+            kind,
         )
     }
 
@@ -323,6 +360,38 @@ impl UiShapeCache {
             None,
             None,
             Kind::Cursor,
+        )
+        .ok()
+    }
+
+    fn cursor_arrow_element_for_output(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        pointer_loc: Point<i32, Logical>,
+        output_scale: f64,
+        plane_limit: Option<Size<u32, BufferCoord>>,
+        kind: Kind,
+    ) -> Option<MemoryRenderBufferRenderElement<GlesRenderer>> {
+        let logical_size = Size::from((24, 24));
+        let resolved_kind = resolve_cursor_element_kind(
+            kind == Kind::Cursor,
+            logical_size,
+            output_scale,
+            plane_limit,
+        );
+        let origin =
+            scaled_cursor_physical_origin(pointer_loc, Point::from((2.0, 2.0)), output_scale);
+        let buf = self
+            .cursor_arrow
+            .get_or_insert_with(rasterize_cursor_arrow_buffer);
+        MemoryRenderBufferRenderElement::from_buffer(
+            renderer,
+            origin,
+            buf,
+            None,
+            None,
+            Some(logical_size),
+            resolved_kind,
         )
         .ok()
     }
@@ -778,6 +847,74 @@ fn xcursor_target_size() -> u32 {
         .unwrap_or(24)
 }
 
+/// Computes the target `XCursor` pixel size for an output scale factor (`RUSTYOS-046`).
+#[must_use]
+pub(crate) fn xcursor_target_pixel_size(output_scale: f64) -> u32 {
+    let clamped = crate::config::clamp_display_scale(output_scale);
+    let px = (f64::from(xcursor_target_size()) * clamped)
+        .round()
+        .clamp(16.0, 128.0);
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    {
+        px as u32
+    }
+}
+
+/// Maps logical pointer + hotspot coordinates into snapped physical cursor origin (`RUSTYOS-046`).
+#[must_use]
+pub(crate) fn scaled_cursor_physical_origin(
+    pointer_loc: Point<i32, Logical>,
+    hotspot: Point<f64, Logical>,
+    output_scale: f64,
+) -> Point<f64, Physical> {
+    let clamped = crate::config::clamp_display_scale(output_scale);
+    let logical_origin = Point::<f64, Logical>::from((
+        f64::from(pointer_loc.x) - hotspot.x,
+        f64::from(pointer_loc.y) - hotspot.y,
+    ));
+    logical_origin
+        .to_physical(clamped)
+        .to_i32_round::<i32>()
+        .to_f64()
+}
+
+/// Checks whether a logical cursor size fits within a hardware DRM cursor plane at `output_scale` (`RUSTYOS-046`).
+#[must_use]
+pub(crate) fn cursor_fits_plane_limit(
+    logical_size: Size<i32, Logical>,
+    output_scale: f64,
+    plane_limit: Option<Size<u32, BufferCoord>>,
+) -> bool {
+    let Some(limit) = plane_limit else {
+        return true;
+    };
+    let clamped = crate::config::clamp_display_scale(output_scale);
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let phys_w = (f64::from(logical_size.w.max(0)) * clamped)
+        .round()
+        .max(0.0) as u32;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let phys_h = (f64::from(logical_size.h.max(0)) * clamped)
+        .round()
+        .max(0.0) as u32;
+    phys_w > 0 && phys_h > 0 && phys_w <= limit.w && phys_h <= limit.h
+}
+
+/// Resolves whether a cursor element should request hardware cursor plane placement or fallback to primary composition (`RUSTYOS-046`).
+#[must_use]
+pub(crate) fn resolve_cursor_element_kind(
+    prefer_hw_cursor: bool,
+    logical_size: Size<i32, Logical>,
+    output_scale: f64,
+    plane_limit: Option<Size<u32, BufferCoord>>,
+) -> Kind {
+    if prefer_hw_cursor && cursor_fits_plane_limit(logical_size, output_scale, plane_limit) {
+        Kind::Cursor
+    } else {
+        Kind::Unspecified
+    }
+}
+
 fn xcursor_search_roots() -> Vec<PathBuf> {
     let mut roots = Vec::new();
     if let Ok(home) = env::var("HOME")
@@ -868,7 +1005,12 @@ fn xcursor_candidate_names(icon: CursorIcon) -> Vec<&'static str> {
     names
 }
 
-fn load_xcursor_for_icon(icon: CursorIcon, theme_override: Option<&str>) -> Option<CachedCursor> {
+fn load_xcursor_for_icon(
+    icon: CursorIcon,
+    theme_override: Option<&str>,
+    target_size: u32,
+    output_scale: f64,
+) -> Option<CachedCursor> {
     let mut themes: Vec<String> = Vec::new();
     if let Some(t) = theme_override.map(str::trim).filter(|t| !t.is_empty()) {
         themes.push(t.to_owned());
@@ -908,7 +1050,8 @@ fn load_xcursor_for_icon(icon: CursorIcon, theme_override: Option<&str>) -> Opti
     }
 
     let names = xcursor_candidate_names(icon);
-    let target_size = xcursor_target_size();
+    let nominal_size = xcursor_target_size();
+    let clamped_scale = crate::config::clamp_display_scale(output_scale);
 
     for theme in &expanded_themes {
         for root in &roots {
@@ -921,6 +1064,20 @@ fn load_xcursor_for_icon(icon: CursorIcon, theme_override: Option<&str>) -> Opti
                 if let Ok(bytes) = fs::read(&candidate)
                     && let Some((w, h, xhot, yhot, bgra)) = parse_xcursor_bytes(&bytes, target_size)
                 {
+                    let eff_scale =
+                        if clamped_scale > 1.0 && f64::from(w.max(h)) > f64::from(nominal_size) {
+                            (f64::from(w.max(h)) / f64::from(nominal_size)).min(clamped_scale)
+                        } else {
+                            1.0
+                        };
+                    #[allow(clippy::cast_possible_truncation)]
+                    let logical_size = Size::from((
+                        (f64::from(w) / eff_scale).round().max(1.0) as i32,
+                        (f64::from(h) / eff_scale).round().max(1.0) as i32,
+                    ));
+                    let raw_size = Size::from((f64::from(w), f64::from(h)));
+                    let hotspot =
+                        Point::from((f64::from(xhot) / eff_scale, f64::from(yhot) / eff_scale));
                     let buffer = MemoryRenderBuffer::from_slice(
                         &bgra,
                         Fourcc::Argb8888,
@@ -931,7 +1088,9 @@ fn load_xcursor_for_icon(icon: CursorIcon, theme_override: Option<&str>) -> Opti
                     );
                     return Some(CachedCursor {
                         buffer,
-                        hotspot: Point::from((xhot, yhot)),
+                        logical_size,
+                        raw_size,
+                        hotspot,
                     });
                 }
             }
@@ -1143,5 +1302,33 @@ mod tests {
         assert_eq!((w, h, xhot, yhot), (1, 1, 0, 0));
         assert_eq!(bgra, vec![0xFF, 0x00, 0x00, 0xFF]);
         Ok(())
+    }
+
+    #[test]
+    fn hidpi_cursor_origin_and_plane_limit_scale_correctly() {
+        // 1.5x display: pointer (100, 50), hotspot (4.0, 2.0) => logical (96, 48) => physical (144, 72)
+        let phys =
+            scaled_cursor_physical_origin(Point::from((100, 50)), Point::from((4.0, 2.0)), 1.5);
+        assert_eq!(phys, Point::from((144.0, 72.0)));
+
+        // 2.0x scale pixel target is clamped cleanly from default/env size
+        let px_1x = xcursor_target_pixel_size(1.0);
+        let px_2x = xcursor_target_pixel_size(2.0);
+        assert!(px_2x >= px_1x);
+
+        // 24x24 cursor at 2.0x = 48x48 fits inside 64x64 plane, whereas 4.0x = 96x96 falls back to Unspecified.
+        let plane_64 = Some(Size::<u32, BufferCoord>::from((64, 64)));
+        assert_eq!(
+            resolve_cursor_element_kind(true, Size::from((24, 24)), 2.0, plane_64),
+            Kind::Cursor
+        );
+        assert_eq!(
+            resolve_cursor_element_kind(true, Size::from((24, 24)), 4.0, plane_64),
+            Kind::Unspecified
+        );
+        assert_eq!(
+            resolve_cursor_element_kind(false, Size::from((24, 24)), 1.0, plane_64),
+            Kind::Unspecified
+        );
     }
 }

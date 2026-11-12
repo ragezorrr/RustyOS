@@ -464,8 +464,20 @@ fn push_ext_session_lock_elements(
     ));
 }
 
+/// Controls cursor inclusion and hardware cursor plane candidacy per output frame (`RUSTYOS-046`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CursorRenderMode {
+    /// Do not render any compositor cursor element (e.g. compositor screenshot capture).
+    None,
+    /// Composite the cursor on the primary scene (`Kind::Unspecified`) without hardware plane promotion.
+    SoftwareComposited,
+    /// Promote cursor elements with `Kind::Cursor` when fitting inside `max_size`, else fall back to `Kind::Unspecified`.
+    HardwarePlane {
+        max_size: smithay::utils::Size<u32, smithay::utils::Buffer>,
+    },
+}
+
 /// Builds the front-to-back composite render element list scoped to a specific output (`RUSTYOS-042`).
-#[allow(clippy::too_many_lines)]
 pub(crate) fn build_frame_render_list_for_output(
     renderer: &mut GlesRenderer,
     text_cache: &mut crate::text::TextCache,
@@ -474,6 +486,33 @@ pub(crate) fn build_frame_render_list_for_output(
     output_id: rusty_wm::OutputId,
     size: smithay::utils::Size<i32, smithay::utils::Physical>,
     include_software_cursor: bool,
+) -> Vec<CompositorRenderElement> {
+    let cursor_mode = if include_software_cursor {
+        CursorRenderMode::SoftwareComposited
+    } else {
+        CursorRenderMode::None
+    };
+    build_frame_render_list_for_output_with_cursor(
+        renderer,
+        text_cache,
+        shape_cache,
+        state,
+        output_id,
+        size,
+        cursor_mode,
+    )
+}
+
+/// Builds the front-to-back composite render element list for `output_id` using `cursor_mode` (`RUSTYOS-046`).
+#[allow(clippy::too_many_lines)]
+pub(crate) fn build_frame_render_list_for_output_with_cursor(
+    renderer: &mut GlesRenderer,
+    text_cache: &mut crate::text::TextCache,
+    shape_cache: &mut crate::surfaces::UiShapeCache,
+    state: &mut RustyCompositorState,
+    output_id: rusty_wm::OutputId,
+    size: smithay::utils::Size<i32, smithay::utils::Physical>,
+    cursor_mode: CursorRenderMode,
 ) -> Vec<CompositorRenderElement> {
     let output_entry = state
         .output_map
@@ -518,29 +557,53 @@ pub(crate) fn build_frame_render_list_for_output(
         .filter(|id| !state.is_window_minimized(*id));
 
     let mut render_list: Vec<CompositorRenderElement> = Vec::new();
+    let (render_cursor, prefer_hw_cursor, cursor_plane_limit) = match cursor_mode {
+        CursorRenderMode::None => (false, false, None),
+        CursorRenderMode::SoftwareComposited => (true, false, None),
+        CursorRenderMode::HardwarePlane { max_size } => (true, true, Some(max_size)),
+    };
+    let named_cursor_kind = if prefer_hw_cursor {
+        Kind::Cursor
+    } else {
+        Kind::Unspecified
+    };
     let local_ptr = pointer_local_if_on_output(state.pointer_location, output_geo);
-    if include_software_cursor && let Some(ptr) = local_ptr {
+    if render_cursor && let Some(ptr) = local_ptr {
         match &state.cursor_status {
             CursorImageStatus::Hidden => {}
             CursorImageStatus::Surface(surf) if surf.alive() => {
-                push_client_surface_cursor(&mut render_list, renderer, surf, ptr, output_scale);
+                push_client_surface_cursor(
+                    &mut render_list,
+                    renderer,
+                    surf,
+                    ptr,
+                    output_scale,
+                    prefer_hw_cursor,
+                    cursor_plane_limit,
+                );
             }
             CursorImageStatus::Surface(_) => {
-                if let Some(cursor_el) = shape_cache.named_cursor_element(
+                if let Some(cursor_el) = shape_cache.named_cursor_element_for_output(
                     renderer,
                     CursorIcon::Default,
                     state.user_config.cursor_theme.as_deref(),
                     ptr,
+                    output_scale,
+                    cursor_plane_limit,
+                    named_cursor_kind,
                 ) {
                     render_list.push(CompositorRenderElement::Memory(cursor_el));
                 }
             }
             CursorImageStatus::Named(icon) => {
-                if let Some(cursor_el) = shape_cache.named_cursor_element(
+                if let Some(cursor_el) = shape_cache.named_cursor_element_for_output(
                     renderer,
                     *icon,
                     state.user_config.cursor_theme.as_deref(),
                     ptr,
+                    output_scale,
+                    cursor_plane_limit,
+                    named_cursor_kind,
                 ) {
                     render_list.push(CompositorRenderElement::Memory(cursor_el));
                 }
@@ -1061,6 +1124,8 @@ fn render_winit_frame(
                 cursor_surf,
                 ptr,
                 primary_scale,
+                false,
+                None,
             );
             if !cursor_elems.is_empty() {
                 cursor_elems.extend(render_list);
@@ -1194,6 +1259,8 @@ fn push_client_surface_cursor(
     surface: &WlSurface,
     pointer_loc: Point<i32, Logical>,
     output_scale: f64,
+    prefer_hw_cursor: bool,
+    cursor_plane_limit: Option<smithay::utils::Size<u32, smithay::utils::Buffer>>,
 ) {
     let hotspot = compositor::with_states(surface, |states| {
         states
@@ -1204,21 +1271,35 @@ fn push_client_surface_cursor(
     })
     .unwrap_or_default();
     let loc = (pointer_loc - hotspot).to_physical_precise_round(output_scale);
-    render_list.extend(
-        render_elements_from_surface_tree::<
+    let scale = smithay::utils::Scale::from(output_scale);
+    let initial_kind = if prefer_hw_cursor {
+        Kind::Cursor
+    } else {
+        Kind::Unspecified
+    };
+    let mut elements = render_elements_from_surface_tree::<
+        GlesRenderer,
+        WaylandSurfaceRenderElement<GlesRenderer>,
+    >(renderer, surface, loc, scale, 1.0, initial_kind);
+
+    if prefer_hw_cursor
+        && cursor_plane_limit.is_some_and(|limit| {
+            elements.len() > 1
+                || elements.iter().any(|el| {
+                    let sz = el.geometry(scale).size;
+                    let w = u32::try_from(sz.w.max(0)).unwrap_or(u32::MAX);
+                    let h = u32::try_from(sz.h.max(0)).unwrap_or(u32::MAX);
+                    w == 0 || h == 0 || w > limit.w || h > limit.h
+                })
+        })
+    {
+        elements = render_elements_from_surface_tree::<
             GlesRenderer,
             WaylandSurfaceRenderElement<GlesRenderer>,
-        >(
-            renderer,
-            surface,
-            loc,
-            smithay::utils::Scale::from(output_scale),
-            1.0,
-            Kind::Cursor,
-        )
-        .into_iter()
-        .map(CompositorRenderElement::Surface),
-    );
+        >(renderer, surface, loc, scale, 1.0, Kind::Unspecified);
+    }
+
+    render_list.extend(elements.into_iter().map(CompositorRenderElement::Surface));
 }
 
 pub(crate) fn spawn_test_client(

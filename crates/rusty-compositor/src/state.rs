@@ -14,14 +14,15 @@ use rusty_wm::{LayoutMode, OutputId, Rect, WindowId, WindowManager, WmAction, Wo
 use smithay::{
     backend::{
         allocator::{Buffer as AllocatorBuffer, Format, dmabuf::Dmabuf},
-        renderer::{element::RenderElementStates, utils::on_commit_buffer_handler},
+        drm::DrmDeviceFd,
+        renderer::{element::RenderElementStates, sync::Fence, utils::on_commit_buffer_handler},
     },
     delegate_compositor, delegate_cursor_shape, delegate_data_control, delegate_data_device,
-    delegate_dmabuf, delegate_fractional_scale, delegate_idle_inhibit, delegate_idle_notify,
-    delegate_layer_shell, delegate_output, delegate_pointer_constraints, delegate_presentation,
-    delegate_primary_selection, delegate_relative_pointer, delegate_seat, delegate_session_lock,
-    delegate_shm, delegate_viewporter, delegate_xdg_activation, delegate_xdg_decoration,
-    delegate_xdg_shell,
+    delegate_dmabuf, delegate_drm_syncobj, delegate_fractional_scale, delegate_idle_inhibit,
+    delegate_idle_notify, delegate_layer_shell, delegate_output, delegate_pointer_constraints,
+    delegate_presentation, delegate_primary_selection, delegate_relative_pointer, delegate_seat,
+    delegate_session_lock, delegate_shm, delegate_viewporter, delegate_xdg_activation,
+    delegate_xdg_decoration, delegate_xdg_shell,
     desktop::{
         LayerSurface as DesktopLayerSurface, PopupKind, PopupManager, Space, Window,
         WindowSurfaceType, find_popup_root_surface, get_popup_toplevel_coords,
@@ -58,6 +59,9 @@ use smithay::{
         },
         cursor_shape::CursorShapeManagerState,
         dmabuf::{DmabufFeedback, DmabufGlobal, DmabufHandler, DmabufState, ImportNotifier},
+        drm_syncobj::{
+            DrmSyncobjCachedState, DrmSyncobjHandler, DrmSyncobjState, supports_syncobj_eventfd,
+        },
         fractional_scale::{self, FractionalScaleHandler, FractionalScaleManagerState},
         idle_inhibit::{IdleInhibitHandler, IdleInhibitManagerState},
         idle_notify::{IdleNotifierHandler, IdleNotifierState},
@@ -247,6 +251,12 @@ pub struct RustyCompositorState {
     pub dmabuf_state: DmabufState,
     /// Active `zwp_linux_dmabuf_v1` global handle registered by the GPU backend (`RUSTYOS-041`).
     pub dmabuf_global: Option<DmabufGlobal>,
+    /// Shared main event-loop handle used for async explicit-sync fence wakeups (`RUSTYOS-046`).
+    pub loop_handle: LoopHandle<'static, Self>,
+    /// `wp_linux_drm_syncobj_v1` explicit-sync manager state when DRM syncobj eventfd is supported (`RUSTYOS-046`).
+    pub syncobj_state: Option<DrmSyncobjState>,
+    /// Set when an explicit-sync `DrmSyncPointBlocker` clears asynchronously (`RUSTYOS-046`).
+    pub syncobj_surface_unblocked: bool,
     /// `wl_output` and `xdg_output` manager state.
     pub output_manager_state: OutputManagerState,
     /// `wl_seat` manager state.
@@ -385,7 +395,8 @@ impl RustyCompositorState {
         let presentation_state = PresentationState::new::<Self>(&display_handle, 1);
         let cursor_shape_state = CursorShapeManagerState::new::<Self>(&display_handle);
         let xdg_activation_state = XdgActivationState::new::<Self>(&display_handle);
-        let idle_notifier_state = IdleNotifierState::<Self>::new(&display_handle, loop_handle);
+        let idle_notifier_state =
+            IdleNotifierState::<Self>::new(&display_handle, loop_handle.clone());
         let idle_inhibit_state = IdleInhibitManagerState::new::<Self>(&display_handle);
         let session_lock_state = SessionLockManagerState::new::<Self, _>(&display_handle, |_| true);
         let dmabuf_state = DmabufState::new();
@@ -478,6 +489,9 @@ impl RustyCompositorState {
             ext_lock_surfaces: Vec::new(),
             dmabuf_state,
             dmabuf_global: None,
+            loop_handle,
+            syncobj_state: None,
+            syncobj_surface_unblocked: false,
             output_manager_state,
             seat_state,
             data_device_state,
@@ -1054,6 +1068,120 @@ impl RustyCompositorState {
             .create_global_with_default_feedback::<Self>(&self.display_handle, feedback);
         self.dmabuf_global = Some(global);
         info!("Registered zwp_linux_dmabuf_v1 global with default DRM feedback");
+    }
+
+    fn env_flag_enabled(name: &str) -> bool {
+        std::env::var(name)
+            .is_ok_and(|val| matches!(val.trim(), "1" | "true" | "TRUE" | "yes" | "YES"))
+    }
+
+    /// Returns whether explicit synchronization is explicitly disabled via `RUSTYOS_DISABLE_EXPLICIT_SYNC` (`RUSTYOS-046`).
+    #[must_use]
+    pub fn explicit_sync_disabled_by_env() -> bool {
+        Self::env_flag_enabled("RUSTYOS_DISABLE_EXPLICIT_SYNC")
+    }
+
+    /// Returns whether DRM hardware cursor planes are explicitly disabled via `RUSTYOS_DISABLE_HW_CURSOR` (`RUSTYOS-046`).
+    #[must_use]
+    pub fn hw_cursor_disabled_by_env() -> bool {
+        Self::env_flag_enabled("RUSTYOS_DISABLE_HW_CURSOR")
+    }
+
+    /// Registers `wp_linux_drm_syncobj_v1` if `drm_fd` supports syncobj eventfd and explicit sync is enabled (`RUSTYOS-046`).
+    pub fn init_drm_syncobj(&mut self, drm_fd: &DrmDeviceFd) -> bool {
+        if self.syncobj_state.is_some() {
+            return true;
+        }
+        if Self::explicit_sync_disabled_by_env() {
+            info!(
+                "Explicit sync disabled by RUSTYOS_DISABLE_EXPLICIT_SYNC; falling back to implicit sync"
+            );
+            return false;
+        }
+        if !supports_syncobj_eventfd(drm_fd) {
+            info!("DRM device does not support syncobj eventfd; falling back to implicit sync");
+            return false;
+        }
+        self.syncobj_state = Some(DrmSyncobjState::new::<Self>(
+            &self.display_handle,
+            drm_fd.clone(),
+        ));
+        info!("Registered wp_linux_drm_syncobj_v1 global for explicit sync");
+        true
+    }
+
+    /// Returns whether `wp_linux_drm_syncobj_v1` is currently active on this compositor (`RUSTYOS-046`).
+    #[must_use]
+    pub const fn is_explicit_sync_active(&self) -> bool {
+        self.syncobj_state.is_some()
+    }
+
+    /// Consumes and returns whether an explicit-sync blocker cleared since the last check (`RUSTYOS-046`).
+    #[must_use]
+    pub const fn take_syncobj_unblocked(&mut self) -> bool {
+        std::mem::replace(&mut self.syncobj_surface_unblocked, false)
+    }
+
+    fn handle_syncobj_pre_commit(&mut self, _dh: &DisplayHandle, surface: &WlSurface) {
+        if self.syncobj_state.is_none() {
+            return;
+        }
+        let acquire_point = compositor::with_states(surface, |states| {
+            let has_new_buffer = matches!(
+                states
+                    .cached_state
+                    .get::<compositor::SurfaceAttributes>()
+                    .pending()
+                    .buffer,
+                Some(compositor::BufferAssignment::NewBuffer(_))
+            );
+            if !has_new_buffer {
+                return None;
+            }
+            let mut guard = states.cached_state.get::<DrmSyncobjCachedState>();
+            let pending = guard.pending();
+            match (
+                pending.acquire_point.as_ref(),
+                pending.release_point.as_ref(),
+            ) {
+                (Some(acq), Some(_rel)) if !acq.is_signaled() => Some(acq.clone()),
+                _ => None,
+            }
+        });
+
+        let Some(acquire) = acquire_point else {
+            return;
+        };
+
+        let (blocker, source) = match acquire.generate_blocker() {
+            Ok(pair) => pair,
+            Err(err) => {
+                warn!(error = %err, "Failed to create DrmSyncPoint blocker; falling back to immediate commit");
+                return;
+            }
+        };
+
+        let weak_surface = surface.downgrade();
+        if let Err(err) = self
+            .loop_handle
+            .insert_source(source, move |(), _metadata, app_state| {
+                if let Ok(surf) = weak_surface.upgrade()
+                    && let Some(client) = surf.client()
+                {
+                    let dh = app_state.display_handle.clone();
+                    app_state
+                        .client_compositor_state(&client)
+                        .blocker_cleared(app_state, &dh);
+                    app_state.syncobj_surface_unblocked = true;
+                }
+                Ok(())
+            })
+        {
+            warn!(error = %err, "Failed to register DrmSyncPointSource; proceeding without commit blocker");
+            return;
+        }
+
+        compositor::add_blocker(surface, blocker);
     }
 
     /// Returns whether `win_id` is currently in true unbordered fullscreen mode (`RUSTYOS-041`).
@@ -2650,6 +2778,10 @@ impl CompositorHandler for RustyCompositorState {
         }
     }
 
+    fn new_surface(&mut self, surface: &WlSurface) {
+        compositor::add_pre_commit_hook::<Self, _>(surface, Self::handle_syncobj_pre_commit);
+    }
+
     fn commit(&mut self, surface: &WlSurface) {
         on_commit_buffer_handler::<Self>(surface);
         let surface_scale = self.preferred_scale_for_surface(surface);
@@ -3377,6 +3509,12 @@ impl SessionLockHandler for RustyCompositorState {
     }
 }
 
+impl DrmSyncobjHandler for RustyCompositorState {
+    fn drm_syncobj_state(&mut self) -> Option<&mut DrmSyncobjState> {
+        self.syncobj_state.as_mut()
+    }
+}
+
 delegate_compositor!(RustyCompositorState);
 delegate_shm!(RustyCompositorState);
 delegate_viewporter!(RustyCompositorState);
@@ -3390,6 +3528,7 @@ delegate_idle_notify!(RustyCompositorState);
 delegate_idle_inhibit!(RustyCompositorState);
 delegate_session_lock!(RustyCompositorState);
 delegate_dmabuf!(RustyCompositorState);
+delegate_drm_syncobj!(RustyCompositorState);
 delegate_output!(RustyCompositorState);
 delegate_seat!(RustyCompositorState);
 delegate_data_device!(RustyCompositorState);

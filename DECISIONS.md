@@ -150,6 +150,13 @@
                           `idle_inhibit` +        
                           `ext_session_lock_v1`   
                           (ADR-0014)              
+
+  D-023                   Фазы 3/4/5              accepted
+                          (RUSTYOS-046):          
+                          `wp_linux_drm_syncobj_v1`
+                          + Observable Hardware   
+                          Cursor Plane + HiDPI    
+                          Cursor Sizing (ADR-0015)
   -----------------------------------------------------------------------
 
 ## Открытые решения

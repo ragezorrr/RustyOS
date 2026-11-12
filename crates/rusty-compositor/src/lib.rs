@@ -1147,4 +1147,39 @@ mod tests {
 
         Ok(())
     }
+
+    #[test]
+    fn explicit_sync_unsupported_device_falls_back_cleanly() -> Result<(), Box<dyn Error>> {
+        use smithay::backend::drm::DrmDeviceFd;
+        use smithay::utils::DeviceFd;
+        use smithay::wayland::drm_syncobj::DrmSyncobjHandler;
+        use std::os::unix::io::OwnedFd;
+
+        let display: Display<RustyCompositorState> = Display::new()?;
+        let event_loop: EventLoop<RustyCompositorState> = EventLoop::try_new()?;
+        let mut compositor = RustyCompositorState::new(
+            &display,
+            "rusty-test-explicit-sync".to_owned(),
+            event_loop.get_signal(),
+            event_loop.handle(),
+            (1920, 1080).into(),
+        )?;
+
+        assert!(!compositor.is_explicit_sync_active());
+        assert!(compositor.drm_syncobj_state().is_none());
+        assert!(!compositor.take_syncobj_unblocked());
+
+        compositor.syncobj_surface_unblocked = true;
+        assert!(compositor.take_syncobj_unblocked());
+        assert!(!compositor.take_syncobj_unblocked());
+
+        // Non-DRM fd must safely report unsupported syncobj_eventfd and stay in implicit sync mode.
+        let null_file = std::fs::File::open("/dev/null")?;
+        let non_drm_fd = DrmDeviceFd::new(DeviceFd::from(OwnedFd::from(null_file)));
+        assert!(!compositor.init_drm_syncobj(&non_drm_fd));
+        assert!(!compositor.is_explicit_sync_active());
+        assert!(compositor.drm_syncobj_state().is_none());
+
+        Ok(())
+    }
 }

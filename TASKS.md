@@ -641,6 +641,20 @@ hardware/software context и низкие накладные расходы.
   - `cargo fmt --check` и `cargo clippy --workspace --all-targets --offline -- -D warnings` завершаются без предупреждений; 73/73 тестов `rusty-compositor` и 97/97 запущенных тестов workspace проходят (1 предсуществующий тест `rusty-services::tests::networkmanager_and_bluetooth_formatters_handle_all_states` пропущен флагом `--skip`).
 - **Risks:** Нулевые новые внешние зависимости; живая проверка со сторонними клиентами (`swaylock`, `swayidle`, GTK4/Firefox) на bare-metal `--drm` не проводилась в headless-среде.
 
+## RUSTYOS-046 --- Explicit Sync (`wp_linux_drm_syncobj_v1`), Observable Hardware Cursor Plane & HiDPI Cursors
+
+- **Owner:** AI Agent + User
+- **Status:** done
+- **Priority:** P0
+- **Phase:** 3/4/5
+- **ADR / Decision:** ADR-0015 / D-023
+- **Acceptance Criteria:**
+  - В `state.rs` добавлены хранение `LoopHandle<'static, Self>`, `DrmSyncobjState`, `DrmSyncobjHandler`, `delegate_drm_syncobj!`, `init_drm_syncobj` (runtime-проверка `supports_syncobj_eventfd` и `RUSTYOS_DISABLE_EXPLICIT_SYNC` с fallback на implicit sync), `take_syncobj_unblocked`, `hw_cursor_disabled_by_env` (`RUSTYOS_DISABLE_HW_CURSOR`) и `handle_syncobj_pre_commit` (через `add_pre_commit_hook` в `CompositorHandler::new_surface`, `DrmSyncPoint::generate_blocker` + `DrmSyncPointSource` -> `blocker_cleared`).
+  - В `drm_backend.rs` и `frame_timing.rs` добавлены поля `syncobj_eventfd` и `cursor_plane_count` в `DrmHardwareReport`, учёт `drm_surface.planes().cursor.len()`, `RenderFrameResult::needs_sync()` -> `element.sync.wait()`, `hw_cursor_frames` (`result.cursor_element.is_some()`), пробуждение по `take_syncobj_unblocked()`, scoped output dirtying (`output_ids_affected_by_pointer_motion`, `mark_outputs_dirty`) при движении курсора без drag/resize и управление fallback `RUSTYOS_DISABLE_HW_CURSOR`.
+  - В `surfaces.rs` и `winit_backend.rs` реализованы `CursorRenderMode`, `build_frame_render_list_for_output_with_cursor`, `push_client_surface_cursor`, `named_cursor_element_for_output`, `cursor_arrow_element_for_output`, HiDPI-масштабирование hotspot и выбор размера XCursor, а также понижение до `Kind::Unspecified` при превышении `cursor_size` или отключении аппаратного курсора.
+  - `cargo fmt --check` и `cargo clippy --workspace --all-targets --offline -- -D warnings` завершаются без предупреждений; 76/76 тестов `rusty-compositor` и 100/100 запущенных тестов workspace проходят (1 предсуществующий тест `rusty-services::tests::networkmanager_and_bluetooth_formatters_handle_all_states` пропущен флагом `--skip`).
+- **Risks:** Нулевые новые внешние зависимости; реальное срабатывание `wp_linux_drm_syncobj_v1` и DRM cursor plane на физическом оборудовании AMD/Intel/NVIDIA требует отдельного bare-metal `--drm` теста.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance
