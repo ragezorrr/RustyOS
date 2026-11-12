@@ -12,9 +12,12 @@ use rusty_ipc::{
 };
 use rusty_wm::{LayoutMode, OutputId, Rect, WindowId, WindowManager, WmAction, WorkspaceId};
 use smithay::{
-    backend::renderer::utils::on_commit_buffer_handler,
-    delegate_compositor, delegate_data_control, delegate_data_device, delegate_layer_shell,
-    delegate_output, delegate_primary_selection, delegate_seat, delegate_shm,
+    backend::{
+        allocator::{Buffer as AllocatorBuffer, Format, dmabuf::Dmabuf},
+        renderer::utils::on_commit_buffer_handler,
+    },
+    delegate_compositor, delegate_data_control, delegate_data_device, delegate_dmabuf,
+    delegate_layer_shell, delegate_output, delegate_primary_selection, delegate_seat, delegate_shm,
     delegate_xdg_decoration, delegate_xdg_shell,
     desktop::{
         LayerSurface as DesktopLayerSurface, PopupKind, PopupManager, Space, Window,
@@ -46,6 +49,7 @@ use smithay::{
         compositor::{
             self, CompositorClientState, CompositorHandler, CompositorState, TraversalAction,
         },
+        dmabuf::{DmabufFeedback, DmabufGlobal, DmabufHandler, DmabufState, ImportNotifier},
         output::{OutputHandler, OutputManagerState},
         seat::WaylandFocus,
         selection::{
@@ -186,6 +190,10 @@ pub struct RustyCompositorState {
     pub active_kbd_layout: String,
     /// `wl_shm` shared-memory buffer state.
     pub shm_state: ShmState,
+    /// `zwp_linux_dmabuf_v1` client DMA-BUF import state (`RUSTYOS-041`).
+    pub dmabuf_state: DmabufState,
+    /// Active `zwp_linux_dmabuf_v1` global handle registered by the GPU backend (`RUSTYOS-041`).
+    pub dmabuf_global: Option<DmabufGlobal>,
     /// `wl_output` and `xdg_output` manager state.
     pub output_manager_state: OutputManagerState,
     /// `wl_seat` manager state.
@@ -313,6 +321,7 @@ impl RustyCompositorState {
         let wlr_layer_shell_state = WlrLayerShellState::new::<Self>(&display_handle);
         let xwayland_shell_state = XWaylandShellState::new::<Self>(&display_handle);
         let shm_state = ShmState::new::<Self>(&display_handle, Vec::new());
+        let dmabuf_state = DmabufState::new();
         let output_manager_state = OutputManagerState::new_with_xdg_output::<Self>(&display_handle);
         let data_device_state = DataDeviceState::new::<Self>(&display_handle);
         let primary_selection_state = PrimarySelectionState::new::<Self>(&display_handle);
@@ -335,7 +344,9 @@ impl RustyCompositorState {
         space.map_output(&output, (0, 0));
 
         let work_area = crate::shell_render::usable_work_area(initial_size);
-        let wm = WindowManager::new(work_area);
+        let full_area = Rect::new(0, 0, initial_size.w.max(100), initial_size.h.max(100));
+        let mut wm = WindowManager::new(work_area);
+        wm.upsert_output_with_full_area(PRIMARY_OUTPUT_ID, work_area, full_area);
 
         let primary_entry = crate::outputs::OutputEntry::new(
             PRIMARY_OUTPUT_ID,
@@ -377,6 +388,8 @@ impl RustyCompositorState {
             user_config,
             active_kbd_layout: "EN".to_owned(),
             shm_state,
+            dmabuf_state,
+            dmabuf_global: None,
             output_manager_state,
             seat_state,
             data_device_state,
@@ -483,7 +496,8 @@ impl RustyCompositorState {
         let logical_h = (f64::from(mode.size.h) / scale_val.max(0.1)).round() as i32;
 
         let work_area = Rect::new(location.x, location.y, logical_w.max(1), logical_h.max(1));
-        self.wm.upsert_output(new_id, work_area);
+        self.wm
+            .upsert_output_with_full_area(new_id, work_area, work_area);
 
         let entry = crate::outputs::OutputEntry::new(
             new_id,
@@ -540,6 +554,64 @@ impl RustyCompositorState {
         let moved = self.wm.move_focused_to_next_output()?;
         self.sync_space_with_wm(serial);
         Some(moved)
+    }
+
+    /// Registers a version-3 `zwp_linux_dmabuf_v1` global with explicit GPU formats (`RUSTYOS-041`).
+    pub fn init_dmabuf_formats(&mut self, formats: impl IntoIterator<Item = Format>) {
+        if self.dmabuf_global.is_some() {
+            return;
+        }
+        let global = self
+            .dmabuf_state
+            .create_global::<Self>(&self.display_handle, formats);
+        self.dmabuf_global = Some(global);
+        info!("Registered zwp_linux_dmabuf_v1 global (v3 format list)");
+    }
+
+    /// Registers a version-4 `zwp_linux_dmabuf_v1` global with DRM default tranche feedback (`RUSTYOS-041`).
+    pub fn init_dmabuf_feedback(&mut self, feedback: &DmabufFeedback) {
+        if self.dmabuf_global.is_some() {
+            return;
+        }
+        let global = self
+            .dmabuf_state
+            .create_global_with_default_feedback::<Self>(&self.display_handle, feedback);
+        self.dmabuf_global = Some(global);
+        info!("Registered zwp_linux_dmabuf_v1 global with default DRM feedback");
+    }
+
+    /// Returns whether `win_id` is currently in true unbordered fullscreen mode (`RUSTYOS-041`).
+    #[must_use]
+    pub fn is_window_fullscreen(&self, win_id: WindowId) -> bool {
+        self.wm.window(win_id).is_some_and(|w| w.fullscreen)
+    }
+
+    /// Returns the topmost unminimized fullscreen window on the active workspace if no modal
+    /// shell overlay currently occludes it (`RUSTYOS-041`).
+    #[must_use]
+    pub fn active_unoccluded_fullscreen_window(&self) -> Option<WindowId> {
+        let overlay_active = self.screen_locked
+            || self.launcher_active
+            || self.quick_settings_active
+            || self.overview_active
+            || self.window_switcher.is_some()
+            || self.osd.is_some()
+            || !self.notifications.is_empty()
+            || self.lock_screen_anim.current() > 0.01
+            || self.launcher_anim.current() > 0.01
+            || self.quick_settings_anim.current() > 0.01
+            || self.overview_anim.current() > 0.01;
+        if overlay_active {
+            return None;
+        }
+
+        self.wm
+            .visible_windows()
+            .into_iter()
+            .rev()
+            .find(|w| !self.is_window_minimized(w.id))
+            .filter(|w| w.fullscreen)
+            .map(|w| w.id)
     }
 
     fn init_seat_keyboard(
@@ -1456,7 +1528,7 @@ impl RustyCompositorState {
     /// Returns the SSD titlebar height reserved above the client area (`0` for CSD windows).
     #[must_use]
     pub fn window_titlebar_height(&self, win_id: WindowId) -> i32 {
-        if self.window_uses_csd(win_id) {
+        if self.is_window_fullscreen(win_id) || self.window_uses_csd(win_id) {
             0
         } else {
             crate::shell_render::TITLEBAR_HEIGHT
@@ -1690,7 +1762,10 @@ impl RustyCompositorState {
         if focused_is_minimized
             && matches!(
                 action,
-                WmAction::CloseFocused | WmAction::ToggleMaximizeFocused | WmAction::SnapFocused(_)
+                WmAction::CloseFocused
+                    | WmAction::ToggleMaximizeFocused
+                    | WmAction::ToggleFullscreen
+                    | WmAction::SnapFocused(_)
             )
         {
             return;
@@ -1758,12 +1833,12 @@ impl RustyCompositorState {
     /// and Wayland keyboard focus with the deterministic state in [`WindowManager`].
     pub fn sync_space_with_wm(&mut self, serial: Serial) {
         let now = self.elapsed();
-        let visible: Vec<(WindowId, Rect, bool)> = self
+        let visible: Vec<(WindowId, Rect, bool, bool)> = self
             .wm
             .visible_windows()
             .into_iter()
             .filter(|w| !self.is_window_minimized(w.id))
-            .map(|w| (w.id, w.geometry, w.maximized))
+            .map(|w| (w.id, w.geometry, w.maximized, w.fullscreen))
             .collect();
         let focused_id = self
             .wm
@@ -1781,14 +1856,14 @@ impl RustyCompositorState {
             }
             let still_visible = self
                 .window_id_for_smithay(&sw)
-                .is_some_and(|id| visible.iter().any(|(vid, _, _)| *vid == id));
+                .is_some_and(|id| visible.iter().any(|(vid, _, _, _)| *vid == id));
             if !still_visible {
                 self.space.unmap_elem(&sw);
             }
         }
 
         // 2. Map/update visible windows in bottom-to-top z-order and send pending configures.
-        for (win_id, rect, maximized) in visible {
+        for (win_id, rect, maximized, fullscreen) in visible {
             let is_focused = focused_id == Some(win_id);
             self.animations.set_window_target(
                 win_id.0,
@@ -1801,7 +1876,7 @@ impl RustyCompositorState {
                 .unwrap_or((rect.x, rect.y));
 
             if let Some(window) = self.smithay_window_for_id(win_id) {
-                let has_ssd = !self.window_uses_csd(win_id);
+                let has_ssd = !fullscreen && !self.window_uses_csd(win_id);
                 let titlebar_h = self.window_titlebar_height(win_id);
                 let (client_width, client_height) = self.effective_client_size(win_id, rect);
                 let geo_loc = window.geometry().loc;
@@ -1814,10 +1889,15 @@ impl RustyCompositorState {
                         } else {
                             state.states.unset(xdg_toplevel::State::Activated);
                         }
-                        if maximized {
+                        if maximized && !fullscreen {
                             state.states.set(xdg_toplevel::State::Maximized);
                         } else {
                             state.states.unset(xdg_toplevel::State::Maximized);
+                        }
+                        if fullscreen {
+                            state.states.set(xdg_toplevel::State::Fullscreen);
+                        } else {
+                            state.states.unset(xdg_toplevel::State::Fullscreen);
                         }
                     });
                     if toplevel.is_initial_configure_sent() {
@@ -1829,7 +1909,8 @@ impl RustyCompositorState {
                         has_ssd,
                     ));
                     let _ = x11.set_activated(is_focused);
-                    let _ = x11.set_maximized(maximized);
+                    let _ = x11.set_maximized(maximized && !fullscreen);
+                    let _ = x11.set_fullscreen(fullscreen);
                 }
                 self.space.map_element(window, client_origin, is_focused);
             }
@@ -2152,7 +2233,11 @@ impl CompositorHandler for RustyCompositorState {
         };
 
         if let Some(wm_rect) = layer_work_area {
-            self.wm.upsert_output(OutputId(1), wm_rect);
+            let full_area = self.output.current_mode().map_or(wm_rect, |m| {
+                Rect::new(0, 0, m.size.w.max(100), m.size.h.max(100))
+            });
+            self.wm
+                .upsert_output_with_full_area(OutputId(1), wm_rect, full_area);
             let serial = smithay::utils::SERIAL_COUNTER.next_serial();
             self.sync_space_with_wm(serial);
         }
@@ -2388,6 +2473,24 @@ impl XdgShellHandler for RustyCompositorState {
         }
     }
 
+    fn fullscreen_request(&mut self, surface: ToplevelSurface, _output: Option<WlOutput>) {
+        if let Some(win_id) = self.window_id_for_toplevel(&surface) {
+            self.wm.focus_and_raise(win_id);
+            self.wm.set_window_fullscreen(win_id, true);
+            let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+            self.sync_space_with_wm(serial);
+        }
+    }
+
+    fn unfullscreen_request(&mut self, surface: ToplevelSurface) {
+        if let Some(win_id) = self.window_id_for_toplevel(&surface) {
+            self.wm.focus_and_raise(win_id);
+            self.wm.set_window_fullscreen(win_id, false);
+            let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+            self.sync_space_with_wm(serial);
+        }
+    }
+
     fn minimize_request(&mut self, surface: ToplevelSurface) {
         if let Some(win_id) = self.window_id_for_toplevel(&surface) {
             let serial = smithay::utils::SERIAL_COUNTER.next_serial();
@@ -2566,8 +2669,28 @@ impl XdgDecorationHandler for RustyCompositorState {
     }
 }
 
+impl DmabufHandler for RustyCompositorState {
+    fn dmabuf_state(&mut self) -> &mut DmabufState {
+        &mut self.dmabuf_state
+    }
+
+    fn dmabuf_imported(
+        &mut self,
+        _global: &DmabufGlobal,
+        dmabuf: Dmabuf,
+        notifier: ImportNotifier,
+    ) {
+        if dmabuf.num_planes() > 0 && dmabuf.width() > 0 && dmabuf.height() > 0 {
+            let _ = notifier.successful::<Self>();
+        } else {
+            notifier.failed();
+        }
+    }
+}
+
 delegate_compositor!(RustyCompositorState);
 delegate_shm!(RustyCompositorState);
+delegate_dmabuf!(RustyCompositorState);
 delegate_output!(RustyCompositorState);
 delegate_seat!(RustyCompositorState);
 delegate_data_device!(RustyCompositorState);

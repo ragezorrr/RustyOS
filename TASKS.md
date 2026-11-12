@@ -543,6 +543,38 @@ hardware/software context и низкие накладные расходы.
 - **Acceptance criteria:** Все 82 теста воркспейса проходят; `clippy -D warnings` и `cargo fmt` без замечаний; корректное масштабирование геометрии, hit-testing курсора по экранам, миграция окон при hotplug disconnect.
 - **Risks:** Нулевые новые зависимости; сохранена 100% обратная совместимость со всеми существующими одиночными вызовами через `state.output`.
 
+## RUSTYOS-041 --- Direct Scanout & Client `zwp_linux_dmabuf_v1` Support
+
+**Статус:** done **Фаза:** 33 (Hardware & Multi-Monitor)
+
+- **Цель:** Устранить лишнюю промежуточную GLES-копию и включить Zero-Copy прямой вывод на DRM/KMS-плоскости (`Primary` / `Cursor`) для полноэкранных Wayland и XWayland клиентов через протокол `zwp_linux_dmabuf_v1` (`ADR-0010`, `D-018`) с автоматическим безопасным fallback на GLES-композицию.
+- **Scope:**
+  - `crates/rusty-wm/src/lib.rs`:
+    - Состояние полноэкранного окна `ManagedWindow::fullscreen`, действие `WmAction::ToggleFullscreen`, полные границы выхода `ManagedOutput::full_area` (`upsert_output_with_full_area`), методы `set_window_fullscreen` / `toggle_fullscreen_focused`.
+  - `crates/rusty-compositor/src/state.rs`:
+    - Регистрация `DmabufState` / `DmabufHandler` (`delegate_dmabuf!`) и инициализация `init_dmabuf_formats` / `init_dmabuf_feedback`.
+    - Полноэкранный жизненный цикл в `sync_space_with_wm`, обработчики `XdgShellHandler::{fullscreen_request, unfullscreen_request}` и метод `active_unoccluded_fullscreen_window()`.
+  - `crates/rusty-compositor/src/xwayland.rs`:
+    - Обработчики `XwmHandler::{fullscreen_request, unfullscreen_request}` для XWayland-клиентов.
+  - `crates/rusty-compositor/src/input.rs`:
+    - Горячая клавиша `Alt+F` (`WmAction::ToggleFullscreen`) и проброс кликов у краёв экрана в активное неперекрытое fullscreen-окно.
+  - `crates/rusty-compositor/src/winit_backend.rs`:
+    - Инициализация `zwp_linux_dmabuf_v1` (v3) форматами `GlesRenderer` и пропуск chrome/теней/обоев в `build_frame_render_list` при `active_unoccluded_fullscreen_window().is_some()`.
+  - `crates/rusty-compositor/src/drm_backend.rs`:
+    - Регистрация `zwp_linux_dmabuf_v1` v4 с default `DmabufFeedback` + scanout preference tranche из первичной DRM-плоскости.
+    - Подсчёт фактически представленных direct-scanout кадров по `PrimaryPlaneElement::Element(_)` в `handle_vblank`.
+  - `crates/rusty-compositor/src/frame_timing.rs`:
+    - Поле `direct_scanout_frames: u64` в `FrameTimingCollector` / `FrameTimingSummary` (JSON и лог).
+  - `docs/adr/0010-direct-scanout-dmabuf.md`, `DECISIONS.md` (`D-018`).
+- **Dependencies:** `RUSTYOS-006`, `RUSTYOS-028`, `RUSTYOS-040`.
+- **Acceptance criteria:** Все 86 тестов воркспейса проходят; `clippy -D warnings` и `cargo fmt --check` без замечаний; клиенты получают `zwp_linux_dmabuf_v1`; неперекрытое fullscreen-окно освобождает chrome/обои для direct scanout и корректно откатывается к GLES при появлении оверлеев или окнах поверх; фактическая частота KMS scanout-попаданий подлежит верификации на bare-metal `--drm`.
+- **Tests:**
+  - `rusty_wm::tests::fullscreen_uses_full_output_bounds_and_restores_prior_state`.
+  - `input::tests::alt_f_maps_to_toggle_fullscreen`.
+  - `frame_timing::tests::collector_tracks_direct_scanout_frames_in_summary_and_json`.
+  - `tests::dmabuf_global_and_unoccluded_fullscreen_fallback_behavior`.
+- **Risks:** Нулевые новые внешние зависимости; аппаратный KMS direct scanout (`--drm`) не запускался в headless-среде (по правилам `HARDWARE.md` требуется bare-metal прогон на целевом GPU для подтверждения `direct_scanout_frames > 0`).
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

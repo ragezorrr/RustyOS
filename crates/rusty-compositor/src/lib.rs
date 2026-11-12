@@ -776,4 +776,56 @@ mod tests {
 
         Ok(())
     }
+
+    #[test]
+    fn dmabuf_global_and_unoccluded_fullscreen_fallback_behavior() -> Result<(), Box<dyn Error>> {
+        let display: Display<RustyCompositorState> = Display::new()?;
+        let event_loop: EventLoop<RustyCompositorState> = EventLoop::try_new()?;
+        let mut compositor = RustyCompositorState::new(
+            &display,
+            "rusty-test-dmabuf-fs".to_owned(),
+            event_loop.get_signal(),
+            (1920, 1080).into(),
+        )?;
+
+        assert!(compositor.dmabuf_global.is_none());
+        compositor.init_dmabuf_formats(
+            [
+                smithay::backend::allocator::Fourcc::Argb8888,
+                smithay::backend::allocator::Fourcc::Xrgb8888,
+            ]
+            .into_iter()
+            .map(|code| smithay::backend::allocator::Format {
+                code,
+                modifier: smithay::backend::allocator::Modifier::Linear,
+            }),
+        );
+        assert!(compositor.dmabuf_global.is_some());
+
+        let w1 = compositor.wm.next_window_id();
+        let _ = compositor.wm.map_window(w1, Some((800, 600)));
+        assert_eq!(compositor.active_unoccluded_fullscreen_window(), None);
+
+        let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+        compositor.apply_wm_action(rusty_wm::WmAction::ToggleFullscreen, serial);
+        assert!(compositor.is_window_fullscreen(w1));
+        assert_eq!(compositor.window_titlebar_height(w1), 0);
+        assert_eq!(compositor.active_unoccluded_fullscreen_window(), Some(w1));
+        let fs_geom = compositor.wm.window(w1).map(|w| w.geometry);
+        assert_eq!(fs_geom, Some(rusty_wm::Rect::new(0, 0, 1920, 1080)));
+
+        // Overlays must force shell compositing fallback instead of unoccluded scanout bypass.
+        compositor.handle_ipc_request(rusty_ipc::ShellRequest::ToggleLauncher);
+        assert_eq!(compositor.active_unoccluded_fullscreen_window(), None);
+        compositor.handle_ipc_request(rusty_ipc::ShellRequest::ToggleLauncher);
+        compositor.handle_ipc_request(rusty_ipc::ShellRequest::SetReducedMotion { enabled: true });
+        assert_eq!(compositor.active_unoccluded_fullscreen_window(), Some(w1));
+
+        // Second non-fullscreen window stacked on top also disables unoccluded fullscreen bypass.
+        let w2 = compositor.wm.next_window_id();
+        let _ = compositor.wm.map_window(w2, Some((400, 300)));
+        assert_eq!(compositor.active_unoccluded_fullscreen_window(), None);
+
+        Ok(())
+    }
 }

@@ -52,6 +52,8 @@ pub struct FrameTimingSummary {
     pub dispatch_stalls: u64,
     /// Count of frames with zero damaged pixels (`damage_rects == 0`).
     pub zero_damage_frames: u64,
+    /// Count of frames presented via zero-copy KMS direct primary-plane scanout (`RUSTYOS-041`).
+    pub direct_scanout_frames: u64,
     /// Average damaged area ratio in permille (`0..=1000`).
     pub damage_ratio_avg_permille: u16,
     /// 95th percentile damaged area ratio in permille (`0..=1000`).
@@ -99,7 +101,7 @@ impl FrameTimingSummary {
     #[must_use]
     pub fn to_log_line(&self) -> String {
         format!(
-            "frames={} target_us={} interval_us(p50/p95/p99/max)={}/{}/{}/{} render_us(p50/p95/p99/max)={}/{}/{}/{} input_us(n={}:p50/p95/max)={}/{}/{} dispatch_us(p95/max)={}/{} damage_permille(avg/p95/zero)={}/{}/{} late={} missed={} stalls={}/{}",
+            "frames={} target_us={} interval_us(p50/p95/p99/max)={}/{}/{}/{} render_us(p50/p95/p99/max)={}/{}/{}/{} input_us(n={}:p50/p95/max)={}/{}/{} dispatch_us(p95/max)={}/{} damage_permille(avg/p95/zero)={}/{}/{} late={} missed={} stalls={}/{} scanout={}",
             self.total_frames,
             self.target_interval_us,
             self.interval_p50_us,
@@ -123,6 +125,7 @@ impl FrameTimingSummary {
             self.missed_frames,
             self.render_stalls,
             self.dispatch_stalls,
+            self.direct_scanout_frames,
         )
     }
 
@@ -157,6 +160,11 @@ impl FrameTimingSummary {
             out,
             "  \"zero_damage_frames\": {},",
             self.zero_damage_frames
+        );
+        let _ = writeln!(
+            out,
+            "  \"direct_scanout_frames\": {},",
+            self.direct_scanout_frames
         );
         let _ = writeln!(out, "  \"damage_ratio_permille\": {{");
         let _ = writeln!(out, "    \"avg\": {},", self.damage_ratio_avg_permille);
@@ -213,6 +221,7 @@ pub struct FrameTimingCollector {
     render_stalls: u64,
     dispatch_stalls: u64,
     zero_damage_frames: u64,
+    direct_scanout_frames: u64,
     last_present_instant: Option<Instant>,
     pending_input_instant: Option<Instant>,
 }
@@ -246,6 +255,7 @@ impl FrameTimingCollector {
             render_stalls: 0,
             dispatch_stalls: 0,
             zero_damage_frames: 0,
+            direct_scanout_frames: 0,
             last_present_instant: None,
             pending_input_instant: None,
         }
@@ -396,6 +406,14 @@ impl FrameTimingCollector {
         self.total_frames
     }
 
+    /// Records whether the just-presented frame bypassed GLES composition via KMS direct scanout
+    /// (`RUSTYOS-041`). Performs zero heap allocations.
+    pub fn record_direct_scanout(&mut self, direct_scanout: bool) {
+        if direct_scanout {
+            self.direct_scanout_frames = self.direct_scanout_frames.saturating_add(1);
+        }
+    }
+
     /// Computes percentile statistics (`p50`, `p95`, `p99`, `max`) over the retained window.
     #[must_use]
     pub fn summary(&self) -> FrameTimingSummary {
@@ -442,6 +460,7 @@ impl FrameTimingCollector {
             render_stalls: self.render_stalls,
             dispatch_stalls: self.dispatch_stalls,
             zero_damage_frames: self.zero_damage_frames,
+            direct_scanout_frames: self.direct_scanout_frames,
             damage_ratio_avg_permille: damage_avg,
             damage_ratio_p95_permille: damage_p95,
             interval_min_us: intervals.first().copied().unwrap_or(0),
@@ -584,5 +603,34 @@ mod tests {
         assert_eq!(summary.damage_ratio_avg_permille, 125);
         assert_eq!(summary.dispatch_stalls, 1);
         assert_eq!(summary.dispatch_max_us, 10_000);
+    }
+
+    #[test]
+    fn collector_tracks_direct_scanout_frames_in_summary_and_json() {
+        let mut collector = FrameTimingCollector::new(16, 60_000);
+        collector.record_durations(Duration::from_micros(300), None, 1);
+        collector.record_direct_scanout(false);
+        collector.record_durations(
+            Duration::from_micros(250),
+            Some(Duration::from_micros(16_667)),
+            1,
+        );
+        collector.record_direct_scanout(true);
+        collector.record_durations(
+            Duration::from_micros(240),
+            Some(Duration::from_micros(16_667)),
+            1,
+        );
+        collector.record_direct_scanout(true);
+
+        let summary = collector.summary();
+        assert_eq!(summary.total_frames, 3);
+        assert_eq!(summary.direct_scanout_frames, 2);
+        assert!(summary.to_log_line().contains("scanout=2"));
+        assert!(
+            summary
+                .to_json("native-drm-kms", (1920, 1080))
+                .contains("\"direct_scanout_frames\": 2")
+        );
     }
 }

@@ -8,7 +8,7 @@ use rusty_ipc::{IpcServer, default_ipc_socket_path};
 use smithay::{
     backend::{
         renderer::{
-            Color32F,
+            Color32F, ImportDma,
             damage::OutputDamageTracker,
             element::AsRenderElements,
             element::Kind,
@@ -70,6 +70,8 @@ pub fn run_nested_winit(config: &CompositorConfig) -> Result<BootstrapReport, Co
         event_loop.get_signal(),
         initial_size,
     )?;
+    let dmabuf_formats = backend.renderer().dmabuf_formats();
+    state.init_dmabuf_formats(dmabuf_formats);
     state
         .animations
         .set_reduced_motion(state.user_config.reduced_motion || config.reduced_motion);
@@ -261,7 +263,10 @@ fn handle_winit_event(event: WinitEvent, app_state: &mut RustyCompositorState) {
         WinitEvent::Resized { size, scale_factor } => {
             update_output_size(&app_state.output, size, scale_factor);
             let work_area = crate::shell_render::usable_work_area(size);
-            app_state.wm.upsert_output(PRIMARY_OUTPUT_ID, work_area);
+            let full_area = rusty_wm::Rect::new(0, 0, size.w.max(100), size.h.max(100));
+            app_state
+                .wm
+                .upsert_output_with_full_area(PRIMARY_OUTPUT_ID, work_area, full_area);
             let serial = smithay::utils::SERIAL_COUNTER.next_serial();
             app_state.sync_space_with_wm(serial);
         }
@@ -484,8 +489,13 @@ pub(crate) fn build_frame_render_list(
         renderer,
         &[Layer::Overlay, Layer::Top],
     );
+    let fullscreen_win = if layer_surfaces_present {
+        None
+    } else {
+        state.active_unoccluded_fullscreen_window()
+    };
 
-    if !layer_surfaces_present {
+    if !layer_surfaces_present && fullscreen_win.is_none() {
         let tray_views: Vec<crate::shell_render::TopBarTrayItem<'_>> = state
             .tray_items
             .iter()
@@ -681,12 +691,18 @@ pub(crate) fn build_frame_render_list(
         if state.is_window_minimized(win_id) {
             continue;
         }
+        if let Some(fs_id) = fullscreen_win
+            && win_id != fs_id
+        {
+            continue;
+        }
         let origin = state
             .animations
             .animated_window_origin(win_id.0)
             .unwrap_or((rect.x, rect.y));
         let is_focused = focused_win == Some(win_id);
-        let has_ssd = !state.window_uses_csd(win_id);
+        let is_fullscreen = fullscreen_win == Some(win_id) || state.is_window_fullscreen(win_id);
+        let has_ssd = !is_fullscreen && !state.window_uses_csd(win_id);
         let titlebar_h = if has_ssd {
             crate::shell_render::TITLEBAR_HEIGHT
         } else {
@@ -773,12 +789,14 @@ pub(crate) fn build_frame_render_list(
             ));
         }
 
-        render_list.extend(crate::shell_render::generate_window_shadow_elements(
-            shape_cache,
-            renderer,
-            frame_rect,
-            is_focused,
-        ));
+        if !is_fullscreen {
+            render_list.extend(crate::shell_render::generate_window_shadow_elements(
+                shape_cache,
+                renderer,
+                frame_rect,
+                is_focused,
+            ));
+        }
     }
 
     if layer_surfaces_present {
@@ -790,11 +808,13 @@ pub(crate) fn build_frame_render_list(
         );
     }
 
-    if let Some(wallpaper) = shape_cache.wallpaper_element(
-        renderer,
-        Size::<i32, Logical>::from((size.w, size.h)),
-        state.user_config.wallpaper.as_deref(),
-    ) {
+    if fullscreen_win.is_none()
+        && let Some(wallpaper) = shape_cache.wallpaper_element(
+            renderer,
+            Size::<i32, Logical>::from((size.w, size.h)),
+            state.user_config.wallpaper.as_deref(),
+        )
+    {
         render_list.push(CompositorRenderElement::Memory(wallpaper));
     }
 

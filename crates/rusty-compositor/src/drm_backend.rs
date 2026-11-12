@@ -31,7 +31,7 @@ use smithay::{
         },
         drm::{
             DrmDevice, DrmDeviceFd, DrmEvent, DrmNode, NodeType,
-            compositor::{DrmCompositor, FrameFlags},
+            compositor::{DrmCompositor, FrameFlags, PrimaryPlaneElement},
             exporter::gbm::GbmFramebufferExporter,
         },
         egl::{EGLContext, EGLDevice, EGLDisplay},
@@ -56,10 +56,11 @@ use smithay::{
         },
         input::Libinput,
         rustix::fs::OFlags,
+        wayland_protocols::wp::linux_dmabuf::zv1::server::zwp_linux_dmabuf_feedback_v1,
         wayland_server::Display,
     },
     utils::{DeviceFd, Logical, Physical, Point, Rectangle, Size, Transform},
-    wayland::socket::ListeningSocketSource,
+    wayland::{dmabuf::DmabufFeedbackBuilder, socket::ListeningSocketSource},
 };
 use tracing::{info, warn};
 
@@ -235,6 +236,7 @@ enum SessionStartOutcome {
     DeferToProbe(String),
 }
 
+#[allow(clippy::struct_excessive_bools)]
 struct DrmRuntime {
     drm_device: DrmDevice,
     libinput: Libinput,
@@ -248,6 +250,7 @@ struct DrmRuntime {
     vblank_pending: bool,
     vblank_queued_at: Option<Instant>,
     needs_redraw: bool,
+    last_frame_direct_scanout: bool,
     frame_start: Option<Instant>,
     rendered_frames: u64,
     max_frames: Option<u64>,
@@ -315,19 +318,27 @@ impl DrmRuntime {
             Ok(result) => {
                 if result.is_empty {
                     self.needs_redraw = false;
-                } else if let Err(err) = self.drm_compositor.queue_frame(()) {
-                    warn!(error = ?err, "Failed to queue DRM/KMS page flip");
-                    self.needs_redraw = true;
+                    self.last_frame_direct_scanout = false;
                 } else {
-                    self.vblank_pending = true;
-                    self.vblank_queued_at = Some(Instant::now());
-                    self.needs_redraw = false;
-                    self.frame_start = Some(render_start);
+                    let direct_scanout =
+                        matches!(result.primary_element, PrimaryPlaneElement::Element(_));
+                    if let Err(err) = self.drm_compositor.queue_frame(()) {
+                        warn!(error = ?err, "Failed to queue DRM/KMS page flip");
+                        self.needs_redraw = true;
+                        self.last_frame_direct_scanout = false;
+                    } else {
+                        self.vblank_pending = true;
+                        self.vblank_queued_at = Some(Instant::now());
+                        self.needs_redraw = false;
+                        self.frame_start = Some(render_start);
+                        self.last_frame_direct_scanout = direct_scanout;
+                    }
                 }
             }
             Err(err) => {
                 warn!(error = ?err, "DRM/KMS render_frame error");
                 self.needs_redraw = true;
+                self.last_frame_direct_scanout = false;
             }
         }
     }
@@ -348,6 +359,9 @@ impl DrmRuntime {
             self.total_output_pixels,
             self.total_output_pixels,
         );
+        state
+            .frame_timing
+            .record_direct_scanout(self.last_frame_direct_scanout);
 
         let elapsed = state.elapsed();
         for window in state.space.elements() {
@@ -565,7 +579,15 @@ fn try_run_native_drm_session(
         primary.refresh_milli_hz = refresh_milli_hz;
     }
     let work_area = crate::shell_render::usable_work_area(setup.pixel_size);
-    state.wm.upsert_output(PRIMARY_OUTPUT_ID, work_area);
+    let full_area = rusty_wm::Rect::new(
+        0,
+        0,
+        setup.pixel_size.w.max(100),
+        setup.pixel_size.h.max(100),
+    );
+    state
+        .wm
+        .upsert_output_with_full_area(PRIMARY_OUTPUT_ID, work_area, full_area);
     let serial = smithay::utils::SERIAL_COUNTER.next_serial();
     state.sync_space_with_wm(serial);
     state.pointer_location = Point::<f64, Logical>::from((
@@ -580,6 +602,37 @@ fn try_run_native_drm_session(
     state.dbus_notifications =
         crate::dbus_notifications::DbusNotificationHandle::start_background();
     state.tray = crate::tray::TrayWatcherHandle::start_background();
+
+    let client_dmabuf_formats = renderer.dmabuf_formats();
+    let scanout_formats: Vec<_> = drm_surface
+        .plane_info()
+        .formats
+        .iter()
+        .filter(|fmt| client_dmabuf_formats.contains(fmt))
+        .copied()
+        .collect();
+    let main_device = primary_node
+        .node_with_type(NodeType::Render)
+        .and_then(Result::ok)
+        .unwrap_or(primary_node)
+        .dev_id();
+    let feedback_builder = DmabufFeedbackBuilder::new(main_device, client_dmabuf_formats.clone());
+    let feedback_builder = if scanout_formats.is_empty() {
+        feedback_builder
+    } else {
+        feedback_builder.add_preference_tranche(
+            primary_node.dev_id(),
+            Some(zwp_linux_dmabuf_feedback_v1::TrancheFlags::Scanout),
+            scanout_formats,
+        )
+    };
+    match feedback_builder.build() {
+        Ok(feedback) => state.init_dmabuf_feedback(&feedback),
+        Err(err) => {
+            warn!(error = %err, "Failed to build DmabufFeedback; falling back to v3 format list");
+            state.init_dmabuf_formats(client_dmabuf_formats);
+        }
+    }
 
     let gbm_allocator = GbmAllocator::new(
         gbm_device.clone(),
@@ -621,6 +674,7 @@ fn try_run_native_drm_session(
         vblank_pending: false,
         vblank_queued_at: None,
         needs_redraw: true,
+        last_frame_direct_scanout: false,
         frame_start: None,
         rendered_frames: 0,
         max_frames: config.max_frames,

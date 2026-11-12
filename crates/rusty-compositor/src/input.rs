@@ -365,25 +365,7 @@ impl RustyCompositorState {
             return;
         }
 
-        let primary_entry = self.output_map.primary();
-        let primary_geo = primary_entry.logical_geometry();
-        #[allow(clippy::cast_possible_truncation)]
-        let px = pos.x.round() as i32;
-        #[allow(clippy::cast_possible_truncation)]
-        let py = pos.y.round() as i32;
-        let is_on_primary = primary_geo.contains((px, py));
-
-        self.dock_hover_slot =
-            if is_on_primary && !self.launcher_active && !self.quick_settings_active {
-                crate::shell_render::check_dock_slot(
-                    primary_entry.physical_size,
-                    self.wm.visible_windows().len(),
-                    pos.x,
-                    pos.y,
-                )
-            } else {
-                None
-            };
+        self.update_dock_hover_slot(pos);
 
         if let Some(drag) = self.active_window_drag {
             #[allow(clippy::cast_possible_truncation)]
@@ -448,6 +430,31 @@ impl RustyCompositorState {
             },
         );
         pointer.frame(self);
+    }
+
+    fn update_dock_hover_slot(&mut self, pos: Point<f64, Logical>) {
+        let primary_entry = self.output_map.primary();
+        let primary_geo = primary_entry.logical_geometry();
+        #[allow(clippy::cast_possible_truncation)]
+        let px = pos.x.round() as i32;
+        #[allow(clippy::cast_possible_truncation)]
+        let py = pos.y.round() as i32;
+        let is_on_primary = primary_geo.contains((px, py));
+
+        self.dock_hover_slot = if is_on_primary
+            && !self.launcher_active
+            && !self.quick_settings_active
+            && self.active_unoccluded_fullscreen_window().is_none()
+        {
+            crate::shell_render::check_dock_slot(
+                primary_entry.physical_size,
+                self.wm.visible_windows().len(),
+                pos.x,
+                pos.y,
+            )
+        } else {
+            None
+        };
     }
 
     fn handle_launcher_pointer_click(&mut self) {
@@ -550,87 +557,91 @@ impl RustyCompositorState {
                 .output_geometry(&self.output)
                 .map_or(1280, |geo| geo.size.w);
 
+            let shell_chrome_visible = self.active_unoccluded_fullscreen_window().is_none();
+
             // Check for TopBar click to switch workspaces, toggle layout, or open Quick Settings
-            if let Some(target_ws) = crate::shell_render::check_top_bar_workspace_click(
-                self.pointer_location.x,
-                self.pointer_location.y,
-            ) {
-                let ws = WorkspaceId::new_clamped(target_ws);
-                self.apply_wm_action(WmAction::SwitchWorkspace(ws), serial);
-                return;
-            }
-            if crate::shell_render::check_top_bar_layout_click(
-                self.pointer_location.x,
-                self.pointer_location.y,
-            ) {
-                self.apply_wm_action(WmAction::ToggleLayoutMode, serial);
-                return;
-            }
-            if let Some(menu_hit) = crate::shell_render::check_top_bar_menu_click(
-                self.pointer_location.x,
-                self.pointer_location.y,
-            ) {
-                match menu_hit {
-                    crate::shell_render::TopBarMenuHit::SystemLogo => {
-                        self.toggle_launcher();
-                    }
-                    crate::shell_render::TopBarMenuHit::ActiveApp => {
-                        self.toggle_overview();
-                    }
-                    crate::shell_render::TopBarMenuHit::Window => {
-                        self.apply_wm_action(WmAction::ToggleLayoutMode, serial);
-                    }
-                    crate::shell_render::TopBarMenuHit::File
-                    | crate::shell_render::TopBarMenuHit::Edit
-                    | crate::shell_render::TopBarMenuHit::View => {}
+            if shell_chrome_visible {
+                if let Some(target_ws) = crate::shell_render::check_top_bar_workspace_click(
+                    self.pointer_location.x,
+                    self.pointer_location.y,
+                ) {
+                    let ws = WorkspaceId::new_clamped(target_ws);
+                    self.apply_wm_action(WmAction::SwitchWorkspace(ws), serial);
+                    return;
                 }
-                return;
-            }
-            if crate::shell_render::check_top_bar_status_click(
-                output_width,
-                self.pointer_location.x,
-                self.pointer_location.y,
-            ) {
-                self.toggle_quick_settings();
-                return;
-            }
-            if crate::shell_render::check_top_bar_notification_click(
-                output_width,
-                self.notification_count,
-                self.pointer_location.x,
-                self.pointer_location.y,
-            ) {
-                self.clear_notifications();
-                return;
-            }
-            if crate::shell_render::check_top_bar_kbd_click(
-                output_width,
-                self.notification_count,
-                self.pointer_location.x,
-                self.pointer_location.y,
-            ) {
-                self.cycle_keyboard_layout();
-                return;
-            }
-            if let Some(tray_idx) = crate::shell_render::check_top_bar_tray_click(
-                output_width,
-                self.notification_count,
-                self.tray_items.len(),
-                self.pointer_location.x,
-                self.pointer_location.y,
-            ) && let Some(item) = self.tray_items.get(tray_idx)
-            {
-                #[allow(clippy::cast_possible_truncation)]
-                let click_x = self.pointer_location.x.round() as i32;
-                #[allow(clippy::cast_possible_truncation)]
-                let click_y = self.pointer_location.y.round() as i32;
-                match button {
-                    272 => self.tray.activate(&item.key, click_x, click_y),
-                    273 => self.tray.context_menu(&item.key, click_x, click_y),
-                    274 => self.tray.secondary_activate(&item.key, click_x, click_y),
-                    _ => {}
+                if crate::shell_render::check_top_bar_layout_click(
+                    self.pointer_location.x,
+                    self.pointer_location.y,
+                ) {
+                    self.apply_wm_action(WmAction::ToggleLayoutMode, serial);
+                    return;
                 }
-                return;
+                if let Some(menu_hit) = crate::shell_render::check_top_bar_menu_click(
+                    self.pointer_location.x,
+                    self.pointer_location.y,
+                ) {
+                    match menu_hit {
+                        crate::shell_render::TopBarMenuHit::SystemLogo => {
+                            self.toggle_launcher();
+                        }
+                        crate::shell_render::TopBarMenuHit::ActiveApp => {
+                            self.toggle_overview();
+                        }
+                        crate::shell_render::TopBarMenuHit::Window => {
+                            self.apply_wm_action(WmAction::ToggleLayoutMode, serial);
+                        }
+                        crate::shell_render::TopBarMenuHit::File
+                        | crate::shell_render::TopBarMenuHit::Edit
+                        | crate::shell_render::TopBarMenuHit::View => {}
+                    }
+                    return;
+                }
+                if crate::shell_render::check_top_bar_status_click(
+                    output_width,
+                    self.pointer_location.x,
+                    self.pointer_location.y,
+                ) {
+                    self.toggle_quick_settings();
+                    return;
+                }
+                if crate::shell_render::check_top_bar_notification_click(
+                    output_width,
+                    self.notification_count,
+                    self.pointer_location.x,
+                    self.pointer_location.y,
+                ) {
+                    self.clear_notifications();
+                    return;
+                }
+                if crate::shell_render::check_top_bar_kbd_click(
+                    output_width,
+                    self.notification_count,
+                    self.pointer_location.x,
+                    self.pointer_location.y,
+                ) {
+                    self.cycle_keyboard_layout();
+                    return;
+                }
+                if let Some(tray_idx) = crate::shell_render::check_top_bar_tray_click(
+                    output_width,
+                    self.notification_count,
+                    self.tray_items.len(),
+                    self.pointer_location.x,
+                    self.pointer_location.y,
+                ) && let Some(item) = self.tray_items.get(tray_idx)
+                {
+                    #[allow(clippy::cast_possible_truncation)]
+                    let click_x = self.pointer_location.x.round() as i32;
+                    #[allow(clippy::cast_possible_truncation)]
+                    let click_y = self.pointer_location.y.round() as i32;
+                    match button {
+                        272 => self.tray.activate(&item.key, click_x, click_y),
+                        273 => self.tray.context_menu(&item.key, click_x, click_y),
+                        274 => self.tray.secondary_activate(&item.key, click_x, click_y),
+                        _ => {}
+                    }
+                    return;
+                }
             }
 
             // Handle Spotlight clicks exclusively while launcher overlay is open (RUSTYOS-018b)
@@ -689,14 +700,16 @@ impl RustyCompositorState {
                 return;
             }
 
-            // Handle bottom Dock clicks (`RUSTYOS-023`) before Overview/windows
+            // Handle bottom Dock clicks (`RUSTYOS-023`) before Overview/windows when visible
             let ordered_ids = self.ordered_visible_window_ids();
-            if let Some(dock_hit) = crate::shell_render::check_dock_click(
-                output_phys,
-                ordered_ids.len(),
-                self.pointer_location.x,
-                self.pointer_location.y,
-            ) {
+            if shell_chrome_visible
+                && let Some(dock_hit) = crate::shell_render::check_dock_click(
+                    output_phys,
+                    ordered_ids.len(),
+                    self.pointer_location.x,
+                    self.pointer_location.y,
+                )
+            {
                 self.handle_dock_hit(dock_hit, serial);
                 return;
             }
@@ -1036,6 +1049,7 @@ fn match_shortcut(modifiers: ModifiersState, sym: Keysym) -> Option<KeyIntercept
         }
         Keysym::l | Keysym::L => Some(KeyIntercept::Wm(WmAction::ToggleLayoutMode)),
         Keysym::m | Keysym::M => Some(KeyIntercept::Wm(WmAction::ToggleMaximizeFocused)),
+        Keysym::f | Keysym::F => Some(KeyIntercept::Wm(WmAction::ToggleFullscreen)),
         Keysym::Left => Some(KeyIntercept::Wm(WmAction::SnapFocused(
             SnapTarget::LeftHalf,
         ))),
@@ -1532,5 +1546,21 @@ mod tests {
         let p3 = clamp_relative_pointer_rect((3800.0, 500.0).into(), (200.0, 0.0).into(), bounds);
         assert_eq!(p3.x, 3839.0);
         assert_eq!(p3.y, 500.0);
+    }
+
+    #[test]
+    fn alt_f_maps_to_toggle_fullscreen() {
+        let alt = ModifiersState {
+            alt: true,
+            ..ModifiersState::default()
+        };
+        assert_eq!(
+            match_shortcut(alt, Keysym::f),
+            Some(KeyIntercept::Wm(WmAction::ToggleFullscreen))
+        );
+        assert_eq!(
+            match_shortcut(alt, Keysym::F),
+            Some(KeyIntercept::Wm(WmAction::ToggleFullscreen))
+        );
     }
 }

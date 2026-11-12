@@ -111,6 +111,14 @@
                           инсталлятор             
                           `scripts/install.sh`    
                           (ADR-0009)              
+
+  D-018                   Фазы 3/4/9              accepted
+                          (RUSTYOS-041):          
+                          `zwp_linux_dmabuf_v1`   
+                          + полноэкранный Direct  
+                          Scanout через           
+                          `DrmCompositor` с GLES  
+                          fallback (ADR-0010)     
   -----------------------------------------------------------------------
 
 ## Открытые решения

@@ -301,6 +301,24 @@ impl XwmHandler for RustyCompositorState {
         }
     }
 
+    fn fullscreen_request(&mut self, _xwm: XwmId, window: X11Surface) {
+        if let Some(win_id) = find_bound_window_id(self, window.window_id()) {
+            self.wm.focus_and_raise(win_id);
+            self.wm.set_window_fullscreen(win_id, true);
+            let serial = SERIAL_COUNTER.next_serial();
+            self.sync_space_with_wm(serial);
+        }
+    }
+
+    fn unfullscreen_request(&mut self, _xwm: XwmId, window: X11Surface) {
+        if let Some(win_id) = find_bound_window_id(self, window.window_id()) {
+            self.wm.focus_and_raise(win_id);
+            self.wm.set_window_fullscreen(win_id, false);
+            let serial = SERIAL_COUNTER.next_serial();
+            self.sync_space_with_wm(serial);
+        }
+    }
+
     fn minimize_request(&mut self, _xwm: XwmId, window: X11Surface) {
         if let Some(win_id) = find_bound_window_id(self, window.window_id()) {
             let serial = SERIAL_COUNTER.next_serial();

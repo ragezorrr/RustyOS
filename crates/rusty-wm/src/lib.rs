@@ -107,6 +107,8 @@ pub enum WmAction {
     ToggleLayoutMode,
     /// Toggle maximization of the focused window (`Alt+M`).
     ToggleMaximizeFocused,
+    /// Toggle true unbordered fullscreen on the focused window (`Alt+F` / XDG fullscreen).
+    ToggleFullscreen,
     /// Snap the focused window to a specific region (`Alt+Left`, `Alt+Right`, `Alt+C`).
     SnapFocused(SnapTarget),
 }
@@ -118,12 +120,14 @@ pub struct ManagedWindow {
     pub id: WindowId,
     /// Workspace to which the window currently belongs.
     pub workspace: WorkspaceId,
-    /// Current effective logical geometry (either floating, snapped, maximized, or tiled).
+    /// Current effective logical geometry (either floating, snapped, maximized, fullscreen, or tiled).
     pub geometry: Rect,
-    /// Saved floating geometry restored when leaving maximized or tiled states.
+    /// Saved floating geometry restored when leaving maximized, fullscreen, or tiled states.
     pub saved_floating_geometry: Rect,
     /// Whether the window is currently maximized on its workspace.
     pub maximized: bool,
+    /// Whether the window is currently in true unbordered fullscreen mode (`RUSTYOS-041`).
+    pub fullscreen: bool,
 }
 
 /// State of a display output managed by [`WindowManager`].
@@ -131,8 +135,10 @@ pub struct ManagedWindow {
 pub struct ManagedOutput {
     /// Unique identifier of the output.
     pub id: OutputId,
-    /// Usable logical work area of the output.
+    /// Usable logical work area of the output (reserving shell panels/docks).
     pub work_area: Rect,
+    /// Complete physical/logical display bounds used for fullscreen direct scanout (`RUSTYOS-041`).
+    pub full_area: Rect,
     /// Workspace currently displayed on this output.
     pub active_workspace: WorkspaceId,
 }
@@ -186,9 +192,11 @@ impl WindowManager {
     #[must_use]
     pub fn new(primary_work_area: Rect) -> Self {
         let primary_id = OutputId(1);
+        let clean_work = sanitize_rect(primary_work_area);
         let outputs = vec![ManagedOutput {
             id: primary_id,
-            work_area: sanitize_rect(primary_work_area),
+            work_area: clean_work,
+            full_area: clean_work,
             active_workspace: WorkspaceId(1),
         }];
 
@@ -232,8 +240,17 @@ impl WindowManager {
     /// Adds or updates a display output and recomputes layout for its active workspace.
     pub fn upsert_output(&mut self, id: OutputId, work_area: Rect) {
         let clean_area = sanitize_rect(work_area);
+        self.upsert_output_with_full_area(id, clean_area, clean_area);
+    }
+
+    /// Adds or updates a display output with explicit usable work area and full display bounds
+    /// (`RUSTYOS-041`), then recomputes layout for its active workspace.
+    pub fn upsert_output_with_full_area(&mut self, id: OutputId, work_area: Rect, full_area: Rect) {
+        let clean_work = sanitize_rect(work_area);
+        let clean_full = sanitize_rect(full_area);
         if let Some(existing) = self.outputs.iter_mut().find(|o| o.id == id) {
-            existing.work_area = clean_area;
+            existing.work_area = clean_work;
+            existing.full_area = clean_full;
             let ws = existing.active_workspace;
             self.relayout_workspace(ws);
             return;
@@ -248,7 +265,8 @@ impl WindowManager {
 
         self.outputs.push(ManagedOutput {
             id,
-            work_area: clean_area,
+            work_area: clean_work,
+            full_area: clean_full,
             active_workspace: next_ws,
         });
         self.relayout_workspace(next_ws);
@@ -362,6 +380,7 @@ impl WindowManager {
             geometry: floating_rect,
             saved_floating_geometry: floating_rect,
             maximized: false,
+            fullscreen: false,
         });
 
         if let Some(ws) = self.workspace_mut(ws_id) {
@@ -559,6 +578,7 @@ impl WindowManager {
         let work_area = self.work_area_for_workspace(ws_id);
 
         if let Some(win) = self.windows.iter_mut().find(|w| w.id == win_id) {
+            win.fullscreen = false;
             win.maximized = !win.maximized;
             if win.maximized {
                 win.geometry = work_area;
@@ -569,6 +589,40 @@ impl WindowManager {
 
         self.relayout_workspace(ws_id);
         self.window(win_id).map(|w| w.geometry)
+    }
+
+    /// Explicitly enables or disables fullscreen mode for `win_id` (`RUSTYOS-041`).
+    ///
+    /// In fullscreen mode, the window spans its output's complete `full_area` (ignoring
+    /// `TopBar`/`Dock` margins). Leaving fullscreen restores maximized or floating geometry.
+    pub fn set_window_fullscreen(&mut self, win_id: WindowId, enabled: bool) -> Option<Rect> {
+        let ws_id = self.window(win_id)?.workspace;
+        let full_area = self.full_area_for_workspace(ws_id);
+        let work_area = self.work_area_for_workspace(ws_id);
+
+        if let Some(win) = self.windows.iter_mut().find(|w| w.id == win_id) {
+            if win.fullscreen == enabled {
+                return Some(win.geometry);
+            }
+            win.fullscreen = enabled;
+            if enabled {
+                win.geometry = full_area;
+            } else if win.maximized {
+                win.geometry = work_area;
+            } else {
+                win.geometry = win.saved_floating_geometry;
+            }
+        }
+
+        self.relayout_workspace(ws_id);
+        self.window(win_id).map(|w| w.geometry)
+    }
+
+    /// Toggles fullscreen state of the currently focused window (`RUSTYOS-041`).
+    pub fn toggle_fullscreen_focused(&mut self) -> Option<Rect> {
+        let win_id = self.focused_window()?;
+        let next_state = !self.window(win_id)?.fullscreen;
+        self.set_window_fullscreen(win_id, next_state)
     }
 
     /// Snaps the focused window to a [`SnapTarget`] and switches its state to non-maximized floating.
@@ -600,6 +654,7 @@ impl WindowManager {
         };
 
         if let Some(win) = self.windows.iter_mut().find(|w| w.id == win_id) {
+            win.fullscreen = false;
             win.maximized = false;
             win.geometry = snapped;
             win.saved_floating_geometry = snapped;
@@ -609,13 +664,14 @@ impl WindowManager {
         self.window(win_id).map(|w| w.geometry)
     }
 
-    /// Moves a window to `(x, y)` in logical space, clearing any maximized flag.
+    /// Moves a window to `(x, y)` in logical space, clearing any maximized or fullscreen flag.
     pub fn move_window(&mut self, id: WindowId, x: i32, y: i32) -> bool {
         let Some(win) = self.windows.iter_mut().find(|w| w.id == id) else {
             return false;
         };
-        if win.maximized {
+        if win.maximized || win.fullscreen {
             win.maximized = false;
+            win.fullscreen = false;
             win.geometry.width = win.saved_floating_geometry.width;
             win.geometry.height = win.saved_floating_geometry.height;
         }
@@ -627,13 +683,14 @@ impl WindowManager {
     }
 
     /// Resizes and repositions a window to `rect` in logical space (`RUSTYOS-022`),
-    /// enforcing minimum interactive bounds and clearing any maximized flag.
+    /// enforcing minimum interactive bounds and clearing any maximized or fullscreen flag.
     pub fn resize_window(&mut self, id: WindowId, rect: Rect) -> bool {
         let Some(win) = self.windows.iter_mut().find(|w| w.id == id) else {
             return false;
         };
         let sanitized = Rect::new(rect.x, rect.y, rect.width.max(240), rect.height.max(160));
         win.maximized = false;
+        win.fullscreen = false;
         win.geometry = sanitized;
         win.saved_floating_geometry = sanitized;
         true
@@ -674,6 +731,10 @@ impl WindowManager {
                 self.toggle_maximize_focused();
                 None
             }
+            WmAction::ToggleFullscreen => {
+                self.toggle_fullscreen_focused();
+                None
+            }
             WmAction::SnapFocused(target) => {
                 self.snap_focused(target);
                 None
@@ -693,8 +754,17 @@ impl WindowManager {
             .map_or_else(|| Rect::new(0, 0, 1280, 800), |o| o.work_area)
     }
 
+    fn full_area_for_workspace(&self, ws_id: WorkspaceId) -> Rect {
+        self.outputs
+            .iter()
+            .find(|o| o.active_workspace == ws_id)
+            .or_else(|| self.outputs.iter().find(|o| o.id == self.focused_output))
+            .map_or_else(|| Rect::new(0, 0, 1280, 800), |o| o.full_area)
+    }
+
     fn relayout_workspace(&mut self, ws_id: WorkspaceId) {
         let work_area = self.work_area_for_workspace(ws_id);
+        let full_area = self.full_area_for_workspace(ws_id);
         let gap = self.gap_px.max(0);
 
         let Some((layout, stacking)) = self
@@ -708,7 +778,9 @@ impl WindowManager {
             LayoutMode::Floating => {
                 for win_id in stacking {
                     if let Some(win) = self.windows.iter_mut().find(|w| w.id == win_id) {
-                        if win.maximized {
+                        if win.fullscreen {
+                            win.geometry = full_area;
+                        } else if win.maximized {
                             win.geometry = work_area;
                         } else {
                             win.geometry =
@@ -718,15 +790,24 @@ impl WindowManager {
                 }
             }
             LayoutMode::MasterStack => {
-                let count = stacking.len();
+                let mut tiled_ids = Vec::with_capacity(stacking.len());
+                for &win_id in stacking.iter().rev() {
+                    if self.window(win_id).is_some_and(|w| w.fullscreen) {
+                        if let Some(win) = self.windows.iter_mut().find(|w| w.id == win_id) {
+                            win.geometry = full_area;
+                        }
+                    } else {
+                        tiled_ids.push(win_id);
+                    }
+                }
+
+                let count = tiled_ids.len();
                 if count == 0 {
                     return;
                 }
 
-                // In MasterStack, the topmost (most recently focused/mapped) window is Master on the left,
+                // In MasterStack, the topmost (most recently focused/mapped) non-fullscreen window is Master on the left,
                 // and remaining windows stack vertically on the right.
-                let ordered: Vec<WindowId> = stacking.into_iter().rev().collect();
-
                 if count == 1 {
                     let single_rect = Rect::new(
                         work_area.x + gap,
@@ -734,7 +815,7 @@ impl WindowManager {
                         (work_area.width - gap * 2).max(100),
                         (work_area.height - gap * 2).max(100),
                     );
-                    if let Some(win) = self.windows.iter_mut().find(|w| w.id == ordered[0]) {
+                    if let Some(win) = self.windows.iter_mut().find(|w| w.id == tiled_ids[0]) {
                         win.geometry = single_rect;
                     }
                     return;
@@ -746,7 +827,7 @@ impl WindowManager {
 
                 let master_rect =
                     Rect::new(work_area.x + gap, work_area.y + gap, master_w, master_h);
-                if let Some(win) = self.windows.iter_mut().find(|w| w.id == ordered[0]) {
+                if let Some(win) = self.windows.iter_mut().find(|w| w.id == tiled_ids[0]) {
                     win.geometry = master_rect;
                 }
 
@@ -755,7 +836,7 @@ impl WindowManager {
                 let each_h = ((work_area.height - total_stack_gaps) / stack_count).max(60);
                 let stack_x = work_area.x + gap * 2 + master_w;
 
-                for (idx, &win_id) in ordered.iter().skip(1).enumerate() {
+                for (idx, &win_id) in tiled_ids.iter().skip(1).enumerate() {
                     let idx_i32 = i32::try_from(idx).unwrap_or(0);
                     let y = work_area.y + gap + idx_i32 * (each_h + gap);
                     let rect = Rect::new(stack_x, y, stack_w, each_h);
@@ -930,5 +1011,33 @@ mod tests {
             resized.as_ref().map(|w| w.saved_floating_geometry),
             Some(Rect::new(150, 90, 240, 160))
         );
+    }
+
+    #[test]
+    fn fullscreen_uses_full_output_bounds_and_restores_prior_state() {
+        let work = Rect::new(0, 28, 1920, 980);
+        let full = Rect::new(0, 0, 1920, 1080);
+        let mut wm = WindowManager::new(work);
+        wm.upsert_output_with_full_area(OutputId(1), work, full);
+
+        let w1 = wm.next_window_id();
+        let initial = wm.map_window(w1, Some((900, 600)));
+        assert_eq!(wm.window(w1).map(|w| w.fullscreen), Some(false));
+
+        // Entering fullscreen uses full display bounds (0, 0, 1920, 1080).
+        wm.apply_action(WmAction::ToggleFullscreen);
+        assert_eq!(wm.window(w1).map(|w| w.fullscreen), Some(true));
+        assert_eq!(wm.window(w1).map(|w| w.geometry), Some(full));
+
+        // Exiting fullscreen restores saved floating geometry.
+        wm.apply_action(WmAction::ToggleFullscreen);
+        assert_eq!(wm.window(w1).map(|w| w.fullscreen), Some(false));
+        assert_eq!(wm.window(w1).map(|w| w.geometry), Some(initial));
+
+        // If maximized before fullscreen, exiting fullscreen restores maximized work area.
+        wm.apply_action(WmAction::ToggleMaximizeFocused);
+        assert_eq!(wm.window(w1).map(|w| w.geometry), Some(work));
+        assert_eq!(wm.set_window_fullscreen(w1, true), Some(full));
+        assert_eq!(wm.set_window_fullscreen(w1, false), Some(work));
     }
 }
