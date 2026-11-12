@@ -330,6 +330,19 @@ hardware/software context и низкие накладные расходы.
 - **Acceptance criteria:** При наличии `Xwayland` запускается X11 WM и X11-окна управляются `rusty-wm` наравне с Wayland-окнами; `LauncherState` передаёт `DISPLAY` запускаемым приложениям; фоновый D-Bus сервер принимает уведомления в HUD с поддержкой `replaces_id` и graceful fallback без падения при отсутствии шины; 52 теста и `clippy -D warnings` проходят без предупреждений.
 - **Risks:** При отсутствии бинарника `Xwayland` или сессионной шины D-Bus соответствующие подсистемы логируют предупреждение и отключаются без нарушения работы композитора.
 
+## RUSTYOS-027 --- System Integration ч. 2: BlueZ, NetworkManager D-Bus & Quick Settings Bluetooth
+
+**Статус:** done **Фаза:** 24 (System Integration: NetworkManager, BlueZ & Control Center)
+
+- **Цель:** Перевести системные сервисы сети и Bluetooth на прямые D-Bus запросы (`org.freedesktop.NetworkManager` и `org.bluez`) с CLI/sysfs fallback и добавить интерактивные плитки `Bluetooth` и `Lock Session` в Quick Settings.
+- **Scope:**
+  - `crates/rusty-services/Cargo.toml` и `lib.rs`: подключён `zbus`; `NetworkService` читает активное соединение и `SSID`/`Id` напрямую с System D-Bus `NetworkManager` (с fallback на `/sys/class/net` и `nmcli`); добавлены `BluetoothStatus` и `BluetoothService` (опрос `org.bluez.Adapter1`/`Device1` и управление `Powered` по D-Bus или `bluetoothctl`).
+  - `crates/rusty-compositor/src/telemetry.rs`: добавлено поле `bluetooth: BluetoothStatus` в `SystemTelemetry` и оптимистичный метод `toggle_bluetooth()` с асинхронной записью в фоне.
+  - `crates/rusty-compositor/src/shell_render.rs`, `winit_backend.rs` и `input.rs`: расширена карточка `QuickSettings` (высота `326`), добавлен 3-й ряд кнопок `ToggleBluetooth` (`BT: On`/`Off`/`<device>`) и `LockSession` с hit-testing и тестами.
+- **Dependencies:** `RUSTYOS-011`, `RUSTYOS-021`, `RUSTYOS-025`, `RUSTYOS-026`.
+- **Acceptance criteria:** Сеть и Bluetooth опрашиваются через System D-Bus без блокировки event loop с безопасным fallback; клик по плитке Bluetooth оптимистично обновляет UI и переключает питание адаптера в фоне; клик `Lock Session` мгновенно включает Lock Screen; 53 теста и `clippy -D warnings` проходят без предупреждений.
+- **Risks:** При отсутствии системной шины D-Bus, `NetworkManager` или `bluetoothd` сервисы корректно деградируют на `/sys/class/*` или статус `Unavailable`.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

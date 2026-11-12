@@ -154,6 +154,12 @@ pub struct QuickSettingsRenderState<'a> {
     pub network_label: &'a str,
     /// Whether network interface is up.
     pub net_connected: bool,
+    /// Whether a Bluetooth adapter is available (`RUSTYOS-027`).
+    pub bt_available: bool,
+    /// Whether Bluetooth adapter power is enabled (`RUSTYOS-027`).
+    pub bt_powered: bool,
+    /// Concise Bluetooth status label (`RUSTYOS-027`).
+    pub bt_label: &'a str,
     /// Battery charge percentage.
     pub battery_percent: u8,
     /// Whether a hardware battery was detected.
@@ -306,6 +312,10 @@ pub enum QuickSettingsHit {
     OpenSpotlight,
     /// Trigger immediate background telemetry refresh.
     RefreshMetrics,
+    /// Toggle Bluetooth adapter power via BlueZ (`RUSTYOS-027`).
+    ToggleBluetooth,
+    /// Engage desktop Lock Screen from Quick Settings (`RUSTYOS-027`).
+    LockSession,
     /// Click inside popover frame (absorb event, keep open).
     InsidePopover,
     /// Click outside popover (dismiss Quick Settings).
@@ -435,7 +445,7 @@ pub fn check_top_bar_notification_click(
 
 fn quick_settings_rect(width: i32, height: i32) -> (i32, i32, i32, i32) {
     let pop_w = 304.min(width - 24).max(240);
-    let pop_h = 286.min(height - TOP_BAR_HEIGHT - 24).max(200);
+    let pop_h = 326.min(height - TOP_BAR_HEIGHT - 24).max(200);
     let pop_x = width - pop_w - 12;
     let pop_y = TOP_BAR_HEIGHT + 8;
     (pop_x, pop_y, pop_w, pop_h)
@@ -676,6 +686,17 @@ pub fn check_quick_settings_click(
         }
         if x >= right_x && x < right_x + hw {
             return QuickSettingsHit::RefreshMetrics;
+        }
+    }
+
+    // Action row 3 (`RUSTYOS-027`): py + 282 .. py + 314
+    let row3_y = f64::from(py + 282);
+    if y >= row3_y && y < row3_y + 32.0 {
+        if x >= left_x && x < left_x + hw {
+            return QuickSettingsHit::ToggleBluetooth;
+        }
+        if x >= right_x && x < right_x + hw {
+            return QuickSettingsHit::LockSession;
         }
     }
 
@@ -2050,6 +2071,29 @@ fn render_quick_settings_text(
     ) {
         elements.push(el);
     }
+    let bt_text = truncate_ascii(qs.bt_label, 17);
+    if let Some(el) = text_cache.render_label_centered(
+        renderer,
+        &bt_text,
+        11.0,
+        if qs.bt_available {
+            text_bright
+        } else {
+            text_muted
+        },
+        Rectangle::new(Point::from((left_x, py + 282)), Size::from((half_w, 32))),
+    ) {
+        elements.push(el);
+    }
+    if let Some(el) = text_cache.render_label_centered(
+        renderer,
+        "Lock Session",
+        11.0,
+        text_bright,
+        Rectangle::new(Point::from((right_x, py + 282)), Size::from((half_w, 32))),
+    ) {
+        elements.push(el);
+    }
 }
 
 /// Generates centered title text element for a window's SSD titlebar (`RUSTYOS-020`).
@@ -2617,6 +2661,28 @@ pub fn generate_shell_composite_elements(
                 shape_cache,
                 renderer,
                 Rectangle::new(Point::from((right_x, py + 242)), Size::from((half_w, 32))),
+                8,
+                RGBA_SURFACE_OVERLAY,
+                Some(RGBA_BORDER),
+            );
+            push_rounded_glass_box(
+                &mut out,
+                shape_cache,
+                renderer,
+                Rectangle::new(Point::from((left_x, py + 282)), Size::from((half_w, 32))),
+                8,
+                if qs.bt_available && qs.bt_powered {
+                    RGBA_ACCENT_MUTED
+                } else {
+                    RGBA_SURFACE_OVERLAY
+                },
+                Some(RGBA_BORDER),
+            );
+            push_rounded_glass_box(
+                &mut out,
+                shape_cache,
+                renderer,
+                Rectangle::new(Point::from((right_x, py + 282)), Size::from((half_w, 32))),
                 8,
                 RGBA_SURFACE_OVERLAY,
                 Some(RGBA_BORDER),
@@ -3280,6 +3346,9 @@ mod tests {
             reduced_motion: false,
             network_label: "Wi-Fi Connected",
             net_connected: true,
+            bt_available: true,
+            bt_powered: true,
+            bt_label: "BT: On",
             battery_percent: 88,
             has_battery: true,
             ac_online: true,
@@ -3346,6 +3415,14 @@ mod tests {
         assert_eq!(
             check_quick_settings_click(size, f64::from(px + 200), f64::from(py + 255)),
             QuickSettingsHit::RefreshMetrics
+        );
+        assert_eq!(
+            check_quick_settings_click(size, f64::from(px + 30), f64::from(py + 295)),
+            QuickSettingsHit::ToggleBluetooth
+        );
+        assert_eq!(
+            check_quick_settings_click(size, f64::from(px + 200), f64::from(py + 295)),
+            QuickSettingsHit::LockSession
         );
     }
 

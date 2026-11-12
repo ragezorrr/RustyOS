@@ -385,6 +385,12 @@ impl RustyCompositorState {
             crate::shell_render::QuickSettingsHit::RefreshMetrics => {
                 self.telemetry.request_refresh();
             }
+            crate::shell_render::QuickSettingsHit::ToggleBluetooth => {
+                self.telemetry.toggle_bluetooth();
+            }
+            crate::shell_render::QuickSettingsHit::LockSession => {
+                self.set_screen_locked(true, serial);
+            }
             crate::shell_render::QuickSettingsHit::InsidePopover => {}
             crate::shell_render::QuickSettingsHit::OutsidePopover => {
                 self.close_quick_settings();

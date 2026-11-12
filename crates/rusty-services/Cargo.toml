@@ -8,6 +8,7 @@ authors.workspace = true
 description = "RustyOS Linux system service adapters (audio, battery, network, session lifecycle)"
 
 [dependencies]
+zbus.workspace = true
 
 [lints]
 workspace = true

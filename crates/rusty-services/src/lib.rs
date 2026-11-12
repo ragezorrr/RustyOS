@@ -7,6 +7,8 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
+use zbus::zvariant::Value;
+
 /// Battery charging and health status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BatteryState {
@@ -65,6 +67,30 @@ impl Default for NetworkStatus {
             interface: None,
             wifi_ssid: None,
             status_label: "Disconnected".to_owned(),
+        }
+    }
+}
+
+/// Bluetooth adapter & connected-device status (`RUSTYOS-027`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BluetoothStatus {
+    /// True if at least one BlueZ or sysfs Bluetooth adapter is present.
+    pub available: bool,
+    /// True if the primary adapter is powered on.
+    pub powered: bool,
+    /// Name/alias of the first connected Bluetooth device, if any.
+    pub connected_device: Option<String>,
+    /// Concise status label formatted for Quick Settings (`BT: On`, `BT: Off`, `BT: <dev>`).
+    pub status_label: String,
+}
+
+impl Default for BluetoothStatus {
+    fn default() -> Self {
+        Self {
+            available: false,
+            powered: false,
+            connected_device: None,
+            status_label: "BT: Unavailable".to_owned(),
         }
     }
 }
@@ -167,12 +193,16 @@ impl NetworkService {
         Self
     }
 
-    /// Queries the active network status via `/sys/class/net` and `nmcli`.
+    /// Queries the active network status via `NetworkManager` D-Bus, falling back to `/sys/class/net` and `nmcli`.
     #[must_use]
     pub fn query_status(&self) -> NetworkStatus {
+        if let Some(dbus_status) = query_network_via_dbus() {
+            return dbus_status;
+        }
+
         let mut status = NetworkStatus::default();
 
-        // 1. Try reading from /sys/class/net to find operational state
+        // Fallback: /sys/class/net operstate + nmcli
         let net_path = Path::new("/sys/class/net");
         if let Ok(entries) = fs::read_dir(net_path) {
             for entry in entries.flatten() {
@@ -196,7 +226,6 @@ impl NetworkService {
             }
         }
 
-        // 2. Try obtaining Wi-Fi SSID via nmcli if wireless
         if status.connected
             && let Ok(output) = Command::new("nmcli")
                 .args(["-t", "-f", "active,ssid", "dev", "wifi"])
@@ -218,6 +247,241 @@ impl NetworkService {
 
         status
     }
+}
+
+fn query_network_via_dbus() -> Option<NetworkStatus> {
+    let conn = zbus::blocking::Connection::system().ok()?;
+    let nm_iface =
+        zbus::names::InterfaceName::from_static_str("org.freedesktop.NetworkManager").ok()?;
+    let props = zbus::blocking::fdo::PropertiesProxy::builder(&conn)
+        .destination("org.freedesktop.NetworkManager")
+        .ok()?
+        .path("/org/freedesktop/NetworkManager")
+        .ok()?
+        .build()
+        .ok()?;
+    let all = props.get_all(nm_iface).ok()?;
+
+    let nm_state = match all.get("State").map(|v| &**v) {
+        Some(Value::U32(n)) => *n,
+        _ => 0,
+    };
+    // NetworkManager states >= 50 correspond to ConnectedLocal / ConnectedSite / ConnectedGlobal.
+    if nm_state < 50 {
+        return Some(NetworkStatus::default());
+    }
+
+    let conn_type = match all.get("PrimaryConnectionType").map(|v| &**v) {
+        Some(Value::Str(s)) => s.as_str().to_owned(),
+        _ => String::new(),
+    };
+
+    let mut active_id = None;
+    if let Some(Value::ObjectPath(primary_path)) = all.get("PrimaryConnection").map(|v| &**v)
+        && primary_path.as_str() != "/"
+        && let Ok(ac_iface) = zbus::names::InterfaceName::from_static_str(
+            "org.freedesktop.NetworkManager.Connection.Active",
+        )
+        && let Ok(path_builder) = zbus::blocking::fdo::PropertiesProxy::builder(&conn)
+            .destination("org.freedesktop.NetworkManager")
+            .and_then(|b| b.path(primary_path.as_str().to_owned()))
+        && let Ok(ac_props) = path_builder.build()
+        && let Ok(id_val) = ac_props.get(ac_iface, "Id")
+        && let Value::Str(id_str) = &*id_val
+        && !id_str.as_str().trim().is_empty()
+    {
+        active_id = Some(id_str.as_str().to_owned());
+    }
+
+    Some(format_nm_network_status(&conn_type, active_id))
+}
+
+/// Formats NetworkManager connection type & profile ID into [`NetworkStatus`].
+#[must_use]
+pub fn format_nm_network_status(conn_type: &str, active_id: Option<String>) -> NetworkStatus {
+    let clean_id = active_id.filter(|s| !s.trim().is_empty());
+    let is_wifi = conn_type.contains("wireless") || conn_type.contains("wifi");
+    let status_label = match (&clean_id, is_wifi) {
+        (Some(name), true) => format!("Wi-Fi: {name}"),
+        (Some(name), false) => name.clone(),
+        (None, true) => "Wi-Fi Connected".to_owned(),
+        (None, false) => "Ethernet Connected".to_owned(),
+    };
+    NetworkStatus {
+        connected: true,
+        interface: None,
+        wifi_ssid: if is_wifi { clean_id } else { None },
+        status_label,
+    }
+}
+
+/// Bluetooth service interacting with `BlueZ` over System D-Bus (with CLI/sysfs fallback) (`RUSTYOS-027`).
+#[derive(Debug, Default, Clone)]
+pub struct BluetoothService;
+
+impl BluetoothService {
+    /// Creates a new Bluetooth adapter service.
+    #[must_use]
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Queries the primary Bluetooth adapter and connected device status.
+    #[must_use]
+    pub fn query_status(&self) -> BluetoothStatus {
+        if let Some(dbus_bt) = query_bluez_via_dbus() {
+            return dbus_bt;
+        }
+        query_bluetooth_fallback()
+    }
+
+    /// Enables or disables Bluetooth adapter power via `BlueZ` D-Bus or `bluetoothctl`.
+    #[must_use]
+    pub fn set_powered(&self, powered: bool) -> bool {
+        if set_bluez_powered_via_dbus(powered) {
+            return true;
+        }
+        let arg = if powered { "on" } else { "off" };
+        Command::new("bluetoothctl")
+            .args(["power", arg])
+            .status()
+            .is_ok_and(|s| s.success())
+    }
+}
+
+/// Formats a [`BluetoothStatus`] summary from adapter/device metadata (`RUSTYOS-027`).
+#[must_use]
+pub fn format_bluetooth_label(
+    available: bool,
+    powered: bool,
+    connected_device: Option<&str>,
+) -> String {
+    if !available {
+        return "BT: Unavailable".to_owned();
+    }
+    if !powered {
+        return "BT: Off".to_owned();
+    }
+    match connected_device.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(name) => format!("BT: {name}"),
+        None => "BT: On".to_owned(),
+    }
+}
+
+fn query_bluez_via_dbus() -> Option<BluetoothStatus> {
+    let conn = zbus::blocking::Connection::system().ok()?;
+    let om = zbus::blocking::fdo::ObjectManagerProxy::builder(&conn)
+        .destination("org.bluez")
+        .ok()?
+        .path("/")
+        .ok()?
+        .build()
+        .ok()?;
+    let objects = om.get_managed_objects().ok()?;
+
+    let mut available = false;
+    let mut powered = false;
+    let mut connected_device: Option<String> = None;
+
+    for ifaces in objects.values() {
+        for (iface_name, props) in ifaces {
+            if iface_name.as_str() == "org.bluez.Adapter1" {
+                available = true;
+                if matches!(props.get("Powered").map(|v| &**v), Some(Value::Bool(true))) {
+                    powered = true;
+                }
+            } else if iface_name.as_str() == "org.bluez.Device1"
+                && connected_device.is_none()
+                && matches!(
+                    props.get("Connected").map(|v| &**v),
+                    Some(Value::Bool(true))
+                )
+            {
+                connected_device = props
+                    .get("Alias")
+                    .or_else(|| props.get("Name"))
+                    .and_then(|v| match &**v {
+                        Value::Str(s) => Some(s.as_str().to_owned()),
+                        _ => None,
+                    })
+                    .filter(|s| !s.trim().is_empty());
+            }
+        }
+    }
+
+    let status_label = format_bluetooth_label(available, powered, connected_device.as_deref());
+    Some(BluetoothStatus {
+        available,
+        powered,
+        connected_device,
+        status_label,
+    })
+}
+
+fn set_bluez_powered_via_dbus(powered: bool) -> bool {
+    let Ok(conn) = zbus::blocking::Connection::system() else {
+        return false;
+    };
+    let Ok(om_builder) = zbus::blocking::fdo::ObjectManagerProxy::builder(&conn)
+        .destination("org.bluez")
+        .and_then(|b| b.path("/"))
+    else {
+        return false;
+    };
+    let Ok(om) = om_builder.build() else {
+        return false;
+    };
+    let Ok(objects) = om.get_managed_objects() else {
+        return false;
+    };
+    let Some(adapter_path) = objects.into_iter().find_map(|(path, ifaces)| {
+        ifaces
+            .keys()
+            .any(|k| k.as_str() == "org.bluez.Adapter1")
+            .then_some(path)
+    }) else {
+        return false;
+    };
+
+    let Ok(iface_name) = zbus::names::InterfaceName::from_static_str("org.bluez.Adapter1") else {
+        return false;
+    };
+    let Ok(props_builder) = zbus::blocking::fdo::PropertiesProxy::builder(&conn)
+        .destination("org.bluez")
+        .and_then(|b| b.path(adapter_path))
+    else {
+        return false;
+    };
+    let Ok(props) = props_builder.build() else {
+        return false;
+    };
+    props
+        .set(iface_name, "Powered", Value::Bool(powered))
+        .is_ok()
+}
+
+fn query_bluetooth_fallback() -> BluetoothStatus {
+    let sysfs_present = fs::read_dir("/sys/class/bluetooth").is_ok_and(|mut d| d.next().is_some());
+    let mut status = BluetoothStatus {
+        available: sysfs_present,
+        powered: false,
+        connected_device: None,
+        status_label: format_bluetooth_label(sysfs_present, false, None),
+    };
+    if let Ok(output) = Command::new("bluetoothctl").arg("show").output()
+        && output.status.success()
+    {
+        let text = String::from_utf8_lossy(&output.stdout);
+        for line in text.lines() {
+            let trimmed = line.trim();
+            if let Some(rest) = trimmed.strip_prefix("Powered:") {
+                status.available = true;
+                status.powered = rest.trim().eq_ignore_ascii_case("yes");
+            }
+        }
+        status.status_label = format_bluetooth_label(status.available, status.powered, None);
+    }
+    status
 }
 
 /// Audio service interacting with PipeWire/WirePlumber or PulseAudio/ALSA.
@@ -389,6 +653,8 @@ pub struct ServiceRegistry {
     pub power: PowerService,
     /// Network status service.
     pub network: NetworkService,
+    /// Bluetooth adapter & device service (`RUSTYOS-027`).
+    pub bluetooth: BluetoothService,
     /// Audio volume service.
     pub audio: AudioService,
     /// Session power/lifecycle service.
@@ -402,6 +668,7 @@ impl ServiceRegistry {
         Self {
             power: PowerService::new(),
             network: NetworkService::new(),
+            bluetooth: BluetoothService::new(),
             audio: AudioService::new(),
             session: SessionService::new(),
         }
@@ -443,5 +710,32 @@ mod tests {
         let clock = local_clock_hhmm();
         assert_eq!(clock.len(), 5);
         assert_eq!(clock.as_bytes().get(2), Some(&b':'));
+    }
+
+    #[test]
+    fn networkmanager_and_bluetooth_formatters_handle_all_states() {
+        let wifi = format_nm_network_status("802-11-wireless", Some("Studio5G".to_owned()));
+        assert!(wifi.connected);
+        assert_eq!(wifi.wifi_ssid.as_deref(), Some("Studio5G"));
+        assert_eq!(wifi.status_label, "Wi-Fi: Studio5G");
+
+        let eth = format_nm_network_status("802-3-ethernet", None);
+        assert!(eth.connected);
+        assert_eq!(eth.wifi_ssid, None);
+        assert_eq!(eth.status_label, "Ethernet Connected");
+
+        assert_eq!(
+            format_bluetooth_label(false, false, None),
+            "BT: Unavailable"
+        );
+        assert_eq!(format_bluetooth_label(true, false, None), "BT: Off");
+        assert_eq!(format_bluetooth_label(true, true, None), "BT: On");
+        assert_eq!(
+            format_bluetooth_label(true, true, Some("AirPods")),
+            "BT: AirPods"
+        );
+
+        let bt = BluetoothService::new().query_status();
+        assert_ne!(bt.status_label, "");
     }
 }

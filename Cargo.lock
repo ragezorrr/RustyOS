@@ -1684,6 +1684,9 @@ version = "0.1.0"
 [[package]]
 name = "rusty-services"
 version = "0.1.0"
+dependencies = [
+ "zbus",
+]
 
 [[package]]
 name = "rusty-shell"

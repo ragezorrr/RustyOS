@@ -12,7 +12,9 @@ use std::sync::{
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use rusty_services::{AudioStatus, NetworkStatus, PowerStatus, ServiceRegistry, local_clock_hhmm};
+use rusty_services::{
+    AudioStatus, BluetoothStatus, NetworkStatus, PowerStatus, ServiceRegistry, local_clock_hhmm,
+};
 
 const POLL_INTERVAL: Duration = Duration::from_secs(3);
 
@@ -23,6 +25,8 @@ pub struct SystemTelemetry {
     pub power: PowerStatus,
     /// Network connectivity and SSID / interface status.
     pub network: NetworkStatus,
+    /// Bluetooth adapter & connected-device status (`RUSTYOS-027`).
+    pub bluetooth: BluetoothStatus,
     /// Output volume percentage and mute flag.
     pub audio: AudioStatus,
     /// Local wall-clock time formatted as `HH:MM`.
@@ -34,6 +38,7 @@ impl Default for SystemTelemetry {
         Self {
             power: PowerStatus::default(),
             network: NetworkStatus::default(),
+            bluetooth: BluetoothStatus::default(),
             audio: AudioStatus::default(),
             clock_hhmm: "12:00".to_owned(),
         }
@@ -45,6 +50,7 @@ enum TelemetryCmd {
     RefreshNow,
     SetVolume(u8),
     ToggleMute,
+    SetBluetoothPowered(bool),
 }
 
 struct SharedState {
@@ -164,6 +170,29 @@ impl SystemMetricsHandle {
         self.push_cmd(TelemetryCmd::ToggleMute);
     }
 
+    /// Toggles Bluetooth adapter power optimistically and applies via BlueZ asynchronously (`RUSTYOS-027`).
+    pub fn toggle_bluetooth(&self) {
+        let next_powered = if let Ok(mut guard) = self.shared.latest.lock() {
+            let next = !guard.bluetooth.powered;
+            if guard.bluetooth.available {
+                guard.bluetooth.powered = next;
+                guard.bluetooth.status_label = rusty_services::format_bluetooth_label(
+                    true,
+                    next,
+                    guard.bluetooth.connected_device.as_deref(),
+                );
+                Some(next)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        if let Some(enabled) = next_powered {
+            self.push_cmd(TelemetryCmd::SetBluetoothPowered(enabled));
+        }
+    }
+
     fn push_cmd(&self, cmd: TelemetryCmd) {
         if let Ok(mut q) = self.shared.queue.lock() {
             q.push_back(cmd);
@@ -176,6 +205,7 @@ fn poll_once(services: &ServiceRegistry) -> SystemTelemetry {
     SystemTelemetry {
         power: services.power.query_status(),
         network: services.network.query_status(),
+        bluetooth: services.bluetooth.query_status(),
         audio: services.audio.query_status(),
         clock_hhmm: local_clock_hhmm(),
     }
@@ -218,6 +248,9 @@ fn telemetry_worker_loop(shared: &SharedState) {
                 TelemetryCmd::ToggleMute => {
                     let _ = services.audio.toggle_mute();
                 }
+                TelemetryCmd::SetBluetoothPowered(enabled) => {
+                    let _ = services.bluetooth.set_powered(enabled);
+                }
             }
         }
 
@@ -249,5 +282,19 @@ mod tests {
         handle.step_volume(-30);
         assert_eq!(handle.snapshot().audio.volume_percent, 70);
         assert!(handle.snapshot().audio.muted);
+
+        let initial_bt = SystemTelemetry {
+            bluetooth: BluetoothStatus {
+                available: true,
+                powered: false,
+                connected_device: None,
+                status_label: "BT: Off".to_owned(),
+            },
+            ..SystemTelemetry::default()
+        };
+        let bt_handle = SystemMetricsHandle::with_initial(initial_bt);
+        bt_handle.toggle_bluetooth();
+        assert!(bt_handle.snapshot().bluetooth.powered);
+        assert_eq!(bt_handle.snapshot().bluetooth.status_label, "BT: On");
     }
 }
