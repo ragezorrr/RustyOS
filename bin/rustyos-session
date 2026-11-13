@@ -1,20 +1,24 @@
 #!/bin/sh
 # RustyOS Desktop Session Entry Point (`RUSTYOS-014`, ADR-0009)
+set -eu
 
 export XDG_CURRENT_DESKTOP=RustyOS
 export XDG_SESSION_DESKTOP=RustyOS
 export XDG_SESSION_TYPE=wayland
 
-# Find bin directory (relative or installed in PATH)
+# Find bin directory (relative, PATH, or local cargo build)
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SHELL_BIN=""
 if [ -x "$SCRIPT_DIR/rusty-compositor" ]; then
     COMPOSITOR_BIN="$SCRIPT_DIR/rusty-compositor"
     SHELL_BIN="$SCRIPT_DIR/rusty-shell"
 elif command -v rusty-compositor >/dev/null 2>&1; then
     COMPOSITOR_BIN="$(command -v rusty-compositor)"
-    SHELL_BIN="$(command -v rusty-shell)"
+    SHELL_BIN="$(command -v rusty-shell 2>/dev/null || true)"
+elif [ -x "$SCRIPT_DIR/../target/release/rusty-compositor" ]; then
+    COMPOSITOR_BIN="$SCRIPT_DIR/../target/release/rusty-compositor"
+    SHELL_BIN="$SCRIPT_DIR/../target/release/rusty-shell"
 else
-    # Fallback to local cargo debug build
     COMPOSITOR_BIN="$SCRIPT_DIR/../target/debug/rusty-compositor"
     SHELL_BIN="$SCRIPT_DIR/../target/debug/rusty-shell"
 fi
@@ -24,10 +28,34 @@ if [ ! -x "$COMPOSITOR_BIN" ]; then
     exit 1
 fi
 
-BACKEND_FLAG="--winit"
-if [ "$1" = "--drm" ] || [ -z "$WAYLAND_DISPLAY" -a -z "$DISPLAY" ]; then
-    BACKEND_FLAG="--drm"
+BACKEND_FLAG=""
+case "${1:-}" in
+    --drm|--kms|--winit|--nested|--drm-probe|--check)
+        BACKEND_FLAG="$1"
+        shift
+        ;;
+esac
+
+if [ -z "$BACKEND_FLAG" ]; then
+    if [ -z "${WAYLAND_DISPLAY:-}" ] && [ -z "${DISPLAY:-}" ]; then
+        BACKEND_FLAG="--drm"
+    else
+        BACKEND_FLAG="--winit"
+    fi
+fi
+
+# Sync session desktop variables into systemd/D-Bus user environment only for standalone sessions.
+if [ "$BACKEND_FLAG" = "--drm" ] || [ "$BACKEND_FLAG" = "--kms" ]; then
+    if command -v dbus-update-activation-environment >/dev/null 2>&1; then
+        dbus-update-activation-environment --systemd \
+            XDG_CURRENT_DESKTOP XDG_SESSION_DESKTOP XDG_SESSION_TYPE \
+            >/dev/null 2>&1 || true
+    fi
 fi
 
 echo "Starting RustyOS Desktop Session (Backend: $BACKEND_FLAG)..."
-exec "$COMPOSITOR_BIN" "$BACKEND_FLAG" --spawn "$SHELL_BIN" "$@"
+if [ "$BACKEND_FLAG" != "--check" ] && [ "$BACKEND_FLAG" != "--drm-probe" ] \
+    && [ -n "$SHELL_BIN" ] && [ -x "$SHELL_BIN" ]; then
+    exec "$COMPOSITOR_BIN" "$BACKEND_FLAG" --spawn "$SHELL_BIN" "$@"
+fi
+exec "$COMPOSITOR_BIN" "$BACKEND_FLAG" "$@"
