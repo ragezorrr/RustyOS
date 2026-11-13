@@ -6,6 +6,7 @@
 pub mod auth;
 pub mod logind;
 pub mod polkit;
+pub mod portal;
 
 pub use auth::{
     AsyncAuthHandle, AuthCheckResult, AuthOutcome, SecretText, is_valid_unix_username,
@@ -15,6 +16,19 @@ pub use logind::{LogindEvent, LogindMonitorHandle, notify_session_locked_hint};
 pub use polkit::{
     HelperLine, PolkitAgentError, PolkitAgentHandle, PolkitEvent, PolkitPromptRequest,
     PolkitUserReply, parse_helper_line,
+};
+pub use portal::{
+    PIPEWIRE_FRAME_MAGIC, PIPEWIRE_MAX_DIM, PIPEWIRE_MIN_DIM, PORTAL_DBUS_NAME, PORTAL_OBJECT_PATH,
+    PORTAL_RESPONSE_CANCELLED, PORTAL_RESPONSE_OK, PORTAL_RESPONSE_OTHER, PipeWireStreamConfig,
+    PipeWireStreamHandle, PortalDesktopSnapshot, PortalEvent, PortalHandle, PortalOutputInfo,
+    PortalPromptKind, PortalPromptRequest, PortalReply, PortalReplySender, PortalSelection,
+    PortalStreamDescriptor, PortalWindowInfo, SCREENCAST_AVAILABLE_CURSOR_MODES,
+    SCREENCAST_AVAILABLE_SOURCE_TYPES, SCREENCAST_CURSOR_EMBEDDED, SCREENCAST_CURSOR_HIDDEN,
+    SCREENCAST_SOURCE_MONITOR, SCREENCAST_SOURCE_WINDOW, SCREENSHOT_AVAILABLE_TARGETS,
+    SCREENSHOT_TARGET_ACTIVE_WINDOW, SCREENSHOT_TARGET_AREA, SCREENSHOT_TARGET_SCREEN,
+    SCREENSHOT_TARGET_WINDOW, WorkerStatusLine, encode_pipewire_frame_header,
+    encode_screencast_streams_value, parse_worker_line, path_to_file_uri,
+    resolve_pipewire_helper_path, rgba_pixel_to_portal_color, sanitize_portal_text,
 };
 
 use std::fs;

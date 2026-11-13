@@ -93,6 +93,7 @@ pub fn run_nested_winit(config: &CompositorConfig) -> Result<BootstrapReport, Co
     let mut damage_tracker = OutputDamageTracker::from_output(&state.output);
     let mut text_cache = crate::text::TextCache::new();
     let mut shape_cache = crate::surfaces::UiShapeCache::new();
+    let mut portal_capture_cache = crate::screenshot::OffscreenCaptureBuffer::default();
     let loop_handle = event_loop.handle();
     let _xwayland_started = crate::xwayland::spawn_xwayland_source(&display.handle(), &loop_handle);
 
@@ -143,6 +144,7 @@ pub fn run_nested_winit(config: &CompositorConfig) -> Result<BootstrapReport, Co
                     &mut damage_tracker,
                     &mut text_cache,
                     &mut shape_cache,
+                    &mut portal_capture_cache,
                     app_state,
                     force_full_damage,
                     rendered_frames,
@@ -953,8 +955,37 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
                 },
             );
 
+        let portal_rows: Vec<crate::shell_render::PortalSourceRow<'_>> = state
+            .portal_prompt
+            .as_ref()
+            .map(|p| {
+                p.candidates
+                    .iter()
+                    .map(|c| crate::shell_render::PortalSourceRow {
+                        label: &c.label,
+                        detail: &c.detail,
+                        is_window: c.is_window,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let portal_view =
+            state
+                .portal_prompt
+                .as_ref()
+                .map(|p| crate::shell_render::PortalPromptRenderState {
+                    app_id: &p.app_id,
+                    is_screencast: p.is_screencast,
+                    include_cursor: p.include_cursor,
+                    cursor_mode_editable: p.cursor_mode_editable,
+                    rows: &portal_rows,
+                    selected: p.selected,
+                });
+
         let overlay = if let Some(pk) = polkit_view.as_ref() {
             crate::shell_render::ShellOverlayView::Polkit(pk)
+        } else if let Some(pt) = portal_view.as_ref() {
+            crate::shell_render::ShellOverlayView::Portal(pt)
         } else if let Some(sw) = switcher_view.as_ref() {
             crate::shell_render::ShellOverlayView::Switcher(sw)
         } else if let Some(spot) = spotlight_view.as_ref() {
@@ -963,6 +994,8 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
             crate::shell_render::ShellOverlayView::QuickSettings(qs)
         } else if let Some(ov) = ov_view.as_ref() {
             crate::shell_render::ShellOverlayView::Overview(ov)
+        } else if let Some(pick) = state.portal_pick_color.as_ref() {
+            crate::shell_render::ShellOverlayView::PickColor(&pick.app_id)
         } else {
             crate::shell_render::ShellOverlayView::None
         };
@@ -1160,12 +1193,228 @@ pub(crate) fn process_pending_screenshot(
     }
 }
 
-#[allow(clippy::too_many_lines)]
+/// Executes pending XDG Portal screenshots, `PickColor` samples, and paced PipeWire `ScreenCast` frames (`RUSTYOS-057`).
+pub(crate) fn process_portal_captures_and_streams(
+    renderer: &mut GlesRenderer,
+    text_cache: &mut crate::text::TextCache,
+    shape_cache: &mut crate::surfaces::UiShapeCache,
+    capture_cache: &mut crate::screenshot::OffscreenCaptureBuffer,
+    state: &mut RustyCompositorState,
+) {
+    if state.is_session_locked() {
+        return;
+    }
+
+    if let Some(pending) = state.pending_portal_capture.take() {
+        match pending {
+            crate::state::PendingPortalCapture::Screenshot {
+                request_id,
+                target,
+                output_id,
+                window_id,
+            } => capture_portal_screenshot(
+                renderer,
+                text_cache,
+                shape_cache,
+                capture_cache,
+                state,
+                request_id,
+                target,
+                output_id,
+                window_id,
+            ),
+            crate::state::PendingPortalCapture::PickColorSample {
+                request_id,
+                pointer_global,
+            } => capture_portal_pick_color(
+                renderer,
+                text_cache,
+                shape_cache,
+                capture_cache,
+                state,
+                request_id,
+                pointer_global,
+            ),
+        }
+    }
+
+    pump_active_screencasts(renderer, text_cache, shape_cache, capture_cache, state);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn capture_portal_screenshot(
+    renderer: &mut GlesRenderer,
+    text_cache: &mut crate::text::TextCache,
+    shape_cache: &mut crate::surfaces::UiShapeCache,
+    capture_cache: &mut crate::screenshot::OffscreenCaptureBuffer,
+    state: &mut RustyCompositorState,
+    request_id: u64,
+    target: u32,
+    output_id: Option<rusty_wm::OutputId>,
+    window_id: Option<rusty_wm::WindowId>,
+) {
+    let cap_target = if let Some(wid) = window_id
+        && state.wm.window(wid).is_some()
+    {
+        crate::state::ScreencastCaptureTarget::Window(wid)
+    } else if let Some(oid) = output_id
+        && state.output_map.get(oid).is_some()
+    {
+        crate::state::ScreencastCaptureTarget::Output(oid)
+    } else if (target & rusty_services::SCREENSHOT_TARGET_WINDOW) != 0
+        && let Some(fid) = state.wm.focused_window()
+    {
+        crate::state::ScreencastCaptureTarget::Window(fid)
+    } else {
+        crate::state::ScreencastCaptureTarget::Output(state.output_map.primary().id)
+    };
+
+    let resolved = state.resolve_portal_capture_target(cap_target);
+    let snap_list = build_frame_render_list_for_output_with_cursor(
+        renderer,
+        text_cache,
+        shape_cache,
+        state,
+        resolved.output_id,
+        resolved.capture_size,
+        CursorRenderMode::None,
+    );
+    match capture_cache.capture_rgba(
+        renderer,
+        &snap_list,
+        resolved.capture_size,
+        resolved.output_scale,
+        resolved.crop,
+    ) {
+        Ok((width, height, rgba)) => {
+            crate::screenshot::spawn_save_portal_screenshot(
+                request_id,
+                width,
+                height,
+                rgba,
+                state.socket_name.clone(),
+                state.portal.reply_sender(),
+            );
+        }
+        Err(err) => {
+            state
+                .portal
+                .send_reply(rusty_services::PortalReply::ScreenshotResult {
+                    request_id,
+                    result: Err(err),
+                });
+        }
+    }
+}
+
+fn capture_portal_pick_color(
+    renderer: &mut GlesRenderer,
+    text_cache: &mut crate::text::TextCache,
+    shape_cache: &mut crate::surfaces::UiShapeCache,
+    capture_cache: &mut crate::screenshot::OffscreenCaptureBuffer,
+    state: &mut RustyCompositorState,
+    request_id: u64,
+    pointer_global: smithay::utils::Point<f64, smithay::utils::Logical>,
+) {
+    let out_id = state
+        .output_under(pointer_global)
+        .unwrap_or_else(|| state.output_map.primary().id);
+    let entry = state
+        .output_map
+        .get(out_id)
+        .cloned()
+        .unwrap_or_else(|| state.output_map.primary().clone());
+    let capture_size = entry.transformed_physical_size();
+    let snap_list = build_frame_render_list_for_output_with_cursor(
+        renderer,
+        text_cache,
+        shape_cache,
+        state,
+        entry.id,
+        capture_size,
+        CursorRenderMode::None,
+    );
+    let result =
+        match capture_cache.capture_rgba(renderer, &snap_list, capture_size, entry.scale, None) {
+            Ok((width, height, rgba)) => {
+                let local_x = pointer_global.x - f64::from(entry.location.x);
+                let local_y = pointer_global.y - f64::from(entry.location.y);
+                let (px, py) = crate::screenshot::logical_point_to_buffer_pixel(
+                    local_x,
+                    local_y,
+                    entry.scale,
+                    width,
+                    height,
+                );
+                crate::screenshot::sample_rgba_pixel(width, height, &rgba, px, py)
+            }
+            Err(err) => Err(err),
+        };
+    state
+        .portal
+        .send_reply(rusty_services::PortalReply::PickColorResult { request_id, result });
+}
+
+fn pump_active_screencasts(
+    renderer: &mut GlesRenderer,
+    text_cache: &mut crate::text::TextCache,
+    shape_cache: &mut crate::surfaces::UiShapeCache,
+    capture_cache: &mut crate::screenshot::OffscreenCaptureBuffer,
+    state: &mut RustyCompositorState,
+) {
+    let now = Instant::now();
+    let due: Vec<(usize, crate::state::ScreencastCaptureTarget, bool)> = state
+        .active_screencasts
+        .iter()
+        .enumerate()
+        .filter(|(_, sess)| {
+            let interval = Duration::from_secs_f64(1.0 / f64::from(sess.fps.clamp(15, 120)));
+            sess.stream.is_alive()
+                && (!sess.pushed_initial_frame
+                    || (sess.stream.is_consumer_active()
+                        && now.duration_since(sess.last_pushed_at) >= interval))
+        })
+        .map(|(idx, sess)| (idx, sess.target, sess.include_cursor))
+        .collect();
+
+    for (idx, target, include_cursor) in due {
+        let resolved = state.resolve_portal_capture_target(target);
+        let cursor_mode = if include_cursor {
+            CursorRenderMode::SoftwareComposited
+        } else {
+            CursorRenderMode::None
+        };
+        let render_list = build_frame_render_list_for_output_with_cursor(
+            renderer,
+            text_cache,
+            shape_cache,
+            state,
+            resolved.output_id,
+            resolved.capture_size,
+            cursor_mode,
+        );
+        if let Ok((width, height, rgba)) = capture_cache.capture_rgba(
+            renderer,
+            &render_list,
+            resolved.capture_size,
+            resolved.output_scale,
+            resolved.crop,
+        ) && let Some(sess) = state.active_screencasts.get_mut(idx)
+        {
+            let _ = sess.stream.push_frame(width, height, rgba);
+            sess.last_pushed_at = now;
+            sess.pushed_initial_frame = true;
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn render_winit_frame(
     backend: &mut WinitGraphicsBackend<GlesRenderer>,
     damage_tracker: &mut OutputDamageTracker,
     text_cache: &mut crate::text::TextCache,
     shape_cache: &mut crate::surfaces::UiShapeCache,
+    portal_capture_cache: &mut crate::screenshot::OffscreenCaptureBuffer,
     state: &mut RustyCompositorState,
     force_full_damage: bool,
     frame_seq: u64,
@@ -1187,6 +1436,17 @@ fn render_winit_frame(
         let snap_list =
             build_frame_render_list(renderer, text_cache, shape_cache, state, size, false);
         process_pending_screenshot(renderer, &snap_list, state, size);
+    }
+
+    if state.pending_portal_capture.is_some() || state.has_due_screencast_frame(Instant::now()) {
+        let renderer = backend.renderer();
+        process_portal_captures_and_streams(
+            renderer,
+            text_cache,
+            shape_cache,
+            portal_capture_cache,
+            state,
+        );
     }
 
     {

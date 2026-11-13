@@ -236,6 +236,15 @@
                           Screen, systemd-logind  
                           и Polkit Agent          
                           (ADR-0025)              
+  D-034                   Фаза 7/Portals          accepted
+                          (RUSTYOS-057): Нативный 
+                          XDG Desktop Portal      
+                          backend (Screenshot v3, 
+                          PickColor, ScreenCast   
+                          v6) и изолированный     
+                          PipeWire воркер         
+                          rusty-pipewire-stream   
+                          (ADR-0026)              
   -----------------------------------------------------------------------
 
 ## Открытые решения

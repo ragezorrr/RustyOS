@@ -6,10 +6,12 @@
 //! event loop never blocks on compression or disk I/O.
 
 use std::collections::VecDeque;
+use std::fmt;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -71,12 +73,104 @@ pub fn clamp_capture_region(
     Rectangle::new(Point::from((cx, cy)), Size::from((cw, ch)))
 }
 
+static SCREENSHOT_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Reusable offscreen GLES texture target avoiding per-frame allocations during `ScreenCast` streaming.
+#[derive(Default)]
+pub struct OffscreenCaptureBuffer {
+    cached: Option<(Size<i32, BufferCoord>, GlesTexture)>,
+}
+
+impl fmt::Debug for OffscreenCaptureBuffer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OffscreenCaptureBuffer")
+            .field("cached_size", &self.cached.as_ref().map(|(sz, _)| *sz))
+            .finish()
+    }
+}
+
+impl OffscreenCaptureBuffer {
+    /// Renders `elements` into a cached offscreen `GlesTexture` and copies `crop` (or full output)
+    /// as tightly packed opaque `RGBA8` bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error string if offscreen allocation, rendering, or GPU readback fails.
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn capture_rgba(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        elements: &[CompositorRenderElement],
+        output_size: Size<i32, Physical>,
+        output_scale: f64,
+        crop: Option<Rect>,
+    ) -> Result<(u32, u32, Vec<u8>), String> {
+        let scale = crate::config::clamp_display_scale(output_scale);
+        let phys_crop = crop.map(|r| {
+            Rect::new(
+                (f64::from(r.x) * scale).round() as i32,
+                (f64::from(r.y) * scale).round() as i32,
+                (f64::from(r.width) * scale).round() as i32,
+                (f64::from(r.height) * scale).round() as i32,
+            )
+        });
+        let buf_size = Size::<i32, BufferCoord>::from((output_size.w.max(1), output_size.h.max(1)));
+        let needs_alloc = self.cached.as_ref().is_none_or(|(sz, _)| *sz != buf_size);
+        if needs_alloc {
+            let tex: GlesTexture = renderer
+                .create_buffer(Fourcc::Abgr8888, buf_size)
+                .map_err(|err| format!("offscreen buffer allocation failed: {err}"))?;
+            self.cached = Some((buf_size, tex));
+        }
+
+        let Some((_, tex)) = self.cached.as_mut() else {
+            return Err("offscreen texture missing after allocation".to_owned());
+        };
+        {
+            let mut fb = renderer
+                .bind(tex)
+                .map_err(|err| format!("offscreen bind failed: {err}"))?;
+            let mut damage = OutputDamageTracker::new(output_size, scale, Transform::Normal);
+            damage
+                .render_output(renderer, &mut fb, 0, elements, BACKGROUND_COLOR)
+                .map_err(|err| format!("offscreen render_output failed: {err}"))?;
+        }
+
+        let region = clamp_capture_region(output_size, phys_crop);
+        let mapping = renderer
+            .copy_texture(tex, region, Fourcc::Abgr8888)
+            .map_err(|err| format!("GPU copy_texture failed: {err}"))?;
+        let bytes = renderer
+            .map_texture(&mapping)
+            .map_err(|err| format!("GPU map_texture failed: {err}"))?;
+
+        let width = u32::try_from(region.size.w).map_err(|_| "invalid capture width".to_owned())?;
+        let height =
+            u32::try_from(region.size.h).map_err(|_| "invalid capture height".to_owned())?;
+        let expected_len = usize::try_from(width)
+            .ok()
+            .and_then(|w| usize::try_from(height).ok().map(|h| w * h * 4))
+            .ok_or_else(|| "capture dimensions overflow".to_owned())?;
+        if bytes.len() < expected_len {
+            return Err(format!(
+                "mapped buffer too short ({} < {expected_len})",
+                bytes.len()
+            ));
+        }
+
+        let mut rgba = bytes[..expected_len].to_vec();
+        for px in rgba.as_chunks_mut::<4>().0 {
+            px[3] = 255;
+        }
+        Ok((width, height, rgba))
+    }
+}
+
 /// Renders `elements` into an offscreen `GlesTexture` and copies `crop` (or full output) as opaque RGBA bytes.
 ///
 /// # Errors
 ///
 /// Returns an error string if offscreen allocation, rendering, or GPU readback fails.
-#[allow(clippy::cast_possible_truncation)]
 pub fn capture_render_list_rgba(
     renderer: &mut GlesRenderer,
     elements: &[CompositorRenderElement],
@@ -84,55 +178,96 @@ pub fn capture_render_list_rgba(
     output_scale: f64,
     crop: Option<Rect>,
 ) -> Result<(u32, u32, Vec<u8>), String> {
+    let mut scratch = OffscreenCaptureBuffer::default();
+    scratch.capture_rgba(renderer, elements, output_size, output_scale, crop)
+}
+
+/// Encodes and writes an XDG Portal screenshot on a background thread and replies with a `file://` URI.
+pub fn spawn_save_portal_screenshot(
+    request_id: u64,
+    width: u32,
+    height: u32,
+    rgba: Vec<u8>,
+    wayland_socket: String,
+    portal: rusty_services::PortalReplySender,
+) {
+    let _ = thread::Builder::new()
+        .name("rustyos-portal-shot".to_owned())
+        .spawn(move || {
+            let result = encode_png_rgba(width, height, &rgba).and_then(|png_bytes| {
+                let path = unique_screenshot_path();
+                if let Some(parent) = path.parent() {
+                    fs::create_dir_all(parent)
+                        .map_err(|err| format!("failed to create {}: {err}", parent.display()))?;
+                }
+                fs::write(&path, &png_bytes)
+                    .map_err(|err| format!("failed to write {}: {err}", path.display()))?;
+                copy_png_to_clipboard(&png_bytes, &wayland_socket);
+                Ok(rusty_services::path_to_file_uri(&path))
+            });
+            portal.send_reply(rusty_services::PortalReply::ScreenshotResult { request_id, result });
+        });
+}
+
+/// Converts output-local logical coordinates into clamped physical buffer pixel coordinates.
+#[must_use]
+#[allow(clippy::cast_possible_truncation)]
+pub fn logical_point_to_buffer_pixel(
+    local_x: f64,
+    local_y: f64,
+    output_scale: f64,
+    width: u32,
+    height: u32,
+) -> (i32, i32) {
     let scale = crate::config::clamp_display_scale(output_scale);
-    let phys_crop = crop.map(|r| {
-        Rect::new(
-            (f64::from(r.x) * scale).round() as i32,
-            (f64::from(r.y) * scale).round() as i32,
-            (f64::from(r.width) * scale).round() as i32,
-            (f64::from(r.height) * scale).round() as i32,
-        )
-    });
-    let buf_size = Size::<i32, BufferCoord>::from((output_size.w.max(1), output_size.h.max(1)));
-    let mut tex: GlesTexture = renderer
-        .create_buffer(Fourcc::Abgr8888, buf_size)
-        .map_err(|err| format!("offscreen buffer allocation failed: {err}"))?;
-    {
-        let mut fb = renderer
-            .bind(&mut tex)
-            .map_err(|err| format!("offscreen bind failed: {err}"))?;
-        let mut damage = OutputDamageTracker::new(output_size, scale, Transform::Normal);
-        damage
-            .render_output(renderer, &mut fb, 0, elements, BACKGROUND_COLOR)
-            .map_err(|err| format!("offscreen render_output failed: {err}"))?;
+    let max_x = i32::try_from(width.saturating_sub(1)).unwrap_or(i32::MAX);
+    let max_y = i32::try_from(height.saturating_sub(1)).unwrap_or(i32::MAX);
+    let px = (local_x * scale).round() as i32;
+    let py = (local_y * scale).round() as i32;
+    (px.clamp(0, max_x), py.clamp(0, max_y))
+}
+
+/// Samples a single pixel from tightly packed `RGBA8` bytes and normalizes channels to `0.0..=1.0`.
+///
+/// # Errors
+///
+/// Returns an error string if dimensions are zero or the RGBA buffer is too small.
+pub fn sample_rgba_pixel(
+    width: u32,
+    height: u32,
+    rgba: &[u8],
+    x: i32,
+    y: i32,
+) -> Result<(f64, f64, f64), String> {
+    if width == 0 || height == 0 {
+        return Err("sample dimensions must be positive".to_owned());
     }
-
-    let region = clamp_capture_region(output_size, phys_crop);
-    let mapping = renderer
-        .copy_texture(&tex, region, Fourcc::Abgr8888)
-        .map_err(|err| format!("GPU copy_texture failed: {err}"))?;
-    let bytes = renderer
-        .map_texture(&mapping)
-        .map_err(|err| format!("GPU map_texture failed: {err}"))?;
-
-    let width = u32::try_from(region.size.w).map_err(|_| "invalid capture width".to_owned())?;
-    let height = u32::try_from(region.size.h).map_err(|_| "invalid capture height".to_owned())?;
-    let expected_len = usize::try_from(width)
-        .ok()
-        .and_then(|w| usize::try_from(height).ok().map(|h| w * h * 4))
-        .ok_or_else(|| "capture dimensions overflow".to_owned())?;
-    if bytes.len() < expected_len {
+    let w = usize::try_from(width).map_err(|_| "width overflow".to_owned())?;
+    let h = usize::try_from(height).map_err(|_| "height overflow".to_owned())?;
+    let expected_len = w
+        .checked_mul(h)
+        .and_then(|px| px.checked_mul(4))
+        .ok_or_else(|| "sample buffer size overflow".to_owned())?;
+    if rgba.len() < expected_len {
         return Err(format!(
-            "mapped buffer too short ({} < {expected_len})",
-            bytes.len()
+            "RGBA buffer too short for {}x{}: {} < {expected_len}",
+            width,
+            height,
+            rgba.len()
         ));
     }
-
-    let mut rgba = bytes[..expected_len].to_vec();
-    for px in rgba.as_chunks_mut::<4>().0 {
-        px[3] = 255;
-    }
-    Ok((width, height, rgba))
+    let max_x = i32::try_from(width - 1).unwrap_or(i32::MAX);
+    let max_y = i32::try_from(height - 1).unwrap_or(i32::MAX);
+    let cx = usize::try_from(x.clamp(0, max_x)).unwrap_or(0);
+    let cy = usize::try_from(y.clamp(0, max_y)).unwrap_or(0);
+    let offset = (cy * w + cx) * 4;
+    let pixel = [
+        rgba[offset],
+        rgba[offset + 1],
+        rgba[offset + 2],
+        rgba[offset + 3],
+    ];
+    Ok(rusty_services::rgba_pixel_to_portal_color(pixel))
 }
 
 /// Spawns PNG encoding, file writing, and Wayland clipboard copy (`wl-copy`) on a background thread.
@@ -184,6 +319,29 @@ fn copy_png_to_clipboard(png_bytes: &[u8], wayland_socket: &str) {
             let _ = stdin.write_all(png_bytes);
         }
         let _ = child.wait();
+    }
+}
+
+/// Computes a collision-free screenshot path (`~/Pictures/Screenshots/RustyOS_<ts>[_seq].png`).
+#[must_use]
+pub fn unique_screenshot_path() -> PathBuf {
+    let base = default_screenshot_path();
+    if !base.exists() {
+        return base;
+    }
+    let dir = base
+        .parent()
+        .map_or_else(std::env::temp_dir, Path::to_path_buf);
+    let stem = base
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("RustyOS");
+    loop {
+        let seq = SCREENSHOT_SEQ.fetch_add(1, Ordering::Relaxed) + 1;
+        let candidate = dir.join(format!("{stem}_{seq}.png"));
+        if !candidate.exists() {
+            return candidate;
+        }
     }
 }
 
@@ -387,5 +545,30 @@ mod tests {
         assert_eq!(cropped.loc.y, 700);
         assert_eq!(cropped.size.w, 180);
         assert_eq!(cropped.size.h, 100);
+    }
+
+    #[test]
+    fn samples_rgba_pixels_and_clamps_buffer_coordinates() -> Result<(), String> {
+        let rgba = vec![
+            255, 0, 0, 255, // (0, 0)
+            0, 255, 0, 255, // (1, 0)
+            0, 0, 255, 255, // (0, 1)
+            255, 128, 64, 255, // (1, 1)
+        ];
+        assert_eq!(sample_rgba_pixel(2, 2, &rgba, 0, 0)?, (1.0, 0.0, 0.0));
+        assert_eq!(
+            sample_rgba_pixel(2, 2, &rgba, 9, 9)?,
+            (1.0, 128.0 / 255.0, 64.0 / 255.0)
+        );
+        assert_eq!(
+            logical_point_to_buffer_pixel(100.0, 50.0, 2.0, 400, 400),
+            (200, 100)
+        );
+        assert_eq!(
+            logical_point_to_buffer_pixel(-5.0, 999.0, 1.5, 400, 400),
+            (0, 399)
+        );
+        assert!(is_png_path(&unique_screenshot_path()));
+        Ok(())
     }
 }

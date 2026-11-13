@@ -807,6 +807,19 @@ hardware/software context и низкие накладные расходы.
 - **Verification:** `cargo fmt --all --check` и `cargo clippy --workspace --all-targets --offline -- -D warnings` завершились с кодом 0 без предупреждений; 147/147 тестов workspace прошли без пропусков (`rusty_animation` 4/4, `rusty_compositor` 109/109, `rusty_ipc` 3/3, `rusty_services` 19/19, `rusty_shell` 5/5, `rusty_wm` 7/7); выполнены `cargo run -p rusty-compositor --offline -- --check` и живой smoke-запуск `cargo run -p rusty-compositor --offline -- --winit --max-frames 3` (Mesa Intel(R) Graphics RPL-U, выход с кодом 0).
 - **Risks:** Нулевые новые внешние зависимости и ноль `unsafe`; во вложенном `--winit` запуске под хост-сессией (KDE Plasma) регистрация системного Polkit-агента может быть отклонена `polkitd`, так как один PID/сессия уже владеет агентом на D-Bus (сквозная регистрация агента и реальный `pkexec`/sleep с TTY требуют проверки в standalone `--drm` сессии RustyOS).
 
+### RUSTYOS-057 — Native XDG Desktop Portal (`Screenshot` / `PickColor` / `ScreenCast`) & PipeWire Worker
+- **Status:** done
+- **Priority:** P1
+- **Phase:** Фаза 7 / Portals & Media Streaming
+- **Scope:**
+  - В `crates/rusty-services/c/rusty-pipewire-stream.c` и `crates/rusty-services/build.rs` реализован изолированный C11 PipeWire `Video/Source` воркер (`libpipewire-0.3`, `libspa-0.2`), принимающий `RPW1` кадры по `stdin`, выполняющий `pw_core_sync` до вывода `READY <node_id> <serial>` и отчитывающийся о `STATE streaming`/`paused`.
+  - В `crates/rusty-services/src/portal.rs` реализованы `PortalHandle`, `PipeWireStreamHandle`, `org.freedesktop.impl.portal.Screenshot` (v3: `Screenshot`, `PickColor`), `org.freedesktop.impl.portal.ScreenCast` (v6: `CreateSession`, `SelectSources`, `Start`), `Request` и `Session` на `zbus` 5 без блокировки композитора и с `unsafe_code = "deny"`.
+  - В `crates/rusty-compositor/src/{screenshot,state,shell_render,input,winit_backend,drm_backend}.rs` добавлены `OffscreenCaptureBuffer`, `unique_screenshot_path`, `sample_rgba_pixel`, Liquid Glass диалог выбора источника `ShellOverlayView::Portal` и пипетка `ShellOverlayView::PickColor`, принудительное отклонение и закрытие сессий при `is_session_locked()`, а также единая подача кадров из Winit и DRM/KMS бэкендов.
+  - Добавлены конфиги `packaging/portals/rustyos.portal` и `packaging/portals/rustyos-portals.conf`, интегрированные в `bin/rustyos-session` и `scripts/install.sh`.
+  - Оформлены `docs/adr/0026-xdg-desktop-portal-pipewire-screencast.md`, запись `D-034` в `DECISIONS.md` и задача `RUSTYOS-057` в `TASKS.md`.
+- **Verification:** `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --offline -- -D warnings`, `cargo test --workspace --offline` (158 passed, 0 failed: `rusty_animation` 4, `rusty_compositor` 113, `rusty_ipc` 3, `rusty_services` 26 — включая `portal::tests::resolves_and_streams_real_pipewire_worker_when_available`, `rusty_shell` 5, `rusty_wm` 7), `cargo run -p rusty-compositor --offline -- --check`, `cargo run -p rusty-compositor --offline -- --winit --max-frames 3` (rendered_frames=3, wayland-4), а также `sh -n bin/rustyos-session && bash -n scripts/install.sh`.
+- **Risks:** Ноль новых внешних Rust-зависимостей и ноль `unsafe`; при работе в PipeWire пока используется offscreen `GlesTexture` readback через канал в воркер вместо zero-copy DMA-BUF, а перехват D-Bus имени во вложенной `--winit` сессии возможен только при отсутствии стороннего активного `rustyos` portal provider; полноэкранная интеграция `xdg-desktop-portal` проверяется в standalone `--drm` сессии.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

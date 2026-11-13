@@ -290,6 +290,7 @@ struct DrmRuntime {
     hw_cursor_disabled: bool,
     text_cache: crate::text::TextCache,
     shape_cache: crate::surfaces::UiShapeCache,
+    portal_capture_cache: crate::screenshot::OffscreenCaptureBuffer,
     outputs: HashMap<crtc::Handle, DrmOutputState>,
     output_order: Vec<crtc::Handle>,
     paused: bool,
@@ -571,6 +572,19 @@ impl DrmRuntime {
         for out in self.outputs.values_mut() {
             out.needs_redraw = true;
         }
+    }
+
+    fn process_portal(&mut self, state: &mut RustyCompositorState) {
+        if !state.running || self.paused || state.is_session_locked() {
+            return;
+        }
+        crate::winit_backend::process_portal_captures_and_streams(
+            &mut self.renderer,
+            &mut self.text_cache,
+            &mut self.shape_cache,
+            &mut self.portal_capture_cache,
+            state,
+        );
     }
 
     fn mark_outputs_dirty(&mut self, output_ids: &[rusty_wm::OutputId]) {
@@ -1220,6 +1234,7 @@ fn try_run_native_drm_session(
         hw_cursor_disabled,
         text_cache: crate::text::TextCache::new(),
         shape_cache: crate::surfaces::UiShapeCache::new(),
+        portal_capture_cache: crate::screenshot::OffscreenCaptureBuffer::default(),
         outputs,
         output_order,
         paused: false,
@@ -1427,6 +1442,11 @@ fn try_run_native_drm_session(
                 let mut rt = rt_dispatch.borrow_mut();
                 rt.mark_all_dirty();
                 rt.render_ready_outputs(app_state, false);
+            }
+            if app_state.pending_portal_capture.is_some()
+                || app_state.has_due_screencast_frame(Instant::now())
+            {
+                rt_dispatch.borrow_mut().process_portal(app_state);
             }
         })
         .map_err(|err| CompositorError::EventLoop(err.to_string()))?;

@@ -44,12 +44,27 @@ if [ -z "$BACKEND_FLAG" ]; then
     fi
 fi
 
+# Discover XDG Desktop Portal configuration cleanly (system, ~/.local user install, or source tree)
+if [ -z "${XDG_DESKTOP_PORTAL_DIR:-}" ]; then
+    USER_PORTAL_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/xdg-desktop-portal/portals"
+    if [ -f "$USER_PORTAL_DIR/rustyos.portal" ]; then
+        export XDG_DESKTOP_PORTAL_DIR="$USER_PORTAL_DIR"
+    elif [ ! -f /usr/share/xdg-desktop-portal/portals/rustyos.portal ] \
+        && [ -f "$SCRIPT_DIR/../packaging/portals/rustyos.portal" ]; then
+        export XDG_DESKTOP_PORTAL_DIR="$SCRIPT_DIR/../packaging/portals"
+    fi
+fi
+
 # Sync session desktop variables into systemd/D-Bus user environment only for standalone sessions.
 if [ "$BACKEND_FLAG" = "--drm" ] || [ "$BACKEND_FLAG" = "--kms" ]; then
     if command -v dbus-update-activation-environment >/dev/null 2>&1; then
         dbus-update-activation-environment --systemd \
             XDG_CURRENT_DESKTOP XDG_SESSION_DESKTOP XDG_SESSION_TYPE \
+            ${XDG_DESKTOP_PORTAL_DIR:+XDG_DESKTOP_PORTAL_DIR} \
             >/dev/null 2>&1 || true
+    fi
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl --user try-restart xdg-desktop-portal.service >/dev/null 2>&1 || true
     fi
 fi
 

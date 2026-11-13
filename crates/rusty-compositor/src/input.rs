@@ -32,6 +32,17 @@ use tracing::info;
 
 use crate::state::RustyCompositorState;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PortalKeyAction {
+    PrevSource,
+    NextSource,
+    ToggleCursor,
+    Accept,
+    Cancel,
+    PickColorCancel,
+    Consume,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SecurityKeyAction {
     LockSubmit,
@@ -62,6 +73,7 @@ enum KeyIntercept {
     LockSelectDelta(i8),
     LockScreenConsume,
     Security(SecurityKeyAction),
+    Portal(PortalKeyAction),
     QuickSettingsClose,
     TopBarMenuClose,
     LauncherClose,
@@ -269,6 +281,9 @@ impl RustyCompositorState {
             | KeyIntercept::SwitcherConsume => {}
             KeyIntercept::Security(action) => {
                 self.dispatch_security_key_intercept(action, serial);
+            }
+            KeyIntercept::Portal(action) => {
+                self.dispatch_portal_key_intercept(action, serial);
             }
             KeyIntercept::QuickSettingsClose => {
                 self.close_quick_settings();
@@ -509,7 +524,11 @@ impl RustyCompositorState {
             self.wm.set_focused_output(out_id);
         }
 
-        if self.ext_session_locked || self.screen_locked || self.polkit_prompt.is_some() {
+        if self.ext_session_locked
+            || self.screen_locked
+            || self.polkit_prompt.is_some()
+            || self.portal_prompt.is_some()
+        {
             self.clear_shell_hover_states();
             let under = if self.ext_session_locked {
                 self.ext_lock_surface_under(pos)
@@ -1054,6 +1073,21 @@ impl RustyCompositorState {
                 return;
             }
 
+            if self.portal_prompt.is_some() {
+                let output_phys = self
+                    .space
+                    .output_geometry(&self.output)
+                    .map_or_else(|| Size::from((1280, 800)), |geo| geo.size)
+                    .to_physical(1);
+                self.handle_portal_pointer_click(output_phys, serial);
+                return;
+            }
+
+            if self.portal_pick_color.is_some() {
+                self.trigger_pick_color_sample(self.pointer_location);
+                return;
+            }
+
             let output_width = self
                 .space
                 .output_geometry(&self.output)
@@ -1324,7 +1358,7 @@ impl RustyCompositorState {
     }
 
     fn handle_gesture_swipe_begin<B: InputBackend>(&mut self, event: &B::GestureSwipeBeginEvent) {
-        if self.screen_locked || self.polkit_prompt.is_some() {
+        if self.screen_locked || self.polkit_prompt.is_some() || self.portal_prompt.is_some() {
             self.touchpad_swipe = crate::state::TouchpadSwipeState::default();
             return;
         }
@@ -1344,7 +1378,7 @@ impl RustyCompositorState {
     }
 
     fn handle_gesture_swipe_update<B: InputBackend>(&mut self, event: &B::GestureSwipeUpdateEvent) {
-        if self.screen_locked || self.polkit_prompt.is_some() {
+        if self.screen_locked || self.polkit_prompt.is_some() || self.portal_prompt.is_some() {
             return;
         }
         let delta = GestureSwipeUpdateEvent::delta(event);
@@ -1362,7 +1396,7 @@ impl RustyCompositorState {
     }
 
     fn handle_gesture_swipe_end<B: InputBackend>(&mut self, event: &B::GestureSwipeEndEvent) {
-        if self.screen_locked || self.polkit_prompt.is_some() {
+        if self.screen_locked || self.polkit_prompt.is_some() || self.portal_prompt.is_some() {
             self.touchpad_swipe = crate::state::TouchpadSwipeState::default();
             return;
         }
@@ -1383,7 +1417,7 @@ impl RustyCompositorState {
     }
 
     fn handle_gesture_pinch_begin<B: InputBackend>(&mut self, event: &B::GesturePinchBeginEvent) {
-        if self.screen_locked || self.polkit_prompt.is_some() {
+        if self.screen_locked || self.polkit_prompt.is_some() || self.portal_prompt.is_some() {
             return;
         }
         let pointer = self.pointer.clone();
@@ -1398,7 +1432,7 @@ impl RustyCompositorState {
     }
 
     fn handle_gesture_pinch_update<B: InputBackend>(&mut self, event: &B::GesturePinchUpdateEvent) {
-        if self.screen_locked || self.polkit_prompt.is_some() {
+        if self.screen_locked || self.polkit_prompt.is_some() || self.portal_prompt.is_some() {
             return;
         }
         let pointer = self.pointer.clone();
@@ -1414,7 +1448,7 @@ impl RustyCompositorState {
     }
 
     fn handle_gesture_pinch_end<B: InputBackend>(&mut self, event: &B::GesturePinchEndEvent) {
-        if self.screen_locked || self.polkit_prompt.is_some() {
+        if self.screen_locked || self.polkit_prompt.is_some() || self.portal_prompt.is_some() {
             return;
         }
         let pointer = self.pointer.clone();
@@ -1429,7 +1463,7 @@ impl RustyCompositorState {
     }
 
     fn handle_gesture_hold_begin<B: InputBackend>(&mut self, event: &B::GestureHoldBeginEvent) {
-        if self.screen_locked || self.polkit_prompt.is_some() {
+        if self.screen_locked || self.polkit_prompt.is_some() || self.portal_prompt.is_some() {
             return;
         }
         let pointer = self.pointer.clone();
@@ -1444,7 +1478,7 @@ impl RustyCompositorState {
     }
 
     fn handle_gesture_hold_end<B: InputBackend>(&mut self, event: &B::GestureHoldEndEvent) {
-        if self.screen_locked || self.polkit_prompt.is_some() {
+        if self.screen_locked || self.polkit_prompt.is_some() || self.portal_prompt.is_some() {
             return;
         }
         let pointer = self.pointer.clone();
@@ -1491,6 +1525,18 @@ fn classify_keyboard_input(
             return FilterResult::Intercept(KeyIntercept::Security(SecurityKeyAction::Consume));
         }
         return FilterResult::Intercept(match_polkit_key(modifiers, sym, utf8));
+    }
+    if state.portal_prompt.is_some() {
+        if key_state != KeyState::Pressed {
+            return FilterResult::Intercept(KeyIntercept::Portal(PortalKeyAction::Consume));
+        }
+        return FilterResult::Intercept(match_portal_key(modifiers, sym));
+    }
+    if state.portal_pick_color.is_some() {
+        if key_state == KeyState::Pressed && sym.raw() == Keysym::Escape.raw() {
+            return FilterResult::Intercept(KeyIntercept::Portal(PortalKeyAction::PickColorCancel));
+        }
+        return FilterResult::Intercept(KeyIntercept::Portal(PortalKeyAction::Consume));
     }
     if shortcuts_inhibited && !state.has_blocking_shell_overlay() {
         if key_state == KeyState::Pressed && modifiers.logo && sym.raw() == Keysym::Escape.raw() {
@@ -1759,6 +1805,23 @@ fn match_polkit_key(modifiers: ModifiersState, sym: Keysym, utf8: Option<&str>) 
     KeyIntercept::Security(SecurityKeyAction::Consume)
 }
 
+fn match_portal_key(modifiers: ModifiersState, sym: Keysym) -> KeyIntercept {
+    if modifiers.ctrl && modifiers.alt && sym.raw() == Keysym::BackSpace.raw() {
+        return KeyIntercept::ExitCompositor;
+    }
+    let action = match sym {
+        Keysym::Escape => PortalKeyAction::Cancel,
+        Keysym::Return | Keysym::KP_Enter => PortalKeyAction::Accept,
+        Keysym::Up | Keysym::KP_Up | Keysym::Left | Keysym::KP_Left => PortalKeyAction::PrevSource,
+        Keysym::Down | Keysym::KP_Down | Keysym::Right | Keysym::KP_Right | Keysym::Tab => {
+            PortalKeyAction::NextSource
+        }
+        Keysym::space | Keysym::c | Keysym::C => PortalKeyAction::ToggleCursor,
+        _ => PortalKeyAction::Consume,
+    };
+    KeyIntercept::Portal(action)
+}
+
 fn match_lock_screen_key(
     require_password: bool,
     modifiers: ModifiersState,
@@ -1871,6 +1934,54 @@ impl crate::state::RustyCompositorState {
             crate::shell_render::PolkitHit::Cancel => self.cancel_polkit_prompt(serial),
             crate::shell_render::PolkitHit::PasswordField
             | crate::shell_render::PolkitHit::Outside => {}
+        }
+    }
+
+    fn dispatch_portal_key_intercept(
+        &mut self,
+        action: PortalKeyAction,
+        serial: smithay::utils::Serial,
+    ) {
+        match action {
+            PortalKeyAction::PrevSource => self.move_portal_selection(-1),
+            PortalKeyAction::NextSource => self.move_portal_selection(1),
+            PortalKeyAction::ToggleCursor => self.toggle_portal_include_cursor(),
+            PortalKeyAction::Accept => self.accept_portal_prompt(serial),
+            PortalKeyAction::Cancel => self.cancel_portal_prompt(serial),
+            PortalKeyAction::PickColorCancel => self.cancel_portal_pick_color(),
+            PortalKeyAction::Consume => {}
+        }
+    }
+
+    pub(crate) fn handle_portal_pointer_click(
+        &mut self,
+        output_phys: Size<i32, smithay::utils::Physical>,
+        serial: smithay::utils::Serial,
+    ) {
+        let Some(prompt) = self.portal_prompt.as_ref() else {
+            return;
+        };
+        let hit = crate::shell_render::hit_test_portal_dialog(
+            output_phys,
+            prompt.candidates.len(),
+            prompt.selected,
+            prompt.is_screencast && prompt.cursor_mode_editable,
+            self.pointer_location.x,
+            self.pointer_location.y,
+        );
+        match hit {
+            crate::shell_render::PortalHit::Row(idx) => {
+                if let Some(p) = self.portal_prompt.as_mut()
+                    && idx < p.candidates.len()
+                {
+                    p.selected = idx;
+                    self.shell_redraw_needed = true;
+                }
+            }
+            crate::shell_render::PortalHit::CursorToggle => self.toggle_portal_include_cursor(),
+            crate::shell_render::PortalHit::Accept => self.accept_portal_prompt(serial),
+            crate::shell_render::PortalHit::Cancel => self.cancel_portal_prompt(serial),
+            crate::shell_render::PortalHit::Outside => {}
         }
     }
 
@@ -3250,6 +3361,227 @@ mod tests {
             }
         }
 
+        Ok(())
+    }
+
+    fn sample_screencast_prompt_event(
+        request_id: u64,
+        app_id: &str,
+        allowed_types: u32,
+        persist_mode: u32,
+    ) -> rusty_services::PortalEvent {
+        rusty_services::PortalEvent::ShowPrompt(rusty_services::PortalPromptRequest {
+            request_id,
+            request_handle: format!("/org/freedesktop/portal/desktop/request/{request_id}"),
+            app_id: app_id.to_owned(),
+            parent_window: String::new(),
+            kind: rusty_services::PortalPromptKind::ScreenCast {
+                session_handle: format!("/org/freedesktop/portal/desktop/session/{request_id}"),
+                allowed_types,
+                multiple: false,
+                cursor_mode: rusty_services::SCREENCAST_CURSOR_HIDDEN,
+                persist_mode,
+                restored_target: None,
+            },
+        })
+    }
+
+    #[test]
+    fn portal_prompt_screencast_flow_and_lock_isolation() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let mut display: smithay::reexports::wayland_server::Display<RustyCompositorState> =
+            smithay::reexports::wayland_server::Display::new()?;
+        let event_loop: smithay::reexports::calloop::EventLoop<RustyCompositorState> =
+            smithay::reexports::calloop::EventLoop::try_new()?;
+        let mut compositor = RustyCompositorState::new(
+            &display,
+            "rusty-test-portal-ui".to_owned(),
+            event_loop.get_signal(),
+            event_loop.handle(),
+            (1280, 800).into(),
+        )?;
+        let (ev_tx, ev_rx) = std::sync::mpsc::channel();
+        let (rep_tx, rep_rx) = std::sync::mpsc::channel();
+        compositor.portal = rusty_services::PortalHandle::with_test_channels_and_replies(
+            ev_tx.clone(),
+            ev_rx,
+            Some(rep_tx),
+        );
+        let serial = SERIAL_COUNTER.next_serial();
+
+        // 1. Lock Screen immediately denies portal prompts.
+        compositor.set_screen_locked(true, serial);
+        ev_tx.send(sample_screencast_prompt_event(
+            10,
+            "obs",
+            rusty_services::SCREENCAST_SOURCE_MONITOR,
+            0,
+        ))?;
+        compositor.drain_system_integration_events(serial);
+        assert!(compositor.portal_prompt.is_none());
+        assert!(matches!(
+            rep_rx.try_recv()?,
+            rusty_services::PortalReply::PromptDecision {
+                request_id: 10,
+                accepted: false,
+                selection: None
+            }
+        ));
+
+        // 2. Unlocked: ScreenCast prompt accepts keyboard cursor toggle + Return approval.
+        compositor.set_screen_locked(false, serial);
+        ev_tx.send(sample_screencast_prompt_event(
+            12,
+            "firefox",
+            rusty_services::SCREENCAST_SOURCE_MONITOR | rusty_services::SCREENCAST_SOURCE_WINDOW,
+            1,
+        ))?;
+        compositor.drain_system_integration_events(serial);
+        assert!(compositor.portal_prompt.is_some());
+        assert!(compositor.has_blocking_shell_overlay());
+
+        let mods = ModifiersState::default();
+        assert!(matches!(
+            classify_keyboard_input(
+                &compositor,
+                false,
+                mods,
+                Keysym::space,
+                KeyState::Pressed,
+                None
+            ),
+            FilterResult::Intercept(KeyIntercept::Portal(PortalKeyAction::ToggleCursor))
+        ));
+        compositor
+            .dispatch_key_intercept(KeyIntercept::Portal(PortalKeyAction::ToggleCursor), serial);
+        assert!(
+            compositor
+                .portal_prompt
+                .as_ref()
+                .is_some_and(|p| p.include_cursor)
+        );
+
+        assert!(matches!(
+            classify_keyboard_input(
+                &compositor,
+                false,
+                mods,
+                Keysym::Return,
+                KeyState::Pressed,
+                None
+            ),
+            FilterResult::Intercept(KeyIntercept::Portal(PortalKeyAction::Accept))
+        ));
+        compositor.dispatch_key_intercept(KeyIntercept::Portal(PortalKeyAction::Accept), serial);
+        assert!(compositor.portal_prompt.is_none());
+        match rep_rx.try_recv()? {
+            rusty_services::PortalReply::PromptDecision {
+                request_id: 12,
+                accepted: true,
+                selection:
+                    Some(rusty_services::PortalSelection::ScreenCast {
+                        source_type: rusty_services::SCREENCAST_SOURCE_MONITOR,
+                        cursor_mode: rusty_services::SCREENCAST_CURSOR_EMBEDDED,
+                        ..
+                    }),
+            } => {}
+            other => return Err(format!("unexpected portal reply: {other:?}").into()),
+        }
+
+        let _ = display.flush_clients();
+        Ok(())
+    }
+
+    #[test]
+    fn portal_pick_color_lock_isolation_and_escape_cancel() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let mut display: smithay::reexports::wayland_server::Display<RustyCompositorState> =
+            smithay::reexports::wayland_server::Display::new()?;
+        let event_loop: smithay::reexports::calloop::EventLoop<RustyCompositorState> =
+            smithay::reexports::calloop::EventLoop::try_new()?;
+        let mut compositor = RustyCompositorState::new(
+            &display,
+            "rusty-test-portal-pick".to_owned(),
+            event_loop.get_signal(),
+            event_loop.handle(),
+            (1280, 800).into(),
+        )?;
+        let (ev_tx, ev_rx) = std::sync::mpsc::channel();
+        let (rep_tx, rep_rx) = std::sync::mpsc::channel();
+        compositor.portal = rusty_services::PortalHandle::with_test_channels_and_replies(
+            ev_tx.clone(),
+            ev_rx,
+            Some(rep_tx),
+        );
+        let serial = SERIAL_COUNTER.next_serial();
+
+        // 1. Lock Screen immediately rejects PickColor.
+        compositor.set_screen_locked(true, serial);
+        ev_tx.send(rusty_services::PortalEvent::PickColor {
+            request_id: 11,
+            app_id: "gimp".to_owned(),
+        })?;
+        compositor.drain_system_integration_events(serial);
+        assert!(compositor.portal_pick_color.is_none());
+        assert!(matches!(
+            rep_rx.try_recv()?,
+            rusty_services::PortalReply::PickColorResult {
+                request_id: 11,
+                result: Err(_)
+            }
+        ));
+
+        // 2. Unlocked PickColor intercepts Escape cleanly.
+        compositor.set_screen_locked(false, serial);
+        ev_tx.send(rusty_services::PortalEvent::PickColor {
+            request_id: 13,
+            app_id: "kcolorchooser".to_owned(),
+        })?;
+        compositor.drain_system_integration_events(serial);
+        assert!(compositor.portal_pick_color.is_some());
+        let mods = ModifiersState::default();
+        assert!(matches!(
+            classify_keyboard_input(
+                &compositor,
+                false,
+                mods,
+                Keysym::Escape,
+                KeyState::Pressed,
+                None
+            ),
+            FilterResult::Intercept(KeyIntercept::Portal(PortalKeyAction::PickColorCancel))
+        ));
+        compositor.dispatch_key_intercept(
+            KeyIntercept::Portal(PortalKeyAction::PickColorCancel),
+            serial,
+        );
+        assert!(compositor.portal_pick_color.is_none());
+        assert!(matches!(
+            rep_rx.try_recv()?,
+            rusty_services::PortalReply::PickColorResult {
+                request_id: 13,
+                result: Err(_)
+            }
+        ));
+
+        // 3. Locking mid-PickColor revokes the active picker immediately.
+        ev_tx.send(rusty_services::PortalEvent::PickColor {
+            request_id: 14,
+            app_id: "kcolorchooser".to_owned(),
+        })?;
+        compositor.drain_system_integration_events(serial);
+        assert!(compositor.portal_pick_color.is_some());
+        compositor.set_screen_locked(true, serial);
+        assert!(compositor.portal_pick_color.is_none());
+        assert!(matches!(
+            rep_rx.try_recv()?,
+            rusty_services::PortalReply::PickColorResult {
+                request_id: 14,
+                result: Err(_)
+            }
+        ));
+
+        let _ = display.flush_clients();
         Ok(())
     }
 

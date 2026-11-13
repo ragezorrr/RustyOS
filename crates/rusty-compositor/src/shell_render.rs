@@ -679,6 +679,49 @@ pub enum PolkitHit {
     Outside,
 }
 
+/// Single monitor or window candidate row inside the XDG Portal consent modal (`RUSTYOS-057`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PortalSourceRow<'a> {
+    /// Primary label (`"Monitor: eDP-1"` or window title).
+    pub label: &'a str,
+    /// Secondary subtitle (resolution / refresh or `app_id`).
+    pub detail: &'a str,
+    /// `true` for a window candidate, `false` for a monitor output.
+    pub is_window: bool,
+}
+
+/// Active XDG Desktop Portal source-selection / consent modal render state (`RUSTYOS-057`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PortalPromptRenderState<'a> {
+    /// Requesting client application identifier (`app_id`).
+    pub app_id: &'a str,
+    /// `true` for `ScreenCast`, `false` for `Screenshot`.
+    pub is_screencast: bool,
+    /// Whether the software cursor should be embedded (`ScreenCast`).
+    pub include_cursor: bool,
+    /// Whether the `"Include cursor"` toggle row is displayed.
+    pub cursor_mode_editable: bool,
+    /// Selectable monitors and/or windows.
+    pub rows: &'a [PortalSourceRow<'a>],
+    /// Highlighted row index inside `rows`.
+    pub selected: usize,
+}
+
+/// Interactive click targets inside the Liquid Glass XDG Portal modal (`RUSTYOS-057`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PortalHit {
+    /// Clicked candidate row index inside `rows`.
+    Row(usize),
+    /// Clicked `"Include cursor"` toggle row (`ScreenCast`).
+    CursorToggle,
+    /// Clicked `Cancel` button.
+    Cancel,
+    /// Clicked `Capture` or `Share` button.
+    Accept,
+    /// Clicked outside interactive buttons without dismissing.
+    Outside,
+}
+
 /// Interactive click target while Workspace Overview is open (`RUSTYOS-023` / `RUSTYOS-051`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OverviewHit {
@@ -731,6 +774,10 @@ pub enum ShellOverlayView<'a> {
     Switcher(&'a WindowSwitcherRenderState<'a>),
     /// Native `PolicyKit` authentication modal (`RUSTYOS-056`).
     Polkit(&'a PolkitPromptRenderState<'a>),
+    /// Native XDG Desktop Portal consent modal (`RUSTYOS-057`).
+    Portal(&'a PortalPromptRenderState<'a>),
+    /// Non-dimming interactive `PickColor` sampling banner pill (`RUSTYOS-057`).
+    PickColor(&'a str),
 }
 
 /// Active transient On-Screen Display (OSD) indicator pill (`RUSTYOS-031`).
@@ -1232,6 +1279,132 @@ pub fn hit_test_polkit_dialog(
         return PolkitHit::PasswordField;
     }
     PolkitHit::Outside
+}
+
+const PORTAL_MAX_VISIBLE_ROWS: usize = 5;
+
+#[derive(Debug, Clone, Copy)]
+struct PortalModalLayout {
+    modal: Rectangle<i32, smithay::utils::Physical>,
+    badge: Rectangle<i32, smithay::utils::Physical>,
+    row_start: usize,
+    row_rects: [Rectangle<i32, smithay::utils::Physical>; PORTAL_MAX_VISIBLE_ROWS],
+    visible_count: usize,
+    cursor_toggle: Option<Rectangle<i32, smithay::utils::Physical>>,
+    cancel: Rectangle<i32, smithay::utils::Physical>,
+    accept: Rectangle<i32, smithay::utils::Physical>,
+}
+
+fn portal_visible_range(total: usize, selected: usize) -> (usize, usize) {
+    if total == 0 {
+        return (0, 0);
+    }
+    let count = total.min(PORTAL_MAX_VISIBLE_ROWS);
+    let sel = selected.min(total - 1);
+    let max_start = total.saturating_sub(count);
+    let start = sel.saturating_sub(count / 2).min(max_start);
+    (start, start + count)
+}
+
+fn portal_modal_layout(
+    screen_size: Size<i32, smithay::utils::Physical>,
+    total_rows: usize,
+    selected: usize,
+    show_cursor_toggle: bool,
+) -> PortalModalLayout {
+    let w = screen_size.w.max(320);
+    let h = screen_size.h.max(360);
+    let mw = 460.min(w - 32).max(280);
+    let (row_start, row_end) = portal_visible_range(total_rows, selected);
+    let visible_count = row_end.saturating_sub(row_start);
+    let list_rows = i32::try_from(visible_count.max(1)).unwrap_or(1);
+    let row_h = 40;
+    let row_gap = 6;
+    let list_h = list_rows * row_h + (list_rows - 1) * row_gap;
+    let toggle_h = if show_cursor_toggle { 34 } else { 0 };
+    let mh = 96 + list_h + toggle_h + 62;
+    let mx = (w - mw) / 2;
+    let my = ((h - mh) / 2 - 10).max(TOP_BAR_HEIGHT + 16);
+
+    let list_y = my + 84;
+    let zero = Rectangle::new(Point::from((0, 0)), Size::from((0, 0)));
+    let mut row_rects = [zero; PORTAL_MAX_VISIBLE_ROWS];
+    for (idx, slot) in row_rects.iter_mut().take(visible_count).enumerate() {
+        let off = i32::try_from(idx).unwrap_or(0);
+        *slot = Rectangle::new(
+            Point::from((mx + 22, list_y + off * (row_h + row_gap))),
+            Size::from((mw - 44, row_h)),
+        );
+    }
+    let after_list_y = list_y + list_h + 10;
+    let cursor_toggle = show_cursor_toggle.then(|| {
+        Rectangle::new(
+            Point::from((mx + 22, after_list_y)),
+            Size::from((mw - 44, 26)),
+        )
+    });
+    let btn_w = ((mw - 60) / 2).clamp(96, 146);
+    let btn_y = my + mh - 50;
+
+    PortalModalLayout {
+        modal: Rectangle::new(Point::from((mx, my)), Size::from((mw, mh))),
+        badge: Rectangle::new(Point::from((mx + 22, my + 20)), Size::from((38, 38))),
+        row_start,
+        row_rects,
+        visible_count,
+        cursor_toggle,
+        cancel: Rectangle::new(Point::from((mx + 22, btn_y)), Size::from((btn_w, 32))),
+        accept: Rectangle::new(
+            Point::from((mx + mw - 22 - btn_w, btn_y)),
+            Size::from((btn_w, 32)),
+        ),
+    }
+}
+
+fn pick_color_pill_rect(
+    screen_size: Size<i32, smithay::utils::Physical>,
+) -> Rectangle<i32, smithay::utils::Physical> {
+    let w = screen_size.w.max(320);
+    let pw = 390.min(w - 32).max(240);
+    let ph = 36;
+    let px = (w - pw) / 2;
+    let py = TOP_BAR_HEIGHT + 12;
+    Rectangle::new(Point::from((px, py)), Size::from((pw, ph)))
+}
+
+/// Hit-tests `(x, y)` inside the centered Liquid Glass XDG Portal consent dialog (`RUSTYOS-057`).
+#[must_use]
+pub fn hit_test_portal_dialog(
+    screen_size: Size<i32, smithay::utils::Physical>,
+    total_rows: usize,
+    selected: usize,
+    show_cursor_toggle: bool,
+    x: f64,
+    y: f64,
+) -> PortalHit {
+    let layout = portal_modal_layout(screen_size, total_rows, selected, show_cursor_toggle);
+    if rect_contains(layout.accept, x, y) {
+        return PortalHit::Accept;
+    }
+    if rect_contains(layout.cancel, x, y) {
+        return PortalHit::Cancel;
+    }
+    if let Some(toggle_rect) = layout.cursor_toggle
+        && rect_contains(toggle_rect, x, y)
+    {
+        return PortalHit::CursorToggle;
+    }
+    for (idx, rect) in layout
+        .row_rects
+        .iter()
+        .take(layout.visible_count)
+        .enumerate()
+    {
+        if rect_contains(*rect, x, y) {
+            return PortalHit::Row(layout.row_start + idx);
+        }
+    }
+    PortalHit::Outside
 }
 
 /// Dynamic left-side geometry for `TopBar` app name, global menus, optional workspace strip, and layout badge (`RUSTYOS-048`/`049`).
@@ -3483,7 +3656,9 @@ pub fn generate_shell_render_elements(
         ShellOverlayView::None
         | ShellOverlayView::Overview(_)
         | ShellOverlayView::Switcher(_)
-        | ShellOverlayView::Polkit(_) => {}
+        | ShellOverlayView::Polkit(_)
+        | ShellOverlayView::Portal(_)
+        | ShellOverlayView::PickColor(_) => {}
         ShellOverlayView::Spotlight(spot) => {
             render_spotlight_modal(&mut elements, width, height, spot, has_text);
         }
@@ -3937,6 +4112,12 @@ pub fn generate_shell_text_elements(
         ShellOverlayView::Polkit(pk) => {
             render_polkit_text(text_cache, renderer, screen_size, pk, &mut elements);
         }
+        ShellOverlayView::Portal(portal) => {
+            render_portal_text(text_cache, renderer, screen_size, portal, &mut elements);
+        }
+        ShellOverlayView::PickColor(app_id) => {
+            render_pick_color_text(text_cache, renderer, screen_size, app_id, &mut elements);
+        }
     }
 
     // 1b. TopBar Left Active App & Global Menus (`RUSTYOS-038`, `RUSTYOS-048`, `RUSTYOS-049`)
@@ -4203,6 +4384,7 @@ pub fn generate_shell_text_elements(
         ShellOverlayView::Spotlight(_)
             | ShellOverlayView::QuickSettings(_)
             | ShellOverlayView::Polkit(_)
+            | ShellOverlayView::Portal(_)
     ) && !notifications.is_empty()
     {
         let rects = notification_toast_rects(screen_size, notifications.len());
@@ -4241,6 +4423,7 @@ pub fn generate_shell_text_elements(
             | ShellOverlayView::QuickSettings(_)
             | ShellOverlayView::Switcher(_)
             | ShellOverlayView::Polkit(_)
+            | ShellOverlayView::Portal(_)
     ) && let Some((tooltip_rect, tooltip_label)) =
         dock_tooltip_rect_and_label(width, height, dock_view)
         && let Some(el) = text_cache.render_label_centered_weighted(
@@ -5713,6 +5896,25 @@ pub fn generate_shell_composite_elements(
                 pk,
             );
         }
+        ShellOverlayView::Portal(portal) => {
+            render_portal_composite(
+                &mut out,
+                shape_cache,
+                renderer,
+                screen_size,
+                top_telemetry,
+                portal,
+            );
+        }
+        ShellOverlayView::PickColor(_) => {
+            render_pick_color_composite(
+                &mut out,
+                shape_cache,
+                renderer,
+                screen_size,
+                top_telemetry,
+            );
+        }
     }
 
     // 2b. Floating top-right Notification HUD toasts (`RUSTYOS-024`/`051`)
@@ -5721,6 +5923,7 @@ pub fn generate_shell_composite_elements(
         ShellOverlayView::Spotlight(_)
             | ShellOverlayView::QuickSettings(_)
             | ShellOverlayView::Polkit(_)
+            | ShellOverlayView::Portal(_)
     ) && !notifications.is_empty()
     {
         let rects = notification_toast_rects(screen_size, notifications.len());
@@ -6034,6 +6237,7 @@ pub fn generate_shell_composite_elements(
             | ShellOverlayView::QuickSettings(_)
             | ShellOverlayView::Switcher(_)
             | ShellOverlayView::Polkit(_)
+            | ShellOverlayView::Portal(_)
     ) && let Some((tooltip_rect, _)) = dock_tooltip_rect_and_label(width, height, dock_view)
     {
         push_rounded_glass_box(
@@ -7166,6 +7370,317 @@ fn render_polkit_composite(
         Rectangle::new(Point::from((0, 0)), screen_size),
         premul(0.059, 0.039, 0.098, 0.44),
     )));
+}
+
+fn phys_to_logical_rect(
+    rect: Rectangle<i32, smithay::utils::Physical>,
+) -> Rectangle<i32, smithay::utils::Logical> {
+    Rectangle::new(
+        Point::from((rect.loc.x, rect.loc.y)),
+        Size::from((rect.size.w, rect.size.h)),
+    )
+}
+
+fn render_portal_text(
+    text_cache: &mut crate::text::TextCache,
+    renderer: &mut GlesRenderer,
+    screen_size: Size<i32, smithay::utils::Physical>,
+    portal: &PortalPromptRenderState<'_>,
+    elements: &mut Vec<MemoryRenderBufferRenderElement<GlesRenderer>>,
+) {
+    let layout = portal_modal_layout(
+        screen_size,
+        portal.rows.len(),
+        portal.selected,
+        portal.cursor_mode_editable,
+    );
+    let mx = layout.modal.loc.x;
+    let my = layout.modal.loc.y;
+    let title = if portal.is_screencast {
+        "Share Screen or Window"
+    } else {
+        "Screenshot Request"
+    };
+    if let Some(el) = text_cache.render_label_weighted(
+        renderer,
+        title,
+        crate::text::FontWeight::Bold,
+        14.5,
+        [248, 245, 255, 255],
+        Point::from((mx + 70, my + 20)),
+    ) {
+        elements.push(el);
+    }
+    let subtitle = truncate_ascii(
+        &format!(
+            "Requested by {}",
+            if portal.app_id.is_empty() {
+                "Application"
+            } else {
+                portal.app_id
+            }
+        ),
+        40,
+    );
+    if let Some(el) = text_cache.render_label(
+        renderer,
+        &subtitle,
+        11.5,
+        [188, 178, 212, 255],
+        Point::from((mx + 70, my + 40)),
+    ) {
+        elements.push(el);
+    }
+
+    for (vis_idx, row_rect) in layout
+        .row_rects
+        .iter()
+        .take(layout.visible_count)
+        .enumerate()
+    {
+        let row_idx = layout.row_start + vis_idx;
+        let Some(row) = portal.rows.get(row_idx) else {
+            continue;
+        };
+        let label = truncate_ascii(row.label, 38);
+        if let Some(el) = text_cache.render_label_weighted(
+            renderer,
+            &label,
+            crate::text::FontWeight::Bold,
+            12.0,
+            [248, 244, 255, 255],
+            Point::from((row_rect.loc.x + 36, row_rect.loc.y + 5)),
+        ) {
+            elements.push(el);
+        }
+        let detail = truncate_ascii(row.detail, 44);
+        if let Some(el) = text_cache.render_label(
+            renderer,
+            &detail,
+            10.0,
+            [176, 166, 200, 255],
+            Point::from((row_rect.loc.x + 36, row_rect.loc.y + 22)),
+        ) {
+            elements.push(el);
+        }
+    }
+
+    render_portal_footer_text(text_cache, renderer, screen_size, portal, elements);
+}
+
+fn render_portal_footer_text(
+    text_cache: &mut crate::text::TextCache,
+    renderer: &mut GlesRenderer,
+    screen_size: Size<i32, smithay::utils::Physical>,
+    portal: &PortalPromptRenderState<'_>,
+    elements: &mut Vec<MemoryRenderBufferRenderElement<GlesRenderer>>,
+) {
+    let layout = portal_modal_layout(
+        screen_size,
+        portal.rows.len(),
+        portal.selected,
+        portal.cursor_mode_editable,
+    );
+
+    if let Some(toggle_rect) = layout.cursor_toggle {
+        let mark = if portal.include_cursor {
+            "[x] Include cursor in stream"
+        } else {
+            "[ ] Include cursor in stream"
+        };
+        if let Some(el) = text_cache.render_label(
+            renderer,
+            mark,
+            11.5,
+            [232, 224, 248, 255],
+            Point::from((toggle_rect.loc.x + 6, toggle_rect.loc.y + 5)),
+        ) {
+            elements.push(el);
+        }
+    }
+
+    if let Some(el) = text_cache.render_label_centered_weighted(
+        renderer,
+        "Cancel",
+        crate::text::FontWeight::Regular,
+        12.5,
+        [240, 236, 248, 255],
+        phys_to_logical_rect(layout.cancel),
+    ) {
+        elements.push(el);
+    }
+    let accept_label = if portal.is_screencast {
+        "Share"
+    } else {
+        "Capture"
+    };
+    if let Some(el) = text_cache.render_label_centered_weighted(
+        renderer,
+        accept_label,
+        crate::text::FontWeight::Bold,
+        12.5,
+        [252, 249, 255, 255],
+        phys_to_logical_rect(layout.accept),
+    ) {
+        elements.push(el);
+    }
+}
+
+fn render_portal_composite(
+    out: &mut Vec<CompositorRenderElement>,
+    shape_cache: &mut crate::surfaces::UiShapeCache,
+    renderer: &mut GlesRenderer,
+    screen_size: Size<i32, smithay::utils::Physical>,
+    top_telemetry: &TopBarTelemetry<'_>,
+    portal: &PortalPromptRenderState<'_>,
+) {
+    let layout = portal_modal_layout(
+        screen_size,
+        portal.rows.len(),
+        portal.selected,
+        portal.cursor_mode_editable,
+    );
+    let badge = layout.badge;
+    if let Some(el) = shape_cache.ui_glyph_element(
+        renderer,
+        crate::surfaces::UiGlyphKind::Grid,
+        18,
+        [248, 244, 255, 255],
+        Point::from((badge.loc.x + 10, badge.loc.y + 10)),
+    ) {
+        out.push(CompositorRenderElement::Memory(el));
+    }
+    push_rounded_glass_box(
+        out,
+        shape_cache,
+        renderer,
+        badge,
+        11,
+        [165, 110, 255, 205],
+        Some([215, 185, 255, 155]),
+    );
+
+    for (vis_idx, row_rect) in layout
+        .row_rects
+        .iter()
+        .take(layout.visible_count)
+        .enumerate()
+    {
+        let row_idx = layout.row_start + vis_idx;
+        let is_selected = row_idx == portal.selected;
+        let glyph = if portal.rows.get(row_idx).is_some_and(|r| r.is_window) {
+            crate::surfaces::UiGlyphKind::WindowMax
+        } else {
+            crate::surfaces::UiGlyphKind::Grid
+        };
+        if let Some(el) = shape_cache.ui_glyph_element(
+            renderer,
+            glyph,
+            14,
+            [244, 238, 255, 255],
+            Point::from((row_rect.loc.x + 12, row_rect.loc.y + 13)),
+        ) {
+            out.push(CompositorRenderElement::Memory(el));
+        }
+        let (fill, border) = if is_selected {
+            ([165, 110, 255, 138], [215, 185, 255, 225])
+        } else {
+            (RGBA_SURFACE, RGBA_BORDER)
+        };
+        push_rounded_glass_box(
+            out,
+            shape_cache,
+            renderer,
+            *row_rect,
+            10,
+            fill,
+            Some(border),
+        );
+    }
+
+    push_rounded_glass_box(
+        out,
+        shape_cache,
+        renderer,
+        layout.cancel,
+        10,
+        RGBA_SURFACE,
+        Some(RGBA_BORDER),
+    );
+    push_rounded_glass_box(
+        out,
+        shape_cache,
+        renderer,
+        layout.accept,
+        10,
+        [165, 110, 255, 224],
+        Some([215, 185, 255, 185]),
+    );
+
+    push_liquid_glass_panel(
+        out,
+        shape_cache,
+        renderer,
+        layout.modal,
+        WINDOW_RADIUS,
+        crate::surfaces::GlassPanelStyle::Popover,
+        top_telemetry.glass_opacity,
+        top_telemetry.reduce_transparency,
+        Some((22, 62)),
+    );
+
+    out.push(CompositorRenderElement::Solid(make_solid_element(
+        Rectangle::new(Point::from((0, 0)), screen_size),
+        premul(0.059, 0.039, 0.098, 0.44),
+    )));
+}
+
+fn render_pick_color_text(
+    text_cache: &mut crate::text::TextCache,
+    renderer: &mut GlesRenderer,
+    screen_size: Size<i32, smithay::utils::Physical>,
+    app_id: &str,
+    elements: &mut Vec<MemoryRenderBufferRenderElement<GlesRenderer>>,
+) {
+    let pill = pick_color_pill_rect(screen_size);
+    let msg = truncate_ascii(
+        &format!(
+            "Pick Color ({}) · Click pixel · Esc cancel",
+            if app_id.is_empty() { "App" } else { app_id }
+        ),
+        48,
+    );
+    if let Some(el) = text_cache.render_label_centered_weighted(
+        renderer,
+        &msg,
+        crate::text::FontWeight::Bold,
+        12.0,
+        [248, 244, 255, 255],
+        phys_to_logical_rect(pill),
+    ) {
+        elements.push(el);
+    }
+}
+
+fn render_pick_color_composite(
+    out: &mut Vec<CompositorRenderElement>,
+    shape_cache: &mut crate::surfaces::UiShapeCache,
+    renderer: &mut GlesRenderer,
+    screen_size: Size<i32, smithay::utils::Physical>,
+    top_telemetry: &TopBarTelemetry<'_>,
+) {
+    let pill = pick_color_pill_rect(screen_size);
+    push_liquid_glass_panel(
+        out,
+        shape_cache,
+        renderer,
+        pill,
+        12,
+        crate::surfaces::GlassPanelStyle::Popover,
+        top_telemetry.glass_opacity,
+        top_telemetry.reduce_transparency,
+        Some((12, 42)),
+    );
 }
 
 /// Generates rounded SSD titlebar, gel-lit macOS traffic lights (with optional hover glyphs),
@@ -8593,5 +9108,61 @@ mod tests {
             PolkitHit::PasswordField
         );
         assert_eq!(hit_test_polkit_dialog(size, 20.0, 20.0), PolkitHit::Outside);
+    }
+
+    #[test]
+    fn portal_modal_hit_testing() {
+        let size = Size::from((1280, 800));
+        let portal_layout = portal_modal_layout(size, 3, 1, true);
+        assert_eq!(
+            hit_test_portal_dialog(
+                size,
+                3,
+                1,
+                true,
+                f64::from(portal_layout.row_rects[1].loc.x + 20),
+                f64::from(portal_layout.row_rects[1].loc.y + 14),
+            ),
+            PortalHit::Row(1)
+        );
+        if let Some(toggle) = portal_layout.cursor_toggle {
+            assert_eq!(
+                hit_test_portal_dialog(
+                    size,
+                    3,
+                    1,
+                    true,
+                    f64::from(toggle.loc.x + 20),
+                    f64::from(toggle.loc.y + 10),
+                ),
+                PortalHit::CursorToggle
+            );
+        }
+        assert_eq!(
+            hit_test_portal_dialog(
+                size,
+                3,
+                1,
+                true,
+                f64::from(portal_layout.accept.loc.x + 20),
+                f64::from(portal_layout.accept.loc.y + 14),
+            ),
+            PortalHit::Accept
+        );
+        assert_eq!(
+            hit_test_portal_dialog(
+                size,
+                3,
+                1,
+                true,
+                f64::from(portal_layout.cancel.loc.x + 20),
+                f64::from(portal_layout.cancel.loc.y + 14),
+            ),
+            PortalHit::Cancel
+        );
+        assert_eq!(
+            hit_test_portal_dialog(size, 3, 1, true, 20.0, 20.0),
+            PortalHit::Outside
+        );
     }
 }
