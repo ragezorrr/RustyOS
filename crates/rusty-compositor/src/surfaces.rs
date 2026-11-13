@@ -163,6 +163,18 @@ pub enum UiGlyphKind {
     Moon,
     /// Overlapping rounded window panes for `Overview` spaces circle (`RUSTYOS-053`).
     OverviewSpaces,
+    /// Compact ANSI keyboard outline for Lock Screen input source switcher (`RUSTYOS-054`).
+    Keyboard,
+    /// Power `⏻` glyph for Lock Screen top-right power controls (`RUSTYOS-054`).
+    PowerSymbol,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct AvatarKey {
+    path: Option<PathBuf>,
+    diameter: u16,
+    seed: u32,
+    selected: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -190,6 +202,7 @@ pub struct UiShapeCache {
     glass_panels: HashMap<GlassPanelKey, MemoryRenderBuffer>,
     traffic_lights: HashMap<TrafficLightKey, MemoryRenderBuffer>,
     dock_icon_shadows: HashMap<u16, MemoryRenderBuffer>,
+    avatars: HashMap<AvatarKey, MemoryRenderBuffer>,
     wallpaper: CachedWallpaper,
     cursor_arrow: Option<MemoryRenderBuffer>,
     xcursors: HashMap<(Option<String>, &'static str, u32), Option<CachedCursor>>,
@@ -493,11 +506,24 @@ impl UiShapeCache {
         screen_size: Size<i32, Logical>,
         custom_path: Option<&Path>,
     ) -> Option<MemoryRenderBufferRenderElement<GlesRenderer>> {
+        self.wallpaper_element_with_alpha(renderer, screen_size, custom_path, 1.0)
+    }
+
+    /// Returns a GPU-cached wallpaper element scaled to `screen_size` with explicit opacity (`RUSTYOS-054`).
+    pub fn wallpaper_element_with_alpha(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        screen_size: Size<i32, Logical>,
+        custom_path: Option<&Path>,
+        alpha: f32,
+    ) -> Option<MemoryRenderBufferRenderElement<GlesRenderer>> {
         const WALLPAPER_W: i32 = 640;
         const WALLPAPER_H: i32 = 360;
-        if screen_size.w <= 0 || screen_size.h <= 0 {
+        let alpha = alpha.clamp(0.0, 1.0);
+        if screen_size.w <= 0 || screen_size.h <= 0 || alpha <= 0.001 {
             return None;
         }
+        let alpha_opt = (alpha < 0.999).then_some(alpha);
 
         if let Some(path) = custom_path {
             let desired_key = (path.to_path_buf(), screen_size);
@@ -524,7 +550,7 @@ impl UiShapeCache {
                     renderer,
                     Point::<f64, smithay::utils::Physical>::from((0.0, 0.0)),
                     buf,
-                    None,
+                    alpha_opt,
                     None,
                     None,
                     Kind::Unspecified,
@@ -541,12 +567,67 @@ impl UiShapeCache {
             renderer,
             Point::<f64, smithay::utils::Physical>::from((0.0, 0.0)),
             buf,
-            None,
+            alpha_opt,
             Some(Rectangle::<f64, Logical>::from_size(Size::from((
                 f64::from(WALLPAPER_W),
                 f64::from(WALLPAPER_H),
             )))),
             Some(screen_size),
+            Kind::Unspecified,
+        )
+        .ok()
+    }
+
+    /// Returns a GPU-cached circular user avatar badge (`~/.face`/`AccountsService` PNG or crisp
+    /// stylized silhouette) for the Lock Screen (`RUSTYOS-054`).
+    pub fn user_avatar_element(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        diameter: i32,
+        avatar_path: Option<&Path>,
+        seed: u32,
+        selected: bool,
+        loc: Point<i32, Logical>,
+    ) -> Option<MemoryRenderBufferRenderElement<GlesRenderer>> {
+        if diameter <= 0 {
+            return None;
+        }
+        let d_u16 = u16::try_from(diameter).ok()?;
+        let key = AvatarKey {
+            path: avatar_path.map(Path::to_path_buf),
+            diameter: d_u16,
+            seed,
+            selected,
+        };
+        if !self.avatars.contains_key(&key) {
+            let d_usize = usize::try_from(diameter).ok()?;
+            let loaded = avatar_path
+                .and_then(|p| crate::icons::load_circular_avatar_bgra(p, d_usize))
+                .map(|bgra| {
+                    MemoryRenderBuffer::from_slice(
+                        &bgra,
+                        Fourcc::Argb8888,
+                        (diameter, diameter),
+                        1,
+                        Transform::Normal,
+                        None,
+                    )
+                });
+            let buf = loaded.unwrap_or_else(|| {
+                rasterize_rgba_rect(diameter, diameter, |px, py| {
+                    sample_fallback_avatar_pixel(px, py, diameter, seed, selected)
+                })
+            });
+            self.avatars.insert(key.clone(), buf);
+        }
+        let buf = self.avatars.get(&key)?;
+        MemoryRenderBufferRenderElement::from_buffer(
+            renderer,
+            loc.to_f64().to_physical(1.0),
+            buf,
+            None,
+            None,
+            None,
             Kind::Unspecified,
         )
         .ok()
@@ -1642,6 +1723,99 @@ fn sample_overview_spaces_glyph_uv(u: f32, v: f32, edge: f32, tint: [f32; 4]) ->
     out
 }
 
+fn sample_keyboard_glyph_uv(u: f32, v: f32, edge: f32, tint: [f32; 4]) -> [f32; 4] {
+    let frame = sd_rounded_box(u, v, 0.50, 0.50, 0.43, 0.28, 0.085);
+    let rim = frame.abs() - 0.036;
+    let mut keys = 1e6_f32;
+    for row_y in [0.38_f32, 0.50_f32] {
+        for col_x in [0.22_f32, 0.36_f32, 0.50_f32, 0.64_f32, 0.78_f32] {
+            keys = keys.min(sd_rounded_box(u, v, col_x, row_y, 0.036, 0.032, 0.014));
+        }
+    }
+    let space = sd_rounded_box(u, v, 0.50, 0.63, 0.20, 0.034, 0.016);
+    let d = rim.min(keys).min(space);
+    premul_tint(tint, sd_cov(d, edge))
+}
+
+fn sample_power_symbol_glyph_uv(u: f32, v: f32, edge: f32, tint: [f32; 4]) -> [f32; 4] {
+    let dx = u - 0.50;
+    let dy = v - 0.53;
+    let ring = (dx.hypot(dy) - 0.28).abs() - 0.044;
+    let top_notch = sd_rounded_box(u, v, 0.50, 0.27, 0.14, 0.14, 0.02);
+    let arc = ring.max(-top_notch);
+    let stem = sd_segment(u, v, 0.50, 0.16, 0.50, 0.47, 0.048);
+    premul_tint(tint, sd_cov(arc.min(stem), edge))
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn sample_fallback_avatar_pixel(
+    px: i32,
+    py: i32,
+    diameter: i32,
+    seed: u32,
+    selected: bool,
+) -> [u8; 4] {
+    const SUBSAMPLES: [f32; 4] = [0.125, 0.375, 0.625, 0.875];
+    let dim = diameter.max(1) as f32;
+    let edge = 1.05 / dim;
+    let palette = match seed % 4 {
+        0 => ([122.0_f32, 92.0, 214.0], [238.0_f32, 198.0, 154.0]),
+        1 => ([86.0_f32, 134.0, 224.0], [186.0_f32, 220.0, 250.0]),
+        2 => ([168.0_f32, 92.0, 166.0], [244.0_f32, 186.0, 206.0]),
+        _ => ([94.0_f32, 148.0, 142.0], [214.0_f32, 232.0, 194.0]),
+    };
+    let mut sum = [0.0_f32; 4];
+    for sy in SUBSAMPLES {
+        for sx in SUBSAMPLES {
+            let u = (px as f32 + sx) / dim;
+            let v = (py as f32 + sy) / dim;
+            let outer = sd_circle(u, v, 0.5, 0.5, 0.475);
+            let cov = sd_cov(outer, edge);
+            if cov <= 0.001 {
+                continue;
+            }
+            let radial = ((u - 0.38).hypot(v - 0.30) / 0.72).clamp(0.0, 1.0);
+            let mut red = palette.1[0] * (1.0 - radial) + palette.0[0] * radial;
+            let mut green = palette.1[1] * (1.0 - radial) + palette.0[1] * radial;
+            let mut blue = palette.1[2] * (1.0 - radial) + palette.0[2] * radial;
+
+            let head = sd_circle(u, v, 0.50, 0.38, 0.155);
+            let shoulders = sd_circle(u, v, 0.50, 0.90, 0.34);
+            let fig = sd_cov(head.min(shoulders), edge);
+            if fig > 0.001 {
+                let fa = fig * 0.90;
+                red = red * (1.0 - fa) + 252.0 * fa;
+                green = green * (1.0 - fa) + 248.0 * fa;
+                blue = blue * (1.0 - fa) + 255.0 * fa;
+            }
+
+            let rim_sd = (outer + 0.018).abs() - 0.016;
+            let rim_cov = sd_cov(rim_sd, edge) * if selected { 0.92 } else { 0.62 };
+            if rim_cov > 0.001 {
+                red = red * (1.0 - rim_cov) + 255.0 * rim_cov;
+                green = green * (1.0 - rim_cov) + 252.0 * rim_cov;
+                blue = blue * (1.0 - rim_cov) + 255.0 * rim_cov;
+            }
+
+            sum[0] += red * cov;
+            sum[1] += green * cov;
+            sum[2] += blue * cov;
+            sum[3] += cov;
+        }
+    }
+    let avg_a = (sum[3] * 0.0625).clamp(0.0, 1.0);
+    if avg_a <= 0.001 {
+        return [0, 0, 0, 0];
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    [
+        (sum[2] * 0.0625).clamp(0.0, 255.0).round() as u8,
+        (sum[1] * 0.0625).clamp(0.0, 255.0).round() as u8,
+        (sum[0] * 0.0625).clamp(0.0, 255.0).round() as u8,
+        (avg_a * 255.0).clamp(0.0, 255.0).round() as u8,
+    ]
+}
+
 #[cfg(test)]
 #[allow(clippy::cast_precision_loss)]
 fn sample_ui_glyph_pixel(
@@ -1719,6 +1893,8 @@ fn sample_ui_glyph_pixel_rect(
                 UiGlyphKind::MusicNote => sample_music_note_glyph_uv(u, v, edge, tint),
                 UiGlyphKind::Moon => sample_moon_glyph_uv(u, v, edge, tint),
                 UiGlyphKind::OverviewSpaces => sample_overview_spaces_glyph_uv(u, v, edge, tint),
+                UiGlyphKind::Keyboard => sample_keyboard_glyph_uv(u, v, edge, tint),
+                UiGlyphKind::PowerSymbol => sample_power_symbol_glyph_uv(u, v, edge, tint),
             };
             sum[0] += s[0];
             sum[1] += s[1];
@@ -2985,6 +3161,8 @@ mod tests {
             UiGlyphKind::MusicNote,
             UiGlyphKind::Moon,
             UiGlyphKind::OverviewSpaces,
+            UiGlyphKind::Keyboard,
+            UiGlyphKind::PowerSymbol,
         ] {
             let center = sample_ui_glyph_pixel(10, 10, 20, glyph, [255, 255, 255, 255]);
             let corner = sample_ui_glyph_pixel(0, 0, 20, glyph, [255, 255, 255, 255]);
@@ -2994,6 +3172,10 @@ mod tests {
                 .any(|(x, y)| sample_ui_glyph_pixel(x, y, 20, glyph, [255, 255, 255, 255])[3] > 0);
             assert!(any_lit || center[3] > 0);
         }
+        let avatar_corner = sample_fallback_avatar_pixel(0, 0, 44, 0, true);
+        let avatar_center = sample_fallback_avatar_pixel(22, 22, 44, 0, true);
+        assert_eq!(avatar_corner[3], 0);
+        assert_eq!(avatar_center[3], 255);
 
         // Traffic lights: clean circular contour + hover glyph contrast
         let close_plain =

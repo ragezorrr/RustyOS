@@ -787,6 +787,59 @@ pub(crate) fn scale_cover_rgba_to_premul_bgra(
     Some(out)
 }
 
+/// Decodes a user avatar PNG (`~/.face`, `AccountsService`) and crops it into an
+/// anti-aliased `diameter x diameter` circle with a crisp white glass rim (`RUSTYOS-054`).
+#[allow(clippy::cast_precision_loss)]
+pub(crate) fn load_circular_avatar_bgra(path: &Path, diameter: usize) -> Option<Vec<u8>> {
+    if diameter == 0 || diameter > 512 {
+        return None;
+    }
+    let meta = fs::metadata(path).ok()?;
+    if usize::try_from(meta.len()).unwrap_or(usize::MAX) > MAX_WALLPAPER_FILE_BYTES {
+        return None;
+    }
+    let bytes = fs::read(path).ok()?;
+    let (w, h, rgba) = decode_png_rgba_limited(&bytes, MAX_ICON_DIM, MAX_INFLATE_BYTES)?;
+    let mut bgra = scale_cover_rgba_to_premul_bgra(w, h, &rgba, diameter, diameter)?;
+    apply_circular_avatar_mask(&mut bgra, diameter);
+    Some(bgra)
+}
+
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
+)]
+pub(crate) fn apply_circular_avatar_mask(bgra: &mut [u8], diameter: usize) {
+    let center = (diameter as f32 - 1.0) * 0.5;
+    let radius = diameter as f32 * 0.5 - 0.5;
+    for y in 0..diameter {
+        for x in 0..diameter {
+            let dx = x as f32 - center;
+            let dy = y as f32 - center;
+            let dist = dx.hypot(dy);
+            let sd = dist - radius;
+            let cov = (0.5 - sd).clamp(0.0, 1.0);
+            let rim = (1.0 - (dist - (radius - 1.0)).abs() / 1.1).clamp(0.0, 1.0) * 0.65;
+            let off = (y * diameter + x) * 4;
+            if cov <= 0.001 {
+                bgra[off] = 0;
+                bgra[off + 1] = 0;
+                bgra[off + 2] = 0;
+                bgra[off + 3] = 0;
+            } else {
+                let b = f32::from(bgra[off]) * (1.0 - rim) + 255.0 * rim;
+                let g = f32::from(bgra[off + 1]) * (1.0 - rim) + 250.0 * rim;
+                let r = f32::from(bgra[off + 2]) * (1.0 - rim) + 255.0 * rim;
+                bgra[off] = (b * cov).round().clamp(0.0, 255.0) as u8;
+                bgra[off + 1] = (g * cov).round().clamp(0.0, 255.0) as u8;
+                bgra[off + 2] = (r * cov).round().clamp(0.0, 255.0) as u8;
+                bgra[off + 3] = (255.0 * cov).round().clamp(0.0, 255.0) as u8;
+            }
+        }
+    }
+}
+
 /// Decodes a standard non-interlaced PNG byte buffer into `(width, height, straight_rgba)`.
 #[must_use]
 pub fn decode_png_rgba(data: &[u8]) -> Option<(usize, usize, Vec<u8>)> {

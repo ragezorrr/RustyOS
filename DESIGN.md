@@ -455,6 +455,23 @@ layout and material behavior follow macOS 27. No Apple assets or branding.
 - A light `0.36` radial-style scrim preserves wallpaper depth while floating `Popover` preview cards
   (and focused outline ring) arrange below the Spaces strip above the visible Dock.
 
+### 12.7 Lock Screen
+
+- Locking switches the topmost compositing layer (`generate_lock_screen_elements`, rendered in front
+  of all windows, `TopBar`, and `Dock` across `--winit` and `--drm`) to the full-screen desktop
+  wallpaper without a modal card or opaque dark veil (`RUSTYOS-054`).
+- Top-center header displays neutral C-locale date (`local_clock_lock_date`, e.g. `"Fri Nov 13"`)
+  over large frosted semi-translucent clock numerals (`local_clock_lock_hhmm`, respecting
+  `clock_24h`, without AM/PM suffix).
+- Top-right minimal status cluster renders on the clean wallpaper: interactive keyboard layout label
+  + `UiGlyphKind::Keyboard` (`U.S.`/`RU`), `UiGlyphKind::Battery`, 3-band `UiGlyphKind::Wifi`, and
+  `UiGlyphKind::PowerSymbol` opening a compact `Popover` menu (`Sleep`, `Restart...`,
+  `Shut Down...`) backed by `SessionService`.
+- Bottom centered user list (`UserService` reading `/etc/passwd` UID `1000..=60000` and `~/.face` /
+  `AccountsService` avatars or `4x4` SSAA silhouette badges) allows selecting an account
+  (`Up`/`Down`/`Tab`/click) and unlocking immediately via single-user click, clicking the active
+  selected user, `Enter`, `Space`, or `Escape`.
+
 ---
 
 **RustyOS Design Philosophy**

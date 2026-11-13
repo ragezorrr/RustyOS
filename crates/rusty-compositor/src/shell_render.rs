@@ -580,21 +580,59 @@ pub struct OverviewRenderState<'a> {
     pub progress: f64,
 }
 
-/// Live data for the interactive Lock Screen curtain & card (`RUSTYOS-025`).
+/// Live data for the macOS-style interactive Lock Screen (`RUSTYOS-025`/`054`).
 #[derive(Debug, Clone)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct LockScreenRenderState<'a> {
-    /// Local wall-clock time (`HH:MM`).
+    /// Lock Screen date header in neutral C locale (`"Thu Sep 10"`, `"Fri Nov 13"`).
+    pub date_label: &'a str,
+    /// Local wall-clock time without AM/PM suffix (`"8:52"` or `"14:52"`).
     pub clock_hhmm: &'a str,
-    /// Network status label.
-    pub network_label: &'a str,
-    /// Battery charge percentage (`0..=100`).
-    pub battery_percent: u8,
+    /// Active keyboard layout badge (`"EN"`, `"RU"`, etc.).
+    pub keyboard_layout: &'a str,
     /// Whether hardware battery is present.
     pub has_battery: bool,
-    /// Number of user windows paused behind the lock curtain.
-    pub window_count: usize,
+    /// Battery charge percentage (`0..=100`).
+    pub battery_percent: u8,
+    /// True when charging or connected to AC power.
+    pub battery_charging: bool,
+    /// True when Wi-Fi / network connection is active.
+    pub wifi_connected: bool,
+    /// Live Wi-Fi signal strength (`0..=100`).
+    pub wifi_signal_percent: Option<u8>,
+    /// Optional custom PNG wallpaper path matching active desktop background.
+    pub wallpaper_path: Option<&'a std::path::Path>,
+    /// Human user accounts rendered at bottom-center (`RUSTYOS-054`).
+    pub users: &'a [rusty_services::UserAccount],
+    /// Currently highlighted/selected account index in `users`.
+    pub selected_user: usize,
+    /// True while the top-right power actions popover is open.
+    pub power_menu_open: bool,
+    /// User `[ui] glass_opacity` setting (`0.35..=1.0`).
+    pub glass_opacity: f32,
+    /// High-contrast opaque mode (`reduce_transparency`).
+    pub reduce_transparency: bool,
     /// Animated reveal progress (`0.0` unlocked -> `1.0` locked).
     pub progress: f64,
+}
+
+/// Interactive click targets on the macOS-style Lock Screen (`RUSTYOS-054`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LockScreenHit {
+    /// Unlock the desktop session as user `usize`.
+    UnlockUser(usize),
+    /// Select another account `usize` in the multi-user stack.
+    SelectUser(usize),
+    /// Cycle active XKB keyboard layout (`U.S.` / `RU`).
+    ToggleKeyboardLayout,
+    /// Open or close the top-right power popover (`Sleep` / `Restart` / `Shut Down`).
+    TogglePowerMenu,
+    /// Dispatch a power lifecycle action from the power popover.
+    PowerAction(rusty_services::SessionAction),
+    /// Clicked outside an open power popover to close it.
+    DismissPowerMenu,
+    /// Non-interactive Lock Screen wallpaper/clock region.
+    None,
 }
 
 /// Interactive click target while Workspace Overview is open (`RUSTYOS-023` / `RUSTYOS-051`).
@@ -739,39 +777,277 @@ fn anim_offset(progress: f64, max_offset: f64) -> i32 {
     ((1.0 - progress.clamp(0.0, 1.0)) * max_offset).round() as i32
 }
 
-fn lock_screen_card_rect(screen_size: Size<i32, smithay::utils::Physical>) -> (i32, i32, i32, i32) {
-    let w = 360.min((screen_size.w - 40).max(260));
-    let h = 216.min((screen_size.h - 60).max(160));
-    let x = (screen_size.w - w) / 2;
-    let y = (screen_size.h - h) / 2;
-    (x, y, w, h)
+fn format_lock_kbd_label(layout: &str) -> &str {
+    let trimmed = layout.trim();
+    if trimmed.is_empty()
+        || trimmed.eq_ignore_ascii_case("EN")
+        || trimmed.eq_ignore_ascii_case("US")
+    {
+        "U.S."
+    } else {
+        trimmed
+    }
 }
 
-fn lock_screen_unlock_button_rect(
+fn default_lock_user_fallback() -> rusty_services::UserAccount {
+    rusty_services::UserAccount {
+        username: "user".to_owned(),
+        display_name: "RustyOS User".to_owned(),
+        uid: 1000,
+        avatar_path: None,
+    }
+}
+
+#[derive(Debug, Clone)]
+struct LockScreenLayout {
+    kbd_hit_rect: Rectangle<i32, smithay::utils::Physical>,
+    kbd_text_x: i32,
+    kbd_glyph_x: i32,
+    battery_x: Option<i32>,
+    wifi_x: i32,
+    power_btn_rect: Rectangle<i32, smithay::utils::Physical>,
+    power_menu_rect: Rectangle<i32, smithay::utils::Physical>,
+    power_item_rects: [Rectangle<i32, smithay::utils::Physical>; 3],
+    date_y: i32,
+    date_size: f32,
+    clock_y: i32,
+    clock_size: f32,
+    user_row_rects: Vec<Rectangle<i32, smithay::utils::Physical>>,
+    avatar_x: i32,
+    name_x: i32,
+    unlock_hint_rect: Option<Rectangle<i32, smithay::utils::Physical>>,
+}
+
+#[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+fn compute_lock_screen_layout(
     screen_size: Size<i32, smithay::utils::Physical>,
-    card_dy: i32,
-) -> Rectangle<i32, smithay::utils::Physical> {
-    let (cx, cy, cw, ch) = lock_screen_card_rect(screen_size);
-    let btn_w = 188.min(cw - 48);
-    let btn_h = 36;
-    let btn_x = cx + (cw - btn_w) / 2;
-    let btn_y = cy + card_dy + ch - 68;
-    Rectangle::new(Point::from((btn_x, btn_y)), Size::from((btn_w, btn_h)))
+    keyboard_layout: &str,
+    has_battery: bool,
+    user_names: &[&str],
+    slide_dy: i32,
+) -> LockScreenLayout {
+    let w = screen_size.w.max(320);
+    let h = screen_size.h.max(240);
+
+    let pwr_w = 22;
+    let pwr_x = w - 12 - pwr_w;
+    let power_btn_rect = Rectangle::new(Point::from((pwr_x, 7)), Size::from((pwr_w, 22)));
+
+    let wifi_w = 18;
+    let wifi_x = pwr_x - 10 - wifi_w;
+    let mut left_cursor = wifi_x;
+
+    let battery_x = if has_battery {
+        let bx = left_cursor - 11 - 24;
+        left_cursor = bx;
+        Some(bx)
+    } else {
+        None
+    };
+
+    let kbd_glyph_w = 18;
+    let kbd_glyph_x = left_cursor - 12 - kbd_glyph_w;
+    let kbd_label = format_lock_kbd_label(keyboard_layout);
+    let kbd_text_w =
+        crate::text::measure_ui_text_width(kbd_label, 12.0, crate::text::FontWeight::Bold)
+            .clamp(18, 64);
+    let kbd_text_x = kbd_glyph_x - 5 - kbd_text_w;
+    let kbd_hit_rect = Rectangle::new(
+        Point::from((kbd_text_x - 6, 6)),
+        Size::from((kbd_text_w + 5 + kbd_glyph_w + 10, 24)),
+    );
+
+    let pm_w = 148;
+    let pm_h = 104;
+    let pm_x = (w - 12 - pm_w).max(8);
+    let pm_y = 34;
+    let power_menu_rect = Rectangle::new(Point::from((pm_x, pm_y)), Size::from((pm_w, pm_h)));
+    let power_item_rects = [
+        Rectangle::new(
+            Point::from((pm_x + 6, pm_y + 7)),
+            Size::from((pm_w - 12, 30)),
+        ),
+        Rectangle::new(
+            Point::from((pm_x + 6, pm_y + 37)),
+            Size::from((pm_w - 12, 30)),
+        ),
+        Rectangle::new(
+            Point::from((pm_x + 6, pm_y + 67)),
+            Size::from((pm_w - 12, 30)),
+        ),
+    ];
+
+    let date_size = (f64::from(h) * 0.025).clamp(16.0, 26.0) as f32;
+    let clock_size = (f64::from(h) * 0.136).clamp(66.0, 132.0) as f32;
+    let date_y = (f64::from(h) * 0.088).round() as i32 + slide_dy;
+    let clock_y = date_y + (date_size * 0.92).round() as i32;
+
+    let avatar_d = 38;
+    let row_gap = 12;
+    let step = avatar_d + row_gap;
+    let count = user_names.len().max(1);
+    let single_user = count == 1;
+    let stack_h = i32::try_from(count).unwrap_or(1) * avatar_d
+        + (i32::try_from(count).unwrap_or(1) - 1) * row_gap
+        + if single_user { 26 } else { 0 };
+    let stack_top_y = (h - 68 - stack_h).min((f64::from(h) * 0.745).round() as i32) + slide_dy;
+
+    let mut max_name_w = 24;
+    for name in user_names {
+        let nw = crate::text::measure_ui_text_width(name, 13.5, crate::text::FontWeight::Bold);
+        max_name_w = max_name_w.max(nw.min(220));
+    }
+    let group_w = (avatar_d + 10 + max_name_w).clamp(64, 300);
+    let avatar_x = (w - group_w) / 2;
+    let name_x = avatar_x + avatar_d + 10;
+
+    let mut user_row_rects = Vec::with_capacity(count);
+    for idx in 0..count {
+        let row_y = stack_top_y + i32::try_from(idx).unwrap_or(0) * step;
+        user_row_rects.push(Rectangle::new(
+            Point::from((avatar_x - 8, row_y - 4)),
+            Size::from((group_w + 16, avatar_d + 8)),
+        ));
+    }
+
+    let unlock_hint_rect = single_user.then(|| {
+        let hint_w = 224.min(w - 32);
+        Rectangle::new(
+            Point::from(((w - hint_w) / 2, stack_top_y + avatar_d + 10)),
+            Size::from((hint_w, 22)),
+        )
+    });
+
+    LockScreenLayout {
+        kbd_hit_rect,
+        kbd_text_x,
+        kbd_glyph_x,
+        battery_x,
+        wifi_x,
+        power_btn_rect,
+        power_menu_rect,
+        power_item_rects,
+        date_y,
+        date_size,
+        clock_y,
+        clock_size,
+        user_row_rects,
+        avatar_x,
+        name_x,
+        unlock_hint_rect,
+    }
 }
 
-/// Hit-tests `(x, y)` against the interactive Lock Screen `"Unlock Session"` pill button (`RUSTYOS-025`).
+/// Hit-tests `(x, y)` on the interactive macOS-style Lock Screen (`RUSTYOS-054`).
+#[must_use]
+pub fn hit_test_lock_screen(
+    screen_size: Size<i32, smithay::utils::Physical>,
+    lock: &LockScreenRenderState<'_>,
+    x: f64,
+    y: f64,
+) -> LockScreenHit {
+    let fallback_user = default_lock_user_fallback();
+    let users = if lock.users.is_empty() {
+        std::slice::from_ref(&fallback_user)
+    } else {
+        lock.users
+    };
+    let names: Vec<&str> = users.iter().map(|u| u.display_name.as_str()).collect();
+    let layout = compute_lock_screen_layout(
+        screen_size,
+        lock.keyboard_layout,
+        lock.has_battery,
+        &names,
+        0,
+    );
+
+    if rect_contains(layout.power_btn_rect, x, y) {
+        return LockScreenHit::TogglePowerMenu;
+    }
+
+    if lock.power_menu_open {
+        let actions = [
+            rusty_services::SessionAction::Suspend,
+            rusty_services::SessionAction::Reboot,
+            rusty_services::SessionAction::PowerOff,
+        ];
+        for (rect, action) in layout.power_item_rects.into_iter().zip(actions) {
+            if rect_contains(rect, x, y) {
+                return LockScreenHit::PowerAction(action);
+            }
+        }
+        if rect_contains(layout.power_menu_rect, x, y) {
+            return LockScreenHit::None;
+        }
+        return LockScreenHit::DismissPowerMenu;
+    }
+
+    if rect_contains(layout.kbd_hit_rect, x, y) {
+        return LockScreenHit::ToggleKeyboardLayout;
+    }
+
+    let selected = lock.selected_user.min(users.len().saturating_sub(1));
+    for (idx, row_rect) in layout.user_row_rects.iter().enumerate() {
+        if rect_contains(*row_rect, x, y) {
+            return if users.len() <= 1 || idx == selected {
+                LockScreenHit::UnlockUser(idx)
+            } else {
+                LockScreenHit::SelectUser(idx)
+            };
+        }
+    }
+
+    if let Some(hint_rect) = layout.unlock_hint_rect
+        && rect_contains(hint_rect, x, y)
+    {
+        return LockScreenHit::UnlockUser(selected);
+    }
+
+    LockScreenHit::None
+}
+
+/// Hit-tests `(x, y)` against the primary Lock Screen unlock row/hint (`RUSTYOS-025`/`054`).
 #[must_use]
 pub fn check_lock_screen_unlock_click(
     screen_size: Size<i32, smithay::utils::Physical>,
     x: f64,
     y: f64,
 ) -> bool {
-    let btn = lock_screen_unlock_button_rect(screen_size, 0);
-    let bx = f64::from(btn.loc.x);
-    let by = f64::from(btn.loc.y);
-    let bw = f64::from(btn.size.w);
-    let bh = f64::from(btn.size.h);
-    x >= bx && x < bx + bw && y >= by && y < by + bh
+    let default_state = LockScreenRenderState {
+        date_label: "Thu Sep 10",
+        clock_hhmm: "8:52",
+        keyboard_layout: "EN",
+        has_battery: true,
+        battery_percent: 100,
+        battery_charging: true,
+        wifi_connected: true,
+        wifi_signal_percent: Some(90),
+        wallpaper_path: None,
+        users: &[],
+        selected_user: 0,
+        power_menu_open: false,
+        glass_opacity: 0.78,
+        reduce_transparency: false,
+        progress: 1.0,
+    };
+    matches!(
+        hit_test_lock_screen(screen_size, &default_state, x, y),
+        LockScreenHit::UnlockUser(_)
+    )
+}
+
+#[cfg(test)]
+#[must_use]
+pub(crate) fn lock_screen_primary_row_center(
+    screen_size: Size<i32, smithay::utils::Physical>,
+    user_names: &[&str],
+) -> (f64, f64) {
+    let layout = compute_lock_screen_layout(screen_size, "EN", true, user_names, 0);
+    let row = layout.user_row_rects[0];
+    (
+        f64::from(row.loc.x + row.size.w / 2),
+        f64::from(row.loc.y + row.size.h / 2),
+    )
 }
 
 /// Dynamic left-side geometry for `TopBar` app name, global menus, optional workspace strip, and layout badge (`RUSTYOS-048`/`049`).
@@ -5832,8 +6108,321 @@ pub fn generate_shell_composite_elements(
     out
 }
 
-/// Generates topmost front-to-back Lock Screen curtain, clock, and unlock button (`RUSTYOS-025`).
-#[allow(clippy::cast_possible_truncation, clippy::too_many_lines)]
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn render_lock_power_menu(
+    out: &mut Vec<CompositorRenderElement>,
+    text_cache: &mut crate::text::TextCache,
+    shape_cache: &mut crate::surfaces::UiShapeCache,
+    renderer: &mut GlesRenderer,
+    layout: &LockScreenLayout,
+    lock: &LockScreenRenderState<'_>,
+    fade: f32,
+) {
+    if !lock.power_menu_open || fade <= 0.25 {
+        return;
+    }
+    let text_alpha = (244.0 * fade).clamp(0.0, 255.0).round() as u8;
+    let text_rgba = [246, 248, 252, text_alpha];
+    let labels = ["Sleep", "Restart...", "Shut Down..."];
+    for (idx, (rect, label)) in layout.power_item_rects.iter().zip(labels).enumerate() {
+        if let Some(el) = text_cache.render_label_weighted(
+            renderer,
+            label,
+            crate::text::FontWeight::Regular,
+            12.5,
+            text_rgba,
+            Point::from((rect.loc.x + 12, rect.loc.y + 7)),
+        ) {
+            out.push(CompositorRenderElement::Memory(el));
+        }
+        if idx < 2 {
+            out.push(CompositorRenderElement::Solid(make_solid_element(
+                Rectangle::new(
+                    Point::from((rect.loc.x + 8, rect.loc.y + rect.size.h - 1)),
+                    Size::from((rect.size.w - 16, 1)),
+                ),
+                premul(1.0, 1.0, 1.0, 0.14 * fade),
+            )));
+        }
+    }
+    push_liquid_glass_panel(
+        out,
+        shape_cache,
+        renderer,
+        layout.power_menu_rect,
+        12,
+        crate::surfaces::GlassPanelStyle::Popover,
+        lock.glass_opacity,
+        lock.reduce_transparency,
+        Some((14, (44.0 * fade).round() as u8)),
+    );
+}
+
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn render_lock_top_right_status(
+    out: &mut Vec<CompositorRenderElement>,
+    text_cache: &mut crate::text::TextCache,
+    shape_cache: &mut crate::surfaces::UiShapeCache,
+    renderer: &mut GlesRenderer,
+    layout: &LockScreenLayout,
+    lock: &LockScreenRenderState<'_>,
+    fade: f32,
+) {
+    if fade <= 0.15 {
+        return;
+    }
+    let white_a = (242.0 * fade).clamp(0.0, 255.0).round() as u8;
+    let shadow_a = (72.0 * fade).clamp(0.0, 255.0).round() as u8;
+    let white = [255, 255, 255, white_a];
+    let kbd_label = format_lock_kbd_label(lock.keyboard_layout);
+
+    if text_cache.has_font() {
+        if let Some(el) = text_cache.render_label_weighted(
+            renderer,
+            kbd_label,
+            crate::text::FontWeight::Bold,
+            12.0,
+            white,
+            Point::from((layout.kbd_text_x, 10)),
+        ) {
+            out.push(CompositorRenderElement::Memory(el));
+        }
+        if let Some(el) = text_cache.render_label_weighted(
+            renderer,
+            kbd_label,
+            crate::text::FontWeight::Bold,
+            12.0,
+            [0, 0, 0, shadow_a],
+            Point::from((layout.kbd_text_x, 11)),
+        ) {
+            out.push(CompositorRenderElement::Memory(el));
+        }
+    }
+
+    if let Some(el) = shape_cache.ui_glyph_rect_element(
+        renderer,
+        crate::surfaces::UiGlyphKind::Keyboard,
+        18,
+        14,
+        white,
+        Point::from((layout.kbd_glyph_x, 11)),
+    ) {
+        out.push(CompositorRenderElement::Memory(el));
+    }
+
+    if let Some(bx) = layout.battery_x
+        && let Some(el) = shape_cache.ui_glyph_rect_element(
+            renderer,
+            crate::surfaces::UiGlyphKind::Battery {
+                percent: lock.battery_percent,
+                charging: lock.battery_charging,
+            },
+            24,
+            18,
+            white,
+            Point::from((bx, 9)),
+        )
+    {
+        out.push(CompositorRenderElement::Memory(el));
+    }
+
+    if let Some(el) = shape_cache.ui_glyph_element(
+        renderer,
+        crate::surfaces::UiGlyphKind::Wifi {
+            connected: lock.wifi_connected,
+            signal_percent: lock.wifi_signal_percent,
+        },
+        18,
+        white,
+        Point::from((layout.wifi_x, 9)),
+    ) {
+        out.push(CompositorRenderElement::Memory(el));
+    }
+
+    if let Some(el) = shape_cache.ui_glyph_element(
+        renderer,
+        crate::surfaces::UiGlyphKind::PowerSymbol,
+        16,
+        white,
+        Point::from((
+            layout.power_btn_rect.loc.x + 3,
+            layout.power_btn_rect.loc.y + 3,
+        )),
+    ) {
+        out.push(CompositorRenderElement::Memory(el));
+    }
+    if lock.power_menu_open
+        && let Some(el) = shape_cache.circle_element(
+            renderer,
+            layout.power_btn_rect.size.w,
+            [255, 255, 255, (56.0 * fade).round() as u8],
+            Some([255, 255, 255, (92.0 * fade).round() as u8]),
+            Point::from((layout.power_btn_rect.loc.x, layout.power_btn_rect.loc.y)),
+        )
+    {
+        out.push(CompositorRenderElement::Memory(el));
+    }
+}
+
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn render_lock_clock_header(
+    out: &mut Vec<CompositorRenderElement>,
+    text_cache: &mut crate::text::TextCache,
+    renderer: &mut GlesRenderer,
+    screen_width: i32,
+    layout: &LockScreenLayout,
+    lock: &LockScreenRenderState<'_>,
+    fade: f32,
+) {
+    if fade <= 0.15 || !text_cache.has_font() {
+        return;
+    }
+    let date_bounds = Rectangle::new(
+        Point::from((0, layout.date_y)),
+        Size::from((screen_width, (layout.date_size * 1.4).round() as i32)),
+    );
+    if let Some(el) = text_cache.render_label_centered_weighted(
+        renderer,
+        lock.date_label,
+        crate::text::FontWeight::Bold,
+        layout.date_size,
+        [248, 249, 252, (238.0 * fade).round() as u8],
+        date_bounds,
+    ) {
+        out.push(CompositorRenderElement::Memory(el));
+    }
+    let date_shadow_bounds = Rectangle::new(Point::from((0, layout.date_y + 1)), date_bounds.size);
+    if let Some(el) = text_cache.render_label_centered_weighted(
+        renderer,
+        lock.date_label,
+        crate::text::FontWeight::Bold,
+        layout.date_size,
+        [0, 0, 0, (48.0 * fade).round() as u8],
+        date_shadow_bounds,
+    ) {
+        out.push(CompositorRenderElement::Memory(el));
+    }
+
+    let clock_bounds = Rectangle::new(
+        Point::from((0, layout.clock_y)),
+        Size::from((screen_width, (layout.clock_size * 1.15).round() as i32)),
+    );
+    // macOS Liquid Glass lock clock: clean translucent numerals letting wallpaper glow through.
+    if let Some(el) = text_cache.render_label_centered_weighted(
+        renderer,
+        lock.clock_hhmm,
+        crate::text::FontWeight::Bold,
+        layout.clock_size,
+        [255, 255, 255, (186.0 * fade).round() as u8],
+        clock_bounds,
+    ) {
+        out.push(CompositorRenderElement::Memory(el));
+    }
+}
+
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn render_lock_users_section(
+    out: &mut Vec<CompositorRenderElement>,
+    text_cache: &mut crate::text::TextCache,
+    shape_cache: &mut crate::surfaces::UiShapeCache,
+    renderer: &mut GlesRenderer,
+    layout: &LockScreenLayout,
+    lock: &LockScreenRenderState<'_>,
+    fade: f32,
+) {
+    if fade <= 0.18 {
+        return;
+    }
+    let fallback_user = default_lock_user_fallback();
+    let users = if lock.users.is_empty() {
+        std::slice::from_ref(&fallback_user)
+    } else {
+        lock.users
+    };
+    let selected = lock.selected_user.min(users.len().saturating_sub(1));
+    let multi_user = users.len() > 1;
+    let name_alpha = (246.0 * fade).round() as u8;
+    let shadow_alpha = (64.0 * fade).round() as u8;
+
+    for (idx, (user, row_rect)) in users.iter().zip(&layout.user_row_rects).enumerate() {
+        let row_y = row_rect.loc.y + 4;
+        let is_selected = idx == selected;
+        if text_cache.has_font() {
+            let text_rgba = if is_selected || !multi_user {
+                [255, 255, 255, name_alpha]
+            } else {
+                [232, 236, 242, (206.0 * fade).round() as u8]
+            };
+            if let Some(el) = text_cache.render_label_weighted(
+                renderer,
+                &user.display_name,
+                crate::text::FontWeight::Bold,
+                13.5,
+                text_rgba,
+                Point::from((layout.name_x, row_y + 10)),
+            ) {
+                out.push(CompositorRenderElement::Memory(el));
+            }
+            if let Some(el) = text_cache.render_label_weighted(
+                renderer,
+                &user.display_name,
+                crate::text::FontWeight::Bold,
+                13.5,
+                [0, 0, 0, shadow_alpha],
+                Point::from((layout.name_x, row_y + 11)),
+            ) {
+                out.push(CompositorRenderElement::Memory(el));
+            }
+        }
+        if let Some(el) = shape_cache.user_avatar_element(
+            renderer,
+            38,
+            user.avatar_path.as_deref().map(std::path::Path::new),
+            user.uid,
+            is_selected,
+            Point::from((layout.avatar_x, row_y)),
+        ) {
+            out.push(CompositorRenderElement::Memory(el));
+        }
+    }
+
+    if let Some(hint_rect) = layout.unlock_hint_rect
+        && text_cache.has_font()
+    {
+        let hint_logical = Rectangle::new(
+            Point::from((hint_rect.loc.x, hint_rect.loc.y)),
+            Size::from((hint_rect.size.w, hint_rect.size.h)),
+        );
+        if let Some(el) = text_cache.render_label_centered_weighted(
+            renderer,
+            "Click or press Return to unlock",
+            crate::text::FontWeight::Regular,
+            11.0,
+            [244, 247, 252, (170.0 * fade).round() as u8],
+            hint_logical,
+        ) {
+            out.push(CompositorRenderElement::Memory(el));
+        }
+        let shadow_logical = Rectangle::new(
+            Point::from((hint_rect.loc.x, hint_rect.loc.y + 1)),
+            hint_logical.size,
+        );
+        if let Some(el) = text_cache.render_label_centered_weighted(
+            renderer,
+            "Click or press Return to unlock",
+            crate::text::FontWeight::Regular,
+            11.0,
+            [0, 0, 0, shadow_alpha],
+            shadow_logical,
+        ) {
+            out.push(CompositorRenderElement::Memory(el));
+        }
+    }
+}
+
+/// Generates topmost front-to-back macOS-style Lock Screen backdrop, frosted clock,
+/// minimal top-right controls, and bottom user selector (`RUSTYOS-025`/`054`).
+#[allow(clippy::cast_possible_truncation)]
 pub fn generate_lock_screen_elements(
     text_cache: &mut crate::text::TextCache,
     shape_cache: &mut crate::surfaces::UiShapeCache,
@@ -5847,112 +6436,73 @@ pub fn generate_lock_screen_elements(
         return out;
     }
 
-    let width = screen_size.w;
-    let height = screen_size.h;
-    let (cx, base_cy, cw, ch) = lock_screen_card_rect(screen_size);
-    let card_dy = anim_offset(p, 24.0);
-    let cy = base_cy + card_dy;
-    let btn_rect = lock_screen_unlock_button_rect(screen_size, card_dy);
+    let fallback_user = default_lock_user_fallback();
+    let users = if lock.users.is_empty() {
+        std::slice::from_ref(&fallback_user)
+    } else {
+        lock.users
+    };
+    let names: Vec<&str> = users.iter().map(|u| u.display_name.as_str()).collect();
+    let slide_dy = anim_offset(p, 16.0);
+    let layout = compute_lock_screen_layout(
+        screen_size,
+        lock.keyboard_layout,
+        lock.has_battery,
+        &names,
+        slide_dy,
+    );
+    let fade = p as f32;
 
-    let text_bright = [244, 240, 250, 255];
-    let text_muted = [166, 155, 181, 255];
+    render_lock_power_menu(
+        &mut out,
+        text_cache,
+        shape_cache,
+        renderer,
+        &layout,
+        lock,
+        fade,
+    );
+    render_lock_top_right_status(
+        &mut out,
+        text_cache,
+        shape_cache,
+        renderer,
+        &layout,
+        lock,
+        fade,
+    );
+    render_lock_clock_header(
+        &mut out,
+        text_cache,
+        renderer,
+        screen_size.w,
+        &layout,
+        lock,
+        fade,
+    );
+    render_lock_users_section(
+        &mut out,
+        text_cache,
+        shape_cache,
+        renderer,
+        &layout,
+        lock,
+        fade,
+    );
 
-    if p > 0.2 && text_cache.has_font() {
-        if let Some(el) = text_cache.render_label_centered(
-            renderer,
-            lock.clock_hhmm,
-            34.0,
-            text_bright,
-            Rectangle::new(Point::from((cx + 16, cy + 20)), Size::from((cw - 32, 46))),
-        ) {
-            out.push(CompositorRenderElement::Memory(el));
-        }
-        if let Some(el) = text_cache.render_label_centered(
-            renderer,
-            "RustyOS Session Locked",
-            12.5,
-            text_bright,
-            Rectangle::new(Point::from((cx + 16, cy + 72)), Size::from((cw - 32, 22))),
-        ) {
-            out.push(CompositorRenderElement::Memory(el));
-        }
-        let status = if lock.has_battery {
-            format!(
-                "{} • {}% • {} win",
-                truncate_ascii(lock.network_label, 14),
-                lock.battery_percent,
-                lock.window_count
-            )
-        } else {
-            format!(
-                "{} • {} windows paused",
-                truncate_ascii(lock.network_label, 16),
-                lock.window_count
-            )
-        };
-        if let Some(el) = text_cache.render_label_centered(
-            renderer,
-            &status,
-            10.5,
-            text_muted,
-            Rectangle::new(Point::from((cx + 16, cy + 96)), Size::from((cw - 32, 20))),
-        ) {
-            out.push(CompositorRenderElement::Memory(el));
-        }
-        let btn_logical = Rectangle::new(
-            Point::from((btn_rect.loc.x, btn_rect.loc.y)),
-            Size::from((btn_rect.size.w, btn_rect.size.h)),
-        );
-        if let Some(el) = text_cache.render_label_centered(
-            renderer,
-            "Unlock Session",
-            12.5,
-            text_bright,
-            btn_logical,
-        ) {
-            out.push(CompositorRenderElement::Memory(el));
-        }
-        if let Some(el) = text_cache.render_label_centered(
-            renderer,
-            "Press Enter, Space, or click Unlock",
-            10.0,
-            text_muted,
-            Rectangle::new(
-                Point::from((cx + 16, cy + ch - 26)),
-                Size::from((cw - 32, 18)),
-            ),
-        ) {
-            out.push(CompositorRenderElement::Memory(el));
-        }
+    if let Some(bg) = shape_cache.wallpaper_element_with_alpha(
+        renderer,
+        Size::from((screen_size.w, screen_size.h)),
+        lock.wallpaper_path,
+        fade,
+    ) {
+        out.push(CompositorRenderElement::Memory(bg));
+    } else {
+        out.push(CompositorRenderElement::Solid(make_solid_element(
+            Rectangle::new(Point::from((0, 0)), screen_size),
+            premul(0.08, 0.09, 0.13, fade),
+        )));
     }
-
-    push_rounded_glass_box(
-        &mut out,
-        shape_cache,
-        renderer,
-        btn_rect,
-        8,
-        RGBA_ACCENT,
-        Some(RGBA_BORDER_HIGHLIGHT),
-    );
-
-    let card_rect = Rectangle::new(Point::from((cx, cy)), Size::from((cw, ch)));
-    push_rounded_glass_box(
-        &mut out,
-        shape_cache,
-        renderer,
-        card_rect,
-        16,
-        RGBA_SURFACE_ELEVATED,
-        Some(RGBA_BORDER_HIGHLIGHT),
-    );
-    push_soft_shadow(&mut out, shape_cache, renderer, card_rect, 16, 14, 48);
-
-    let curtain_a = 0.92 * (p as f32);
-    out.push(CompositorRenderElement::Solid(make_solid_element(
-        Rectangle::new(Point::from((0, 0)), Size::from((width, height))),
-        premul(0.059, 0.039, 0.098, curtain_a),
-    )));
 
     out
 }
@@ -6771,13 +7321,150 @@ mod tests {
     #[test]
     fn lock_screen_hit_testing_and_animation_offsets_match_bounds() {
         let size = Size::from((1280, 800));
-        let btn = lock_screen_unlock_button_rect(size, 0);
+        let single_users = [rusty_services::UserAccount {
+            username: "anc".to_owned(),
+            display_name: "anc".to_owned(),
+            uid: 1000,
+            avatar_path: None,
+        }];
+        let single_layout = compute_lock_screen_layout(size, "EN", true, &["anc"], 0);
+        let single_state = LockScreenRenderState {
+            date_label: "Thu Sep 10",
+            clock_hhmm: "8:52",
+            keyboard_layout: "EN",
+            has_battery: true,
+            battery_percent: 100,
+            battery_charging: true,
+            wifi_connected: true,
+            wifi_signal_percent: Some(90),
+            wallpaper_path: None,
+            users: &single_users,
+            selected_user: 0,
+            power_menu_open: false,
+            glass_opacity: 0.78,
+            reduce_transparency: false,
+            progress: 1.0,
+        };
+        let row0 = single_layout.user_row_rects[0];
+        assert_eq!(
+            hit_test_lock_screen(
+                size,
+                &single_state,
+                f64::from(row0.loc.x + row0.size.w / 2),
+                f64::from(row0.loc.y + row0.size.h / 2)
+            ),
+            LockScreenHit::UnlockUser(0)
+        );
         assert!(check_lock_screen_unlock_click(
             size,
-            f64::from(btn.loc.x + btn.size.w / 2),
-            f64::from(btn.loc.y + btn.size.h / 2)
+            f64::from(row0.loc.x + row0.size.w / 2),
+            f64::from(row0.loc.y + row0.size.h / 2)
         ));
         assert!(!check_lock_screen_unlock_click(size, 40.0, 40.0));
+        assert_eq!(
+            hit_test_lock_screen(
+                size,
+                &single_state,
+                f64::from(single_layout.kbd_hit_rect.loc.x + 6),
+                f64::from(single_layout.kbd_hit_rect.loc.y + 8)
+            ),
+            LockScreenHit::ToggleKeyboardLayout
+        );
+        assert_eq!(
+            hit_test_lock_screen(
+                size,
+                &single_state,
+                f64::from(single_layout.power_btn_rect.loc.x + 8),
+                f64::from(single_layout.power_btn_rect.loc.y + 8)
+            ),
+            LockScreenHit::TogglePowerMenu
+        );
+        assert_eq!(anim_offset(1.0, -22.0), 0);
+        assert_eq!(anim_offset(0.0, -22.0), -22);
+    }
+
+    #[test]
+    fn lock_screen_power_menu_and_multi_user_hit_testing() {
+        let size = Size::from((1280, 800));
+        let multi_users = [
+            rusty_services::UserAccount {
+                username: "anc".to_owned(),
+                display_name: "anc".to_owned(),
+                uid: 1000,
+                avatar_path: None,
+            },
+            rusty_services::UserAccount {
+                username: "stephen".to_owned(),
+                display_name: "Stephen Hackett".to_owned(),
+                uid: 1001,
+                avatar_path: None,
+            },
+        ];
+        let multi_layout =
+            compute_lock_screen_layout(size, "RU", true, &["anc", "Stephen Hackett"], 0);
+        let mut multi_state = LockScreenRenderState {
+            date_label: "Thu Sep 10",
+            clock_hhmm: "8:52",
+            keyboard_layout: "RU",
+            has_battery: true,
+            battery_percent: 100,
+            battery_charging: true,
+            wifi_connected: true,
+            wifi_signal_percent: Some(90),
+            wallpaper_path: None,
+            users: &multi_users,
+            selected_user: 0,
+            power_menu_open: false,
+            glass_opacity: 0.78,
+            reduce_transparency: false,
+            progress: 1.0,
+        };
+        let row1 = multi_layout.user_row_rects[1];
+        assert_eq!(
+            hit_test_lock_screen(
+                size,
+                &multi_state,
+                f64::from(row1.loc.x + 12),
+                f64::from(row1.loc.y + 12)
+            ),
+            LockScreenHit::SelectUser(1)
+        );
+        multi_state.selected_user = 1;
+        assert_eq!(
+            hit_test_lock_screen(
+                size,
+                &multi_state,
+                f64::from(row1.loc.x + 12),
+                f64::from(row1.loc.y + 12)
+            ),
+            LockScreenHit::UnlockUser(1)
+        );
+
+        multi_state.power_menu_open = true;
+        let sleep_item = multi_layout.power_item_rects[0];
+        let shutdown_item = multi_layout.power_item_rects[2];
+        assert_eq!(
+            hit_test_lock_screen(
+                size,
+                &multi_state,
+                f64::from(sleep_item.loc.x + 20),
+                f64::from(sleep_item.loc.y + 10)
+            ),
+            LockScreenHit::PowerAction(rusty_services::SessionAction::Suspend)
+        );
+        assert_eq!(
+            hit_test_lock_screen(
+                size,
+                &multi_state,
+                f64::from(shutdown_item.loc.x + 20),
+                f64::from(shutdown_item.loc.y + 10)
+            ),
+            LockScreenHit::PowerAction(rusty_services::SessionAction::PowerOff)
+        );
+        assert_eq!(
+            hit_test_lock_screen(size, &multi_state, 40.0, 40.0),
+            LockScreenHit::DismissPowerMenu
+        );
 
         assert_eq!(anim_offset(1.0, -22.0), 0);
         assert_eq!(anim_offset(0.0, -22.0), -22);

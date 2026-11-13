@@ -767,6 +767,19 @@ hardware/software context и низкие накладные расходы.
 - **Verification:** `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --offline -- -D warnings` и `cargo run -p rusty-compositor --offline -- --check` завершились с кодом 0 без предупреждений; 128/128 тестов workspace прошли без пропусков (`rusty_animation` 4/4, `rusty_compositor` 100/100, `rusty_ipc` 3/3, `rusty_services` 9/9, `rusty_shell` 5/5, `rusty_wm` 7/7); живая проверка `rusty-compositor --winit` (Mesa Intel(R) Graphics RPL-U, OpenGL ES 3.2) и визуальная инспекция открытого Control Center (`rustyos_053_cc_crop.png`) подтвердили 1:1 соответствие макету и типографике macOS 27.
 - **Risks:** Нулевые новые внешние зависимости и ноль `unsafe`; телеметрия MPRIS2 и Wi-Fi обновляется по циклу опроса `POLL_INTERVAL` (с мгновенным запросом обновления при открытии Control Center).
 
+### RUSTYOS-054 — 1:1 macOS 27 Built-In Lock Screen Parity
+- **Status:** done
+- **Priority:** P1
+- **Phase:** Фаза 7 / UX Polish & macOS 27 Lock Screen Parity
+- **Scope:**
+  - В `crates/rusty-services/src/lib.rs` добавлены `UserAccount`, `UserService` (`query_users`, `parse_passwd_users`, `resolve_user_avatar_path`), `SessionAction::{Suspend, Reboot, PowerOff}`, `SessionService::dispatch`, `local_clock_lock_date` и `local_clock_lock_hhmm`, а также модульный тест `passwd_user_parser_and_lock_clock_formatters_work`.
+  - В `crates/rusty-compositor/src/telemetry.rs` добавлены поля `SystemTelemetry::{users, lock_date, lock_time_hhmm, lock_time_24h}`, команда `TelemetryCmd::Session(SessionAction)` и `SystemMetricsHandle::dispatch_session`.
+  - В `crates/rusty-compositor/src/icons.rs` и `surfaces.rs` добавлены `load_circular_avatar_bgra`, `UiShapeCache::wallpaper_element_with_alpha`, `UiShapeCache::user_avatar_element`, 4×4 SSAA SDF-глифы `UiGlyphKind::{Keyboard, PowerSymbol}` и расширены проверки в тестах глифов/аватаров.
+  - В `crates/rusty-compositor/src/shell_render.rs`, `state.rs`, `input.rs` и `winit_backend.rs` убраны 92%-ная тёмная завеса и карточка `360×216`: реализованы полноэкранный фон текущих обоев поверх скрытых окон/`TopBar`/`Dock`, верхние дата и крупные полупрозрачные часы, верхне-правый минимальный статус (раскладка + клавиатура, Battery, 3-полосный Wi-Fi, кнопка питания с поповером `Sleep`/`Restart...`/`Shut Down...`), нижний центрированный список пользователей (`38×38` круглые аватары и имена) и разблокировка по клику / `Enter` / `Space` / `Escape`, сохранив `ext_session_lock_v1` без изменений.
+  - Обновлены `DESIGN.md` §12.7, создан `docs/adr/0023-macos-lock-screen-parity.md`, добавлена запись `D-031` в `DECISIONS.md` и статус задачи в `TASKS.md`.
+- **Verification:** `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --offline -- -D warnings` и `cargo run -p rusty-compositor --offline -- --check` завершились с кодом 0 без предупреждений; 131/131 тестов workspace прошли без пропусков (`rusty_animation` 4/4, `rusty_compositor` 102/102, `rusty_ipc` 3/3, `rusty_services` 10/10, `rusty_shell` 5/5, `rusty_wm` 7/7); живая проверка `rusty-compositor --winit` (Mesa Intel(R) Graphics RPL-U, OpenGL ES 3.2) и визуальная инспекция скриншотов `rustyos_054_lock_full.png`, `rustyos_054_lock_topright.png`, `rustyos_054_lock_users.png` и `rustyos_054_lock_powermenu.png` подтвердили 1:1 соответствие макету и отцентрированную композицию экрана блокировки macOS 27.
+- **Risks:** Нулевые новые внешние Rust-зависимости и ноль `unsafe`; встроенный Lock Screen остается без PAM-проверки пароля (внешний PAM-локер может подключаться через сохранённый протокол `ext_session_lock_v1`).
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

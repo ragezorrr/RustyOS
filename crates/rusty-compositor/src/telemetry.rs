@@ -14,7 +14,8 @@ use std::time::Duration;
 
 use rusty_services::{
     AudioStatus, BluetoothStatus, BrightnessStatus, MediaAction, MediaStatus, NetworkStatus,
-    PowerStatus, ServiceRegistry, local_clock_hhmm, local_clock_short_datetime_fmt,
+    PowerStatus, ServiceRegistry, SessionAction, UserAccount, local_clock_hhmm,
+    local_clock_lock_date, local_clock_lock_hhmm, local_clock_short_datetime_fmt,
 };
 
 const POLL_INTERVAL: Duration = Duration::from_secs(3);
@@ -34,12 +35,20 @@ pub struct SystemTelemetry {
     pub brightness: BrightnessStatus,
     /// MPRIS2 media playback status and active track metadata (`RUSTYOS-053`).
     pub media: MediaStatus,
+    /// Local user accounts for Lock Screen user switcher (`RUSTYOS-054`).
+    pub users: Vec<UserAccount>,
     /// Local wall-clock time formatted as `HH:MM`.
     pub clock_hhmm: String,
     /// Compact macOS-style `TopBar` date + 12h time label (`"Wed Apr 1  9:41 AM"`).
     pub clock_date_hhmm: String,
     /// Compact macOS-style `TopBar` date + 24h time label (`"Wed Apr 1  09:41"`).
     pub clock_date_24h: String,
+    /// Lock Screen date header (`"Fri Nov 13"`) (`RUSTYOS-054`).
+    pub lock_date: String,
+    /// Lock Screen 12h clock without AM/PM suffix (`"8:52"`) (`RUSTYOS-054`).
+    pub lock_time_hhmm: String,
+    /// Lock Screen 24h clock (`"08:52"`) (`RUSTYOS-054`).
+    pub lock_time_24h: String,
 }
 
 impl Default for SystemTelemetry {
@@ -51,9 +60,13 @@ impl Default for SystemTelemetry {
             audio: AudioStatus::default(),
             brightness: BrightnessStatus::default(),
             media: MediaStatus::default(),
+            users: Vec::new(),
             clock_hhmm: "12:00".to_owned(),
             clock_date_hhmm: "Wed Apr 1  9:41 AM".to_owned(),
             clock_date_24h: "Wed Apr 1  09:41".to_owned(),
+            lock_date: "Thu Sep 10".to_owned(),
+            lock_time_hhmm: "12:00".to_owned(),
+            lock_time_24h: "12:00".to_owned(),
         }
     }
 }
@@ -67,6 +80,7 @@ enum TelemetryCmd {
     SetWifiEnabled(bool),
     SetBrightness(u8),
     MediaControl(MediaAction),
+    Session(SessionAction),
 }
 
 struct SharedState {
@@ -318,6 +332,11 @@ impl SystemMetricsHandle {
         }
     }
 
+    /// Dispatches a session power action (`Suspend` / `Reboot` / `PowerOff`) asynchronously (`RUSTYOS-054`).
+    pub fn dispatch_session(&self, action: SessionAction) {
+        self.push_cmd(TelemetryCmd::Session(action));
+    }
+
     fn push_cmd(&self, cmd: TelemetryCmd) {
         if let Ok(mut q) = self.shared.queue.lock() {
             q.push_back(cmd);
@@ -334,9 +353,13 @@ fn poll_once(services: &ServiceRegistry) -> SystemTelemetry {
         audio: services.audio.query_status(),
         brightness: services.brightness.query_status(),
         media: services.media.query_status(),
+        users: services.users.query_users(),
         clock_hhmm: local_clock_hhmm(),
         clock_date_hhmm: local_clock_short_datetime_fmt(false),
         clock_date_24h: local_clock_short_datetime_fmt(true),
+        lock_date: local_clock_lock_date(),
+        lock_time_hhmm: local_clock_lock_hhmm(false),
+        lock_time_24h: local_clock_lock_hhmm(true),
     }
 }
 
@@ -388,6 +411,9 @@ fn telemetry_worker_loop(shared: &SharedState) {
                 }
                 TelemetryCmd::MediaControl(action) => {
                     let _ = services.media.dispatch(action);
+                }
+                TelemetryCmd::Session(action) => {
+                    let _ = services.session.dispatch(action);
                 }
             }
         }

@@ -461,6 +461,10 @@ pub struct RustyCompositorState {
     pub screen_locked: bool,
     /// Animated Lock Screen transition progress (`0.0` unlocked -> `1.0` locked) (`RUSTYOS-025`).
     pub lock_screen_anim: AnimatedValue,
+    /// Selected account index on the macOS-style Lock Screen user switcher (`RUSTYOS-054`).
+    pub lock_selected_user: usize,
+    /// Whether the Lock Screen top-right power popover (`Sleep`/`Restart`/`Shut Down`) is open (`RUSTYOS-054`).
+    pub lock_power_menu_open: bool,
     /// Count of active notifications held in compositor HUD queue (`RUSTYOS-009`/`010`/`024`).
     pub notification_count: u32,
     /// Active desktop notification queue rendered in Notification HUD & exposed via IPC (`RUSTYOS-024`).
@@ -731,6 +735,8 @@ impl RustyCompositorState {
             telemetry: crate::telemetry::SystemMetricsHandle::static_default(),
             screen_locked: false,
             lock_screen_anim: AnimatedValue::new_settled(0.0),
+            lock_selected_user: 0,
+            lock_power_menu_open: false,
             notification_count: 0,
             notifications: Vec::new(),
             dbus_notifications: crate::dbus_notifications::DbusNotificationHandle::default(),
@@ -1811,6 +1817,8 @@ impl RustyCompositorState {
     /// Engages or disengages the interactive session Lock Screen with smooth transition (`RUSTYOS-025`).
     pub fn set_screen_locked(&mut self, locked: bool, serial: Serial) {
         self.screen_locked = locked;
+        self.lock_power_menu_open = false;
+        self.lock_selected_user = 0;
         if locked {
             self.window_switcher = None;
             self.dnd_icon = None;
@@ -1823,6 +1831,7 @@ impl RustyCompositorState {
             self.clear_shell_hover_states();
             self.touchpad_swipe = TouchpadSwipeState::default();
             self.deactivate_focused_shortcut_inhibitor();
+            self.telemetry.request_refresh();
             let keyboard = self.keyboard.clone();
             keyboard.set_focus(self, None, serial);
         } else {
@@ -1838,6 +1847,17 @@ impl RustyCompositorState {
             Easing::EaseOutQuart,
             self.animations.reduced_motion(),
         );
+    }
+
+    /// Toggles the Lock Screen top-right power popover (`RUSTYOS-054`).
+    pub fn toggle_lock_power_menu(&mut self) {
+        self.lock_power_menu_open = !self.lock_power_menu_open;
+    }
+
+    /// Selects an interactive user row index on the Lock Screen (`RUSTYOS-054`).
+    pub fn select_lock_user(&mut self, idx: usize) {
+        let user_count = self.telemetry.snapshot().users.len().max(1);
+        self.lock_selected_user = idx.min(user_count - 1);
     }
 
     /// Updates accessibility `reduced_motion` and snaps in-flight shell transitions if enabled (`RUSTYOS-025`).

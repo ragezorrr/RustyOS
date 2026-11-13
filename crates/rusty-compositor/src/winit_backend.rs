@@ -673,12 +673,27 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
     let timing = state.frame_timing.summary();
     let lock_progress = state.lock_screen_anim.current();
     if state.screen_locked || lock_progress > 0.01 {
+        let lock_clock = if state.clock_24h {
+            &tel.lock_time_24h
+        } else {
+            &tel.lock_time_hhmm
+        };
         let lock_view = crate::shell_render::LockScreenRenderState {
-            clock_hhmm: &tel.clock_hhmm,
-            network_label: &tel.network.status_label,
-            battery_percent: tel.power.percentage,
+            date_label: &tel.lock_date,
+            clock_hhmm: lock_clock,
+            keyboard_layout: &state.active_kbd_layout,
             has_battery: tel.power.has_battery,
-            window_count,
+            battery_percent: tel.power.percentage,
+            battery_charging: tel.power.ac_online
+                || tel.power.state == rusty_services::BatteryState::Charging,
+            wifi_connected: tel.network.connected,
+            wifi_signal_percent: tel.network.wifi_signal_percent,
+            wallpaper_path: state.user_config.wallpaper.as_deref(),
+            users: &tel.users,
+            selected_user: state.lock_selected_user,
+            power_menu_open: state.lock_power_menu_open,
+            glass_opacity: state.glass_opacity,
+            reduce_transparency: state.reduce_transparency,
             progress: lock_progress,
         };
         render_list.extend(crate::shell_render::generate_lock_screen_elements(

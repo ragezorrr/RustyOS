@@ -1238,6 +1238,19 @@ pub fn local_clock_hhmm() -> String {
     format!("{hh:02}:{mm:02}")
 }
 
+fn run_c_locale_date(fmt_arg: &str, max_len: usize) -> Option<String> {
+    let output = Command::new("date")
+        .env("LC_ALL", "C")
+        .arg(fmt_arg)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    (!text.is_empty() && text.len() <= max_len).then_some(text)
+}
+
 /// Returns compact macOS-style `TopBar` date + time in neutral C locale (`RUSTYOS-049`), falling back to `HH:MM`.
 ///
 /// - When `use_24h == false` (default): `"Wed Apr 1  9:41 AM"`
@@ -1249,24 +1262,174 @@ pub fn local_clock_short_datetime_fmt(use_24h: bool) -> String {
     } else {
         "+%a %b %-d  %-I:%M %p"
     };
-    if let Ok(output) = Command::new("date")
-        .env("LC_ALL", "C")
-        .arg(fmt_arg)
-        .output()
-        && output.status.success()
-    {
-        let text = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-        if !text.is_empty() && text.len() <= 28 {
-            return text;
-        }
-    }
-    local_clock_hhmm()
+    run_c_locale_date(fmt_arg, 28).unwrap_or_else(local_clock_hhmm)
+}
+
+/// Returns compact macOS Lock Screen date label in C locale (e.g. `"Thu Sep 10"`) (`RUSTYOS-054`).
+#[must_use]
+pub fn local_clock_lock_date() -> String {
+    run_c_locale_date("+%a %b %-d", 24).unwrap_or_else(|| "Today".to_owned())
+}
+
+/// Returns compact macOS Lock Screen clock without AM/PM suffix (e.g. `"8:52"` in 12h or `"08:52"` in 24h) (`RUSTYOS-054`).
+#[must_use]
+pub fn local_clock_lock_hhmm(use_24h: bool) -> String {
+    let fmt_arg = if use_24h { "+%H:%M" } else { "+%-I:%M" };
+    run_c_locale_date(fmt_arg, 8).unwrap_or_else(local_clock_hhmm)
 }
 
 /// Returns compact macOS-style `TopBar` date + time (`"Wed Apr 1  9:41 AM"`), falling back to `HH:MM` (`RUSTYOS-048`/`049`).
 #[must_use]
 pub fn local_clock_short_datetime() -> String {
     local_clock_short_datetime_fmt(false)
+}
+
+/// Human user account summary displayed on the Lock Screen (`RUSTYOS-054`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserAccount {
+    /// UNIX login username.
+    pub username: String,
+    /// Friendly GECOS display name (falls back to `username`).
+    pub display_name: String,
+    /// UNIX user ID.
+    pub uid: u32,
+    /// Optional resolved avatar PNG/image file path (`~/.face`, `AccountsService`, etc.).
+    pub avatar_path: Option<String>,
+}
+
+/// Read-only user account discovery service reading `/etc/passwd` and avatar hints (`RUSTYOS-054`).
+#[derive(Debug, Default, Clone)]
+pub struct UserService {
+    passwd_path: String,
+    accounts_icons_dir: String,
+}
+
+impl UserService {
+    /// Creates a new user discovery service pointing at standard Linux account databases.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            passwd_path: "/etc/passwd".to_owned(),
+            accounts_icons_dir: "/var/lib/AccountsService/icons".to_owned(),
+        }
+    }
+
+    /// Queries non-system human users (`UID 1000..=60000`) with the current `$USER` prioritized first.
+    #[must_use]
+    pub fn query_users(&self) -> Vec<UserAccount> {
+        let current_user = std::env::var("USER")
+            .ok()
+            .map(|u| u.trim().to_owned())
+            .filter(|u| !u.is_empty());
+        let mut users = fs::read_to_string(&self.passwd_path)
+            .map(|raw| parse_passwd_users(&raw, current_user.as_deref()))
+            .unwrap_or_default();
+
+        if users.is_empty() {
+            let fallback_name = current_user.unwrap_or_else(|| "User".to_owned());
+            users.push(UserAccount {
+                username: fallback_name.clone(),
+                display_name: fallback_name,
+                uid: 1000,
+                avatar_path: None,
+            });
+        }
+
+        let home_dir = std::env::var("HOME").ok();
+        let active_env_user = std::env::var("USER").ok();
+        for account in &mut users {
+            if account.avatar_path.is_none() {
+                account.avatar_path = resolve_user_avatar_path(
+                    &account.username,
+                    active_env_user.as_deref(),
+                    home_dir.as_deref(),
+                    &self.accounts_icons_dir,
+                );
+            }
+        }
+        users
+    }
+}
+
+/// Parses `/etc/passwd` entries for interactive human users (`UID 1000..=60000`) (`RUSTYOS-054`).
+#[must_use]
+pub fn parse_passwd_users(passwd_contents: &str, current_user: Option<&str>) -> Vec<UserAccount> {
+    let mut users = Vec::new();
+    for line in passwd_contents.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let parts: Vec<&str> = trimmed.split(':').collect();
+        if parts.len() < 7 {
+            continue;
+        }
+        let username = parts[0].trim();
+        let Ok(uid) = parts[2].trim().parse::<u32>() else {
+            continue;
+        };
+        let shell = parts[6].trim();
+        if username.is_empty()
+            || !(1000..=60000).contains(&uid)
+            || shell.ends_with("/nologin")
+            || shell.ends_with("/false")
+        {
+            continue;
+        }
+        let gecos_name = parts[4].split(',').next().unwrap_or_default().trim();
+        let display_name = if gecos_name.is_empty() {
+            username.to_owned()
+        } else {
+            gecos_name.to_owned()
+        };
+        users.push(UserAccount {
+            username: username.to_owned(),
+            display_name,
+            uid,
+            avatar_path: None,
+        });
+    }
+
+    if let Some(cur) = current_user.map(str::trim).filter(|s| !s.is_empty())
+        && let Some(pos) = users.iter().position(|u| u.username == cur)
+        && pos > 0
+    {
+        let active = users.remove(pos);
+        users.insert(0, active);
+    }
+    users.truncate(4);
+    users
+}
+
+fn resolve_user_avatar_path(
+    username: &str,
+    active_env_user: Option<&str>,
+    home_dir: Option<&str>,
+    accounts_icons_dir: &str,
+) -> Option<String> {
+    let mut candidates = Vec::new();
+    if active_env_user == Some(username)
+        && let Some(home) = home_dir
+    {
+        candidates.push(Path::new(home).join(".face"));
+        candidates.push(Path::new(home).join(".face.icon"));
+    }
+    candidates.push(Path::new(accounts_icons_dir).join(username));
+    candidates
+        .into_iter()
+        .find(|p| p.is_file())
+        .map(|p| p.to_string_lossy().into_owned())
+}
+
+/// Power/session lifecycle commands triggered from desktop/Lock Screen power controls (`RUSTYOS-054`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionAction {
+    /// Suspend system to RAM via `systemd-logind`.
+    Suspend,
+    /// Reboot system via `systemd-logind`.
+    Reboot,
+    /// Shut down system via `systemd-logind`.
+    PowerOff,
 }
 
 /// Session management service interacting with `systemd-logind`.
@@ -1278,6 +1441,16 @@ impl SessionService {
     #[must_use]
     pub fn new() -> Self {
         Self
+    }
+
+    /// Executes a [`SessionAction`] via `systemd-logind` (`systemctl`).
+    #[must_use]
+    pub fn dispatch(&self, action: SessionAction) -> bool {
+        match action {
+            SessionAction::Suspend => self.request_suspend(),
+            SessionAction::Reboot => self.request_reboot(),
+            SessionAction::PowerOff => self.request_poweroff(),
+        }
     }
 
     /// Requests system suspension (sleep) via logind.
@@ -1323,6 +1496,8 @@ pub struct ServiceRegistry {
     pub brightness: BrightnessService,
     /// MPRIS2 media control service (`RUSTYOS-031`).
     pub media: MediaService,
+    /// User account discovery service (`RUSTYOS-054`).
+    pub users: UserService,
     /// Session power/lifecycle service.
     pub session: SessionService,
 }
@@ -1338,6 +1513,7 @@ impl ServiceRegistry {
             audio: AudioService::new(),
             brightness: BrightnessService::new(),
             media: MediaService::new(),
+            users: UserService::new(),
             session: SessionService::new(),
         }
     }
@@ -1528,5 +1704,30 @@ Inter-| sta-|   Quality        |   Discarded packets               | Missed | WE
         assert!(!idle.active);
         assert!(!idle.playing);
         assert_eq!(idle.title, "");
+    }
+
+    #[test]
+    fn passwd_user_parser_and_lock_clock_formatters_work() {
+        let passwd = "\
+root:x:0:0:root:/root:/bin/bash
+nobody:x:65534:65534:Kernel Overflow User:/:/sbin/nologin
+merri:x:1001:1001:Merri,,,:/home/merri:/bin/zsh
+anc:x:1000:1000:Stephen Hackett,Room 1:/home/anc:/bin/bash
+svc:x:1002:1002:Disabled Account:/home/svc:/usr/bin/false
+";
+        let users = parse_passwd_users(passwd, Some("anc"));
+        assert_eq!(users.len(), 2);
+        assert_eq!(users[0].username, "anc");
+        assert_eq!(users[0].display_name, "Stephen Hackett");
+        assert_eq!(users[1].username, "merri");
+        assert_eq!(users[1].display_name, "Merri");
+
+        let lock_date = local_clock_lock_date();
+        assert!(!lock_date.is_empty() && lock_date.is_ascii());
+
+        let lock_12 = local_clock_lock_hhmm(false);
+        assert!(lock_12.contains(':') && !lock_12.contains("AM") && !lock_12.contains("PM"));
+        let lock_24 = local_clock_lock_hhmm(true);
+        assert!(lock_24.len() == 5 && lock_24.contains(':'));
     }
 }

@@ -45,6 +45,7 @@ enum KeyIntercept {
     OverviewClose,
     LockScreen,
     UnlockScreen,
+    LockSelectDelta(i8),
     LockScreenConsume,
     QuickSettingsClose,
     TopBarMenuClose,
@@ -233,6 +234,20 @@ impl RustyCompositorState {
             KeyIntercept::UnlockScreen => {
                 self.set_screen_locked(false, serial);
                 info!("Unlocked desktop session Lock Screen");
+            }
+            KeyIntercept::LockSelectDelta(delta) => {
+                let user_count = self.telemetry.snapshot().users.len().max(1);
+                self.lock_power_menu_open = false;
+                let next = if delta < 0 {
+                    if self.lock_selected_user == 0 {
+                        user_count.saturating_sub(1)
+                    } else {
+                        self.lock_selected_user.saturating_sub(1)
+                    }
+                } else {
+                    (self.lock_selected_user + 1) % user_count
+                };
+                self.select_lock_user(next);
             }
             KeyIntercept::LockScreenConsume
             | KeyIntercept::LauncherConsume
@@ -973,13 +988,7 @@ impl RustyCompositorState {
                     .output_geometry(&self.output)
                     .map_or_else(|| Size::from((1280, 800)), |geo| geo.size)
                     .to_physical(1);
-                if crate::shell_render::check_lock_screen_unlock_click(
-                    output_phys,
-                    self.pointer_location.x,
-                    self.pointer_location.y,
-                ) {
-                    self.set_screen_locked(false, serial);
-                }
+                self.handle_lock_screen_pointer_click(output_phys, serial);
                 return;
             }
 
@@ -1646,7 +1655,77 @@ const fn match_lock_screen_key(sym: Keysym) -> KeyIntercept {
         Keysym::Return | Keysym::KP_Enter | Keysym::space | Keysym::Escape => {
             KeyIntercept::UnlockScreen
         }
+        Keysym::Up | Keysym::KP_Up | Keysym::Left | Keysym::KP_Left => {
+            KeyIntercept::LockSelectDelta(-1)
+        }
+        Keysym::Down | Keysym::KP_Down | Keysym::Right | Keysym::KP_Right | Keysym::Tab => {
+            KeyIntercept::LockSelectDelta(1)
+        }
         _ => KeyIntercept::LockScreenConsume,
+    }
+}
+
+impl crate::state::RustyCompositorState {
+    pub(crate) fn handle_lock_screen_pointer_click(
+        &mut self,
+        output_phys: Size<i32, smithay::utils::Physical>,
+        serial: smithay::utils::Serial,
+    ) {
+        let tel = self.telemetry.snapshot();
+        let lock_clock = if self.clock_24h {
+            &tel.lock_time_24h
+        } else {
+            &tel.lock_time_hhmm
+        };
+        let lock_view = crate::shell_render::LockScreenRenderState {
+            date_label: &tel.lock_date,
+            clock_hhmm: lock_clock,
+            keyboard_layout: &self.active_kbd_layout,
+            has_battery: tel.power.has_battery,
+            battery_percent: tel.power.percentage,
+            battery_charging: tel.power.ac_online
+                || tel.power.state == rusty_services::BatteryState::Charging,
+            wifi_connected: tel.network.connected,
+            wifi_signal_percent: tel.network.wifi_signal_percent,
+            wallpaper_path: self.user_config.wallpaper.as_deref(),
+            users: &tel.users,
+            selected_user: self.lock_selected_user,
+            power_menu_open: self.lock_power_menu_open,
+            glass_opacity: self.glass_opacity,
+            reduce_transparency: self.reduce_transparency,
+            progress: 1.0,
+        };
+        match crate::shell_render::hit_test_lock_screen(
+            output_phys,
+            &lock_view,
+            self.pointer_location.x,
+            self.pointer_location.y,
+        ) {
+            crate::shell_render::LockScreenHit::UnlockUser(_) => {
+                self.set_screen_locked(false, serial);
+                info!("Unlocked desktop session Lock Screen via user click");
+            }
+            crate::shell_render::LockScreenHit::SelectUser(idx) => {
+                self.lock_power_menu_open = false;
+                self.select_lock_user(idx);
+            }
+            crate::shell_render::LockScreenHit::ToggleKeyboardLayout => {
+                self.lock_power_menu_open = false;
+                self.cycle_keyboard_layout();
+            }
+            crate::shell_render::LockScreenHit::TogglePowerMenu => {
+                self.toggle_lock_power_menu();
+            }
+            crate::shell_render::LockScreenHit::DismissPowerMenu => {
+                self.lock_power_menu_open = false;
+            }
+            crate::shell_render::LockScreenHit::PowerAction(action) => {
+                self.lock_power_menu_open = false;
+                self.telemetry.dispatch_session(action);
+                info!(?action, "Dispatched Lock Screen power menu action");
+            }
+            crate::shell_render::LockScreenHit::None => {}
+        }
     }
 }
 
@@ -1896,6 +1975,14 @@ mod tests {
         assert_eq!(
             match_lock_screen_key(Keysym::Return),
             KeyIntercept::UnlockScreen
+        );
+        assert_eq!(
+            match_lock_screen_key(Keysym::Down),
+            KeyIntercept::LockSelectDelta(1)
+        );
+        assert_eq!(
+            match_lock_screen_key(Keysym::Up),
+            KeyIntercept::LockSelectDelta(-1)
         );
         assert_eq!(
             match_lock_screen_key(Keysym::a),
@@ -2668,6 +2755,42 @@ mod tests {
         assert_eq!(compositor.hovered_notification_idx, None);
         assert_eq!(compositor.top_bar_menu_hover_row, None);
         assert_eq!(compositor.qs_slider_drag, None);
+        assert!(!compositor.lock_power_menu_open);
+
+        Ok(())
+    }
+
+    #[test]
+    fn lock_screen_pointer_power_menu_and_unlock() -> Result<(), Box<dyn std::error::Error>> {
+        let (_display, _event_loop, mut compositor) =
+            test_compositor_state("rusty-test-lock-pointer")?;
+        let serial = SERIAL_COUNTER.next_serial();
+        let out_size = compositor.output_map.primary().physical_size;
+        compositor.set_screen_locked(true, serial);
+
+        // Toggle power menu via top-right power symbol and dismiss by clicking outside.
+        let pwr_pos: Point<f64, Logical> = (f64::from(out_size.w - 20), 18.0).into();
+        compositor.apply_pointer_position(pwr_pos, 1);
+        compositor.handle_lock_screen_pointer_click(out_size, serial);
+        assert!(compositor.lock_power_menu_open);
+        compositor.apply_pointer_position(Point::from((40.0, 40.0)), 2);
+        compositor.handle_lock_screen_pointer_click(out_size, serial);
+        assert!(!compositor.lock_power_menu_open);
+
+        // Click active user row (row 0, already selected_user == 0) to unlock on any host user count.
+        let users_snap = compositor.telemetry.snapshot().users;
+        let user_names: Vec<&str> = users_snap.iter().map(|u| u.display_name.as_str()).collect();
+        let (ux, uy) = crate::shell_render::lock_screen_primary_row_center(
+            out_size,
+            if user_names.is_empty() {
+                &["RustyOS User"]
+            } else {
+                &user_names
+            },
+        );
+        compositor.apply_pointer_position((ux, uy).into(), 3);
+        compositor.handle_lock_screen_pointer_click(out_size, serial);
+        assert!(!compositor.screen_locked);
 
         Ok(())
     }

@@ -215,6 +215,13 @@
                           & Live MPRIS2/Display   
                           Parity (ADR-0022)       
   -----------------------------------------------------------------------
+  D-031                   Фаза 7/UX               accepted
+                          (RUSTYOS-054):          
+                          1:1 macOS Lock Screen   
+                          Wallpaper Backdrop,     
+                          Frosted Clock & User    
+                          Selector (ADR-0023)     
+  -----------------------------------------------------------------------
 
 ## Открытые решения
 
