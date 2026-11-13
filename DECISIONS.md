@@ -191,6 +191,15 @@
                           Parity, Top-Lit Glass & 
                           4x4 SSAA Squircle Icons 
                           (ADR-0019)              
+
+  D-028                   Фаза 7/UX               accepted
+                          (RUSTYOS-051):          
+                          1:1 macOS Shell         
+                          Overlays, Modular       
+                          Control Center,         
+                          Overview Spaces &       
+                          Window Chrome           
+                          (ADR-0020)              
   -----------------------------------------------------------------------
 
 ## Открытые решения

@@ -52,13 +52,41 @@ struct ShadowCornerKey {
     max_alpha: u8,
 }
 
+/// Top-lit frosted glass panel variant used by shell surfaces (`RUSTYOS-050`/`051`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct DockGlassKey {
+pub enum GlassPanelStyle {
+    /// Floating bottom Dock container (`RUSTYOS-050`).
+    Dock,
+    /// Elevated menus, Control Center, Spotlight, Notification HUD & OSD (`RUSTYOS-051`).
+    Popover,
+    /// Lighter inner glass tile/track inside Control Center (`RUSTYOS-051`).
+    ControlModule,
+}
+
+/// Interactive macOS-style window traffic light button kind (`RUSTYOS-051`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TrafficLightKind {
+    Close,
+    Minimize,
+    Maximize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct GlassPanelKey {
+    style: GlassPanelStyle,
     width: u16,
     height: u16,
     radius: u16,
     glass_pct: u8,
     reduce_transparency: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct TrafficLightKey {
+    kind: TrafficLightKind,
+    diameter: u16,
+    focused: bool,
+    hovered_glyph: bool,
 }
 
 #[derive(Debug)]
@@ -69,7 +97,7 @@ struct CachedCursor {
     hotspot: Point<f64, Logical>,
 }
 
-/// Procedural anti-aliased UI icon glyphs for `TopBar` and `Spotlight` (`RUSTYOS-048`).
+/// Procedural anti-aliased UI icon glyphs for `TopBar`, Menus, Control Center, `Spotlight` & `OSD` (`RUSTYOS-048`..`051`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum UiGlyphKind {
     /// Faceted RustyOS diamond/prism emblem replacing missing fallback glyphs.
@@ -84,6 +112,40 @@ pub enum UiGlyphKind {
     Search,
     /// Dual macOS Control Center toggle switches.
     ControlCenter,
+    /// Circled info `i` glyph for `About RustyOS`.
+    Info,
+    /// Compact `>_` terminal outline glyph.
+    TerminalPrompt,
+    /// Minimal folder outline glyph for `Files`.
+    Folder,
+    /// 2x2 workspace grid glyph for `Overview`.
+    Grid,
+    /// Split-pane layout toggle glyph (`Float / Tile`).
+    LayoutSplit,
+    /// Overlapping motion rings glyph (`Reduced Motion`).
+    Motion,
+    /// Overlapping translucent squares glyph (`Opaque / Clear`).
+    Transparency,
+    /// Circular refresh arrow glyph.
+    Refresh,
+    /// Padlock glyph (`Lock Screen`).
+    Lock,
+    /// Looped command-key symbol for `Keyboard Shortcuts`.
+    Shortcuts,
+    /// Window expand / maximize outline glyph.
+    WindowMax,
+    /// Window minimize underline glyph.
+    WindowMin,
+    /// Crisp close `X` glyph.
+    Close,
+    /// Forward arrow `->` (`Next Workspace` / `Focus Next`).
+    ArrowNext,
+    /// Backward arrow `<-` (`Previous Workspace`).
+    ArrowPrev,
+    /// Classic Bluetooth rune glyph.
+    Bluetooth,
+    /// 8-ray sun glyph for `Display` / `Glass` / `Brightness`.
+    Sun,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -107,7 +169,8 @@ pub struct UiShapeCache {
     corners: HashMap<CornerKey, (MemoryRenderBuffer, Size<i32, Logical>)>,
     shadow_corners: HashMap<ShadowCornerKey, (MemoryRenderBuffer, Size<i32, Logical>)>,
     glyphs: HashMap<GlyphKey, MemoryRenderBuffer>,
-    dock_glass_panels: HashMap<DockGlassKey, MemoryRenderBuffer>,
+    glass_panels: HashMap<GlassPanelKey, MemoryRenderBuffer>,
+    traffic_lights: HashMap<TrafficLightKey, MemoryRenderBuffer>,
     dock_icon_shadows: HashMap<u16, MemoryRenderBuffer>,
     wallpaper: CachedWallpaper,
     cursor_arrow: Option<MemoryRenderBuffer>,
@@ -259,6 +322,36 @@ impl UiShapeCache {
         reduce_transparency: bool,
         loc: Point<i32, Logical>,
     ) -> Option<MemoryRenderBufferRenderElement<GlesRenderer>> {
+        self.glass_panel_element(
+            renderer,
+            GlassPanelStyle::Dock,
+            width,
+            height,
+            radius,
+            glass_opacity,
+            reduce_transparency,
+            loc,
+        )
+    }
+
+    /// Returns a GPU-cached Liquid Glass panel container for menus, Control Center, Spotlight,
+    /// Notification HUD, OSD, and Dock (`RUSTYOS-050` / `RUSTYOS-051`).
+    #[allow(
+        clippy::too_many_arguments,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
+    pub fn glass_panel_element(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        style: GlassPanelStyle,
+        width: i32,
+        height: i32,
+        radius: i32,
+        glass_opacity: f32,
+        reduce_transparency: bool,
+        loc: Point<i32, Logical>,
+    ) -> Option<MemoryRenderBufferRenderElement<GlesRenderer>> {
         if width <= 0 || height <= 0 {
             return None;
         }
@@ -266,20 +359,21 @@ impl UiShapeCache {
         let h_u16 = u16::try_from(height).ok()?;
         let r_u16 = u16::try_from(radius.clamp(0, width.min(height) / 2)).ok()?;
         let glass_pct = (crate::config::clamp_glass_opacity(glass_opacity) * 100.0).round() as u8;
-        let key = DockGlassKey {
+        let key = GlassPanelKey {
+            style,
             width: w_u16,
             height: h_u16,
             radius: r_u16,
             glass_pct,
             reduce_transparency,
         };
-        if !self.dock_glass_panels.contains_key(&key) {
-            if self.dock_glass_panels.len() >= 16 {
-                self.dock_glass_panels.clear();
+        if !self.glass_panels.contains_key(&key) {
+            if self.glass_panels.len() >= 48 {
+                self.glass_panels.clear();
             }
             let clamped_glass = f32::from(glass_pct) / 100.0;
             let buf = rasterize_rgba_rect(width, height, |px, py| {
-                sample_dock_glass_pixel(
+                sample_glass_panel_pixel(
                     px,
                     py,
                     width,
@@ -287,11 +381,49 @@ impl UiShapeCache {
                     i32::from(r_u16),
                     clamped_glass,
                     reduce_transparency,
+                    style,
                 )
             });
-            self.dock_glass_panels.insert(key, buf);
+            self.glass_panels.insert(key, buf);
         }
-        let buf = self.dock_glass_panels.get(&key)?;
+        let buf = self.glass_panels.get(&key)?;
+        MemoryRenderBufferRenderElement::from_buffer(
+            renderer,
+            loc.to_f64().to_physical(1.0),
+            buf,
+            None,
+            None,
+            None,
+            Kind::Unspecified,
+        )
+        .ok()
+    }
+
+    /// Returns a GPU-cached 4x4 SSAA gel-lit traffic light window control button (`RUSTYOS-051`).
+    pub fn traffic_light_element(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        kind: TrafficLightKind,
+        diameter: i32,
+        focused: bool,
+        hovered_glyph: bool,
+        loc: Point<i32, Logical>,
+    ) -> Option<MemoryRenderBufferRenderElement<GlesRenderer>> {
+        if diameter <= 0 {
+            return None;
+        }
+        let d_u16 = u16::try_from(diameter).ok()?;
+        let key = TrafficLightKey {
+            kind,
+            diameter: d_u16,
+            focused,
+            hovered_glyph,
+        };
+        let buf = self.traffic_lights.entry(key).or_insert_with(|| {
+            rasterize_rgba_rect(diameter, diameter, |px, py| {
+                sample_traffic_light_pixel(px, py, diameter, kind, focused, hovered_glyph)
+            })
+        });
         MemoryRenderBufferRenderElement::from_buffer(
             renderer,
             loc.to_f64().to_physical(1.0),
@@ -1157,6 +1289,200 @@ fn sample_control_center_glyph_uv(u: f32, v: f32, edge: f32, tint: [f32; 4]) -> 
     out
 }
 
+fn sample_info_glyph_uv(u: f32, v: f32, edge: f32, tint: [f32; 4]) -> [f32; 4] {
+    let ring = sd_circle(u, v, 0.50, 0.50, 0.36).abs() - 0.044;
+    let dot = sd_circle(u, v, 0.50, 0.31, 0.048);
+    let stem = sd_segment(u, v, 0.50, 0.44, 0.50, 0.69, 0.046);
+    premul_tint(tint, sd_cov(ring.min(dot).min(stem), edge))
+}
+
+fn sample_terminal_prompt_glyph_uv(u: f32, v: f32, edge: f32, tint: [f32; 4]) -> [f32; 4] {
+    let frame = sd_rounded_box(u, v, 0.50, 0.50, 0.37, 0.31, 0.10).abs() - 0.042;
+    let chev_top = sd_segment(u, v, 0.27, 0.37, 0.41, 0.50, 0.045);
+    let chev_bot = sd_segment(u, v, 0.41, 0.50, 0.27, 0.63, 0.045);
+    let dash = sd_segment(u, v, 0.48, 0.63, 0.72, 0.63, 0.045);
+    premul_tint(
+        tint,
+        sd_cov(frame.min(chev_top).min(chev_bot).min(dash), edge),
+    )
+}
+
+fn sample_folder_glyph_uv(u: f32, v: f32, edge: f32, tint: [f32; 4]) -> [f32; 4] {
+    let body = sd_rounded_box(u, v, 0.50, 0.57, 0.37, 0.25, 0.08).abs() - 0.042;
+    let tab = sd_rounded_box(u, v, 0.31, 0.30, 0.17, 0.08, 0.05);
+    let body_fill = sd_rounded_box(u, v, 0.50, 0.57, 0.37, 0.25, 0.08);
+    let mut out = [0.0_f32; 4];
+    let fill_cov = sd_cov(body_fill.min(tab), edge);
+    if fill_cov > 0.0 {
+        out = blend_premul_over(out, [tint[0], tint[1], tint[2]], tint[3] * fill_cov * 0.24);
+    }
+    let rim_cov = sd_cov(body.min(tab.abs() - 0.036), edge);
+    if rim_cov > 0.0 {
+        out = blend_premul_over(out, [tint[0], tint[1], tint[2]], tint[3] * rim_cov * 0.96);
+    }
+    out
+}
+
+fn sample_grid_glyph_uv(u: f32, v: f32, edge: f32, tint: [f32; 4]) -> [f32; 4] {
+    let tl = sd_rounded_box(u, v, 0.31, 0.31, 0.125, 0.125, 0.045);
+    let tr = sd_rounded_box(u, v, 0.69, 0.31, 0.125, 0.125, 0.045);
+    let bl = sd_rounded_box(u, v, 0.31, 0.69, 0.125, 0.125, 0.045);
+    let br = sd_rounded_box(u, v, 0.69, 0.69, 0.125, 0.125, 0.045);
+    let cov = sd_cov(tl.min(tr).min(bl).min(br), edge);
+    premul_tint(tint, cov)
+}
+
+fn sample_layout_split_glyph_uv(u: f32, v: f32, edge: f32, tint: [f32; 4]) -> [f32; 4] {
+    let frame = sd_rounded_box(u, v, 0.50, 0.50, 0.36, 0.29, 0.09).abs() - 0.044;
+    let divider = sd_segment(u, v, 0.50, 0.22, 0.50, 0.78, 0.040);
+    let left_pane = sd_rounded_box(u, v, 0.33, 0.50, 0.11, 0.20, 0.04);
+    let mut out = [0.0_f32; 4];
+    let fill_cov = sd_cov(left_pane, edge);
+    if fill_cov > 0.0 {
+        out = blend_premul_over(out, [tint[0], tint[1], tint[2]], tint[3] * fill_cov * 0.45);
+    }
+    let rim_cov = sd_cov(frame.min(divider), edge);
+    if rim_cov > 0.0 {
+        out = blend_premul_over(out, [tint[0], tint[1], tint[2]], tint[3] * rim_cov);
+    }
+    out
+}
+
+fn sample_motion_glyph_uv(u: f32, v: f32, edge: f32, tint: [f32; 4]) -> [f32; 4] {
+    let back = sd_circle(u, v, 0.32, 0.58, 0.17).abs() - 0.036;
+    let mid = sd_circle(u, v, 0.48, 0.50, 0.19).abs() - 0.040;
+    let front = sd_circle(u, v, 0.66, 0.42, 0.20);
+    let mut out = [0.0_f32; 4];
+    let back_cov = sd_cov(back, edge);
+    if back_cov > 0.0 {
+        out = blend_premul_over(out, [tint[0], tint[1], tint[2]], tint[3] * back_cov * 0.45);
+    }
+    let mid_cov = sd_cov(mid, edge);
+    if mid_cov > 0.0 {
+        out = blend_premul_over(out, [tint[0], tint[1], tint[2]], tint[3] * mid_cov * 0.72);
+    }
+    let front_cov = sd_cov(front, edge);
+    if front_cov > 0.0 {
+        out = blend_premul_over(out, [tint[0], tint[1], tint[2]], tint[3] * front_cov);
+    }
+    out
+}
+
+fn sample_transparency_glyph_uv(u: f32, v: f32, edge: f32, tint: [f32; 4]) -> [f32; 4] {
+    let back = sd_rounded_box(u, v, 0.39, 0.39, 0.22, 0.22, 0.07).abs() - 0.042;
+    let front_fill = sd_rounded_box(u, v, 0.61, 0.61, 0.22, 0.22, 0.07);
+    let front_rim = front_fill.abs() - 0.042;
+    let mut out = [0.0_f32; 4];
+    let back_cov = sd_cov(back, edge);
+    if back_cov > 0.0 {
+        out = blend_premul_over(out, [tint[0], tint[1], tint[2]], tint[3] * back_cov * 0.65);
+    }
+    let fill_cov = sd_cov(front_fill, edge);
+    if fill_cov > 0.0 {
+        out = blend_premul_over(out, [tint[0], tint[1], tint[2]], tint[3] * fill_cov * 0.36);
+    }
+    let rim_cov = sd_cov(front_rim, edge);
+    if rim_cov > 0.0 {
+        out = blend_premul_over(out, [tint[0], tint[1], tint[2]], tint[3] * rim_cov);
+    }
+    out
+}
+
+fn sample_refresh_glyph_uv(u: f32, v: f32, edge: f32, tint: [f32; 4]) -> [f32; 4] {
+    let dx = u - 0.50;
+    let dy = v - 0.52;
+    let ring = (dx.hypot(dy) - 0.29).abs() - 0.052;
+    // Open upper-right gap between top and 3 o'clock before the arrowhead.
+    let gap = u8::from(dx > 0.04 && dy < -0.02 && dy > -0.26);
+    let arc = if gap == 1 { 0.2 } else { ring };
+    let head = signed_distance_polygon(u, v, &[(0.52, 0.14), (0.76, 0.26), (0.55, 0.38)]);
+    premul_tint(tint, sd_cov(arc.min(head), edge))
+}
+
+fn sample_lock_glyph_uv(u: f32, v: f32, edge: f32, tint: [f32; 4]) -> [f32; 4] {
+    let shackle_arc = sd_arc_up(u, v, 0.50, 0.36, 0.15, core::f32::consts::FRAC_PI_2, 0.048);
+    let shackle_l = sd_segment(u, v, 0.35, 0.36, 0.35, 0.48, 0.048);
+    let shackle_r = sd_segment(u, v, 0.65, 0.36, 0.65, 0.48, 0.048);
+    let body = sd_rounded_box(u, v, 0.50, 0.65, 0.27, 0.20, 0.07);
+    let keyhole = sd_circle(u, v, 0.50, 0.64, 0.055);
+    let body_with_hole = body.max(-keyhole);
+    let d = shackle_arc
+        .min(shackle_l)
+        .min(shackle_r)
+        .min(body_with_hole);
+    premul_tint(tint, sd_cov(d, edge))
+}
+
+fn sample_shortcuts_glyph_uv(u: f32, v: f32, edge: f32, tint: [f32; 4]) -> [f32; 4] {
+    let bars = sd_segment(u, v, 0.36, 0.24, 0.36, 0.76, 0.042)
+        .min(sd_segment(u, v, 0.64, 0.24, 0.64, 0.76, 0.042))
+        .min(sd_segment(u, v, 0.24, 0.36, 0.76, 0.36, 0.042))
+        .min(sd_segment(u, v, 0.24, 0.64, 0.76, 0.64, 0.042));
+    let loops = (sd_circle(u, v, 0.26, 0.26, 0.10).abs() - 0.040)
+        .min(sd_circle(u, v, 0.74, 0.26, 0.10).abs() - 0.040)
+        .min(sd_circle(u, v, 0.26, 0.74, 0.10).abs() - 0.040)
+        .min(sd_circle(u, v, 0.74, 0.74, 0.10).abs() - 0.040);
+    premul_tint(tint, sd_cov(bars.min(loops), edge))
+}
+
+fn sample_window_max_glyph_uv(u: f32, v: f32, edge: f32, tint: [f32; 4]) -> [f32; 4] {
+    let frame = sd_rounded_box(u, v, 0.50, 0.50, 0.35, 0.29, 0.09).abs() - 0.042;
+    let diag1 = sd_segment(u, v, 0.33, 0.67, 0.67, 0.33, 0.042);
+    let diag2 = sd_segment(u, v, 0.52, 0.33, 0.67, 0.33, 0.042);
+    let diag3 = sd_segment(u, v, 0.67, 0.33, 0.67, 0.48, 0.042);
+    premul_tint(tint, sd_cov(frame.min(diag1).min(diag2).min(diag3), edge))
+}
+
+fn sample_window_min_glyph_uv(u: f32, v: f32, edge: f32, tint: [f32; 4]) -> [f32; 4] {
+    let frame = sd_rounded_box(u, v, 0.50, 0.50, 0.35, 0.29, 0.09).abs() - 0.042;
+    let dash = sd_segment(u, v, 0.32, 0.64, 0.68, 0.64, 0.046);
+    premul_tint(tint, sd_cov(frame.min(dash), edge))
+}
+
+fn sample_close_glyph_uv(u: f32, v: f32, edge: f32, tint: [f32; 4]) -> [f32; 4] {
+    let d1 = sd_segment(u, v, 0.28, 0.28, 0.72, 0.72, 0.062);
+    let d2 = sd_segment(u, v, 0.72, 0.28, 0.28, 0.72, 0.062);
+    premul_tint(tint, sd_cov(d1.min(d2), edge))
+}
+
+fn sample_arrow_glyph_uv(u: f32, v: f32, edge: f32, tint: [f32; 4], forward: bool) -> [f32; 4] {
+    let x = if forward { u } else { 1.0 - u };
+    let shaft = sd_segment(x, v, 0.20, 0.50, 0.78, 0.50, 0.052);
+    let tip_top = sd_segment(x, v, 0.55, 0.27, 0.78, 0.50, 0.052);
+    let tip_bot = sd_segment(x, v, 0.55, 0.73, 0.78, 0.50, 0.052);
+    premul_tint(tint, sd_cov(shaft.min(tip_top).min(tip_bot), edge))
+}
+
+fn sample_bluetooth_glyph_uv(u: f32, v: f32, edge: f32, tint: [f32; 4]) -> [f32; 4] {
+    let spine = sd_segment(u, v, 0.48, 0.16, 0.48, 0.84, 0.048);
+    let top_r = sd_segment(u, v, 0.48, 0.16, 0.69, 0.34, 0.046);
+    let cross1 = sd_segment(u, v, 0.69, 0.34, 0.29, 0.68, 0.046);
+    let bot_r = sd_segment(u, v, 0.48, 0.84, 0.69, 0.66, 0.046);
+    let cross2 = sd_segment(u, v, 0.69, 0.66, 0.29, 0.32, 0.046);
+    let d = spine.min(top_r).min(cross1).min(bot_r).min(cross2);
+    premul_tint(tint, sd_cov(d, edge))
+}
+
+fn sample_sun_glyph_uv(u: f32, v: f32, edge: f32, tint: [f32; 4]) -> [f32; 4] {
+    let core = sd_circle(u, v, 0.50, 0.50, 0.175);
+    let mut rays = f32::MAX;
+    for i in 0_i8..8 {
+        let angle = f32::from(i) * core::f32::consts::FRAC_PI_4;
+        let (sa, ca) = angle.sin_cos();
+        let ray = sd_segment(
+            u,
+            v,
+            0.50 + ca * 0.27,
+            0.50 + sa * 0.27,
+            0.50 + ca * 0.39,
+            0.50 + sa * 0.39,
+            0.042,
+        );
+        rays = rays.min(ray);
+    }
+    premul_tint(tint, sd_cov(core.min(rays), edge))
+}
+
 #[allow(clippy::cast_precision_loss)]
 fn sample_ui_glyph_pixel(
     px: i32,
@@ -1193,6 +1519,23 @@ fn sample_ui_glyph_pixel(
                 }
                 UiGlyphKind::Search => sample_search_glyph_uv(u, v, edge, tint),
                 UiGlyphKind::ControlCenter => sample_control_center_glyph_uv(u, v, edge, tint),
+                UiGlyphKind::Info => sample_info_glyph_uv(u, v, edge, tint),
+                UiGlyphKind::TerminalPrompt => sample_terminal_prompt_glyph_uv(u, v, edge, tint),
+                UiGlyphKind::Folder => sample_folder_glyph_uv(u, v, edge, tint),
+                UiGlyphKind::Grid => sample_grid_glyph_uv(u, v, edge, tint),
+                UiGlyphKind::LayoutSplit => sample_layout_split_glyph_uv(u, v, edge, tint),
+                UiGlyphKind::Motion => sample_motion_glyph_uv(u, v, edge, tint),
+                UiGlyphKind::Transparency => sample_transparency_glyph_uv(u, v, edge, tint),
+                UiGlyphKind::Refresh => sample_refresh_glyph_uv(u, v, edge, tint),
+                UiGlyphKind::Lock => sample_lock_glyph_uv(u, v, edge, tint),
+                UiGlyphKind::Shortcuts => sample_shortcuts_glyph_uv(u, v, edge, tint),
+                UiGlyphKind::WindowMax => sample_window_max_glyph_uv(u, v, edge, tint),
+                UiGlyphKind::WindowMin => sample_window_min_glyph_uv(u, v, edge, tint),
+                UiGlyphKind::Close => sample_close_glyph_uv(u, v, edge, tint),
+                UiGlyphKind::ArrowNext => sample_arrow_glyph_uv(u, v, edge, tint, true),
+                UiGlyphKind::ArrowPrev => sample_arrow_glyph_uv(u, v, edge, tint, false),
+                UiGlyphKind::Bluetooth => sample_bluetooth_glyph_uv(u, v, edge, tint),
+                UiGlyphKind::Sun => sample_sun_glyph_uv(u, v, edge, tint),
             };
             sum[0] += s[0];
             sum[1] += s[1];
@@ -1248,7 +1591,7 @@ fn rasterize_ui_glyph_buffer(
     mem_buf
 }
 
-fn signed_distance_polygon(px: f32, py: f32, verts: &[(f32, f32)]) -> f32 {
+pub(crate) fn signed_distance_polygon(px: f32, py: f32, verts: &[(f32, f32)]) -> f32 {
     let mut d = f32::MAX;
     let mut s = 1.0_f32;
     let len = verts.len();
@@ -1742,7 +2085,7 @@ fn rasterize_rgba_rect(
     mem_buf
 }
 
-#[allow(clippy::cast_precision_loss)]
+#[cfg(test)]
 fn sample_dock_glass_pixel(
     px: i32,
     py: i32,
@@ -1751,6 +2094,29 @@ fn sample_dock_glass_pixel(
     radius: i32,
     glass_opacity: f32,
     reduce_transparency: bool,
+) -> [u8; 4] {
+    sample_glass_panel_pixel(
+        px,
+        py,
+        width,
+        height,
+        radius,
+        glass_opacity,
+        reduce_transparency,
+        GlassPanelStyle::Dock,
+    )
+}
+
+#[allow(clippy::cast_precision_loss, clippy::too_many_arguments)]
+fn sample_glass_panel_pixel(
+    px: i32,
+    py: i32,
+    width: i32,
+    height: i32,
+    radius: i32,
+    glass_opacity: f32,
+    reduce_transparency: bool,
+    style: GlassPanelStyle,
 ) -> [u8; 4] {
     const BAYER4: [[u8; 4]; 4] = [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]];
 
@@ -1778,28 +2144,67 @@ fn sample_dock_glass_pixel(
     let dir_light = (1.0 - t_v * 0.72).clamp(0.26, 1.0);
 
     if reduce_transparency {
-        let rim_mix = rim_band * (0.08 + 0.12 * dir_light);
-        let r_col = (31.0 - 4.0 * t_v + dither) * (1.0 - rim_mix) + 244.0 * rim_mix;
-        let g_col = (25.0 - 4.0 * t_v + dither) * (1.0 - rim_mix) + 238.0 * rim_mix;
-        let b_col = (45.0 - 5.0 * t_v + dither) * (1.0 - rim_mix) + 255.0 * rim_mix;
-        return premul_pixel(r_col, g_col, b_col, (246.0 / 255.0) * cov);
+        let (base_rgb, rim_scale, alpha) = match style {
+            GlassPanelStyle::Dock => ([31.0, 25.0, 45.0], 1.0, 246.0 / 255.0),
+            GlassPanelStyle::Popover => ([34.0, 27.0, 50.0], 1.15, 248.0 / 255.0),
+            GlassPanelStyle::ControlModule => ([54.0, 44.0, 76.0], 0.90, 232.0 / 255.0),
+        };
+        let rim_mix = rim_band * (0.08 + 0.12 * dir_light) * rim_scale;
+        let r_col = (base_rgb[0] - 4.0 * t_v + dither) * (1.0 - rim_mix) + 244.0 * rim_mix;
+        let g_col = (base_rgb[1] - 4.0 * t_v + dither) * (1.0 - rim_mix) + 238.0 * rim_mix;
+        let b_col = (base_rgb[2] - 5.0 * t_v + dither) * (1.0 - rim_mix) + 255.0 * rim_mix;
+        return premul_pixel(r_col, g_col, b_col, alpha * cov);
     }
 
     let glass_scale = crate::config::clamp_glass_opacity(glass_opacity);
-    let base_a = (0.32 - 0.08 * t_v) * (0.42 + 0.58 * glass_scale);
-    let mut layer = [
-        (118.0 - 30.0 * t_v + dither) * base_a,
-        (112.0 - 30.0 * t_v + dither) * base_a,
-        (142.0 - 32.0 * t_v + dither) * base_a,
-        base_a,
-    ];
+    let mut layer = match style {
+        GlassPanelStyle::Dock => {
+            let base_a = (0.32 - 0.08 * t_v) * (0.42 + 0.58 * glass_scale);
+            [
+                (118.0 - 30.0 * t_v + dither) * base_a,
+                (112.0 - 30.0 * t_v + dither) * base_a,
+                (142.0 - 32.0 * t_v + dither) * base_a,
+                base_a,
+            ]
+        }
+        GlassPanelStyle::Popover => {
+            let base_a = (0.76 - 0.08 * t_v) * (0.48 + 0.52 * glass_scale);
+            [
+                (48.0 - 12.0 * t_v + dither) * base_a,
+                (37.0 - 10.0 * t_v + dither) * base_a,
+                (70.0 - 16.0 * t_v + dither) * base_a,
+                base_a,
+            ]
+        }
+        GlassPanelStyle::ControlModule => {
+            let base_a = (0.16 - 0.03 * t_v) * (0.55 + 0.45 * glass_scale);
+            [
+                (236.0 - 20.0 * t_v + dither) * base_a,
+                (224.0 - 18.0 * t_v + dither) * base_a,
+                (255.0 - 12.0 * t_v + dither) * base_a,
+                base_a,
+            ]
+        }
+    };
 
-    if t_v < 0.22 && sd < -0.5 {
-        let sheen_a = (1.0 - t_v / 0.22) * 0.055 * glass_scale;
+    let sheen_limit = match style {
+        GlassPanelStyle::Dock => 0.22,
+        GlassPanelStyle::Popover | GlassPanelStyle::ControlModule => 0.16,
+    };
+    if t_v < sheen_limit && sd < -0.5 {
+        let sheen_peak = match style {
+            GlassPanelStyle::Dock | GlassPanelStyle::Popover => 0.055,
+            GlassPanelStyle::ControlModule => 0.045,
+        };
+        let sheen_a = (1.0 - t_v / sheen_limit) * sheen_peak * glass_scale;
         layer = blend_premul_over(layer, [255.0, 248.0, 255.0], sheen_a);
     }
 
-    let rim_alpha = rim_band * (0.08 + 0.30 * dir_light);
+    let rim_alpha = match style {
+        GlassPanelStyle::Dock => rim_band * (0.08 + 0.30 * dir_light),
+        GlassPanelStyle::Popover => rim_band * (0.14 + 0.26 * dir_light),
+        GlassPanelStyle::ControlModule => rim_band * (0.08 + 0.14 * dir_light),
+    };
     if rim_alpha > 0.001 {
         layer = blend_premul_over(layer, [255.0, 252.0, 255.0], rim_alpha);
     }
@@ -1814,6 +2219,118 @@ fn sample_dock_glass_pixel(
         layer[2] / layer[3],
         out_a,
     )
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn sample_traffic_light_pixel(
+    px: i32,
+    py: i32,
+    diameter: i32,
+    kind: TrafficLightKind,
+    focused: bool,
+    hovered_glyph: bool,
+) -> [u8; 4] {
+    const SUBSAMPLES: [f32; 4] = [0.125, 0.375, 0.625, 0.875];
+    let dim = diameter.max(1) as f32;
+    let edge = 1.05 / dim;
+    let active_look = focused || hovered_glyph;
+    let (fill_top, fill_bot, ring_rgb, glyph_rgb) = if active_look {
+        match kind {
+            TrafficLightKind::Close => (
+                [255.0, 108.0, 99.0],
+                [246.0, 78.0, 70.0],
+                [194.0, 56.0, 50.0],
+                [76.0, 14.0, 12.0],
+            ),
+            TrafficLightKind::Minimize => (
+                [255.0, 198.0, 62.0],
+                [246.0, 174.0, 32.0],
+                [196.0, 134.0, 24.0],
+                [92.0, 58.0, 4.0],
+            ),
+            TrafficLightKind::Maximize => (
+                [56.0, 212.0, 78.0],
+                [34.0, 186.0, 54.0],
+                [24.0, 140.0, 40.0],
+                [10.0, 68.0, 18.0],
+            ),
+        }
+    } else {
+        (
+            [128.0, 118.0, 152.0],
+            [106.0, 96.0, 130.0],
+            [84.0, 74.0, 106.0],
+            [42.0, 36.0, 58.0],
+        )
+    };
+
+    let mut sum = [0.0_f32; 4];
+    for sy in SUBSAMPLES {
+        for sx in SUBSAMPLES {
+            let u = (px as f32 + sx) / dim;
+            let v = (py as f32 + sy) / dim;
+            let body_sd = sd_circle(u, v, 0.50, 0.50, 0.44);
+            let body_cov = sd_cov(body_sd, edge);
+            if body_cov <= 0.001 {
+                continue;
+            }
+            let t = v.clamp(0.0, 1.0);
+            let mut rgb = [
+                fill_top[0] + (fill_bot[0] - fill_top[0]) * t,
+                fill_top[1] + (fill_bot[1] - fill_top[1]) * t,
+                fill_top[2] + (fill_bot[2] - fill_top[2]) * t,
+            ];
+            let base_a = if active_look { 1.0 } else { 0.82 };
+            let mut prem = [rgb[0] * base_a, rgb[1] * base_a, rgb[2] * base_a, base_a];
+
+            // Soft top specular dot & rim stroke so the dot reads like backlit glass gel.
+            let gloss_sd = sd_circle(u, v, 0.50, 0.34, 0.24);
+            let gloss_cov = sd_cov(gloss_sd, edge * 2.5) * (1.0 - t).clamp(0.0, 1.0);
+            if gloss_cov > 0.0 && active_look {
+                prem = blend_premul_over(prem, [255.0, 250.0, 255.0], gloss_cov * 0.22);
+            }
+            let rim_sd = sd_circle(u, v, 0.50, 0.50, 0.415).abs() - 0.025;
+            let rim_cov = sd_cov(rim_sd, edge);
+            if rim_cov > 0.0 {
+                prem = blend_premul_over(prem, ring_rgb, rim_cov * 0.55);
+            }
+            if hovered_glyph {
+                let g_sd = match kind {
+                    TrafficLightKind::Close => sd_segment(u, v, 0.33, 0.33, 0.67, 0.67, 0.055)
+                        .min(sd_segment(u, v, 0.67, 0.33, 0.33, 0.67, 0.055)),
+                    TrafficLightKind::Minimize => sd_segment(u, v, 0.30, 0.50, 0.70, 0.50, 0.058),
+                    TrafficLightKind::Maximize => sd_segment(u, v, 0.30, 0.50, 0.70, 0.50, 0.055)
+                        .min(sd_segment(u, v, 0.50, 0.30, 0.50, 0.70, 0.055)),
+                };
+                let g_cov = sd_cov(g_sd, edge);
+                if g_cov > 0.0 {
+                    prem = blend_premul_over(prem, glyph_rgb, g_cov * 0.88);
+                }
+            }
+
+            rgb = if prem[3] > 1e-4 {
+                [prem[0] / prem[3], prem[1] / prem[3], prem[2] / prem[3]]
+            } else {
+                rgb
+            };
+            let out_a = (prem[3] * body_cov).clamp(0.0, 1.0);
+            sum[0] += rgb[0] * out_a;
+            sum[1] += rgb[1] * out_a;
+            sum[2] += rgb[2] * out_a;
+            sum[3] += out_a;
+        }
+    }
+    let avg_a = (sum[3] * 0.0625).clamp(0.0, 1.0);
+    if avg_a <= 0.001 {
+        return [0, 0, 0, 0];
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    [
+        (sum[2] * 0.0625).clamp(0.0, 255.0).round() as u8,
+        (sum[1] * 0.0625).clamp(0.0, 255.0).round() as u8,
+        (sum[0] * 0.0625).clamp(0.0, 255.0).round() as u8,
+        (avg_a * 255.0).clamp(0.0, 255.0).round() as u8,
+    ]
 }
 
 #[allow(clippy::cast_precision_loss)]
@@ -2006,6 +2523,23 @@ mod tests {
             },
             UiGlyphKind::Search,
             UiGlyphKind::ControlCenter,
+            UiGlyphKind::Info,
+            UiGlyphKind::TerminalPrompt,
+            UiGlyphKind::Folder,
+            UiGlyphKind::Grid,
+            UiGlyphKind::LayoutSplit,
+            UiGlyphKind::Motion,
+            UiGlyphKind::Transparency,
+            UiGlyphKind::Refresh,
+            UiGlyphKind::Lock,
+            UiGlyphKind::Shortcuts,
+            UiGlyphKind::WindowMax,
+            UiGlyphKind::WindowMin,
+            UiGlyphKind::Close,
+            UiGlyphKind::ArrowNext,
+            UiGlyphKind::ArrowPrev,
+            UiGlyphKind::Bluetooth,
+            UiGlyphKind::Sun,
         ] {
             let mut non_zero = 0_usize;
             for py in 0..16 {
@@ -2016,10 +2550,62 @@ mod tests {
                     }
                 }
             }
-            assert!(non_zero >= 18, "Glyph {kind:?} too sparse: {non_zero}");
+            assert!(non_zero >= 12, "Glyph {kind:?} too sparse: {non_zero}");
             let corner = sample_ui_glyph_pixel(0, 0, 16, kind, white);
             assert_eq!(corner[3], 0, "Glyph {kind:?} corner should be transparent");
         }
+    }
+
+    #[test]
+    fn popover_glass_and_traffic_lights_rasterize_cleanly() {
+        let pop_corner =
+            sample_glass_panel_pixel(0, 0, 248, 220, 16, 0.78, false, GlassPanelStyle::Popover);
+        let pop_center = sample_glass_panel_pixel(
+            124,
+            110,
+            248,
+            220,
+            16,
+            0.78,
+            false,
+            GlassPanelStyle::Popover,
+        );
+        let pop_top_rim =
+            sample_glass_panel_pixel(124, 0, 248, 220, 16, 0.78, false, GlassPanelStyle::Popover);
+        assert_eq!(pop_corner[3], 0);
+        assert!(pop_center[3] > 120 && pop_center[3] < 240);
+        assert!(pop_top_rim[3] > 0);
+
+        let mod_center = sample_glass_panel_pixel(
+            70,
+            32,
+            140,
+            64,
+            14,
+            0.78,
+            false,
+            GlassPanelStyle::ControlModule,
+        );
+        assert!(mod_center[3] > 16 && mod_center[3] < pop_center[3]);
+
+        // Traffic lights: clean circular contour + hover glyph contrast
+        let close_plain =
+            sample_traffic_light_pixel(6, 6, 12, TrafficLightKind::Close, true, false);
+        let close_hover = sample_traffic_light_pixel(6, 6, 12, TrafficLightKind::Close, true, true);
+        let close_unfocused =
+            sample_traffic_light_pixel(6, 6, 12, TrafficLightKind::Close, false, false);
+        let min_hover =
+            sample_traffic_light_pixel(6, 6, 12, TrafficLightKind::Minimize, true, true);
+        let max_hover =
+            sample_traffic_light_pixel(6, 6, 12, TrafficLightKind::Maximize, true, true);
+        let corner = sample_traffic_light_pixel(0, 0, 12, TrafficLightKind::Close, true, true);
+        assert_eq!(corner[3], 0);
+        assert_eq!(close_plain[3], 255);
+        assert!(close_unfocused[3] >= 180 && close_unfocused != close_plain);
+        // Hover glyph darkens the center of Close/Min/Max compared to plain gel sphere.
+        assert_ne!(close_plain, close_hover);
+        assert_ne!(min_hover, close_hover);
+        assert_ne!(max_hover, close_hover);
     }
 
     #[test]

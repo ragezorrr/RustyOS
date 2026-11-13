@@ -212,6 +212,8 @@ pub struct TopBarTelemetry<'a> {
     pub tray_items: &'a [TopBarTrayItem<'a>],
     /// Currently open `TopBar` left menu dropdown if any (`RUSTYOS-048`).
     pub active_menu: Option<TopBarMenuHit>,
+    /// Currently hovered item index (`0..`) inside the open `TopBar` dropdown (`RUSTYOS-051`).
+    pub menu_hover_row: Option<usize>,
     /// Global shell glass opacity multiplier (`0.35..=1.0`, default `0.78`) (`RUSTYOS-048`).
     pub glass_opacity: f32,
     /// High-contrast opaque shell panels mode (`RUSTYOS-048`).
@@ -256,6 +258,7 @@ impl Default for TopBarTelemetry<'static> {
             kbd_layout: "EN",
             tray_items: &[],
             active_menu: None,
+            menu_hover_row: None,
             glass_opacity: crate::config::DEFAULT_GLASS_OPACITY,
             reduce_transparency: false,
             show_workspaces: false,
@@ -277,6 +280,8 @@ pub struct NotificationToastView<'a> {
     pub title: &'a str,
     /// Notification body text.
     pub body: &'a str,
+    /// True when the pointer is hovering this notification card (`RUSTYOS-051`).
+    pub hovered: bool,
 }
 
 /// Live data for the Quick Settings Control Center popover (`RUSTYOS-021`).
@@ -451,6 +456,27 @@ pub enum TopBarMenuAction {
     CloseFocused,
 }
 
+/// Corner radius for floating Menu Bar dropdowns and Notification cards (`DESIGN.md` §12.3–12.6).
+pub const MENU_POPOVER_RADIUS: i32 = 16;
+
+/// Rich menu item entry with leading SDF glyph, optional shortcut label, and separator (`RUSTYOS-051`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TopBarMenuEntry {
+    /// Clickable action row.
+    Item {
+        /// Visible label.
+        label: &'static str,
+        /// Leading `4x4` SSAA SDF glyph.
+        icon: crate::surfaces::UiGlyphKind,
+        /// Optional right-aligned real keybinding hint.
+        shortcut: Option<&'static str>,
+        /// Target compositor / WM action.
+        action: TopBarMenuAction,
+    },
+    /// Horizontal hairline separator between logical groups.
+    Separator,
+}
+
 /// Hit-test outcome inside an open `TopBar` menu dropdown popover (`RUSTYOS-048`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TopBarMenuPopoverClick {
@@ -502,6 +528,19 @@ pub enum DockHit {
     PinnedTrash,
 }
 
+/// Miniature workspace summary rendered in the top Spaces strip inside Overview (`RUSTYOS-051`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OverviewWorkspaceSpace {
+    /// Workspace number (`1..=9`).
+    pub id: u8,
+    /// Total windows assigned to this workspace.
+    pub window_count: usize,
+    /// True when this is the currently active workspace.
+    pub active: bool,
+    /// Normalized `(x, y, w, h)` mini-window rectangles within `0.0..=1.0` (`w == 0` marks unused slot).
+    pub preview_rects: [(f32, f32, f32, f32); 4],
+}
+
 /// Live data for the Workspace Overview / Expose card grid (`RUSTYOS-023`).
 #[derive(Debug, Clone)]
 pub struct OverviewRenderState<'a> {
@@ -511,6 +550,8 @@ pub struct OverviewRenderState<'a> {
     pub layout_mode: &'a str,
     /// Open visible windows on the active workspace in stable order.
     pub windows: &'a [DockWindowEntry],
+    /// Miniature workspace strip summaries shown at the top of Overview (`RUSTYOS-051`).
+    pub spaces: &'a [OverviewWorkspaceSpace],
     /// Animated reveal progress (`0.0` closed -> `1.0` open) (`RUSTYOS-025`).
     pub progress: f64,
 }
@@ -532,11 +573,13 @@ pub struct LockScreenRenderState<'a> {
     pub progress: f64,
 }
 
-/// Interactive click target while Workspace Overview is open (`RUSTYOS-023`).
+/// Interactive click target while Workspace Overview is open (`RUSTYOS-023` / `RUSTYOS-051`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OverviewHit {
     /// Focus and raise the window at card index `usize`.
     Card(usize),
+    /// Switch to workspace `u8` (`1..=9`) from the top Spaces strip (`RUSTYOS-051`).
+    SwitchWorkspace(u8),
     /// Dismiss Overview without changing window focus.
     Dismiss,
 }
@@ -591,6 +634,15 @@ pub struct OsdRenderState<'a> {
     pub value_percent: Option<u8>,
     /// True when audio is muted (grays out the bar fill).
     pub muted: bool,
+}
+
+/// Active slider drag target inside the Control Center (`RUSTYOS-051`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuickSettingsSliderDrag {
+    /// Master Sound volume slider.
+    Sound,
+    /// Shell Display / Glass Opacity slider.
+    GlassOpacity,
 }
 
 /// Interactive click target inside or outside the Quick Settings popover (`RUSTYOS-021`).
@@ -1046,7 +1098,7 @@ pub fn notification_toast_rects(
         return Vec::new();
     }
     let width = screen_size.w.max(320);
-    let toast_w = 320.min((width - 32).max(200));
+    let toast_w = 340.min((width - 32).max(200));
     let toast_h = 68;
     let gap = 10;
     let toast_x = width - toast_w - 16;
@@ -1276,12 +1328,98 @@ pub fn check_top_bar_tray_click_for_telemetry(
     )
 }
 
+fn rect_contains(rect: Rectangle<i32, smithay::utils::Physical>, x: f64, y: f64) -> bool {
+    let rx = f64::from(rect.loc.x);
+    let ry = f64::from(rect.loc.y);
+    let rw = f64::from(rect.size.w);
+    let rh = f64::from(rect.size.h);
+    x >= rx && x < rx + rw && y >= ry && y < ry + rh
+}
+
 fn quick_settings_rect(width: i32, height: i32) -> (i32, i32, i32, i32) {
-    let pop_w = 320.min(width - 24).max(240);
-    let pop_h = 392.min(height - TOP_BAR_HEIGHT - 24).max(220);
+    let pop_w = 324.min((width - 24).max(240));
+    let pop_h = 346.min((height - TOP_BAR_HEIGHT - 24).max(240));
     let pop_x = width - pop_w - 12;
     let pop_y = TOP_BAR_HEIGHT + 8;
     (pop_x, pop_y, pop_w, pop_h)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct QuickSettingsLayout {
+    px: i32,
+    py: i32,
+    pw: i32,
+    ph: i32,
+    left_x: i32,
+    conn_card: Rectangle<i32, smithay::utils::Physical>,
+    bt_row: Rectangle<i32, smithay::utils::Physical>,
+    layout_btn: Rectangle<i32, smithay::utils::Physical>,
+    layout_hit: Rectangle<i32, smithay::utils::Physical>,
+    motion_btn: Rectangle<i32, smithay::utils::Physical>,
+    motion_hit: Rectangle<i32, smithay::utils::Physical>,
+    transparency_btn: Rectangle<i32, smithay::utils::Physical>,
+    display_card: Rectangle<i32, smithay::utils::Physical>,
+    display_track: Rectangle<i32, smithay::utils::Physical>,
+    sound_card: Rectangle<i32, smithay::utils::Physical>,
+    sound_track: Rectangle<i32, smithay::utils::Physical>,
+    sound_mute_zone: Rectangle<i32, smithay::utils::Physical>,
+    power_card: Rectangle<i32, smithay::utils::Physical>,
+    search_btn: Rectangle<i32, smithay::utils::Physical>,
+    refresh_btn: Rectangle<i32, smithay::utils::Physical>,
+    lock_btn: Rectangle<i32, smithay::utils::Physical>,
+}
+
+fn quick_settings_layout(width: i32, height: i32, anim_dy: i32) -> QuickSettingsLayout {
+    let (px, base_py, pw, ph) = quick_settings_rect(width, height);
+    let py = base_py + anim_dy;
+    let pad = 14;
+    let inner_w = pw - pad * 2;
+    let col_w = (inner_w - 10) / 2;
+    let left_x = px + pad;
+    let right_x = left_x + col_w + 10;
+    let sub_w = (col_w - 8) / 2;
+    let round_off = (sub_w - 46) / 2;
+    let right_btn_mid = right_x + (col_w - 42) / 2;
+    let right_btn_end = right_x + col_w - 42;
+    let track_w = (inner_w - 24).max(24);
+    QuickSettingsLayout {
+        px,
+        py,
+        pw,
+        ph,
+        left_x,
+        conn_card: Rectangle::new(Point::from((left_x, py + 14)), Size::from((col_w, 100))),
+        bt_row: Rectangle::new(Point::from((left_x, py + 64)), Size::from((col_w, 50))),
+        layout_btn: Rectangle::new(
+            Point::from((right_x + round_off, py + 14)),
+            Size::from((46, 46)),
+        ),
+        layout_hit: Rectangle::new(Point::from((right_x, py + 14)), Size::from((sub_w, 62))),
+        motion_btn: Rectangle::new(
+            Point::from((right_x + sub_w + 8 + round_off, py + 14)),
+            Size::from((46, 46)),
+        ),
+        motion_hit: Rectangle::new(
+            Point::from((right_x + sub_w + 8, py + 14)),
+            Size::from((sub_w, 62)),
+        ),
+        transparency_btn: Rectangle::new(Point::from((right_x, py + 80)), Size::from((col_w, 34))),
+        display_card: Rectangle::new(Point::from((left_x, py + 124)), Size::from((inner_w, 60))),
+        display_track: Rectangle::new(
+            Point::from((left_x + 12, py + 154)),
+            Size::from((track_w, 22)),
+        ),
+        sound_card: Rectangle::new(Point::from((left_x, py + 194)), Size::from((inner_w, 60))),
+        sound_track: Rectangle::new(
+            Point::from((left_x + 12, py + 224)),
+            Size::from((track_w, 22)),
+        ),
+        sound_mute_zone: Rectangle::new(Point::from((left_x + 12, py + 224)), Size::from((24, 22))),
+        power_card: Rectangle::new(Point::from((left_x, py + 266)), Size::from((col_w, 64))),
+        search_btn: Rectangle::new(Point::from((right_x, py + 272)), Size::from((42, 42))),
+        refresh_btn: Rectangle::new(Point::from((right_btn_mid, py + 272)), Size::from((42, 42))),
+        lock_btn: Rectangle::new(Point::from((right_btn_end, py + 272)), Size::from((42, 42))),
+    }
 }
 
 #[must_use]
@@ -1417,6 +1555,34 @@ pub fn check_dock_click(
     }
 }
 
+/// Computes centered top Spaces miniature strip rectangles for `count` workspaces (`RUSTYOS-051`).
+#[must_use]
+pub fn overview_space_rects(
+    screen_size: Size<i32, smithay::utils::Physical>,
+    count: usize,
+) -> Vec<Rectangle<i32, smithay::utils::Physical>> {
+    if count == 0 {
+        return Vec::new();
+    }
+    let visible = count.min(9);
+    let width = screen_size.w.max(320);
+    let count_i32 = i32::try_from(visible).unwrap_or(1);
+    let gap = 10;
+    let avail_w = (width - 64).max(180);
+    let thumb_w = ((avail_w - gap * (count_i32 - 1)) / count_i32).clamp(52, 108);
+    let thumb_h = ((thumb_w * 58) / 100).clamp(34, 62);
+    let total_w = count_i32 * thumb_w + (count_i32 - 1) * gap;
+    let start_x = (width - total_w) / 2;
+    let start_y = TOP_BAR_HEIGHT + 16;
+
+    (0..visible)
+        .map(|idx| {
+            let sx = start_x + i32::try_from(idx).unwrap_or(0) * (thumb_w + gap);
+            Rectangle::new(Point::from((sx, start_y)), Size::from((thumb_w, thumb_h)))
+        })
+        .collect()
+}
+
 /// Computes centered Workspace Overview preview card rectangles for `count` windows (`RUSTYOS-023`).
 #[must_use]
 pub fn overview_card_rects(
@@ -1428,7 +1594,7 @@ pub fn overview_card_rects(
     }
     let width = screen_size.w.max(320);
     let height = screen_size.h.max(240);
-    let area_top = TOP_BAR_HEIGHT + 70;
+    let area_top = TOP_BAR_HEIGHT + 108;
     let area_bottom = (height - DOCK_HEIGHT - DOCK_MARGIN_BOTTOM - 22).max(area_top + 120);
     let avail_w = (width - 64).max(200);
     let avail_h = (area_bottom - area_top).max(120);
@@ -1472,7 +1638,34 @@ pub fn overview_card_rects(
     rects
 }
 
-/// Hit-tests `(x, y)` inside Workspace Overview (`RUSTYOS-023`).
+/// Hit-tests `(x, y)` inside Workspace Overview, including Spaces strip and window cards (`RUSTYOS-023` / `RUSTYOS-051`).
+#[must_use]
+pub fn check_overview_click_with_spaces(
+    screen_size: Size<i32, smithay::utils::Physical>,
+    spaces: &[OverviewWorkspaceSpace],
+    window_count: usize,
+    x: f64,
+    y: f64,
+) -> OverviewHit {
+    if !spaces.is_empty() {
+        let space_rects = overview_space_rects(screen_size, spaces.len());
+        for (space, rect) in spaces.iter().zip(space_rects) {
+            let hit_rect = Rectangle::new(rect.loc, Size::from((rect.size.w, rect.size.h + 18)));
+            if rect_contains(hit_rect, x, y) {
+                return OverviewHit::SwitchWorkspace(space.id);
+            }
+        }
+    }
+    let cards = overview_card_rects(screen_size, window_count);
+    for (idx, rect) in cards.into_iter().enumerate() {
+        if rect_contains(rect, x, y) {
+            return OverviewHit::Card(idx);
+        }
+    }
+    OverviewHit::Dismiss
+}
+
+/// Hit-tests `(x, y)` against Workspace Overview window cards (`RUSTYOS-023`).
 #[must_use]
 pub fn check_overview_click(
     screen_size: Size<i32, smithay::utils::Physical>,
@@ -1480,17 +1673,7 @@ pub fn check_overview_click(
     x: f64,
     y: f64,
 ) -> OverviewHit {
-    let cards = overview_card_rects(screen_size, window_count);
-    for (idx, rect) in cards.into_iter().enumerate() {
-        let rx = f64::from(rect.loc.x);
-        let ry = f64::from(rect.loc.y);
-        let rw = f64::from(rect.size.w);
-        let rh = f64::from(rect.size.h);
-        if x >= rx && x < rx + rw && y >= ry && y < ry + rh {
-            return OverviewHit::Card(idx);
-        }
-    }
-    OverviewHit::Dismiss
+    check_overview_click_with_spaces(screen_size, &[], window_count, x, y)
 }
 
 /// Computes `(panel_rect, card_rects)` for the centered `Alt+Tab` window switcher HUD (`RUSTYOS-033`).
@@ -1564,8 +1747,225 @@ pub fn check_switcher_click(
     None
 }
 
-/// Checks if `(x, y)` clicked any item in the `TopBar` Left Menu area (`RUSTYOS-038`).
-/// Returns menu dropdown actions for an open `TopBar` left menu item (`RUSTYOS-048`).
+const MENU_SYSTEM: &[TopBarMenuEntry] = &[
+    TopBarMenuEntry::Item {
+        label: "About RustyOS",
+        icon: crate::surfaces::UiGlyphKind::Info,
+        shortcut: None,
+        action: TopBarMenuAction::AboutRustyOs,
+    },
+    TopBarMenuEntry::Separator,
+    TopBarMenuEntry::Item {
+        label: "Workspace Overview",
+        icon: crate::surfaces::UiGlyphKind::Grid,
+        shortcut: Some("Super+Tab"),
+        action: TopBarMenuAction::OpenOverview,
+    },
+    TopBarMenuEntry::Item {
+        label: "Control Center",
+        icon: crate::surfaces::UiGlyphKind::ControlCenter,
+        shortcut: Some("Alt+S"),
+        action: TopBarMenuAction::OpenControlCenter,
+    },
+    TopBarMenuEntry::Separator,
+    TopBarMenuEntry::Item {
+        label: "Lock Screen",
+        icon: crate::surfaces::UiGlyphKind::Lock,
+        shortcut: Some("Super+L"),
+        action: TopBarMenuAction::LockSession,
+    },
+];
+
+const MENU_ACTIVE_APP: &[TopBarMenuEntry] = &[
+    TopBarMenuEntry::Item {
+        label: "New Terminal",
+        icon: crate::surfaces::UiGlyphKind::TerminalPrompt,
+        shortcut: None,
+        action: TopBarMenuAction::NewTerminal,
+    },
+    TopBarMenuEntry::Item {
+        label: "Open Files",
+        icon: crate::surfaces::UiGlyphKind::Folder,
+        shortcut: None,
+        action: TopBarMenuAction::OpenFiles,
+    },
+    TopBarMenuEntry::Separator,
+    TopBarMenuEntry::Item {
+        label: "Control Center",
+        icon: crate::surfaces::UiGlyphKind::ControlCenter,
+        shortcut: Some("Alt+S"),
+        action: TopBarMenuAction::OpenControlCenter,
+    },
+];
+
+const MENU_FILE: &[TopBarMenuEntry] = &[
+    TopBarMenuEntry::Item {
+        label: "New Terminal",
+        icon: crate::surfaces::UiGlyphKind::TerminalPrompt,
+        shortcut: None,
+        action: TopBarMenuAction::NewTerminal,
+    },
+    TopBarMenuEntry::Item {
+        label: "Open Files",
+        icon: crate::surfaces::UiGlyphKind::Folder,
+        shortcut: None,
+        action: TopBarMenuAction::OpenFiles,
+    },
+    TopBarMenuEntry::Separator,
+    TopBarMenuEntry::Item {
+        label: "Spotlight Search",
+        icon: crate::surfaces::UiGlyphKind::Search,
+        shortcut: Some("Super+Space"),
+        action: TopBarMenuAction::OpenSpotlight,
+    },
+];
+
+const MENU_EDIT: &[TopBarMenuEntry] = &[
+    TopBarMenuEntry::Item {
+        label: "Toggle Float / Tile",
+        icon: crate::surfaces::UiGlyphKind::LayoutSplit,
+        shortcut: Some("Alt+L"),
+        action: TopBarMenuAction::ToggleLayout,
+    },
+    TopBarMenuEntry::Separator,
+    TopBarMenuEntry::Item {
+        label: "Toggle Reduced Motion",
+        icon: crate::surfaces::UiGlyphKind::Motion,
+        shortcut: Some("Alt+R"),
+        action: TopBarMenuAction::ToggleReducedMotion,
+    },
+    TopBarMenuEntry::Item {
+        label: "Toggle Opaque Panels",
+        icon: crate::surfaces::UiGlyphKind::Transparency,
+        shortcut: None,
+        action: TopBarMenuAction::ToggleReduceTransparency,
+    },
+];
+
+const MENU_VIEW: &[TopBarMenuEntry] = &[
+    TopBarMenuEntry::Item {
+        label: "Workspace Overview",
+        icon: crate::surfaces::UiGlyphKind::Grid,
+        shortcut: Some("Super+Tab"),
+        action: TopBarMenuAction::OpenOverview,
+    },
+    TopBarMenuEntry::Item {
+        label: "Control Center",
+        icon: crate::surfaces::UiGlyphKind::ControlCenter,
+        shortcut: Some("Alt+S"),
+        action: TopBarMenuAction::OpenControlCenter,
+    },
+    TopBarMenuEntry::Separator,
+    TopBarMenuEntry::Item {
+        label: "Refresh Metrics",
+        icon: crate::surfaces::UiGlyphKind::Refresh,
+        shortcut: None,
+        action: TopBarMenuAction::RefreshMetrics,
+    },
+];
+
+const MENU_GO: &[TopBarMenuEntry] = &[
+    TopBarMenuEntry::Item {
+        label: "Workspace Overview",
+        icon: crate::surfaces::UiGlyphKind::Grid,
+        shortcut: Some("Super+Tab"),
+        action: TopBarMenuAction::OpenOverview,
+    },
+    TopBarMenuEntry::Separator,
+    TopBarMenuEntry::Item {
+        label: "Next Workspace",
+        icon: crate::surfaces::UiGlyphKind::ArrowNext,
+        shortcut: None,
+        action: TopBarMenuAction::NextWorkspace,
+    },
+    TopBarMenuEntry::Item {
+        label: "Previous Workspace",
+        icon: crate::surfaces::UiGlyphKind::ArrowPrev,
+        shortcut: None,
+        action: TopBarMenuAction::PrevWorkspace,
+    },
+    TopBarMenuEntry::Separator,
+    TopBarMenuEntry::Item {
+        label: "Spotlight Search",
+        icon: crate::surfaces::UiGlyphKind::Search,
+        shortcut: Some("Super+Space"),
+        action: TopBarMenuAction::OpenSpotlight,
+    },
+];
+
+const MENU_WINDOW: &[TopBarMenuEntry] = &[
+    TopBarMenuEntry::Item {
+        label: "Focus Next Window",
+        icon: crate::surfaces::UiGlyphKind::ArrowNext,
+        shortcut: Some("Alt+J"),
+        action: TopBarMenuAction::FocusNextWindow,
+    },
+    TopBarMenuEntry::Separator,
+    TopBarMenuEntry::Item {
+        label: "Maximize / Restore",
+        icon: crate::surfaces::UiGlyphKind::WindowMax,
+        shortcut: Some("Alt+M"),
+        action: TopBarMenuAction::ToggleMaximizeFocused,
+    },
+    TopBarMenuEntry::Item {
+        label: "Minimize Window",
+        icon: crate::surfaces::UiGlyphKind::WindowMin,
+        shortcut: Some("Alt+H"),
+        action: TopBarMenuAction::MinimizeFocused,
+    },
+    TopBarMenuEntry::Item {
+        label: "Toggle Float / Tile",
+        icon: crate::surfaces::UiGlyphKind::LayoutSplit,
+        shortcut: Some("Alt+L"),
+        action: TopBarMenuAction::ToggleLayout,
+    },
+    TopBarMenuEntry::Separator,
+    TopBarMenuEntry::Item {
+        label: "Close Window",
+        icon: crate::surfaces::UiGlyphKind::Close,
+        shortcut: Some("Alt+W"),
+        action: TopBarMenuAction::CloseFocused,
+    },
+];
+
+const MENU_HELP: &[TopBarMenuEntry] = &[
+    TopBarMenuEntry::Item {
+        label: "About RustyOS",
+        icon: crate::surfaces::UiGlyphKind::Info,
+        shortcut: None,
+        action: TopBarMenuAction::AboutRustyOs,
+    },
+    TopBarMenuEntry::Item {
+        label: "Keyboard Shortcuts",
+        icon: crate::surfaces::UiGlyphKind::Shortcuts,
+        shortcut: None,
+        action: TopBarMenuAction::ShowShortcuts,
+    },
+    TopBarMenuEntry::Separator,
+    TopBarMenuEntry::Item {
+        label: "Refresh Metrics",
+        icon: crate::surfaces::UiGlyphKind::Refresh,
+        shortcut: None,
+        action: TopBarMenuAction::RefreshMetrics,
+    },
+];
+
+/// Returns menu dropdown entries with leading SDF icons, group separators, and real keybindings (`RUSTYOS-051`).
+#[must_use]
+pub const fn top_bar_menu_entries(menu: TopBarMenuHit) -> &'static [TopBarMenuEntry] {
+    match menu {
+        TopBarMenuHit::SystemLogo => MENU_SYSTEM,
+        TopBarMenuHit::ActiveApp => MENU_ACTIVE_APP,
+        TopBarMenuHit::File => MENU_FILE,
+        TopBarMenuHit::Edit => MENU_EDIT,
+        TopBarMenuHit::View => MENU_VIEW,
+        TopBarMenuHit::Go => MENU_GO,
+        TopBarMenuHit::Window => MENU_WINDOW,
+        TopBarMenuHit::Help => MENU_HELP,
+    }
+}
+
+/// Returns compact `(label, action)` menu tuples for an open `TopBar` dropdown (`RUSTYOS-048`).
 #[must_use]
 pub const fn top_bar_menu_items(
     menu: TopBarMenuHit,
@@ -1627,7 +2027,11 @@ pub const fn top_bar_menu_items(
     }
 }
 
-/// Computes the glass dropdown popover rectangle anchored beneath `menu` (`RUSTYOS-048`/`049`).
+const MENU_POPOVER_PAD_Y: i32 = 6;
+const MENU_ITEM_HEIGHT: i32 = 28;
+const MENU_SEPARATOR_HEIGHT: i32 = 9;
+
+/// Computes the glass dropdown popover rectangle anchored beneath `menu` (`RUSTYOS-048`/`051`).
 #[must_use]
 pub fn top_bar_menu_popover_rect(
     active_app_name: &str,
@@ -1644,13 +2048,50 @@ pub fn top_bar_menu_popover_rect(
         TopBarMenuHit::Window => left.win_x,
         TopBarMenuHit::Help => left.help_x,
     };
-    let items_len = i32::try_from(top_bar_menu_items(menu).len()).unwrap_or(3);
-    let pop_w = 216;
-    let pop_h = 12 + items_len * 28;
+    let mut content_h = 0;
+    for entry in top_bar_menu_entries(menu) {
+        content_h += match entry {
+            TopBarMenuEntry::Item { .. } => MENU_ITEM_HEIGHT,
+            TopBarMenuEntry::Separator => MENU_SEPARATOR_HEIGHT,
+        };
+    }
+    let pop_w = 256;
+    let pop_h = MENU_POPOVER_PAD_Y * 2 + content_h;
     (anchor_x, TOP_BAR_HEIGHT + 6, pop_w, pop_h)
 }
 
-/// Hit-tests `(x, y)` against an open `TopBar` menu dropdown popover (`RUSTYOS-048`).
+fn top_bar_menu_entry_at(
+    active_app_name: &str,
+    menu: TopBarMenuHit,
+    x: f64,
+    y: f64,
+) -> Option<(usize, TopBarMenuAction)> {
+    let (px, py, pw, ph) = top_bar_menu_popover_rect(active_app_name, menu);
+    let fx = f64::from(px);
+    let fy = f64::from(py);
+    if x < fx || x >= fx + f64::from(pw) || y < fy || y >= fy + f64::from(ph) {
+        return None;
+    }
+    let mut cursor_y = py + MENU_POPOVER_PAD_Y;
+    for (entry_idx, entry) in top_bar_menu_entries(menu).iter().enumerate() {
+        match entry {
+            TopBarMenuEntry::Item { action, .. } => {
+                let top = f64::from(cursor_y);
+                let bot = f64::from(cursor_y + MENU_ITEM_HEIGHT);
+                if y >= top && y < bot {
+                    return Some((entry_idx, *action));
+                }
+                cursor_y += MENU_ITEM_HEIGHT;
+            }
+            TopBarMenuEntry::Separator => {
+                cursor_y += MENU_SEPARATOR_HEIGHT;
+            }
+        }
+    }
+    None
+}
+
+/// Hit-tests `(x, y)` against an open `TopBar` menu dropdown popover (`RUSTYOS-048`/`051`).
 #[must_use]
 pub fn check_top_bar_menu_popover_click(
     active_app_name: &str,
@@ -1664,16 +2105,22 @@ pub fn check_top_bar_menu_popover_click(
     if x < fx || x >= fx + f64::from(pw) || y < fy || y >= fy + f64::from(ph) {
         return TopBarMenuPopoverClick::Outside;
     }
-    let items = top_bar_menu_items(menu);
-    let row_y = y - fy - 6.0;
-    if row_y >= 0.0 {
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let idx = (row_y / 28.0).floor() as usize;
-        if let Some((_, action)) = items.get(idx) {
-            return TopBarMenuPopoverClick::Action(*action);
-        }
+    if let Some((_, action)) = top_bar_menu_entry_at(active_app_name, menu, x, y) {
+        TopBarMenuPopoverClick::Action(action)
+    } else {
+        TopBarMenuPopoverClick::Inside
     }
-    TopBarMenuPopoverClick::Inside
+}
+
+/// Returns the hovered entry index (`0..top_bar_menu_entries(menu).len()`) inside an open menu popover (`RUSTYOS-051`).
+#[must_use]
+pub fn check_top_bar_menu_popover_hover_row(
+    active_app_name: &str,
+    menu: TopBarMenuHit,
+    x: f64,
+    y: f64,
+) -> Option<usize> {
+    top_bar_menu_entry_at(active_app_name, menu, x, y).map(|(idx, _)| idx)
 }
 
 /// Hit-tests `(x, y)` against the `TopBar` Left Menu (`Logo`, `App`, `File`, `Edit`, `View`, `Go`, `Window`, `Help`) (`RUSTYOS-038`/`049`).
@@ -1823,108 +2270,117 @@ pub fn check_top_bar_status_click_for_telemetry(
     )
 }
 
-/// Hit-tests `(x, y)` against the open Quick Settings popover controls (`RUSTYOS-021`, `RUSTYOS-037`, `RUSTYOS-048`).
+/// Hit-tests `(x, y)` against the open modular Control Center popover (`RUSTYOS-021`, `RUSTYOS-037`, `RUSTYOS-048`, `RUSTYOS-051`).
 #[must_use]
 pub fn check_quick_settings_click(
     screen_size: Size<i32, smithay::utils::Physical>,
     x: f64,
     y: f64,
 ) -> QuickSettingsHit {
-    let (px, py, pw, ph) = quick_settings_rect(screen_size.w, screen_size.h);
-    let fx = f64::from(px);
-    let fy = f64::from(py);
-    let fw = f64::from(pw);
-    let fh = f64::from(ph);
-
-    if x < fx || x >= fx + fw || y < fy || y >= fy + fh {
+    let layout = quick_settings_layout(screen_size.w, screen_size.h, 0);
+    let pop_rect = Rectangle::new(
+        Point::from((layout.px, layout.py)),
+        Size::from((layout.pw, layout.ph)),
+    );
+    if !rect_contains(pop_rect, x, y) {
         return QuickSettingsHit::OutsidePopover;
     }
 
-    let pad = 14;
-    let inner_w = pw - pad * 2;
-    let half_w = (inner_w - 8) / 2;
-    let left_x = f64::from(px + pad);
-    let right_x = f64::from(px + pad + half_w + 8);
-    let hw = f64::from(half_w);
-
-    // Sound control buttons row: y in py + 128 .. py + 152
-    let audio_btn_y = f64::from(py + 128);
-    if y >= audio_btn_y && y < audio_btn_y + 24.0 {
-        let mute_x = f64::from(px + pw - pad - 116);
-        let minus_x = f64::from(px + pw - pad - 62);
-        let plus_x = f64::from(px + pw - pad - 30);
-        if x >= mute_x && x < mute_x + 48.0 {
-            return QuickSettingsHit::ToggleMute;
-        }
-        if x >= minus_x && x < minus_x + 28.0 {
-            return QuickSettingsHit::VolumeDown;
-        }
-        if x >= plus_x && x < plus_x + 28.0 {
-            return QuickSettingsHit::VolumeUp;
-        }
+    if rect_contains(layout.bt_row, x, y) {
+        return QuickSettingsHit::ToggleBluetooth;
     }
-
-    // Sound interactive capsule slider track: y in py + 158 .. py + 178
-    let track_x = f64::from(px + pad + 12);
-    let track_w = f64::from((inner_w - 24).max(1));
-    let sound_track_y = f64::from(py + 158);
-    if y >= sound_track_y && y < sound_track_y + 20.0 && x >= track_x && x < track_x + track_w {
-        let norm = ((x - track_x) / track_w).clamp(0.0, 1.0);
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let pct = (norm * 100.0).round() as u8;
-        return QuickSettingsHit::SetVolumePercent(pct.min(100));
+    if rect_contains(layout.layout_hit, x, y) {
+        return QuickSettingsHit::ToggleLayout;
     }
-
-    // Glass Surface card: reduce_transparency toggle button (py + 200 .. py + 222)
-    let glass_btn_x = f64::from(px + pw - pad - 86);
-    let glass_btn_y = f64::from(py + 200);
-    if y >= glass_btn_y && y < glass_btn_y + 24.0 && x >= glass_btn_x && x < glass_btn_x + 76.0 {
+    if rect_contains(layout.motion_hit, x, y) {
+        return QuickSettingsHit::ToggleReducedMotion;
+    }
+    if rect_contains(layout.transparency_btn, x, y) {
         return QuickSettingsHit::ToggleReduceTransparency;
     }
-
-    // Glass Opacity interactive capsule slider track: y in py + 228 .. py + 248
-    let glass_track_y = f64::from(py + 228);
-    if y >= glass_track_y && y < glass_track_y + 20.0 && x >= track_x && x < track_x + track_w {
-        let norm = ((x - track_x) / track_w).clamp(0.0, 1.0);
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let pct = (35.0 + norm * 65.0).round() as u8;
-        return QuickSettingsHit::SetGlassOpacityPercent(pct.clamp(35, 100));
+    if rect_contains(layout.display_track, x, y) {
+        return QuickSettingsHit::SetGlassOpacityPercent(quick_settings_slider_percent(
+            screen_size,
+            QuickSettingsSliderDrag::GlassOpacity,
+            x,
+        ));
     }
-
-    // Action row 1: py + 260 .. py + 294
-    let row1_y = f64::from(py + 260);
-    if y >= row1_y && y < row1_y + 34.0 {
-        if x >= left_x && x < left_x + hw {
-            return QuickSettingsHit::ToggleLayout;
-        }
-        if x >= right_x && x < right_x + hw {
-            return QuickSettingsHit::ToggleReducedMotion;
-        }
+    if rect_contains(layout.sound_mute_zone, x, y) {
+        return QuickSettingsHit::ToggleMute;
     }
-
-    // Action row 2: py + 302 .. py + 336
-    let row2_y = f64::from(py + 302);
-    if y >= row2_y && y < row2_y + 34.0 {
-        if x >= left_x && x < left_x + hw {
-            return QuickSettingsHit::OpenSpotlight;
-        }
-        if x >= right_x && x < right_x + hw {
-            return QuickSettingsHit::RefreshMetrics;
-        }
+    if rect_contains(layout.sound_track, x, y) {
+        return QuickSettingsHit::SetVolumePercent(quick_settings_slider_percent(
+            screen_size,
+            QuickSettingsSliderDrag::Sound,
+            x,
+        ));
     }
-
-    // Action row 3 (`RUSTYOS-027`): py + 344 .. py + 378
-    let row3_y = f64::from(py + 344);
-    if y >= row3_y && y < row3_y + 34.0 {
-        if x >= left_x && x < left_x + hw {
-            return QuickSettingsHit::ToggleBluetooth;
-        }
-        if x >= right_x && x < right_x + hw {
-            return QuickSettingsHit::LockSession;
-        }
+    let search_hit = Rectangle::new(
+        layout.search_btn.loc,
+        Size::from((layout.search_btn.size.w, 56)),
+    );
+    if rect_contains(search_hit, x, y) {
+        return QuickSettingsHit::OpenSpotlight;
+    }
+    let refresh_hit = Rectangle::new(
+        layout.refresh_btn.loc,
+        Size::from((layout.refresh_btn.size.w, 56)),
+    );
+    if rect_contains(refresh_hit, x, y) {
+        return QuickSettingsHit::RefreshMetrics;
+    }
+    let lock_hit = Rectangle::new(
+        layout.lock_btn.loc,
+        Size::from((layout.lock_btn.size.w, 56)),
+    );
+    if rect_contains(lock_hit, x, y) {
+        return QuickSettingsHit::LockSession;
     }
 
     QuickSettingsHit::InsidePopover
+}
+
+/// Identifies whether `(x, y)` initiated a continuous slider drag inside Control Center (`RUSTYOS-051`).
+#[must_use]
+pub fn check_quick_settings_slider_drag(
+    screen_size: Size<i32, smithay::utils::Physical>,
+    x: f64,
+    y: f64,
+) -> Option<QuickSettingsSliderDrag> {
+    let layout = quick_settings_layout(screen_size.w, screen_size.h, 0);
+    if rect_contains(layout.display_track, x, y) {
+        Some(QuickSettingsSliderDrag::GlassOpacity)
+    } else if rect_contains(layout.sound_track, x, y)
+        && !rect_contains(layout.sound_mute_zone, x, y)
+    {
+        Some(QuickSettingsSliderDrag::Sound)
+    } else {
+        None
+    }
+}
+
+/// Maps pointer `x` along an active Control Center slider track to `0..=100` (Sound) or `35..=100` (`GlassOpacity`) (`RUSTYOS-051`).
+#[must_use]
+pub fn quick_settings_slider_percent(
+    screen_size: Size<i32, smithay::utils::Physical>,
+    drag: QuickSettingsSliderDrag,
+    x: f64,
+) -> u8 {
+    let layout = quick_settings_layout(screen_size.w, screen_size.h, 0);
+    let track = match drag {
+        QuickSettingsSliderDrag::Sound => layout.sound_track,
+        QuickSettingsSliderDrag::GlassOpacity => layout.display_track,
+    };
+    let track_x = f64::from(track.loc.x);
+    let track_w = f64::from(track.size.w.max(1));
+    let norm = ((x - track_x) / track_w).clamp(0.0, 1.0);
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    match drag {
+        QuickSettingsSliderDrag::Sound => (norm * 100.0).round() as u8,
+        QuickSettingsSliderDrag::GlassOpacity => {
+            ((35.0 + norm * 65.0).round() as u8).clamp(35, 100)
+        }
+    }
 }
 
 fn truncate_ascii(text: &str, max_chars: usize) -> String {
@@ -2353,96 +2809,86 @@ fn render_quick_settings_popover(
     height: i32,
     qs: &QuickSettingsRenderState<'_>,
 ) {
-    let (px, py, pw, ph) = quick_settings_rect(width, height);
-    let pad = 14;
-    let inner_w = pw - pad * 2;
-    let half_w = (inner_w - 8) / 2;
+    let layout = quick_settings_layout(width, height, 0);
 
     // 1. Outer glass rim + elevated body
     elements.push(make_solid_element(
-        Rectangle::new(Point::from((px - 1, py - 1)), Size::from((pw + 2, ph + 2))),
+        Rectangle::new(
+            Point::from((layout.px - 1, layout.py - 1)),
+            Size::from((layout.pw + 2, layout.ph + 2)),
+        ),
         COLOR_BORDER_HIGHLIGHT,
     ));
     elements.push(make_solid_element(
-        Rectangle::new(Point::from((px, py)), Size::from((pw, ph))),
+        Rectangle::new(
+            Point::from((layout.px, layout.py)),
+            Size::from((layout.pw, layout.ph)),
+        ),
         COLOR_SURFACE_ELEVATED,
     ));
 
-    // Header divider
+    // 2. Connectivity card + round toggle tiles + Transparency pill
+    elements.push(make_solid_element(layout.conn_card, COLOR_SURFACE_OVERLAY));
     elements.push(make_solid_element(
-        Rectangle::new(Point::from((px + pad, py + 50)), Size::from((inner_w, 1))),
-        COLOR_BORDER,
-    ));
-
-    // 2. Network & Power info tiles (macOS Control Center style)
-    let left_x = px + pad;
-    let right_x = px + pad + half_w + 8;
-    elements.push(make_solid_element(
-        Rectangle::new(Point::from((left_x, py + 56)), Size::from((half_w, 58))),
-        COLOR_SURFACE_OVERLAY,
-    ));
-    elements.push(make_solid_element(
-        Rectangle::new(Point::from((left_x + 12, py + 71)), Size::from((28, 28))),
-        if qs.net_connected {
+        layout.layout_btn,
+        if qs.layout_mode == "master-stack" {
             COLOR_ACCENT_MUTED
         } else {
-            COLOR_SURFACE
+            COLOR_SURFACE_OVERLAY
+        },
+    ));
+    elements.push(make_solid_element(
+        layout.motion_btn,
+        if qs.reduced_motion {
+            COLOR_ACCENT_MUTED
+        } else {
+            COLOR_SURFACE_OVERLAY
+        },
+    ));
+    elements.push(make_solid_element(
+        layout.transparency_btn,
+        if qs.reduce_transparency {
+            COLOR_ACCENT_MUTED
+        } else {
+            COLOR_SURFACE_OVERLAY
         },
     ));
 
+    // 3. Display (Glass Opacity) & Sound full-width slider cards
     elements.push(make_solid_element(
-        Rectangle::new(Point::from((right_x, py + 56)), Size::from((half_w, 58))),
+        layout.display_card,
         COLOR_SURFACE_OVERLAY,
     ));
-    elements.push(make_solid_element(
-        Rectangle::new(Point::from((right_x + 12, py + 71)), Size::from((28, 28))),
-        if qs.ac_online || qs.battery_percent > 20 {
-            COLOR_SUCCESS
-        } else {
-            COLOR_WARNING
-        },
-    ));
+    elements.push(make_solid_element(layout.display_track, COLOR_SURFACE));
+    let glass_norm = (crate::config::clamp_glass_opacity(qs.glass_opacity)
+        - crate::config::MIN_GLASS_OPACITY)
+        / (1.0 - crate::config::MIN_GLASS_OPACITY);
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
+    let glass_fill_w =
+        ((layout.display_track.size.w as f32) * glass_norm.clamp(0.0, 1.0)).round() as i32;
+    if glass_fill_w > 0 {
+        elements.push(make_solid_element(
+            Rectangle::new(
+                layout.display_track.loc,
+                Size::from((glass_fill_w, layout.display_track.size.h)),
+            ),
+            COLOR_ACCENT_HOVER,
+        ));
+    }
 
-    // 3. Audio slider card
-    elements.push(make_solid_element(
-        Rectangle::new(Point::from((left_x, py + 122)), Size::from((inner_w, 66))),
-        COLOR_SURFACE_OVERLAY,
-    ));
-
-    // Mute, -, + buttons inside audio card
-    let btn_y = py + 128;
-    let mute_x = px + pw - pad - 116;
-    let minus_x = px + pw - pad - 62;
-    let plus_x = px + pw - pad - 30;
-    elements.push(make_solid_element(
-        Rectangle::new(Point::from((mute_x, btn_y)), Size::from((48, 22))),
-        if qs.audio_muted {
-            COLOR_DANGER
-        } else {
-            COLOR_SURFACE
-        },
-    ));
-    elements.push(make_solid_element(
-        Rectangle::new(Point::from((minus_x, btn_y)), Size::from((28, 22))),
-        COLOR_SURFACE,
-    ));
-    elements.push(make_solid_element(
-        Rectangle::new(Point::from((plus_x, btn_y)), Size::from((28, 22))),
-        COLOR_SURFACE,
-    ));
-
-    // Capsule audio progress bar track + fill
-    let track_w = inner_w - 24;
-    let track_x = left_x + 12;
-    let track_y = py + 158;
-    elements.push(make_solid_element(
-        Rectangle::new(Point::from((track_x, track_y)), Size::from((track_w, 18))),
-        COLOR_SURFACE,
-    ));
-    let fill_w = (track_w * i32::from(qs.volume_percent.min(100))) / 100;
+    elements.push(make_solid_element(layout.sound_card, COLOR_SURFACE_OVERLAY));
+    elements.push(make_solid_element(layout.sound_track, COLOR_SURFACE));
+    let fill_w = (layout.sound_track.size.w * i32::from(qs.volume_percent.min(100))) / 100;
     if fill_w > 0 {
         elements.push(make_solid_element(
-            Rectangle::new(Point::from((track_x, track_y)), Size::from((fill_w, 18))),
+            Rectangle::new(
+                layout.sound_track.loc,
+                Size::from((fill_w, layout.sound_track.size.h)),
+            ),
             if qs.audio_muted {
                 COLOR_SUBTLE
             } else {
@@ -2451,44 +2897,14 @@ fn render_quick_settings_popover(
         ));
     }
 
-    // 4. Quick Action toggles shifted below Sound + Glass cards (`RUSTYOS-048`)
-    let is_tile = qs.layout_mode == "master-stack";
+    // 4. Bottom Power card + round utility actions
+    elements.push(make_solid_element(layout.power_card, COLOR_SURFACE_OVERLAY));
+    elements.push(make_solid_element(layout.search_btn, COLOR_SURFACE_OVERLAY));
     elements.push(make_solid_element(
-        Rectangle::new(Point::from((left_x, py + 260)), Size::from((half_w, 34))),
-        if is_tile {
-            COLOR_ACCENT_MUTED
-        } else {
-            COLOR_SURFACE_OVERLAY
-        },
-    ));
-    elements.push(make_solid_element(
-        Rectangle::new(Point::from((right_x, py + 260)), Size::from((half_w, 34))),
-        if qs.reduced_motion {
-            COLOR_ACCENT_MUTED
-        } else {
-            COLOR_SURFACE_OVERLAY
-        },
-    ));
-    elements.push(make_solid_element(
-        Rectangle::new(Point::from((left_x, py + 302)), Size::from((half_w, 34))),
+        layout.refresh_btn,
         COLOR_SURFACE_OVERLAY,
     ));
-    elements.push(make_solid_element(
-        Rectangle::new(Point::from((right_x, py + 302)), Size::from((half_w, 34))),
-        COLOR_SURFACE_OVERLAY,
-    ));
-    elements.push(make_solid_element(
-        Rectangle::new(Point::from((left_x, py + 344)), Size::from((half_w, 34))),
-        if qs.bt_available && qs.bt_powered {
-            COLOR_ACCENT_MUTED
-        } else {
-            COLOR_SURFACE_OVERLAY
-        },
-    ));
-    elements.push(make_solid_element(
-        Rectangle::new(Point::from((right_x, py + 344)), Size::from((half_w, 34))),
-        COLOR_SURFACE_OVERLAY,
-    ));
+    elements.push(make_solid_element(layout.lock_btn, COLOR_SURFACE_OVERLAY));
 }
 
 /// Generates custom GLES render elements for `TopBar`, `Dock`, and active shell overlays.
@@ -2707,6 +3123,19 @@ pub fn check_window_ssd_hit(
     check_window_frame_hit(&targets, x, y)
 }
 
+/// Returns the topmost SSD window whose traffic-light cluster is hovered at `(x, y)` (`RUSTYOS-051`).
+#[must_use]
+pub fn check_window_traffic_lights_hover(
+    windows_bottom_to_top: &[SsdHitWindow],
+    x: f64,
+    y: f64,
+) -> Option<rusty_wm::WindowId> {
+    match check_window_frame_hit(windows_bottom_to_top, x, y) {
+        Some(SsdHit::Close(id) | SsdHit::Minimize(id) | SsdHit::Maximize(id)) => Some(id),
+        _ => None,
+    }
+}
+
 /// Generates Server-Side Decoration elements (titlebar, macOS traffic lights, 1px glass border)
 /// for a managed window rectangle in Smithay front-to-back order (`RUSTYOS-019`).
 #[must_use]
@@ -2923,8 +3352,10 @@ pub fn generate_shell_text_elements(
                     elements.push(el);
                 }
 
-                // macOS Spotlight Category Tag on the right (RUSTYOS-039)
-                let cat_label = if item.is_custom_command {
+                // macOS Spotlight action / category badge on the right (`RUSTYOS-039`/`051`)
+                let cat_label = if is_sel {
+                    "Open ↵"
+                } else if item.is_custom_command {
                     "Command"
                 } else {
                     "Application"
@@ -2934,12 +3365,12 @@ pub fn generate_shell_text_elements(
                     Size::from((80, 18)),
                 );
                 let cat_color = if is_sel {
-                    [230, 220, 245, 255]
+                    [255, 252, 255, 255]
                 } else {
                     text_muted
                 };
                 if let Some(el) = text_cache
-                    .render_label_centered(renderer, cat_label, 10.0, cat_color, cat_bounds)
+                    .render_label_centered(renderer, cat_label, 10.5, cat_color, cat_bounds)
                 {
                     elements.push(el);
                 }
@@ -3073,22 +3504,53 @@ pub fn generate_shell_text_elements(
         }
     }
 
-    // Active TopBar left dropdown menu labels (`RUSTYOS-048`, `RUSTYOS-049`)
+    // Active TopBar left dropdown menu labels + right-aligned real shortcuts (`RUSTYOS-048`/`049`/`051`)
     if let Some(open_menu) = top_telemetry.active_menu {
         let (mx, my, mw, _) = top_bar_menu_popover_rect(&active_app_name, open_menu);
-        for (idx, (label, _)) in top_bar_menu_items(open_menu).iter().enumerate() {
-            let idx_i32 = i32::try_from(idx).unwrap_or(0);
-            let row_y = my + 6 + idx_i32 * 28;
-            if let Some(el) = text_cache.render_label(
-                renderer,
-                label,
-                12.0,
-                text_bright,
-                Point::from((mx + 14, row_y + 5)),
-            ) {
-                elements.push(el);
+        let mut row_y = my + MENU_POPOVER_PAD_Y;
+        for (entry_idx, entry) in top_bar_menu_entries(open_menu).iter().enumerate() {
+            match entry {
+                TopBarMenuEntry::Item {
+                    label, shortcut, ..
+                } => {
+                    let hovered = top_telemetry.menu_hover_row == Some(entry_idx);
+                    let fg = if hovered {
+                        [255, 252, 255, 255]
+                    } else {
+                        text_bright
+                    };
+                    if let Some(el) = text_cache.render_label(
+                        renderer,
+                        label,
+                        12.0,
+                        fg,
+                        Point::from((mx + 34, row_y + 6)),
+                    ) {
+                        elements.push(el);
+                    }
+                    if let Some(hint) = shortcut {
+                        let (hint_w, _) = text_cache.measure_text(hint, 11.0);
+                        let hint_fg = if hovered {
+                            [248, 240, 255, 255]
+                        } else {
+                            text_muted
+                        };
+                        if let Some(el) = text_cache.render_label(
+                            renderer,
+                            hint,
+                            11.0,
+                            hint_fg,
+                            Point::from((mx + mw - 14 - hint_w, row_y + 7)),
+                        ) {
+                            elements.push(el);
+                        }
+                    }
+                    row_y += MENU_ITEM_HEIGHT;
+                }
+                TopBarMenuEntry::Separator => {
+                    row_y += MENU_SEPARATOR_HEIGHT;
+                }
             }
-            let _ = mw;
         }
     }
 
@@ -3234,7 +3696,7 @@ pub fn generate_shell_text_elements(
         }
     }
 
-    // 4b. Floating top-right Notification HUD toast labels (`RUSTYOS-024`)
+    // 4b. Floating top-right Notification HUD toast labels (`RUSTYOS-024`/`051`)
     if !matches!(
         overlay,
         ShellOverlayView::Spotlight(_) | ShellOverlayView::QuickSettings(_)
@@ -3244,35 +3706,26 @@ pub fn generate_shell_text_elements(
         for (toast, card) in notifications.iter().zip(rects) {
             let tx = card.loc.x;
             let ty = card.loc.y;
-            let tw = card.size.w;
 
-            let title_text = truncate_ascii(toast.title, 30);
+            let title_text = truncate_ascii(toast.title, 28);
             if let Some(el) = text_cache.render_label(
                 renderer,
                 &title_text,
                 12.5,
                 text_bright,
-                Point::from((tx + 22, ty + 11)),
+                Point::from((tx + 62, ty + 13)),
             ) {
                 elements.push(el);
             }
 
-            let body_text = truncate_ascii(toast.body, 40);
+            let body_text = truncate_ascii(toast.body, 36);
             if let Some(el) = text_cache.render_label(
                 renderer,
                 &body_text,
                 10.5,
                 text_muted,
-                Point::from((tx + 22, ty + 34)),
+                Point::from((tx + 62, ty + 35)),
             ) {
-                elements.push(el);
-            }
-
-            let close_bounds =
-                Rectangle::new(Point::from((tx + tw - 26, ty + 10)), Size::from((18, 18)));
-            if let Some(el) =
-                text_cache.render_label_centered(renderer, "x", 10.5, text_muted, close_bounds)
-            {
                 elements.push(el);
             }
         }
@@ -3367,53 +3820,41 @@ fn render_overview_text(
     elements: &mut Vec<MemoryRenderBufferRenderElement<GlesRenderer>>,
 ) {
     let text_bright = [244, 240, 250, 255];
-    let text_muted = [166, 155, 181, 255];
+    let text_muted = [188, 178, 206, 255];
     let width = screen_size.w;
+    let heading_dy = anim_offset(ov.progress, 12.0);
 
-    let heading_dy = anim_offset(ov.progress, 14.0);
-    let heading = format!(
-        "Workspace {}  •  {} windows  ({})",
-        ov.active_workspace,
-        ov.windows.len(),
-        ov.layout_mode
-    );
-    if let Some(el) = text_cache.render_label_centered(
-        renderer,
-        &heading,
-        15.0,
-        text_bright,
-        Rectangle::new(
-            Point::from((0, TOP_BAR_HEIGHT + 14 + heading_dy)),
-            Size::from((width, 24)),
-        ),
-    ) {
-        elements.push(el);
-    }
-    if let Some(el) = text_cache.render_label_centered(
-        renderer,
-        "Click a window card to focus  •  Esc or Dock Ov to close",
-        11.0,
-        text_muted,
-        Rectangle::new(
-            Point::from((0, TOP_BAR_HEIGHT + 38 + heading_dy)),
-            Size::from((width, 18)),
-        ),
-    ) {
-        elements.push(el);
+    // Top Spaces miniature captions ("Desktop 1", "Desktop 2", ...) matching Mission Control (`RUSTYOS-051`)
+    if !ov.spaces.is_empty() {
+        let space_rects = overview_space_rects(screen_size, ov.spaces.len());
+        for (space, rect) in ov.spaces.iter().zip(space_rects) {
+            let label = format!("Desktop {}", space.id);
+            let label_bounds = Rectangle::new(
+                Point::from((rect.loc.x - 4, rect.loc.y + rect.size.h + 4 + heading_dy)),
+                Size::from((rect.size.w + 8, 16)),
+            );
+            let color = if space.active {
+                text_bright
+            } else {
+                text_muted
+            };
+            if let Some(el) =
+                text_cache.render_label_centered(renderer, &label, 10.5, color, label_bounds)
+            {
+                elements.push(el);
+            }
+        }
     }
 
     if ov.windows.is_empty() {
-        let empty_msg = format!(
-            "Workspace {} is empty — launch an app from Dock >_ or Alt+Space",
-            ov.active_workspace
-        );
+        let empty_msg = format!("Desktop {} is empty", ov.active_workspace);
         if let Some(el) = text_cache.render_label_centered(
             renderer,
             &empty_msg,
-            13.0,
+            13.5,
             text_muted,
             Rectangle::new(
-                Point::from((32, screen_size.h / 2 - 20 + heading_dy)),
+                Point::from((32, screen_size.h / 2 - 14 + heading_dy)),
                 Size::from((width - 64, 28)),
             ),
         ) {
@@ -3425,29 +3866,30 @@ fn render_overview_text(
     let card_dy = anim_offset(ov.progress, 22.0);
     let cards = overview_card_rects(screen_size, ov.windows.len());
     for (win, card) in ov.windows.iter().zip(cards) {
-        let header_bounds = Rectangle::new(
-            Point::from((card.loc.x + 10, card.loc.y + 4 + card_dy)),
-            Size::from((card.size.w - 20, 24)),
+        let label = truncate_ascii(&win.title, 26);
+        let footer_bounds = Rectangle::new(
+            Point::from((card.loc.x + 8, card.loc.y + card.size.h + 5 + card_dy)),
+            Size::from((card.size.w - 16, 20)),
         );
         if let Some(el) = text_cache.render_label_centered(
             renderer,
-            &win.title,
-            12.0,
+            &label,
+            11.5,
             if win.focused { text_bright } else { text_muted },
-            header_bounds,
+            footer_bounds,
         ) {
             elements.push(el);
         }
         let body_bounds = Rectangle::new(
-            Point::from((card.loc.x + 14, card.loc.y + 34 + card_dy)),
-            Size::from((card.size.w - 28, card.size.h - 46)),
+            Point::from((card.loc.x + 12, card.loc.y + 12 + card_dy)),
+            Size::from((card.size.w - 24, card.size.h - 24)),
         );
         let center_badge = format!("{}  •  {}", win.badge, win.dimensions);
         if let Some(el) = text_cache.render_label_centered(
             renderer,
             &center_badge,
-            12.0,
-            text_bright,
+            11.5,
+            if win.focused { text_bright } else { text_muted },
             body_bounds,
         ) {
             elements.push(el);
@@ -3455,85 +3897,137 @@ fn render_overview_text(
     }
 }
 
-#[allow(clippy::too_many_lines)]
-fn render_quick_settings_text(
+const QS_TEXT_BRIGHT: [u8; 4] = [248, 244, 255, 255];
+const QS_TEXT_MUTED: [u8; 4] = [182, 172, 204, 255];
+
+fn render_control_center_slider_header(
     text_cache: &mut crate::text::TextCache,
     renderer: &mut GlesRenderer,
-    width: i32,
-    height: i32,
+    card: Rectangle<i32, smithay::utils::Physical>,
+    title: &str,
+    value_label: &str,
+    elements: &mut Vec<MemoryRenderBufferRenderElement<GlesRenderer>>,
+) {
+    if let Some(el) = text_cache.render_label(
+        renderer,
+        title,
+        11.5,
+        QS_TEXT_BRIGHT,
+        Point::from((card.loc.x + 12, card.loc.y + 8)),
+    ) {
+        elements.push(el);
+    }
+    let (vw, _) = text_cache.measure_text(value_label, 10.5);
+    if let Some(el) = text_cache.render_label(
+        renderer,
+        value_label,
+        10.5,
+        QS_TEXT_MUTED,
+        Point::from((card.loc.x + card.size.w - 12 - vw, card.loc.y + 9)),
+    ) {
+        elements.push(el);
+    }
+}
+
+fn render_control_center_top_row_labels(
+    text_cache: &mut crate::text::TextCache,
+    renderer: &mut GlesRenderer,
+    layout: &QuickSettingsLayout,
     qs: &QuickSettingsRenderState<'_>,
     elements: &mut Vec<MemoryRenderBufferRenderElement<GlesRenderer>>,
 ) {
-    let (px, base_py, pw, _ph) = quick_settings_rect(width, height);
-    let py = base_py + anim_offset(qs.progress, -16.0);
-    let pad = 14;
-    let inner_w = pw - pad * 2;
-    let half_w = (inner_w - 8) / 2;
-    let left_x = px + pad;
-    let right_x = px + pad + half_w + 8;
+    let net_sub = truncate_ascii(qs.network_label, 12);
+    let bt_sub = truncate_ascii(qs.bt_label, 12);
+    for (title, sub, bright, y_off) in [
+        ("Wi-Fi", net_sub.as_str(), true, 12),
+        ("Bluetooth", bt_sub.as_str(), qs.bt_available, 56),
+    ] {
+        if let Some(el) = text_cache.render_label(
+            renderer,
+            title,
+            11.5,
+            if bright {
+                QS_TEXT_BRIGHT
+            } else {
+                QS_TEXT_MUTED
+            },
+            Point::from((layout.left_x + 52, layout.conn_card.loc.y + y_off)),
+        ) {
+            elements.push(el);
+        }
+        if let Some(el) = text_cache.render_label(
+            renderer,
+            sub,
+            10.0,
+            QS_TEXT_MUTED,
+            Point::from((layout.left_x + 52, layout.conn_card.loc.y + y_off + 16)),
+        ) {
+            elements.push(el);
+        }
+    }
 
-    let text_bright = [244, 240, 250, 255];
-    let text_muted = [166, 155, 181, 255];
-
+    let layout_cap = if qs.layout_mode == "master-stack" {
+        "Tile"
+    } else {
+        "Float"
+    };
+    for (hit, cap, y_base) in [
+        (layout.layout_hit, layout_cap, layout.layout_btn.loc.y),
+        (layout.motion_hit, "Motion", layout.motion_btn.loc.y),
+    ] {
+        if let Some(el) = text_cache.render_label_centered(
+            renderer,
+            cap,
+            10.0,
+            QS_TEXT_BRIGHT,
+            Rectangle::new(
+                Point::from((hit.loc.x, y_base + 47)),
+                Size::from((hit.size.w, 15)),
+            ),
+        ) {
+            elements.push(el);
+        }
+    }
+    let transp_label = if qs.reduce_transparency {
+        "Opaque"
+    } else {
+        "Clear Glass"
+    };
     if let Some(el) = text_cache.render_label(
         renderer,
-        "Control Center",
-        13.5,
-        text_bright,
-        Point::from((left_x, py + 12)),
+        transp_label,
+        11.0,
+        QS_TEXT_BRIGHT,
+        Point::from((
+            layout.transparency_btn.loc.x + 34,
+            layout.transparency_btn.loc.y + 10,
+        )),
     ) {
         elements.push(el);
     }
+}
 
-    #[allow(clippy::cast_precision_loss)]
-    let p50_ms = (qs.frame_p50_us as f64) / 1000.0;
-    let perf_sub = format!("{p50_ms:.1} ms p50 • {} win", qs.window_count);
-    if let Some(el) = text_cache.render_label(
-        renderer,
-        &perf_sub,
-        10.5,
-        text_muted,
-        Point::from((left_x, py + 31)),
-    ) {
-        elements.push(el);
-    }
-
-    // Network tile
-    if let Some(el) = text_cache.render_label(
-        renderer,
-        "Network",
-        11.5,
-        text_bright,
-        Point::from((left_x + 46, py + 64)),
-    ) {
-        elements.push(el);
-    }
-    let net_sub = truncate_ascii(qs.network_label, 13);
-    if let Some(el) = text_cache.render_label(
-        renderer,
-        &net_sub,
-        10.0,
-        text_muted,
-        Point::from((left_x + 46, py + 86)),
-    ) {
-        elements.push(el);
-    }
-
-    // Power tile
+fn render_control_center_power_and_actions(
+    text_cache: &mut crate::text::TextCache,
+    renderer: &mut GlesRenderer,
+    layout: &QuickSettingsLayout,
+    qs: &QuickSettingsRenderState<'_>,
+    elements: &mut Vec<MemoryRenderBufferRenderElement<GlesRenderer>>,
+) {
     if let Some(el) = text_cache.render_label(
         renderer,
         "Power",
         11.5,
-        text_bright,
-        Point::from((right_x + 46, py + 64)),
+        QS_TEXT_BRIGHT,
+        Point::from((layout.power_card.loc.x + 52, layout.power_card.loc.y + 15)),
     ) {
         elements.push(el);
     }
     let power_sub = if qs.has_battery {
         if qs.ac_online {
-            format!("Bat {}% (AC)", qs.battery_percent)
+            format!("{}% • AC", qs.battery_percent)
         } else {
-            format!("Battery {}%", qs.battery_percent)
+            format!("{}%", qs.battery_percent)
         }
     } else {
         "AC Power".to_owned()
@@ -3542,164 +4036,76 @@ fn render_quick_settings_text(
         renderer,
         &power_sub,
         10.0,
-        text_muted,
-        Point::from((right_x + 46, py + 86)),
+        QS_TEXT_MUTED,
+        Point::from((layout.power_card.loc.x + 52, layout.power_card.loc.y + 33)),
     ) {
         elements.push(el);
     }
 
-    // Audio row
-    let vol_title = if qs.audio_muted {
-        format!("Sound: Muted ({}%)", qs.volume_percent)
-    } else {
-        format!("Sound: {}%", qs.volume_percent)
-    };
-    if let Some(el) = text_cache.render_label(
-        renderer,
-        &vol_title,
-        11.5,
-        text_bright,
-        Point::from((left_x + 12, py + 133)),
-    ) {
-        elements.push(el);
+    for (btn, cap) in [
+        (layout.search_btn, "Search"),
+        (layout.refresh_btn, "Sync"),
+        (layout.lock_btn, "Lock"),
+    ] {
+        if let Some(el) = text_cache.render_label_centered(
+            renderer,
+            cap,
+            10.0,
+            QS_TEXT_MUTED,
+            Rectangle::new(
+                Point::from((btn.loc.x - 4, btn.loc.y + btn.size.h + 3)),
+                Size::from((btn.size.w + 8, 14)),
+            ),
+        ) {
+            elements.push(el);
+        }
     }
+}
 
-    let btn_y = py + 128;
-    let mute_x = px + pw - pad - 116;
-    let minus_x = px + pw - pad - 62;
-    let plus_x = px + pw - pad - 30;
-    let mute_label = if qs.audio_muted { "Unmute" } else { "Mute" };
-    if let Some(el) = text_cache.render_label_centered(
-        renderer,
-        mute_label,
-        10.0,
-        text_bright,
-        Rectangle::new(Point::from((mute_x, btn_y)), Size::from((48, 22))),
-    ) {
-        elements.push(el);
-    }
-    if let Some(el) = text_cache.render_label_centered(
-        renderer,
-        "-",
-        13.0,
-        text_bright,
-        Rectangle::new(Point::from((minus_x, btn_y)), Size::from((28, 22))),
-    ) {
-        elements.push(el);
-    }
-    if let Some(el) = text_cache.render_label_centered(
-        renderer,
-        "+",
-        13.0,
-        text_bright,
-        Rectangle::new(Point::from((plus_x, btn_y)), Size::from((28, 22))),
-    ) {
-        elements.push(el);
-    }
+fn render_quick_settings_text(
+    text_cache: &mut crate::text::TextCache,
+    renderer: &mut GlesRenderer,
+    width: i32,
+    height: i32,
+    qs: &QuickSettingsRenderState<'_>,
+    elements: &mut Vec<MemoryRenderBufferRenderElement<GlesRenderer>>,
+) {
+    let layout = quick_settings_layout(width, height, anim_offset(qs.progress, -16.0));
+    let _ = qs.frame_p50_us;
+    let _ = qs.window_count;
 
-    // Glass Surface card (`RUSTYOS-048`)
+    render_control_center_top_row_labels(text_cache, renderer, &layout, qs, elements);
+
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let glass_pct = (crate::config::clamp_glass_opacity(qs.glass_opacity) * 100.0).round() as u8;
-    let glass_title = if qs.reduce_transparency {
-        "Glass: Opaque Mode".to_owned()
+    let glass_val = if qs.reduce_transparency {
+        "Opaque".to_owned()
     } else {
-        format!("Glass Opacity: {glass_pct}%")
+        format!("{glass_pct}%")
     };
-    if let Some(el) = text_cache.render_label(
+    render_control_center_slider_header(
+        text_cache,
         renderer,
-        &glass_title,
-        11.0,
-        text_bright,
-        Point::from((left_x + 12, py + 202)),
-    ) {
-        elements.push(el);
-    }
-    let transp_btn_label = if qs.reduce_transparency {
-        "Glass"
+        layout.display_card,
+        "Display",
+        &glass_val,
+        elements,
+    );
+    let vol_val = if qs.audio_muted {
+        "Muted".to_owned()
     } else {
-        "Opaque"
+        format!("{}%", qs.volume_percent)
     };
-    let glass_btn_x = px + pw - pad - 86;
-    if let Some(el) = text_cache.render_label_centered(
+    render_control_center_slider_header(
+        text_cache,
         renderer,
-        transp_btn_label,
-        10.0,
-        text_bright,
-        Rectangle::new(Point::from((glass_btn_x, py + 200)), Size::from((76, 22))),
-    ) {
-        elements.push(el);
-    }
+        layout.sound_card,
+        "Sound",
+        &vol_val,
+        elements,
+    );
 
-    // Quick toggle labels (2 columns, 3 rows shifted below Glass card)
-    let layout_text = if qs.layout_mode == "master-stack" {
-        "Layout: Tile"
-    } else {
-        "Layout: Float"
-    };
-    if let Some(el) = text_cache.render_label_centered(
-        renderer,
-        layout_text,
-        11.0,
-        text_bright,
-        Rectangle::new(Point::from((left_x, py + 260)), Size::from((half_w, 34))),
-    ) {
-        elements.push(el);
-    }
-    let motion_text = if qs.reduced_motion {
-        "Motion: Reduced"
-    } else {
-        "Motion: Smooth"
-    };
-    if let Some(el) = text_cache.render_label_centered(
-        renderer,
-        motion_text,
-        11.0,
-        text_bright,
-        Rectangle::new(Point::from((right_x, py + 260)), Size::from((half_w, 34))),
-    ) {
-        elements.push(el);
-    }
-    if let Some(el) = text_cache.render_label_centered(
-        renderer,
-        "Open Spotlight",
-        11.0,
-        text_bright,
-        Rectangle::new(Point::from((left_x, py + 302)), Size::from((half_w, 34))),
-    ) {
-        elements.push(el);
-    }
-    if let Some(el) = text_cache.render_label_centered(
-        renderer,
-        "Refresh Metrics",
-        11.0,
-        text_bright,
-        Rectangle::new(Point::from((right_x, py + 302)), Size::from((half_w, 34))),
-    ) {
-        elements.push(el);
-    }
-    let bt_text = truncate_ascii(qs.bt_label, 17);
-    if let Some(el) = text_cache.render_label_centered(
-        renderer,
-        &bt_text,
-        11.0,
-        if qs.bt_available {
-            text_bright
-        } else {
-            text_muted
-        },
-        Rectangle::new(Point::from((left_x, py + 344)), Size::from((half_w, 34))),
-    ) {
-        elements.push(el);
-    }
-    if let Some(el) = text_cache.render_label_centered(
-        renderer,
-        "Lock Session",
-        11.0,
-        text_bright,
-        Rectangle::new(Point::from((right_x, py + 344)), Size::from((half_w, 34))),
-    ) {
-        elements.push(el);
-    }
+    render_control_center_power_and_actions(text_cache, renderer, &layout, qs, elements);
 }
 
 /// Generates centered title text element for a window's SSD titlebar (`RUSTYOS-020`).
@@ -3729,9 +4135,7 @@ const RGBA_SURFACE: [u8; 4] = [22, 16, 35, 255]; // #161023
 const RGBA_SURFACE_ELEVATED: [u8; 4] = [32, 24, 46, 245]; // #20182E @ 0.96
 const RGBA_SURFACE_OVERLAY: [u8; 4] = [41, 32, 55, 250]; // #292037 @ 0.98
 const RGBA_ACCENT: [u8; 4] = [165, 110, 255, 255]; // #A56EFF
-const RGBA_ACCENT_HOVER: [u8; 4] = [185, 138, 255, 255]; // #B98AFF
 const RGBA_ACCENT_MUTED: [u8; 4] = [118, 80, 181, 255]; // #7650B5
-const RGBA_SUBTLE: [u8; 4] = [118, 107, 133, 255]; // #766B85
 const RGBA_BORDER: [u8; 4] = [255, 255, 255, 31];
 const RGBA_BORDER_HIGHLIGHT: [u8; 4] = [255, 255, 255, 56];
 const RGBA_DANGER: [u8; 4] = [229, 107, 117, 255];
@@ -4040,6 +4444,421 @@ fn push_top_bar_right_glyphs(
     );
 }
 
+#[allow(clippy::too_many_arguments)]
+fn push_liquid_glass_panel(
+    out: &mut Vec<CompositorRenderElement>,
+    shape_cache: &mut crate::surfaces::UiShapeCache,
+    renderer: &mut GlesRenderer,
+    rect: Rectangle<i32, smithay::utils::Physical>,
+    radius: i32,
+    style: crate::surfaces::GlassPanelStyle,
+    glass_opacity: f32,
+    reduce_transparency: bool,
+    shadow: Option<(i32, u8)>,
+) {
+    if let Some(el) = shape_cache.glass_panel_element(
+        renderer,
+        style,
+        rect.size.w,
+        rect.size.h,
+        radius,
+        glass_opacity,
+        reduce_transparency,
+        Point::from((rect.loc.x, rect.loc.y)),
+    ) {
+        out.push(CompositorRenderElement::Memory(el));
+    }
+    if let Some((spread, max_alpha)) = shadow {
+        push_soft_shadow(out, shape_cache, renderer, rect, radius, spread, max_alpha);
+    }
+}
+
+fn notification_app_icon(title: &str) -> crate::icons::BuiltinAppIcon {
+    let lower = title.to_ascii_lowercase();
+    if lower.contains("term")
+        || lower.contains("shell")
+        || lower.contains("bash")
+        || lower.contains("konsole")
+    {
+        crate::icons::BuiltinAppIcon::Terminal
+    } else if lower.contains("file") || lower.contains("download") || lower.contains("dolphin") {
+        crate::icons::BuiltinAppIcon::Files
+    } else if lower.contains("browser")
+        || lower.contains("web")
+        || lower.contains("firefox")
+        || lower.contains("chrom")
+    {
+        crate::icons::BuiltinAppIcon::Browser
+    } else if lower.contains("setting") || lower.contains("config") || lower.contains("pref") {
+        crate::icons::BuiltinAppIcon::Settings
+    } else {
+        crate::icons::BuiltinAppIcon::RustySystem
+    }
+}
+
+fn osd_glyph_kind(
+    label: &str,
+    value_percent: Option<u8>,
+    muted: bool,
+) -> crate::surfaces::UiGlyphKind {
+    let lower = label.to_ascii_lowercase();
+    if lower.contains("bright") || lower.contains("glass") || lower.contains("display") {
+        crate::surfaces::UiGlyphKind::Sun
+    } else if lower.contains("vol")
+        || lower.contains("audio")
+        || lower.contains("sound")
+        || lower.contains("mute")
+        || value_percent.is_some()
+    {
+        crate::surfaces::UiGlyphKind::Volume {
+            level_percent: value_percent.unwrap_or(50),
+            muted,
+        }
+    } else {
+        crate::surfaces::UiGlyphKind::Info
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_control_center_slider(
+    out: &mut Vec<CompositorRenderElement>,
+    shape_cache: &mut crate::surfaces::UiShapeCache,
+    renderer: &mut GlesRenderer,
+    track: Rectangle<i32, smithay::utils::Physical>,
+    norm: f32,
+    icon: crate::surfaces::UiGlyphKind,
+    active_fill: bool,
+    glass_opacity: f32,
+    reduce_transparency: bool,
+) {
+    let thumb_d = track.size.h - 4;
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
+    let fill_w = ((track.size.w as f32) * norm.clamp(0.0, 1.0))
+        .round()
+        .clamp(f32::from(thumb_d as i16), track.size.w as f32) as i32;
+    let icon_fg = if active_fill {
+        [32, 22, 54, 245]
+    } else {
+        [244, 240, 250, 255]
+    };
+    if let Some(el) = shape_cache.ui_glyph_element(
+        renderer,
+        icon,
+        14,
+        icon_fg,
+        Point::from((track.loc.x + 5, track.loc.y + (track.size.h - 14) / 2)),
+    ) {
+        out.push(CompositorRenderElement::Memory(el));
+    }
+    let knob_x = (track.loc.x + fill_w - thumb_d - 2)
+        .clamp(track.loc.x + 2, track.loc.x + track.size.w - thumb_d - 2);
+    if let Some(el) = shape_cache.circle_element(
+        renderer,
+        thumb_d,
+        [255, 252, 255, 250],
+        Some([205, 192, 232, 160]),
+        Point::from((knob_x, track.loc.y + 2)),
+    ) {
+        out.push(CompositorRenderElement::Memory(el));
+    }
+    let fill_rgba = if active_fill {
+        [246, 240, 255, 232]
+    } else {
+        [152, 140, 174, 175]
+    };
+    push_rounded_glass_box(
+        out,
+        shape_cache,
+        renderer,
+        Rectangle::new(track.loc, Size::from((fill_w, track.size.h))),
+        track.size.h / 2,
+        fill_rgba,
+        None,
+    );
+    push_liquid_glass_panel(
+        out,
+        shape_cache,
+        renderer,
+        track,
+        track.size.h / 2,
+        crate::surfaces::GlassPanelStyle::ControlModule,
+        glass_opacity,
+        reduce_transparency,
+        None,
+    );
+}
+
+#[allow(clippy::too_many_lines)]
+fn render_quick_settings_composite(
+    out: &mut Vec<CompositorRenderElement>,
+    shape_cache: &mut crate::surfaces::UiShapeCache,
+    renderer: &mut GlesRenderer,
+    width: i32,
+    height: i32,
+    qs: &QuickSettingsRenderState<'_>,
+) {
+    let layout = quick_settings_layout(width, height, anim_offset(qs.progress, -16.0));
+    let white = [250, 246, 255, 255];
+
+    // 1. Connectivity circular status toggles (`Wi-Fi`, `Bluetooth`)
+    let wifi_fill = if qs.net_connected {
+        RGBA_ACCENT
+    } else {
+        [255, 255, 255, 36]
+    };
+    if let Some(el) = shape_cache.ui_glyph_element(
+        renderer,
+        crate::surfaces::UiGlyphKind::Wifi {
+            connected: qs.net_connected,
+        },
+        16,
+        white,
+        Point::from((layout.left_x + 19, layout.conn_card.loc.y + 18)),
+    ) {
+        out.push(CompositorRenderElement::Memory(el));
+    }
+    if let Some(el) = shape_cache.circle_element(
+        renderer,
+        34,
+        wifi_fill,
+        Some([255, 255, 255, 58]),
+        Point::from((layout.left_x + 10, layout.conn_card.loc.y + 9)),
+    ) {
+        out.push(CompositorRenderElement::Memory(el));
+    }
+
+    let bt_on = qs.bt_available && qs.bt_powered;
+    let bt_fill = if bt_on {
+        RGBA_ACCENT
+    } else {
+        [255, 255, 255, 34]
+    };
+    if let Some(el) = shape_cache.ui_glyph_element(
+        renderer,
+        crate::surfaces::UiGlyphKind::Bluetooth,
+        16,
+        if qs.bt_available {
+            white
+        } else {
+            [185, 175, 205, 175]
+        },
+        Point::from((layout.left_x + 19, layout.conn_card.loc.y + 62)),
+    ) {
+        out.push(CompositorRenderElement::Memory(el));
+    }
+    if let Some(el) = shape_cache.circle_element(
+        renderer,
+        34,
+        bt_fill,
+        Some([255, 255, 255, 58]),
+        Point::from((layout.left_x + 10, layout.conn_card.loc.y + 53)),
+    ) {
+        out.push(CompositorRenderElement::Memory(el));
+    }
+
+    // 2. Large round Layout & Reduced Motion toggles + Transparency pill
+    let is_tile = qs.layout_mode == "master-stack";
+    for (btn_rect, active, kind) in [
+        (
+            layout.layout_btn,
+            is_tile,
+            crate::surfaces::UiGlyphKind::LayoutSplit,
+        ),
+        (
+            layout.motion_btn,
+            qs.reduced_motion,
+            crate::surfaces::UiGlyphKind::Motion,
+        ),
+    ] {
+        if let Some(el) = shape_cache.ui_glyph_element(
+            renderer,
+            kind,
+            18,
+            white,
+            Point::from((btn_rect.loc.x + 14, btn_rect.loc.y + 14)),
+        ) {
+            out.push(CompositorRenderElement::Memory(el));
+        }
+        if let Some(el) = shape_cache.circle_element(
+            renderer,
+            46,
+            if active {
+                RGBA_ACCENT
+            } else {
+                [255, 255, 255, 36]
+            },
+            Some([255, 255, 255, if active { 120 } else { 52 }]),
+            Point::from((btn_rect.loc.x, btn_rect.loc.y)),
+        ) {
+            out.push(CompositorRenderElement::Memory(el));
+        }
+    }
+
+    if let Some(el) = shape_cache.ui_glyph_element(
+        renderer,
+        crate::surfaces::UiGlyphKind::Transparency,
+        16,
+        white,
+        Point::from((
+            layout.transparency_btn.loc.x + 11,
+            layout.transparency_btn.loc.y + 9,
+        )),
+    ) {
+        out.push(CompositorRenderElement::Memory(el));
+    }
+    if qs.reduce_transparency {
+        push_rounded_glass_box(
+            out,
+            shape_cache,
+            renderer,
+            layout.transparency_btn,
+            15,
+            RGBA_ACCENT_MUTED,
+            Some(RGBA_ACCENT),
+        );
+    } else {
+        push_liquid_glass_panel(
+            out,
+            shape_cache,
+            renderer,
+            layout.transparency_btn,
+            15,
+            crate::surfaces::GlassPanelStyle::ControlModule,
+            qs.glass_opacity,
+            qs.reduce_transparency,
+            None,
+        );
+    }
+
+    // 3. Full-width Display (Glass Opacity) & Sound capsule sliders
+    let glass_norm = (crate::config::clamp_glass_opacity(qs.glass_opacity)
+        - crate::config::MIN_GLASS_OPACITY)
+        / (1.0 - crate::config::MIN_GLASS_OPACITY);
+    push_control_center_slider(
+        out,
+        shape_cache,
+        renderer,
+        layout.display_track,
+        glass_norm,
+        crate::surfaces::UiGlyphKind::Sun,
+        !qs.reduce_transparency,
+        qs.glass_opacity,
+        qs.reduce_transparency,
+    );
+
+    let vol_norm = f32::from(qs.volume_percent.min(100)) / 100.0;
+    push_control_center_slider(
+        out,
+        shape_cache,
+        renderer,
+        layout.sound_track,
+        vol_norm,
+        crate::surfaces::UiGlyphKind::Volume {
+            level_percent: qs.volume_percent,
+            muted: qs.audio_muted,
+        },
+        !qs.audio_muted,
+        qs.glass_opacity,
+        qs.reduce_transparency,
+    );
+
+    // 4. Bottom Power status + 3 round quick utility buttons
+    let power_fill = if qs.ac_online {
+        RGBA_SUCCESS
+    } else if qs.battery_percent > 20 {
+        RGBA_ACCENT_MUTED
+    } else {
+        RGBA_WARNING
+    };
+    if let Some(el) = shape_cache.ui_glyph_element(
+        renderer,
+        crate::surfaces::UiGlyphKind::Battery {
+            percent: qs.battery_percent,
+            charging: qs.ac_online,
+        },
+        16,
+        white,
+        Point::from((layout.power_card.loc.x + 19, layout.power_card.loc.y + 24)),
+    ) {
+        out.push(CompositorRenderElement::Memory(el));
+    }
+    if let Some(el) = shape_cache.circle_element(
+        renderer,
+        34,
+        power_fill,
+        Some([255, 255, 255, 58]),
+        Point::from((layout.power_card.loc.x + 10, layout.power_card.loc.y + 15)),
+    ) {
+        out.push(CompositorRenderElement::Memory(el));
+    }
+
+    for (btn_rect, kind) in [
+        (layout.search_btn, crate::surfaces::UiGlyphKind::Search),
+        (layout.refresh_btn, crate::surfaces::UiGlyphKind::Refresh),
+        (layout.lock_btn, crate::surfaces::UiGlyphKind::Lock),
+    ] {
+        if let Some(el) = shape_cache.ui_glyph_element(
+            renderer,
+            kind,
+            16,
+            white,
+            Point::from((btn_rect.loc.x + 13, btn_rect.loc.y + 13)),
+        ) {
+            out.push(CompositorRenderElement::Memory(el));
+        }
+        if let Some(el) = shape_cache.circle_element(
+            renderer,
+            42,
+            [255, 255, 255, 34],
+            Some([255, 255, 255, 52]),
+            Point::from((btn_rect.loc.x, btn_rect.loc.y)),
+        ) {
+            out.push(CompositorRenderElement::Memory(el));
+        }
+    }
+
+    // 5. Inner glass module backgrounds behind icons & sliders
+    for card in [
+        layout.conn_card,
+        layout.display_card,
+        layout.sound_card,
+        layout.power_card,
+    ] {
+        push_liquid_glass_panel(
+            out,
+            shape_cache,
+            renderer,
+            card,
+            16,
+            crate::surfaces::GlassPanelStyle::ControlModule,
+            qs.glass_opacity,
+            qs.reduce_transparency,
+            None,
+        );
+    }
+
+    // 6. Outer Liquid Glass Popover & soft deep elevation shadow
+    let qs_rect = Rectangle::new(
+        Point::from((layout.px, layout.py)),
+        Size::from((layout.pw, layout.ph)),
+    );
+    push_liquid_glass_panel(
+        out,
+        shape_cache,
+        renderer,
+        qs_rect,
+        WINDOW_RADIUS,
+        crate::surfaces::GlassPanelStyle::Popover,
+        qs.glass_opacity,
+        qs.reduce_transparency,
+        Some((28, 118)),
+    );
+}
+
 fn title_hue_seed(title: &str, id: u64) -> u8 {
     let base = u8::try_from(id & 0xff).unwrap_or(0);
     title.bytes().fold(base, u8::wrapping_add) % 4
@@ -4113,15 +4932,17 @@ pub fn generate_shell_composite_elements(
                 )));
             }
 
-            // Search input bar plate (macOS 27 Liquid Glass style, RUSTYOS-039)
-            push_rounded_glass_box(
+            // Search input bar plate (`macOS 27` Liquid Glass module, `RUSTYOS-039`/`051`)
+            push_liquid_glass_panel(
                 &mut out,
                 shape_cache,
                 renderer,
-                Rectangle::new(Point::from((mx + 16, my + 14)), Size::from((mw - 32, 52))),
+                Rectangle::new(Point::from((mx + 16, my + 16)), Size::from((mw - 32, 48))),
                 14,
-                RGBA_SURFACE_OVERLAY,
-                Some(RGBA_BORDER),
+                crate::surfaces::GlassPanelStyle::ControlModule,
+                glass_op,
+                reduce_tr,
+                None,
             );
             out.push(CompositorRenderElement::Solid(make_solid_element(
                 Rectangle::new(Point::from((mx + 16, my + 72)), Size::from((mw - 32, 1))),
@@ -4135,452 +4956,49 @@ pub fn generate_shell_composite_elements(
                 let row_y = start_row_y + i * (row_h + 4);
                 let is_sel = idx == spot.selected_in_window;
 
-                if is_sel {
-                    out.push(CompositorRenderElement::Solid(make_solid_element(
-                        Rectangle::new(
-                            Point::from((mx + 18, row_y + 8)),
-                            Size::from((3, row_h - 16)),
-                        ),
-                        COLOR_ACCENT,
-                    )));
-                }
-                let icon_el = spot
-                    .items
-                    .get(idx)
-                    .and_then(|item| item.icon.as_deref())
-                    .and_then(|icon_name| {
-                        shape_cache.icons.icon_element_by_name(
-                            renderer,
-                            icon_name,
-                            28,
-                            Point::from((mx + 28, row_y + 9)),
-                        )
-                    });
-                if let Some(el) = icon_el {
-                    out.push(CompositorRenderElement::Memory(el));
+                let row_rgba = if is_sel {
+                    [165, 110, 255, 198]
                 } else {
-                    let icon_rgba = if is_sel {
-                        RGBA_ACCENT
-                    } else if idx == 1 {
-                        RGBA_ACCENT_MUTED
-                    } else {
-                        RGBA_SUBTLE
-                    };
+                    RGBA_SURFACE
+                };
+                if is_sel {
                     push_rounded_glass_box(
                         &mut out,
                         shape_cache,
                         renderer,
-                        Rectangle::new(Point::from((mx + 28, row_y + 9)), Size::from((28, 28))),
-                        7,
-                        icon_rgba,
+                        Rectangle::new(Point::from((mx + 14, row_y)), Size::from((mw - 28, row_h))),
+                        12,
+                        row_rgba,
+                        Some([215, 185, 255, 120]),
+                    );
+                } else {
+                    push_rounded_glass_box(
+                        &mut out,
+                        shape_cache,
+                        renderer,
+                        Rectangle::new(Point::from((mx + 16, row_y)), Size::from((mw - 32, row_h))),
+                        12,
+                        row_rgba,
                         None,
                     );
                 }
-                if !has_text {
-                    out.push(CompositorRenderElement::Solid(make_solid_element(
-                        Rectangle::new(
-                            Point::from((mx + 66, row_y + 12)),
-                            Size::from((120 + i * 20, 8)),
-                        ),
-                        COLOR_TEXT,
-                    )));
-                }
-                let row_rgba = if is_sel {
-                    RGBA_ACCENT_MUTED
-                } else {
-                    RGBA_SURFACE
-                };
-                push_rounded_glass_box(
-                    &mut out,
-                    shape_cache,
-                    renderer,
-                    Rectangle::new(Point::from((mx + 16, row_y)), Size::from((mw - 32, row_h))),
-                    12,
-                    row_rgba,
-                    if is_sel { Some(RGBA_ACCENT) } else { None },
-                );
             }
 
             let modal_rect = Rectangle::new(Point::from((mx, my)), Size::from((mw, mh)));
-            push_rounded_glass_box(
+            push_liquid_glass_panel(
                 &mut out,
                 shape_cache,
                 renderer,
                 modal_rect,
                 WINDOW_RADIUS,
-                scale_glass_rgba(RGBA_SURFACE_ELEVATED, glass_op, reduce_tr),
-                Some(RGBA_BORDER_HIGHLIGHT),
-            );
-            push_soft_shadow(
-                &mut out,
-                shape_cache,
-                renderer,
-                modal_rect,
-                WINDOW_RADIUS,
-                28,
-                108,
+                crate::surfaces::GlassPanelStyle::Popover,
+                glass_op,
+                reduce_tr,
+                Some((32, 124)),
             );
         }
         ShellOverlayView::QuickSettings(qs) => {
-            let (px, base_py, pw, ph) = quick_settings_rect(width, height);
-            let py = base_py + anim_offset(qs.progress, -16.0);
-            let pad = 14;
-            let inner_w = pw - pad * 2;
-            let half_w = (inner_w - 8) / 2;
-            let left_x = px + pad;
-            let right_x = px + pad + half_w + 8;
-
-            // 1. Primary round toggle buttons & SDF status glyphs inside top cards
-            let net_circle_fill = if qs.net_connected {
-                RGBA_ACCENT
-            } else {
-                RGBA_SURFACE
-            };
-            let net_circle_border = Some(if qs.net_connected {
-                RGBA_BORDER_HIGHLIGHT
-            } else {
-                RGBA_BORDER
-            });
-            if let Some(el) = shape_cache.ui_glyph_element(
-                renderer,
-                crate::surfaces::UiGlyphKind::Wifi {
-                    connected: qs.net_connected,
-                },
-                16,
-                [248, 245, 255, 255],
-                Point::from((left_x + 15, py + 77)),
-            ) {
-                out.push(CompositorRenderElement::Memory(el));
-            }
-            if let Some(el) = shape_cache.circle_element(
-                renderer,
-                30,
-                net_circle_fill,
-                net_circle_border,
-                Point::from((left_x + 8, py + 70)),
-            ) {
-                out.push(CompositorRenderElement::Memory(el));
-            }
-
-            let power_fill = if qs.ac_online {
-                RGBA_SUCCESS
-            } else if qs.battery_percent > 20 {
-                RGBA_ACCENT_MUTED
-            } else {
-                RGBA_WARNING
-            };
-            if let Some(el) = shape_cache.ui_glyph_element(
-                renderer,
-                crate::surfaces::UiGlyphKind::Battery {
-                    percent: qs.battery_percent,
-                    charging: qs.ac_online,
-                },
-                16,
-                [248, 245, 255, 255],
-                Point::from((right_x + 15, py + 77)),
-            ) {
-                out.push(CompositorRenderElement::Memory(el));
-            }
-            if let Some(el) = shape_cache.circle_element(
-                renderer,
-                30,
-                power_fill,
-                Some(RGBA_BORDER_HIGHLIGHT),
-                Point::from((right_x + 8, py + 70)),
-            ) {
-                out.push(CompositorRenderElement::Memory(el));
-            }
-
-            // Leading SDF speaker glyph inside Sound capsule slider
-            let track_w = inner_w - 24;
-            let track_x = left_x + 12;
-            let track_y = py + 158;
-            let fill_w = (track_w * i32::from(qs.volume_percent.min(100))) / 100;
-            let vol_glyph_rgba = if fill_w > 24 {
-                [22, 16, 35, 255]
-            } else {
-                [244, 240, 250, 255]
-            };
-            if let Some(el) = shape_cache.ui_glyph_element(
-                renderer,
-                crate::surfaces::UiGlyphKind::Volume {
-                    level_percent: qs.volume_percent,
-                    muted: qs.audio_muted,
-                },
-                14,
-                vol_glyph_rgba,
-                Point::from((track_x + 5, track_y + 2)),
-            ) {
-                out.push(CompositorRenderElement::Memory(el));
-            }
-
-            // Sound control pill buttons
-            let btn_y = py + 128;
-            let mute_x = px + pw - pad - 116;
-            let minus_x = px + pw - pad - 62;
-            let plus_x = px + pw - pad - 30;
-            push_rounded_glass_box(
-                &mut out,
-                shape_cache,
-                renderer,
-                Rectangle::new(Point::from((mute_x, btn_y)), Size::from((48, 22))),
-                11,
-                if qs.audio_muted {
-                    RGBA_DANGER
-                } else {
-                    RGBA_SURFACE
-                },
-                Some(RGBA_BORDER),
-            );
-            push_rounded_glass_box(
-                &mut out,
-                shape_cache,
-                renderer,
-                Rectangle::new(Point::from((minus_x, btn_y)), Size::from((28, 22))),
-                11,
-                RGBA_SURFACE,
-                Some(RGBA_BORDER),
-            );
-            push_rounded_glass_box(
-                &mut out,
-                shape_cache,
-                renderer,
-                Rectangle::new(Point::from((plus_x, btn_y)), Size::from((28, 22))),
-                11,
-                RGBA_SURFACE,
-                Some(RGBA_BORDER),
-            );
-
-            // Sound capsule slider fill & track (`DESIGN.md` §12.4)
-            if fill_w > 0 {
-                push_rounded_glass_box(
-                    &mut out,
-                    shape_cache,
-                    renderer,
-                    Rectangle::new(Point::from((track_x, track_y)), Size::from((fill_w, 18))),
-                    fill_w.min(9),
-                    if qs.audio_muted {
-                        RGBA_SUBTLE
-                    } else {
-                        RGBA_ACCENT
-                    },
-                    None,
-                );
-            }
-            push_rounded_glass_box(
-                &mut out,
-                shape_cache,
-                renderer,
-                Rectangle::new(Point::from((track_x, track_y)), Size::from((track_w, 18))),
-                9,
-                RGBA_SURFACE,
-                Some(RGBA_BORDER),
-            );
-
-            // Sound card
-            push_rounded_glass_box(
-                &mut out,
-                shape_cache,
-                renderer,
-                Rectangle::new(Point::from((left_x, py + 122)), Size::from((inner_w, 66))),
-                16,
-                RGBA_SURFACE_OVERLAY,
-                Some(RGBA_BORDER),
-            );
-
-            // Glass Surface card (`RUSTYOS-048`): toggle + capsule opacity slider (`0.35..=1.0`)
-            let glass_btn_x = px + pw - pad - 86;
-            push_rounded_glass_box(
-                &mut out,
-                shape_cache,
-                renderer,
-                Rectangle::new(Point::from((glass_btn_x, py + 200)), Size::from((76, 22))),
-                11,
-                if qs.reduce_transparency {
-                    RGBA_ACCENT_MUTED
-                } else {
-                    RGBA_SURFACE
-                },
-                Some(if qs.reduce_transparency {
-                    RGBA_ACCENT
-                } else {
-                    RGBA_BORDER
-                }),
-            );
-            let glass_norm = (crate::config::clamp_glass_opacity(qs.glass_opacity)
-                - crate::config::MIN_GLASS_OPACITY)
-                / (1.0 - crate::config::MIN_GLASS_OPACITY);
-            #[allow(
-                clippy::cast_precision_loss,
-                clippy::cast_possible_truncation,
-                clippy::cast_sign_loss
-            )]
-            let glass_fill_w = ((track_w as f32) * glass_norm.clamp(0.0, 1.0)).round() as i32;
-            let glass_track_y = py + 228;
-            if glass_fill_w > 0 {
-                push_rounded_glass_box(
-                    &mut out,
-                    shape_cache,
-                    renderer,
-                    Rectangle::new(
-                        Point::from((track_x, glass_track_y)),
-                        Size::from((glass_fill_w, 16)),
-                    ),
-                    glass_fill_w.min(8),
-                    if qs.reduce_transparency {
-                        RGBA_SUBTLE
-                    } else {
-                        RGBA_ACCENT_HOVER
-                    },
-                    None,
-                );
-            }
-            push_rounded_glass_box(
-                &mut out,
-                shape_cache,
-                renderer,
-                Rectangle::new(
-                    Point::from((track_x, glass_track_y)),
-                    Size::from((track_w, 16)),
-                ),
-                8,
-                RGBA_SURFACE,
-                Some(RGBA_BORDER),
-            );
-            push_rounded_glass_box(
-                &mut out,
-                shape_cache,
-                renderer,
-                Rectangle::new(Point::from((left_x, py + 196)), Size::from((inner_w, 56))),
-                16,
-                RGBA_SURFACE_OVERLAY,
-                Some(RGBA_BORDER),
-            );
-
-            // Network & Power cards
-            push_rounded_glass_box(
-                &mut out,
-                shape_cache,
-                renderer,
-                Rectangle::new(Point::from((left_x, py + 56)), Size::from((half_w, 58))),
-                16,
-                RGBA_SURFACE_OVERLAY,
-                Some(RGBA_BORDER),
-            );
-            push_rounded_glass_box(
-                &mut out,
-                shape_cache,
-                renderer,
-                Rectangle::new(Point::from((right_x, py + 56)), Size::from((half_w, 58))),
-                16,
-                RGBA_SURFACE_OVERLAY,
-                Some(RGBA_BORDER),
-            );
-
-            // Quick Action toggles (2 columns, 3 rows shifted below Glass Surface card)
-            let is_tile = qs.layout_mode == "master-stack";
-            push_rounded_glass_box(
-                &mut out,
-                shape_cache,
-                renderer,
-                Rectangle::new(Point::from((left_x, py + 260)), Size::from((half_w, 34))),
-                14,
-                if is_tile {
-                    RGBA_ACCENT_MUTED
-                } else {
-                    RGBA_SURFACE_OVERLAY
-                },
-                Some(if is_tile { RGBA_ACCENT } else { RGBA_BORDER }),
-            );
-            push_rounded_glass_box(
-                &mut out,
-                shape_cache,
-                renderer,
-                Rectangle::new(Point::from((right_x, py + 260)), Size::from((half_w, 34))),
-                14,
-                if qs.reduced_motion {
-                    RGBA_ACCENT_MUTED
-                } else {
-                    RGBA_SURFACE_OVERLAY
-                },
-                Some(if qs.reduced_motion {
-                    RGBA_ACCENT
-                } else {
-                    RGBA_BORDER
-                }),
-            );
-            push_rounded_glass_box(
-                &mut out,
-                shape_cache,
-                renderer,
-                Rectangle::new(Point::from((left_x, py + 302)), Size::from((half_w, 34))),
-                14,
-                RGBA_SURFACE_OVERLAY,
-                Some(RGBA_BORDER),
-            );
-            push_rounded_glass_box(
-                &mut out,
-                shape_cache,
-                renderer,
-                Rectangle::new(Point::from((right_x, py + 302)), Size::from((half_w, 34))),
-                14,
-                RGBA_SURFACE_OVERLAY,
-                Some(RGBA_BORDER),
-            );
-            let bt_active = qs.bt_available && qs.bt_powered;
-            push_rounded_glass_box(
-                &mut out,
-                shape_cache,
-                renderer,
-                Rectangle::new(Point::from((left_x, py + 344)), Size::from((half_w, 34))),
-                14,
-                if bt_active {
-                    RGBA_ACCENT_MUTED
-                } else {
-                    RGBA_SURFACE_OVERLAY
-                },
-                Some(if bt_active { RGBA_ACCENT } else { RGBA_BORDER }),
-            );
-            push_rounded_glass_box(
-                &mut out,
-                shape_cache,
-                renderer,
-                Rectangle::new(Point::from((right_x, py + 344)), Size::from((half_w, 34))),
-                14,
-                RGBA_SURFACE_OVERLAY,
-                Some(RGBA_BORDER),
-            );
-
-            // Hairline separator
-            out.push(CompositorRenderElement::Solid(make_solid_element(
-                Rectangle::new(Point::from((left_x, py + 50)), Size::from((inner_w, 1))),
-                COLOR_BORDER,
-            )));
-
-            // Outer glass popover (radius: 20, soft drop shadow, opacity scaled by Control Center slider)
-            let qs_rect = Rectangle::new(Point::from((px, py)), Size::from((pw, ph)));
-            push_rounded_glass_box(
-                &mut out,
-                shape_cache,
-                renderer,
-                qs_rect,
-                WINDOW_RADIUS,
-                scale_glass_rgba(
-                    RGBA_SURFACE_ELEVATED,
-                    qs.glass_opacity,
-                    qs.reduce_transparency,
-                ),
-                Some(RGBA_BORDER_HIGHLIGHT),
-            );
-            push_soft_shadow(
-                &mut out,
-                shape_cache,
-                renderer,
-                qs_rect,
-                WINDOW_RADIUS,
-                24,
-                102,
-            );
+            render_quick_settings_composite(&mut out, shape_cache, renderer, width, height, qs);
         }
         ShellOverlayView::Switcher(sw) => {
             let (panel_rect, cards) = switcher_layout(screen_size, sw.cards.len());
@@ -4660,7 +5078,7 @@ pub fn generate_shell_composite_elements(
         }
     }
 
-    // 2b. Floating top-right Notification HUD toasts (`RUSTYOS-024`)
+    // 2b. Floating top-right Notification HUD toasts (`RUSTYOS-024`/`051`)
     if !matches!(
         overlay,
         ShellOverlayView::Spotlight(_) | ShellOverlayView::QuickSettings(_)
@@ -4671,41 +5089,49 @@ pub fn generate_shell_composite_elements(
             let tx = card.loc.x;
             let ty = card.loc.y;
             let tw = card.size.w;
-            let th = card.size.h;
 
-            let stripe_rgba = match toast.urgency {
-                rusty_ipc::Urgency::Low => RGBA_SUCCESS,
-                rusty_ipc::Urgency::Normal => RGBA_ACCENT,
-                rusty_ipc::Urgency::Critical => RGBA_DANGER,
-            };
-            push_rounded_glass_box(
-                &mut out,
-                shape_cache,
+            if toast.hovered {
+                if let Some(el) = shape_cache.ui_glyph_element(
+                    renderer,
+                    crate::surfaces::UiGlyphKind::Close,
+                    10,
+                    [248, 244, 255, 255],
+                    Point::from((tx + tw - 23, ty + 15)),
+                ) {
+                    out.push(CompositorRenderElement::Memory(el));
+                }
+                if let Some(el) = shape_cache.circle_element(
+                    renderer,
+                    20,
+                    [255, 255, 255, 42],
+                    Some([255, 255, 255, 76]),
+                    Point::from((tx + tw - 28, ty + 10)),
+                ) {
+                    out.push(CompositorRenderElement::Memory(el));
+                }
+            }
+
+            let app_icon = notification_app_icon(toast.title);
+            if let Some(icon_el) = shape_cache.icons.builtin_squircle_icon_element(
                 renderer,
-                Rectangle::new(Point::from((tx + 10, ty + 12)), Size::from((4, th - 24))),
-                2,
-                stripe_rgba,
-                None,
-            );
-            push_rounded_glass_box(
-                &mut out,
-                shape_cache,
-                renderer,
-                Rectangle::new(Point::from((tx + tw - 26, ty + 10)), Size::from((18, 18))),
-                5,
-                RGBA_SURFACE_OVERLAY,
-                Some(RGBA_BORDER),
-            );
-            push_rounded_glass_box(
+                app_icon,
+                38,
+                Point::from((tx + 14, ty + 15)),
+            ) {
+                out.push(CompositorRenderElement::Memory(icon_el));
+            }
+
+            push_liquid_glass_panel(
                 &mut out,
                 shape_cache,
                 renderer,
                 card,
-                10,
-                RGBA_SURFACE_ELEVATED,
-                Some(RGBA_BORDER_HIGHLIGHT),
+                MENU_POPOVER_RADIUS,
+                crate::surfaces::GlassPanelStyle::Popover,
+                top_telemetry.glass_opacity,
+                top_telemetry.reduce_transparency,
+                Some((16, 98)),
             );
-            push_soft_shadow(&mut out, shape_cache, renderer, card, 10, 12, 88);
         }
     }
 
@@ -4777,20 +5203,61 @@ pub fn generate_shell_composite_elements(
         );
         let (mx, my, mw, mh) = top_bar_menu_popover_rect(&active_app_name, open_menu);
         let menu_rect = Rectangle::new(Point::from((mx, my)), Size::from((mw, mh)));
-        push_rounded_glass_box(
+        let mut row_y = my + MENU_POPOVER_PAD_Y;
+        for (entry_idx, entry) in top_bar_menu_entries(open_menu).iter().enumerate() {
+            match entry {
+                TopBarMenuEntry::Item { icon, .. } => {
+                    let hovered = top_telemetry.menu_hover_row == Some(entry_idx);
+                    let icon_tint = if hovered {
+                        [255, 252, 255, 255]
+                    } else {
+                        [218, 208, 238, 240]
+                    };
+                    if let Some(el) = shape_cache.ui_glyph_element(
+                        renderer,
+                        *icon,
+                        14,
+                        icon_tint,
+                        Point::from((mx + 14, row_y + 7)),
+                    ) {
+                        out.push(CompositorRenderElement::Memory(el));
+                    }
+                    if hovered {
+                        push_rounded_glass_box(
+                            &mut out,
+                            shape_cache,
+                            renderer,
+                            Rectangle::new(
+                                Point::from((mx + 6, row_y + 1)),
+                                Size::from((mw - 12, MENU_ITEM_HEIGHT - 2)),
+                            ),
+                            8,
+                            [165, 110, 255, 200],
+                            Some([215, 185, 255, 110]),
+                        );
+                    }
+                    row_y += MENU_ITEM_HEIGHT;
+                }
+                TopBarMenuEntry::Separator => {
+                    out.push(CompositorRenderElement::Solid(make_solid_element(
+                        Rectangle::new(Point::from((mx + 12, row_y + 4)), Size::from((mw - 24, 1))),
+                        COLOR_BORDER,
+                    )));
+                    row_y += MENU_SEPARATOR_HEIGHT;
+                }
+            }
+        }
+        push_liquid_glass_panel(
             &mut out,
             shape_cache,
             renderer,
             menu_rect,
-            12,
-            scale_glass_rgba(
-                RGBA_SURFACE_ELEVATED,
-                top_telemetry.glass_opacity,
-                top_telemetry.reduce_transparency,
-            ),
-            Some(RGBA_BORDER_HIGHLIGHT),
+            MENU_POPOVER_RADIUS,
+            crate::surfaces::GlassPanelStyle::Popover,
+            top_telemetry.glass_opacity,
+            top_telemetry.reduce_transparency,
+            Some((20, 108)),
         );
-        push_soft_shadow(&mut out, shape_cache, renderer, menu_rect, 12, 18, 96);
     }
 
     if top_telemetry.show_tray {
@@ -4867,12 +5334,12 @@ pub fn generate_shell_composite_elements(
             shape_cache,
             renderer,
             Rectangle::new(
-                Point::from((right_layout.status_pill_x, TOP_BAR_ITEM_Y)),
-                Size::from((right_layout.status_pill_w, TOP_BAR_ITEM_H)),
+                Point::from((right_layout.control_center_x - 5, TOP_BAR_ITEM_Y)),
+                Size::from((right_layout.control_center_w + 10, TOP_BAR_ITEM_H)),
             ),
             6,
-            [255, 255, 255, 42],
-            None,
+            [255, 255, 255, 58],
+            Some([255, 255, 255, 42]),
         );
     }
 
@@ -5133,49 +5600,103 @@ pub fn generate_shell_composite_elements(
         96,
     );
 
-    // 5. Workspace Overview cards & scrim rendered below TopBar & Dock so both stay crisp and clickable (`RUSTYOS-023`/`025`)
+    // 5. Workspace Overview Spaces strip, floating cards & light scrim (`RUSTYOS-023`/`025`/`051`)
     if let ShellOverlayView::Overview(ov) = overlay {
+        let heading_dy = anim_offset(ov.progress, 12.0);
         let card_dy = anim_offset(ov.progress, 22.0);
+
+        if !ov.spaces.is_empty() {
+            let space_rects = overview_space_rects(screen_size, ov.spaces.len());
+            for (space, base_thumb) in ov.spaces.iter().zip(space_rects) {
+                let thumb = Rectangle::new(
+                    Point::from((base_thumb.loc.x, base_thumb.loc.y + heading_dy)),
+                    base_thumb.size,
+                );
+                for &(nx, ny, nw, nh) in &space.preview_rects {
+                    if nw <= 0.0 || nh <= 0.0 {
+                        continue;
+                    }
+                    #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+                    let (rx, ry, rw, rh) = (
+                        thumb.loc.x + 4 + ((thumb.size.w - 8) as f32 * nx).round() as i32,
+                        thumb.loc.y + 4 + ((thumb.size.h - 8) as f32 * ny).round() as i32,
+                        (((thumb.size.w - 8) as f32 * nw).round() as i32).max(6),
+                        (((thumb.size.h - 8) as f32 * nh).round() as i32).max(5),
+                    );
+                    push_rounded_glass_box(
+                        &mut out,
+                        shape_cache,
+                        renderer,
+                        Rectangle::new(Point::from((rx, ry)), Size::from((rw, rh))),
+                        3,
+                        [224, 212, 248, 185],
+                        Some([255, 255, 255, 90]),
+                    );
+                }
+                let thumb_border = if space.active {
+                    [185, 138, 255, 255]
+                } else {
+                    RGBA_BORDER
+                };
+                let thumb_bg = if space.active {
+                    [72, 42, 124, 228]
+                } else if space.window_count > 0 {
+                    [50, 32, 86, 214]
+                } else {
+                    [36, 24, 62, 196]
+                };
+                push_rounded_glass_box(
+                    &mut out,
+                    shape_cache,
+                    renderer,
+                    thumb,
+                    8,
+                    thumb_bg,
+                    Some(thumb_border),
+                );
+                push_soft_shadow(&mut out, shape_cache, renderer, thumb, 8, 8, 72);
+            }
+            out.push(CompositorRenderElement::Solid(make_solid_element(
+                Rectangle::new(Point::from((0, TOP_BAR_HEIGHT)), Size::from((width, 98))),
+                premul(0.08, 0.05, 0.14, 0.28),
+            )));
+        }
+
         let cards = overview_card_rects(screen_size, ov.windows.len());
         for (win, base_card) in ov.windows.iter().zip(cards) {
             let card = Rectangle::new(
                 Point::from((base_card.loc.x, base_card.loc.y + card_dy)),
                 base_card.size,
             );
-            let preview_rect = Rectangle::new(
-                Point::from((card.loc.x + 12, card.loc.y + 32)),
-                Size::from((card.size.w - 24, card.size.h - 44)),
-            );
-            push_rounded_glass_box(
-                &mut out,
-                shape_cache,
-                renderer,
-                preview_rect,
-                8,
-                if win.focused {
-                    RGBA_ACCENT_MUTED
-                } else {
-                    RGBA_SURFACE_OVERLAY
-                },
-                Some(RGBA_BORDER),
-            );
-            push_rounded_glass_box(
+            push_liquid_glass_panel(
                 &mut out,
                 shape_cache,
                 renderer,
                 card,
-                12,
-                RGBA_SURFACE_ELEVATED,
-                Some(if win.focused {
-                    RGBA_ACCENT
-                } else {
-                    RGBA_BORDER_HIGHLIGHT
-                }),
+                14,
+                crate::surfaces::GlassPanelStyle::Popover,
+                top_telemetry.glass_opacity,
+                top_telemetry.reduce_transparency,
+                None,
             );
-            push_soft_shadow(&mut out, shape_cache, renderer, card, 12, 14, 96);
+            if win.focused {
+                push_rounded_glass_box(
+                    &mut out,
+                    shape_cache,
+                    renderer,
+                    Rectangle::new(
+                        Point::from((card.loc.x - 2, card.loc.y - 2)),
+                        Size::from((card.size.w + 4, card.size.h + 4)),
+                    ),
+                    15,
+                    [165, 110, 255, 68],
+                    Some([198, 156, 255, 245]),
+                );
+            }
+            push_soft_shadow(&mut out, shape_cache, renderer, card, 14, 20, 108);
         }
         #[allow(clippy::cast_possible_truncation)]
-        let scrim_a = 0.88 * (ov.progress.clamp(0.0, 1.0) as f32);
+        let scrim_a = 0.36 * (ov.progress.clamp(0.0, 1.0) as f32);
         out.push(CompositorRenderElement::Solid(make_solid_element(
             Rectangle::new(
                 Point::from((0, TOP_BAR_HEIGHT)),
@@ -5313,8 +5834,9 @@ pub fn generate_lock_screen_elements(
     out
 }
 
-/// Generates rounded SSD titlebar, circular macOS traffic lights, and 1px frame rim (`RUSTYOS-022`).
-#[allow(clippy::many_single_char_names, clippy::too_many_lines)]
+/// Generates rounded SSD titlebar, gel-lit macOS traffic lights (with optional hover glyphs),
+/// and 4-corner rounded 1px glass rim (`RUSTYOS-022`/`051`).
+#[must_use]
 pub fn generate_window_ssd_composite_elements(
     text_cache: &mut crate::text::TextCache,
     shape_cache: &mut crate::surfaces::UiShapeCache,
@@ -5323,7 +5845,30 @@ pub fn generate_window_ssd_composite_elements(
     title: &str,
     is_focused: bool,
 ) -> Vec<CompositorRenderElement> {
-    use crate::surfaces::CornerQuadrant;
+    generate_window_ssd_composite_elements_with_hover(
+        text_cache,
+        shape_cache,
+        renderer,
+        rect,
+        title,
+        is_focused,
+        false,
+    )
+}
+
+/// Generates rounded SSD titlebar, gel-lit macOS traffic lights, optional hover glyphs (`×`, `−`, `+`),
+/// and 4-corner `WINDOW_RADIUS` rounded 1px frame rim (`RUSTYOS-051`).
+#[allow(clippy::many_single_char_names, clippy::too_many_lines)]
+pub fn generate_window_ssd_composite_elements_with_hover(
+    text_cache: &mut crate::text::TextCache,
+    shape_cache: &mut crate::surfaces::UiShapeCache,
+    renderer: &mut GlesRenderer,
+    rect: rusty_wm::Rect,
+    title: &str,
+    is_focused: bool,
+    traffic_lights_hovered: bool,
+) -> Vec<CompositorRenderElement> {
+    use crate::surfaces::{CornerQuadrant, TrafficLightKind};
 
     let mut out = Vec::new();
     let x = rect.x;
@@ -5337,32 +5882,28 @@ pub fn generate_window_ssd_composite_elements(
         out.push(CompositorRenderElement::Memory(title_el));
     }
 
-    // Circular anti-aliased macOS traffic-light buttons
+    // 4x4 SSAA gel-lit traffic lights with hover glyphs (`Close`, `Minimize`, `Maximize`)
     let btn_y = y + 8;
     let btn_d = 12;
-    let close_rgba = if is_focused { RGBA_DANGER } else { RGBA_SUBTLE };
-    let min_rgba = if is_focused {
-        RGBA_WARNING
-    } else {
-        RGBA_SUBTLE
-    };
-    let max_rgba = if is_focused {
-        RGBA_SUCCESS
-    } else {
-        RGBA_SUBTLE
-    };
-    let rim_opt = is_focused.then_some([255, 255, 255, 45]);
-
-    for (bx, rgba) in [(x + 12, close_rgba), (x + 30, min_rgba), (x + 48, max_rgba)] {
-        if let Some(el) =
-            shape_cache.circle_element(renderer, btn_d, rgba, rim_opt, Point::from((bx, btn_y)))
-        {
+    for (bx, kind) in [
+        (x + 12, TrafficLightKind::Close),
+        (x + 30, TrafficLightKind::Minimize),
+        (x + 48, TrafficLightKind::Maximize),
+    ] {
+        if let Some(el) = shape_cache.traffic_light_element(
+            renderer,
+            kind,
+            btn_d,
+            is_focused,
+            traffic_lights_hovered,
+            Point::from((bx, btn_y)),
+        ) {
             out.push(CompositorRenderElement::Memory(el));
         }
     }
 
-    // Rounded top corners (8px radius) + seamless 1px glass border around window frame
-    let r = WINDOW_RADIUS;
+    // Rounded top & bottom corners (`WINDOW_RADIUS = 20`) + crisp 1px glass rim
+    let r = WINDOW_RADIUS.min(w / 2).min(h / 2).max(4);
     let titlebar_rgba = if is_focused {
         RGBA_SURFACE_OVERLAY
     } else {
@@ -5377,39 +5918,53 @@ pub fn generate_window_ssd_composite_elements(
     let top_rim_col = blend_border_over_fill_color(border_rgba, titlebar_rgba);
     let edge_border_col = rgba_to_premul_color32f(border_rgba);
 
-    if let Some(el) = shape_cache.corner_element(
-        renderer,
-        r,
-        CornerQuadrant::TopLeft,
-        titlebar_rgba,
-        Some(border_rgba),
-        Point::from((x, y)),
-    ) {
-        out.push(CompositorRenderElement::Memory(el));
-    }
-    if let Some(el) = shape_cache.corner_element(
-        renderer,
-        r,
-        CornerQuadrant::TopRight,
-        titlebar_rgba,
-        Some(border_rgba),
-        Point::from((x + w - r, y)),
-    ) {
-        out.push(CompositorRenderElement::Memory(el));
+    for (quad, fill, loc) in [
+        (CornerQuadrant::TopLeft, titlebar_rgba, Point::from((x, y))),
+        (
+            CornerQuadrant::TopRight,
+            titlebar_rgba,
+            Point::from((x + w - r, y)),
+        ),
+        (
+            CornerQuadrant::BottomLeft,
+            [0, 0, 0, 0],
+            Point::from((x, y + h - r)),
+        ),
+        (
+            CornerQuadrant::BottomRight,
+            [0, 0, 0, 0],
+            Point::from((x + w - r, y + h - r)),
+        ),
+    ] {
+        if let Some(el) =
+            shape_cache.corner_element(renderer, r, quad, fill, Some(border_rgba), loc)
+        {
+            out.push(CompositorRenderElement::Memory(el));
+        }
     }
 
-    // Top border between rounded corners & side/bottom 1px frame rim
+    // Top rim + subtle top specular highlight + straight side/bottom 1px frame segments
     if w > 2 * r {
         out.push(CompositorRenderElement::Solid(make_solid_element(
             Rectangle::new(Point::from((x + r, y)), Size::from((w - 2 * r, 1))),
             top_rim_col,
         )));
         out.push(CompositorRenderElement::Solid(make_solid_element(
-            Rectangle::new(Point::from((x + r, y + 1)), Size::from((w - 2 * r, r - 1))),
-            titlebar_fill,
+            Rectangle::new(Point::from((x + r, y + 1)), Size::from((w - 2 * r, 1))),
+            rgba_to_premul_color32f([255, 252, 255, if is_focused { 30 } else { 14 }]),
+        )));
+        if r > 2 {
+            out.push(CompositorRenderElement::Solid(make_solid_element(
+                Rectangle::new(Point::from((x + r, y + 2)), Size::from((w - 2 * r, r - 2))),
+                titlebar_fill,
+            )));
+        }
+        out.push(CompositorRenderElement::Solid(make_solid_element(
+            Rectangle::new(Point::from((x + r, y + h - 1)), Size::from((w - 2 * r, 1))),
+            edge_border_col,
         )));
     }
-    if h > TITLEBAR_HEIGHT {
+    if TITLEBAR_HEIGHT > r + 1 {
         out.push(CompositorRenderElement::Solid(make_solid_element(
             Rectangle::new(
                 Point::from((x + 1, y + r)),
@@ -5418,7 +5973,6 @@ pub fn generate_window_ssd_composite_elements(
             titlebar_fill,
         )));
     }
-    // Titlebar bottom divider + side & bottom 1px rim
     out.push(CompositorRenderElement::Solid(make_solid_element(
         Rectangle::new(
             Point::from((x + 1, y + TITLEBAR_HEIGHT - 1)),
@@ -5426,18 +5980,16 @@ pub fn generate_window_ssd_composite_elements(
         ),
         COLOR_BORDER,
     )));
-    out.push(CompositorRenderElement::Solid(make_solid_element(
-        Rectangle::new(Point::from((x, y + r)), Size::from((1, h - r - 1))),
-        edge_border_col,
-    )));
-    out.push(CompositorRenderElement::Solid(make_solid_element(
-        Rectangle::new(Point::from((x + w - 1, y + r)), Size::from((1, h - r - 1))),
-        edge_border_col,
-    )));
-    out.push(CompositorRenderElement::Solid(make_solid_element(
-        Rectangle::new(Point::from((x, y + h - 1)), Size::from((w, 1))),
-        edge_border_col,
-    )));
+    if h > 2 * r {
+        out.push(CompositorRenderElement::Solid(make_solid_element(
+            Rectangle::new(Point::from((x, y + r)), Size::from((1, h - 2 * r))),
+            edge_border_col,
+        )));
+        out.push(CompositorRenderElement::Solid(make_solid_element(
+            Rectangle::new(Point::from((x + w - 1, y + r)), Size::from((1, h - 2 * r))),
+            edge_border_col,
+        )));
+    }
 
     out
 }
@@ -5455,7 +6007,7 @@ pub fn osd_pill_rect(
     Rectangle::new(Point::from((x, y)), Size::from((w, h)))
 }
 
-/// Generates glass OSD indicator elements (`Volume`, `Brightness`, `Media`, `Screenshot`) (`RUSTYOS-031`).
+/// Generates Liquid Glass OSD indicator elements (`Volume`, `Brightness`, `Media`, `Screenshot`) (`RUSTYOS-031`/`051`).
 pub fn generate_osd_elements(
     text_cache: &mut crate::text::TextCache,
     shape_cache: &mut crate::surfaces::UiShapeCache,
@@ -5469,8 +6021,18 @@ pub fn generate_osd_elements(
     let py = pill.loc.y;
     let pw = pill.size.w;
 
-    let text_bright = [244, 240, 250, 255];
-    let text_muted = [166, 155, 181, 255];
+    let text_bright = [248, 244, 255, 255];
+    let text_muted = [182, 172, 204, 255];
+
+    if let Some(el) = shape_cache.ui_glyph_element(
+        renderer,
+        osd_glyph_kind(osd.label, osd.value_percent, osd.muted),
+        22,
+        [250, 246, 255, 255],
+        Point::from((px + 14, py + (pill.size.h - 22) / 2)),
+    ) {
+        out.push(CompositorRenderElement::Memory(el));
+    }
 
     if let Some(pct) = osd.value_percent {
         if let Some(el) = text_cache.render_label(
@@ -5478,7 +6040,7 @@ pub fn generate_osd_elements(
             osd.label,
             12.0,
             text_bright,
-            Point::from((px + 16, py + 11)),
+            Point::from((px + 44, py + 11)),
         ) {
             out.push(CompositorRenderElement::Memory(el));
         }
@@ -5493,55 +6055,69 @@ pub fn generate_osd_elements(
             &val_text,
             12.0,
             if osd.muted { text_muted } else { text_bright },
-            Point::from((px + pw - 16 - vw, py + 11)),
+            Point::from((px + pw - 14 - vw, py + 11)),
         ) {
             out.push(CompositorRenderElement::Memory(el));
         }
 
-        let bar_x = px + 16;
-        let bar_y = py + 36;
-        let bar_w = (pw - 32).max(24);
-        let bar_h = 6;
+        let bar_x = px + 44;
+        let bar_y = py + 34;
+        let bar_w = (pw - 58).max(24);
+        let bar_h = 8;
         let fill_w = (bar_w * i32::from(pct.min(100))) / 100;
         if fill_w > 0 {
-            let fill_col = if osd.muted {
-                COLOR_SUBTLE
+            let fill_rgba = if osd.muted {
+                [152, 140, 174, 180]
             } else {
-                COLOR_ACCENT
+                [246, 240, 255, 236]
             };
-            out.push(CompositorRenderElement::Solid(make_solid_element(
+            push_rounded_glass_box(
+                &mut out,
+                shape_cache,
+                renderer,
                 Rectangle::new(Point::from((bar_x, bar_y)), Size::from((fill_w, bar_h))),
-                fill_col,
-            )));
+                fill_w.min(4),
+                fill_rgba,
+                None,
+            );
         }
-        out.push(CompositorRenderElement::Solid(make_solid_element(
+        push_rounded_glass_box(
+            &mut out,
+            shape_cache,
+            renderer,
             Rectangle::new(Point::from((bar_x, bar_y)), Size::from((bar_w, bar_h))),
-            COLOR_SURFACE,
-        )));
+            4,
+            [255, 255, 255, 30],
+            Some([255, 255, 255, 48]),
+        );
     } else if let Some(el) = text_cache.render_label_centered(
         renderer,
         osd.label,
         12.5,
         text_bright,
-        Rectangle::new(Point::from((px, py)), Size::from((pw, pill.size.h))),
+        Rectangle::new(
+            Point::from((px + 38, py)),
+            Size::from((pw - 48, pill.size.h)),
+        ),
     ) {
         out.push(CompositorRenderElement::Memory(el));
     }
 
-    push_rounded_glass_box(
+    push_liquid_glass_panel(
         &mut out,
         shape_cache,
         renderer,
         pill,
-        14,
-        RGBA_SURFACE_OVERLAY,
-        Some(RGBA_BORDER_HIGHLIGHT),
+        18,
+        crate::surfaces::GlassPanelStyle::Popover,
+        crate::config::DEFAULT_GLASS_OPACITY,
+        false,
+        Some((16, 94)),
     );
-    push_soft_shadow(&mut out, shape_cache, renderer, pill, 14, 12, 84);
     out
 }
 
-/// Generates soft radial drop shadow elements strictly outside a managed window rectangle (`RUSTYOS-022`).
+/// Generates layered macOS ambient + contact drop shadows strictly outside a window frame (`RUSTYOS-022`/`051`).
 pub fn generate_window_shadow_elements(
     shape_cache: &mut crate::surfaces::UiShapeCache,
     renderer: &mut GlesRenderer,
@@ -5551,17 +6127,45 @@ pub fn generate_window_shadow_elements(
     let mut out = Vec::new();
     let w = rect.width.max(64);
     let h = rect.height.max(TITLEBAR_HEIGHT + 32);
-    let spread = if is_focused { 28 } else { 16 };
-    let max_alpha = if is_focused { 88 } else { 44 };
-    push_soft_shadow(
-        &mut out,
-        shape_cache,
-        renderer,
-        Rectangle::new(Point::from((rect.x, rect.y)), Size::from((w, h))),
-        WINDOW_RADIUS,
-        spread,
-        max_alpha,
-    );
+    if is_focused {
+        push_soft_shadow(
+            &mut out,
+            shape_cache,
+            renderer,
+            Rectangle::new(Point::from((rect.x, rect.y + 2)), Size::from((w, h))),
+            WINDOW_RADIUS,
+            10,
+            72,
+        );
+        push_soft_shadow(
+            &mut out,
+            shape_cache,
+            renderer,
+            Rectangle::new(Point::from((rect.x, rect.y + 8)), Size::from((w, h))),
+            WINDOW_RADIUS,
+            42,
+            68,
+        );
+    } else {
+        push_soft_shadow(
+            &mut out,
+            shape_cache,
+            renderer,
+            Rectangle::new(Point::from((rect.x, rect.y + 2)), Size::from((w, h))),
+            WINDOW_RADIUS,
+            8,
+            32,
+        );
+        push_soft_shadow(
+            &mut out,
+            shape_cache,
+            renderer,
+            Rectangle::new(Point::from((rect.x, rect.y + 4)), Size::from((w, h))),
+            WINDOW_RADIUS,
+            22,
+            38,
+        );
+    }
     out
 }
 
@@ -5656,10 +6260,9 @@ mod tests {
     }
 
     #[test]
-    fn top_bar_and_quick_settings_hit_testing_work_accurately() {
-        let size = Size::from((1280, 800));
-        assert!(check_top_bar_status_click(size.w, 1200.0, 12.0));
-        assert!(!check_top_bar_status_click(size.w, 100.0, 12.0));
+    fn top_bar_hit_testing_works_accurately() {
+        assert!(check_top_bar_status_click(1280, 1200.0, 12.0));
+        assert!(!check_top_bar_status_click(1280, 100.0, 12.0));
 
         let left_ws = compute_top_bar_left_layout_with_options("RustyOS", true);
         let layout_mid = f64::from(left_ws.layout_x + left_ws.layout_w / 2);
@@ -5698,50 +6301,82 @@ mod tests {
             check_top_bar_menu_click(15.0, f64::from(TOP_BAR_HEIGHT + 5)),
             None
         );
+    }
 
-        let (px, py, pw, _ph) = quick_settings_rect(size.w, size.h);
+    #[test]
+    fn quick_settings_hit_testing_works_accurately() {
+        let size = Size::from((1280, 800));
+        let layout = quick_settings_layout(size.w, size.h, 0);
         assert_eq!(
             check_quick_settings_click(size, 100.0, 200.0),
             QuickSettingsHit::OutsidePopover
         );
         assert_eq!(
-            check_quick_settings_click(size, f64::from(px + 20), f64::from(py + 20)),
+            check_quick_settings_click(size, f64::from(layout.px + 2), f64::from(layout.py + 2)),
             QuickSettingsHit::InsidePopover
         );
         assert_eq!(
-            check_quick_settings_click(size, f64::from(px + pw - 14 - 20), f64::from(py + 145)),
-            QuickSettingsHit::VolumeUp
-        );
-        assert_eq!(
-            check_quick_settings_click(size, f64::from(px + pw - 14 - 50), f64::from(py + 145)),
-            QuickSettingsHit::VolumeDown
-        );
-        assert_eq!(
-            check_quick_settings_click(size, f64::from(px + pw - 14 - 90), f64::from(py + 145)),
-            QuickSettingsHit::ToggleMute
-        );
-        assert_eq!(
-            check_quick_settings_click(size, f64::from(px + 30), f64::from(py + 275)),
-            QuickSettingsHit::ToggleLayout
-        );
-        assert_eq!(
-            check_quick_settings_click(size, f64::from(px + 200), f64::from(py + 275)),
-            QuickSettingsHit::ToggleReducedMotion
-        );
-        assert_eq!(
-            check_quick_settings_click(size, f64::from(px + 30), f64::from(py + 317)),
-            QuickSettingsHit::OpenSpotlight
-        );
-        assert_eq!(
-            check_quick_settings_click(size, f64::from(px + 200), f64::from(py + 317)),
-            QuickSettingsHit::RefreshMetrics
-        );
-        assert_eq!(
-            check_quick_settings_click(size, f64::from(px + 30), f64::from(py + 359)),
+            check_quick_settings_click(
+                size,
+                f64::from(layout.bt_row.loc.x + 40),
+                f64::from(layout.bt_row.loc.y + 20)
+            ),
             QuickSettingsHit::ToggleBluetooth
         );
         assert_eq!(
-            check_quick_settings_click(size, f64::from(px + 200), f64::from(py + 359)),
+            check_quick_settings_click(
+                size,
+                f64::from(layout.layout_btn.loc.x + 23),
+                f64::from(layout.layout_btn.loc.y + 23)
+            ),
+            QuickSettingsHit::ToggleLayout
+        );
+        assert_eq!(
+            check_quick_settings_click(
+                size,
+                f64::from(layout.motion_btn.loc.x + 23),
+                f64::from(layout.motion_btn.loc.y + 23)
+            ),
+            QuickSettingsHit::ToggleReducedMotion
+        );
+        assert_eq!(
+            check_quick_settings_click(
+                size,
+                f64::from(layout.transparency_btn.loc.x + 40),
+                f64::from(layout.transparency_btn.loc.y + 17)
+            ),
+            QuickSettingsHit::ToggleReduceTransparency
+        );
+        assert_eq!(
+            check_quick_settings_click(
+                size,
+                f64::from(layout.sound_mute_zone.loc.x + 8),
+                f64::from(layout.sound_mute_zone.loc.y + 11)
+            ),
+            QuickSettingsHit::ToggleMute
+        );
+        assert_eq!(
+            check_quick_settings_click(
+                size,
+                f64::from(layout.search_btn.loc.x + 21),
+                f64::from(layout.search_btn.loc.y + 21)
+            ),
+            QuickSettingsHit::OpenSpotlight
+        );
+        assert_eq!(
+            check_quick_settings_click(
+                size,
+                f64::from(layout.refresh_btn.loc.x + 21),
+                f64::from(layout.refresh_btn.loc.y + 21)
+            ),
+            QuickSettingsHit::RefreshMetrics
+        );
+        assert_eq!(
+            check_quick_settings_click(
+                size,
+                f64::from(layout.lock_btn.loc.x + 21),
+                f64::from(layout.lock_btn.loc.y + 21)
+            ),
             QuickSettingsHit::LockSession
         );
     }
@@ -6075,25 +6710,44 @@ mod tests {
     #[test]
     fn macos27_quick_settings_glass_and_volume_slider_hit_testing() {
         let size = Size::from((1280, 800));
-        let (px, py, pw, _ph) = quick_settings_rect(size.w, size.h);
-        let pad = 14;
-        let track_x = f64::from(px + pad + 12);
-        let track_w = f64::from(pw - pad * 2 - 24);
+        let layout = quick_settings_layout(size.w, size.h, 0);
+        let sound_x = f64::from(layout.sound_track.loc.x);
+        let sound_w = f64::from(layout.sound_track.size.w);
+        let sound_y = f64::from(layout.sound_track.loc.y + layout.sound_track.size.h / 2);
+        let disp_x = f64::from(layout.display_track.loc.x);
+        let disp_w = f64::from(layout.display_track.size.w);
+        let disp_y = f64::from(layout.display_track.loc.y + layout.display_track.size.h / 2);
 
         assert_eq!(
-            check_quick_settings_click(size, track_x + track_w * 0.5, f64::from(py + 168)),
+            check_quick_settings_click(size, sound_x + sound_w * 0.5, sound_y),
             QuickSettingsHit::SetVolumePercent(50)
         );
         assert_eq!(
-            check_quick_settings_click(size, f64::from(px + pw - pad - 40), f64::from(py + 212)),
+            check_quick_settings_slider_drag(size, sound_x + sound_w * 0.5, sound_y),
+            Some(QuickSettingsSliderDrag::Sound)
+        );
+        assert_eq!(
+            quick_settings_slider_percent(size, QuickSettingsSliderDrag::Sound, sound_x),
+            0
+        );
+        assert_eq!(
+            check_quick_settings_click(
+                size,
+                f64::from(layout.transparency_btn.loc.x + 24),
+                f64::from(layout.transparency_btn.loc.y + 16)
+            ),
             QuickSettingsHit::ToggleReduceTransparency
         );
         assert_eq!(
-            check_quick_settings_click(size, track_x + 1.0, f64::from(py + 238)),
+            check_quick_settings_click(size, disp_x + 1.0, disp_y),
             QuickSettingsHit::SetGlassOpacityPercent(35)
         );
         assert_eq!(
-            check_quick_settings_click(size, track_x + track_w - 1.0, f64::from(py + 238)),
+            check_quick_settings_slider_drag(size, disp_x + 40.0, disp_y),
+            Some(QuickSettingsSliderDrag::GlassOpacity)
+        );
+        assert_eq!(
+            check_quick_settings_click(size, disp_x + disp_w - 1.0, disp_y),
             QuickSettingsHit::SetGlassOpacityPercent(100)
         );
 
@@ -6232,5 +6886,132 @@ mod tests {
             assert_eq!(label, "Files");
             assert!(pill_rect.loc.y + pill_rect.size.h < 800 - DOCK_HEIGHT - DOCK_MARGIN_BOTTOM);
         }
+    }
+
+    #[test]
+    fn macos27_menu_entries_and_overview_spaces_hit_testing() {
+        // 1. Rich menu entries have separators, leading SDF icons, shortcuts & accurate hover rows
+        let win_entries = top_bar_menu_entries(TopBarMenuHit::Window);
+        assert!(
+            win_entries
+                .iter()
+                .any(|e| matches!(e, TopBarMenuEntry::Separator))
+        );
+        let (wx, wy, _mw, _mh) = top_bar_menu_popover_rect("RustyOS", TopBarMenuHit::Window);
+        assert_eq!(
+            check_top_bar_menu_popover_hover_row(
+                "RustyOS",
+                TopBarMenuHit::Window,
+                f64::from(wx + 24),
+                f64::from(wy + MENU_POPOVER_PAD_Y + 10)
+            ),
+            Some(0)
+        );
+        // Separator gap does not trigger hover highlight
+        assert_eq!(
+            check_top_bar_menu_popover_hover_row(
+                "RustyOS",
+                TopBarMenuHit::Window,
+                f64::from(wx + 24),
+                f64::from(wy + MENU_POPOVER_PAD_Y + MENU_ITEM_HEIGHT + 4)
+            ),
+            None
+        );
+
+        // 2. Overview Spaces strip hit-testing switches workspace cleanly
+        let size = Size::from((1280, 800));
+        let spaces = [
+            OverviewWorkspaceSpace {
+                id: 1,
+                window_count: 1,
+                active: true,
+                preview_rects: [
+                    (0.1, 0.1, 0.4, 0.4),
+                    (0.0, 0.0, 0.0, 0.0),
+                    (0.0, 0.0, 0.0, 0.0),
+                    (0.0, 0.0, 0.0, 0.0),
+                ],
+            },
+            OverviewWorkspaceSpace {
+                id: 2,
+                window_count: 2,
+                active: false,
+                preview_rects: [
+                    (0.1, 0.1, 0.35, 0.7),
+                    (0.55, 0.1, 0.35, 0.7),
+                    (0.0, 0.0, 0.0, 0.0),
+                    (0.0, 0.0, 0.0, 0.0),
+                ],
+            },
+        ];
+        let space_rects = overview_space_rects(size, spaces.len());
+        assert_eq!(space_rects.len(), 2);
+        let s2 = space_rects[1];
+        assert_eq!(
+            check_overview_click_with_spaces(
+                size,
+                &spaces,
+                1,
+                f64::from(s2.loc.x + s2.size.w / 2),
+                f64::from(s2.loc.y + s2.size.h / 2)
+            ),
+            OverviewHit::SwitchWorkspace(2)
+        );
+    }
+
+    #[test]
+    fn macos27_traffic_hover_notifications_and_osd_routing() {
+        let size = Size::from((1280, 800));
+
+        // 3. SSD traffic-light hover helper respects stacking & CSD windows
+        let ssd_win = SsdHitWindow {
+            id: rusty_wm::WindowId(10),
+            rect: rusty_wm::Rect::new(100, 80, 500, 360),
+            has_ssd: true,
+        };
+        let csd_win = SsdHitWindow {
+            id: rusty_wm::WindowId(11),
+            rect: rusty_wm::Rect::new(200, 120, 400, 300),
+            has_ssd: false,
+        };
+        assert_eq!(
+            check_window_traffic_lights_hover(&[ssd_win], 116.0, 92.0),
+            Some(rusty_wm::WindowId(10))
+        );
+        assert_eq!(
+            check_window_traffic_lights_hover(&[ssd_win], 300.0, 92.0),
+            None
+        );
+        assert_eq!(
+            check_window_traffic_lights_hover(&[csd_win], 216.0, 132.0),
+            None
+        );
+
+        // 4. Notifications (340 px, squircle icon choice) & OSD SDF glyph routing
+        let notif_rects = notification_toast_rects(size, 1);
+        assert_eq!(notif_rects[0].size.w, 340);
+        assert_eq!(
+            notification_app_icon("Foot Terminal"),
+            crate::icons::BuiltinAppIcon::Terminal
+        );
+        assert_eq!(
+            notification_app_icon("System Update"),
+            crate::icons::BuiltinAppIcon::RustySystem
+        );
+        assert_eq!(
+            osd_glyph_kind("Brightness", Some(70), false),
+            crate::surfaces::UiGlyphKind::Sun
+        );
+        assert_eq!(
+            osd_glyph_kind("Volume", Some(45), false),
+            crate::surfaces::UiGlyphKind::Volume {
+                level_percent: 45,
+                muted: false
+            }
+        );
+        assert_eq!(
+            osd_glyph_kind("Screenshot Saved", None, false),
+            crate::surfaces::UiGlyphKind::Info
+        );
     }
 }

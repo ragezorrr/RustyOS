@@ -412,6 +412,29 @@ impl RustyCompositorState {
         self.apply_pointer_position(pos, time);
     }
 
+    fn dispatch_pointer_motion_to_surface(
+        &mut self,
+        pos: Point<f64, Logical>,
+        under: Option<(
+            smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
+            Point<f64, Logical>,
+        )>,
+        time: u32,
+    ) {
+        let serial = SERIAL_COUNTER.next_serial();
+        let pointer = self.pointer.clone();
+        pointer.motion(
+            self,
+            under,
+            &MotionEvent {
+                location: pos,
+                serial,
+                time,
+            },
+        );
+        pointer.frame(self);
+    }
+
     fn apply_pointer_position(&mut self, pos: Point<f64, Logical>, time: u32) {
         self.pointer_location = pos;
 
@@ -419,42 +442,25 @@ impl RustyCompositorState {
             self.wm.set_focused_output(out_id);
         }
 
-        if self.ext_session_locked {
-            self.set_dock_hover_slot(None);
-            let serial = SERIAL_COUNTER.next_serial();
-            let under = self.ext_lock_surface_under(pos);
-            let pointer = self.pointer.clone();
-            pointer.motion(
-                self,
-                under,
-                &MotionEvent {
-                    location: pos,
-                    serial,
-                    time,
-                },
-            );
-            pointer.frame(self);
-            return;
-        }
-
-        if self.screen_locked {
-            self.set_dock_hover_slot(None);
-            let serial = SERIAL_COUNTER.next_serial();
-            let pointer = self.pointer.clone();
-            pointer.motion(
-                self,
-                None,
-                &MotionEvent {
-                    location: pos,
-                    serial,
-                    time,
-                },
-            );
-            pointer.frame(self);
+        if self.ext_session_locked || self.screen_locked {
+            self.clear_shell_hover_states();
+            let under = if self.ext_session_locked {
+                self.ext_lock_surface_under(pos)
+            } else {
+                None
+            };
+            self.dispatch_pointer_motion_to_surface(pos, under, time);
             return;
         }
 
         self.update_dock_hover_slot(pos);
+        if self.quick_settings_active
+            && let Some(drag) = self.qs_slider_drag
+        {
+            self.apply_quick_settings_slider_drag(drag, pos);
+            return;
+        }
+        self.update_shell_hover_states(pos);
 
         if let Some(drag) = self.active_window_drag {
             #[allow(clippy::cast_possible_truncation)]
@@ -503,25 +509,16 @@ impl RustyCompositorState {
             return;
         }
 
-        let serial = SERIAL_COUNTER.next_serial();
         let under = self
             .target_surface_under(pos)
             .map(|(_win, surface, origin)| (surface, origin));
-
-        let pointer = self.pointer.clone();
-        pointer.motion(
-            self,
-            under,
-            &MotionEvent {
-                location: pos,
-                serial,
-                time,
-            },
-        );
-        pointer.frame(self);
+        self.dispatch_pointer_motion_to_surface(pos, under, time);
     }
 
-    fn update_dock_hover_slot(&mut self, pos: Point<f64, Logical>) {
+    fn primary_local_coords(
+        &self,
+        pos: Point<f64, Logical>,
+    ) -> (Size<i32, smithay::utils::Physical>, bool, f64, f64) {
         let primary_entry = self.output_map.primary();
         let primary_geo = primary_entry.logical_geometry();
         #[allow(clippy::cast_possible_truncation)]
@@ -529,6 +526,26 @@ impl RustyCompositorState {
         #[allow(clippy::cast_possible_truncation)]
         let py = pos.y.round() as i32;
         let is_on_primary = primary_geo.contains((px, py));
+        let local_x = pos.x - f64::from(primary_geo.loc.x);
+        let local_y = pos.y - f64::from(primary_geo.loc.y);
+        (primary_entry.physical_size, is_on_primary, local_x, local_y)
+    }
+
+    fn visible_ssd_hit_windows(&self) -> Vec<crate::shell_render::SsdHitWindow> {
+        self.wm
+            .visible_windows()
+            .into_iter()
+            .filter(|w| !self.is_window_minimized(w.id))
+            .map(|w| crate::shell_render::SsdHitWindow {
+                id: w.id,
+                rect: w.geometry,
+                has_ssd: !self.window_uses_csd(w.id),
+            })
+            .collect()
+    }
+
+    fn update_dock_hover_slot(&mut self, pos: Point<f64, Logical>) {
+        let (primary_size, is_on_primary, local_x, local_y) = self.primary_local_coords(pos);
 
         let next_slot = if is_on_primary
             && !self.launcher_active
@@ -536,10 +553,10 @@ impl RustyCompositorState {
             && self.active_unoccluded_fullscreen_window().is_none()
         {
             crate::shell_render::check_dock_slot(
-                primary_entry.physical_size,
+                primary_size,
                 self.wm.visible_windows().len(),
-                pos.x,
-                pos.y,
+                local_x,
+                local_y,
             )
         } else {
             None
@@ -547,14 +564,77 @@ impl RustyCompositorState {
         self.set_dock_hover_slot(next_slot);
     }
 
-    fn active_top_bar_app_name(&self) -> String {
-        self.wm
-            .focused_window()
-            .filter(|id| self.wm.visible_windows().iter().any(|w| w.id == *id))
-            .map_or_else(
-                || "RustyOS".to_owned(),
-                |id| crate::shell_render::extract_app_name(&self.window_title(id)),
+    fn apply_quick_settings_slider_drag(
+        &mut self,
+        drag: crate::shell_render::QuickSettingsSliderDrag,
+        pos: Point<f64, Logical>,
+    ) {
+        let (primary_size, _on_primary, local_x, _local_y) = self.primary_local_coords(pos);
+        let pct = crate::shell_render::quick_settings_slider_percent(primary_size, drag, local_x);
+        match drag {
+            crate::shell_render::QuickSettingsSliderDrag::Sound => {
+                self.telemetry.set_volume_percent(pct);
+            }
+            crate::shell_render::QuickSettingsSliderDrag::GlassOpacity => {
+                self.set_glass_opacity(f32::from(pct) / 100.0);
+            }
+        }
+    }
+
+    fn update_shell_hover_states(&mut self, pos: Point<f64, Logical>) {
+        let (primary_size, is_on_primary, local_x, local_y) = self.primary_local_coords(pos);
+        let fullscreen_active = self.active_unoccluded_fullscreen_window().is_some();
+
+        self.top_bar_menu_hover_row = if is_on_primary && !fullscreen_active {
+            if let Some(menu) = self.active_top_bar_menu {
+                let active_app = self.active_top_bar_app_name();
+                crate::shell_render::check_top_bar_menu_popover_hover_row(
+                    &active_app,
+                    menu,
+                    local_x,
+                    local_y,
+                )
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let visible_toast_count = self
+            .notifications
+            .len()
+            .min(crate::shell_render::MAX_VISIBLE_NOTIFICATIONS);
+        self.hovered_notification_idx = if is_on_primary
+            && visible_toast_count > 0
+            && !self.launcher_active
+            && !self.quick_settings_active
+            && self.window_switcher.is_none()
+        {
+            crate::shell_render::check_notification_click(
+                primary_size,
+                visible_toast_count,
+                local_x,
+                local_y,
             )
+        } else {
+            None
+        };
+
+        self.hovered_traffic_light_window = if !fullscreen_active
+            && !self.launcher_active
+            && !self.quick_settings_active
+            && !self.overview_active
+            && self.active_top_bar_menu.is_none()
+            && self.window_switcher.is_none()
+            && self.active_window_drag.is_none()
+            && self.active_window_resize.is_none()
+        {
+            let hit_windows = self.visible_ssd_hit_windows();
+            crate::shell_render::check_window_traffic_lights_hover(&hit_windows, pos.x, pos.y)
+        } else {
+            None
+        };
     }
 
     fn handle_top_bar_pointer_click(
@@ -737,17 +817,10 @@ impl RustyCompositorState {
         }
     }
 
-    fn handle_quick_settings_pointer_click(&mut self, serial: smithay::utils::Serial) {
-        let output_size = self
-            .space
-            .output_geometry(&self.output)
-            .map_or_else(|| Size::from((1280, 800)), |geo| geo.size)
-            .to_physical(1);
-        match crate::shell_render::check_quick_settings_click(
-            output_size,
-            self.pointer_location.x,
-            self.pointer_location.y,
-        ) {
+    fn handle_quick_settings_pointer_click(&mut self, serial: smithay::utils::Serial, button: u32) {
+        let (output_size, _on_primary, local_x, local_y) =
+            self.primary_local_coords(self.pointer_location);
+        match crate::shell_render::check_quick_settings_click(output_size, local_x, local_y) {
             crate::shell_render::QuickSettingsHit::ToggleMute => {
                 self.telemetry.toggle_mute();
             }
@@ -788,6 +861,43 @@ impl RustyCompositorState {
             crate::shell_render::QuickSettingsHit::InsidePopover => {}
             crate::shell_render::QuickSettingsHit::OutsidePopover => {
                 self.close_quick_settings();
+                return;
+            }
+        }
+
+        self.qs_slider_drag = if button == 272 && self.quick_settings_active {
+            crate::shell_render::check_quick_settings_slider_drag(output_size, local_x, local_y)
+        } else {
+            None
+        };
+    }
+
+    fn handle_overview_pointer_click(
+        &mut self,
+        output_phys: Size<i32, smithay::utils::Physical>,
+        window_count: usize,
+        serial: smithay::utils::Serial,
+    ) {
+        let spaces = self.overview_workspace_spaces();
+        match crate::shell_render::check_overview_click_with_spaces(
+            output_phys,
+            &spaces,
+            window_count,
+            self.pointer_location.x,
+            self.pointer_location.y,
+        ) {
+            crate::shell_render::OverviewHit::Card(idx) => {
+                self.focus_ordered_window(idx, serial);
+            }
+            crate::shell_render::OverviewHit::SwitchWorkspace(ws) => {
+                let target_ws = WorkspaceId::new_clamped(ws);
+                if target_ws != self.wm.active_workspace_id() {
+                    self.apply_wm_action(WmAction::SwitchWorkspace(target_ws), serial);
+                }
+                self.close_overview();
+            }
+            crate::shell_render::OverviewHit::Dismiss => {
+                self.close_overview();
             }
         }
     }
@@ -801,6 +911,7 @@ impl RustyCompositorState {
         if button_state == ButtonState::Released {
             self.active_window_drag = None;
             self.active_window_resize = None;
+            self.qs_slider_drag = None;
         }
 
         if self.ext_session_locked {
@@ -883,7 +994,7 @@ impl RustyCompositorState {
 
             // Handle Quick Settings popover clicks exclusively while open (RUSTYOS-021)
             if self.quick_settings_active {
-                self.handle_quick_settings_pointer_click(serial);
+                self.handle_quick_settings_pointer_click(serial, button);
                 return;
             }
 
@@ -908,6 +1019,7 @@ impl RustyCompositorState {
             ) && let Some(&toast_id) = visible_toast_ids.get(toast_idx)
             {
                 self.dismiss_notification(toast_id);
+                self.hovered_notification_idx = None;
                 return;
             }
 
@@ -925,21 +1037,9 @@ impl RustyCompositorState {
                 return;
             }
 
-            // Handle Workspace Overview card clicks & backdrop dismissal (`RUSTYOS-023`)
+            // Handle Workspace Overview card & Spaces strip clicks or backdrop dismissal (`RUSTYOS-023` / `RUSTYOS-051`)
             if self.overview_active {
-                match crate::shell_render::check_overview_click(
-                    output_phys,
-                    ordered_ids.len(),
-                    self.pointer_location.x,
-                    self.pointer_location.y,
-                ) {
-                    crate::shell_render::OverviewHit::Card(idx) => {
-                        self.focus_ordered_window(idx, serial);
-                    }
-                    crate::shell_render::OverviewHit::Dismiss => {
-                        self.close_overview();
-                    }
-                }
+                self.handle_overview_pointer_click(output_phys, ordered_ids.len(), serial);
                 return;
             }
 
@@ -963,17 +1063,7 @@ impl RustyCompositorState {
 
             // Check for SSD titlebar, traffic-light buttons, or outer frame resize hits (RUSTYOS-019 / RUSTYOS-030)
             if !self.launcher_active && !hits_popup {
-                let hit_windows: Vec<crate::shell_render::SsdHitWindow> = self
-                    .wm
-                    .visible_windows()
-                    .into_iter()
-                    .filter(|w| !self.is_window_minimized(w.id))
-                    .map(|w| crate::shell_render::SsdHitWindow {
-                        id: w.id,
-                        rect: w.geometry,
-                        has_ssd: !self.window_uses_csd(w.id),
-                    })
-                    .collect();
+                let hit_windows = self.visible_ssd_hit_windows();
                 if let Some(hit) = crate::shell_render::check_window_frame_hit(
                     &hit_windows,
                     self.pointer_location.x,
@@ -2440,6 +2530,104 @@ mod tests {
             FilterResult::Intercept(KeyIntercept::ToggleLauncher)
         ));
         assert!(!compositor.is_keyboard_shortcuts_inhibited());
+
+        Ok(())
+    }
+
+    #[test]
+    fn macos27_pointer_hover_slider_drag_and_overview_space_switching()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (_display, _event_loop, mut compositor) =
+            test_compositor_state("rusty-test-macos27-hover")?;
+        let serial = SERIAL_COUNTER.next_serial();
+        let out_size = compositor.output_map.primary().physical_size;
+
+        // 1. Traffic-light hover tracks top-most visible SSD window and clears when pointer leaves.
+        let win_id = rusty_wm::WindowId(77);
+        let rect = compositor.wm.map_window(win_id, Some((640, 480)));
+        let tl_pos: Point<f64, Logical> =
+            (f64::from(rect.x) + 18.0, f64::from(rect.y) + 14.0).into();
+        compositor.apply_pointer_position(tl_pos, 1);
+        assert_eq!(compositor.hovered_traffic_light_window, Some(win_id));
+        compositor.apply_pointer_position((10.0, 400.0).into(), 2);
+        assert_eq!(compositor.hovered_traffic_light_window, None);
+
+        // 2. Notification toast hover sets and clears `hovered_notification_idx`.
+        let _ = compositor.push_notification(
+            rusty_ipc::Urgency::Normal,
+            "Build Complete".to_owned(),
+            "All checks finished".to_owned(),
+        );
+        let toast_rect = crate::shell_render::notification_toast_rects(out_size, 1)[0];
+        let toast_center: Point<f64, Logical> = (
+            f64::from(toast_rect.loc.x + toast_rect.size.w / 2),
+            f64::from(toast_rect.loc.y + toast_rect.size.h / 2),
+        )
+            .into();
+        compositor.apply_pointer_position(toast_center, 3);
+        assert_eq!(compositor.hovered_notification_idx, Some(0));
+
+        // 3. Open menu row hover tracks active row and resets on `close_top_bar_menu`.
+        compositor.toggle_top_bar_menu(crate::shell_render::TopBarMenuHit::File);
+        let (pop_x, pop_y, _, _) = crate::shell_render::top_bar_menu_popover_rect(
+            "RustyOS",
+            crate::shell_render::TopBarMenuHit::File,
+        );
+        compositor.apply_pointer_position((f64::from(pop_x + 24), f64::from(pop_y + 18)).into(), 4);
+        assert_eq!(compositor.top_bar_menu_hover_row, Some(0));
+        compositor.close_top_bar_menu();
+        assert_eq!(compositor.top_bar_menu_hover_row, None);
+
+        // 4. Control Center slider drag continuously adjusts `glass_opacity` and resets on close.
+        let qs_w = 324.min((out_size.w - 24).max(240));
+        let qs_x = out_size.w - qs_w - 12;
+        let qs_y = crate::shell_render::TOP_BAR_HEIGHT + 8;
+        let track_left = f64::from(qs_x + 26);
+        let track_right = f64::from(qs_x + qs_w - 26);
+        let track_mid_x = f64::midpoint(track_left, track_right);
+        let track_y = f64::from(qs_y + 165);
+
+        compositor.toggle_quick_settings();
+        compositor.pointer_location = (track_mid_x, track_y).into();
+        compositor.handle_quick_settings_pointer_click(serial, 272);
+        assert_eq!(
+            compositor.qs_slider_drag,
+            Some(crate::shell_render::QuickSettingsSliderDrag::GlassOpacity)
+        );
+        compositor.apply_pointer_position((track_left, track_y).into(), 5);
+        assert!(compositor.glass_opacity <= 0.36);
+        compositor.apply_pointer_position((track_right, track_y).into(), 6);
+        assert!(compositor.glass_opacity >= 0.99);
+        compositor.close_quick_settings();
+        assert_eq!(compositor.qs_slider_drag, None);
+
+        // 5. Overview Space miniature strip reflects mapped window & switches workspace on click.
+        let spaces = compositor.overview_workspace_spaces();
+        assert_eq!(spaces.len(), 9);
+        assert!(spaces[0].active);
+        assert_eq!(spaces[0].window_count, 1);
+        assert!(spaces[0].preview_rects[0].2 > 0.0);
+        compositor.toggle_overview();
+        assert!(compositor.overview_active);
+        let space3_rect = crate::shell_render::overview_space_rects(out_size, 9)[2];
+        compositor.pointer_location = (
+            f64::from(space3_rect.loc.x + space3_rect.size.w / 2),
+            f64::from(space3_rect.loc.y + space3_rect.size.h / 2),
+        )
+            .into();
+        compositor.handle_overview_pointer_click(out_size, 1, serial);
+        assert_eq!(compositor.wm.active_workspace_id(), WorkspaceId(3));
+        assert!(!compositor.overview_active);
+
+        // 6. Locking session clears all transient hover and drag states.
+        compositor.apply_wm_action(WmAction::SwitchWorkspace(WorkspaceId(1)), serial);
+        compositor.apply_pointer_position(tl_pos, 7);
+        assert_eq!(compositor.hovered_traffic_light_window, Some(win_id));
+        compositor.set_screen_locked(true, serial);
+        assert_eq!(compositor.hovered_traffic_light_window, None);
+        assert_eq!(compositor.hovered_notification_idx, None);
+        assert_eq!(compositor.top_bar_menu_hover_row, None);
+        assert_eq!(compositor.qs_slider_drag, None);
 
         Ok(())
     }

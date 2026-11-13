@@ -121,6 +121,8 @@ pub enum BuiltinAppIcon {
     Downloads,
     /// Free-standing tapered frosted silver Trash wastebasket (`RUSTYOS-050`).
     Trash,
+    /// Original amethyst-glass RustyOS crest squircle for system notifications (`RUSTYOS-051`).
+    RustySystem,
     /// Frosted jewel-tone window card squircle for windows lacking an XDG PNG or SHM icon.
     WindowFallback {
         /// Deterministic color bucket derived from the application ID.
@@ -1518,6 +1520,7 @@ fn sample_squircle_uv(u: f32, v: f32, edge: f32, icon: BuiltinAppIcon) -> [f32; 
         BuiltinAppIcon::Browser => ([250.0, 251.0, 255.0], [224.0, 229.0, 240.0]),
         BuiltinAppIcon::Notes => ([252.0, 251.0, 246.0], [235.0, 233.0, 226.0]),
         BuiltinAppIcon::Settings => ([178.0, 182.0, 190.0], [114.0, 118.0, 128.0]),
+        BuiltinAppIcon::RustySystem => ([152.0, 102.0, 252.0], [76.0, 34.0, 154.0]),
         BuiltinAppIcon::Downloads | BuiltinAppIcon::Trash => ([0.0; 3], [0.0; 3]),
         BuiltinAppIcon::WindowFallback { hue_seed, active } => {
             let palettes: [([f32; 3], [f32; 3]); 4] = [
@@ -1660,6 +1663,44 @@ fn paint_settings_glyph(u: f32, v: f32, edge: f32, mut col: [f32; 4]) -> [f32; 4
     col
 }
 
+fn paint_rusty_system_glyph(u: f32, v: f32, edge: f32, mut col: [f32; 4]) -> [f32; 4] {
+    // Faceted pentagon emblem with bright inner prism core for RustyOS system alerts.
+    let outer = [
+        (0.50, 0.21),
+        (0.77, 0.41),
+        (0.67, 0.74),
+        (0.33, 0.74),
+        (0.23, 0.41),
+    ];
+    let outer_sd = crate::surfaces::signed_distance_polygon(u, v, &outer);
+    let outer_cov = sq_cov(outer_sd, edge);
+    if outer_cov > 0.0 {
+        let grad = lerp_rgb(
+            [255.0, 250.0, 255.0],
+            [218.0, 198.0, 255.0],
+            (v - 0.2) * 1.6,
+        );
+        col = blend_rgba(col, [grad[0], grad[1], grad[2], outer_cov * 0.96]);
+    }
+    let hole = [
+        (0.50, 0.36),
+        (0.63, 0.46),
+        (0.58, 0.61),
+        (0.42, 0.61),
+        (0.37, 0.46),
+    ];
+    let hole_sd = crate::surfaces::signed_distance_polygon(u, v, &hole);
+    let hole_cov = sq_cov(hole_sd, edge);
+    if hole_cov > 0.0 {
+        col = blend_rgba(col, [104.0, 52.0, 194.0, hole_cov * 0.92]);
+    }
+    let core_cov = sq_cov((u - 0.50).hypot(v - 0.50) - 0.055, edge);
+    if core_cov > 0.0 {
+        col = blend_rgba(col, [252.0, 246.0, 255.0, core_cov * 0.95]);
+    }
+    col
+}
+
 fn paint_squircle_glyph(
     u: f32,
     v: f32,
@@ -1732,6 +1773,7 @@ fn paint_squircle_glyph(
             }
         }
         BuiltinAppIcon::Settings => return paint_settings_glyph(u, v, edge, col),
+        BuiltinAppIcon::RustySystem => return paint_rusty_system_glyph(u, v, edge, col),
         BuiltinAppIcon::Downloads | BuiltinAppIcon::Trash => {}
         BuiltinAppIcon::WindowFallback { .. } => {
             let win = sq_sd_rounded_box(u, v, 0.50, 0.51, 0.27, 0.22, 0.05);
@@ -1951,6 +1993,7 @@ mod tests {
         let browser_center = sample_builtin_squircle_pixel(24, 24, 48, BuiltinAppIcon::Browser);
         let notes_center = sample_builtin_squircle_pixel(24, 24, 48, BuiltinAppIcon::Notes);
         let settings_center = sample_builtin_squircle_pixel(24, 24, 48, BuiltinAppIcon::Settings);
+        let rusty_center = sample_builtin_squircle_pixel(24, 24, 48, BuiltinAppIcon::RustySystem);
         let downloads_center = sample_builtin_squircle_pixel(24, 30, 48, BuiltinAppIcon::Downloads);
         let trash_center = sample_builtin_squircle_pixel(24, 24, 48, BuiltinAppIcon::Trash);
         let fallback_center = sample_builtin_squircle_pixel(
@@ -1969,6 +2012,7 @@ mod tests {
             browser_center,
             notes_center,
             settings_center,
+            rusty_center,
             downloads_center,
             fallback_center,
         ] {
@@ -1979,11 +2023,13 @@ mod tests {
         assert_ne!(files_center, overview_center);
         assert_ne!(browser_center, notes_center);
         assert_ne!(settings_center, downloads_center);
+        assert_ne!(rusty_center, overview_center);
         assert_ne!(downloads_center, trash_center);
 
         for kind in [
             BuiltinAppIcon::Files,
             BuiltinAppIcon::Browser,
+            BuiltinAppIcon::RustySystem,
             BuiltinAppIcon::Downloads,
             BuiltinAppIcon::Trash,
         ] {

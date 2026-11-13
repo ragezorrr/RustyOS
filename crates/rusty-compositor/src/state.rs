@@ -421,6 +421,14 @@ pub struct RustyCompositorState {
     pub dock_hover_anim: AnimatedValue,
     /// Open `TopBar` left dropdown menu popover if any (`RUSTYOS-048`).
     pub active_top_bar_menu: Option<crate::shell_render::TopBarMenuHit>,
+    /// Currently hovered row index inside an open `TopBar` dropdown menu (`RUSTYOS-051`).
+    pub top_bar_menu_hover_row: Option<usize>,
+    /// Active Control Center slider drag state (`RUSTYOS-051`).
+    pub qs_slider_drag: Option<crate::shell_render::QuickSettingsSliderDrag>,
+    /// Index of currently hovered floating Notification HUD toast (`RUSTYOS-051`).
+    pub hovered_notification_idx: Option<usize>,
+    /// Managed SSD window whose traffic-light button cluster is currently hovered (`RUSTYOS-051`).
+    pub hovered_traffic_light_window: Option<WindowId>,
     /// Live shell glass opacity multiplier (`0.35..=1.0`, default `0.78`) (`RUSTYOS-048`).
     pub glass_opacity: f32,
     /// High-contrast opaque shell panels mode (`RUSTYOS-048`).
@@ -701,6 +709,10 @@ impl RustyCompositorState {
             dock_hover_slot: None,
             dock_hover_anim: AnimatedValue::new_settled(0.0),
             active_top_bar_menu: None,
+            top_bar_menu_hover_row: None,
+            qs_slider_drag: None,
+            hovered_notification_idx: None,
+            hovered_traffic_light_window: None,
             glass_opacity: initial_glass_opacity,
             reduce_transparency: initial_reduce_transparency,
             menubar_show_workspaces: initial_menubar_show_workspaces,
@@ -1623,7 +1635,7 @@ impl RustyCompositorState {
     pub fn toggle_launcher(&mut self) {
         self.launcher_active = !self.launcher_active;
         if self.launcher_active {
-            self.active_top_bar_menu = None;
+            self.close_top_bar_menu();
             self.window_switcher = None;
             self.close_quick_settings();
             self.close_overview();
@@ -1642,8 +1654,9 @@ impl RustyCompositorState {
     /// Toggles the `TopBar` Quick Settings popover and triggers an async telemetry refresh when opened.
     pub fn toggle_quick_settings(&mut self) {
         self.quick_settings_active = !self.quick_settings_active;
+        self.qs_slider_drag = None;
         if self.quick_settings_active {
-            self.active_top_bar_menu = None;
+            self.close_top_bar_menu();
             self.window_switcher = None;
             self.close_launcher();
             self.close_overview();
@@ -1655,23 +1668,35 @@ impl RustyCompositorState {
     /// Closes the Quick Settings popover.
     pub fn close_quick_settings(&mut self) {
         self.quick_settings_active = false;
+        self.qs_slider_drag = None;
         self.retarget_quick_settings_anim();
     }
 
     /// Toggles a `TopBar` left menu dropdown popover (`RUSTYOS-048`).
     pub fn toggle_top_bar_menu(&mut self, menu: crate::shell_render::TopBarMenuHit) {
         if self.active_top_bar_menu == Some(menu) {
-            self.active_top_bar_menu = None;
+            self.close_top_bar_menu();
         } else {
             self.close_quick_settings();
             self.close_launcher();
             self.active_top_bar_menu = Some(menu);
+            self.top_bar_menu_hover_row = None;
         }
     }
 
     /// Closes any open `TopBar` menu dropdown popover (`RUSTYOS-048`).
     pub fn close_top_bar_menu(&mut self) {
         self.active_top_bar_menu = None;
+        self.top_bar_menu_hover_row = None;
+    }
+
+    /// Clears transient shell hover and active slider drag states (`RUSTYOS-051`).
+    pub fn clear_shell_hover_states(&mut self) {
+        self.set_dock_hover_slot(None);
+        self.top_bar_menu_hover_row = None;
+        self.qs_slider_drag = None;
+        self.hovered_notification_idx = None;
+        self.hovered_traffic_light_window = None;
     }
 
     /// Updates hovered Dock slot and triggers a 120 ms lift transition (`RUSTYOS-048`).
@@ -1705,7 +1730,7 @@ impl RustyCompositorState {
         action: crate::shell_render::TopBarMenuAction,
         serial: Serial,
     ) {
-        self.active_top_bar_menu = None;
+        self.close_top_bar_menu();
         match action {
             crate::shell_render::TopBarMenuAction::AboutRustyOs => {
                 let _ = self.push_notification(
@@ -1783,7 +1808,7 @@ impl RustyCompositorState {
             self.close_overview();
             self.active_window_drag = None;
             self.active_window_resize = None;
-            self.set_dock_hover_slot(None);
+            self.clear_shell_hover_states();
             self.touchpad_swipe = TouchpadSwipeState::default();
             self.deactivate_focused_shortcut_inhibitor();
             let keyboard = self.keyboard.clone();
@@ -2284,6 +2309,68 @@ impl RustyCompositorState {
             .collect();
         ids.sort_by_key(|id| id.0);
         ids
+    }
+
+    /// Returns the active frontmost application label shown beside the `RustyOS` emblem (`RUSTYOS-049`/`051`).
+    #[must_use]
+    pub fn active_top_bar_app_name(&self) -> String {
+        self.wm
+            .focused_window()
+            .filter(|id| self.wm.visible_windows().iter().any(|w| w.id == *id))
+            .map_or_else(
+                || "RustyOS".to_owned(),
+                |id| crate::shell_render::extract_app_name(&self.window_title(id)),
+            )
+    }
+
+    /// Builds miniature Space entries (`Desktop 1..=9`) for Workspace Overview (`RUSTYOS-051`).
+    #[must_use]
+    pub fn overview_workspace_spaces(&self) -> Vec<crate::shell_render::OverviewWorkspaceSpace> {
+        let primary_geo = self.output_map.primary().logical_geometry();
+        let active_ws = self.wm.active_workspace_id().0;
+        let top_bar = f32::from(i16::try_from(crate::shell_render::TOP_BAR_HEIGHT).unwrap_or(28));
+        #[allow(clippy::cast_precision_loss)]
+        let avail_w = primary_geo.size.w.max(320) as f32;
+        #[allow(clippy::cast_precision_loss)]
+        let avail_h = (primary_geo.size.h.max(240) as f32 - top_bar).max(120.0);
+
+        (rusty_wm::WorkspaceId::MIN..=rusty_wm::WorkspaceId::MAX)
+            .map(|ws_id| {
+                let mut preview_rects = [(0.0_f32, 0.0_f32, 0.0_f32, 0.0_f32); 4];
+                let mut count = 0_usize;
+                if let Some(ws) = self.wm.workspace(rusty_wm::WorkspaceId(ws_id)) {
+                    for &win_id in &ws.stacking {
+                        if self.is_window_minimized(win_id) {
+                            continue;
+                        }
+                        if let Some(win) = self.wm.window(win_id) {
+                            if count < preview_rects.len() {
+                                #[allow(clippy::cast_precision_loss)]
+                                let (rx, ry, rw, rh) = (
+                                    (win.geometry.x - primary_geo.loc.x) as f32 / avail_w,
+                                    ((win.geometry.y - primary_geo.loc.y) as f32 - top_bar)
+                                        / avail_h,
+                                    win.geometry.width as f32 / avail_w,
+                                    win.geometry.height as f32 / avail_h,
+                                );
+                                let nx = rx.clamp(0.02, 0.85);
+                                let ny = ry.clamp(0.02, 0.85);
+                                let nw = rw.clamp(0.10, 0.96 - nx);
+                                let nh = rh.clamp(0.10, 0.96 - ny);
+                                preview_rects[count] = (nx, ny, nw, nh);
+                            }
+                            count += 1;
+                        }
+                    }
+                }
+                crate::shell_render::OverviewWorkspaceSpace {
+                    id: ws_id,
+                    window_count: count,
+                    active: ws_id == active_ws,
+                    preview_rects,
+                }
+            })
+            .collect()
     }
 
     /// Focuses and raises the `idx`-th window in [`Self::ordered_visible_window_ids`],

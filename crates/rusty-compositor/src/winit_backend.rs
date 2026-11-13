@@ -761,6 +761,7 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
             kbd_layout: &state.active_kbd_layout,
             tray_items: &tray_views,
             active_menu: state.active_top_bar_menu,
+            menu_hover_row: state.top_bar_menu_hover_row,
             glass_opacity: state.glass_opacity,
             reduce_transparency: state.reduce_transparency,
             show_workspaces: state.menubar_show_workspaces,
@@ -774,11 +775,13 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
             .iter()
             .rev()
             .take(crate::shell_render::MAX_VISIBLE_NOTIFICATIONS)
-            .map(|n| crate::shell_render::NotificationToastView {
+            .enumerate()
+            .map(|(idx, n)| crate::shell_render::NotificationToastView {
                 id: n.id,
                 urgency: n.urgency,
                 title: &n.title,
                 body: &n.body,
+                hovered: state.hovered_notification_idx == Some(idx),
             })
             .collect();
 
@@ -905,10 +908,16 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
 
         let ov_progress = state.overview_anim.current();
         let show_ov = !show_launcher && !show_qs && (state.overview_active || ov_progress > 0.01);
+        let overview_spaces = if show_ov {
+            state.overview_workspace_spaces()
+        } else {
+            Vec::new()
+        };
         let ov_view = show_ov.then_some(crate::shell_render::OverviewRenderState {
             active_workspace: active_ws,
             layout_mode: layout_str,
             windows: &dock_windows,
+            spaces: &overview_spaces,
             progress: ov_progress,
         });
 
@@ -988,16 +997,20 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
                     .is_some()
             });
 
+        let ssd_hovered = state.hovered_traffic_light_window == Some(win_id);
         if has_ssd && !has_open_popup {
             let title_text = state.window_title(win_id);
-            render_list.extend(crate::shell_render::generate_window_ssd_composite_elements(
-                text_cache,
-                shape_cache,
-                renderer,
-                frame_rect,
-                &title_text,
-                is_focused,
-            ));
+            render_list.extend(
+                crate::shell_render::generate_window_ssd_composite_elements_with_hover(
+                    text_cache,
+                    shape_cache,
+                    renderer,
+                    frame_rect,
+                    &title_text,
+                    is_focused,
+                    ssd_hovered,
+                ),
+            );
         }
 
         if let Some(ref sw) = smithay_win {
@@ -1024,14 +1037,17 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
 
         if has_ssd && has_open_popup {
             let title_text = state.window_title(win_id);
-            render_list.extend(crate::shell_render::generate_window_ssd_composite_elements(
-                text_cache,
-                shape_cache,
-                renderer,
-                frame_rect,
-                &title_text,
-                is_focused,
-            ));
+            render_list.extend(
+                crate::shell_render::generate_window_ssd_composite_elements_with_hover(
+                    text_cache,
+                    shape_cache,
+                    renderer,
+                    frame_rect,
+                    &title_text,
+                    is_focused,
+                    ssd_hovered,
+                ),
+            );
         }
 
         if !is_fullscreen {

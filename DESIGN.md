@@ -389,34 +389,58 @@ layout and material behavior follow macOS 27. No Apple assets or branding.
   interruptible animation; subtle `2 px` static lift when `reduced_motion = true`), accompanied by
   a floating frosted glass tooltip pill naming the hovered application above the Dock.
 
-### 12.3 Windows and menus
+### 12.3 Windows, menus, Spotlight, Notifications, and OSD
 
-- Window radius `large` (20) with wide soft shadow (blur ~40-60, low alpha); active window has a
-  stronger shadow, inactive a flatter one.
-- Titlebar traffic lights 12-13 px, ~8 px spacing, left aligned; toolbar items grouped in
-  rounded capsules.
-- Menus/popovers: radius `large`, 4-6 px inner padding, item height ~28 px, monochrome leading
-  icons, secondary-colored shortcuts right-aligned, hairline separators, hover fill uses accent.
-- Sidebars are lighter/translucent than content area; selected row uses accent fill with
-  `medium` radius.
+- Window chrome (`SSD`): `WINDOW_RADIUS = 20` rounded corners at both top (`TITLEBAR_HEIGHT`
+  titlebar) and bottom (1 px transparent-interior corner rim curves over client content), top
+  1 px specular rim, and multi-layer soft ambient + contact shadows (`generate_window_shadow_elements`,
+  stronger when focused, flatter when unfocused).
+- Titlebar traffic lights: `12 px` gel-lit buttons (`TrafficLightKind::{Close, Minimize, Maximize}`)
+  with subtle specular highlight and border, revealing `4x4` SSAA SDF hover glyphs (`×`, `−`, `+`)
+  across the button cluster when hovered (`hovered_traffic_light_window`).
+- Menu bar dropdowns (`MENU_POPOVER_RADIUS = 16`): `Popover` top-lit liquid glass (`pop_w = 256`),
+  leading `4x4` SSAA monochrome `UiGlyphKind` icons, hairline section dividers, right-aligned real
+  compositor shortcuts (`Super+Tab`, `Alt+S`, `Super+L`, `Super+Space`, `Alt+L`, `Alt+R`, `Alt+J`,
+  `Alt+M`, `Alt+H`, `Alt+W`), and a rounded accent pill highlight on the hovered row
+  (`top_bar_menu_hover_row`), anchored under a highlighted `TopBar` button when active.
+- Spotlight (`ShellOverlayView::Spotlight`): `Popover` modal with a `48 px` `ControlModule` search
+  field, full-width rounded accent pill highlight for the selected match, and a right-aligned
+  `"Open ↵"` action hint.
+- Notification HUD & OSD: `340x68` `Popover` (`radius = 16`) toast cards lead with a `38x38`
+  `BuiltinAppIcon` squircle (`Terminal`, `Files`, `Browser`, `Notes`, `Settings`, `RustySystem`)
+  and reveal a circular `20x20` close (`×`) button on hover (`hovered_notification_idx`); centered
+  OSD pills (`Popover`, `radius = 18`) pair a `22x22` `Sun` / `Volume` / `Info` SDF glyph with a
+  rounded `h = 8, r = 4` capsule level bar.
 
 ### 12.4 Control center and quick settings
 
-- Tiles use `large` radius glass cards; primary toggles are large round buttons (accent when on).
-- Sliders: full-width capsule track, leading icon, accent fill, no tick marks.
-- Panel anchors under the menu-bar control-center toggle.
+- Anchored top-right (`324x346` `Popover` glass under the highlighted `TopBar` Control Center pill).
+- Top grid pairs a `ControlModule` connectivity card (`Wi-Fi` and `Bluetooth` toggle rows) with
+  large `46x46` round `Float`/`Tile` Layout and Reduced `Motion` toggles plus a `Clear Glass` /
+  `Opaque` mode pill (`reduce_transparency`).
+- `Display` (Glass Opacity `35%..=100%`) and `Sound` (`0%..=100%`) use full-width `ControlModule`
+  cards with full-width capsule tracks, leading clickable icons (`Sun` / mute `Volume`), white round
+  slider thumbs, and continuous mouse drag (`QuickSettingsSliderDrag`), followed by a `Power`
+  module and three `42x42` round quick-action buttons (`Search`, `Sync`, `Lock`).
 
 ### 12.5 Material and depth
 
-- True lensing/blur is optional and needs a separate ADR (GLES shader cost, hardware matrix).
-  Until approved, emulate glass with alpha, top-lit gradient and inner rim; always provide an
-  opaque fallback and respect the transparency setting.
-- Planned user setting `glass_opacity` (Liquid Glass slider equivalent) is not yet approved or
-  implemented; see TASKS.md when scheduled.
+- Multi-pass GLES FBO blur-behind remains deferred to a dedicated future hardware ADR; until then,
+  `UiShapeCache::glass_panel_element` (`GlassPanelStyle::{Dock, Popover, ControlModule}`) emulates
+  top-lit liquid glass with `4x4` Bayer dithering, directional alpha tinting, and crisp inner
+  specular rims.
+- User controls for `glass_opacity` (`0.35..=1.0`, default `0.78`) and `reduce_transparency`
+  (`true` switches shell panels to opaque high-contrast surfaces) are configurable via `[ui]` in
+  `config.toml` and live-adjustable in Control Center.
 
 ### 12.6 Mission Control / Overview
 
-- Workspace strip at the top with captions, windows tiled in a grid below, Dock stays visible.
+- Top centered `Desktop 1..9` Spaces miniature strip (`overview_space_rects`) displays live
+  non-minimized normalized `preview_rects` inside each workspace thumbnail, highlights the active
+  workspace with accent fill/border, and switches directly to the clicked workspace
+  (`OverviewHit::SwitchWorkspace`).
+- A light `0.36` radial-style scrim preserves wallpaper depth while floating `Popover` preview cards
+  (and focused outline ring) arrange below the Spaces strip above the visible Dock.
 
 ---
 

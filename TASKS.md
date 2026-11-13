@@ -721,6 +721,23 @@ hardware/software context и низкие накладные расходы.
 - **Verification:** `cargo fmt --all --check` и `cargo clippy --workspace --all-targets --offline -- -D warnings` завершились с кодом 0 без предупреждений; 118/118 тестов workspace прошли без пропусков (`rusty_animation` 4/4, `rusty_compositor` 93/93, `rusty_ipc` 3/3, `rusty_services` 6/6, `rusty_shell` 5/5, `rusty_wm` 7/7); живая проверка `rusty-compositor --winit` и визуальная инспекция скриншота + 200% Dock-кропа подтвердили чистоту иконок, стекла, тени, разделителя и индикаторной точки.
 - **Risks:** Нулевые новые внешние Rust-зависимости и ноль `unsafe`; многопроходный GLES FBO blur-behind вынесен за пределы текущей задачи (эмулируется top-lit альфа-градиентом).
 
+## RUSTYOS-051 --- 1:1 macOS Shell Overlays, Modular Control Center, Overview Spaces & Window Chrome
+
+- **Owner:** AI Agent + User
+- **Status:** done
+- **Priority:** P0
+- **Phase:** 7 / UX
+- **ADR / Decision:** ADR-0020 / D-028
+- **Acceptance Criteria:**
+  - В `crates/rusty-compositor/src/surfaces.rs` обобщён рендер стеклянных панелей `UiShapeCache::glass_panel_element` (`GlassPanelStyle::{Dock, Popover, ControlModule}`), добавлен светофор `UiShapeCache::traffic_light_element` (`TrafficLightKind::{Close, Minimize, Maximize}`) с гелевым градиентом/бликом и 17 новых `4×4` SSAA SDF-глифов `UiGlyphKind`; в `crates/rusty-compositor/src/icons.rs` добавлен `BuiltinAppIcon::RustySystem`.
+  - В `crates/rusty-compositor/src/shell_render.rs` выпадающие меню Menu Bar обновлены на `MENU_POPOVER_RADIUS = 16`, `pop_w = 256`, ведущие `4×4` SSAA иконки, разделители групп (`TopBarMenuEntry::Separator`), правые реальные шорткаты и hover-пилюлю (`menu_hover_row`), а кнопка Control Center в `TopBar` получила пилюлю-подсветку при открытии (`quick_settings_open`).
+  - Control Center переработан на модульный макет `324×346` (`QuickSettingsLayout`): карточка `Wi-Fi` + `Bluetooth`, круглые `46×46` кнопки `Float`/`Tile` и `Motion`, переключатель `Clear Glass`/`Opaque`, полноширинные капсульные слайдеры `Display` и `Sound` с перетаскиванием (`QuickSettingsSliderDrag`), модуль `Power` и круглые действия `Search`/`Sync`/`Lock`.
+  - Хром `SSD` (`generate_window_ssd_composite_elements_with_hover`) получил hover-глифы светофора (`check_window_traffic_lights_hover`), верхний specular-обод titlebar, прозрачные дуги нижнего скругления `WINDOW_RADIUS = 20` и многослойные тени (`generate_window_shadow_elements`); Spotlight получил `48 px` поле `ControlModule` и сплошную акцентную пилюлю + `"Open ↵"`; Notification HUD (`340×68`, радиус `16`) заменил полосу срочности на `38×38` squircle-иконку и hover-кнопку закрытия `20×20`; OSD получил ведущий `22×22` `UiGlyphKind` и капсульный трек `h = 8, r = 4`; Overview получил верхнюю ленту миниатюр `Desktop 1..9` с `preview_rects` и `OverviewHit::SwitchWorkspace(u8)` и лёгкий скрайм `0.36`.
+  - В `crates/rusty-compositor/src/state.rs`, `input.rs` и `winit_backend.rs` подключены `top_bar_menu_hover_row`, `qs_slider_drag`, `hovered_notification_idx`, `hovered_traffic_light_window`, `overview_workspace_spaces` и сброс временных hover/drag-состояний при закрытии/блокировке.
+  - Обновлены `DESIGN.md` §12.3–12.6, `ADR-0020`, запись `D-028` в `DECISIONS.md` и статус задачи в `TASKS.md`.
+- **Verification:** `cargo fmt --all --check` и `cargo clippy --workspace --all-targets --offline -- -D warnings` завершились с кодом 0 без предупреждений; 123/123 тестов workspace прошли без пропусков (`rusty_animation` 4/4, `rusty_compositor` 98/98, `rusty_ipc` 3/3, `rusty_services` 6/6, `rusty_shell` 5/5, `rusty_wm` 7/7); `cargo run --package rusty-compositor --offline -- --check` и дымовой запуск `timeout -s INT 3s target/debug/rusty-compositor --winit` инициализировали OpenGL ES 3.2 (Mesa Intel(R) Graphics), шрифты Inter, XWayland и рендер 1280×800 без ошибок.
+- **Risks:** Многопроходный GLES FBO blur-behind по Утверждённому Варианту 1 остаётся будущей задачей; интерактивные состояния оверлеев при реальном пользовательском вводе покрыты тестами `input.rs` и `shell_render.rs` (визуальная инспекция живых оверлеев в окне не запускалась автоматически из CLI без интерактивного скрипта ввода).
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance
