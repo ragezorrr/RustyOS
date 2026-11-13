@@ -421,14 +421,20 @@ layout and material behavior follow macOS 27. No Apple assets or branding.
 
 ### 12.4 Control center and quick settings
 
-- Anchored top-right (`324x346` `Popover` glass under the highlighted `TopBar` Control Center pill).
-- Top grid pairs a `ControlModule` connectivity card (`Wi-Fi` and `Bluetooth` toggle rows) with
-  large `46x46` round `Float`/`Tile` Layout and Reduced `Motion` toggles plus a `Clear Glass` /
-  `Opaque` mode pill (`reduce_transparency`).
-- `Display` (Glass Opacity `35%..=100%`) and `Sound` (`0%..=100%`) use full-width `ControlModule`
-  cards with full-width capsule tracks, leading clickable icons (`Sun` / mute `Volume`), white round
-  slider thumbs, and continuous mouse drag (`QuickSettingsSliderDrag`), followed by a `Power`
-  module and three `42x42` round quick-action buttons (`Search`, `Sync`, `Lock`).
+- Floating Liquid Glass islands anchored top-right (`316x456` bounding box at `TOP_BAR_HEIGHT + 10`
+  under the highlighted `TopBar` Control Center pill) with no outer dark container box; each
+  island uses individual `GlassPanelStyle::ControlModule` glass and drop shadow (`RUSTYOS-053`).
+- Upper grid pairs three full-pill connectivity/status capsules on the left (`Wi-Fi`, `Bluetooth`,
+  `Power` with inverted white active circles and live SSID/power state) beside a top-right square
+  `Now Playing` card backed by `MPRIS2` / `playerctl` (`Not Playing` or live track title with
+  working `Prev`/`PlayPause`/`Next` controls), two captionless `66x66` circular quick toggles
+  (`Tile`/`Float` Layout and `Overview`), two captionless circular toggles (`Reduced Motion` and
+  `Clear Glass`/`Opaque`), and a right `Focus` (`Do Not Disturb`) capsule suppressing visible toast
+  banners when active.
+- Lower section stacks two full-width `58px`-tall `ControlModule` sliders (`Display` backed by
+  `BrightnessService` when available with `glass_opacity` `35%..=100%` fallback, and `Sound`
+  `0%..=100%` with an integrated right-side `Mute` circular toggle, thin `6px` tracks without
+  percentage readouts), followed by a bottom centered `118x30` `Lock Screen` floating glass pill.
 
 ### 12.5 Material and depth
 

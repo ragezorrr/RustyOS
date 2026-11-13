@@ -52,6 +52,8 @@ impl Default for PowerStatus {
 pub struct NetworkStatus {
     /// True if an active network interface has an IP and is connected.
     pub connected: bool,
+    /// True if the system Wi-Fi radio is enabled (`RUSTYOS-053`).
+    pub wifi_enabled: bool,
     /// Name of the primary active interface (e.g., "wlan0", "eth0").
     pub interface: Option<String>,
     /// Wi-Fi SSID if connected via wireless.
@@ -66,6 +68,7 @@ impl Default for NetworkStatus {
     fn default() -> Self {
         Self {
             connected: false,
+            wifi_enabled: false,
             interface: None,
             wifi_ssid: None,
             wifi_signal_percent: None,
@@ -138,6 +141,19 @@ impl Default for BrightnessStatus {
             device: None,
         }
     }
+}
+
+/// Active MPRIS2 media playback status and metadata (`RUSTYOS-053`).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct MediaStatus {
+    /// True if an active MPRIS2 media player is registered on the session bus.
+    pub active: bool,
+    /// True if the active media player is currently playing.
+    pub playing: bool,
+    /// Concise track title (empty when nothing is playing).
+    pub title: String,
+    /// Optional artist metadata.
+    pub artist: Option<String>,
 }
 
 /// Media playback control command dispatched via MPRIS2 / `playerctl` (`RUSTYOS-031`).
@@ -285,9 +301,12 @@ impl NetworkService {
                 .interface
                 .as_deref()
                 .is_some_and(|iface| iface.starts_with('w'));
-            if is_wifi_iface && let Ok(wireless) = fs::read_to_string("/proc/net/wireless") {
-                status.wifi_signal_percent =
-                    parse_proc_net_wireless_signal(&wireless, status.interface.as_deref());
+            if is_wifi_iface {
+                status.wifi_enabled = true;
+                if let Ok(wireless) = fs::read_to_string("/proc/net/wireless") {
+                    status.wifi_signal_percent =
+                        parse_proc_net_wireless_signal(&wireless, status.interface.as_deref());
+                }
             }
             if let Ok(output) = Command::new("nmcli")
                 .args(["-t", "-f", "active,signal,ssid", "dev", "wifi"])
@@ -299,6 +318,7 @@ impl NetworkService {
                     if let Some(rest) = line.strip_prefix("yes:")
                         && let Some((sig_raw, ssid_raw)) = rest.split_once(':')
                     {
+                        status.wifi_enabled = true;
                         if let Ok(sig) = sig_raw.trim().parse::<u8>() {
                             status.wifi_signal_percent = Some(sig.min(100));
                         }
@@ -314,6 +334,19 @@ impl NetworkService {
         }
 
         status
+    }
+
+    /// Enables or disables the system Wi-Fi radio via `NetworkManager` D-Bus or `nmcli` (`RUSTYOS-053`).
+    #[must_use]
+    pub fn set_wifi_enabled(&self, enabled: bool) -> bool {
+        if set_nm_wifi_enabled_via_dbus(enabled) {
+            return true;
+        }
+        let arg = if enabled { "on" } else { "off" };
+        Command::new("nmcli")
+            .args(["radio", "wifi", arg])
+            .status()
+            .is_ok_and(|s| s.success())
     }
 }
 
@@ -462,9 +495,16 @@ fn query_network_via_dbus() -> Option<NetworkStatus> {
         Some(Value::U32(n)) => *n,
         _ => 0,
     };
+    let wireless_enabled = matches!(
+        all.get("WirelessEnabled").map(|v| &**v),
+        Some(Value::Bool(true))
+    );
     // NetworkManager states >= 50 correspond to ConnectedLocal / ConnectedSite / ConnectedGlobal.
     if nm_state < 50 {
-        return Some(NetworkStatus::default());
+        return Some(NetworkStatus {
+            wifi_enabled: wireless_enabled,
+            ..NetworkStatus::default()
+        });
     }
 
     let conn_type = match all.get("PrimaryConnectionType").map(|v| &**v) {
@@ -504,12 +544,37 @@ fn query_network_via_dbus() -> Option<NetworkStatus> {
         wifi_signal_percent = parse_proc_net_wireless_signal(&wireless, active_iface.as_deref());
     }
 
-    Some(format_nm_network_status_with_signal(
+    let mut status = format_nm_network_status_with_signal(
         &conn_type,
         active_id,
         active_iface,
         wifi_signal_percent,
-    ))
+    );
+    status.wifi_enabled = wireless_enabled || status.wifi_ssid.is_some();
+    Some(status)
+}
+
+fn set_nm_wifi_enabled_via_dbus(enabled: bool) -> bool {
+    let Ok(conn) = zbus::blocking::Connection::system() else {
+        return false;
+    };
+    let Ok(iface_name) =
+        zbus::names::InterfaceName::from_static_str("org.freedesktop.NetworkManager")
+    else {
+        return false;
+    };
+    let Ok(props_builder) = zbus::blocking::fdo::PropertiesProxy::builder(&conn)
+        .destination("org.freedesktop.NetworkManager")
+        .and_then(|b| b.path("/org/freedesktop/NetworkManager"))
+    else {
+        return false;
+    };
+    let Ok(props) = props_builder.build() else {
+        return false;
+    };
+    props
+        .set(iface_name, "WirelessEnabled", Value::Bool(enabled))
+        .is_ok()
 }
 
 /// Formats NetworkManager connection type & profile ID into [`NetworkStatus`].
@@ -536,6 +601,7 @@ pub fn format_nm_network_status_with_signal(
     };
     NetworkStatus {
         connected: true,
+        wifi_enabled: is_wifi,
         interface,
         wifi_ssid: if is_wifi { clean_id } else { None },
         wifi_signal_percent: if is_wifi {
@@ -976,6 +1042,23 @@ impl MediaService {
         Self
     }
 
+    /// Queries the first active MPRIS2 player over Session D-Bus (or `playerctl`) (`RUSTYOS-053`).
+    #[must_use]
+    pub fn query_status(&self) -> MediaStatus {
+        if let Some(status) = query_mpris_via_dbus() {
+            return status;
+        }
+        if let Ok(output) = Command::new("playerctl")
+            .args(["metadata", "--format", "{{status}}\t{{title}}\t{{artist}}"])
+            .output()
+            && output.status.success()
+        {
+            let text = String::from_utf8_lossy(&output.stdout);
+            return parse_playerctl_status_line(&text);
+        }
+        MediaStatus::default()
+    }
+
     /// Sends a media playback control action to the first active MPRIS2 player (or `playerctl`).
     #[must_use]
     pub fn dispatch(&self, action: MediaAction) -> bool {
@@ -995,20 +1078,121 @@ impl MediaService {
     }
 }
 
+/// Parses a tab-delimited `playerctl metadata --format "{{status}}\t{{title}}\t{{artist}}"` line (`RUSTYOS-053`).
+#[must_use]
+pub fn parse_playerctl_status_line(line: &str) -> MediaStatus {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return MediaStatus::default();
+    }
+    let mut parts = trimmed.split('\t');
+    let status_raw = parts.next().unwrap_or_default().trim();
+    let title = parts.next().unwrap_or_default().trim().to_owned();
+    let artist_raw = parts.next().unwrap_or_default().trim();
+    let playing = status_raw.eq_ignore_ascii_case("Playing");
+    let paused = status_raw.eq_ignore_ascii_case("Paused");
+    let active = playing || paused || !title.is_empty();
+    MediaStatus {
+        active,
+        playing,
+        title,
+        artist: (!artist_raw.is_empty()).then(|| artist_raw.to_owned()),
+    }
+}
+
+fn first_mpris_bus_name(conn: &zbus::blocking::Connection) -> Option<String> {
+    let dbus = zbus::blocking::fdo::DBusProxy::new(conn).ok()?;
+    let names = dbus.list_names().ok()?;
+    names
+        .into_iter()
+        .find(|n| n.as_str().starts_with("org.mpris.MediaPlayer2."))
+        .map(|n| n.as_str().to_owned())
+}
+
+fn unwrap_zvariant_str(val: &Value<'_>) -> Option<String> {
+    match val {
+        Value::Str(s) => Some(s.as_str().trim().to_owned()).filter(|t| !t.is_empty()),
+        Value::Value(inner) => unwrap_zvariant_str(inner),
+        _ => None,
+    }
+}
+
+fn query_mpris_via_dbus() -> Option<MediaStatus> {
+    let conn = zbus::blocking::Connection::session().ok()?;
+    let Some(player_bus) = first_mpris_bus_name(&conn) else {
+        // Session D-Bus is reachable and no MPRIS2 player is active.
+        return Some(MediaStatus::default());
+    };
+    let player_iface =
+        zbus::names::InterfaceName::from_static_str("org.mpris.MediaPlayer2.Player").ok()?;
+    let props = zbus::blocking::fdo::PropertiesProxy::builder(&conn)
+        .destination(player_bus.as_str())
+        .ok()?
+        .path("/org/mpris/MediaPlayer2")
+        .ok()?
+        .build()
+        .ok()?;
+    let all = props.get_all(player_iface).ok()?;
+
+    let playback = all
+        .get("PlaybackStatus")
+        .and_then(|v| unwrap_zvariant_str(v))
+        .unwrap_or_default();
+    let playing = playback.eq_ignore_ascii_case("Playing");
+
+    let mut title = String::new();
+    let mut artist = None;
+    if let Some(meta_val) = all.get("Metadata").map(|v| &**v) {
+        let dict_ref = match meta_val {
+            Value::Dict(d) => Some(d),
+            Value::Value(inner) => match &**inner {
+                Value::Dict(d) => Some(d),
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some(dict) = dict_ref {
+            for (k, v) in dict.iter() {
+                if let Some(key) = unwrap_zvariant_str(k) {
+                    if key == "xesam:title" {
+                        if let Some(t) = unwrap_zvariant_str(v) {
+                            title = t;
+                        }
+                    } else if key == "xesam:artist" {
+                        let arr_ref = match v {
+                            Value::Array(a) => Some(a),
+                            Value::Value(inner) => match &**inner {
+                                Value::Array(a) => Some(a),
+                                _ => None,
+                            },
+                            _ => None,
+                        };
+                        if let Some(arr) = arr_ref
+                            && let Some(first) = arr.iter().find_map(unwrap_zvariant_str)
+                        {
+                            artist = Some(first);
+                        } else if let Some(single) = unwrap_zvariant_str(v) {
+                            artist = Some(single);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Some(MediaStatus {
+        active: true,
+        playing,
+        title,
+        artist,
+    })
+}
+
 fn dispatch_mpris_via_dbus(action: MediaAction) -> bool {
     let Ok(conn) = zbus::blocking::Connection::session() else {
         return false;
     };
-    let Ok(dbus) = zbus::blocking::fdo::DBusProxy::new(&conn) else {
-        return false;
-    };
-    let Ok(names) = dbus.list_names() else {
-        return false;
-    };
-    let Some(player_bus) = names
-        .into_iter()
-        .find(|n| n.as_str().starts_with("org.mpris.MediaPlayer2."))
-    else {
+    let Some(player_bus) = first_mpris_bus_name(&conn) else {
         return false;
     };
     let method = match action {
@@ -1324,5 +1508,25 @@ Inter-| sta-|   Quality        |   Discarded packets               | Missed | WE
         assert_eq!(calc_backlight_raw(0, 500), 0);
 
         let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn playerctl_status_line_parses_playing_paused_and_empty() {
+        let playing = parse_playerctl_status_line("Playing\tMidnight City\tM83");
+        assert!(playing.active);
+        assert!(playing.playing);
+        assert_eq!(playing.title, "Midnight City");
+        assert_eq!(playing.artist.as_deref(), Some("M83"));
+
+        let paused = parse_playerctl_status_line("Paused\tAmbient Track\t");
+        assert!(paused.active);
+        assert!(!paused.playing);
+        assert_eq!(paused.title, "Ambient Track");
+        assert_eq!(paused.artist, None);
+
+        let idle = parse_playerctl_status_line("");
+        assert!(!idle.active);
+        assert!(!idle.playing);
+        assert_eq!(idle.title, "");
     }
 }

@@ -149,6 +149,20 @@ pub enum UiGlyphKind {
     Bluetooth,
     /// 8-ray sun glyph for `Display` / `Glass` / `Brightness`.
     Sun,
+    /// Double-triangle seek-previous `<<` glyph for Now Playing (`RUSTYOS-053`).
+    MediaPrev,
+    /// Solid rounded triangle play glyph for Now Playing (`RUSTYOS-053`).
+    MediaPlay,
+    /// Dual vertical bar pause glyph for Now Playing (`RUSTYOS-053`).
+    MediaPause,
+    /// Double-triangle seek-next `>>` glyph for Now Playing (`RUSTYOS-053`).
+    MediaNext,
+    /// Eighth-note glyph for Now Playing artwork tile (`RUSTYOS-053`).
+    MusicNote,
+    /// Crescent moon glyph for `Focus` Do Not Disturb capsule (`RUSTYOS-053`).
+    Moon,
+    /// Overlapping rounded window panes for `Overview` spaces circle (`RUSTYOS-053`).
+    OverviewSpaces,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1570,6 +1584,64 @@ fn sample_sun_glyph_uv(u: f32, v: f32, edge: f32, tint: [f32; 4]) -> [f32; 4] {
     premul_tint(tint, sd_cov(core.min(rays), edge))
 }
 
+fn sample_media_play_glyph_uv(u: f32, v: f32, edge: f32, tint: [f32; 4]) -> [f32; 4] {
+    let tri = signed_distance_polygon(u, v, &[(0.28, 0.20), (0.80, 0.50), (0.28, 0.80)]) - 0.028;
+    premul_tint(tint, sd_cov(tri, edge))
+}
+
+fn sample_media_pause_glyph_uv(u: f32, v: f32, edge: f32, tint: [f32; 4]) -> [f32; 4] {
+    let left = sd_rounded_box(u, v, 0.34, 0.50, 0.088, 0.27, 0.032);
+    let right = sd_rounded_box(u, v, 0.66, 0.50, 0.088, 0.27, 0.032);
+    premul_tint(tint, sd_cov(left.min(right), edge))
+}
+
+fn sample_media_seek_glyph_uv(
+    u: f32,
+    v: f32,
+    edge: f32,
+    tint: [f32; 4],
+    forward: bool,
+) -> [f32; 4] {
+    let x = if forward { u } else { 1.0 - u };
+    let first = signed_distance_polygon(x, v, &[(0.14, 0.27), (0.48, 0.50), (0.14, 0.73)]) - 0.022;
+    let second = signed_distance_polygon(x, v, &[(0.49, 0.27), (0.84, 0.50), (0.49, 0.73)]) - 0.022;
+    premul_tint(tint, sd_cov(first.min(second), edge))
+}
+
+fn sample_music_note_glyph_uv(u: f32, v: f32, edge: f32, tint: [f32; 4]) -> [f32; 4] {
+    let head1 = sd_circle(u, v, 0.31, 0.71, 0.115);
+    let head2 = sd_circle(u, v, 0.67, 0.65, 0.115);
+    let stem1 = sd_segment(u, v, 0.40, 0.27, 0.40, 0.70, 0.042);
+    let stem2 = sd_segment(u, v, 0.76, 0.21, 0.76, 0.64, 0.042);
+    let beam = sd_segment(u, v, 0.40, 0.27, 0.76, 0.21, 0.056);
+    let d = head1.min(head2).min(stem1).min(stem2).min(beam);
+    premul_tint(tint, sd_cov(d, edge))
+}
+
+fn sample_moon_glyph_uv(u: f32, v: f32, edge: f32, tint: [f32; 4]) -> [f32; 4] {
+    let outer = sd_circle(u, v, 0.47, 0.52, 0.30);
+    let cut = sd_circle(u, v, 0.61, 0.40, 0.24);
+    premul_tint(tint, sd_cov(outer.max(-cut), edge))
+}
+
+fn sample_overview_spaces_glyph_uv(u: f32, v: f32, edge: f32, tint: [f32; 4]) -> [f32; 4] {
+    let back = sd_rounded_box(u, v, 0.39, 0.41, 0.23, 0.18, 0.065);
+    let back_rim = back.abs() - 0.038;
+    let front = sd_rounded_box(u, v, 0.60, 0.59, 0.23, 0.18, 0.065);
+    let front_rim = front.abs() - 0.042;
+    let masked_back = back_rim.max(-front);
+    let mut out = [0.0_f32; 4];
+    let back_cov = sd_cov(masked_back, edge);
+    if back_cov > 0.0 {
+        out = blend_premul_over(out, [tint[0], tint[1], tint[2]], tint[3] * back_cov * 0.72);
+    }
+    let front_cov = sd_cov(front_rim, edge);
+    if front_cov > 0.0 {
+        out = blend_premul_over(out, [tint[0], tint[1], tint[2]], tint[3] * front_cov);
+    }
+    out
+}
+
 #[cfg(test)]
 #[allow(clippy::cast_precision_loss)]
 fn sample_ui_glyph_pixel(
@@ -1640,6 +1712,13 @@ fn sample_ui_glyph_pixel_rect(
                 UiGlyphKind::ArrowPrev => sample_arrow_glyph_uv(u, v, edge, tint, false),
                 UiGlyphKind::Bluetooth => sample_bluetooth_glyph_uv(u, v, edge, tint),
                 UiGlyphKind::Sun => sample_sun_glyph_uv(u, v, edge, tint),
+                UiGlyphKind::MediaPrev => sample_media_seek_glyph_uv(u, v, edge, tint, false),
+                UiGlyphKind::MediaPlay => sample_media_play_glyph_uv(u, v, edge, tint),
+                UiGlyphKind::MediaPause => sample_media_pause_glyph_uv(u, v, edge, tint),
+                UiGlyphKind::MediaNext => sample_media_seek_glyph_uv(u, v, edge, tint, true),
+                UiGlyphKind::MusicNote => sample_music_note_glyph_uv(u, v, edge, tint),
+                UiGlyphKind::Moon => sample_moon_glyph_uv(u, v, edge, tint),
+                UiGlyphKind::OverviewSpaces => sample_overview_spaces_glyph_uv(u, v, edge, tint),
             };
             sum[0] += s[0];
             sum[1] += s[1];
@@ -2284,11 +2363,11 @@ fn sample_glass_panel_pixel(
             ]
         }
         GlassPanelStyle::ControlModule => {
-            let base_a = (0.16 - 0.03 * t_v) * (0.55 + 0.45 * glass_scale);
+            let base_a = (0.24 - 0.04 * t_v) * (0.48 + 0.52 * glass_scale);
             [
-                (236.0 - 20.0 * t_v + dither) * base_a,
-                (224.0 - 18.0 * t_v + dither) * base_a,
-                (255.0 - 12.0 * t_v + dither) * base_a,
+                (176.0 - 22.0 * t_v + dither) * base_a,
+                (166.0 - 20.0 * t_v + dither) * base_a,
+                (198.0 - 16.0 * t_v + dither) * base_a,
                 base_a,
             ]
         }
@@ -2296,21 +2375,23 @@ fn sample_glass_panel_pixel(
 
     let sheen_limit = match style {
         GlassPanelStyle::Dock => 0.22,
-        GlassPanelStyle::Popover | GlassPanelStyle::ControlModule => 0.16,
+        GlassPanelStyle::Popover => 0.16,
+        GlassPanelStyle::ControlModule => 0.20,
     };
     if t_v < sheen_limit && sd < -0.5 {
         let sheen_peak = match style {
             GlassPanelStyle::Dock | GlassPanelStyle::Popover => 0.055,
-            GlassPanelStyle::ControlModule => 0.045,
+            GlassPanelStyle::ControlModule => 0.065,
         };
         let sheen_a = (1.0 - t_v / sheen_limit) * sheen_peak * glass_scale;
         layer = blend_premul_over(layer, [255.0, 248.0, 255.0], sheen_a);
     }
 
+    let mod_rim_light = dir_light.max(((t_v - 0.78) * 1.8).clamp(0.0, 0.55));
     let rim_alpha = match style {
         GlassPanelStyle::Dock => rim_band * (0.08 + 0.30 * dir_light),
         GlassPanelStyle::Popover => rim_band * (0.14 + 0.26 * dir_light),
-        GlassPanelStyle::ControlModule => rim_band * (0.08 + 0.14 * dir_light),
+        GlassPanelStyle::ControlModule => rim_band * (0.10 + 0.28 * mod_rim_light),
     };
     if rim_alpha > 0.001 {
         layer = blend_premul_over(layer, [255.0, 252.0, 255.0], rim_alpha);
@@ -2896,6 +2977,23 @@ mod tests {
             GlassPanelStyle::ControlModule,
         );
         assert!(mod_center[3] > 16 && mod_center[3] < pop_center[3]);
+        for glyph in [
+            UiGlyphKind::MediaPrev,
+            UiGlyphKind::MediaPlay,
+            UiGlyphKind::MediaPause,
+            UiGlyphKind::MediaNext,
+            UiGlyphKind::MusicNote,
+            UiGlyphKind::Moon,
+            UiGlyphKind::OverviewSpaces,
+        ] {
+            let center = sample_ui_glyph_pixel(10, 10, 20, glyph, [255, 255, 255, 255]);
+            let corner = sample_ui_glyph_pixel(0, 0, 20, glyph, [255, 255, 255, 255]);
+            assert_eq!(corner[3], 0);
+            let any_lit = (0..20)
+                .flat_map(|y| (0..20).map(move |x| (x, y)))
+                .any(|(x, y)| sample_ui_glyph_pixel(x, y, 20, glyph, [255, 255, 255, 255])[3] > 0);
+            assert!(any_lit || center[3] > 0);
+        }
 
         // Traffic lights: clean circular contour + hover glyph contrast
         let close_plain =

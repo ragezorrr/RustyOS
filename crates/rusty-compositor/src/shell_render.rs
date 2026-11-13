@@ -302,6 +302,8 @@ pub struct QuickSettingsRenderState<'a> {
     pub network_label: &'a str,
     /// Whether network interface is up.
     pub net_connected: bool,
+    /// Live Wi-Fi radio enabled flag (`RUSTYOS-053`).
+    pub wifi_enabled: bool,
     /// Live Wi-Fi signal strength percentage (`0..=100`, `RUSTYOS-052`).
     pub wifi_signal_percent: Option<u8>,
     /// Whether a Bluetooth adapter is available (`RUSTYOS-027`).
@@ -318,10 +320,22 @@ pub struct QuickSettingsRenderState<'a> {
     pub ac_online: bool,
     /// Whether battery is actively charging (`RUSTYOS-052`).
     pub battery_charging: bool,
+    /// Whether sysfs display backlight control is available (`RUSTYOS-053`).
+    pub brightness_available: bool,
+    /// Current hardware backlight brightness percentage (`0..=100`, `RUSTYOS-053`).
+    pub brightness_percent: u8,
     /// Master output volume percentage (`0..=100`).
     pub volume_percent: u8,
     /// Master audio mute flag.
     pub audio_muted: bool,
+    /// Whether an active MPRIS2 media player is registered (`RUSTYOS-053`).
+    pub media_active: bool,
+    /// Whether active MPRIS2 media playback is currently playing (`RUSTYOS-053`).
+    pub media_playing: bool,
+    /// Active MPRIS2 track title (empty when nothing is playing) (`RUSTYOS-053`).
+    pub media_title: &'a str,
+    /// Whether Focus (Do Not Disturb) notification suppression is active (`RUSTYOS-053`).
+    pub focus_mode: bool,
     /// Median frame interval in microseconds (`p50`).
     pub frame_p50_us: u64,
     /// Number of visible windows on active workspace.
@@ -651,13 +665,15 @@ pub struct OsdRenderState<'a> {
 pub enum QuickSettingsSliderDrag {
     /// Master Sound volume slider.
     Sound,
-    /// Shell Display / Glass Opacity slider.
-    GlassOpacity,
+    /// Display brightness slider (falling back to glass opacity when no backlight exists) (`RUSTYOS-053`).
+    Display,
 }
 
 /// Interactive click target inside or outside the Quick Settings popover (`RUSTYOS-021`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QuickSettingsHit {
+    /// Toggle Wi-Fi radio via NetworkManager / `nmcli` (`RUSTYOS-053`).
+    ToggleWifi,
     /// Mute / unmute audio output.
     ToggleMute,
     /// Decrease audio volume.
@@ -668,14 +684,22 @@ pub enum QuickSettingsHit {
     SetVolumePercent(u8),
     /// Toggle `reduce_transparency` high-contrast mode (`RUSTYOS-048`).
     ToggleReduceTransparency,
-    /// Directly set shell glass opacity (`35..=100` percent) along the Glass slider (`RUSTYOS-048`).
-    SetGlassOpacityPercent(u8),
+    /// Set Display brightness (or fallback glass opacity) along the Display track (`0..=100`) (`RUSTYOS-053`).
+    SetDisplayPercent(u8),
+    /// Skip to previous track via MPRIS2 (`RUSTYOS-053`).
+    MediaPrev,
+    /// Toggle playback via MPRIS2 (`RUSTYOS-053`).
+    MediaPlayPause,
+    /// Skip to next track via MPRIS2 (`RUSTYOS-053`).
+    MediaNext,
     /// Toggle workspace layout (`Floating <-> MasterStack`).
     ToggleLayout,
+    /// Open Workspace Overview from Control Center (`RUSTYOS-053`).
+    ToggleOverview,
     /// Toggle accessibility `reduced_motion`.
     ToggleReducedMotion,
-    /// Switch to Spotlight application launcher.
-    OpenSpotlight,
+    /// Toggle Focus (Do Not Disturb) notification suppression (`RUSTYOS-053`).
+    ToggleFocus,
     /// Trigger immediate background telemetry refresh.
     RefreshMetrics,
     /// Toggle Bluetooth adapter power via BlueZ (`RUSTYOS-027`).
@@ -1350,10 +1374,10 @@ fn rect_contains(rect: Rectangle<i32, smithay::utils::Physical>, x: f64, y: f64)
 }
 
 fn quick_settings_rect(width: i32, height: i32) -> (i32, i32, i32, i32) {
-    let pop_w = 324.min((width - 24).max(240));
-    let pop_h = 346.min((height - TOP_BAR_HEIGHT - 24).max(240));
+    let pop_w = 316.min((width - 24).max(240));
+    let pop_h = 456.min((height - TOP_BAR_HEIGHT - 20).max(240));
     let pop_x = width - pop_w - 12;
-    let pop_y = TOP_BAR_HEIGHT + 8;
+    let pop_y = TOP_BAR_HEIGHT + 10;
     (pop_x, pop_y, pop_w, pop_h)
 }
 
@@ -1363,75 +1387,105 @@ struct QuickSettingsLayout {
     py: i32,
     pw: i32,
     ph: i32,
-    left_x: i32,
-    conn_card: Rectangle<i32, smithay::utils::Physical>,
-    bt_row: Rectangle<i32, smithay::utils::Physical>,
+    wifi_pill: Rectangle<i32, smithay::utils::Physical>,
+    bt_pill: Rectangle<i32, smithay::utils::Physical>,
+    now_playing_card: Rectangle<i32, smithay::utils::Physical>,
+    media_prev_btn: Rectangle<i32, smithay::utils::Physical>,
+    media_play_btn: Rectangle<i32, smithay::utils::Physical>,
+    media_next_btn: Rectangle<i32, smithay::utils::Physical>,
+    power_pill: Rectangle<i32, smithay::utils::Physical>,
     layout_btn: Rectangle<i32, smithay::utils::Physical>,
-    layout_hit: Rectangle<i32, smithay::utils::Physical>,
+    overview_btn: Rectangle<i32, smithay::utils::Physical>,
     motion_btn: Rectangle<i32, smithay::utils::Physical>,
-    motion_hit: Rectangle<i32, smithay::utils::Physical>,
     transparency_btn: Rectangle<i32, smithay::utils::Physical>,
+    focus_pill: Rectangle<i32, smithay::utils::Physical>,
     display_card: Rectangle<i32, smithay::utils::Physical>,
     display_track: Rectangle<i32, smithay::utils::Physical>,
     sound_card: Rectangle<i32, smithay::utils::Physical>,
     sound_track: Rectangle<i32, smithay::utils::Physical>,
     sound_mute_zone: Rectangle<i32, smithay::utils::Physical>,
-    power_card: Rectangle<i32, smithay::utils::Physical>,
-    search_btn: Rectangle<i32, smithay::utils::Physical>,
-    refresh_btn: Rectangle<i32, smithay::utils::Physical>,
+    sound_left_mute_zone: Rectangle<i32, smithay::utils::Physical>,
     lock_btn: Rectangle<i32, smithay::utils::Physical>,
 }
 
 fn quick_settings_layout(width: i32, height: i32, anim_dy: i32) -> QuickSettingsLayout {
     let (px, base_py, pw, ph) = quick_settings_rect(width, height);
     let py = base_py + anim_dy;
-    let pad = 14;
-    let inner_w = pw - pad * 2;
-    let col_w = (inner_w - 10) / 2;
-    let left_x = px + pad;
-    let right_x = left_x + col_w + 10;
-    let sub_w = (col_w - 8) / 2;
-    let round_off = (sub_w - 46) / 2;
-    let right_btn_mid = right_x + (col_w - 42) / 2;
-    let right_btn_end = right_x + col_w - 42;
-    let track_w = (inner_w - 24).max(24);
+    let gap = 12;
+    let col_w = (pw - gap) / 2;
+    let right_w = pw - col_w - gap;
+    let left_x = px;
+    let right_x = px + col_w + gap;
+    let btn_d = 66.min((col_w - 8) / 2);
+
+    let y_bt = py + 64;
+    let y_row3 = py + 130;
+    let y_row4 = y_row3 + 78;
+    let y_disp = y_row4 + 78;
+    let y_snd = y_disp + 70;
+    let y_lock = y_snd + 70;
+
+    let media_btn_y = y_bt + 10;
+    let media_btn_w = ((right_w - 16) / 3).max(28);
+    let lock_w = 118.min(pw);
+
     QuickSettingsLayout {
         px,
         py,
         pw,
         ph,
-        left_x,
-        conn_card: Rectangle::new(Point::from((left_x, py + 14)), Size::from((col_w, 100))),
-        bt_row: Rectangle::new(Point::from((left_x, py + 64)), Size::from((col_w, 50))),
-        layout_btn: Rectangle::new(
-            Point::from((right_x + round_off, py + 14)),
-            Size::from((46, 46)),
+        wifi_pill: Rectangle::new(Point::from((left_x, py)), Size::from((col_w, 54))),
+        bt_pill: Rectangle::new(Point::from((left_x, y_bt)), Size::from((col_w, 54))),
+        now_playing_card: Rectangle::new(Point::from((right_x, py)), Size::from((right_w, 118))),
+        media_prev_btn: Rectangle::new(
+            Point::from((right_x + 8, media_btn_y)),
+            Size::from((media_btn_w, 36)),
         ),
-        layout_hit: Rectangle::new(Point::from((right_x, py + 14)), Size::from((sub_w, 62))),
-        motion_btn: Rectangle::new(
-            Point::from((right_x + sub_w + 8 + round_off, py + 14)),
-            Size::from((46, 46)),
+        media_play_btn: Rectangle::new(
+            Point::from((right_x + 8 + media_btn_w, media_btn_y)),
+            Size::from((media_btn_w, 36)),
         ),
-        motion_hit: Rectangle::new(
-            Point::from((right_x + sub_w + 8, py + 14)),
-            Size::from((sub_w, 62)),
+        media_next_btn: Rectangle::new(
+            Point::from((right_x + 8 + media_btn_w * 2, media_btn_y)),
+            Size::from((media_btn_w, 36)),
         ),
-        transparency_btn: Rectangle::new(Point::from((right_x, py + 80)), Size::from((col_w, 34))),
-        display_card: Rectangle::new(Point::from((left_x, py + 124)), Size::from((inner_w, 60))),
+        power_pill: Rectangle::new(Point::from((left_x, y_row3 + 3)), Size::from((col_w, 60))),
+        layout_btn: Rectangle::new(Point::from((right_x, y_row3)), Size::from((btn_d, btn_d))),
+        overview_btn: Rectangle::new(
+            Point::from((right_x + right_w - btn_d, y_row3)),
+            Size::from((btn_d, btn_d)),
+        ),
+        motion_btn: Rectangle::new(Point::from((left_x, y_row4)), Size::from((btn_d, btn_d))),
+        transparency_btn: Rectangle::new(
+            Point::from((left_x + col_w - btn_d, y_row4)),
+            Size::from((btn_d, btn_d)),
+        ),
+        focus_pill: Rectangle::new(
+            Point::from((right_x, y_row4 + 3)),
+            Size::from((right_w, 60)),
+        ),
+        display_card: Rectangle::new(Point::from((px, y_disp)), Size::from((pw, 58))),
         display_track: Rectangle::new(
-            Point::from((left_x + 12, py + 154)),
-            Size::from((track_w, 22)),
+            Point::from((px + 34, y_disp + 31)),
+            Size::from(((pw - 68).max(24), 20)),
         ),
-        sound_card: Rectangle::new(Point::from((left_x, py + 194)), Size::from((inner_w, 60))),
+        sound_card: Rectangle::new(Point::from((px, y_snd)), Size::from((pw, 58))),
         sound_track: Rectangle::new(
-            Point::from((left_x + 12, py + 224)),
-            Size::from((track_w, 22)),
+            Point::from((px + 34, y_snd + 31)),
+            Size::from(((pw - 106).max(24), 20)),
         ),
-        sound_mute_zone: Rectangle::new(Point::from((left_x + 12, py + 224)), Size::from((24, 22))),
-        power_card: Rectangle::new(Point::from((left_x, py + 266)), Size::from((col_w, 64))),
-        search_btn: Rectangle::new(Point::from((right_x, py + 272)), Size::from((42, 42))),
-        refresh_btn: Rectangle::new(Point::from((right_btn_mid, py + 272)), Size::from((42, 42))),
-        lock_btn: Rectangle::new(Point::from((right_btn_end, py + 272)), Size::from((42, 42))),
+        sound_mute_zone: Rectangle::new(
+            Point::from((px + pw - 39, y_snd + 23)),
+            Size::from((30, 30)),
+        ),
+        sound_left_mute_zone: Rectangle::new(
+            Point::from((px + 8, y_snd + 28)),
+            Size::from((24, 24)),
+        ),
+        lock_btn: Rectangle::new(
+            Point::from((px + (pw - lock_w) / 2, y_lock)),
+            Size::from((lock_w, 30)),
+        ),
     }
 }
 
@@ -2283,7 +2337,30 @@ pub fn check_top_bar_status_click_for_telemetry(
     )
 }
 
-/// Hit-tests `(x, y)` against the open modular Control Center popover (`RUSTYOS-021`, `RUSTYOS-037`, `RUSTYOS-048`, `RUSTYOS-051`).
+fn rounded_rect_contains(
+    rect: Rectangle<i32, smithay::utils::Physical>,
+    radius: i32,
+    x: f64,
+    y: f64,
+) -> bool {
+    if !rect_contains(rect, x, y) {
+        return false;
+    }
+    let rx = f64::from(rect.loc.x);
+    let ry = f64::from(rect.loc.y);
+    let rw = f64::from(rect.size.w.max(1));
+    let rh = f64::from(rect.size.h.max(1));
+    let r = f64::from(radius).clamp(0.0, rw * 0.5).min(rh * 0.5);
+    let cx = rx + rw * 0.5;
+    let cy = ry + rh * 0.5;
+    let qx = (x - cx).abs() - (rw * 0.5 - r);
+    let qy = (y - cy).abs() - (rh * 0.5 - r);
+    let dx = qx.max(0.0);
+    let dy = qy.max(0.0);
+    dx.hypot(dy) <= r + 0.5
+}
+
+/// Evaluates pointer clicks against floating Control Center islands (`RUSTYOS-053`).
 #[must_use]
 pub fn check_quick_settings_click(
     screen_size: Size<i32, smithay::utils::Physical>,
@@ -2299,26 +2376,58 @@ pub fn check_quick_settings_click(
         return QuickSettingsHit::OutsidePopover;
     }
 
-    if rect_contains(layout.bt_row, x, y) {
+    if rounded_rect_contains(layout.wifi_pill, layout.wifi_pill.size.h / 2, x, y) {
+        return QuickSettingsHit::ToggleWifi;
+    }
+    if rounded_rect_contains(layout.bt_pill, layout.bt_pill.size.h / 2, x, y) {
         return QuickSettingsHit::ToggleBluetooth;
     }
-    if rect_contains(layout.layout_hit, x, y) {
+    if rect_contains(layout.media_prev_btn, x, y) {
+        return QuickSettingsHit::MediaPrev;
+    }
+    if rect_contains(layout.media_play_btn, x, y) {
+        return QuickSettingsHit::MediaPlayPause;
+    }
+    if rect_contains(layout.media_next_btn, x, y) {
+        return QuickSettingsHit::MediaNext;
+    }
+    if rounded_rect_contains(layout.power_pill, layout.power_pill.size.h / 2, x, y) {
+        return QuickSettingsHit::RefreshMetrics;
+    }
+    if rounded_rect_contains(layout.layout_btn, layout.layout_btn.size.h / 2, x, y) {
         return QuickSettingsHit::ToggleLayout;
     }
-    if rect_contains(layout.motion_hit, x, y) {
+    if rounded_rect_contains(layout.overview_btn, layout.overview_btn.size.h / 2, x, y) {
+        return QuickSettingsHit::ToggleOverview;
+    }
+    if rounded_rect_contains(layout.motion_btn, layout.motion_btn.size.h / 2, x, y) {
         return QuickSettingsHit::ToggleReducedMotion;
     }
-    if rect_contains(layout.transparency_btn, x, y) {
+    if rounded_rect_contains(
+        layout.transparency_btn,
+        layout.transparency_btn.size.h / 2,
+        x,
+        y,
+    ) {
         return QuickSettingsHit::ToggleReduceTransparency;
     }
+    if rounded_rect_contains(layout.focus_pill, layout.focus_pill.size.h / 2, x, y) {
+        return QuickSettingsHit::ToggleFocus;
+    }
     if rect_contains(layout.display_track, x, y) {
-        return QuickSettingsHit::SetGlassOpacityPercent(quick_settings_slider_percent(
+        return QuickSettingsHit::SetDisplayPercent(quick_settings_slider_percent(
             screen_size,
-            QuickSettingsSliderDrag::GlassOpacity,
+            QuickSettingsSliderDrag::Display,
             x,
         ));
     }
-    if rect_contains(layout.sound_mute_zone, x, y) {
+    if rounded_rect_contains(
+        layout.sound_mute_zone,
+        layout.sound_mute_zone.size.h / 2,
+        x,
+        y,
+    ) || rect_contains(layout.sound_left_mute_zone, x, y)
+    {
         return QuickSettingsHit::ToggleMute;
     }
     if rect_contains(layout.sound_track, x, y) {
@@ -2328,25 +2437,7 @@ pub fn check_quick_settings_click(
             x,
         ));
     }
-    let search_hit = Rectangle::new(
-        layout.search_btn.loc,
-        Size::from((layout.search_btn.size.w, 56)),
-    );
-    if rect_contains(search_hit, x, y) {
-        return QuickSettingsHit::OpenSpotlight;
-    }
-    let refresh_hit = Rectangle::new(
-        layout.refresh_btn.loc,
-        Size::from((layout.refresh_btn.size.w, 56)),
-    );
-    if rect_contains(refresh_hit, x, y) {
-        return QuickSettingsHit::RefreshMetrics;
-    }
-    let lock_hit = Rectangle::new(
-        layout.lock_btn.loc,
-        Size::from((layout.lock_btn.size.w, 56)),
-    );
-    if rect_contains(lock_hit, x, y) {
+    if rounded_rect_contains(layout.lock_btn, layout.lock_btn.size.h / 2, x, y) {
         return QuickSettingsHit::LockSession;
     }
 
@@ -2362,9 +2453,15 @@ pub fn check_quick_settings_slider_drag(
 ) -> Option<QuickSettingsSliderDrag> {
     let layout = quick_settings_layout(screen_size.w, screen_size.h, 0);
     if rect_contains(layout.display_track, x, y) {
-        Some(QuickSettingsSliderDrag::GlassOpacity)
+        Some(QuickSettingsSliderDrag::Display)
     } else if rect_contains(layout.sound_track, x, y)
-        && !rect_contains(layout.sound_mute_zone, x, y)
+        && !rounded_rect_contains(
+            layout.sound_mute_zone,
+            layout.sound_mute_zone.size.h / 2,
+            x,
+            y,
+        )
+        && !rect_contains(layout.sound_left_mute_zone, x, y)
     {
         Some(QuickSettingsSliderDrag::Sound)
     } else {
@@ -2372,7 +2469,7 @@ pub fn check_quick_settings_slider_drag(
     }
 }
 
-/// Maps pointer `x` along an active Control Center slider track to `0..=100` (Sound) or `35..=100` (`GlassOpacity`) (`RUSTYOS-051`).
+/// Maps pointer `x` along an active Control Center slider track to `0..=100` (`RUSTYOS-053`).
 #[must_use]
 pub fn quick_settings_slider_percent(
     screen_size: Size<i32, smithay::utils::Physical>,
@@ -2382,18 +2479,13 @@ pub fn quick_settings_slider_percent(
     let layout = quick_settings_layout(screen_size.w, screen_size.h, 0);
     let track = match drag {
         QuickSettingsSliderDrag::Sound => layout.sound_track,
-        QuickSettingsSliderDrag::GlassOpacity => layout.display_track,
+        QuickSettingsSliderDrag::Display => layout.display_track,
     };
     let track_x = f64::from(track.loc.x);
     let track_w = f64::from(track.size.w.max(1));
     let norm = ((x - track_x) / track_w).clamp(0.0, 1.0);
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    match drag {
-        QuickSettingsSliderDrag::Sound => (norm * 100.0).round() as u8,
-        QuickSettingsSliderDrag::GlassOpacity => {
-            ((35.0 + norm * 65.0).round() as u8).clamp(35, 100)
-        }
-    }
+    ((norm * 100.0).round() as u8).clamp(0, 100)
 }
 
 fn truncate_ascii(text: &str, max_chars: usize) -> String {
@@ -2815,7 +2907,29 @@ fn render_spotlight_modal(
     }
 }
 
-#[allow(clippy::too_many_lines)]
+fn render_quick_settings_slider_solid(
+    elements: &mut Vec<SolidColorRenderElement>,
+    card: Rectangle<i32, smithay::utils::Physical>,
+    track: Rectangle<i32, smithay::utils::Physical>,
+    norm: f32,
+    fill_color: Color32F,
+) {
+    elements.push(make_solid_element(card, COLOR_SURFACE_OVERLAY));
+    elements.push(make_solid_element(track, COLOR_SURFACE));
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
+    let fill_w = ((track.size.w as f32) * norm.clamp(0.0, 1.0)).round() as i32;
+    if fill_w > 0 {
+        elements.push(make_solid_element(
+            Rectangle::new(track.loc, Size::from((fill_w, track.size.h))),
+            fill_color,
+        ));
+    }
+}
+
 fn render_quick_settings_popover(
     elements: &mut Vec<SolidColorRenderElement>,
     width: i32,
@@ -2823,101 +2937,53 @@ fn render_quick_settings_popover(
     qs: &QuickSettingsRenderState<'_>,
 ) {
     let layout = quick_settings_layout(width, height, 0);
-
-    // 1. Outer glass rim + elevated body
-    elements.push(make_solid_element(
-        Rectangle::new(
-            Point::from((layout.px - 1, layout.py - 1)),
-            Size::from((layout.pw + 2, layout.ph + 2)),
-        ),
-        COLOR_BORDER_HIGHLIGHT,
-    ));
-    elements.push(make_solid_element(
-        Rectangle::new(
-            Point::from((layout.px, layout.py)),
-            Size::from((layout.pw, layout.ph)),
-        ),
-        COLOR_SURFACE_ELEVATED,
-    ));
-
-    // 2. Connectivity card + round toggle tiles + Transparency pill
-    elements.push(make_solid_element(layout.conn_card, COLOR_SURFACE_OVERLAY));
-    elements.push(make_solid_element(
-        layout.layout_btn,
-        if qs.layout_mode == "master-stack" {
-            COLOR_ACCENT_MUTED
-        } else {
-            COLOR_SURFACE_OVERLAY
-        },
-    ));
-    elements.push(make_solid_element(
-        layout.motion_btn,
-        if qs.reduced_motion {
-            COLOR_ACCENT_MUTED
-        } else {
-            COLOR_SURFACE_OVERLAY
-        },
-    ));
-    elements.push(make_solid_element(
-        layout.transparency_btn,
-        if qs.reduce_transparency {
-            COLOR_ACCENT_MUTED
-        } else {
-            COLOR_SURFACE_OVERLAY
-        },
-    ));
-
-    // 3. Display (Glass Opacity) & Sound full-width slider cards
-    elements.push(make_solid_element(
-        layout.display_card,
-        COLOR_SURFACE_OVERLAY,
-    ));
-    elements.push(make_solid_element(layout.display_track, COLOR_SURFACE));
-    let glass_norm = (crate::config::clamp_glass_opacity(qs.glass_opacity)
-        - crate::config::MIN_GLASS_OPACITY)
-        / (1.0 - crate::config::MIN_GLASS_OPACITY);
-    #[allow(
-        clippy::cast_precision_loss,
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss
-    )]
-    let glass_fill_w =
-        ((layout.display_track.size.w as f32) * glass_norm.clamp(0.0, 1.0)).round() as i32;
-    if glass_fill_w > 0 {
+    let solid_tiles = [
+        (layout.wifi_pill, qs.net_connected || qs.wifi_enabled),
+        (layout.bt_pill, qs.bt_available && qs.bt_powered),
+        (layout.now_playing_card, false),
+        (layout.power_pill, false),
+        (layout.layout_btn, qs.layout_mode == "master-stack"),
+        (layout.overview_btn, false),
+        (layout.motion_btn, qs.reduced_motion),
+        (layout.transparency_btn, qs.reduce_transparency),
+        (layout.focus_pill, qs.focus_mode),
+        (layout.lock_btn, false),
+    ];
+    for (rect, active) in solid_tiles {
         elements.push(make_solid_element(
-            Rectangle::new(
-                layout.display_track.loc,
-                Size::from((glass_fill_w, layout.display_track.size.h)),
-            ),
-            COLOR_ACCENT_HOVER,
-        ));
-    }
-
-    elements.push(make_solid_element(layout.sound_card, COLOR_SURFACE_OVERLAY));
-    elements.push(make_solid_element(layout.sound_track, COLOR_SURFACE));
-    let fill_w = (layout.sound_track.size.w * i32::from(qs.volume_percent.min(100))) / 100;
-    if fill_w > 0 {
-        elements.push(make_solid_element(
-            Rectangle::new(
-                layout.sound_track.loc,
-                Size::from((fill_w, layout.sound_track.size.h)),
-            ),
-            if qs.audio_muted {
-                COLOR_SUBTLE
+            rect,
+            if active {
+                COLOR_ACCENT_MUTED
             } else {
-                COLOR_ACCENT
+                COLOR_SURFACE_OVERLAY
             },
         ));
     }
 
-    // 4. Bottom Power card + round utility actions
-    elements.push(make_solid_element(layout.power_card, COLOR_SURFACE_OVERLAY));
-    elements.push(make_solid_element(layout.search_btn, COLOR_SURFACE_OVERLAY));
-    elements.push(make_solid_element(
-        layout.refresh_btn,
-        COLOR_SURFACE_OVERLAY,
-    ));
-    elements.push(make_solid_element(layout.lock_btn, COLOR_SURFACE_OVERLAY));
+    let display_norm = if qs.brightness_available {
+        f32::from(qs.brightness_percent.min(100)) / 100.0
+    } else {
+        (crate::config::clamp_glass_opacity(qs.glass_opacity) - crate::config::MIN_GLASS_OPACITY)
+            / (1.0 - crate::config::MIN_GLASS_OPACITY)
+    };
+    render_quick_settings_slider_solid(
+        elements,
+        layout.display_card,
+        layout.display_track,
+        display_norm,
+        COLOR_ACCENT_HOVER,
+    );
+    render_quick_settings_slider_solid(
+        elements,
+        layout.sound_card,
+        layout.sound_track,
+        f32::from(qs.volume_percent.min(100)) / 100.0,
+        if qs.audio_muted {
+            COLOR_SUBTLE
+        } else {
+            COLOR_ACCENT
+        },
+    );
 }
 
 /// Generates custom GLES render elements for `TopBar`, `Dock`, and active shell overlays.
@@ -3866,168 +3932,154 @@ fn render_overview_text(
     }
 }
 
-const QS_TEXT_BRIGHT: [u8; 4] = [248, 244, 255, 255];
-const QS_TEXT_MUTED: [u8; 4] = [182, 172, 204, 255];
+const QS_TEXT_BRIGHT: [u8; 4] = [255, 253, 255, 255];
+const QS_TEXT_MUTED: [u8; 4] = [226, 222, 238, 240];
 
-fn render_control_center_slider_header(
+fn concise_wifi_subtitle(label: &str, connected: bool, wifi_enabled: bool) -> String {
+    let cleaned = label
+        .trim()
+        .strip_prefix("Wi-Fi:")
+        .map_or_else(|| label.trim(), str::trim);
+    if !wifi_enabled && !connected {
+        "Off".to_owned()
+    } else if !connected {
+        "Not Connected".to_owned()
+    } else if cleaned.eq_ignore_ascii_case("Wi-Fi Connected") || cleaned.is_empty() {
+        "Connected".to_owned()
+    } else {
+        truncate_ascii(cleaned, 11)
+    }
+}
+
+fn concise_bt_subtitle(bt_label: &str, bt_available: bool, bt_powered: bool) -> String {
+    if !bt_available {
+        return "Unavailable".to_owned();
+    }
+    if !bt_powered {
+        return "Off".to_owned();
+    }
+    let cleaned = bt_label
+        .trim()
+        .strip_prefix("BT:")
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("On");
+    truncate_ascii(cleaned, 11)
+}
+
+fn render_control_center_capsule_text(
     text_cache: &mut crate::text::TextCache,
     renderer: &mut GlesRenderer,
-    card: Rectangle<i32, smithay::utils::Physical>,
+    pill: Rectangle<i32, smithay::utils::Physical>,
     title: &str,
-    value_label: &str,
+    sub: &str,
+    bright: bool,
     elements: &mut Vec<MemoryRenderBufferRenderElement<GlesRenderer>>,
 ) {
-    if let Some(el) = text_cache.render_label(
+    let top_y = pill.loc.y + (pill.size.h - 29) / 2;
+    if let Some(el) = text_cache.render_label_weighted(
         renderer,
         title,
-        11.5,
-        QS_TEXT_BRIGHT,
-        Point::from((card.loc.x + 12, card.loc.y + 8)),
+        crate::text::FontWeight::Bold,
+        12.0,
+        if bright {
+            QS_TEXT_BRIGHT
+        } else {
+            QS_TEXT_MUTED
+        },
+        Point::from((pill.loc.x + 54, top_y)),
     ) {
         elements.push(el);
     }
-    let (vw, _) = text_cache.measure_text(value_label, 10.5);
     if let Some(el) = text_cache.render_label(
         renderer,
-        value_label,
+        sub,
         10.5,
         QS_TEXT_MUTED,
-        Point::from((card.loc.x + card.size.w - 12 - vw, card.loc.y + 9)),
+        Point::from((pill.loc.x + 54, top_y + 16)),
     ) {
         elements.push(el);
     }
 }
 
-fn render_control_center_top_row_labels(
+fn render_cc_secondary_labels(
     text_cache: &mut crate::text::TextCache,
     renderer: &mut GlesRenderer,
     layout: &QuickSettingsLayout,
     qs: &QuickSettingsRenderState<'_>,
     elements: &mut Vec<MemoryRenderBufferRenderElement<GlesRenderer>>,
 ) {
-    let net_sub = truncate_ascii(qs.network_label, 12);
-    let bt_sub = truncate_ascii(qs.bt_label, 12);
-    for (title, sub, bright, y_off) in [
-        ("Wi-Fi", net_sub.as_str(), true, 12),
-        ("Bluetooth", bt_sub.as_str(), qs.bt_available, 56),
-    ] {
-        if let Some(el) = text_cache.render_label(
-            renderer,
-            title,
-            11.5,
-            if bright {
-                QS_TEXT_BRIGHT
-            } else {
-                QS_TEXT_MUTED
-            },
-            Point::from((layout.left_x + 52, layout.conn_card.loc.y + y_off)),
-        ) {
-            elements.push(el);
-        }
-        if let Some(el) = text_cache.render_label(
-            renderer,
-            sub,
-            10.0,
-            QS_TEXT_MUTED,
-            Point::from((layout.left_x + 52, layout.conn_card.loc.y + y_off + 16)),
-        ) {
-            elements.push(el);
-        }
-    }
-
-    let layout_cap = if qs.layout_mode == "master-stack" {
-        "Tile"
+    let media_label = if qs.media_active && !qs.media_title.trim().is_empty() {
+        truncate_ascii(qs.media_title.trim(), 15)
     } else {
-        "Float"
+        "Not Playing".to_owned()
     };
-    for (hit, cap, y_base) in [
-        (layout.layout_hit, layout_cap, layout.layout_btn.loc.y),
-        (layout.motion_hit, "Motion", layout.motion_btn.loc.y),
-    ] {
-        if let Some(el) = text_cache.render_label_centered(
-            renderer,
-            cap,
-            10.0,
-            QS_TEXT_BRIGHT,
-            Rectangle::new(
-                Point::from((hit.loc.x, y_base + 47)),
-                Size::from((hit.size.w, 15)),
-            ),
-        ) {
-            elements.push(el);
-        }
-    }
-    let transp_label = if qs.reduce_transparency {
-        "Opaque"
-    } else {
-        "Clear Glass"
-    };
-    if let Some(el) = text_cache.render_label(
+    if let Some(el) = text_cache.render_label_weighted(
         renderer,
-        transp_label,
-        11.0,
+        &media_label,
+        crate::text::FontWeight::Bold,
+        12.0,
         QS_TEXT_BRIGHT,
         Point::from((
-            layout.transparency_btn.loc.x + 34,
-            layout.transparency_btn.loc.y + 10,
+            layout.now_playing_card.loc.x + 14,
+            layout.now_playing_card.loc.y + 53,
         )),
     ) {
         elements.push(el);
     }
-}
 
-fn render_control_center_power_and_actions(
-    text_cache: &mut crate::text::TextCache,
-    renderer: &mut GlesRenderer,
-    layout: &QuickSettingsLayout,
-    qs: &QuickSettingsRenderState<'_>,
-    elements: &mut Vec<MemoryRenderBufferRenderElement<GlesRenderer>>,
-) {
-    if let Some(el) = text_cache.render_label(
-        renderer,
-        "Power",
-        11.5,
-        QS_TEXT_BRIGHT,
-        Point::from((layout.power_card.loc.x + 52, layout.power_card.loc.y + 15)),
-    ) {
-        elements.push(el);
-    }
-    let power_sub = if qs.has_battery {
-        if qs.ac_online {
-            format!("{}% • AC", qs.battery_percent)
-        } else {
-            format!("{}%", qs.battery_percent)
-        }
-    } else {
-        "AC Power".to_owned()
-    };
-    if let Some(el) = text_cache.render_label(
-        renderer,
-        &power_sub,
-        10.0,
-        QS_TEXT_MUTED,
-        Point::from((layout.power_card.loc.x + 52, layout.power_card.loc.y + 33)),
-    ) {
-        elements.push(el);
-    }
-
-    for (btn, cap) in [
-        (layout.search_btn, "Search"),
-        (layout.refresh_btn, "Sync"),
-        (layout.lock_btn, "Lock"),
-    ] {
-        if let Some(el) = text_cache.render_label_centered(
+    if qs.focus_mode {
+        render_control_center_capsule_text(
+            text_cache,
             renderer,
-            cap,
-            10.0,
-            QS_TEXT_MUTED,
-            Rectangle::new(
-                Point::from((btn.loc.x - 4, btn.loc.y + btn.size.h + 3)),
-                Size::from((btn.size.w + 8, 14)),
-            ),
+            layout.focus_pill,
+            "Focus",
+            "On",
+            true,
+            elements,
+        );
+    } else if let Some(el) = text_cache.render_label_weighted(
+        renderer,
+        "Focus",
+        crate::text::FontWeight::Bold,
+        12.0,
+        QS_TEXT_BRIGHT,
+        Point::from((
+            layout.focus_pill.loc.x + 56,
+            layout.focus_pill.loc.y + (layout.focus_pill.size.h - 15) / 2,
+        )),
+    ) {
+        elements.push(el);
+    }
+
+    for (card, title) in [
+        (layout.display_card, "Display"),
+        (layout.sound_card, "Sound"),
+    ] {
+        if let Some(el) = text_cache.render_label_weighted(
+            renderer,
+            title,
+            crate::text::FontWeight::Bold,
+            12.0,
+            QS_TEXT_BRIGHT,
+            Point::from((card.loc.x + 14, card.loc.y + 9)),
         ) {
             elements.push(el);
         }
+    }
+
+    if let Some(el) = text_cache.render_label_centered_weighted(
+        renderer,
+        "Lock Screen",
+        crate::text::FontWeight::Bold,
+        11.0,
+        QS_TEXT_BRIGHT,
+        Rectangle::new(
+            Point::from((layout.lock_btn.loc.x, layout.lock_btn.loc.y)),
+            Size::from((layout.lock_btn.size.w, layout.lock_btn.size.h)),
+        ),
+    ) {
+        elements.push(el);
     }
 }
 
@@ -4043,38 +4095,48 @@ fn render_quick_settings_text(
     let _ = qs.frame_p50_us;
     let _ = qs.window_count;
 
-    render_control_center_top_row_labels(text_cache, renderer, &layout, qs, elements);
-
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let glass_pct = (crate::config::clamp_glass_opacity(qs.glass_opacity) * 100.0).round() as u8;
-    let glass_val = if qs.reduce_transparency {
-        "Opaque".to_owned()
-    } else {
-        format!("{glass_pct}%")
-    };
-    render_control_center_slider_header(
+    let wifi_sub = concise_wifi_subtitle(qs.network_label, qs.net_connected, qs.wifi_enabled);
+    render_control_center_capsule_text(
         text_cache,
         renderer,
-        layout.display_card,
-        "Display",
-        &glass_val,
-        elements,
-    );
-    let vol_val = if qs.audio_muted {
-        "Muted".to_owned()
-    } else {
-        format!("{}%", qs.volume_percent)
-    };
-    render_control_center_slider_header(
-        text_cache,
-        renderer,
-        layout.sound_card,
-        "Sound",
-        &vol_val,
+        layout.wifi_pill,
+        "Wi-Fi",
+        &wifi_sub,
+        true,
         elements,
     );
 
-    render_control_center_power_and_actions(text_cache, renderer, &layout, qs, elements);
+    let bt_sub = concise_bt_subtitle(qs.bt_label, qs.bt_available, qs.bt_powered);
+    render_control_center_capsule_text(
+        text_cache,
+        renderer,
+        layout.bt_pill,
+        "Bluetooth",
+        &bt_sub,
+        qs.bt_available,
+        elements,
+    );
+
+    let power_sub = if qs.has_battery {
+        if qs.ac_online {
+            format!("{}% • AC", qs.battery_percent)
+        } else {
+            format!("{}%", qs.battery_percent)
+        }
+    } else {
+        "AC Power".to_owned()
+    };
+    render_control_center_capsule_text(
+        text_cache,
+        renderer,
+        layout.power_pill,
+        "Power",
+        &power_sub,
+        true,
+        elements,
+    );
+
+    render_cc_secondary_labels(text_cache, renderer, &layout, qs, elements);
 }
 
 /// Generates centered title text element for a window's SSD titlebar (`RUSTYOS-020`).
@@ -4108,8 +4170,6 @@ const RGBA_ACCENT_MUTED: [u8; 4] = [118, 80, 181, 255]; // #7650B5
 const RGBA_BORDER: [u8; 4] = [255, 255, 255, 31];
 const RGBA_BORDER_HIGHLIGHT: [u8; 4] = [255, 255, 255, 56];
 const RGBA_DANGER: [u8; 4] = [229, 107, 117, 255];
-const RGBA_WARNING: [u8; 4] = [232, 196, 119, 255];
-const RGBA_SUCCESS: [u8; 4] = [131, 214, 160, 255];
 
 fn rgba_to_premul_color32f(rgba: [u8; 4]) -> Color32F {
     let a = f32::from(rgba[3]) / 255.0;
@@ -4483,18 +4543,146 @@ fn osd_glyph_kind(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn push_control_center_slider(
+fn push_cc_capsule_icon(
+    out: &mut Vec<CompositorRenderElement>,
+    shape_cache: &mut crate::surfaces::UiShapeCache,
+    renderer: &mut GlesRenderer,
+    pill: Rectangle<i32, smithay::utils::Physical>,
+    active: bool,
+    glyph: crate::surfaces::UiGlyphKind,
+    active_glyph_rgba: [u8; 4],
+    inactive_glyph_rgba: [u8; 4],
+) {
+    let circle_d = 36;
+    let circle_x = pill.loc.x + 10;
+    let circle_y = pill.loc.y + (pill.size.h - circle_d) / 2;
+    let glyph_size = 17;
+    if let Some(el) = shape_cache.ui_glyph_element(
+        renderer,
+        glyph,
+        glyph_size,
+        if active {
+            active_glyph_rgba
+        } else {
+            inactive_glyph_rgba
+        },
+        Point::from((
+            circle_x + (circle_d - glyph_size) / 2,
+            circle_y + (circle_d - glyph_size) / 2,
+        )),
+    ) {
+        out.push(CompositorRenderElement::Memory(el));
+    }
+    let circle_fill = if active {
+        [252, 252, 255, 252]
+    } else {
+        [255, 255, 255, 42]
+    };
+    let circle_border = if active {
+        [255, 255, 255, 255]
+    } else {
+        [255, 255, 255, 62]
+    };
+    if let Some(el) = shape_cache.circle_element(
+        renderer,
+        circle_d,
+        circle_fill,
+        Some(circle_border),
+        Point::from((circle_x, circle_y)),
+    ) {
+        out.push(CompositorRenderElement::Memory(el));
+    }
+}
+
+fn push_cc_now_playing_contents(
+    out: &mut Vec<CompositorRenderElement>,
+    shape_cache: &mut crate::surfaces::UiShapeCache,
+    renderer: &mut GlesRenderer,
+    layout: &QuickSettingsLayout,
+    qs: &QuickSettingsRenderState<'_>,
+) {
+    let card = layout.now_playing_card;
+    let art_rect = Rectangle::new(
+        Point::from((card.loc.x + 14, card.loc.y + 12)),
+        Size::from((36, 36)),
+    );
+    let note_rgba = if qs.media_active {
+        [252, 250, 255, 245]
+    } else {
+        [244, 240, 255, 130]
+    };
+    if let Some(el) = shape_cache.ui_glyph_element(
+        renderer,
+        crate::surfaces::UiGlyphKind::MusicNote,
+        16,
+        note_rgba,
+        Point::from((art_rect.loc.x + 10, art_rect.loc.y + 10)),
+    ) {
+        out.push(CompositorRenderElement::Memory(el));
+    }
+    let art_bg = if qs.media_active {
+        [108, 90, 224, 215]
+    } else {
+        [255, 255, 255, 38]
+    };
+    push_rounded_glass_box(
+        out,
+        shape_cache,
+        renderer,
+        art_rect,
+        9,
+        art_bg,
+        Some([255, 255, 255, 44]),
+    );
+
+    let play_kind = if qs.media_playing {
+        crate::surfaces::UiGlyphKind::MediaPause
+    } else {
+        crate::surfaces::UiGlyphKind::MediaPlay
+    };
+    let transport_tint = if qs.media_active {
+        [255, 252, 255, 248]
+    } else {
+        [240, 236, 248, 200]
+    };
+    for (btn_rect, kind, g_size) in [
+        (
+            layout.media_prev_btn,
+            crate::surfaces::UiGlyphKind::MediaPrev,
+            17,
+        ),
+        (layout.media_play_btn, play_kind, 20),
+        (
+            layout.media_next_btn,
+            crate::surfaces::UiGlyphKind::MediaNext,
+            17,
+        ),
+    ] {
+        if let Some(el) = shape_cache.ui_glyph_element(
+            renderer,
+            kind,
+            g_size,
+            transport_tint,
+            Point::from((
+                btn_rect.loc.x + (btn_rect.size.w - g_size) / 2,
+                btn_rect.loc.y + (btn_rect.size.h - g_size) / 2,
+            )),
+        ) {
+            out.push(CompositorRenderElement::Memory(el));
+        }
+    }
+}
+
+fn push_cc_thin_slider(
     out: &mut Vec<CompositorRenderElement>,
     shape_cache: &mut crate::surfaces::UiShapeCache,
     renderer: &mut GlesRenderer,
     track: Rectangle<i32, smithay::utils::Physical>,
     norm: f32,
-    icon: crate::surfaces::UiGlyphKind,
     active_fill: bool,
-    glass_opacity: f32,
-    reduce_transparency: bool,
 ) {
-    let thumb_d = track.size.h - 4;
+    let bar_h = 6;
+    let bar_y = track.loc.y + (track.size.h - bar_h) / 2;
     #[allow(
         clippy::cast_precision_loss,
         clippy::cast_possible_truncation,
@@ -4502,60 +4690,223 @@ fn push_control_center_slider(
     )]
     let fill_w = ((track.size.w as f32) * norm.clamp(0.0, 1.0))
         .round()
-        .clamp(f32::from(thumb_d as i16), track.size.w as f32) as i32;
-    let icon_fg = if active_fill {
-        [32, 22, 54, 245]
-    } else {
-        [244, 240, 250, 255]
-    };
-    if let Some(el) = shape_cache.ui_glyph_element(
-        renderer,
-        icon,
-        14,
-        icon_fg,
-        Point::from((track.loc.x + 5, track.loc.y + (track.size.h - 14) / 2)),
-    ) {
-        out.push(CompositorRenderElement::Memory(el));
-    }
-    let knob_x = (track.loc.x + fill_w - thumb_d - 2)
-        .clamp(track.loc.x + 2, track.loc.x + track.size.w - thumb_d - 2);
-    if let Some(el) = shape_cache.circle_element(
-        renderer,
-        thumb_d,
-        [255, 252, 255, 250],
-        Some([205, 192, 232, 160]),
-        Point::from((knob_x, track.loc.y + 2)),
-    ) {
-        out.push(CompositorRenderElement::Memory(el));
-    }
+        .clamp(6.0, track.size.w as f32) as i32;
     let fill_rgba = if active_fill {
-        [246, 240, 255, 232]
+        [255, 253, 255, 245]
     } else {
-        [152, 140, 174, 175]
+        [190, 184, 204, 185]
     };
     push_rounded_glass_box(
         out,
         shape_cache,
         renderer,
-        Rectangle::new(track.loc, Size::from((fill_w, track.size.h))),
-        track.size.h / 2,
+        Rectangle::new(
+            Point::from((track.loc.x, bar_y)),
+            Size::from((fill_w, bar_h)),
+        ),
+        bar_h / 2,
         fill_rgba,
         None,
     );
-    push_liquid_glass_panel(
+    push_rounded_glass_box(
         out,
         shape_cache,
         renderer,
-        track,
-        track.size.h / 2,
-        crate::surfaces::GlassPanelStyle::ControlModule,
-        glass_opacity,
-        reduce_transparency,
+        Rectangle::new(
+            Point::from((track.loc.x, bar_y)),
+            Size::from((track.size.w, bar_h)),
+        ),
+        bar_h / 2,
+        [255, 255, 255, 58],
         None,
     );
 }
 
-#[allow(clippy::too_many_lines)]
+fn push_cc_display_slider(
+    out: &mut Vec<CompositorRenderElement>,
+    shape_cache: &mut crate::surfaces::UiShapeCache,
+    renderer: &mut GlesRenderer,
+    layout: &QuickSettingsLayout,
+    qs: &QuickSettingsRenderState<'_>,
+) {
+    let white = [255, 253, 255, 245];
+    let disp_cy = layout.display_track.loc.y + layout.display_track.size.h / 2;
+    if let Some(el) = shape_cache.ui_glyph_element(
+        renderer,
+        crate::surfaces::UiGlyphKind::Sun,
+        12,
+        white,
+        Point::from((layout.display_card.loc.x + 14, disp_cy - 6)),
+    ) {
+        out.push(CompositorRenderElement::Memory(el));
+    }
+    if let Some(el) = shape_cache.ui_glyph_element(
+        renderer,
+        crate::surfaces::UiGlyphKind::Sun,
+        16,
+        white,
+        Point::from((
+            layout.display_card.loc.x + layout.display_card.size.w - 28,
+            disp_cy - 8,
+        )),
+    ) {
+        out.push(CompositorRenderElement::Memory(el));
+    }
+    let disp_norm = if qs.brightness_available {
+        f32::from(qs.brightness_percent.min(100)) / 100.0
+    } else {
+        (crate::config::clamp_glass_opacity(qs.glass_opacity) - crate::config::MIN_GLASS_OPACITY)
+            / (1.0 - crate::config::MIN_GLASS_OPACITY)
+    };
+    push_cc_thin_slider(
+        out,
+        shape_cache,
+        renderer,
+        layout.display_track,
+        disp_norm,
+        true,
+    );
+}
+
+fn push_cc_sound_slider(
+    out: &mut Vec<CompositorRenderElement>,
+    shape_cache: &mut crate::surfaces::UiShapeCache,
+    renderer: &mut GlesRenderer,
+    layout: &QuickSettingsLayout,
+    qs: &QuickSettingsRenderState<'_>,
+) {
+    let white = [255, 253, 255, 245];
+    let snd_cy = layout.sound_track.loc.y + layout.sound_track.size.h / 2;
+    if let Some(el) = shape_cache.ui_glyph_element(
+        renderer,
+        crate::surfaces::UiGlyphKind::Volume {
+            level_percent: 0,
+            muted: false,
+        },
+        13,
+        white,
+        Point::from((layout.sound_card.loc.x + 13, snd_cy - 6)),
+    ) {
+        out.push(CompositorRenderElement::Memory(el));
+    }
+    if let Some(el) = shape_cache.ui_glyph_element(
+        renderer,
+        crate::surfaces::UiGlyphKind::Volume {
+            level_percent: 90,
+            muted: false,
+        },
+        15,
+        white,
+        Point::from((
+            layout.sound_card.loc.x + layout.sound_card.size.w - 64,
+            snd_cy - 7,
+        )),
+    ) {
+        out.push(CompositorRenderElement::Memory(el));
+    }
+    let mute_fg = if qs.audio_muted {
+        [248, 86, 86, 255]
+    } else {
+        white
+    };
+    if let Some(el) = shape_cache.ui_glyph_element(
+        renderer,
+        crate::surfaces::UiGlyphKind::Volume {
+            level_percent: qs.volume_percent,
+            muted: qs.audio_muted,
+        },
+        15,
+        mute_fg,
+        Point::from((
+            layout.sound_mute_zone.loc.x + (layout.sound_mute_zone.size.w - 15) / 2,
+            layout.sound_mute_zone.loc.y + (layout.sound_mute_zone.size.h - 15) / 2,
+        )),
+    ) {
+        out.push(CompositorRenderElement::Memory(el));
+    }
+    let mute_circle_bg = if qs.audio_muted {
+        [252, 252, 255, 245]
+    } else {
+        [255, 255, 255, 42]
+    };
+    if let Some(el) = shape_cache.circle_element(
+        renderer,
+        layout.sound_mute_zone.size.w,
+        mute_circle_bg,
+        Some([255, 255, 255, 68]),
+        Point::from((layout.sound_mute_zone.loc.x, layout.sound_mute_zone.loc.y)),
+    ) {
+        out.push(CompositorRenderElement::Memory(el));
+    }
+    let vol_norm = f32::from(qs.volume_percent.min(100)) / 100.0;
+    push_cc_thin_slider(
+        out,
+        shape_cache,
+        renderer,
+        layout.sound_track,
+        vol_norm,
+        !qs.audio_muted,
+    );
+}
+
+fn push_cc_round_toggle_buttons(
+    out: &mut Vec<CompositorRenderElement>,
+    shape_cache: &mut crate::surfaces::UiShapeCache,
+    renderer: &mut GlesRenderer,
+    layout: &QuickSettingsLayout,
+    qs: &QuickSettingsRenderState<'_>,
+) {
+    let white = [255, 252, 255, 255];
+    let is_tile = qs.layout_mode == "master-stack";
+    for (btn_rect, active, kind) in [
+        (
+            layout.layout_btn,
+            is_tile,
+            crate::surfaces::UiGlyphKind::LayoutSplit,
+        ),
+        (
+            layout.overview_btn,
+            false,
+            crate::surfaces::UiGlyphKind::OverviewSpaces,
+        ),
+        (
+            layout.motion_btn,
+            qs.reduced_motion,
+            crate::surfaces::UiGlyphKind::Motion,
+        ),
+        (
+            layout.transparency_btn,
+            qs.reduce_transparency,
+            crate::surfaces::UiGlyphKind::Transparency,
+        ),
+    ] {
+        let g_size = 21;
+        if let Some(el) = shape_cache.ui_glyph_element(
+            renderer,
+            kind,
+            g_size,
+            white,
+            Point::from((
+                btn_rect.loc.x + (btn_rect.size.w - g_size) / 2,
+                btn_rect.loc.y + (btn_rect.size.h - g_size) / 2,
+            )),
+        ) {
+            out.push(CompositorRenderElement::Memory(el));
+        }
+        if active
+            && let Some(el) = shape_cache.circle_element(
+                renderer,
+                btn_rect.size.w,
+                [88, 134, 252, 118],
+                Some([255, 255, 255, 110]),
+                Point::from((btn_rect.loc.x, btn_rect.loc.y)),
+            )
+        {
+            out.push(CompositorRenderElement::Memory(el));
+        }
+    }
+}
+
 fn render_quick_settings_composite(
     out: &mut Vec<CompositorRenderElement>,
     shape_cache: &mut crate::surfaces::UiShapeCache,
@@ -4565,262 +4916,105 @@ fn render_quick_settings_composite(
     qs: &QuickSettingsRenderState<'_>,
 ) {
     let layout = quick_settings_layout(width, height, anim_offset(qs.progress, -16.0));
-    let white = [250, 246, 255, 255];
+    let white = [255, 252, 255, 255];
+    let blue_active = [24, 128, 250, 255];
 
-    // 1. Connectivity circular status toggles (`Wi-Fi`, `Bluetooth`)
-    let wifi_fill = if qs.net_connected {
-        RGBA_ACCENT
-    } else {
-        [255, 255, 255, 36]
-    };
-    if let Some(el) = shape_cache.ui_glyph_element(
+    let wifi_active = qs.net_connected || qs.wifi_enabled;
+    push_cc_capsule_icon(
+        out,
+        shape_cache,
         renderer,
+        layout.wifi_pill,
+        wifi_active,
         crate::surfaces::UiGlyphKind::Wifi {
             connected: qs.net_connected,
             signal_percent: qs.wifi_signal_percent,
         },
-        16,
+        blue_active,
         white,
-        Point::from((layout.left_x + 19, layout.conn_card.loc.y + 18)),
-    ) {
-        out.push(CompositorRenderElement::Memory(el));
-    }
-    if let Some(el) = shape_cache.circle_element(
-        renderer,
-        34,
-        wifi_fill,
-        Some([255, 255, 255, 58]),
-        Point::from((layout.left_x + 10, layout.conn_card.loc.y + 9)),
-    ) {
-        out.push(CompositorRenderElement::Memory(el));
-    }
+    );
 
-    let bt_on = qs.bt_available && qs.bt_powered;
-    let bt_fill = if bt_on {
-        RGBA_ACCENT
-    } else {
-        [255, 255, 255, 34]
-    };
-    if let Some(el) = shape_cache.ui_glyph_element(
+    let bt_active = qs.bt_available && qs.bt_powered;
+    push_cc_capsule_icon(
+        out,
+        shape_cache,
         renderer,
+        layout.bt_pill,
+        bt_active,
         crate::surfaces::UiGlyphKind::Bluetooth,
-        16,
+        blue_active,
         if qs.bt_available {
             white
         } else {
-            [185, 175, 205, 175]
+            [210, 204, 224, 170]
         },
-        Point::from((layout.left_x + 19, layout.conn_card.loc.y + 62)),
-    ) {
-        out.push(CompositorRenderElement::Memory(el));
-    }
-    if let Some(el) = shape_cache.circle_element(
-        renderer,
-        34,
-        bt_fill,
-        Some([255, 255, 255, 58]),
-        Point::from((layout.left_x + 10, layout.conn_card.loc.y + 53)),
-    ) {
-        out.push(CompositorRenderElement::Memory(el));
-    }
-
-    // 2. Large round Layout & Reduced Motion toggles + Transparency pill
-    let is_tile = qs.layout_mode == "master-stack";
-    for (btn_rect, active, kind) in [
-        (
-            layout.layout_btn,
-            is_tile,
-            crate::surfaces::UiGlyphKind::LayoutSplit,
-        ),
-        (
-            layout.motion_btn,
-            qs.reduced_motion,
-            crate::surfaces::UiGlyphKind::Motion,
-        ),
-    ] {
-        if let Some(el) = shape_cache.ui_glyph_element(
-            renderer,
-            kind,
-            18,
-            white,
-            Point::from((btn_rect.loc.x + 14, btn_rect.loc.y + 14)),
-        ) {
-            out.push(CompositorRenderElement::Memory(el));
-        }
-        if let Some(el) = shape_cache.circle_element(
-            renderer,
-            46,
-            if active {
-                RGBA_ACCENT
-            } else {
-                [255, 255, 255, 36]
-            },
-            Some([255, 255, 255, if active { 120 } else { 52 }]),
-            Point::from((btn_rect.loc.x, btn_rect.loc.y)),
-        ) {
-            out.push(CompositorRenderElement::Memory(el));
-        }
-    }
-
-    if let Some(el) = shape_cache.ui_glyph_element(
-        renderer,
-        crate::surfaces::UiGlyphKind::Transparency,
-        16,
-        white,
-        Point::from((
-            layout.transparency_btn.loc.x + 11,
-            layout.transparency_btn.loc.y + 9,
-        )),
-    ) {
-        out.push(CompositorRenderElement::Memory(el));
-    }
-    if qs.reduce_transparency {
-        push_rounded_glass_box(
-            out,
-            shape_cache,
-            renderer,
-            layout.transparency_btn,
-            15,
-            RGBA_ACCENT_MUTED,
-            Some(RGBA_ACCENT),
-        );
-    } else {
-        push_liquid_glass_panel(
-            out,
-            shape_cache,
-            renderer,
-            layout.transparency_btn,
-            15,
-            crate::surfaces::GlassPanelStyle::ControlModule,
-            qs.glass_opacity,
-            qs.reduce_transparency,
-            None,
-        );
-    }
-
-    // 3. Full-width Display (Glass Opacity) & Sound capsule sliders
-    let glass_norm = (crate::config::clamp_glass_opacity(qs.glass_opacity)
-        - crate::config::MIN_GLASS_OPACITY)
-        / (1.0 - crate::config::MIN_GLASS_OPACITY);
-    push_control_center_slider(
-        out,
-        shape_cache,
-        renderer,
-        layout.display_track,
-        glass_norm,
-        crate::surfaces::UiGlyphKind::Sun,
-        !qs.reduce_transparency,
-        qs.glass_opacity,
-        qs.reduce_transparency,
     );
 
-    let vol_norm = f32::from(qs.volume_percent.min(100)) / 100.0;
-    push_control_center_slider(
-        out,
-        shape_cache,
-        renderer,
-        layout.sound_track,
-        vol_norm,
-        crate::surfaces::UiGlyphKind::Volume {
-            level_percent: qs.volume_percent,
-            muted: qs.audio_muted,
-        },
-        !qs.audio_muted,
-        qs.glass_opacity,
-        qs.reduce_transparency,
-    );
-
-    // 4. Bottom Power status + 3 round quick utility buttons
-    let power_fill = if qs.ac_online {
-        RGBA_SUCCESS
-    } else if qs.battery_percent > 20 {
-        RGBA_ACCENT_MUTED
+    let power_healthy = qs.ac_online || qs.battery_charging || qs.battery_percent > 20;
+    let power_icon_active = if qs.ac_online || qs.battery_charging {
+        [22, 163, 74, 255]
+    } else if power_healthy {
+        blue_active
     } else {
-        RGBA_WARNING
+        [239, 68, 68, 255]
     };
-    if let Some(el) = shape_cache.ui_glyph_element(
+    push_cc_capsule_icon(
+        out,
+        shape_cache,
         renderer,
+        layout.power_pill,
+        power_healthy,
         crate::surfaces::UiGlyphKind::Battery {
             percent: qs.battery_percent,
             charging: qs.ac_online || qs.battery_charging,
         },
-        16,
+        power_icon_active,
         white,
-        Point::from((layout.power_card.loc.x + 19, layout.power_card.loc.y + 24)),
-    ) {
-        out.push(CompositorRenderElement::Memory(el));
-    }
-    if let Some(el) = shape_cache.circle_element(
+    );
+
+    push_cc_now_playing_contents(out, shape_cache, renderer, &layout, qs);
+    push_cc_round_toggle_buttons(out, shape_cache, renderer, &layout, qs);
+
+    push_cc_capsule_icon(
+        out,
+        shape_cache,
         renderer,
-        34,
-        power_fill,
-        Some([255, 255, 255, 58]),
-        Point::from((layout.power_card.loc.x + 10, layout.power_card.loc.y + 15)),
-    ) {
-        out.push(CompositorRenderElement::Memory(el));
-    }
+        layout.focus_pill,
+        qs.focus_mode,
+        crate::surfaces::UiGlyphKind::Moon,
+        [106, 84, 212, 255],
+        white,
+    );
 
-    for (btn_rect, kind) in [
-        (layout.search_btn, crate::surfaces::UiGlyphKind::Search),
-        (layout.refresh_btn, crate::surfaces::UiGlyphKind::Refresh),
-        (layout.lock_btn, crate::surfaces::UiGlyphKind::Lock),
-    ] {
-        if let Some(el) = shape_cache.ui_glyph_element(
-            renderer,
-            kind,
-            16,
-            white,
-            Point::from((btn_rect.loc.x + 13, btn_rect.loc.y + 13)),
-        ) {
-            out.push(CompositorRenderElement::Memory(el));
-        }
-        if let Some(el) = shape_cache.circle_element(
-            renderer,
-            42,
-            [255, 255, 255, 34],
-            Some([255, 255, 255, 52]),
-            Point::from((btn_rect.loc.x, btn_rect.loc.y)),
-        ) {
-            out.push(CompositorRenderElement::Memory(el));
-        }
-    }
+    push_cc_display_slider(out, shape_cache, renderer, &layout, qs);
+    push_cc_sound_slider(out, shape_cache, renderer, &layout, qs);
 
-    // 5. Inner glass module backgrounds behind icons & sliders
-    for card in [
-        layout.conn_card,
-        layout.display_card,
-        layout.sound_card,
-        layout.power_card,
+    for (rect, radius) in [
+        (layout.wifi_pill, layout.wifi_pill.size.h / 2),
+        (layout.bt_pill, layout.bt_pill.size.h / 2),
+        (layout.now_playing_card, 24),
+        (layout.power_pill, layout.power_pill.size.h / 2),
+        (layout.layout_btn, layout.layout_btn.size.h / 2),
+        (layout.overview_btn, layout.overview_btn.size.h / 2),
+        (layout.motion_btn, layout.motion_btn.size.h / 2),
+        (layout.transparency_btn, layout.transparency_btn.size.h / 2),
+        (layout.focus_pill, layout.focus_pill.size.h / 2),
+        (layout.display_card, 22),
+        (layout.sound_card, 22),
+        (layout.lock_btn, layout.lock_btn.size.h / 2),
     ] {
         push_liquid_glass_panel(
             out,
             shape_cache,
             renderer,
-            card,
-            16,
+            rect,
+            radius,
             crate::surfaces::GlassPanelStyle::ControlModule,
             qs.glass_opacity,
             qs.reduce_transparency,
-            None,
+            Some((10, 26)),
         );
     }
-
-    // 6. Outer Liquid Glass Popover & soft deep elevation shadow
-    let qs_rect = Rectangle::new(
-        Point::from((layout.px, layout.py)),
-        Size::from((layout.pw, layout.ph)),
-    );
-    push_liquid_glass_panel(
-        out,
-        shape_cache,
-        renderer,
-        qs_rect,
-        WINDOW_RADIUS,
-        crate::surfaces::GlassPanelStyle::Popover,
-        qs.glass_opacity,
-        qs.reduce_transparency,
-        Some((18, 56)),
-    );
 }
 
 fn title_hue_seed(title: &str, id: u64) -> u8 {
@@ -6161,6 +6355,7 @@ mod tests {
             reduced_motion: false,
             network_label: "Wi-Fi Connected",
             net_connected: true,
+            wifi_enabled: true,
             wifi_signal_percent: Some(80),
             bt_available: true,
             bt_powered: true,
@@ -6169,8 +6364,14 @@ mod tests {
             has_battery: true,
             ac_online: true,
             battery_charging: true,
+            brightness_available: false,
+            brightness_percent: 100,
             volume_percent: 75,
             audio_muted: false,
+            media_active: false,
+            media_playing: false,
+            media_title: "",
+            focus_mode: false,
             frame_p50_us: 16_667,
             window_count: 2,
             progress: 1.0,
@@ -6238,78 +6439,85 @@ mod tests {
     fn quick_settings_hit_testing_works_accurately() {
         let size = Size::from((1280, 800));
         let layout = quick_settings_layout(size.w, size.h, 0);
-        assert_eq!(
-            check_quick_settings_click(size, 100.0, 200.0),
-            QuickSettingsHit::OutsidePopover
-        );
-        assert_eq!(
-            check_quick_settings_click(size, f64::from(layout.px + 2), f64::from(layout.py + 2)),
-            QuickSettingsHit::InsidePopover
-        );
-        assert_eq!(
-            check_quick_settings_click(
-                size,
-                f64::from(layout.bt_row.loc.x + 40),
-                f64::from(layout.bt_row.loc.y + 20)
+        let cases = [
+            (100, 200, QuickSettingsHit::OutsidePopover),
+            (
+                layout.px + 2,
+                layout.py + 2,
+                QuickSettingsHit::InsidePopover,
             ),
-            QuickSettingsHit::ToggleBluetooth
-        );
-        assert_eq!(
-            check_quick_settings_click(
-                size,
-                f64::from(layout.layout_btn.loc.x + 23),
-                f64::from(layout.layout_btn.loc.y + 23)
+            (
+                layout.wifi_pill.loc.x + 60,
+                layout.wifi_pill.loc.y + 27,
+                QuickSettingsHit::ToggleWifi,
             ),
-            QuickSettingsHit::ToggleLayout
-        );
-        assert_eq!(
-            check_quick_settings_click(
-                size,
-                f64::from(layout.motion_btn.loc.x + 23),
-                f64::from(layout.motion_btn.loc.y + 23)
+            (
+                layout.bt_pill.loc.x + 60,
+                layout.bt_pill.loc.y + 27,
+                QuickSettingsHit::ToggleBluetooth,
             ),
-            QuickSettingsHit::ToggleReducedMotion
-        );
-        assert_eq!(
-            check_quick_settings_click(
-                size,
-                f64::from(layout.transparency_btn.loc.x + 40),
-                f64::from(layout.transparency_btn.loc.y + 17)
+            (
+                layout.media_prev_btn.loc.x + 12,
+                layout.media_prev_btn.loc.y + 12,
+                QuickSettingsHit::MediaPrev,
             ),
-            QuickSettingsHit::ToggleReduceTransparency
-        );
-        assert_eq!(
-            check_quick_settings_click(
-                size,
-                f64::from(layout.sound_mute_zone.loc.x + 8),
-                f64::from(layout.sound_mute_zone.loc.y + 11)
+            (
+                layout.media_play_btn.loc.x + 12,
+                layout.media_play_btn.loc.y + 12,
+                QuickSettingsHit::MediaPlayPause,
             ),
-            QuickSettingsHit::ToggleMute
-        );
-        assert_eq!(
-            check_quick_settings_click(
-                size,
-                f64::from(layout.search_btn.loc.x + 21),
-                f64::from(layout.search_btn.loc.y + 21)
+            (
+                layout.media_next_btn.loc.x + 12,
+                layout.media_next_btn.loc.y + 12,
+                QuickSettingsHit::MediaNext,
             ),
-            QuickSettingsHit::OpenSpotlight
-        );
-        assert_eq!(
-            check_quick_settings_click(
-                size,
-                f64::from(layout.refresh_btn.loc.x + 21),
-                f64::from(layout.refresh_btn.loc.y + 21)
+            (
+                layout.power_pill.loc.x + 60,
+                layout.power_pill.loc.y + 30,
+                QuickSettingsHit::RefreshMetrics,
             ),
-            QuickSettingsHit::RefreshMetrics
-        );
-        assert_eq!(
-            check_quick_settings_click(
-                size,
-                f64::from(layout.lock_btn.loc.x + 21),
-                f64::from(layout.lock_btn.loc.y + 21)
+            (
+                layout.layout_btn.loc.x + 33,
+                layout.layout_btn.loc.y + 33,
+                QuickSettingsHit::ToggleLayout,
             ),
-            QuickSettingsHit::LockSession
-        );
+            (
+                layout.overview_btn.loc.x + 33,
+                layout.overview_btn.loc.y + 33,
+                QuickSettingsHit::ToggleOverview,
+            ),
+            (
+                layout.motion_btn.loc.x + 33,
+                layout.motion_btn.loc.y + 33,
+                QuickSettingsHit::ToggleReducedMotion,
+            ),
+            (
+                layout.transparency_btn.loc.x + 33,
+                layout.transparency_btn.loc.y + 33,
+                QuickSettingsHit::ToggleReduceTransparency,
+            ),
+            (
+                layout.focus_pill.loc.x + 60,
+                layout.focus_pill.loc.y + 30,
+                QuickSettingsHit::ToggleFocus,
+            ),
+            (
+                layout.sound_mute_zone.loc.x + 15,
+                layout.sound_mute_zone.loc.y + 15,
+                QuickSettingsHit::ToggleMute,
+            ),
+            (
+                layout.lock_btn.loc.x + 50,
+                layout.lock_btn.loc.y + 15,
+                QuickSettingsHit::LockSession,
+            ),
+        ];
+        for (px, py, expected) in cases {
+            assert_eq!(
+                check_quick_settings_click(size, f64::from(px), f64::from(py)),
+                expected
+            );
+        }
     }
 
     #[test]
@@ -6671,15 +6879,23 @@ mod tests {
         );
         assert_eq!(
             check_quick_settings_click(size, disp_x + 1.0, disp_y),
-            QuickSettingsHit::SetGlassOpacityPercent(35)
+            QuickSettingsHit::SetDisplayPercent(0)
         );
         assert_eq!(
             check_quick_settings_slider_drag(size, disp_x + 40.0, disp_y),
-            Some(QuickSettingsSliderDrag::GlassOpacity)
+            Some(QuickSettingsSliderDrag::Display)
         );
         assert_eq!(
             check_quick_settings_click(size, disp_x + disp_w - 1.0, disp_y),
-            QuickSettingsHit::SetGlassOpacityPercent(100)
+            QuickSettingsHit::SetDisplayPercent(100)
+        );
+        assert_eq!(
+            quick_settings_slider_percent(
+                size,
+                QuickSettingsSliderDrag::Display,
+                disp_x + disp_w * 0.5
+            ),
+            50
         );
 
         let tinted = scale_glass_rgba([20, 14, 34, 200], 0.50, false);

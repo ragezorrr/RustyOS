@@ -564,6 +564,16 @@ impl RustyCompositorState {
         self.set_dock_hover_slot(next_slot);
     }
 
+    fn apply_display_slider_percent(&mut self, track_pct: u8) {
+        if self.telemetry.snapshot().brightness.available {
+            let hw_pct = track_pct.clamp(5, 100);
+            let _ = self.telemetry.set_brightness_percent(hw_pct);
+        } else {
+            let glass_pct = 35_u16 + (u16::from(track_pct.min(100)) * 65 + 50) / 100;
+            self.set_glass_opacity(f32::from(glass_pct.clamp(35, 100)) / 100.0);
+        }
+    }
+
     fn apply_quick_settings_slider_drag(
         &mut self,
         drag: crate::shell_render::QuickSettingsSliderDrag,
@@ -575,8 +585,8 @@ impl RustyCompositorState {
             crate::shell_render::QuickSettingsSliderDrag::Sound => {
                 self.telemetry.set_volume_percent(pct);
             }
-            crate::shell_render::QuickSettingsSliderDrag::GlassOpacity => {
-                self.set_glass_opacity(f32::from(pct) / 100.0);
+            crate::shell_render::QuickSettingsSliderDrag::Display => {
+                self.apply_display_slider_percent(pct);
             }
         }
     }
@@ -601,10 +611,13 @@ impl RustyCompositorState {
             None
         };
 
-        let visible_toast_count = self
-            .notifications
-            .len()
-            .min(crate::shell_render::MAX_VISIBLE_NOTIFICATIONS);
+        let visible_toast_count = if self.focus_mode {
+            0
+        } else {
+            self.notifications
+                .len()
+                .min(crate::shell_render::MAX_VISIBLE_NOTIFICATIONS)
+        };
         self.hovered_notification_idx = if is_on_primary
             && visible_toast_count > 0
             && !self.launcher_active
@@ -821,6 +834,9 @@ impl RustyCompositorState {
         let (output_size, _on_primary, local_x, local_y) =
             self.primary_local_coords(self.pointer_location);
         match crate::shell_render::check_quick_settings_click(output_size, local_x, local_y) {
+            crate::shell_render::QuickSettingsHit::ToggleWifi => {
+                let _ = self.telemetry.toggle_wifi();
+            }
             crate::shell_render::QuickSettingsHit::ToggleMute => {
                 self.telemetry.toggle_mute();
             }
@@ -836,18 +852,33 @@ impl RustyCompositorState {
             crate::shell_render::QuickSettingsHit::ToggleReduceTransparency => {
                 self.toggle_reduce_transparency();
             }
-            crate::shell_render::QuickSettingsHit::SetGlassOpacityPercent(pct) => {
-                self.set_glass_opacity(f32::from(pct) / 100.0);
+            crate::shell_render::QuickSettingsHit::SetDisplayPercent(pct) => {
+                self.apply_display_slider_percent(pct);
+            }
+            crate::shell_render::QuickSettingsHit::MediaPrev => {
+                self.telemetry
+                    .dispatch_media(rusty_services::MediaAction::Previous);
+            }
+            crate::shell_render::QuickSettingsHit::MediaPlayPause => {
+                self.telemetry
+                    .dispatch_media(rusty_services::MediaAction::PlayPause);
+            }
+            crate::shell_render::QuickSettingsHit::MediaNext => {
+                self.telemetry
+                    .dispatch_media(rusty_services::MediaAction::Next);
             }
             crate::shell_render::QuickSettingsHit::ToggleLayout => {
                 self.apply_wm_action(WmAction::ToggleLayoutMode, serial);
+            }
+            crate::shell_render::QuickSettingsHit::ToggleOverview => {
+                self.toggle_overview();
             }
             crate::shell_render::QuickSettingsHit::ToggleReducedMotion => {
                 let reduced = !self.animations.reduced_motion();
                 self.set_reduced_motion_pref(reduced);
             }
-            crate::shell_render::QuickSettingsHit::OpenSpotlight => {
-                self.toggle_launcher();
+            crate::shell_render::QuickSettingsHit::ToggleFocus => {
+                let _ = self.toggle_focus_mode();
             }
             crate::shell_render::QuickSettingsHit::RefreshMetrics => {
                 self.telemetry.request_refresh();
@@ -2578,26 +2609,35 @@ mod tests {
         compositor.close_top_bar_menu();
         assert_eq!(compositor.top_bar_menu_hover_row, None);
 
-        // 4. Control Center slider drag continuously adjusts `glass_opacity` and resets on close.
-        let qs_w = 324.min((out_size.w - 24).max(240));
+        // 4. Control Center Display slider drag adjusts `glass_opacity` (fallback when no backlight),
+        //    and Focus capsule toggles DND cleanly.
+        let qs_w = 316.min((out_size.w - 24).max(240));
         let qs_x = out_size.w - qs_w - 12;
-        let qs_y = crate::shell_render::TOP_BAR_HEIGHT + 8;
-        let track_left = f64::from(qs_x + 26);
-        let track_right = f64::from(qs_x + qs_w - 26);
+        let qs_y = crate::shell_render::TOP_BAR_HEIGHT + 10;
+        let track_left = f64::from(qs_x + 34);
+        let track_right = f64::from(qs_x + qs_w - 34);
         let track_mid_x = f64::midpoint(track_left, track_right);
-        let track_y = f64::from(qs_y + 165);
+        let track_y = f64::from(qs_y + 327);
 
         compositor.toggle_quick_settings();
         compositor.pointer_location = (track_mid_x, track_y).into();
         compositor.handle_quick_settings_pointer_click(serial, 272);
         assert_eq!(
             compositor.qs_slider_drag,
-            Some(crate::shell_render::QuickSettingsSliderDrag::GlassOpacity)
+            Some(crate::shell_render::QuickSettingsSliderDrag::Display)
         );
         compositor.apply_pointer_position((track_left, track_y).into(), 5);
         assert!(compositor.glass_opacity <= 0.36);
         compositor.apply_pointer_position((track_right, track_y).into(), 6);
         assert!(compositor.glass_opacity >= 0.99);
+
+        let col_w = (qs_w - 12) / 2;
+        let focus_x = f64::from(qs_x + col_w + 12 + col_w / 2);
+        let focus_y = f64::from(qs_y + 240);
+        compositor.pointer_location = (focus_x, focus_y).into();
+        compositor.handle_quick_settings_pointer_click(serial, 272);
+        assert!(compositor.focus_mode);
+
         compositor.close_quick_settings();
         assert_eq!(compositor.qs_slider_drag, None);
 

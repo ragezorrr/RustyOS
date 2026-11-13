@@ -772,20 +772,24 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
             show_volume: state.menubar_show_volume,
         };
 
-        let toast_views: Vec<crate::shell_render::NotificationToastView<'_>> = state
-            .notifications
-            .iter()
-            .rev()
-            .take(crate::shell_render::MAX_VISIBLE_NOTIFICATIONS)
-            .enumerate()
-            .map(|(idx, n)| crate::shell_render::NotificationToastView {
-                id: n.id,
-                urgency: n.urgency,
-                title: &n.title,
-                body: &n.body,
-                hovered: state.hovered_notification_idx == Some(idx),
-            })
-            .collect();
+        let toast_views: Vec<crate::shell_render::NotificationToastView<'_>> = if state.focus_mode {
+            Vec::new()
+        } else {
+            state
+                .notifications
+                .iter()
+                .rev()
+                .take(crate::shell_render::MAX_VISIBLE_NOTIFICATIONS)
+                .enumerate()
+                .map(|(idx, n)| crate::shell_render::NotificationToastView {
+                    id: n.id,
+                    urgency: n.urgency,
+                    title: &n.title,
+                    body: &n.body,
+                    hovered: state.hovered_notification_idx == Some(idx),
+                })
+                .collect()
+        };
 
         let mut dock_windows: Vec<crate::shell_render::DockWindowEntry> = visible_windows
             .iter()
@@ -893,6 +897,7 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
             reduced_motion: state.animations.reduced_motion(),
             network_label: &tel.network.status_label,
             net_connected: tel.network.connected,
+            wifi_enabled: tel.network.wifi_enabled,
             wifi_signal_percent: tel.network.wifi_signal_percent,
             bt_available: tel.bluetooth.available,
             bt_powered: tel.bluetooth.powered,
@@ -901,8 +906,14 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
             has_battery: tel.power.has_battery,
             ac_online: tel.power.ac_online,
             battery_charging: tel.power.state == rusty_services::BatteryState::Charging,
+            brightness_available: tel.brightness.available,
+            brightness_percent: tel.brightness.percentage,
             volume_percent: tel.audio.volume_percent,
             audio_muted: tel.audio.muted,
+            media_active: tel.media.active,
+            media_playing: tel.media.playing,
+            media_title: &tel.media.title,
+            focus_mode: state.focus_mode,
             frame_p50_us: timing.interval_p50_us,
             window_count,
             progress: qs_progress,

@@ -453,6 +453,8 @@ pub struct RustyCompositorState {
     pub quick_settings_active: bool,
     /// Animated Quick Settings transition progress (`0.0` closed -> `1.0` open) (`RUSTYOS-025`).
     pub quick_settings_anim: AnimatedValue,
+    /// Whether Focus (Do Not Disturb) notification popup suppression is active (`RUSTYOS-053`).
+    pub focus_mode: bool,
     /// Non-blocking system telemetry & quick audio controls (`RUSTYOS-021`).
     pub telemetry: crate::telemetry::SystemMetricsHandle,
     /// Whether the session lock screen is active (`RUSTYOS-009`/`010`/`025`).
@@ -725,6 +727,7 @@ impl RustyCompositorState {
             launcher: crate::launcher::LauncherState::new(),
             quick_settings_active: false,
             quick_settings_anim: AnimatedValue::new_settled(0.0),
+            focus_mode: false,
             telemetry: crate::telemetry::SystemMetricsHandle::static_default(),
             screen_locked: false,
             lock_screen_anim: AnimatedValue::new_settled(0.0),
@@ -1717,6 +1720,15 @@ impl RustyCompositorState {
     /// Updates shell glass opacity clamped to `0.35..=1.0` (`RUSTYOS-048`).
     pub fn set_glass_opacity(&mut self, opacity: f32) {
         self.glass_opacity = crate::config::clamp_glass_opacity(opacity);
+    }
+
+    /// Toggles Focus (Do Not Disturb) notification popup suppression (`RUSTYOS-053`).
+    pub fn toggle_focus_mode(&mut self) -> bool {
+        self.focus_mode = !self.focus_mode;
+        if self.focus_mode {
+            self.hovered_notification_idx = None;
+        }
+        self.focus_mode
     }
 
     /// Toggles opaque high-contrast shell panels (`reduce_transparency`) (`RUSTYOS-048`).

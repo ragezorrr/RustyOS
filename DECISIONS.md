@@ -208,6 +208,13 @@
                           Battery Bolt            
                           (ADR-0021)              
   -----------------------------------------------------------------------
+  D-030                   Фаза 7/UX               accepted
+                          (RUSTYOS-053):          
+                          Floating Liquid Glass   
+                          Control Center Islands  
+                          & Live MPRIS2/Display   
+                          Parity (ADR-0022)       
+  -----------------------------------------------------------------------
 
 ## Открытые решения
 

@@ -753,6 +753,20 @@ hardware/software context и низкие накладные расходы.
 - **Verification:** `cargo fmt --all --check` и `cargo clippy --workspace --all-targets --offline -- -D warnings` завершились с кодом 0 без предупреждений; 127/127 тестов workspace прошли без пропусков (`rusty_animation` 4/4, `rusty_compositor` 100/100, `rusty_ipc` 3/3, `rusty_services` 8/8, `rusty_shell` 5/5, `rusty_wm` 7/7); живая проверка `rusty-compositor --winit` (Mesa Intel(R) Graphics, EGL/OpenGL ES 3.2) и инспекция финального 500%-кропа подтвердили 1:1 соответствие иконок `Battery`, `Wi-Fi` и `Control Center` с референсом macOS 27.
 - **Risks:** Нулевые новые внешние Rust-зависимости и ноль `unsafe`; обновление телеметрии при изменении уровня сигнала выполняется с интервалом опроса `POLL_INTERVAL = 3s`.
 
+### RUSTYOS-053 — 1:1 macOS 27 Floating Liquid Glass Control Center Islands
+- **Status:** done
+- **Priority:** P1
+- **Phase:** Фаза 7 / UX Polish & macOS 27 Control Center Parity
+- **Scope:**
+  - Убрана внешняя тёмная оболочка `GlassPanelStyle::Popover`; каждый модуль рендерится как парящий островок `GlassPanelStyle::ControlModule` с собственной тенью и мягким верхне-нижним спекулярным бликом (`surfaces.rs`, `shell_render.rs`, `quick_settings_rect` `316x456` на `TOP_BAR_HEIGHT + 10`).
+  - В `crates/rusty-services/src/lib.rs` добавлены `NetworkStatus::wifi_enabled`, `NetworkService::set_wifi_enabled` (NetworkManager D-Bus + fallback `nmcli radio wifi`), `MediaStatus` и `MediaService::query_status` (MPRIS2 Session D-Bus + fallback `playerctl`) и модульный тест `playerctl_status_line_parses_playing_paused_and_empty`.
+  - В `crates/rusty-compositor/src/telemetry.rs` добавлены `SystemTelemetry::media`, `TelemetryCmd::SetWifiEnabled(bool)`, `SystemMetricsHandle::{set_brightness_percent, toggle_wifi}` и оптимистичное обновление воспроизведения/громкости.
+  - В `crates/rusty-compositor/src/surfaces.rs` добавлены 4×4 SSAA SDF-глифы `MediaPrev`, `MediaPlay`, `MediaPause`, `MediaNext`, `MusicNote`, `Moon`, `OverviewSpaces`.
+  - В `shell_render.rs`, `state.rs`, `input.rs` и `winit_backend.rs` реализованы отдельные левые капсулы с инвертированными белыми кругами (`Wi-Fi`, `Bluetooth`, `Power`), правая квадратная карточка `Now Playing` (`Not Playing` или трек с рабочими `Prev`/`PlayPause`/`Next`), парные круглые кнопки без подписей (`Tile`/`Float`, `Overview`, `Motion`, `Clear Glass`/`Opaque`), капсула `Focus` (с `State::focus_mode`, подавляющим видимые toast-уведомления), тонкие слайдеры `Display` (`BrightnessService` с fallback на `glass_opacity` `35..=100%`) и `Sound` (с круглой кнопкой `Mute` справа), нижняя пилюля `Lock Screen`, а также заголовки на `Inter SemiBold` (`FontWeight::Bold`).
+  - Обновлены `DESIGN.md` §12.4, создан `docs/adr/0022-control-center-floating-islands.md`, добавлена запись `D-030` в `DECISIONS.md` и статус задачи в `TASKS.md`.
+- **Verification:** `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --offline -- -D warnings` и `cargo run -p rusty-compositor --offline -- --check` завершились с кодом 0 без предупреждений; 128/128 тестов workspace прошли без пропусков (`rusty_animation` 4/4, `rusty_compositor` 100/100, `rusty_ipc` 3/3, `rusty_services` 9/9, `rusty_shell` 5/5, `rusty_wm` 7/7); живая проверка `rusty-compositor --winit` (Mesa Intel(R) Graphics RPL-U, OpenGL ES 3.2) и визуальная инспекция открытого Control Center (`rustyos_053_cc_crop.png`) подтвердили 1:1 соответствие макету и типографике macOS 27.
+- **Risks:** Нулевые новые внешние зависимости и ноль `unsafe`; телеметрия MPRIS2 и Wi-Fi обновляется по циклу опроса `POLL_INTERVAL` (с мгновенным запросом обновления при открытии Control Center).
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

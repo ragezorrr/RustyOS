@@ -13,8 +13,8 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use rusty_services::{
-    AudioStatus, BluetoothStatus, BrightnessStatus, MediaAction, NetworkStatus, PowerStatus,
-    ServiceRegistry, local_clock_hhmm, local_clock_short_datetime_fmt,
+    AudioStatus, BluetoothStatus, BrightnessStatus, MediaAction, MediaStatus, NetworkStatus,
+    PowerStatus, ServiceRegistry, local_clock_hhmm, local_clock_short_datetime_fmt,
 };
 
 const POLL_INTERVAL: Duration = Duration::from_secs(3);
@@ -32,6 +32,8 @@ pub struct SystemTelemetry {
     pub audio: AudioStatus,
     /// Display backlight brightness status (`RUSTYOS-031`).
     pub brightness: BrightnessStatus,
+    /// MPRIS2 media playback status and active track metadata (`RUSTYOS-053`).
+    pub media: MediaStatus,
     /// Local wall-clock time formatted as `HH:MM`.
     pub clock_hhmm: String,
     /// Compact macOS-style `TopBar` date + 12h time label (`"Wed Apr 1  9:41 AM"`).
@@ -48,6 +50,7 @@ impl Default for SystemTelemetry {
             bluetooth: BluetoothStatus::default(),
             audio: AudioStatus::default(),
             brightness: BrightnessStatus::default(),
+            media: MediaStatus::default(),
             clock_hhmm: "12:00".to_owned(),
             clock_date_hhmm: "Wed Apr 1  9:41 AM".to_owned(),
             clock_date_24h: "Wed Apr 1  09:41".to_owned(),
@@ -61,6 +64,7 @@ enum TelemetryCmd {
     SetVolume(u8),
     ToggleMute,
     SetBluetoothPowered(bool),
+    SetWifiEnabled(bool),
     SetBrightness(u8),
     MediaControl(MediaAction),
 }
@@ -230,9 +234,65 @@ impl SystemMetricsHandle {
         result
     }
 
+    /// Sets display backlight brightness directly to `percent` (`5..=100`) when backlight hardware exists (`RUSTYOS-053`).
+    #[must_use]
+    pub fn set_brightness_percent(&self, percent: u8) -> bool {
+        let clamped = percent.clamp(5, 100);
+        let applied = if let Ok(mut guard) = self.shared.latest.lock()
+            && guard.brightness.available
+        {
+            guard.brightness.percentage = clamped;
+            true
+        } else {
+            false
+        };
+        if applied {
+            self.push_cmd(TelemetryCmd::SetBrightness(clamped));
+        }
+        applied
+    }
+
     /// Dispatches an MPRIS2 / `playerctl` media control action asynchronously (`RUSTYOS-031`).
     pub fn dispatch_media(&self, action: MediaAction) {
+        if matches!(action, MediaAction::PlayPause)
+            && let Ok(mut guard) = self.shared.latest.lock()
+            && guard.media.active
+        {
+            guard.media.playing = !guard.media.playing;
+        }
         self.push_cmd(TelemetryCmd::MediaControl(action));
+    }
+
+    /// Toggles Wi-Fi radio state optimistically and applies via `NetworkManager` / `nmcli` (`RUSTYOS-053`).
+    #[must_use]
+    pub fn toggle_wifi(&self) -> bool {
+        let next_enabled = if let Ok(mut guard) = self.shared.latest.lock() {
+            let currently_on = guard.network.wifi_enabled || guard.network.wifi_ssid.is_some();
+            let next = !currently_on;
+            guard.network.wifi_enabled = next;
+            if next {
+                if !guard.network.connected {
+                    "Wi-Fi: On".clone_into(&mut guard.network.status_label);
+                }
+            } else {
+                guard.network.wifi_ssid = None;
+                guard.network.wifi_signal_percent = None;
+                if guard
+                    .network
+                    .interface
+                    .as_deref()
+                    .is_some_and(|iface| iface.starts_with('w'))
+                {
+                    guard.network.connected = false;
+                    "Wi-Fi Off".clone_into(&mut guard.network.status_label);
+                }
+            }
+            next
+        } else {
+            return false;
+        };
+        self.push_cmd(TelemetryCmd::SetWifiEnabled(next_enabled));
+        next_enabled
     }
 
     /// Toggles Bluetooth adapter power optimistically and applies via BlueZ asynchronously (`RUSTYOS-027`).
@@ -273,6 +333,7 @@ fn poll_once(services: &ServiceRegistry) -> SystemTelemetry {
         bluetooth: services.bluetooth.query_status(),
         audio: services.audio.query_status(),
         brightness: services.brightness.query_status(),
+        media: services.media.query_status(),
         clock_hhmm: local_clock_hhmm(),
         clock_date_hhmm: local_clock_short_datetime_fmt(false),
         clock_date_24h: local_clock_short_datetime_fmt(true),
@@ -318,6 +379,9 @@ fn telemetry_worker_loop(shared: &SharedState) {
                 }
                 TelemetryCmd::SetBluetoothPowered(enabled) => {
                     let _ = services.bluetooth.set_powered(enabled);
+                }
+                TelemetryCmd::SetWifiEnabled(enabled) => {
+                    let _ = services.network.set_wifi_enabled(enabled);
                 }
                 TelemetryCmd::SetBrightness(pct) => {
                     let _ = services.brightness.set_percent(pct);
@@ -381,6 +445,34 @@ mod tests {
         });
         assert_eq!(bright_handle.step_brightness_with_osd(10), (true, 50));
         assert_eq!(bright_handle.step_brightness_with_osd(-90), (true, 1));
+        assert!(bright_handle.set_brightness_percent(2));
+        assert_eq!(bright_handle.snapshot().brightness.percentage, 5);
+        assert!(bright_handle.set_brightness_percent(82));
+        assert_eq!(bright_handle.snapshot().brightness.percentage, 82);
+
+        let wifi_handle = SystemMetricsHandle::with_initial(SystemTelemetry {
+            network: NetworkStatus {
+                connected: true,
+                wifi_enabled: true,
+                interface: Some("wlan0".to_owned()),
+                wifi_ssid: Some("LabNet".to_owned()),
+                wifi_signal_percent: Some(74),
+                status_label: "Wi-Fi: LabNet".to_owned(),
+            },
+            media: MediaStatus {
+                active: true,
+                playing: false,
+                title: "Test Track".to_owned(),
+                artist: Some("Artist".to_owned()),
+            },
+            ..SystemTelemetry::default()
+        });
+        assert!(!wifi_handle.toggle_wifi());
+        assert!(!wifi_handle.snapshot().network.wifi_enabled);
+        assert!(!wifi_handle.snapshot().network.connected);
+        assert_eq!(wifi_handle.snapshot().network.status_label, "Wi-Fi Off");
+        wifi_handle.dispatch_media(MediaAction::PlayPause);
+        assert!(wifi_handle.snapshot().media.playing);
 
         handle.set_volume_percent(42);
         assert_eq!(handle.snapshot().audio.volume_percent, 42);
