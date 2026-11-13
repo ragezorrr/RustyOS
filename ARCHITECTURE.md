@@ -15,6 +15,12 @@ socket IPC (`rusty-ipc`) и `zwlr_layer_shell_v1`.
 
 ### Compositor (`crates/rusty-compositor`)
 
+- состояние композитора (`state/`):
+  - `state/mod.rs` — core `RustyCompositorState`, `ClientState`, типы overlay/drag/clipboard и wiring;
+  - `state/wm_windows.rs` — `WindowMap`, workspaces, focus, fullscreen/maximize, foreign toplevel;
+  - `state/shell_actions.rs` — TopBar, Dock, Spotlight, Overview, Switcher, Quick Settings и notifications;
+  - `state/system_bridges.rs` — Lock Screen, PAM/logind, Polkit, Portal/ScreenCast, PipeWire, config и IPC;
+  - `state/wayland_handlers/` — сгруппированные Smithay/Wayland delegate-хендлеры (`core`, `seat_input`, `selection`, `session_lock`, `dmabuf_sync`, `desktop_protocols`);
 - Wayland display/server lifecycle и клиентский input routing (`input.rs`);
 - multi-output раскладка (`outputs.rs`) и интеграция с `rusty-wm`;
 - nested Winit backend (`winit_backend.rs`) и native DRM/KMS per-CRTC
@@ -42,7 +48,7 @@ Event loop не должен блокироваться тяжёлыми опе�
 
 Выделение в отдельный процесс требует отдельного ADR и approval.
 
-### Renderer (`winit_backend.rs`, `drm_backend.rs`, `shell_render.rs`, `surfaces.rs`)
+### Renderer (`winit_backend.rs`, `drm_backend.rs`, `shell_render/`, `surfaces.rs`)
 
 - EGL + OpenGL ES (`GlesRenderer`) + GBM/DMA-BUF без Vulkan/wgpu;
 - tracking damage (`OutputDamageTracker`), Direct Scanout при полноэкранном
@@ -63,8 +69,10 @@ Event loop не должен блокироваться тяжёлыми опе�
   сообщений;
 - `apps/rusty-shell`: внешний процесс shell-панели/дока/лончера, устойчивый
   к независимому перезапуску, плюс встроенные композиторные оверлеи
-  (`shell_render.rs`) для low-latency взаимодействия (TopBar, Dock, Spotlight
-  Launcher, Overview, Quick Settings, Lock Screen, Notifications, Alt+Tab HUD).
+  (`shell_render/`: `tokens`, `top_bar`, `dock`, `quick_settings`,
+  `spotlight_overview`, `lock_screen`, `modals`, `ssd`) для low-latency
+  взаимодействия (TopBar, Dock, Spotlight Launcher, Overview, Quick Settings,
+  Lock Screen, Notifications, Alt+Tab HUD).
 
 ### System Services (`crates/rusty-services`)
 
@@ -84,7 +92,10 @@ RustyOS/
 ├── Cargo.toml                 # workspace (edition = 2024, MSRV 1.99, unsafe_code = "deny")
 ├── rust-toolchain.toml
 ├── crates/
-│   ├── rusty-compositor/      # Wayland compositor, Winit & DRM/KMS backends, input, shell_render
+│   ├── rusty-compositor/      # Wayland compositor, Winit & DRM/KMS backends, input, state/, shell_render/
+│   │   └── src/
+│   │       ├── state/         # RustyCompositorState, wm_windows, shell_actions, system_bridges, wayland_handlers/
+│   │       └── shell_render/  # tokens, top_bar, dock, quick_settings, spotlight_overview, lock_screen, modals, ssd
 │   ├── rusty-wm/              # Детерминированная модель WM и workspace 1..9
 │   ├── rusty-animation/       # Refresh-rate independent animation engine
 │   ├── rusty-ipc/             # Версионируемый IPC-протокол compositor <-> shell

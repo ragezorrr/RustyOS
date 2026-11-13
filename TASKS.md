@@ -820,6 +820,18 @@ hardware/software context и низкие накладные расходы.
 - **Verification:** `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --offline -- -D warnings`, `cargo test --workspace --offline` (158 passed, 0 failed: `rusty_animation` 4, `rusty_compositor` 113, `rusty_ipc` 3, `rusty_services` 26 — включая `portal::tests::resolves_and_streams_real_pipewire_worker_when_available`, `rusty_shell` 5, `rusty_wm` 7), `cargo run -p rusty-compositor --offline -- --check`, `cargo run -p rusty-compositor --offline -- --winit --max-frames 3` (rendered_frames=3, wayland-4), а также `sh -n bin/rustyos-session && bash -n scripts/install.sh`.
 - **Risks:** Ноль новых внешних Rust-зависимостей и ноль `unsafe`; при работе в PipeWire пока используется offscreen `GlesTexture` readback через канал в воркер вместо zero-copy DMA-BUF, а перехват D-Bus имени во вложенной `--winit` сессии возможен только при отсутствии стороннего активного `rustyos` portal provider; полноэкранная интеграция `xdg-desktop-portal` проверяется в standalone `--drm` сессии.
 
+### RUSTYOS-058 — Модульная декомпозиция `crates/rusty-compositor` (Этап А: `state/` и `shell_render/`)
+- **Status:** done
+- **Priority:** P2
+- **Phase:** Фаза 8 / Architecture & Maintainability
+- **Scope:**
+  - Монолитный `crates/rusty-compositor/src/state.rs` (6 164 строки) декомпозирован в директорию `crates/rusty-compositor/src/state/` с сохранением публичного API и поведения через `pub use` в `state/mod.rs` (1 833 строки): `wm_windows.rs` (1 252), `system_bridges.rs` (947), `shell_actions.rs` (835), `tests.rs` (171) и сгруппированный `wayland_handlers/` (`mod.rs` 8, `core.rs` 560, `desktop_protocols.rs` 291, `seat_input.rs` 223, `session_lock.rs` 123, `selection.rs` 97, `dmabuf_sync.rs` 41).
+  - Монолитный `crates/rusty-compositor/src/shell_render.rs` (9 168 строк) декомпозирован в директорию `crates/rusty-compositor/src/shell_render/` с сохранением публичного API и поведения через `pub use` в `shell_render/mod.rs` (1 521 строка): `tokens.rs` (462), `top_bar.rs` (1 817), `dock.rs` (325), `quick_settings.rs` (1 130), `spotlight_overview.rs` (595), `lock_screen.rs` (984), `modals.rs` (885), `ssd.rs` (508) и `tests.rs` (1 144).
+  - Внутренние межмодульные связи ограничены через `pub(in crate::state)` и `pub(super)` с явными импортами (без wildcard-импортов в не-тестовом коде, без новых `Cargo.toml`/крейтов и без нового `unsafe`).
+  - Обновлена схема модулей в `ARCHITECTURE.md` и зафиксирован статус `RUSTYOS-058` в `TASKS.md`.
+- **Verification:** `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --offline -- -D warnings` (0 предупреждений), `cargo test --workspace --offline` (158 passed, 0 failed, 0 ignored: `rusty_animation` 4, `rusty_compositor` 113, `rusty_ipc` 3, `rusty_services` 26, `rusty_shell` 5, `rusty_wm` 7), `cargo run -p rusty-compositor --offline -- --check` и `cargo run -p rusty-compositor --offline -- --winit --max-frames 3` (`rendered_frames=3`, `wayland-2`) завершились с кодом 0.
+- **Risks:** Нулевое изменение публичного API и runtime-логики; остальные крупные модули (`input.rs`, `surfaces.rs`, `crates/rusty-services/src/lib.rs`) вынесены на отдельный опциональный Этап Б.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance
