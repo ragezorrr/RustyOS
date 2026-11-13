@@ -198,34 +198,49 @@ pub fn generate_shell_render_elements(
     elements
 }
 
-/// Generates GPU-cached real font text labels for `TopBar`, `Dock`, `Spotlight`, `QuickSettings`,
-/// `Workspace Overview`, and `Notification HUD` (`RUSTYOS-020`/`021`/`023`/`024`).
-#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
-pub fn generate_shell_text_elements(
+const TEXT_BRIGHT: [u8; 4] = [244, 240, 250, 255]; // #F4F0FA
+const TEXT_MUTED: [u8; 4] = [166, 155, 181, 255]; // #A69BB5
+
+const fn notifications_hidden_by_overlay(overlay: ShellOverlayView<'_>) -> bool {
+    matches!(
+        overlay,
+        ShellOverlayView::Spotlight(_)
+            | ShellOverlayView::QuickSettings(_)
+            | ShellOverlayView::Polkit(_)
+            | ShellOverlayView::Portal(_)
+    )
+}
+
+const fn dock_tooltip_hidden_by_overlay(overlay: ShellOverlayView<'_>) -> bool {
+    matches!(
+        overlay,
+        ShellOverlayView::Spotlight(_)
+            | ShellOverlayView::QuickSettings(_)
+            | ShellOverlayView::Switcher(_)
+            | ShellOverlayView::Polkit(_)
+            | ShellOverlayView::Portal(_)
+    )
+}
+
+#[allow(clippy::too_many_lines)]
+fn append_foreground_overlay_text(
     text_cache: &mut crate::text::TextCache,
     shape_cache: &mut crate::surfaces::UiShapeCache,
     renderer: &mut GlesRenderer,
     screen_size: Size<i32, smithay::utils::Physical>,
-    active_workspace: u8,
-    layout_mode: &str,
-    dock_view: &DockViewState<'_>,
-    top_telemetry: &TopBarTelemetry<'_>,
     overlay: ShellOverlayView<'_>,
     notifications: &[NotificationToastView<'_>],
-) -> Vec<MemoryRenderBufferRenderElement<GlesRenderer>> {
-    let mut elements = Vec::new();
+    elements: &mut Vec<MemoryRenderBufferRenderElement<GlesRenderer>>,
+) {
     if !text_cache.has_font() {
-        return elements;
+        return;
     }
 
     let width = screen_size.w;
     let height = screen_size.h;
-    let text_bright = [244, 240, 250, 255]; // #F4F0FA
-    let text_muted = [166, 155, 181, 255]; // #A69BB5
 
-    // 1. Overlay labels (Spotlight or Quick Settings popover)
     match overlay {
-        ShellOverlayView::None => {}
+        ShellOverlayView::None | ShellOverlayView::Overview(_) => {}
         ShellOverlayView::Spotlight(spot) => {
             let (modal_x, base_modal_y, modal_width, _modal_height) =
                 spotlight_modal_rect(width, height);
@@ -236,7 +251,7 @@ pub fn generate_shell_text_elements(
                     renderer,
                     "Spotlight Search",
                     14.5,
-                    text_muted,
+                    TEXT_MUTED,
                     Point::from((modal_x + 60, modal_y + 30)),
                 ) {
                     elements.push(el);
@@ -245,7 +260,7 @@ pub fn generate_shell_text_elements(
                 renderer,
                 spot.query,
                 14.5,
-                text_bright,
+                TEXT_BRIGHT,
                 Point::from((modal_x + 60, modal_y + 30)),
             ) {
                 elements.push(el);
@@ -271,7 +286,7 @@ pub fn generate_shell_text_elements(
                         renderer,
                         &item.badge,
                         11.0,
-                        text_bright,
+                        TEXT_BRIGHT,
                         badge_bounds,
                     ) {
                         elements.push(el);
@@ -282,7 +297,7 @@ pub fn generate_shell_text_elements(
                     renderer,
                     &item.name,
                     13.5,
-                    text_bright,
+                    TEXT_BRIGHT,
                     Point::from((modal_x + 68, row_y + 7)),
                 ) {
                     elements.push(el);
@@ -291,7 +306,7 @@ pub fn generate_shell_text_elements(
                     renderer,
                     &item.subtitle,
                     10.5,
-                    text_muted,
+                    TEXT_MUTED,
                     Point::from((modal_x + 68, row_y + 26)),
                 ) {
                     elements.push(el);
@@ -312,7 +327,7 @@ pub fn generate_shell_text_elements(
                 let cat_color = if is_sel {
                     [255, 252, 255, 255]
                 } else {
-                    text_muted
+                    TEXT_MUTED
                 };
                 if let Some(el) = text_cache
                     .render_label_centered(renderer, cat_label, 10.5, cat_color, cat_bounds)
@@ -322,31 +337,121 @@ pub fn generate_shell_text_elements(
             }
         }
         ShellOverlayView::QuickSettings(qs) => {
-            render_quick_settings_text(text_cache, renderer, width, height, qs, &mut elements);
-        }
-        ShellOverlayView::Overview(ov) => {
-            render_overview_text(text_cache, renderer, screen_size, ov, &mut elements);
+            render_quick_settings_text(text_cache, renderer, width, height, qs, elements);
         }
         ShellOverlayView::Switcher(sw) => {
-            render_switcher_text(
-                text_cache,
-                shape_cache,
-                renderer,
-                screen_size,
-                sw,
-                &mut elements,
-            );
+            render_switcher_text(text_cache, shape_cache, renderer, screen_size, sw, elements);
         }
         ShellOverlayView::Polkit(pk) => {
-            render_polkit_text(text_cache, renderer, screen_size, pk, &mut elements);
+            render_polkit_text(text_cache, renderer, screen_size, pk, elements);
         }
         ShellOverlayView::Portal(portal) => {
-            render_portal_text(text_cache, renderer, screen_size, portal, &mut elements);
+            render_portal_text(text_cache, renderer, screen_size, portal, elements);
         }
         ShellOverlayView::PickColor(app_id) => {
-            render_pick_color_text(text_cache, renderer, screen_size, app_id, &mut elements);
+            render_pick_color_text(text_cache, renderer, screen_size, app_id, elements);
         }
     }
+
+    if !notifications_hidden_by_overlay(overlay) && !notifications.is_empty() {
+        let rects = notification_toast_rects(screen_size, notifications.len());
+        for (toast, card) in notifications.iter().zip(rects) {
+            let tx = card.loc.x;
+            let ty = card.loc.y;
+
+            let title_text = truncate_ascii(toast.title, 28);
+            if let Some(el) = text_cache.render_label(
+                renderer,
+                &title_text,
+                12.5,
+                TEXT_BRIGHT,
+                Point::from((tx + 62, ty + 13)),
+            ) {
+                elements.push(el);
+            }
+
+            let body_text = truncate_ascii(toast.body, 36);
+            if let Some(el) = text_cache.render_label(
+                renderer,
+                &body_text,
+                10.5,
+                TEXT_MUTED,
+                Point::from((tx + 62, ty + 35)),
+            ) {
+                elements.push(el);
+            }
+        }
+    }
+}
+
+/// Generates GPU-cached real font text labels for `TopBar`, `Dock`, `Spotlight`, `QuickSettings`,
+/// `Workspace Overview`, and `Notification HUD` (`RUSTYOS-020`/`021`/`023`/`024`).
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+pub fn generate_shell_text_elements(
+    text_cache: &mut crate::text::TextCache,
+    shape_cache: &mut crate::surfaces::UiShapeCache,
+    renderer: &mut GlesRenderer,
+    screen_size: Size<i32, smithay::utils::Physical>,
+    active_workspace: u8,
+    layout_mode: &str,
+    dock_view: &DockViewState<'_>,
+    top_telemetry: &TopBarTelemetry<'_>,
+    overlay: ShellOverlayView<'_>,
+    notifications: &[NotificationToastView<'_>],
+) -> Vec<MemoryRenderBufferRenderElement<GlesRenderer>> {
+    let mut elements = Vec::new();
+    if !text_cache.has_font() {
+        return elements;
+    }
+
+    append_foreground_overlay_text(
+        text_cache,
+        shape_cache,
+        renderer,
+        screen_size,
+        overlay,
+        notifications,
+        &mut elements,
+    );
+    if let ShellOverlayView::Overview(ov) = overlay {
+        render_overview_text(text_cache, renderer, screen_size, ov, &mut elements);
+    }
+    append_chrome_text(
+        text_cache,
+        shape_cache,
+        renderer,
+        screen_size,
+        active_workspace,
+        layout_mode,
+        dock_view,
+        top_telemetry,
+        overlay,
+        &mut elements,
+    );
+    elements
+}
+
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+fn append_chrome_text(
+    text_cache: &mut crate::text::TextCache,
+    shape_cache: &mut crate::surfaces::UiShapeCache,
+    renderer: &mut GlesRenderer,
+    screen_size: Size<i32, smithay::utils::Physical>,
+    active_workspace: u8,
+    layout_mode: &str,
+    dock_view: &DockViewState<'_>,
+    top_telemetry: &TopBarTelemetry<'_>,
+    overlay: ShellOverlayView<'_>,
+    elements: &mut Vec<MemoryRenderBufferRenderElement<GlesRenderer>>,
+) {
+    if !text_cache.has_font() {
+        return;
+    }
+
+    let width = screen_size.w;
+    let height = screen_size.h;
+    let text_bright = TEXT_BRIGHT;
+    let text_muted = TEXT_MUTED;
 
     // 1b. TopBar Left Active App & Global Menus (`RUSTYOS-038`, `RUSTYOS-048`, `RUSTYOS-049`)
     let ws_btn_height = TOP_BAR_ITEM_H;
@@ -606,54 +711,10 @@ pub fn generate_shell_text_elements(
         }
     }
 
-    // 4b. Floating top-right Notification HUD toast labels (`RUSTYOS-024`/`051`)
-    if !matches!(
-        overlay,
-        ShellOverlayView::Spotlight(_)
-            | ShellOverlayView::QuickSettings(_)
-            | ShellOverlayView::Polkit(_)
-            | ShellOverlayView::Portal(_)
-    ) && !notifications.is_empty()
-    {
-        let rects = notification_toast_rects(screen_size, notifications.len());
-        for (toast, card) in notifications.iter().zip(rects) {
-            let tx = card.loc.x;
-            let ty = card.loc.y;
-
-            let title_text = truncate_ascii(toast.title, 28);
-            if let Some(el) = text_cache.render_label(
-                renderer,
-                &title_text,
-                12.5,
-                text_bright,
-                Point::from((tx + 62, ty + 13)),
-            ) {
-                elements.push(el);
-            }
-
-            let body_text = truncate_ascii(toast.body, 36);
-            if let Some(el) = text_cache.render_label(
-                renderer,
-                &body_text,
-                10.5,
-                text_muted,
-                Point::from((tx + 62, ty + 35)),
-            ) {
-                elements.push(el);
-            }
-        }
-    }
-
     // 5. Dock hover tooltip label (`RUSTYOS-050`)
-    if !matches!(
-        overlay,
-        ShellOverlayView::Spotlight(_)
-            | ShellOverlayView::QuickSettings(_)
-            | ShellOverlayView::Switcher(_)
-            | ShellOverlayView::Polkit(_)
-            | ShellOverlayView::Portal(_)
-    ) && let Some((tooltip_rect, tooltip_label)) =
-        dock_tooltip_rect_and_label(width, height, dock_view)
+    if !dock_tooltip_hidden_by_overlay(overlay)
+        && let Some((tooltip_rect, tooltip_label)) =
+            dock_tooltip_rect_and_label(width, height, dock_view)
         && let Some(el) = text_cache.render_label_centered_weighted(
             renderer,
             &tooltip_label,
@@ -669,13 +730,130 @@ pub fn generate_shell_text_elements(
         elements.push(el);
     }
     let _ = shape_cache;
+}
 
-    elements
+/// Generates foreground system/interactive overlay elements (`Polkit`, `Portal`, `PickColor`,
+/// `Switcher`, `Spotlight`, `QuickSettings`, and floating notification toasts) sorted front-to-back (`RUSTYOS-060`).
+#[allow(clippy::too_many_arguments)]
+pub fn generate_shell_foreground_overlay_elements(
+    text_cache: &mut crate::text::TextCache,
+    shape_cache: &mut crate::surfaces::UiShapeCache,
+    renderer: &mut GlesRenderer,
+    screen_size: Size<i32, smithay::utils::Physical>,
+    top_telemetry: &TopBarTelemetry<'_>,
+    overlay: ShellOverlayView<'_>,
+    notifications: &[NotificationToastView<'_>],
+) -> Vec<CompositorRenderElement> {
+    let has_foreground_overlay = !matches!(
+        overlay,
+        ShellOverlayView::None | ShellOverlayView::Overview(_)
+    );
+    let show_toasts = !notifications_hidden_by_overlay(overlay) && !notifications.is_empty();
+    if !has_foreground_overlay && !show_toasts {
+        return Vec::new();
+    }
+
+    let mut out = Vec::new();
+    let has_text = text_cache.has_font();
+    let mut overlay_text = Vec::new();
+    append_foreground_overlay_text(
+        text_cache,
+        shape_cache,
+        renderer,
+        screen_size,
+        overlay,
+        notifications,
+        &mut overlay_text,
+    );
+    out.extend(
+        overlay_text
+            .into_iter()
+            .map(CompositorRenderElement::Memory),
+    );
+    out.extend(build_foreground_overlay_shapes(
+        shape_cache,
+        renderer,
+        screen_size,
+        has_text,
+        top_telemetry,
+        overlay,
+        notifications,
+    ));
+    out
+}
+
+/// Generates persistent desktop chrome (`TopBar`, dropdown menu, and `Dock`) sorted front-to-back (`RUSTYOS-060`).
+#[allow(clippy::too_many_arguments)]
+pub fn generate_shell_chrome_composite_elements(
+    text_cache: &mut crate::text::TextCache,
+    shape_cache: &mut crate::surfaces::UiShapeCache,
+    renderer: &mut GlesRenderer,
+    screen_size: Size<i32, smithay::utils::Physical>,
+    active_workspace: u8,
+    layout_mode: &str,
+    dock_view: &DockViewState<'_>,
+    top_telemetry: &TopBarTelemetry<'_>,
+    overlay: ShellOverlayView<'_>,
+) -> Vec<CompositorRenderElement> {
+    let mut out = Vec::new();
+    let mut chrome_text = Vec::new();
+    append_chrome_text(
+        text_cache,
+        shape_cache,
+        renderer,
+        screen_size,
+        active_workspace,
+        layout_mode,
+        dock_view,
+        top_telemetry,
+        overlay,
+        &mut chrome_text,
+    );
+    out.extend(chrome_text.into_iter().map(CompositorRenderElement::Memory));
+    out.extend(build_chrome_shapes(
+        shape_cache,
+        renderer,
+        screen_size,
+        active_workspace,
+        layout_mode,
+        dock_view,
+        top_telemetry,
+        overlay,
+    ));
+    out
+}
+
+/// Generates Workspace Overview elements (Spaces strip, preview cards, scrim) sorted front-to-back (`RUSTYOS-060`).
+pub fn generate_shell_overview_elements(
+    text_cache: &mut crate::text::TextCache,
+    shape_cache: &mut crate::surfaces::UiShapeCache,
+    renderer: &mut GlesRenderer,
+    screen_size: Size<i32, smithay::utils::Physical>,
+    top_telemetry: &TopBarTelemetry<'_>,
+    overlay: ShellOverlayView<'_>,
+) -> Vec<CompositorRenderElement> {
+    let ShellOverlayView::Overview(ov) = overlay else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut ov_text = Vec::new();
+    if text_cache.has_font() {
+        render_overview_text(text_cache, renderer, screen_size, ov, &mut ov_text);
+    }
+    out.extend(ov_text.into_iter().map(CompositorRenderElement::Memory));
+    out.extend(build_overview_shapes(
+        shape_cache,
+        renderer,
+        screen_size,
+        top_telemetry,
+        ov,
+    ));
+    out
 }
 
 /// Generates unified front-to-back shell elements with rounded corners, circular status dots,
 /// soft shadows, interactive Dock badges, Overview cards, Notification HUD, and GPU-cached typography (`RUSTYOS-022`/`023`/`024`).
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments)]
 pub fn generate_shell_composite_elements(
     text_cache: &mut crate::text::TextCache,
     shape_cache: &mut crate::surfaces::UiShapeCache,
@@ -688,13 +866,16 @@ pub fn generate_shell_composite_elements(
     overlay: ShellOverlayView<'_>,
     notifications: &[NotificationToastView<'_>],
 ) -> Vec<CompositorRenderElement> {
-    let mut out = Vec::new();
-    let width = screen_size.w;
-    let height = screen_size.h;
-    let has_text = text_cache.has_font();
-
-    // 1. All shell text labels on the topmost plane
-    let all_text = generate_shell_text_elements(
+    let mut out = generate_shell_foreground_overlay_elements(
+        text_cache,
+        shape_cache,
+        renderer,
+        screen_size,
+        top_telemetry,
+        overlay,
+        notifications,
+    );
+    out.extend(generate_shell_chrome_composite_elements(
         text_cache,
         shape_cache,
         renderer,
@@ -704,13 +885,31 @@ pub fn generate_shell_composite_elements(
         dock_view,
         top_telemetry,
         overlay,
-        notifications,
-    );
-    for el in all_text {
-        out.push(CompositorRenderElement::Memory(el));
-    }
+    ));
+    out.extend(generate_shell_overview_elements(
+        text_cache,
+        shape_cache,
+        renderer,
+        screen_size,
+        top_telemetry,
+        overlay,
+    ));
+    out
+}
 
-    // 2. Active modal Overlay (Spotlight or QuickSettings) above TopBar/Dock/windows
+#[allow(clippy::too_many_lines)]
+fn build_foreground_overlay_shapes(
+    shape_cache: &mut crate::surfaces::UiShapeCache,
+    renderer: &mut GlesRenderer,
+    screen_size: Size<i32, smithay::utils::Physical>,
+    has_text: bool,
+    top_telemetry: &TopBarTelemetry<'_>,
+    overlay: ShellOverlayView<'_>,
+    notifications: &[NotificationToastView<'_>],
+) -> Vec<CompositorRenderElement> {
+    let mut out = Vec::new();
+    let width = screen_size.w;
+    let height = screen_size.h;
     match overlay {
         ShellOverlayView::None | ShellOverlayView::Overview(_) => {}
         ShellOverlayView::Spotlight(spot) => {
@@ -917,14 +1116,7 @@ pub fn generate_shell_composite_elements(
     }
 
     // 2b. Floating top-right Notification HUD toasts (`RUSTYOS-024`/`051`)
-    if !matches!(
-        overlay,
-        ShellOverlayView::Spotlight(_)
-            | ShellOverlayView::QuickSettings(_)
-            | ShellOverlayView::Polkit(_)
-            | ShellOverlayView::Portal(_)
-    ) && !notifications.is_empty()
-    {
+    if !notifications_hidden_by_overlay(overlay) && !notifications.is_empty() {
         let rects = notification_toast_rects(screen_size, notifications.len());
         for (toast, card) in notifications.iter().zip(rects) {
             let tx = card.loc.x;
@@ -975,6 +1167,24 @@ pub fn generate_shell_composite_elements(
             );
         }
     }
+
+    out
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn build_chrome_shapes(
+    shape_cache: &mut crate::surfaces::UiShapeCache,
+    renderer: &mut GlesRenderer,
+    screen_size: Size<i32, smithay::utils::Physical>,
+    active_workspace: u8,
+    layout_mode: &str,
+    dock_view: &DockViewState<'_>,
+    top_telemetry: &TopBarTelemetry<'_>,
+    overlay: ShellOverlayView<'_>,
+) -> Vec<CompositorRenderElement> {
+    let mut out = Vec::new();
+    let width = screen_size.w;
+    let height = screen_size.h;
 
     // 3. TopBar macOS Menu Bar SDF glyphs, optional tray/workspaces, menu popover & transparent default (`RUSTYOS-048`, `RUSTYOS-049`)
     let active_app_name = dock_view
@@ -1230,14 +1440,8 @@ pub fn generate_shell_composite_elements(
     }
 
     // 4. Dock macOS glass container, 4x4 SSAA icons, soft drop shadows, hover magnification, tooltip & divider (`RUSTYOS-050`)
-    if !matches!(
-        overlay,
-        ShellOverlayView::Spotlight(_)
-            | ShellOverlayView::QuickSettings(_)
-            | ShellOverlayView::Switcher(_)
-            | ShellOverlayView::Polkit(_)
-            | ShellOverlayView::Portal(_)
-    ) && let Some((tooltip_rect, _)) = dock_tooltip_rect_and_label(width, height, dock_view)
+    if !dock_tooltip_hidden_by_overlay(overlay)
+        && let Some((tooltip_rect, _)) = dock_tooltip_rect_and_label(width, height, dock_view)
     {
         push_rounded_glass_box(
             &mut out,
@@ -1408,111 +1612,124 @@ pub fn generate_shell_composite_elements(
         out.push(CompositorRenderElement::Memory(dock_glass));
     }
 
-    // 5. Workspace Overview Spaces strip, floating cards & light scrim (`RUSTYOS-023`/`025`/`051`)
-    if let ShellOverlayView::Overview(ov) = overlay {
-        let heading_dy = anim_offset(ov.progress, 12.0);
-        let card_dy = anim_offset(ov.progress, 22.0);
+    out
+}
 
-        if !ov.spaces.is_empty() {
-            let space_rects = overview_space_rects(screen_size, ov.spaces.len());
-            for (space, base_thumb) in ov.spaces.iter().zip(space_rects) {
-                let thumb = Rectangle::new(
-                    Point::from((base_thumb.loc.x, base_thumb.loc.y + heading_dy)),
-                    base_thumb.size,
-                );
-                for &(nx, ny, nw, nh) in &space.preview_rects {
-                    if nw <= 0.0 || nh <= 0.0 {
-                        continue;
-                    }
-                    #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
-                    let (rx, ry, rw, rh) = (
-                        thumb.loc.x + 4 + ((thumb.size.w - 8) as f32 * nx).round() as i32,
-                        thumb.loc.y + 4 + ((thumb.size.h - 8) as f32 * ny).round() as i32,
-                        (((thumb.size.w - 8) as f32 * nw).round() as i32).max(6),
-                        (((thumb.size.h - 8) as f32 * nh).round() as i32).max(5),
-                    );
-                    push_rounded_glass_box(
-                        &mut out,
-                        shape_cache,
-                        renderer,
-                        Rectangle::new(Point::from((rx, ry)), Size::from((rw, rh))),
-                        3,
-                        [224, 212, 248, 185],
-                        Some([255, 255, 255, 90]),
-                    );
+#[allow(clippy::too_many_lines)]
+fn build_overview_shapes(
+    shape_cache: &mut crate::surfaces::UiShapeCache,
+    renderer: &mut GlesRenderer,
+    screen_size: Size<i32, smithay::utils::Physical>,
+    top_telemetry: &TopBarTelemetry<'_>,
+    ov: &OverviewRenderState<'_>,
+) -> Vec<CompositorRenderElement> {
+    let mut out = Vec::new();
+    let width = screen_size.w;
+    let height = screen_size.h;
+
+    // 5. Workspace Overview Spaces strip, floating cards & light scrim (`RUSTYOS-023`/`025`/`051`)
+    let heading_dy = anim_offset(ov.progress, 12.0);
+    let card_dy = anim_offset(ov.progress, 22.0);
+
+    if !ov.spaces.is_empty() {
+        let space_rects = overview_space_rects(screen_size, ov.spaces.len());
+        for (space, base_thumb) in ov.spaces.iter().zip(space_rects) {
+            let thumb = Rectangle::new(
+                Point::from((base_thumb.loc.x, base_thumb.loc.y + heading_dy)),
+                base_thumb.size,
+            );
+            for &(nx, ny, nw, nh) in &space.preview_rects {
+                if nw <= 0.0 || nh <= 0.0 {
+                    continue;
                 }
-                let thumb_border = if space.active {
-                    [185, 138, 255, 255]
-                } else {
-                    RGBA_BORDER
-                };
-                let thumb_bg = if space.active {
-                    [72, 42, 124, 228]
-                } else if space.window_count > 0 {
-                    [50, 32, 86, 214]
-                } else {
-                    [36, 24, 62, 196]
-                };
+                #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+                let (rx, ry, rw, rh) = (
+                    thumb.loc.x + 4 + ((thumb.size.w - 8) as f32 * nx).round() as i32,
+                    thumb.loc.y + 4 + ((thumb.size.h - 8) as f32 * ny).round() as i32,
+                    (((thumb.size.w - 8) as f32 * nw).round() as i32).max(6),
+                    (((thumb.size.h - 8) as f32 * nh).round() as i32).max(5),
+                );
                 push_rounded_glass_box(
                     &mut out,
                     shape_cache,
                     renderer,
-                    thumb,
-                    8,
-                    thumb_bg,
-                    Some(thumb_border),
+                    Rectangle::new(Point::from((rx, ry)), Size::from((rw, rh))),
+                    3,
+                    [224, 212, 248, 185],
+                    Some([255, 255, 255, 90]),
                 );
-                push_soft_shadow(&mut out, shape_cache, renderer, thumb, 8, 8, 32);
             }
-            out.push(CompositorRenderElement::Solid(make_solid_element(
-                Rectangle::new(Point::from((0, TOP_BAR_HEIGHT)), Size::from((width, 98))),
-                premul(0.08, 0.05, 0.14, 0.28),
-            )));
-        }
-
-        let cards = overview_card_rects(screen_size, ov.windows.len());
-        for (win, base_card) in ov.windows.iter().zip(cards) {
-            let card = Rectangle::new(
-                Point::from((base_card.loc.x, base_card.loc.y + card_dy)),
-                base_card.size,
-            );
-            push_liquid_glass_panel(
+            let thumb_border = if space.active {
+                [185, 138, 255, 255]
+            } else {
+                RGBA_BORDER
+            };
+            let thumb_bg = if space.active {
+                [72, 42, 124, 228]
+            } else if space.window_count > 0 {
+                [50, 32, 86, 214]
+            } else {
+                [36, 24, 62, 196]
+            };
+            push_rounded_glass_box(
                 &mut out,
                 shape_cache,
                 renderer,
-                card,
-                14,
-                crate::surfaces::GlassPanelStyle::Popover,
-                top_telemetry.glass_opacity,
-                top_telemetry.reduce_transparency,
-                None,
+                thumb,
+                8,
+                thumb_bg,
+                Some(thumb_border),
             );
-            if win.focused {
-                push_rounded_glass_box(
-                    &mut out,
-                    shape_cache,
-                    renderer,
-                    Rectangle::new(
-                        Point::from((card.loc.x - 2, card.loc.y - 2)),
-                        Size::from((card.size.w + 4, card.size.h + 4)),
-                    ),
-                    15,
-                    [165, 110, 255, 68],
-                    Some([198, 156, 255, 245]),
-                );
-            }
-            push_soft_shadow(&mut out, shape_cache, renderer, card, 14, 16, 50);
+            push_soft_shadow(&mut out, shape_cache, renderer, thumb, 8, 8, 32);
         }
-        #[allow(clippy::cast_possible_truncation)]
-        let scrim_a = 0.36 * (ov.progress.clamp(0.0, 1.0) as f32);
         out.push(CompositorRenderElement::Solid(make_solid_element(
-            Rectangle::new(
-                Point::from((0, TOP_BAR_HEIGHT)),
-                Size::from((width, (height - TOP_BAR_HEIGHT).max(0))),
-            ),
-            premul(0.059, 0.039, 0.098, scrim_a),
+            Rectangle::new(Point::from((0, TOP_BAR_HEIGHT)), Size::from((width, 98))),
+            premul(0.08, 0.05, 0.14, 0.28),
         )));
     }
+
+    let cards = overview_card_rects(screen_size, ov.windows.len());
+    for (win, base_card) in ov.windows.iter().zip(cards) {
+        let card = Rectangle::new(
+            Point::from((base_card.loc.x, base_card.loc.y + card_dy)),
+            base_card.size,
+        );
+        push_liquid_glass_panel(
+            &mut out,
+            shape_cache,
+            renderer,
+            card,
+            14,
+            crate::surfaces::GlassPanelStyle::Popover,
+            top_telemetry.glass_opacity,
+            top_telemetry.reduce_transparency,
+            None,
+        );
+        if win.focused {
+            push_rounded_glass_box(
+                &mut out,
+                shape_cache,
+                renderer,
+                Rectangle::new(
+                    Point::from((card.loc.x - 2, card.loc.y - 2)),
+                    Size::from((card.size.w + 4, card.size.h + 4)),
+                ),
+                15,
+                [165, 110, 255, 68],
+                Some([198, 156, 255, 245]),
+            );
+        }
+        push_soft_shadow(&mut out, shape_cache, renderer, card, 14, 16, 50);
+    }
+    #[allow(clippy::cast_possible_truncation)]
+    let scrim_a = 0.36 * (ov.progress.clamp(0.0, 1.0) as f32);
+    out.push(CompositorRenderElement::Solid(make_solid_element(
+        Rectangle::new(
+            Point::from((0, TOP_BAR_HEIGHT)),
+            Size::from((width, (height - TOP_BAR_HEIGHT).max(0))),
+        ),
+        premul(0.059, 0.039, 0.098, scrim_a),
+    )));
 
     out
 }

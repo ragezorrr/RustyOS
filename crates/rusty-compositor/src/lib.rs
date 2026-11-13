@@ -7,6 +7,7 @@
 pub mod config;
 pub mod dbus_notifications;
 pub mod drm_backend;
+mod frame_composer;
 pub mod frame_timing;
 pub mod icons;
 pub mod input;
@@ -1019,7 +1020,7 @@ mod tests {
             Color32F::BLACK,
             Kind::Unspecified,
         );
-        let scaled = winit_backend::scale_render_elements_for_output(
+        let scaled = frame_composer::scale_render_elements_for_output(
             vec![shell_render::CompositorRenderElement::Solid(solid)],
             1.5,
         );

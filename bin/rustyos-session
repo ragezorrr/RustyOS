@@ -69,8 +69,12 @@ if [ "$BACKEND_FLAG" = "--drm" ] || [ "$BACKEND_FLAG" = "--kms" ]; then
 fi
 
 echo "Starting RustyOS Desktop Session (Backend: $BACKEND_FLAG)..."
-if [ "$BACKEND_FLAG" != "--check" ] && [ "$BACKEND_FLAG" != "--drm-probe" ] \
-    && [ -n "$SHELL_BIN" ] && [ -x "$SHELL_BIN" ]; then
-    exec "$COMPOSITOR_BIN" "$BACKEND_FLAG" --spawn "$SHELL_BIN" "$@"
+if [ "${RUSTYOS_EXTERNAL_SHELL:-0}" = "1" ] \
+    && [ "$BACKEND_FLAG" != "--check" ] \
+    && [ "$BACKEND_FLAG" != "--drm-probe" ]; then
+    if [ -n "$SHELL_BIN" ] && [ -x "$SHELL_BIN" ]; then
+        exec "$COMPOSITOR_BIN" "$BACKEND_FLAG" --spawn "$SHELL_BIN --wayland" "$@"
+    fi
+    echo "Warning: RUSTYOS_EXTERNAL_SHELL=1 set, but rusty-shell binary not found; falling back to built-in compositor shell" >&2
 fi
 exec "$COMPOSITOR_BIN" "$BACKEND_FLAG" "$@"

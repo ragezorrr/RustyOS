@@ -845,6 +845,20 @@ hardware/software context и низкие накладные расходы.
 - **Verification:** `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --offline -- -D warnings` (0 предупреждений), `cargo test --workspace --offline` (158 passed, 0 failed, 0 ignored: `rusty_animation` 4, `rusty_compositor` 113, `rusty_ipc` 3, `rusty_services` 26, `rusty_shell` 5, `rusty_wm` 7), `cargo run -p rusty-compositor --offline -- --check` и `cargo run -p rusty-compositor --offline -- --winit --max-frames 3` (`rendered_frames=3`, `wayland-2`) завершились с кодом 0.
 - **Risks:** Нулевое изменение публичных интерфейсов и runtime-логики; из крупных монолитов вне рамок Этапа Б осознанно оставлен `crates/rusty-compositor/src/icons.rs` (2 094 строки) со встроенным PNG/deflate-декодером.
 
+### RUSTYOS-060 — Видимость/Z-order системных и интерактивных overlay, `frame_composer.rs`, системные dev-пакеты в CI и жизненный цикл shell сессии
+- **Status:** done
+- **Priority:** P1
+- **Phase:** Фаза 8 / Architecture & Session
+- **Scope:**
+  - Исправлена видимость и Z-order системных/интерактивных overlay (`Polkit`, `Portal`, `PickColor`, `Switcher`, `Spotlight`, `QuickSettings`, `Overview`, `LockScreen`, `PowerMenu`, уведомления/OSD) относительно полноэкранных окон и `wlr-layer-shell` слоёв: разделены `foreground_overlay` (выше `Layer::Overlay`/`Layer::Top` и `fullscreen`), persistent `chrome` (`TopBar`/`Dock`, скрываемый при `fullscreen` и активных foreground layer-shell поверхностях) и `Overview` (выше управляемых окон, но ниже `TopBar` и `Layer::Top`).
+  - Политика bypass полноэкранных окон (`state/mod.rs`) и pointer/hover routing (`input/pointer.rs`, `input/shell_pointer.rs`) синхронизированы с разделением overlay и persistent chrome; в `shell_render/mod.rs` добавлены раздельные композиционные хелперы без ломки существующих публичных функций.
+  - Из `winit_backend.rs` в новый backend-независимый модуль `crates/rusty-compositor/src/frame_composer.rs` вынесена общая композиция кадра (сборка render list outputs, HiDPI scale, layer-shell/IME/cursor и post-frame capture/screencast readback), на которую переведены `winit_backend.rs`, `drm_backend.rs` и `screenshot.rs` (без связности `drm_backend -> winit_backend` и без новых зависимостей/`unsafe`).
+  - В `.github/workflows/ci.yml` добавлены системные dev-пакеты Ubuntu (`libwayland-dev`, `libxkbcommon-dev`, `libudev-dev`, `libinput-dev`, `libgbm-dev`, `libdrm-dev`, `libseat-dev`, `libegl-dev`, `libgles-dev`, `libpixman-1-dev`, `libpipewire-0.3-dev` и др.) и headless-проверка `cargo run -p rusty-compositor -- --check`.
+  - Скрипт `bin/rustyos-session` переведён на встроенный композиторный shell по умолчанию без запуска one-shot `rusty-shell`; внешний `rusty-shell --wayland` запускается только по opt-in `RUSTYOS_EXTERNAL_SHELL=1` с fallback-предупреждением при отсутствии бинарника.
+  - Оформлены `docs/adr/0027-session-shell-lifecycle-and-overlay-separation.md` и запись `D-035` в `DECISIONS.md`, обновлены `ARCHITECTURE.md` и `TASKS.md`.
+- **Verification:** `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --offline -- -D warnings` (0 предупреждений), `cargo test --workspace --offline` (160 passed, 0 failed, 0 ignored: `rusty_animation` 4, `rusty_compositor` 115, `rusty_ipc` 3, `rusty_services` 26, `rusty_shell` 5, `rusty_wm` 7), `cargo run -p rusty-compositor --offline -- --check`, `cargo run -p rusty-compositor --offline -- --winit --max-frames 3` (`rendered_frames=3`) и `sh -n bin/rustyos-session` завершены с кодом 0.
+- **Risks:** Обновлённый workflow `.github/workflows/ci.yml` проверяется на GitHub Actions runner только после `git push`; `frame_composer.rs` консолидирует уже существующую композиционную логику без изменения форматов IPC или Wayland-протоколов.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

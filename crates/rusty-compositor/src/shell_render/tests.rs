@@ -1142,3 +1142,64 @@ fn portal_modal_hit_testing() {
         PortalHit::Outside
     );
 }
+
+#[test]
+fn overlay_and_chrome_visibility_predicates_isolate_modals() {
+    let pk = PolkitPromptRenderState {
+        message: "Auth",
+        action_id: "org.freedesktop.policykit.exec",
+        identity_user: "root",
+        prompt_label: "Password",
+        input_display: "",
+        checking: false,
+        error_message: None,
+        info_message: None,
+    };
+    let portal = PortalPromptRenderState {
+        app_id: "app",
+        is_screencast: false,
+        include_cursor: false,
+        cursor_mode_editable: false,
+        rows: &[],
+        selected: 0,
+    };
+    let sw = WindowSwitcherRenderState {
+        cards: &[],
+        selected: 0,
+    };
+    let ov = OverviewRenderState {
+        active_workspace: 1,
+        layout_mode: "floating",
+        windows: &[],
+        spaces: &[],
+        progress: 1.0,
+    };
+
+    assert!(!notifications_hidden_by_overlay(ShellOverlayView::None));
+    assert!(!notifications_hidden_by_overlay(
+        ShellOverlayView::Overview(&ov)
+    ));
+    assert!(!notifications_hidden_by_overlay(
+        ShellOverlayView::PickColor("app")
+    ));
+    assert!(notifications_hidden_by_overlay(ShellOverlayView::Polkit(
+        &pk
+    )));
+    assert!(notifications_hidden_by_overlay(ShellOverlayView::Portal(
+        &portal
+    )));
+
+    assert!(!dock_tooltip_hidden_by_overlay(ShellOverlayView::None));
+    assert!(!dock_tooltip_hidden_by_overlay(
+        ShellOverlayView::PickColor("app")
+    ));
+    assert!(dock_tooltip_hidden_by_overlay(ShellOverlayView::Switcher(
+        &sw
+    )));
+    assert!(dock_tooltip_hidden_by_overlay(ShellOverlayView::Polkit(
+        &pk
+    )));
+    assert!(dock_tooltip_hidden_by_overlay(ShellOverlayView::Portal(
+        &portal
+    )));
+}

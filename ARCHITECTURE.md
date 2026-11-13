@@ -67,12 +67,13 @@ Event loop не должен блокироваться тяжёлыми опе�
 - `rusty-ipc`: версионируемый протокол (`ShellRequest`, `CompositorEvent`,
   `DesktopStateSnapshot`) поверх Unix domain socket с защитой от битых/oversized
   сообщений;
-- `apps/rusty-shell`: внешний процесс shell-панели/дока/лончера, устойчивый
-  к независимому перезапуску, плюс встроенные композиторные оверлеи
+- `apps/rusty-shell`: опциональный внешний процесс shell-клиента
+  (`--wayland`, opt-in через `RUSTYOS_EXTERNAL_SHELL=1` в `rustyos-session`),
+  плюс канонические встроенные композиторные оверлеи
   (`shell_render/`: `tokens`, `top_bar`, `dock`, `quick_settings`,
   `spotlight_overview`, `lock_screen`, `modals`, `ssd`) для low-latency
   взаимодействия (TopBar, Dock, Spotlight Launcher, Overview, Quick Settings,
-  Lock Screen, Notifications, Alt+Tab HUD).
+  Lock Screen, Notifications, Alt+Tab HUD, Polkit/Portal/PickColor modals).
 
 ### System Services (`crates/rusty-services`)
 
@@ -95,8 +96,9 @@ RustyOS/
 ├── Cargo.toml                 # workspace (edition = 2024, MSRV 1.99, unsafe_code = "deny")
 ├── rust-toolchain.toml
 ├── crates/
-│   ├── rusty-compositor/      # Wayland compositor, Winit & DRM/KMS backends, input/, state/, shell_render/, surfaces/
+│   ├── rusty-compositor/      # Wayland compositor, Winit & DRM/KMS backends, frame_composer, input/, state/, shell_render/, surfaces/
 │   │   └── src/
+│   │       ├── frame_composer.rs  # Backend-независимая сборка render list кадра, Z-order overlay/chrome/layer-shell, HiDPI scale, readback
 │   │       ├── state/         # RustyCompositorState, wm_windows, shell_actions, system_bridges, wayland_handlers/
 │   │       ├── shell_render/  # tokens, top_bar, dock, quick_settings, spotlight_overview, lock_screen, modals, ssd
 │   │       ├── input/         # keyboard, pointer, shell_pointer, gestures
@@ -115,7 +117,7 @@ RustyOS/
 ├── scripts/
 │   └── install.sh
 └── docs/
-    ├── adr/                   # ADR-0001 .. ADR-0014
+    ├── adr/                   # ADR-0001 .. ADR-0027
     ├── DEVELOPMENT_ENVIRONMENT.md
     ├── GETTING_STARTED.md
     └── HARDWARE_MATRIX.md

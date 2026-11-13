@@ -26,7 +26,8 @@ impl RustyCompositorState {
         let next_slot = if is_on_primary
             && !self.launcher_active
             && !self.quick_settings_active
-            && self.active_unoccluded_fullscreen_window().is_none()
+            && !self.has_foreground_layer_surfaces()
+            && !self.should_hide_shell_chrome_for_fullscreen()
         {
             crate::shell_render::check_dock_slot(
                 primary_size,
@@ -69,9 +70,13 @@ impl RustyCompositorState {
 
     pub(super) fn update_shell_hover_states(&mut self, pos: Point<f64, Logical>) {
         let (primary_size, is_on_primary, local_x, local_y) = self.primary_local_coords(pos);
-        let fullscreen_active = self.active_unoccluded_fullscreen_window().is_some();
+        let chrome_hidden =
+            self.has_foreground_layer_surfaces() || self.should_hide_shell_chrome_for_fullscreen();
+        let fullscreen_active = self
+            .topmost_fullscreen_window_on(self.output_map.primary().id)
+            .is_some();
 
-        self.top_bar_menu_hover_row = if is_on_primary && !fullscreen_active {
+        self.top_bar_menu_hover_row = if is_on_primary && !chrome_hidden {
             if let Some(menu) = self.active_top_bar_menu {
                 let active_app = self.active_top_bar_app_name();
                 crate::shell_render::check_top_bar_menu_popover_hover_row(

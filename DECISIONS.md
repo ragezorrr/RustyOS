@@ -246,6 +246,20 @@
                           rusty-pipewire-stream   
                           (ADR-0026)              
   -----------------------------------------------------------------------
+  D-035                   Фаза 8/Architecture &   accepted
+                          Session (RUSTYOS-060):  
+                          Разделение системных/   
+                          интерактивных overlay и 
+                          persistent shell chrome 
+                          в Z-order,              
+                          backend-независимый     
+                          frame_composer.rs, CI   
+                          dev-пакеты и встроенный 
+                          shell по умолчанию с    
+                          opt-in                  
+                          RUSTYOS_EXTERNAL_SHELL= 
+                          1 (ADR-0027)            
+  -----------------------------------------------------------------------
 
 ## Открытые решения
 

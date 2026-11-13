@@ -65,7 +65,7 @@ use smithay::{
         },
         session_lock::{LockSurface, SessionLockManagerState, SessionLocker},
         shell::{
-            wlr_layer::WlrLayerShellState,
+            wlr_layer::{Layer, WlrLayerShellState},
             xdg::{PopupSurface, XdgShellState, decoration::XdgDecorationState},
         },
         shm::ShmState,
@@ -1679,8 +1679,61 @@ impl RustyCompositorState {
         self.active_unoccluded_fullscreen_window_on(self.output_map.primary().id)
     }
 
+    /// Returns whether any `Layer::Overlay` or `Layer::Top` layer-shell surface is mapped on `output` (`RUSTYOS-060`).
+    #[must_use]
+    pub fn has_foreground_layer_surfaces_on(&self, output: &Output) -> bool {
+        let layer_map = layer_map_for_output(output);
+        layer_map.layers_on(Layer::Overlay).next().is_some()
+            || layer_map.layers_on(Layer::Top).next().is_some()
+    }
+
+    /// Returns whether any `Layer::Overlay` or `Layer::Top` layer-shell surface is mapped on the primary output (`RUSTYOS-060`).
+    #[must_use]
+    pub fn has_foreground_layer_surfaces(&self) -> bool {
+        self.has_foreground_layer_surfaces_on(&self.output_map.primary().output)
+    }
+
+    /// Returns the topmost unminimized fullscreen window on `output_id`, ignoring shell overlays (`RUSTYOS-060`).
+    #[must_use]
+    pub fn topmost_fullscreen_window_on(&self, output_id: OutputId) -> Option<WindowId> {
+        self.wm
+            .visible_windows_for_output(output_id)
+            .into_iter()
+            .rev()
+            .find(|w| !self.is_window_minimized(w.id))
+            .filter(|w| w.fullscreen)
+            .map(|w| w.id)
+    }
+
+    /// Returns whether persistent desktop chrome (`TopBar` / `Dock`) should stay hidden for a
+    /// fullscreen window on `output_id` unless an interactive shell overlay explicitly requests chrome (`RUSTYOS-060`).
+    #[must_use]
+    pub fn should_hide_shell_chrome_for_fullscreen_on(&self, output_id: OutputId) -> bool {
+        if self.is_session_locked() {
+            return true;
+        }
+        if output_id == self.output_map.primary().id {
+            let interactive_shell_open = self.launcher_active
+                || self.quick_settings_active
+                || self.overview_active
+                || self.launcher_anim.current() > 0.01
+                || self.quick_settings_anim.current() > 0.01
+                || self.overview_anim.current() > 0.01;
+            if interactive_shell_open {
+                return false;
+            }
+        }
+        self.topmost_fullscreen_window_on(output_id).is_some()
+    }
+
+    /// Returns whether persistent desktop chrome on the primary output should stay hidden (`RUSTYOS-060`).
+    #[must_use]
+    pub fn should_hide_shell_chrome_for_fullscreen(&self) -> bool {
+        self.should_hide_shell_chrome_for_fullscreen_on(self.output_map.primary().id)
+    }
+
     /// Returns the topmost unminimized fullscreen window on `output_id` if no active overlay
-    /// occludes that display (`RUSTYOS-042`).
+    /// occludes that display (`RUSTYOS-042`, `RUSTYOS-060`).
     #[must_use]
     pub fn active_unoccluded_fullscreen_window_on(&self, output_id: OutputId) -> Option<WindowId> {
         if self.is_session_locked() || self.lock_screen_anim.current() > 0.01 {
@@ -1691,6 +1744,9 @@ impl RustyCompositorState {
                 || self.quick_settings_active
                 || self.overview_active
                 || self.window_switcher.is_some()
+                || self.polkit_prompt.is_some()
+                || self.portal_prompt.is_some()
+                || self.portal_pick_color.is_some()
                 || self.osd.is_some()
                 || !self.notifications.is_empty()
                 || self.launcher_anim.current() > 0.01
@@ -1701,13 +1757,7 @@ impl RustyCompositorState {
             }
         }
 
-        self.wm
-            .visible_windows_for_output(output_id)
-            .into_iter()
-            .rev()
-            .find(|w| !self.is_window_minimized(w.id))
-            .filter(|w| w.fullscreen)
-            .map(|w| w.id)
+        self.topmost_fullscreen_window_on(output_id)
     }
 
     pub(in crate::state) fn init_seat_keyboard(

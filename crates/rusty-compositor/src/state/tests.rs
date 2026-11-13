@@ -169,3 +169,78 @@ fn xdg_toplevel_icon_buffer_destroyed_while_icon_alive_raises_no_buffer()
 
     Ok(())
 }
+
+#[test]
+fn fullscreen_unoccluded_bypass_yields_for_polkit_portal_and_pick_color_without_exposing_chrome()
+-> Result<(), Box<dyn Error>> {
+    let display: Display<RustyCompositorState> = Display::new()?;
+    let event_loop: EventLoop<RustyCompositorState> = EventLoop::try_new()?;
+    let mut compositor = RustyCompositorState::new(
+        &display,
+        "rusty-test-fullscreen-modals".to_owned(),
+        event_loop.get_signal(),
+        event_loop.handle(),
+        (1280, 800).into(),
+    )?;
+
+    assert!(!compositor.has_foreground_layer_surfaces());
+
+    let w1 = compositor.wm.next_window_id();
+    let _ = compositor.wm.map_window(w1, Some((900, 600)));
+    let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+    compositor.apply_wm_action(rusty_wm::WmAction::ToggleFullscreen, serial);
+    assert_eq!(compositor.active_unoccluded_fullscreen_window(), Some(w1));
+    assert!(compositor.should_hide_shell_chrome_for_fullscreen());
+
+    compositor.polkit_prompt = Some(super::PolkitPromptState {
+        cookie: "cookie-1".to_owned(),
+        action_id: "org.freedesktop.policykit.exec".to_owned(),
+        message: "Authentication required".to_owned(),
+        identity_user: "root".to_owned(),
+        prompt_label: "Password".to_owned(),
+        echo_on: false,
+        checking: false,
+        error_message: None,
+        info_message: None,
+    });
+    assert_eq!(compositor.active_unoccluded_fullscreen_window(), None);
+    assert!(compositor.should_hide_shell_chrome_for_fullscreen());
+    compositor.polkit_prompt = None;
+    assert_eq!(compositor.active_unoccluded_fullscreen_window(), Some(w1));
+
+    compositor.portal_prompt = Some(super::PortalPromptState {
+        request_id: 7,
+        app_id: "org.example.Recorder".to_owned(),
+        is_screencast: true,
+        session_handle: Some("/org/freedesktop/portal/desktop/session/1".to_owned()),
+        requested_target: 1,
+        allowed_types: 1,
+        include_cursor: true,
+        cursor_mode_editable: true,
+        persist_mode: 0,
+        candidates: Vec::new(),
+        selected: 0,
+    });
+    assert_eq!(compositor.active_unoccluded_fullscreen_window(), None);
+    assert!(compositor.should_hide_shell_chrome_for_fullscreen());
+    compositor.portal_prompt = None;
+
+    compositor.portal_pick_color = Some(super::PendingPickColorState {
+        request_id: 8,
+        app_id: "org.example.Picker".to_owned(),
+    });
+    assert_eq!(compositor.active_unoccluded_fullscreen_window(), None);
+    assert!(compositor.should_hide_shell_chrome_for_fullscreen());
+    compositor.portal_pick_color = None;
+
+    // Interactive shell overlay (Spotlight) explicitly exposes desktop chrome above fullscreen windows.
+    compositor.handle_ipc_request(rusty_ipc::ShellRequest::ToggleLauncher);
+    assert_eq!(compositor.active_unoccluded_fullscreen_window(), None);
+    assert!(!compositor.should_hide_shell_chrome_for_fullscreen());
+    compositor.handle_ipc_request(rusty_ipc::ShellRequest::ToggleLauncher);
+    compositor.handle_ipc_request(rusty_ipc::ShellRequest::SetReducedMotion { enabled: true });
+    assert_eq!(compositor.active_unoccluded_fullscreen_window(), Some(w1));
+    assert!(compositor.should_hide_shell_chrome_for_fullscreen());
+
+    Ok(())
+}

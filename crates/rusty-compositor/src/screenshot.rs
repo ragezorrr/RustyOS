@@ -23,8 +23,8 @@ use smithay::backend::renderer::gles::{GlesRenderer, GlesTexture};
 use smithay::backend::renderer::{Bind, ExportMem, Offscreen};
 use smithay::utils::{Buffer as BufferCoord, Physical, Point, Rectangle, Size, Transform};
 
+use crate::frame_composer::BACKGROUND_COLOR;
 use crate::shell_render::CompositorRenderElement;
-use crate::winit_backend::BACKGROUND_COLOR;
 
 /// Requested region for an on-demand compositor screenshot capture (`RUSTYOS-031`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -479,7 +479,7 @@ impl DrmOutputState {
         match self.drm_compositor.render_frame(
             renderer,
             render_list,
-            crate::winit_backend::BACKGROUND_COLOR,
+            crate::frame_composer::BACKGROUND_COLOR,
             FrameFlags::DEFAULT,
         ) {
             Ok(result) => {
@@ -548,8 +548,8 @@ pub(crate) fn output_ids_affected_by_pointer_motion(
     let mut ids = Vec::new();
     for entry in output_map.entries() {
         let geo = entry.logical_geometry();
-        if crate::winit_backend::pointer_local_if_on_output(prev_ptr, geo).is_some()
-            || crate::winit_backend::pointer_local_if_on_output(next_ptr, geo).is_some()
+        if crate::frame_composer::pointer_local_if_on_output(prev_ptr, geo).is_some()
+            || crate::frame_composer::pointer_local_if_on_output(next_ptr, geo).is_some()
         {
             ids.push(entry.id);
         }
@@ -578,7 +578,7 @@ impl DrmRuntime {
         if !state.running || self.paused || state.is_session_locked() {
             return;
         }
-        crate::winit_backend::process_portal_captures_and_streams(
+        crate::frame_composer::process_portal_captures_and_streams(
             &mut self.renderer,
             &mut self.text_cache,
             &mut self.shape_cache,
@@ -627,7 +627,7 @@ impl DrmRuntime {
         output_id: rusty_wm::OutputId,
         pixel_size: smithay::utils::Size<i32, smithay::utils::Physical>,
     ) {
-        let snap_list = crate::winit_backend::build_frame_render_list_for_output(
+        let snap_list = crate::frame_composer::build_frame_render_list_for_output(
             &mut self.renderer,
             &mut self.text_cache,
             &mut self.shape_cache,
@@ -636,7 +636,7 @@ impl DrmRuntime {
             pixel_size,
             false,
         );
-        crate::winit_backend::process_pending_screenshot(
+        crate::frame_composer::process_pending_screenshot(
             &mut self.renderer,
             &snap_list,
             state,
@@ -678,13 +678,13 @@ impl DrmRuntime {
         }
 
         let cursor_mode = if hw_cursor_allowed {
-            crate::winit_backend::CursorRenderMode::HardwarePlane {
+            crate::frame_composer::CursorRenderMode::HardwarePlane {
                 max_size: self.cursor_size,
             }
         } else {
-            crate::winit_backend::CursorRenderMode::SoftwareComposited
+            crate::frame_composer::CursorRenderMode::SoftwareComposited
         };
-        let render_list = crate::winit_backend::build_frame_render_list_for_output_with_cursor(
+        let render_list = crate::frame_composer::build_frame_render_list_for_output_with_cursor(
             &mut self.renderer,
             &mut self.text_cache,
             &mut self.shape_cache,
@@ -1425,7 +1425,7 @@ fn try_run_native_drm_session(
 
     let autostart = state.user_config.autostart.clone();
     for cmd in autostart.iter().chain(config.spawn_clients.iter()) {
-        crate::winit_backend::spawn_test_client(cmd, &socket_name, &ipc_socket_path);
+        crate::frame_composer::spawn_test_client(cmd, &socket_name, &ipc_socket_path);
     }
 
     runtime.borrow_mut().render_ready_outputs(&mut state, true);
@@ -1433,7 +1433,7 @@ fn try_run_native_drm_session(
     let rt_dispatch = Rc::clone(&runtime);
     event_loop
         .run(Some(Duration::from_millis(4)), &mut state, |app_state| {
-            crate::winit_backend::dispatch_and_refresh_clients(
+            crate::frame_composer::dispatch_and_refresh_clients(
                 &mut display,
                 ipc_server.as_mut(),
                 app_state,
@@ -1451,7 +1451,7 @@ fn try_run_native_drm_session(
         })
         .map_err(|err| CompositorError::EventLoop(err.to_string()))?;
 
-    let timing_summary = crate::winit_backend::finalize_frame_timing(
+    let timing_summary = crate::frame_composer::finalize_frame_timing(
         &state,
         BackendMode::NativeDrmKms,
         setup.pixel_size,

@@ -338,7 +338,8 @@ impl RustyCompositorState {
                 .output_geometry(&self.output)
                 .map_or(1280, |geo| geo.size.w);
 
-            let shell_chrome_visible = self.active_unoccluded_fullscreen_window().is_none();
+            let shell_chrome_visible = !self.has_foreground_layer_surfaces()
+                && !self.should_hide_shell_chrome_for_fullscreen();
 
             // Check for TopBar click to open/execute menus, switch workspaces, toggle layout, or open Search / Control Center
             if shell_chrome_visible

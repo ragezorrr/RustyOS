@@ -17,6 +17,24 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Install Linux system development dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config \
+            build-essential \
+            libwayland-dev \
+            libxkbcommon-dev \
+            libudev-dev \
+            libinput-dev \
+            libgbm-dev \
+            libdrm-dev \
+            libseat-dev \
+            libegl-dev \
+            libgles-dev \
+            libpixman-1-dev \
+            libpipewire-0.3-dev
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -33,3 +51,6 @@ jobs:
 
       - name: Run workspace tests
         run: cargo test --workspace
+
+      - name: Run compositor smoke check
+        run: cargo run -p rusty-compositor -- --check
