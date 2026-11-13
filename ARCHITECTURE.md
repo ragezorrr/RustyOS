@@ -21,7 +21,7 @@ socket IPC (`rusty-ipc`) и `zwlr_layer_shell_v1`.
   - `state/shell_actions.rs` — TopBar, Dock, Spotlight, Overview, Switcher, Quick Settings и notifications;
   - `state/system_bridges.rs` — Lock Screen, PAM/logind, Polkit, Portal/ScreenCast, PipeWire, config и IPC;
   - `state/wayland_handlers/` — сгруппированные Smithay/Wayland delegate-хендлеры (`core`, `seat_input`, `selection`, `session_lock`, `dmabuf_sync`, `desktop_protocols`);
-- Wayland display/server lifecycle и клиентский input routing (`input.rs`);
+- Wayland display/server lifecycle и клиентский input routing (`input/`: `mod`, `keyboard`, `pointer`, `shell_pointer`, `gestures`);
 - multi-output раскладка (`outputs.rs`) и интеграция с `rusty-wm`;
 - nested Winit backend (`winit_backend.rs`) и native DRM/KMS per-CRTC
   render loop с mixed refresh, hotplug и VRR (`drm_backend.rs`);
@@ -48,13 +48,13 @@ Event loop не должен блокироваться тяжёлыми опе�
 
 Выделение в отдельный процесс требует отдельного ADR и approval.
 
-### Renderer (`winit_backend.rs`, `drm_backend.rs`, `shell_render/`, `surfaces.rs`)
+### Renderer (`winit_backend.rs`, `drm_backend.rs`, `shell_render/`, `surfaces/`)
 
 - EGL + OpenGL ES (`GlesRenderer`) + GBM/DMA-BUF без Vulkan/wgpu;
 - tracking damage (`OutputDamageTracker`), Direct Scanout при полноэкранном
   DMA-BUF клиенте;
-- 2D shell/SSD рендеринг через `UiShapeCache` (SDF-примитивы и XCursor) и
-  `TextCache` (`fontdue`).
+- 2D shell/SSD рендеринг через `UiShapeCache` (`surfaces/`: `mod`, `sdf`,
+  `glyphs`, `xcursor`) и `TextCache` (`fontdue`).
 
 ### Animation Engine (`crates/rusty-animation`)
 
@@ -83,7 +83,10 @@ Event loop не должен блокироваться тяжёлыми опе�
 - `UPower` / `sysfs` — питание, батарея и подсветка экрана;
 - `XWayland` — X11-приложения и общий буфер обмена;
 - целевой этап Фазы 7: XDG Desktop Portal / PipeWire ScreenCast, Polkit UI,
-  `zwp_text_input_v3`.
+  `zwp_text_input_v3`;
+- модульная структура `src/`: `lib.rs` (`ServiceRegistry`), `power`,
+  `connectivity`, `media`, `display_session`, `auth`, `logind`, `polkit`,
+  `portal`.
 
 ## 3. Текущая структура Cargo workspace и сессии
 
@@ -92,14 +95,17 @@ RustyOS/
 ├── Cargo.toml                 # workspace (edition = 2024, MSRV 1.99, unsafe_code = "deny")
 ├── rust-toolchain.toml
 ├── crates/
-│   ├── rusty-compositor/      # Wayland compositor, Winit & DRM/KMS backends, input, state/, shell_render/
+│   ├── rusty-compositor/      # Wayland compositor, Winit & DRM/KMS backends, input/, state/, shell_render/, surfaces/
 │   │   └── src/
 │   │       ├── state/         # RustyCompositorState, wm_windows, shell_actions, system_bridges, wayland_handlers/
-│   │       └── shell_render/  # tokens, top_bar, dock, quick_settings, spotlight_overview, lock_screen, modals, ssd
+│   │       ├── shell_render/  # tokens, top_bar, dock, quick_settings, spotlight_overview, lock_screen, modals, ssd
+│   │       ├── input/         # keyboard, pointer, shell_pointer, gestures
+│   │       └── surfaces/      # UiShapeCache, sdf, glyphs, xcursor
 │   ├── rusty-wm/              # Детерминированная модель WM и workspace 1..9
 │   ├── rusty-animation/       # Refresh-rate independent animation engine
 │   ├── rusty-ipc/             # Версионируемый IPC-протокол compositor <-> shell
-│   └── rusty-services/        # Адаптеры NetworkManager, BlueZ, PipeWire, UPower, sysfs
+│   └── rusty-services/        # Адаптеры NetworkManager, BlueZ, PipeWire, UPower, sysfs, logind, Polkit, Portal
+│       └── src/               # lib (ServiceRegistry), power, connectivity, media, display_session, auth, logind, polkit, portal
 ├── apps/
 │   └── rusty-shell/           # Внешний процесс shell поверх Wayland layer-shell + IPC
 ├── bin/

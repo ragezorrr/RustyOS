@@ -832,6 +832,19 @@ hardware/software context и низкие накладные расходы.
 - **Verification:** `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --offline -- -D warnings` (0 предупреждений), `cargo test --workspace --offline` (158 passed, 0 failed, 0 ignored: `rusty_animation` 4, `rusty_compositor` 113, `rusty_ipc` 3, `rusty_services` 26, `rusty_shell` 5, `rusty_wm` 7), `cargo run -p rusty-compositor --offline -- --check` и `cargo run -p rusty-compositor --offline -- --winit --max-frames 3` (`rendered_frames=3`, `wayland-2`) завершились с кодом 0.
 - **Risks:** Нулевое изменение публичного API и runtime-логики; остальные крупные модули (`input.rs`, `surfaces.rs`, `crates/rusty-services/src/lib.rs`) вынесены на отдельный опциональный Этап Б.
 
+### RUSTYOS-059 — Модульная декомпозиция `input/`, `surfaces/` и `rusty-services` (Этап Б)
+- **Status:** done
+- **Priority:** P2
+- **Phase:** Фаза 8 / Architecture & Maintainability
+- **Scope:**
+  - Монолитный `crates/rusty-compositor/src/input.rs` (3 672 строки) декомпозирован в директорию `crates/rusty-compositor/src/input/` с сохранением публичного API и поведения через `pub use` в `input/mod.rs` (149 строк): `keyboard.rs` (735), `pointer.rs` (711), `shell_pointer.rs` (513), `gestures.rs` (182) и `tests.rs` (1 478).
+  - Монолитный `crates/rusty-compositor/src/surfaces.rs` (3 234 строки) декомпозирован в директорию `crates/rusty-compositor/src/surfaces/` с сохранением публичного API и поведения в `surfaces/mod.rs` (824 строки): `sdf.rs` (868), `glyphs.rs` (656), `xcursor.rs` (445) и `tests.rs` (504).
+  - Из `crates/rusty-services/src/lib.rs` (1 761 → 308 строк с `ServiceRegistry`, реэкспортами и тестами) сервисы перенесены в тематические подмодули с сохранением всего публичного API через `pub use`: `power.rs` (125), `connectivity.rs` (606), `media.rs` (335) и `display_session.rs` (427), при неизменных `auth.rs`, `logind.rs`, `polkit.rs`, `portal.rs`.
+  - Внутренние связи ограничены `pub(super)` / `pub(crate)` с явными импортами (без wildcard-импортов в не-тестовом коде, без правок `Cargo.toml` и без нового `unsafe`).
+  - Обновлена схема модулей в `ARCHITECTURE.md` и зафиксирован статус `RUSTYOS-059` в `TASKS.md`.
+- **Verification:** `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --offline -- -D warnings` (0 предупреждений), `cargo test --workspace --offline` (158 passed, 0 failed, 0 ignored: `rusty_animation` 4, `rusty_compositor` 113, `rusty_ipc` 3, `rusty_services` 26, `rusty_shell` 5, `rusty_wm` 7), `cargo run -p rusty-compositor --offline -- --check` и `cargo run -p rusty-compositor --offline -- --winit --max-frames 3` (`rendered_frames=3`, `wayland-2`) завершились с кодом 0.
+- **Risks:** Нулевое изменение публичных интерфейсов и runtime-логики; из крупных монолитов вне рамок Этапа Б осознанно оставлен `crates/rusty-compositor/src/icons.rs` (2 094 строки) со встроенным PNG/deflate-декодером.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance
