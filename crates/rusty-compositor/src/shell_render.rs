@@ -93,8 +93,8 @@ pub const WINDOW_RADIUS: i32 = 20;
 
 /// `TopBar` Left Menu metrics (`macOS` Menu Bar layout with `Inter` 13 px) (`RUSTYOS-038`/`049`).
 pub const TOP_BAR_LOGO_X: i32 = 12;
-pub const TOP_BAR_LOGO_W: i32 = 18;
-pub const TOP_BAR_APP_X: i32 = 34;
+pub const TOP_BAR_LOGO_W: i32 = 20;
+pub const TOP_BAR_APP_X: i32 = 36;
 
 /// Workspace button width, stride, and default start offset when optional strip is enabled (`RUSTYOS-038`/`049`).
 pub const WS_BTN_WIDTH: i32 = 18;
@@ -884,25 +884,28 @@ pub fn compute_top_bar_right_layout_with_options(
     let right_edge = screen_width - 10;
     let clock_x = (right_edge - clock_w).max(screen_width - 236);
 
-    let control_center_w = 18;
+    let control_center_w = 20;
     let control_center_x = clock_x - 10 - control_center_w;
 
-    let search_w = 16;
+    let search_w = 18;
     let search_x = control_center_x - 10 - search_w;
 
-    let wifi_x = search_x - 10 - 16;
+    let wifi_w = 20;
+    let wifi_x = search_x - 10 - wifi_w;
     let mut left_cursor = wifi_x;
 
+    let battery_w = 26;
     let battery_x = if opts.has_battery {
-        let bx = left_cursor - 10 - 20;
+        let bx = left_cursor - 10 - battery_w;
         left_cursor = bx;
         Some(bx)
     } else {
         None
     };
 
+    let volume_w = 18;
     let volume_x = if opts.show_volume {
-        let vx = left_cursor - 10 - 16;
+        let vx = left_cursor - 10 - volume_w;
         left_cursor = vx;
         Some(vx)
     } else {
@@ -3397,8 +3400,6 @@ pub fn generate_shell_text_elements(
     // 1b. TopBar Left Active App & Global Menus (`RUSTYOS-038`, `RUSTYOS-048`, `RUSTYOS-049`)
     let ws_btn_height = TOP_BAR_ITEM_H;
     let ws_y = TOP_BAR_ITEM_Y;
-    let bar_shadow = [8, 5, 14, 96];
-    let drop_shadow = !top_telemetry.reduce_transparency;
 
     let active_app_name = dock_view
         .windows
@@ -3422,21 +3423,6 @@ pub fn generate_shell_text_elements(
         pure_white,
         app_bounds,
     ) {
-        elements.push(el);
-    }
-    if drop_shadow
-        && let Some(el) = text_cache.render_label_centered_weighted(
-            renderer,
-            &active_app_name,
-            crate::text::FontWeight::Bold,
-            TOP_BAR_FONT_SIZE,
-            bar_shadow,
-            Rectangle::new(
-                Point::from((app_bounds.loc.x, app_bounds.loc.y + 1)),
-                app_bounds.size,
-            ),
-        )
-    {
         elements.push(el);
     }
 
@@ -3488,18 +3474,6 @@ pub fn generate_shell_text_elements(
             color,
             bounds,
         ) {
-            elements.push(el);
-        }
-        if drop_shadow
-            && let Some(el) = text_cache.render_label_centered_weighted(
-                renderer,
-                name,
-                crate::text::FontWeight::Regular,
-                TOP_BAR_FONT_SIZE,
-                bar_shadow,
-                Rectangle::new(Point::from((x, ws_y + 1)), bounds.size),
-            )
-        {
             elements.push(el);
         }
     }
@@ -3610,21 +3584,6 @@ pub fn generate_shell_text_elements(
         pure_white,
         clock_bounds,
     ) {
-        elements.push(el);
-    }
-    if drop_shadow
-        && let Some(el) = text_cache.render_label_centered_weighted(
-            renderer,
-            top_telemetry.clock_hhmm,
-            crate::text::FontWeight::Regular,
-            TOP_BAR_FONT_SIZE,
-            bar_shadow,
-            Rectangle::new(
-                Point::from((right_layout.clock_x, ws_y + 1)),
-                clock_bounds.size,
-            ),
-        )
-    {
         elements.push(el);
     }
 
@@ -4371,77 +4330,70 @@ fn push_top_bar_right_glyphs(
     use crate::surfaces::UiGlyphKind;
 
     let white = [252, 250, 255, 255];
-    let shadow = [8, 5, 14, 96];
-    let drop_shadow = !t.reduce_transparency;
-    let glyph_y = TOP_BAR_ITEM_Y + (TOP_BAR_ITEM_H - 16) / 2;
 
-    let mut push_glyph = |kind: UiGlyphKind,
-                          size_px: i32,
-                          rgba: [u8; 4],
-                          loc: Point<i32, smithay::utils::Logical>| {
-        if let Some(el) = shape_cache.ui_glyph_element(renderer, kind, size_px, rgba, loc) {
-            out.push(CompositorRenderElement::Memory(el));
-        }
-        if drop_shadow
-            && let Some(el) = shape_cache.ui_glyph_element(
-                renderer,
-                kind,
-                size_px,
-                shadow,
-                Point::from((loc.x, loc.y + 1)),
-            )
-        {
-            out.push(CompositorRenderElement::Memory(el));
-        }
-    };
-
-    if let Some(vx) = right.volume_x {
-        push_glyph(
+    if let Some(vx) = right.volume_x
+        && let Some(el) = shape_cache.ui_glyph_element(
+            renderer,
             UiGlyphKind::Volume {
                 level_percent: t.volume_percent,
                 muted: t.audio_muted,
             },
-            16,
+            18,
             white,
-            Point::from((vx, glyph_y)),
-        );
+            Point::from((vx, TOP_BAR_ITEM_Y + 1)),
+        )
+    {
+        out.push(CompositorRenderElement::Memory(el));
     }
-    if let Some(bx) = right.battery_x {
-        push_glyph(
+    if let Some(bx) = right.battery_x
+        && let Some(el) = shape_cache.ui_glyph_rect_element(
+            renderer,
             UiGlyphKind::Battery {
                 percent: t.battery_percent,
                 charging: t.ac_online && t.battery_percent < 99,
             },
+            26,
             20,
             white,
             Point::from((bx, TOP_BAR_ITEM_Y)),
-        );
+        )
+    {
+        out.push(CompositorRenderElement::Memory(el));
     }
-    push_glyph(
+    if let Some(el) = shape_cache.ui_glyph_element(
+        renderer,
         UiGlyphKind::Wifi {
             connected: t.net_connected,
         },
-        16,
+        20,
         white,
-        Point::from((right.wifi_x, glyph_y)),
-    );
-    push_glyph(
+        Point::from((right.wifi_x, TOP_BAR_ITEM_Y)),
+    ) {
+        out.push(CompositorRenderElement::Memory(el));
+    }
+    if let Some(el) = shape_cache.ui_glyph_element(
+        renderer,
         UiGlyphKind::Search,
-        16,
+        18,
         white,
-        Point::from((right.search_x, glyph_y)),
-    );
+        Point::from((right.search_x, TOP_BAR_ITEM_Y + 1)),
+    ) {
+        out.push(CompositorRenderElement::Memory(el));
+    }
     let cc_color = if t.quick_settings_open {
         [255, 255, 255, 255]
     } else {
         white
     };
-    push_glyph(
+    if let Some(el) = shape_cache.ui_glyph_element(
+        renderer,
         UiGlyphKind::ControlCenter,
-        16,
+        20,
         cc_color,
-        Point::from((right.control_center_x + 1, glyph_y)),
-    );
+        Point::from((right.control_center_x, TOP_BAR_ITEM_Y)),
+    ) {
+        out.push(CompositorRenderElement::Memory(el));
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4855,7 +4807,7 @@ fn render_quick_settings_composite(
         crate::surfaces::GlassPanelStyle::Popover,
         qs.glass_opacity,
         qs.reduce_transparency,
-        Some((28, 118)),
+        Some((18, 56)),
     );
 }
 
@@ -4994,7 +4946,7 @@ pub fn generate_shell_composite_elements(
                 crate::surfaces::GlassPanelStyle::Popover,
                 glass_op,
                 reduce_tr,
-                Some((32, 124)),
+                Some((20, 58)),
             );
         }
         ShellOverlayView::QuickSettings(qs) => {
@@ -5073,7 +5025,7 @@ pub fn generate_shell_composite_elements(
                     RGBA_SURFACE_ELEVATED,
                     Some(RGBA_BORDER_HIGHLIGHT),
                 );
-                push_soft_shadow(&mut out, shape_cache, renderer, panel_rect, 14, 18, 110);
+                push_soft_shadow(&mut out, shape_cache, renderer, panel_rect, 14, 14, 52);
             }
         }
     }
@@ -5130,7 +5082,7 @@ pub fn generate_shell_composite_elements(
                 crate::surfaces::GlassPanelStyle::Popover,
                 top_telemetry.glass_opacity,
                 top_telemetry.reduce_transparency,
-                Some((16, 98)),
+                Some((12, 46)),
             );
         }
     }
@@ -5148,26 +5100,14 @@ pub fn generate_shell_composite_elements(
         compute_top_bar_right_layout_with_options(width, top_telemetry.clock_hhmm, opts);
 
     let pure_white = [252, 250, 255, 255];
-    let bar_shadow = [8, 5, 14, 96];
-    let logo_loc = Point::from((TOP_BAR_LOGO_X + 1, TOP_BAR_ITEM_Y + 2));
+    let logo_loc = Point::from((TOP_BAR_LOGO_X + 1, TOP_BAR_ITEM_Y + 1));
     if let Some(el) = shape_cache.ui_glyph_element(
         renderer,
         crate::surfaces::UiGlyphKind::RustyLogo,
-        16,
+        18,
         pure_white,
         logo_loc,
     ) {
-        out.push(CompositorRenderElement::Memory(el));
-    }
-    if !top_telemetry.reduce_transparency
-        && let Some(el) = shape_cache.ui_glyph_element(
-            renderer,
-            crate::surfaces::UiGlyphKind::RustyLogo,
-            16,
-            bar_shadow,
-            Point::from((logo_loc.x, logo_loc.y + 1)),
-        )
-    {
         out.push(CompositorRenderElement::Memory(el));
     }
     push_top_bar_right_glyphs(
@@ -5256,7 +5196,7 @@ pub fn generate_shell_composite_elements(
             crate::surfaces::GlassPanelStyle::Popover,
             top_telemetry.glass_opacity,
             top_telemetry.reduce_transparency,
-            Some((20, 108)),
+            Some((16, 52)),
         );
     }
 
@@ -5421,7 +5361,7 @@ pub fn generate_shell_composite_elements(
             ),
             Some(RGBA_BORDER_HIGHLIGHT),
         );
-        push_soft_shadow(&mut out, shape_cache, renderer, tooltip_rect, 9, 10, 72);
+        push_soft_shadow(&mut out, shape_cache, renderer, tooltip_rect, 9, 8, 34);
     }
 
     let (dock_x, dock_y, dock_width, dock_items_count) =
@@ -5431,7 +5371,6 @@ pub fn generate_shell_composite_elements(
 
     let mut dock_icons = Vec::with_capacity(dock_items_count);
     let mut dock_dots_and_divider = Vec::new();
-    let mut dock_icon_shadows = Vec::with_capacity(dock_items_count);
 
     if let Some(last_app_slot) =
         dock_slot_rect(width, height, dock_view.windows.len(), left_count - 1)
@@ -5560,25 +5499,12 @@ pub fn generate_shell_composite_elements(
         };
         if let Some(el) = slot_icon_el {
             dock_icons.push(resolved_icon_to_element(el));
-            // Squircle app cards carry a matched rounded drop shadow; free-standing Downloads/Trash
-            // sit cleanly on top of the frosted glass without a square shadow behind them.
-            if i < left_count
-                && let Some(shadow) =
-                    shape_cache.dock_icon_shadow_element(renderer, draw_size, icon_loc)
-            {
-                dock_icon_shadows.push(CompositorRenderElement::Memory(shadow));
-            }
         }
     }
 
     out.extend(dock_icons);
     out.extend(dock_dots_and_divider);
-    out.extend(dock_icon_shadows);
 
-    let dock_rect = Rectangle::new(
-        Point::from((dock_x, dock_y)),
-        Size::from((dock_width, DOCK_HEIGHT)),
-    );
     if let Some(dock_glass) = shape_cache.dock_glass_panel_element(
         renderer,
         dock_width,
@@ -5590,15 +5516,6 @@ pub fn generate_shell_composite_elements(
     ) {
         out.push(CompositorRenderElement::Memory(dock_glass));
     }
-    push_soft_shadow(
-        &mut out,
-        shape_cache,
-        renderer,
-        dock_rect,
-        DOCK_RADIUS,
-        24,
-        96,
-    );
 
     // 5. Workspace Overview Spaces strip, floating cards & light scrim (`RUSTYOS-023`/`025`/`051`)
     if let ShellOverlayView::Overview(ov) = overlay {
@@ -5654,7 +5571,7 @@ pub fn generate_shell_composite_elements(
                     thumb_bg,
                     Some(thumb_border),
                 );
-                push_soft_shadow(&mut out, shape_cache, renderer, thumb, 8, 8, 72);
+                push_soft_shadow(&mut out, shape_cache, renderer, thumb, 8, 8, 32);
             }
             out.push(CompositorRenderElement::Solid(make_solid_element(
                 Rectangle::new(Point::from((0, TOP_BAR_HEIGHT)), Size::from((width, 98))),
@@ -5693,7 +5610,7 @@ pub fn generate_shell_composite_elements(
                     Some([198, 156, 255, 245]),
                 );
             }
-            push_soft_shadow(&mut out, shape_cache, renderer, card, 14, 20, 108);
+            push_soft_shadow(&mut out, shape_cache, renderer, card, 14, 16, 50);
         }
         #[allow(clippy::cast_possible_truncation)]
         let scrim_a = 0.36 * (ov.progress.clamp(0.0, 1.0) as f32);
@@ -5823,7 +5740,7 @@ pub fn generate_lock_screen_elements(
         RGBA_SURFACE_ELEVATED,
         Some(RGBA_BORDER_HIGHLIGHT),
     );
-    push_soft_shadow(&mut out, shape_cache, renderer, card_rect, 16, 18, 115);
+    push_soft_shadow(&mut out, shape_cache, renderer, card_rect, 16, 14, 48);
 
     let curtain_a = 0.92 * (p as f32);
     out.push(CompositorRenderElement::Solid(make_solid_element(
@@ -6112,7 +6029,7 @@ pub fn generate_osd_elements(
         crate::surfaces::GlassPanelStyle::Popover,
         crate::config::DEFAULT_GLASS_OPACITY,
         false,
-        Some((16, 94)),
+        Some((14, 46)),
     );
     out
 }
@@ -6134,17 +6051,17 @@ pub fn generate_window_shadow_elements(
             renderer,
             Rectangle::new(Point::from((rect.x, rect.y + 2)), Size::from((w, h))),
             WINDOW_RADIUS,
-            10,
-            72,
+            8,
+            40,
         );
         push_soft_shadow(
             &mut out,
             shape_cache,
             renderer,
-            Rectangle::new(Point::from((rect.x, rect.y + 8)), Size::from((w, h))),
+            Rectangle::new(Point::from((rect.x, rect.y + 6)), Size::from((w, h))),
             WINDOW_RADIUS,
-            42,
-            68,
+            26,
+            36,
         );
     } else {
         push_soft_shadow(
@@ -6153,8 +6070,8 @@ pub fn generate_window_shadow_elements(
             renderer,
             Rectangle::new(Point::from((rect.x, rect.y + 2)), Size::from((w, h))),
             WINDOW_RADIUS,
-            8,
-            32,
+            6,
+            20,
         );
         push_soft_shadow(
             &mut out,
@@ -6162,8 +6079,8 @@ pub fn generate_window_shadow_elements(
             renderer,
             Rectangle::new(Point::from((rect.x, rect.y + 4)), Size::from((w, h))),
             WINDOW_RADIUS,
+            14,
             22,
-            38,
         );
     }
     out

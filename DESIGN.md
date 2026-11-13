@@ -353,32 +353,33 @@ layout and material behavior follow macOS 27. No Apple assets or branding.
 ### 12.1 Menu bar (top panel)
 
 - Completely transparent by default (`24 px` logical height, zero dark scrim stripe): crisp
-  white text and icons sit directly on the wallpaper with a subtle 1px drop shadow for
-  readability. A high-contrast solid fallback surface is enabled only by `reduce_transparency = true`.
+  shadowless white text and icons sit directly on the wallpaper. A high-contrast solid fallback
+  surface is enabled only by `reduce_transparency = true`.
 - Typography: bundled **Inter** (`Inter-SemiBold` for bold active-app name, `Inter-Regular` for
   menus and clock) at unified `13 px` on a shared optical baseline.
-- Left: pure monochrome white original RustyOS chamfered hexagon emblem (`#FCFAFF`), bold
+- Left: pure monochrome white original RustyOS chamfered hexagon emblem (`18 px`, `#FCFAFF`), bold
   active-app name, and global menus (`File`, `Edit`, `View`, `Go`, `Window`, `Help`).
 - Workspace strip (`1..=9` + `Float`/`Tile`), SNI tray icons, standalone `Volume` glyph, and
   keyboard badge (`EN`/`RU`) are hidden by default for 1:1 visual minimalism and enabled opt-in via
   `[ui]` in `config.toml` (`menubar_show_workspaces`, `menubar_show_tray`,
   `menubar_show_input_source`, `menubar_show_volume`); workspaces and window layout remain directly
   accessible via `Go`/`Window` menus, Overview, Control Center, and keyboard shortcuts.
-- Right (`4x4` SSAA SDF monochrome glyphs, `16 px` / `20 px` battery, `10 px` gaps in macOS order):
-  `Battery` (monochrome white capsule; red `<= 20%`, omitted when absent) -> `Wi-Fi` ->
-  `Search` (bright white) -> `Control Center` (translucent pill highlight when open) ->
-  neutral locale plain Clock (`"Wed Apr 1  9:41 AM"`, or 24h `"Wed Apr 1  09:41"` with `clock_24h = true`).
+- Right (`4x4` SSAA SDF monochrome glyphs, `10 px` gaps in macOS order):
+  `Battery` (`26x20 px` monochrome white capsule; red `<= 20%`, omitted when absent) -> `Wi-Fi`
+  (`20 px`) -> `Search` (`18 px`, bright white) -> `Control Center` (`20 px`, translucent pill
+  highlight when open) -> neutral locale plain Clock (`"Wed Apr 1  9:41 AM"`, or 24h
+  `"Wed Apr 1  09:41"` with `clock_24h = true`).
 
 ### 12.2 Dock
 
 - Concentric rounded floating glass container (`DOCK_HEIGHT = 68 px`, `DOCK_RADIUS = 22 px`,
   `DOCK_MARGIN_BOTTOM = 8 px`), width dynamically fits `6` pinned apps + running windows + `2`
   utility slots; light top-lit frosted fill (`sample_dock_glass_pixel`) with 4×4 Bayer dithering,
-  luminous 1 px top specular rim tapering softly along sides/bottom, outer soft drop shadow, and an
-  opaque high-contrast plum-slate fallback when `reduce_transparency = true`.
-- Resting slots have zero grey box outlines: crisp `50 px` `4x4` SSAA superellipse (exponent `4.8`)
-  app icons sit over `6 px` gaps (`52 px` hit slots) with a soft ambient drop shadow behind squircle
-  cards (`dock_icon_shadow_element`).
+  luminous 1 px top specular rim tapering softly along sides/bottom without a heavy outer shadow
+  halo, and an opaque high-contrast plum-slate fallback when `reduce_transparency = true`.
+- Resting slots have zero grey box outlines or dark backing smudges: crisp `50 px` `4x4` SSAA
+  superellipse (exponent `4.8`) app icons sit cleanly on the translucent glass tray over `6 px` gaps
+  (`52 px` hit slots).
 - Default macOS cadence of original RustyOS artwork (`Files`, `Overview`, `Terminal`, `Browser`,
   `Notes`, `Settings`) + running window slots (preferring real XDG PNG / SHM toplevel icons over
   `WindowFallback`), followed by a centered `1 px` hairline vertical divider and free-standing

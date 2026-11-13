@@ -151,7 +151,8 @@ pub enum UiGlyphKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct GlyphKey {
     kind: UiGlyphKind,
-    size_px: u16,
+    width_px: u16,
+    height_px: u16,
     tint_rgba: [u8; 4],
 }
 
@@ -665,29 +666,43 @@ impl UiShapeCache {
         tint_rgba: [u8; 4],
         loc: Point<i32, Logical>,
     ) -> Option<MemoryRenderBufferRenderElement<GlesRenderer>> {
-        let size_u16 = u16::try_from(size_px).ok()?;
-        if size_px <= 0 {
+        self.ui_glyph_rect_element(renderer, kind, size_px, size_px, tint_rgba, loc)
+    }
+
+    /// Returns a GPU-cached 4x4 SSAA rectangular procedural icon element positioned at `loc`.
+    pub fn ui_glyph_rect_element(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        kind: UiGlyphKind,
+        width_px: i32,
+        height_px: i32,
+        tint_rgba: [u8; 4],
+        loc: Point<i32, Logical>,
+    ) -> Option<MemoryRenderBufferRenderElement<GlesRenderer>> {
+        let w_u16 = u16::try_from(width_px).ok()?;
+        let h_u16 = u16::try_from(height_px).ok()?;
+        if width_px <= 0 || height_px <= 0 {
             return None;
         }
         let key = GlyphKey {
             kind,
-            size_px: size_u16,
+            width_px: w_u16,
+            height_px: h_u16,
             tint_rgba,
         };
-        let buf = self
-            .glyphs
-            .entry(key)
-            .or_insert_with(|| rasterize_ui_glyph_buffer(kind, size_px, tint_rgba));
+        let buf = self.glyphs.entry(key).or_insert_with(|| {
+            rasterize_ui_glyph_buffer_rect(kind, width_px, height_px, tint_rgba)
+        });
         MemoryRenderBufferRenderElement::from_buffer(
             renderer,
             loc.to_f64().to_physical(1.0),
             buf,
             None,
             Some(Rectangle::<f64, Logical>::from_size(Size::from((
-                f64::from(size_px),
-                f64::from(size_px),
+                f64::from(width_px),
+                f64::from(height_px),
             )))),
-            Some(Size::from((size_px, size_px))),
+            Some(Size::from((width_px, height_px))),
             Kind::Unspecified,
         )
         .ok()
@@ -1130,15 +1145,15 @@ fn sd_arc_up(
 fn sample_rusty_logo_uv(u: f32, v: f32, edge: f32, tint: [f32; 4]) -> [f32; 4] {
     // Original sleek chamfered hexagonal crest for RustyOS, pure monochrome with transparent inner cutout.
     const CREST: [(f32, f32); 6] = [
-        (0.50, 0.14),
-        (0.81, 0.31),
-        (0.81, 0.67),
-        (0.50, 0.86),
-        (0.19, 0.67),
-        (0.19, 0.31),
+        (0.50, 0.10),
+        (0.84, 0.29),
+        (0.84, 0.71),
+        (0.50, 0.90),
+        (0.16, 0.71),
+        (0.16, 0.29),
     ];
-    let outer = signed_distance_polygon(u, v, &CREST) - 0.025;
-    let inner_cut = sd_circle(u, v, 0.50, 0.50, 0.125);
+    let outer = signed_distance_polygon(u, v, &CREST) - 0.026;
+    let inner_cut = sd_circle(u, v, 0.50, 0.50, 0.140);
     let sd = outer.max(-inner_cut);
     let cov = sd_cov(sd, edge);
     premul_tint(tint, cov)
@@ -1146,12 +1161,12 @@ fn sample_rusty_logo_uv(u: f32, v: f32, edge: f32, tint: [f32; 4]) -> [f32; 4] {
 
 fn sample_wifi_glyph_uv(u: f32, v: f32, edge: f32, tint: [f32; 4], connected: bool) -> [f32; 4] {
     let cx = 0.50;
-    let cy = 0.77;
-    let half_angle = 0.74_f32; // ~42.4 deg per side -> crisp macOS fan
-    let stroke = 0.052;
+    let cy = 0.80;
+    let half_angle = 0.77_f32; // ~44 deg per side -> bold crisp macOS fan
+    let stroke = 0.056;
 
-    let mut sd = sd_circle(u, v, cx, cy, 0.072);
-    for radius in [0.225_f32, 0.395, 0.565] {
+    let mut sd = sd_circle(u, v, cx, cy, 0.078);
+    for radius in [0.245_f32, 0.425, 0.605] {
         sd = sd.min(sd_arc_up(u, v, cx, cy, radius, half_angle, stroke));
     }
 
@@ -1201,31 +1216,35 @@ fn sample_volume_glyph_uv(
 }
 
 fn sample_battery_glyph_uv(
-    u: f32,
+    u_iso: f32,
     v: f32,
+    aspect: f32,
     edge: f32,
     tint: [f32; 4],
     percent: u8,
     charging: bool,
 ) -> [f32; 4] {
-    let body_outer = sd_rounded_box(u, v, 0.45, 0.50, 0.35, 0.22, 0.10);
-    let nub = sd_rounded_box(u, v, 0.85, 0.50, 0.034, 0.088, 0.025);
+    let cx = aspect * 0.465;
+    let hw = aspect * 0.395;
+    let hh = 0.295;
+    let body_outer = sd_rounded_box(u_iso, v, cx, 0.50, hw, hh, 0.115);
+    let nub = sd_rounded_box(u_iso, v, cx + hw + 0.068, 0.50, 0.026, 0.105, 0.022);
     let shell_ring = body_outer.abs() - 0.036;
 
-    // Clean macOS monochrome pill: solid white when nearly full (>=92%), crisp translucent track + fill otherwise.
+    // Clean macOS wide monochrome pill: crisp shell + solid fill + subtle dark bolt when charging.
     let mut out = [0.0_f32; 4];
     let interior_cov = sd_cov(body_outer + 0.036, edge);
     if interior_cov > 0.0 {
         out = blend_premul_over(
             out,
             [tint[0], tint[1], tint[2]],
-            tint[3] * interior_cov * 0.28,
+            tint[3] * interior_cov * 0.24,
         );
     }
 
     let frame_cov = sd_cov(shell_ring.min(nub), edge);
     if frame_cov > 0.0 {
-        out = blend_premul_over(out, [tint[0], tint[1], tint[2]], tint[3] * frame_cov * 0.92);
+        out = blend_premul_over(out, [tint[0], tint[1], tint[2]], tint[3] * frame_cov * 0.94);
     }
 
     let frac = if percent >= 92 {
@@ -1233,10 +1252,11 @@ fn sample_battery_glyph_uv(
     } else {
         f32::from(percent.clamp(8, 100)) / 100.0
     };
-    let fill_max_hw = 0.27;
-    let fill_hw = fill_max_hw * frac;
-    let fill_cx = 0.18 + fill_hw;
-    let fill_sd = sd_rounded_box(u, v, fill_cx, 0.50, fill_hw, 0.135, 0.048);
+    let fill_max_half_w = (hw - 0.072).max(0.05);
+    let fill_half_h = (hh - 0.074).max(0.05);
+    let fill_half_w = fill_max_half_w * frac;
+    let fill_cx = (cx - fill_max_half_w) + fill_half_w;
+    let fill_sd = sd_rounded_box(u_iso, v, fill_cx, 0.50, fill_half_w, fill_half_h, 0.052);
     let fill_cov = sd_cov(fill_sd, edge);
     if fill_cov > 0.0 {
         let fill_rgb = if !charging && percent <= 20 {
@@ -1248,39 +1268,39 @@ fn sample_battery_glyph_uv(
     }
 
     if charging {
-        let b1 = sd_segment(u, v, 0.49, 0.33, 0.40, 0.51, 0.032);
-        let b2 = sd_segment(u, v, 0.40, 0.51, 0.50, 0.51, 0.030);
-        let b3 = sd_segment(u, v, 0.50, 0.51, 0.41, 0.67, 0.032);
+        let b1 = sd_segment(u_iso, v, cx + 0.04, 0.28, cx - 0.06, 0.51, 0.030);
+        let b2 = sd_segment(u_iso, v, cx - 0.06, 0.51, cx + 0.06, 0.51, 0.028);
+        let b3 = sd_segment(u_iso, v, cx + 0.06, 0.51, cx - 0.04, 0.72, 0.030);
         let bolt_cov = sd_cov(b1.min(b2).min(b3), edge);
         if bolt_cov > 0.0 {
-            out = blend_premul_over(out, [18.0, 14.0, 28.0], tint[3] * bolt_cov * 0.88);
+            out = blend_premul_over(out, [18.0, 14.0, 28.0], tint[3] * bolt_cov * 0.90);
         }
     }
     out
 }
 
 fn sample_search_glyph_uv(u: f32, v: f32, edge: f32, tint: [f32; 4]) -> [f32; 4] {
-    let ring = sd_circle(u, v, 0.42, 0.42, 0.225).abs() - 0.056;
-    let handle = sd_segment(u, v, 0.59, 0.59, 0.83, 0.83, 0.058);
+    let ring = sd_circle(u, v, 0.42, 0.42, 0.255).abs() - 0.062;
+    let handle = sd_segment(u, v, 0.61, 0.61, 0.87, 0.87, 0.064);
     let cov = sd_cov(ring.min(handle), edge);
     premul_tint(tint, cov)
 }
 
 fn sample_control_center_glyph_uv(u: f32, v: f32, edge: f32, tint: [f32; 4]) -> [f32; 4] {
-    let top_capsule = sd_rounded_box(u, v, 0.50, 0.32, 0.34, 0.125, 0.125);
-    let bot_capsule = sd_rounded_box(u, v, 0.50, 0.68, 0.34, 0.125, 0.125);
-    let track_outline = (top_capsule.abs() - 0.034).min(bot_capsule.abs() - 0.034);
+    let top_capsule = sd_rounded_box(u, v, 0.50, 0.30, 0.37, 0.14, 0.14);
+    let bot_capsule = sd_rounded_box(u, v, 0.50, 0.70, 0.37, 0.14, 0.14);
+    let track_outline = (top_capsule.abs() - 0.036).min(bot_capsule.abs() - 0.036);
     let track_fill = top_capsule.min(bot_capsule);
-    let knobs = sd_circle(u, v, 0.33, 0.32, 0.082).min(sd_circle(u, v, 0.67, 0.68, 0.082));
+    let knobs = sd_circle(u, v, 0.31, 0.30, 0.092).min(sd_circle(u, v, 0.69, 0.70, 0.092));
 
     let mut out = [0.0_f32; 4];
     let fill_cov = sd_cov(track_fill, edge);
     if fill_cov > 0.0 {
-        out = blend_premul_over(out, [tint[0], tint[1], tint[2]], tint[3] * fill_cov * 0.26);
+        out = blend_premul_over(out, [tint[0], tint[1], tint[2]], tint[3] * fill_cov * 0.28);
     }
     let rim_cov = sd_cov(track_outline, edge);
     if rim_cov > 0.0 {
-        out = blend_premul_over(out, [tint[0], tint[1], tint[2]], tint[3] * rim_cov * 0.92);
+        out = blend_premul_over(out, [tint[0], tint[1], tint[2]], tint[3] * rim_cov * 0.94);
     }
     let knob_cov = sd_cov(knobs, edge);
     if knob_cov > 0.0 {
@@ -1483,6 +1503,7 @@ fn sample_sun_glyph_uv(u: f32, v: f32, edge: f32, tint: [f32; 4]) -> [f32; 4] {
     premul_tint(tint, sd_cov(core.min(rays), edge))
 }
 
+#[cfg(test)]
 #[allow(clippy::cast_precision_loss)]
 fn sample_ui_glyph_pixel(
     px: i32,
@@ -1491,9 +1512,23 @@ fn sample_ui_glyph_pixel(
     kind: UiGlyphKind,
     tint_rgba: [u8; 4],
 ) -> [u8; 4] {
+    sample_ui_glyph_pixel_rect(px, py, size_px, size_px, kind, tint_rgba)
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn sample_ui_glyph_pixel_rect(
+    px: i32,
+    py: i32,
+    width_px: i32,
+    height_px: i32,
+    kind: UiGlyphKind,
+    tint_rgba: [u8; 4],
+) -> [u8; 4] {
     const SUBSAMPLES: [f32; 4] = [0.125, 0.375, 0.625, 0.875];
-    let dim = size_px.max(1) as f32;
-    let edge = 1.05 / dim;
+    let dim_h = height_px.max(1) as f32;
+    let dim_w = width_px.max(1) as f32;
+    let aspect = dim_w / dim_h;
+    let edge = 1.05 / dim_h;
     let tint = [
         f32::from(tint_rgba[0]),
         f32::from(tint_rgba[1]),
@@ -1503,8 +1538,9 @@ fn sample_ui_glyph_pixel(
     let mut sum = [0.0_f32; 4];
     for sy in SUBSAMPLES {
         for sx in SUBSAMPLES {
-            let u = (px as f32 + sx) / dim;
-            let v = (py as f32 + sy) / dim;
+            let u_iso = (px as f32 + sx) / dim_h;
+            let u = u_iso - (aspect - 1.0) * 0.5;
+            let v = (py as f32 + sy) / dim_h;
             let s = match kind {
                 UiGlyphKind::RustyLogo => sample_rusty_logo_uv(u, v, edge, tint),
                 UiGlyphKind::Wifi { connected } => {
@@ -1515,7 +1551,7 @@ fn sample_ui_glyph_pixel(
                     muted,
                 } => sample_volume_glyph_uv(u, v, edge, tint, level_percent, muted),
                 UiGlyphKind::Battery { percent, charging } => {
-                    sample_battery_glyph_uv(u, v, edge, tint, percent, charging)
+                    sample_battery_glyph_uv(u_iso, v, aspect, edge, tint, percent, charging)
                 }
                 UiGlyphKind::Search => sample_search_glyph_uv(u, v, edge, tint),
                 UiGlyphKind::ControlCenter => sample_control_center_glyph_uv(u, v, edge, tint),
@@ -1556,14 +1592,15 @@ fn sample_ui_glyph_pixel(
     ]
 }
 
-fn rasterize_ui_glyph_buffer(
+fn rasterize_ui_glyph_buffer_rect(
     kind: UiGlyphKind,
-    size_px: i32,
+    width_px: i32,
+    height_px: i32,
     tint_rgba: [u8; 4],
 ) -> MemoryRenderBuffer {
     let mut mem_buf = MemoryRenderBuffer::new(
         Fourcc::Argb8888,
-        (size_px, size_px),
+        (width_px, height_px),
         1,
         Transform::Normal,
         None,
@@ -1571,20 +1608,22 @@ fn rasterize_ui_glyph_buffer(
     {
         let mut ctx = mem_buf.render();
         let _ = ctx.draw(|pixels| {
-            let dim_u = usize::try_from(size_px).unwrap_or(0);
-            for py in 0..size_px {
-                for px in 0..size_px {
+            let w_u = usize::try_from(width_px).unwrap_or(0);
+            for py in 0..height_px {
+                for px in 0..width_px {
                     let row = usize::try_from(py).unwrap_or(0);
                     let col = usize::try_from(px).unwrap_or(0);
-                    let idx = (row * dim_u + col) * 4;
+                    let idx = (row * w_u + col) * 4;
                     if idx + 4 <= pixels.len() {
-                        let p = sample_ui_glyph_pixel(px, py, size_px, kind, tint_rgba);
+                        let p = sample_ui_glyph_pixel_rect(
+                            px, py, width_px, height_px, kind, tint_rgba,
+                        );
                         pixels[idx..idx + 4].copy_from_slice(&p);
                     }
                 }
             }
             Ok::<_, std::convert::Infallible>(vec![smithay::utils::Rectangle::from_size(
-                Size::from((size_px, size_px)),
+                Size::from((width_px, height_px)),
             )])
         });
     }
@@ -2352,9 +2391,9 @@ fn sample_dock_icon_shadow_pixel(px: i32, py: i32, icon_size: i32, pad: i32) -> 
     let t = (sd.max(0.0) / spread).clamp(0.0, 1.0);
     let falloff = 1.0 - t;
     let alpha = if sd <= 0.0 {
-        0.30
+        0.10
     } else {
-        0.30 * falloff * falloff * falloff
+        0.10 * falloff * falloff * falloff
     };
     premul_pixel(10.0, 6.0, 18.0, alpha)
 }
@@ -2554,6 +2593,43 @@ mod tests {
             let corner = sample_ui_glyph_pixel(0, 0, 16, kind, white);
             assert_eq!(corner[3], 0, "Glyph {kind:?} corner should be transparent");
         }
+
+        // TopBar wide rectangular Battery (26x20) fills wider horizontal aspect with transparent corners
+        let mut wide_cols = 0_usize;
+        for px in 0..26 {
+            let p = sample_ui_glyph_pixel_rect(
+                px,
+                10,
+                26,
+                20,
+                UiGlyphKind::Battery {
+                    percent: 82,
+                    charging: true,
+                },
+                white,
+            );
+            if p[3] > 24 {
+                wide_cols += 1;
+            }
+        }
+        assert!(
+            wide_cols >= 20,
+            "Rectangular battery too narrow: {wide_cols}"
+        );
+        assert_eq!(
+            sample_ui_glyph_pixel_rect(
+                0,
+                0,
+                26,
+                20,
+                UiGlyphKind::Battery {
+                    percent: 82,
+                    charging: true,
+                },
+                white
+            )[3],
+            0
+        );
     }
 
     #[test]
@@ -2640,6 +2716,6 @@ mod tests {
             pad,
         );
         assert_eq!(shadow_corner[3], 0);
-        assert!(shadow_center[3] > 40);
+        assert!(shadow_center[3] >= 20 && shadow_center[3] <= 34);
     }
 }
