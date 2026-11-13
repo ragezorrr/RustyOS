@@ -10,7 +10,98 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use smithay::input::keyboard::XkbConfig;
+use smithay::utils::Transform;
 use tracing::{info, warn};
+
+/// Output orientation / rotation in 90-degree `wl_output` steps (`RUSTYOS-055`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DisplayRotation {
+    /// Upright `0°` (`wl_output::Transform::Normal`).
+    #[default]
+    Rotate0,
+    /// Rotated `90°` counter-clockwise (`wl_output::Transform::_90`).
+    Rotate90,
+    /// Upside-down `180°` (`wl_output::Transform::_180`).
+    Rotate180,
+    /// Rotated `270°` counter-clockwise / `90°` clockwise (`wl_output::Transform::_270`).
+    Rotate270,
+}
+
+impl DisplayRotation {
+    /// Parses a display rotation angle or alias (`0`/`normal`, `90`, `180`/`inverted`, `270`).
+    #[must_use]
+    pub fn parse(raw: &str) -> Option<Self> {
+        let stripped = raw
+            .trim()
+            .trim_matches('"')
+            .trim_matches('\'')
+            .trim()
+            .to_ascii_lowercase();
+        let cleaned = stripped
+            .strip_suffix("deg")
+            .or_else(|| stripped.strip_suffix('°'))
+            .unwrap_or(&stripped)
+            .trim();
+        match cleaned {
+            "0" | "normal" => Some(Self::Rotate0),
+            "90" => Some(Self::Rotate90),
+            "180" | "inverted" | "upside-down" => Some(Self::Rotate180),
+            "270" => Some(Self::Rotate270),
+            _ => None,
+        }
+    }
+
+    /// Returns the rotation angle in degrees (`0`, `90`, `180`, `270`).
+    #[must_use]
+    pub const fn degrees(self) -> u16 {
+        match self {
+            Self::Rotate0 => 0,
+            Self::Rotate90 => 90,
+            Self::Rotate180 => 180,
+            Self::Rotate270 => 270,
+        }
+    }
+
+    /// Canonical string representation (`"0"`, `"90"`, `"180"`, `"270"`).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Rotate0 => "0",
+            Self::Rotate90 => "90",
+            Self::Rotate180 => "180",
+            Self::Rotate270 => "270",
+        }
+    }
+
+    /// Returns `true` when width and height swap (`90°` or `270°`).
+    #[must_use]
+    pub const fn swaps_dimensions(self) -> bool {
+        matches!(self, Self::Rotate90 | Self::Rotate270)
+    }
+
+    /// Converts to the Wayland `wl_output` / DRM surface transform.
+    #[must_use]
+    pub const fn to_wl_transform(self) -> Transform {
+        match self {
+            Self::Rotate0 => Transform::Normal,
+            Self::Rotate90 => Transform::_90,
+            Self::Rotate180 => Transform::_180,
+            Self::Rotate270 => Transform::_270,
+        }
+    }
+
+    /// Converts to the Winit OpenGL FBO-compensated `Output` transform so rendered orientation
+    /// matches [`Self::to_wl_transform`] after Winit's default backbuffer Y-flip.
+    #[must_use]
+    pub const fn to_winit_transform(self) -> Transform {
+        match self {
+            Self::Rotate0 => Transform::Flipped180,
+            Self::Rotate90 => Transform::Flipped90,
+            Self::Rotate180 => Transform::Flipped,
+            Self::Rotate270 => Transform::Flipped270,
+        }
+    }
+}
 
 /// Variable Refresh Rate (`Adaptive Sync` / `VRR`) runtime policy (`RUSTYOS-042`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -100,12 +191,22 @@ pub struct UserConfig {
     pub display_scale: f64,
     /// Optional per-connector `HiDPI` scale overrides (`"eDP-1" -> 1.5`, `"DP-1" -> 2.0`) (`RUSTYOS-043`).
     pub output_scales: BTreeMap<String, f64>,
+    /// Default display output orientation when no per-output or CLI override exists (`RUSTYOS-055`).
+    pub display_rotation: DisplayRotation,
+    /// Optional per-connector display rotation overrides (`"eDP-1" -> Rotate180`) (`RUSTYOS-055`).
+    pub output_rotations: BTreeMap<String, DisplayRotation>,
     /// Optional custom desktop wallpaper `.png` path (`~/` expanded).
     pub wallpaper: Option<PathBuf>,
     /// Optional `XCursor` theme override (falls back to `XCURSOR_THEME` and system themes).
     pub cursor_theme: Option<String>,
     /// Commands launched automatically once the Wayland socket is ready.
     pub autostart: Vec<String>,
+    /// Require PAM password verification (`unix_chkpwd`) to unlock the Lock Screen (`RUSTYOS-056`).
+    pub require_password_on_lock: bool,
+    /// Automatically lock the session on `systemd-logind` `PrepareForSleep(true)` / `Session.Lock` (`RUSTYOS-056`).
+    pub lock_on_sleep: bool,
+    /// Enable the native compositor `org.freedesktop.PolicyKit1.AuthenticationAgent` (`RUSTYOS-056`).
+    pub enable_polkit_agent: bool,
 }
 
 impl Default for UserConfig {
@@ -128,9 +229,14 @@ impl Default for UserConfig {
             vrr_mode: VrrMode::Fullscreen,
             display_scale: 1.0,
             output_scales: BTreeMap::new(),
+            display_rotation: DisplayRotation::Rotate0,
+            output_rotations: BTreeMap::new(),
             wallpaper: None,
             cursor_theme: None,
             autostart: Vec::new(),
+            require_password_on_lock: true,
+            lock_on_sleep: true,
+            enable_polkit_agent: true,
         }
     }
 }
@@ -256,39 +362,99 @@ impl UserConfig {
                 }
             }
             ("ui", _) => self.apply_ui_kv(key, val),
-            ("display", "prefer_max_refresh") => {
+            ("display", _) => self.apply_display_kv(key, val),
+            ("display.scales", _) => {
+                self.apply_output_kv(strip_toml_quotes(key), "scale", val);
+            }
+            ("display.rotations", _) => {
+                self.apply_output_kv(strip_toml_quotes(key), "rotation", val);
+            }
+            ("autostart", "commands") => {
+                self.autostart = parse_toml_string_array(val);
+            }
+            ("security", _) => self.apply_security_kv(key, val),
+            _ => {
+                if let Some(raw_output) = section.strip_prefix("display.outputs.") {
+                    self.apply_output_kv(strip_toml_quotes(raw_output), key, val);
+                }
+            }
+        }
+    }
+
+    fn apply_display_kv(&mut self, key: &str, val: &str) {
+        match key {
+            "prefer_max_refresh" => {
                 if let Ok(b) = val.parse::<bool>() {
                     self.prefer_max_refresh = b;
                 }
             }
-            ("display", "vrr" | "vrr_mode") => {
+            "vrr" | "vrr_mode" => {
                 if let Some(s) = parse_toml_string(val)
                     && let Some(mode) = VrrMode::parse(&s)
                 {
                     self.vrr_mode = mode;
                 }
             }
-            ("display", "scale") => {
+            "scale" => {
                 if let Ok(scale) = val.parse::<f64>() {
                     self.display_scale = clamp_display_scale(scale);
                 }
             }
-            ("display", "scales") => {
-                for (name, scale) in parse_toml_inline_scale_table(val) {
+            "scales" => {
+                for (name, scale) in parse_toml_inline_table(val, |v| v.parse::<f64>().ok()) {
                     self.output_scales.insert(name, clamp_display_scale(scale));
                 }
             }
-            ("display.scales", _) => {
-                let output_name = key.trim().trim_matches('"').trim_matches('\'').trim();
-                if !output_name.is_empty()
-                    && let Ok(scale) = val.parse::<f64>()
-                {
+            "rotation" | "transform" => {
+                if let Some(rot) = DisplayRotation::parse(val) {
+                    self.display_rotation = rot;
+                }
+            }
+            "rotations" => {
+                for (name, rot) in parse_toml_inline_table(val, DisplayRotation::parse) {
+                    self.output_rotations.insert(name, rot);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn apply_output_kv(&mut self, output_name: &str, key: &str, val: &str) {
+        if output_name.is_empty() {
+            return;
+        }
+        match key {
+            "rotation" | "transform" => {
+                if let Some(rot) = DisplayRotation::parse(val) {
+                    self.output_rotations.insert(output_name.to_owned(), rot);
+                }
+            }
+            "scale" => {
+                if let Ok(scale) = val.parse::<f64>() {
                     self.output_scales
                         .insert(output_name.to_owned(), clamp_display_scale(scale));
                 }
             }
-            ("autostart", "commands") => {
-                self.autostart = parse_toml_string_array(val);
+            _ => {}
+        }
+    }
+
+    fn apply_security_kv(&mut self, key: &str, val: &str) {
+        match key {
+            "require_password_on_lock" => {
+                if let Ok(b) = val.parse::<bool>() {
+                    self.require_password_on_lock = b;
+                }
+            }
+            "lock_on_sleep" => {
+                if let Ok(b) = val.parse::<bool>() {
+                    self.lock_on_sleep = b;
+                }
+            }
+            "enable_polkit_agent" => {
+                if let Ok(b) = val.parse::<bool>() {
+                    self.enable_polkit_agent = b;
+                }
             }
             _ => {}
         }
@@ -342,24 +508,26 @@ impl UserConfig {
     /// Returns the configured `HiDPI` scale factor for `connector` (or `self.display_scale` fallback).
     #[must_use]
     pub fn scale_for_output(&self, connector: &str) -> f64 {
-        self.output_scales
-            .get(connector)
-            .copied()
-            .or_else(|| {
-                self.output_scales
-                    .iter()
-                    .find(|(k, _)| k.eq_ignore_ascii_case(connector))
-                    .map(|(_, v)| *v)
-            })
-            .unwrap_or(self.display_scale)
+        lookup_per_output(&self.output_scales, connector).unwrap_or(self.display_scale)
     }
 
     /// Returns whether an explicit per-output scale override exists for `connector`.
     #[must_use]
     pub fn has_explicit_output_scale(&self, connector: &str) -> bool {
-        self.output_scales
-            .keys()
-            .any(|k| k.eq_ignore_ascii_case(connector))
+        lookup_per_output(&self.output_scales, connector).is_some()
+    }
+
+    /// Resolves the effective display rotation for `connector`, giving `cli_override` priority
+    /// over per-connector overrides and `[display].rotation` (`RUSTYOS-055`).
+    #[must_use]
+    pub fn rotation_for_output(
+        &self,
+        connector: &str,
+        cli_override: Option<DisplayRotation>,
+    ) -> DisplayRotation {
+        cli_override
+            .or_else(|| lookup_per_output(&self.output_rotations, connector))
+            .unwrap_or(self.display_rotation)
     }
 
     /// Builds a Smithay [`XkbConfig`] referencing the configured layout, variant, and options.
@@ -535,7 +703,22 @@ fn parse_toml_string_array(raw: &str) -> Vec<String> {
     out
 }
 
-fn parse_toml_inline_scale_table(raw: &str) -> Vec<(String, f64)> {
+fn strip_toml_quotes(raw: &str) -> &str {
+    raw.trim().trim_matches('"').trim_matches('\'').trim()
+}
+
+fn lookup_per_output<T: Copy>(map: &BTreeMap<String, T>, connector: &str) -> Option<T> {
+    map.get(connector).copied().or_else(|| {
+        map.iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(connector))
+            .map(|(_, v)| *v)
+    })
+}
+
+fn parse_toml_inline_table<T>(
+    raw: &str,
+    mut parse_val: impl FnMut(&str) -> Option<T>,
+) -> Vec<(String, T)> {
     let trimmed = raw.trim();
     let Some(inner) = trimmed.strip_prefix('{').and_then(|s| s.strip_suffix('}')) else {
         return Vec::new();
@@ -545,11 +728,11 @@ fn parse_toml_inline_scale_table(raw: &str) -> Vec<(String, f64)> {
         let Some((k, v)) = pair.split_once('=') else {
             continue;
         };
-        let key = k.trim().trim_matches('"').trim_matches('\'').trim();
+        let key = strip_toml_quotes(k);
         if !key.is_empty()
-            && let Ok(scale) = v.trim().parse::<f64>()
+            && let Some(parsed) = parse_val(v.trim())
         {
-            entries.push((key.to_owned(), scale));
+            entries.push((key.to_owned(), parsed));
         }
     }
     entries
@@ -707,5 +890,96 @@ mod tests {
         let clamped_high = UserConfig::parse_toml("[ui]\nglass_opacity = 4.5\n");
         assert!((clamped_high.glass_opacity - 1.0).abs() < 1e-6);
         assert!((clamp_glass_opacity(f32::NAN) - DEFAULT_GLASS_OPACITY).abs() < 1e-6);
+    }
+
+    #[test]
+    fn parses_display_rotations_and_per_output_overrides() {
+        assert_eq!(DisplayRotation::parse("0"), Some(DisplayRotation::Rotate0));
+        assert_eq!(
+            DisplayRotation::parse("normal"),
+            Some(DisplayRotation::Rotate0)
+        );
+        assert_eq!(
+            DisplayRotation::parse("90deg"),
+            Some(DisplayRotation::Rotate90)
+        );
+        assert_eq!(
+            DisplayRotation::parse("inverted"),
+            Some(DisplayRotation::Rotate180)
+        );
+        assert_eq!(
+            DisplayRotation::parse("\"270\""),
+            Some(DisplayRotation::Rotate270)
+        );
+        assert_eq!(DisplayRotation::parse("45"), None);
+
+        let cfg = UserConfig::parse_toml(
+            r#"
+            [display]
+            rotation = 90
+            rotations = { "HDMI-A-1" = 270 }
+
+            [display.rotations]
+            "DP-1" = "inverted"
+
+            [display.outputs."eDP-1"]
+            rotation = 180
+            scale = 1.5
+            "#,
+        );
+        assert_eq!(cfg.display_rotation, DisplayRotation::Rotate90);
+        assert_eq!(
+            cfg.rotation_for_output("HDMI-A-1", None),
+            DisplayRotation::Rotate270
+        );
+        assert_eq!(
+            cfg.rotation_for_output("dp-1", None),
+            DisplayRotation::Rotate180
+        );
+        assert_eq!(
+            cfg.rotation_for_output("eDP-1", None),
+            DisplayRotation::Rotate180
+        );
+        assert!((cfg.scale_for_output("eDP-1") - 1.5).abs() < 1e-6);
+        assert_eq!(
+            cfg.rotation_for_output("DP-9", None),
+            DisplayRotation::Rotate90
+        );
+        assert_eq!(
+            cfg.rotation_for_output("eDP-1", Some(DisplayRotation::Rotate0)),
+            DisplayRotation::Rotate0
+        );
+        assert_eq!(
+            DisplayRotation::Rotate180.to_wl_transform(),
+            Transform::_180
+        );
+        assert_eq!(
+            DisplayRotation::Rotate180.to_winit_transform(),
+            Transform::Flipped
+        );
+        assert_eq!(
+            DisplayRotation::Rotate0.to_winit_transform(),
+            Transform::Flipped180
+        );
+    }
+
+    #[test]
+    fn parses_security_section_preferences() {
+        let defaults = UserConfig::default();
+        assert!(defaults.require_password_on_lock);
+        assert!(defaults.lock_on_sleep);
+        assert!(defaults.enable_polkit_agent);
+
+        let cfg = UserConfig::parse_toml(
+            r"
+            [security]
+            require_password_on_lock = false
+            lock_on_sleep = false
+            enable_polkit_agent = false
+            ",
+        );
+        assert!(!cfg.require_password_on_lock);
+        assert!(!cfg.lock_on_sleep);
+        assert!(!cfg.enable_polkit_agent);
     }
 }

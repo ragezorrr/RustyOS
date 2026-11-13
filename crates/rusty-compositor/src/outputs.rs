@@ -7,6 +7,7 @@
 //! - [`OutputMap`]: Collection of managed outputs in global layout space, providing hit-testing,
 //!   adjacent placement calculation for hotplugged displays, and multi-monitor bounding box queries.
 
+use crate::config::DisplayRotation;
 use rusty_wm::{OutputId, Rect};
 use smithay::{
     output::{Mode, Output, PhysicalProperties, Scale, Subpixel},
@@ -23,6 +24,18 @@ pub fn compute_logical_size(physical_size: Size<i32, Physical>, scale: f64) -> S
     let logical_w = (f64::from(physical_size.w) / clamped).round() as i32;
     let logical_h = (f64::from(physical_size.h) / clamped).round() as i32;
     Size::from((logical_w.max(1), logical_h.max(1)))
+}
+
+/// Computes the rounded logical size of a display output after applying `rotation` (`RUSTYOS-055`).
+#[must_use]
+pub fn compute_logical_size_for_rotation(
+    physical_size: Size<i32, Physical>,
+    scale: f64,
+    rotation: DisplayRotation,
+) -> Size<i32, Logical> {
+    rotation
+        .to_wl_transform()
+        .transform_size(compute_logical_size(physical_size, scale))
 }
 
 /// Metadata and handle for an active display output in compositor space.
@@ -42,6 +55,8 @@ pub struct OutputEntry {
     pub scale: f64,
     /// Refresh rate in millihertz (e.g. 60,000 for 60 Hz, 144,000 for 144 Hz).
     pub refresh_milli_hz: i32,
+    /// Display orientation / rotation (`0°`, `90°`, `180°`, `270°`) (`RUSTYOS-055`).
+    pub rotation: DisplayRotation,
     /// Whether this output is the primary desktop display.
     pub is_primary: bool,
     /// Wayland `wl_output` global handle registered for this display (`RUSTYOS-042`).
@@ -49,7 +64,7 @@ pub struct OutputEntry {
 }
 
 impl OutputEntry {
-    /// Constructs a new [`OutputEntry`].
+    /// Constructs a new [`OutputEntry`] with upright (`0°`) orientation.
     #[must_use]
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -70,16 +85,40 @@ impl OutputEntry {
             physical_size,
             scale: crate::config::clamp_display_scale(scale),
             refresh_milli_hz,
+            rotation: DisplayRotation::Rotate0,
             is_primary,
             global_id: None,
         }
     }
 
-    /// Computes the bounding rectangle of this output in compositor logical coordinates.
+    /// Assigns the configured display rotation on this entry (`RUSTYOS-055`).
+    #[must_use]
+    pub const fn with_rotation(mut self, rotation: DisplayRotation) -> Self {
+        self.rotation = rotation;
+        self
+    }
+
+    /// Computes the bounding rectangle of this output in compositor logical coordinates,
+    /// accounting for `scale` and `rotation`.
     #[must_use]
     pub fn logical_geometry(&self) -> Rectangle<i32, Logical> {
-        let logical_size = compute_logical_size(self.physical_size, self.scale);
+        let logical_size =
+            compute_logical_size_for_rotation(self.physical_size, self.scale, self.rotation);
         Rectangle::new(self.location, logical_size)
+    }
+
+    /// Computes the logical output size before rotation (matching raw physical screen axes).
+    #[must_use]
+    pub fn unrotated_logical_size(&self) -> Size<i32, Logical> {
+        compute_logical_size(self.physical_size, self.scale)
+    }
+
+    /// Computes the rotated physical pixel size (`w`/`h` swapped for `90°`/`270°`).
+    #[must_use]
+    pub fn transformed_physical_size(&self) -> Size<i32, Physical> {
+        self.rotation
+            .to_wl_transform()
+            .transform_size(self.physical_size)
     }
 
     /// Returns the window manager work area rectangle corresponding to this output.
@@ -172,6 +211,17 @@ impl OutputMap {
         entry.physical_size = physical_size;
         entry.scale = crate::config::clamp_display_scale(scale);
         entry.refresh_milli_hz = refresh_milli_hz;
+        self.relayout_adjacent();
+        true
+    }
+
+    /// Updates the display rotation for `id` and re-packs adjacent horizontal origins
+    /// when `90°`/`270°` changes effective logical width (`RUSTYOS-055`).
+    pub fn update_entry_rotation(&mut self, id: OutputId, rotation: DisplayRotation) -> bool {
+        let Some(entry) = self.get_mut(id) else {
+            return false;
+        };
+        entry.rotation = rotation;
         self.relayout_adjacent();
         true
     }
@@ -445,5 +495,51 @@ mod tests {
         let p_geo = map.primary().logical_geometry();
         assert_eq!(p_geo.size, (2560, 1440).into());
         assert_eq!(map.get(out2_id).map(|e| e.location), Some((2560, 0).into()));
+    }
+
+    #[test]
+    fn output_entry_rotation_computes_logical_and_physical_bounds() {
+        let out1 = create_test_output("eDP-1", (1920, 1080).into(), 60_000);
+        let entry1 = OutputEntry::new(
+            OutputId(1),
+            "eDP-1",
+            out1,
+            (0, 0).into(),
+            (1920, 1080).into(),
+            1.5,
+            60_000,
+            true,
+        );
+        let mut map = OutputMap::new(entry1);
+
+        let out2_id = map.next_output_id();
+        let out2 = create_test_output("DP-1", (2560, 1440).into(), 120_000);
+        map.add(OutputEntry::new(
+            out2_id,
+            "DP-1",
+            out2,
+            map.next_adjacent_location(),
+            (2560, 1440).into(),
+            1.0,
+            120_000,
+            false,
+        ));
+
+        assert!(map.update_entry_rotation(OutputId(1), DisplayRotation::Rotate180));
+        assert_eq!(map.primary().logical_geometry().size, (1280, 720).into());
+        assert_eq!(
+            map.primary().transformed_physical_size(),
+            (1920, 1080).into()
+        );
+        assert_eq!(map.get(out2_id).map(|e| e.location), Some((1280, 0).into()));
+
+        assert!(map.update_entry_rotation(OutputId(1), DisplayRotation::Rotate90));
+        assert_eq!(map.primary().logical_geometry().size, (720, 1280).into());
+        assert_eq!(
+            map.primary().transformed_physical_size(),
+            (1080, 1920).into()
+        );
+        assert_eq!(map.primary().unrotated_logical_size(), (1280, 720).into());
+        assert_eq!(map.get(out2_id).map(|e| e.location), Some((720, 0).into()));
     }
 }

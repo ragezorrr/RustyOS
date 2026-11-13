@@ -72,6 +72,8 @@ pub struct CompositorConfig {
     pub force_full_damage: bool,
     /// Enable accessibility reduced-motion mode (`RUSTYOS-008`).
     pub reduced_motion: bool,
+    /// Optional CLI display rotation override (`0|90|180|270`) (`RUSTYOS-055`).
+    pub rotation_override: Option<config::DisplayRotation>,
 }
 
 impl CompositorConfig {
@@ -86,6 +88,7 @@ impl CompositorConfig {
             bench_input: false,
             force_full_damage: false,
             reduced_motion: false,
+            rotation_override: None,
         }
     }
 }
@@ -228,6 +231,20 @@ where
             "--bench-input" => config.bench_input = true,
             "--force-full-damage" => config.force_full_damage = true,
             "--reduced-motion" => config.reduced_motion = true,
+            "--rotate" => {
+                let Some(val) = iter.next() else {
+                    return Err(CompositorError::InvalidArgument(
+                        "--rotate requires one of: 0, 90, 180, 270".to_owned(),
+                    ));
+                };
+                let Some(rot) = config::DisplayRotation::parse(val.as_ref()) else {
+                    return Err(CompositorError::InvalidArgument(format!(
+                        "--rotate '{}': expected 0, 90, 180, or 270",
+                        val.as_ref()
+                    )));
+                };
+                config.rotation_override = Some(rot);
+            }
             other => return Err(CompositorError::InvalidArgument(other.to_owned())),
         }
     }
@@ -250,13 +267,17 @@ pub fn run_bootstrap(config: &CompositorConfig) -> Result<BootstrapReport, Compo
                     .map_err(|err| CompositorError::EventLoop(err.to_string()))?;
             let display = smithay::reexports::wayland_server::Display::new()
                 .map_err(|err| CompositorError::WaylandDisplay(err.to_string()))?;
-            let _state = state::RustyCompositorState::new(
+            let mut state = state::RustyCompositorState::new(
                 &display,
                 "wayland-check".to_owned(),
                 event_loop.get_signal(),
                 event_loop.handle(),
                 (1280, 800).into(),
             )?;
+            if let Some(rot) = config.rotation_override {
+                state.rotation_override = Some(rot);
+                state.set_output_rotation(state::PRIMARY_OUTPUT_ID, rot, true);
+            }
 
             Ok(BootstrapReport {
                 version: env!("CARGO_PKG_VERSION"),
@@ -323,6 +344,8 @@ mod tests {
             "--bench-input",
             "--force-full-damage",
             "--reduced-motion",
+            "--rotate",
+            "180",
         ]);
         assert_eq!(
             nested,
@@ -334,8 +357,16 @@ mod tests {
                 bench_input: true,
                 force_full_damage: true,
                 reduced_motion: true,
+                rotation_override: Some(config::DisplayRotation::Rotate180),
             })
         );
+
+        assert_eq!(
+            parse_args(["--rotate", "90"]).map(|c| c.rotation_override),
+            Ok(Some(config::DisplayRotation::Rotate90))
+        );
+        assert!(parse_args(["--rotate", "45"]).is_err());
+        assert!(parse_args(["--rotate"]).is_err());
 
         let invalid = parse_args(["--unknown-flag"]);
         assert_eq!(

@@ -79,15 +79,17 @@ pub fn run_nested_winit(config: &CompositorConfig) -> Result<BootstrapReport, Co
         event_loop.handle(),
         initial_size,
     )?;
+    state.rotation_override = config.rotation_override;
+    let winit_rotation = state
+        .user_config
+        .rotation_for_output("winit-0", config.rotation_override);
+    state.set_output_rotation(PRIMARY_OUTPUT_ID, winit_rotation, true);
     let dmabuf_formats = backend.renderer().dmabuf_formats();
     state.init_dmabuf_formats(dmabuf_formats);
     state
         .animations
         .set_reduced_motion(state.user_config.reduced_motion || config.reduced_motion);
-    state.telemetry = crate::telemetry::SystemMetricsHandle::start_background();
-    state.dbus_notifications =
-        crate::dbus_notifications::DbusNotificationHandle::start_background();
-    state.tray = crate::tray::TrayWatcherHandle::start_background();
+    state.start_background_services();
     let mut damage_tracker = OutputDamageTracker::from_output(&state.output);
     let mut text_cache = crate::text::TextCache::new();
     let mut shape_cache = crate::surfaces::UiShapeCache::new();
@@ -224,6 +226,7 @@ pub(crate) fn dispatch_and_refresh_clients(
     app_state.drain_dbus_notifications();
     app_state.drain_tray_updates();
     app_state.drain_screenshot_results();
+    let _ = app_state.drain_system_integration_events(smithay::utils::SERIAL_COUNTER.next_serial());
     if let Some(ipc) = ipc_server {
         ipc.poll_requests(|req| app_state.handle_ipc_request(req));
     }
@@ -673,29 +676,7 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
     let timing = state.frame_timing.summary();
     let lock_progress = state.lock_screen_anim.current();
     if state.screen_locked || lock_progress > 0.01 {
-        let lock_clock = if state.clock_24h {
-            &tel.lock_time_24h
-        } else {
-            &tel.lock_time_hhmm
-        };
-        let lock_view = crate::shell_render::LockScreenRenderState {
-            date_label: &tel.lock_date,
-            clock_hhmm: lock_clock,
-            keyboard_layout: &state.active_kbd_layout,
-            has_battery: tel.power.has_battery,
-            battery_percent: tel.power.percentage,
-            battery_charging: tel.power.ac_online
-                || tel.power.state == rusty_services::BatteryState::Charging,
-            wifi_connected: tel.network.connected,
-            wifi_signal_percent: tel.network.wifi_signal_percent,
-            wallpaper_path: state.user_config.wallpaper.as_deref(),
-            users: &tel.users,
-            selected_user: state.lock_selected_user,
-            power_menu_open: state.lock_power_menu_open,
-            glass_opacity: state.glass_opacity,
-            reduce_transparency: state.reduce_transparency,
-            progress: lock_progress,
-        };
+        let lock_view = state.lock_screen_render_state(&tel, lock_progress);
         render_list.extend(crate::shell_render::generate_lock_screen_elements(
             text_cache,
             shape_cache,
@@ -951,7 +932,30 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
             progress: ov_progress,
         });
 
-        let overlay = if let Some(sw) = switcher_view.as_ref() {
+        let polkit_display = state
+            .polkit_prompt
+            .as_ref()
+            .map(|pk| state.polkit_password.visible_or_masked(pk.echo_on, 48));
+        let polkit_view = state
+            .polkit_prompt
+            .as_ref()
+            .zip(polkit_display.as_deref())
+            .map(
+                |(pk, display)| crate::shell_render::PolkitPromptRenderState {
+                    message: &pk.message,
+                    action_id: &pk.action_id,
+                    identity_user: &pk.identity_user,
+                    prompt_label: &pk.prompt_label,
+                    input_display: display,
+                    checking: pk.checking,
+                    error_message: pk.error_message.as_deref(),
+                    info_message: pk.info_message.as_deref(),
+                },
+            );
+
+        let overlay = if let Some(pk) = polkit_view.as_ref() {
+            crate::shell_render::ShellOverlayView::Polkit(pk)
+        } else if let Some(sw) = switcher_view.as_ref() {
             crate::shell_render::ShellOverlayView::Switcher(sw)
         } else if let Some(spot) = spotlight_view.as_ref() {
             crate::shell_render::ShellOverlayView::Spotlight(spot)
@@ -1117,12 +1121,14 @@ pub(crate) fn process_pending_screenshot(
     renderer: &mut GlesRenderer,
     render_list: &[CompositorRenderElement],
     state: &mut RustyCompositorState,
-    size: smithay::utils::Size<i32, smithay::utils::Physical>,
+    _size: smithay::utils::Size<i32, smithay::utils::Physical>,
 ) {
     let Some(req) = state.pending_screenshot.take() else {
         return;
     };
-    let output_scale = state.output_map.primary().scale;
+    let primary = state.output_map.primary();
+    let output_scale = primary.scale;
+    let capture_size = primary.transformed_physical_size();
     let crop = match req {
         crate::screenshot::ScreenshotRequest::FullScreen => None,
         crate::screenshot::ScreenshotRequest::FocusedWindow => state
@@ -1134,7 +1140,7 @@ pub(crate) fn process_pending_screenshot(
     match crate::screenshot::capture_render_list_rgba(
         renderer,
         render_list,
-        size,
+        capture_size,
         output_scale,
         crop,
     ) {

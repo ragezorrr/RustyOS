@@ -33,6 +33,20 @@ use tracing::info;
 use crate::state::RustyCompositorState;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+enum SecurityKeyAction {
+    LockSubmit,
+    LockBackspace,
+    LockClear,
+    LockText(String),
+    PolkitSubmit,
+    PolkitCancel,
+    PolkitBackspace,
+    PolkitClear,
+    PolkitText(String),
+    Consume,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum KeyIntercept {
     ExitCompositor,
     ToggleReducedMotion,
@@ -47,6 +61,7 @@ enum KeyIntercept {
     UnlockScreen,
     LockSelectDelta(i8),
     LockScreenConsume,
+    Security(SecurityKeyAction),
     QuickSettingsClose,
     TopBarMenuClose,
     LauncherClose,
@@ -252,6 +267,9 @@ impl RustyCompositorState {
             KeyIntercept::LockScreenConsume
             | KeyIntercept::LauncherConsume
             | KeyIntercept::SwitcherConsume => {}
+            KeyIntercept::Security(action) => {
+                self.dispatch_security_key_intercept(action, serial);
+            }
             KeyIntercept::QuickSettingsClose => {
                 self.close_quick_settings();
                 info!("Closed Quick Settings popover");
@@ -417,12 +435,46 @@ impl RustyCompositorState {
         &mut self,
         event: &B::PointerMotionAbsoluteEvent,
     ) {
-        let bounds = self.total_output_bounds();
-        let normalized: Point<f64, Logical> = event.position_transformed(bounds.size);
-        let pos = Point::from((
-            normalized.x + f64::from(bounds.loc.x),
-            normalized.y + f64::from(bounds.loc.y),
-        ));
+        let pos = if self.output_map.count() <= 1 {
+            let primary = self.output_map.primary();
+            let unrotated = primary.unrotated_logical_size();
+            let raw: Point<f64, Logical> = event.position_transformed(unrotated);
+            let local = transform_screen_point_to_output_logical(raw, unrotated, primary.rotation);
+            Point::from((
+                local.x + f64::from(primary.location.x),
+                local.y + f64::from(primary.location.y),
+            ))
+        } else {
+            let bounds = self.total_output_bounds();
+            let normalized: Point<f64, Logical> = event.position_transformed(bounds.size);
+            let global = Point::from((
+                normalized.x + f64::from(bounds.loc.x),
+                normalized.y + f64::from(bounds.loc.y),
+            ));
+            if let Some(entry) = self
+                .output_map
+                .output_under(global)
+                .and_then(|id| self.output_map.get(id))
+                && entry.rotation != crate::config::DisplayRotation::Rotate0
+            {
+                let geo = entry.logical_geometry();
+                let unrotated = entry.unrotated_logical_size();
+                let local_raw = Point::from((
+                    (global.x - f64::from(geo.loc.x))
+                        * (f64::from(unrotated.w) / f64::from(geo.size.w.max(1))),
+                    (global.y - f64::from(geo.loc.y))
+                        * (f64::from(unrotated.h) / f64::from(geo.size.h.max(1))),
+                ));
+                let local =
+                    transform_screen_point_to_output_logical(local_raw, unrotated, entry.rotation);
+                Point::from((
+                    local.x + f64::from(geo.loc.x),
+                    local.y + f64::from(geo.loc.y),
+                ))
+            } else {
+                global
+            }
+        };
         let time = Event::time_msec(event);
         self.apply_pointer_position(pos, time);
     }
@@ -457,7 +509,7 @@ impl RustyCompositorState {
             self.wm.set_focused_output(out_id);
         }
 
-        if self.ext_session_locked || self.screen_locked {
+        if self.ext_session_locked || self.screen_locked || self.polkit_prompt.is_some() {
             self.clear_shell_hover_states();
             let under = if self.ext_session_locked {
                 self.ext_lock_surface_under(pos)
@@ -992,6 +1044,16 @@ impl RustyCompositorState {
                 return;
             }
 
+            if self.polkit_prompt.is_some() {
+                let output_phys = self
+                    .space
+                    .output_geometry(&self.output)
+                    .map_or_else(|| Size::from((1280, 800)), |geo| geo.size)
+                    .to_physical(1);
+                self.handle_polkit_pointer_click(output_phys, serial);
+                return;
+            }
+
             let output_width = self
                 .space
                 .output_geometry(&self.output)
@@ -1262,7 +1324,7 @@ impl RustyCompositorState {
     }
 
     fn handle_gesture_swipe_begin<B: InputBackend>(&mut self, event: &B::GestureSwipeBeginEvent) {
-        if self.screen_locked {
+        if self.screen_locked || self.polkit_prompt.is_some() {
             self.touchpad_swipe = crate::state::TouchpadSwipeState::default();
             return;
         }
@@ -1282,7 +1344,7 @@ impl RustyCompositorState {
     }
 
     fn handle_gesture_swipe_update<B: InputBackend>(&mut self, event: &B::GestureSwipeUpdateEvent) {
-        if self.screen_locked {
+        if self.screen_locked || self.polkit_prompt.is_some() {
             return;
         }
         let delta = GestureSwipeUpdateEvent::delta(event);
@@ -1300,7 +1362,7 @@ impl RustyCompositorState {
     }
 
     fn handle_gesture_swipe_end<B: InputBackend>(&mut self, event: &B::GestureSwipeEndEvent) {
-        if self.screen_locked {
+        if self.screen_locked || self.polkit_prompt.is_some() {
             self.touchpad_swipe = crate::state::TouchpadSwipeState::default();
             return;
         }
@@ -1321,7 +1383,7 @@ impl RustyCompositorState {
     }
 
     fn handle_gesture_pinch_begin<B: InputBackend>(&mut self, event: &B::GesturePinchBeginEvent) {
-        if self.screen_locked {
+        if self.screen_locked || self.polkit_prompt.is_some() {
             return;
         }
         let pointer = self.pointer.clone();
@@ -1336,7 +1398,7 @@ impl RustyCompositorState {
     }
 
     fn handle_gesture_pinch_update<B: InputBackend>(&mut self, event: &B::GesturePinchUpdateEvent) {
-        if self.screen_locked {
+        if self.screen_locked || self.polkit_prompt.is_some() {
             return;
         }
         let pointer = self.pointer.clone();
@@ -1352,7 +1414,7 @@ impl RustyCompositorState {
     }
 
     fn handle_gesture_pinch_end<B: InputBackend>(&mut self, event: &B::GesturePinchEndEvent) {
-        if self.screen_locked {
+        if self.screen_locked || self.polkit_prompt.is_some() {
             return;
         }
         let pointer = self.pointer.clone();
@@ -1367,7 +1429,7 @@ impl RustyCompositorState {
     }
 
     fn handle_gesture_hold_begin<B: InputBackend>(&mut self, event: &B::GestureHoldBeginEvent) {
-        if self.screen_locked {
+        if self.screen_locked || self.polkit_prompt.is_some() {
             return;
         }
         let pointer = self.pointer.clone();
@@ -1382,7 +1444,7 @@ impl RustyCompositorState {
     }
 
     fn handle_gesture_hold_end<B: InputBackend>(&mut self, event: &B::GestureHoldEndEvent) {
-        if self.screen_locked {
+        if self.screen_locked || self.polkit_prompt.is_some() {
             return;
         }
         let pointer = self.pointer.clone();
@@ -1417,7 +1479,18 @@ fn classify_keyboard_input(
         if key_state != KeyState::Pressed {
             return FilterResult::Intercept(KeyIntercept::LockScreenConsume);
         }
-        return FilterResult::Intercept(match_lock_screen_key(sym));
+        return FilterResult::Intercept(match_lock_screen_key(
+            state.user_config.require_password_on_lock,
+            modifiers,
+            sym,
+            utf8,
+        ));
+    }
+    if state.polkit_prompt.is_some() {
+        if key_state != KeyState::Pressed {
+            return FilterResult::Intercept(KeyIntercept::Security(SecurityKeyAction::Consume));
+        }
+        return FilterResult::Intercept(match_polkit_key(modifiers, sym, utf8));
     }
     if shortcuts_inhibited && !state.has_blocking_shell_overlay() {
         if key_state == KeyState::Pressed && modifiers.logo && sym.raw() == Keysym::Escape.raw() {
@@ -1650,51 +1723,164 @@ const fn match_vt_switch_key(modifiers: ModifiersState, sym: Keysym) -> Option<i
     }
 }
 
-const fn match_lock_screen_key(sym: Keysym) -> KeyIntercept {
-    match sym {
-        Keysym::Return | Keysym::KP_Enter | Keysym::space | Keysym::Escape => {
-            KeyIntercept::UnlockScreen
-        }
-        Keysym::Up | Keysym::KP_Up | Keysym::Left | Keysym::KP_Left => {
-            KeyIntercept::LockSelectDelta(-1)
-        }
-        Keysym::Down | Keysym::KP_Down | Keysym::Right | Keysym::KP_Right | Keysym::Tab => {
-            KeyIntercept::LockSelectDelta(1)
-        }
-        _ => KeyIntercept::LockScreenConsume,
+fn extract_printable_modal_text(modifiers: ModifiersState, utf8: Option<&str>) -> Option<String> {
+    if modifiers.ctrl || modifiers.alt || modifiers.logo {
+        return None;
     }
+    let text = utf8?;
+    text.chars()
+        .any(|c| !c.is_control() && c != '\0')
+        .then(|| text.to_owned())
+}
+
+fn match_polkit_key(modifiers: ModifiersState, sym: Keysym, utf8: Option<&str>) -> KeyIntercept {
+    if modifiers.ctrl && modifiers.alt && sym.raw() == Keysym::BackSpace.raw() {
+        return KeyIntercept::ExitCompositor;
+    }
+    if sym.raw() == Keysym::Escape.raw() {
+        return KeyIntercept::Security(SecurityKeyAction::PolkitCancel);
+    }
+    if sym.raw() == Keysym::Return.raw() || sym.raw() == Keysym::KP_Enter.raw() {
+        return KeyIntercept::Security(SecurityKeyAction::PolkitSubmit);
+    }
+    if sym.raw() == Keysym::BackSpace.raw() {
+        return KeyIntercept::Security(if modifiers.ctrl {
+            SecurityKeyAction::PolkitClear
+        } else {
+            SecurityKeyAction::PolkitBackspace
+        });
+    }
+    if modifiers.ctrl && (sym == Keysym::u || sym == Keysym::U) {
+        return KeyIntercept::Security(SecurityKeyAction::PolkitClear);
+    }
+    if let Some(text) = extract_printable_modal_text(modifiers, utf8) {
+        return KeyIntercept::Security(SecurityKeyAction::PolkitText(text));
+    }
+    KeyIntercept::Security(SecurityKeyAction::Consume)
+}
+
+fn match_lock_screen_key(
+    require_password: bool,
+    modifiers: ModifiersState,
+    sym: Keysym,
+    utf8: Option<&str>,
+) -> KeyIntercept {
+    if !require_password {
+        return match sym {
+            Keysym::Return | Keysym::KP_Enter | Keysym::space | Keysym::Escape => {
+                KeyIntercept::UnlockScreen
+            }
+            Keysym::Up | Keysym::KP_Up | Keysym::Left | Keysym::KP_Left => {
+                KeyIntercept::LockSelectDelta(-1)
+            }
+            Keysym::Down | Keysym::KP_Down | Keysym::Right | Keysym::KP_Right | Keysym::Tab => {
+                KeyIntercept::LockSelectDelta(1)
+            }
+            _ => KeyIntercept::LockScreenConsume,
+        };
+    }
+
+    if sym.raw() == Keysym::Return.raw() || sym.raw() == Keysym::KP_Enter.raw() {
+        return KeyIntercept::Security(SecurityKeyAction::LockSubmit);
+    }
+    if sym.raw() == Keysym::Escape.raw() {
+        return KeyIntercept::Security(SecurityKeyAction::LockClear);
+    }
+    if sym.raw() == Keysym::BackSpace.raw() {
+        return KeyIntercept::Security(if modifiers.ctrl {
+            SecurityKeyAction::LockClear
+        } else {
+            SecurityKeyAction::LockBackspace
+        });
+    }
+    if modifiers.ctrl && (sym == Keysym::u || sym == Keysym::U) {
+        return KeyIntercept::Security(SecurityKeyAction::LockClear);
+    }
+    match sym {
+        Keysym::Up | Keysym::KP_Up => return KeyIntercept::LockSelectDelta(-1),
+        Keysym::Down | Keysym::KP_Down | Keysym::Tab => return KeyIntercept::LockSelectDelta(1),
+        _ => {}
+    }
+    if let Some(text) = extract_printable_modal_text(modifiers, utf8) {
+        return KeyIntercept::Security(SecurityKeyAction::LockText(text));
+    }
+    KeyIntercept::LockScreenConsume
 }
 
 impl crate::state::RustyCompositorState {
+    fn dispatch_security_key_intercept(
+        &mut self,
+        action: SecurityKeyAction,
+        serial: smithay::utils::Serial,
+    ) {
+        match action {
+            SecurityKeyAction::LockSubmit => self.submit_lock_password(serial),
+            SecurityKeyAction::LockBackspace => {
+                self.lock_password.pop_char();
+                self.lock_auth_error = None;
+                self.shell_redraw_needed = true;
+            }
+            SecurityKeyAction::LockClear => {
+                self.lock_password.clear();
+                self.lock_auth_error = None;
+                self.shell_redraw_needed = true;
+            }
+            SecurityKeyAction::LockText(text) => {
+                self.lock_password.push_str(&text);
+                self.lock_auth_error = None;
+                self.shell_redraw_needed = true;
+            }
+            SecurityKeyAction::PolkitSubmit => self.submit_polkit_password(),
+            SecurityKeyAction::PolkitCancel => self.cancel_polkit_prompt(serial),
+            SecurityKeyAction::PolkitBackspace => {
+                self.polkit_password.pop_char();
+                if let Some(p) = self.polkit_prompt.as_mut() {
+                    p.error_message = None;
+                }
+                self.shell_redraw_needed = true;
+            }
+            SecurityKeyAction::PolkitClear => {
+                self.polkit_password.clear();
+                if let Some(p) = self.polkit_prompt.as_mut() {
+                    p.error_message = None;
+                }
+                self.shell_redraw_needed = true;
+            }
+            SecurityKeyAction::PolkitText(text) => {
+                self.polkit_password.push_str(&text);
+                if let Some(p) = self.polkit_prompt.as_mut() {
+                    p.error_message = None;
+                }
+                self.shell_redraw_needed = true;
+            }
+            SecurityKeyAction::Consume => {}
+        }
+    }
+
+    pub(crate) fn handle_polkit_pointer_click(
+        &mut self,
+        output_phys: Size<i32, smithay::utils::Physical>,
+        serial: smithay::utils::Serial,
+    ) {
+        match crate::shell_render::hit_test_polkit_dialog(
+            output_phys,
+            self.pointer_location.x,
+            self.pointer_location.y,
+        ) {
+            crate::shell_render::PolkitHit::Submit => self.submit_polkit_password(),
+            crate::shell_render::PolkitHit::Cancel => self.cancel_polkit_prompt(serial),
+            crate::shell_render::PolkitHit::PasswordField
+            | crate::shell_render::PolkitHit::Outside => {}
+        }
+    }
+
     pub(crate) fn handle_lock_screen_pointer_click(
         &mut self,
         output_phys: Size<i32, smithay::utils::Physical>,
         serial: smithay::utils::Serial,
     ) {
         let tel = self.telemetry.snapshot();
-        let lock_clock = if self.clock_24h {
-            &tel.lock_time_24h
-        } else {
-            &tel.lock_time_hhmm
-        };
-        let lock_view = crate::shell_render::LockScreenRenderState {
-            date_label: &tel.lock_date,
-            clock_hhmm: lock_clock,
-            keyboard_layout: &self.active_kbd_layout,
-            has_battery: tel.power.has_battery,
-            battery_percent: tel.power.percentage,
-            battery_charging: tel.power.ac_online
-                || tel.power.state == rusty_services::BatteryState::Charging,
-            wifi_connected: tel.network.connected,
-            wifi_signal_percent: tel.network.wifi_signal_percent,
-            wallpaper_path: self.user_config.wallpaper.as_deref(),
-            users: &tel.users,
-            selected_user: self.lock_selected_user,
-            power_menu_open: self.lock_power_menu_open,
-            glass_opacity: self.glass_opacity,
-            reduce_transparency: self.reduce_transparency,
-            progress: 1.0,
-        };
+        let lock_view = self.lock_screen_render_state(&tel, 1.0);
         match crate::shell_render::hit_test_lock_screen(
             output_phys,
             &lock_view,
@@ -1702,8 +1888,17 @@ impl crate::state::RustyCompositorState {
             self.pointer_location.y,
         ) {
             crate::shell_render::LockScreenHit::UnlockUser(_) => {
-                self.set_screen_locked(false, serial);
-                info!("Unlocked desktop session Lock Screen via user click");
+                self.lock_power_menu_open = false;
+                if !self.user_config.require_password_on_lock {
+                    self.set_screen_locked(false, serial);
+                    info!("Unlocked desktop session Lock Screen via user click");
+                } else if !self.lock_password.is_empty() {
+                    self.submit_lock_password(serial);
+                }
+            }
+            crate::shell_render::LockScreenHit::SubmitPassword => {
+                self.lock_power_menu_open = false;
+                self.submit_lock_password(serial);
             }
             crate::shell_render::LockScreenHit::SelectUser(idx) => {
                 self.lock_power_menu_open = false;
@@ -1778,6 +1973,27 @@ const fn keysym_to_workspace_index(sym: Keysym) -> Option<u8> {
         Keysym::_9 | Keysym::parenleft => Some(9),
         _ => None,
     }
+}
+
+/// Transforms an unrotated screen-space pointer point inside `unrotated_size` into output-local
+/// logical coordinates under `rotation` (`RUSTYOS-055`).
+#[must_use]
+pub(crate) fn transform_screen_point_to_output_logical(
+    point: Point<f64, Logical>,
+    unrotated_size: Size<i32, Logical>,
+    rotation: crate::config::DisplayRotation,
+) -> Point<f64, Logical> {
+    let w = f64::from(unrotated_size.w.max(1));
+    let h = f64::from(unrotated_size.h.max(1));
+    let x = point.x.clamp(0.0, w);
+    let y = point.y.clamp(0.0, h);
+    let mapped = match rotation {
+        crate::config::DisplayRotation::Rotate0 => (x, y),
+        crate::config::DisplayRotation::Rotate90 => ((h - y).clamp(0.0, h), x.clamp(0.0, w)),
+        crate::config::DisplayRotation::Rotate180 => (w - x, h - y),
+        crate::config::DisplayRotation::Rotate270 => (y.clamp(0.0, h), (w - x).clamp(0.0, w)),
+    };
+    Point::from(mapped)
 }
 
 /// Clamps a relative pointer delta (`libinput` mice/trackpads) within a multi-monitor bounding rectangle (`RUSTYOS-040`).
@@ -1972,21 +2188,34 @@ mod tests {
             match_shortcut(ctrl_alt, Keysym::l),
             Some(KeyIntercept::LockScreen)
         );
+        let none = ModifiersState::default();
         assert_eq!(
-            match_lock_screen_key(Keysym::Return),
+            match_lock_screen_key(false, none, Keysym::Return, None),
             KeyIntercept::UnlockScreen
         );
         assert_eq!(
-            match_lock_screen_key(Keysym::Down),
+            match_lock_screen_key(false, none, Keysym::Down, None),
             KeyIntercept::LockSelectDelta(1)
         );
         assert_eq!(
-            match_lock_screen_key(Keysym::Up),
+            match_lock_screen_key(false, none, Keysym::Up, None),
             KeyIntercept::LockSelectDelta(-1)
         );
         assert_eq!(
-            match_lock_screen_key(Keysym::a),
+            match_lock_screen_key(false, none, Keysym::a, Some("a")),
             KeyIntercept::LockScreenConsume
+        );
+        assert_eq!(
+            match_lock_screen_key(true, none, Keysym::a, Some("a")),
+            KeyIntercept::Security(SecurityKeyAction::LockText("a".to_owned()))
+        );
+        assert_eq!(
+            match_lock_screen_key(true, none, Keysym::space, Some(" ")),
+            KeyIntercept::Security(SecurityKeyAction::LockText(" ".to_owned()))
+        );
+        assert_eq!(
+            match_lock_screen_key(true, none, Keysym::Return, None),
+            KeyIntercept::Security(SecurityKeyAction::LockSubmit)
         );
     }
 
@@ -2271,6 +2500,12 @@ mod tests {
         cancelled: bool,
     }
 
+    struct MockPointerAbs {
+        time: u64,
+        norm_x: f64,
+        norm_y: f64,
+    }
+
     struct MockGestureBackend;
 
     impl InputBackend for MockGestureBackend {
@@ -2279,7 +2514,7 @@ mod tests {
         type PointerAxisEvent = smithay::backend::input::UnusedEvent;
         type PointerButtonEvent = smithay::backend::input::UnusedEvent;
         type PointerMotionEvent = smithay::backend::input::UnusedEvent;
-        type PointerMotionAbsoluteEvent = smithay::backend::input::UnusedEvent;
+        type PointerMotionAbsoluteEvent = MockPointerAbs;
         type GestureSwipeBeginEvent = MockGestureBegin;
         type GestureSwipeUpdateEvent = MockGestureSwipeUpdate;
         type GestureSwipeEndEvent = MockGestureEnd;
@@ -2317,6 +2552,30 @@ mod tests {
     impl smithay::backend::input::GestureSwipeBeginEvent<MockGestureBackend> for MockGestureBegin {}
     impl smithay::backend::input::GesturePinchBeginEvent<MockGestureBackend> for MockGestureBegin {}
     impl smithay::backend::input::GestureHoldBeginEvent<MockGestureBackend> for MockGestureBegin {}
+
+    impl Event<MockGestureBackend> for MockPointerAbs {
+        fn time(&self) -> u64 {
+            self.time
+        }
+        fn device(&self) -> MockTouchpadDevice {
+            MockTouchpadDevice
+        }
+    }
+    impl smithay::backend::input::AbsolutePositionEvent<MockGestureBackend> for MockPointerAbs {
+        fn x(&self) -> f64 {
+            self.norm_x
+        }
+        fn y(&self) -> f64 {
+            self.norm_y
+        }
+        fn x_transformed(&self, width: i32) -> f64 {
+            (self.norm_x * f64::from(width)).max(0.0)
+        }
+        fn y_transformed(&self, height: i32) -> f64 {
+            (self.norm_y * f64::from(height)).max(0.0)
+        }
+    }
+    impl smithay::backend::input::PointerMotionAbsoluteEvent<MockGestureBackend> for MockPointerAbs {}
 
     impl Event<MockGestureBackend> for MockGestureSwipeUpdate {
         fn time(&self) -> u64 {
@@ -2535,6 +2794,20 @@ mod tests {
             ),
             FilterResult::Intercept(KeyIntercept::SwitchVt(2))
         ));
+        // With default require_password_on_lock = true, Escape stays isolated in Lock Screen
+        // (clears password buffer rather than unlocking or triggering ReleaseShortcutInhibitor).
+        assert!(matches!(
+            classify_keyboard_input(
+                &compositor,
+                true,
+                logo,
+                Keysym::Escape,
+                KeyState::Pressed,
+                None
+            ),
+            FilterResult::Intercept(KeyIntercept::Security(SecurityKeyAction::LockClear))
+        ));
+        compositor.user_config.require_password_on_lock = false;
         assert!(matches!(
             classify_keyboard_input(
                 &compositor,
@@ -2546,6 +2819,7 @@ mod tests {
             ),
             FilterResult::Intercept(KeyIntercept::UnlockScreen)
         ));
+        compositor.user_config.require_password_on_lock = true;
 
         compositor.screen_locked = false;
         compositor.ext_session_locked = true;
@@ -2777,7 +3051,7 @@ mod tests {
         compositor.handle_lock_screen_pointer_click(out_size, serial);
         assert!(!compositor.lock_power_menu_open);
 
-        // Click active user row (row 0, already selected_user == 0) to unlock on any host user count.
+        // With default require_password_on_lock = true, clicking the empty row must stay locked.
         let users_snap = compositor.telemetry.snapshot().users;
         let user_names: Vec<&str> = users_snap.iter().map(|u| u.display_name.as_str()).collect();
         let (ux, uy) = crate::shell_render::lock_screen_primary_row_center(
@@ -2790,7 +3064,276 @@ mod tests {
         );
         compositor.apply_pointer_position((ux, uy).into(), 3);
         compositor.handle_lock_screen_pointer_click(out_size, serial);
+        assert!(compositor.screen_locked);
+
+        // When password-on-lock is disabled via [security], clicking row 0 unlocks immediately.
+        compositor.user_config.require_password_on_lock = false;
+        compositor.handle_lock_screen_pointer_click(out_size, serial);
         assert!(!compositor.screen_locked);
+
+        Ok(())
+    }
+
+    #[test]
+    fn lock_screen_password_auth_and_logind_sleep_flow() -> Result<(), Box<dyn std::error::Error>> {
+        use std::sync::{Arc, mpsc};
+
+        let (_display, _event_loop, mut compositor) =
+            test_compositor_state("rusty-test-lock-auth-logind")?;
+        let serial = SERIAL_COUNTER.next_serial();
+
+        compositor.auth =
+            rusty_services::AsyncAuthHandle::with_verifier(Arc::new(|_username, secret| {
+                if secret.as_bytes() == b"correct-horse" {
+                    rusty_services::AuthOutcome::Verified
+                } else {
+                    rusty_services::AuthOutcome::InvalidCredentials
+                }
+            }));
+        let (logind_tx, logind_rx) = mpsc::channel();
+        compositor.logind = rusty_services::LogindMonitorHandle::from_receiver(logind_rx);
+
+        // 2. systemd-logind PrepareForSleep(true) locks session automatically when lock_on_sleep = true.
+        logind_tx.send(rusty_services::LogindEvent::PrepareForSleep {
+            sleep_starting: true,
+        })?;
+        assert!(compositor.drain_system_integration_events(serial));
+        assert!(compositor.screen_locked);
+
+        // 3. Typing wrong password stays locked and clears secret buffer after async rejection.
+        let mods = ModifiersState::default();
+        assert!(matches!(
+            classify_keyboard_input(&compositor, false, mods, Keysym::b, KeyState::Pressed, Some("b")),
+            FilterResult::Intercept(KeyIntercept::Security(SecurityKeyAction::LockText(ref s))) if s == "b"
+        ));
+        compositor.dispatch_key_intercept(
+            KeyIntercept::Security(SecurityKeyAction::LockText("wrong".to_owned())),
+            serial,
+        );
+        assert_eq!(compositor.lock_password.char_len(), 5);
+        compositor.dispatch_key_intercept(
+            KeyIntercept::Security(SecurityKeyAction::LockSubmit),
+            serial,
+        );
+        for _ in 0..40 {
+            if compositor.drain_system_integration_events(serial) && !compositor.lock_auth_checking
+            {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(compositor.screen_locked);
+        assert!(!compositor.lock_auth_checking);
+        assert!(compositor.lock_password.is_empty());
+        assert_eq!(
+            compositor.lock_auth_error.as_deref(),
+            Some("Incorrect password")
+        );
+
+        // 4. Typing correct password unlocks session asynchronously and clears error/secret.
+        compositor.dispatch_key_intercept(
+            KeyIntercept::Security(SecurityKeyAction::LockText("correct-horse".to_owned())),
+            serial,
+        );
+        compositor.dispatch_key_intercept(
+            KeyIntercept::Security(SecurityKeyAction::LockSubmit),
+            serial,
+        );
+        for _ in 0..40 {
+            if compositor.drain_system_integration_events(serial) && !compositor.screen_locked {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(!compositor.screen_locked);
+        assert!(compositor.lock_password.is_empty());
+        assert_eq!(compositor.lock_auth_error, None);
+
+        // 5. logind SessionLock / SessionUnlock transitions work deterministically.
+        logind_tx.send(rusty_services::LogindEvent::SessionLock)?;
+        compositor.drain_system_integration_events(serial);
+        assert!(compositor.screen_locked);
+        logind_tx.send(rusty_services::LogindEvent::SessionUnlock)?;
+        compositor.drain_system_integration_events(serial);
+        assert!(!compositor.screen_locked);
+
+        Ok(())
+    }
+
+    #[test]
+    fn polkit_dialog_captures_input_submits_and_cancels() -> Result<(), Box<dyn std::error::Error>>
+    {
+        use std::sync::mpsc;
+
+        let (_display, _event_loop, mut compositor) =
+            test_compositor_state("rusty-test-polkit-modal")?;
+        let serial = SERIAL_COUNTER.next_serial();
+        let (polkit_ev_tx, polkit_ev_rx) = mpsc::channel();
+        let (polkit_reply_tx, polkit_reply_rx) = mpsc::channel();
+        compositor.polkit =
+            rusty_services::PolkitAgentHandle::with_test_channels(polkit_ev_rx, polkit_reply_tx);
+
+        // 6. Polkit dialog intercepts keys exclusively, submits password, and supports cancellation.
+        polkit_ev_tx.send(rusty_services::PolkitEvent::BeginPrompt(
+            rusty_services::PolkitPromptRequest {
+                cookie: "cookie-42".to_owned(),
+                action_id: "org.freedesktop.policykit.exec".to_owned(),
+                message: "Authentication is needed to run root shell".to_owned(),
+                icon_name: String::new(),
+                username: "root".to_owned(),
+                uid: 0,
+                caller_pid: Some(1234),
+                prompt_label: "Password:".to_owned(),
+                echo_on: false,
+            },
+        ))?;
+        compositor.drain_system_integration_events(serial);
+        assert!(compositor.polkit_prompt.is_some());
+        assert!(compositor.has_blocking_shell_overlay());
+
+        compositor.dispatch_key_intercept(
+            KeyIntercept::Security(SecurityKeyAction::PolkitText("sudo-pass".to_owned())),
+            serial,
+        );
+        compositor.dispatch_key_intercept(
+            KeyIntercept::Security(SecurityKeyAction::PolkitSubmit),
+            serial,
+        );
+        let reply = polkit_reply_rx.try_recv()?;
+        match reply {
+            rusty_services::PolkitUserReply::Submit { cookie, secret } => {
+                assert_eq!(cookie, "cookie-42");
+                assert_eq!(secret.as_bytes(), b"sudo-pass");
+            }
+            rusty_services::PolkitUserReply::Cancel { .. } => {
+                return Err("expected Submit reply, got Cancel".into());
+            }
+        }
+        assert!(compositor.polkit_password.is_empty());
+
+        polkit_ev_tx.send(rusty_services::PolkitEvent::PromptError {
+            cookie: "cookie-42".to_owned(),
+            message: "Authentication failure".to_owned(),
+        })?;
+        compositor.drain_system_integration_events(serial);
+        assert_eq!(
+            compositor
+                .polkit_prompt
+                .as_ref()
+                .and_then(|p| p.error_message.as_deref()),
+            Some("Authentication failure")
+        );
+
+        let mods = ModifiersState::default();
+        assert!(matches!(
+            classify_keyboard_input(
+                &compositor,
+                false,
+                mods,
+                Keysym::Escape,
+                KeyState::Pressed,
+                None
+            ),
+            FilterResult::Intercept(KeyIntercept::Security(SecurityKeyAction::PolkitCancel))
+        ));
+        compositor.dispatch_key_intercept(
+            KeyIntercept::Security(SecurityKeyAction::PolkitCancel),
+            serial,
+        );
+        assert!(compositor.polkit_prompt.is_none());
+        match polkit_reply_rx.try_recv()? {
+            rusty_services::PolkitUserReply::Cancel { cookie } => {
+                assert_eq!(cookie, "cookie-42");
+            }
+            rusty_services::PolkitUserReply::Submit { .. } => {
+                return Err("expected Cancel reply, got Submit".into());
+            }
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn transform_screen_point_handles_all_rotations_and_abs_events()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::config::DisplayRotation;
+        let sz = Size::<i32, Logical>::from((1280, 800));
+
+        assert_eq!(
+            transform_screen_point_to_output_logical(
+                (100.0, 50.0).into(),
+                sz,
+                DisplayRotation::Rotate0
+            ),
+            (100.0, 50.0).into()
+        );
+        assert_eq!(
+            transform_screen_point_to_output_logical(
+                (100.0, 50.0).into(),
+                sz,
+                DisplayRotation::Rotate180
+            ),
+            (1180.0, 750.0).into()
+        );
+        assert_eq!(
+            transform_screen_point_to_output_logical(
+                (100.0, 50.0).into(),
+                sz,
+                DisplayRotation::Rotate90
+            ),
+            (750.0, 100.0).into()
+        );
+        assert_eq!(
+            transform_screen_point_to_output_logical(
+                (100.0, 50.0).into(),
+                sz,
+                DisplayRotation::Rotate270
+            ),
+            (50.0, 1180.0).into()
+        );
+
+        let (_display, _event_loop, mut compositor) =
+            test_compositor_state("rusty-test-rotate-pointer")?;
+        assert!(compositor.set_output_rotation(
+            crate::state::PRIMARY_OUTPUT_ID,
+            DisplayRotation::Rotate180,
+            true,
+        ));
+        assert_eq!(
+            compositor.output.current_transform(),
+            smithay::utils::Transform::Flipped
+        );
+
+        // Moving to (90%, 90%) of rotated 180° 1920x1080 screen hits (10%, 10%) => (192, 108).
+        compositor.process_input_event(InputEvent::<MockGestureBackend>::PointerMotionAbsolute {
+            event: MockPointerAbs {
+                time: 10,
+                norm_x: 0.9,
+                norm_y: 0.9,
+            },
+        });
+        assert!((compositor.pointer_location.x - 192.0).abs() < 1e-4);
+        assert!((compositor.pointer_location.y - 108.0).abs() < 1e-4);
+
+        // Switching to 90° swaps logical dimensions to 1080x1920 and maps normalized raw screen input.
+        assert!(compositor.set_output_rotation(
+            crate::state::PRIMARY_OUTPUT_ID,
+            DisplayRotation::Rotate90,
+            true,
+        ));
+        assert_eq!(
+            compositor.output_map.primary().logical_geometry().size,
+            (1080, 1920).into()
+        );
+        compositor.process_input_event(InputEvent::<MockGestureBackend>::PointerMotionAbsolute {
+            event: MockPointerAbs {
+                time: 11,
+                norm_x: 0.25,
+                norm_y: 0.75,
+            },
+        });
+        assert!((compositor.pointer_location.x - 270.0).abs() < 1e-4);
+        assert!((compositor.pointer_location.y - 480.0).abs() < 1e-4);
 
         Ok(())
     }

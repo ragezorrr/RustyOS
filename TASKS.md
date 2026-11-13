@@ -780,6 +780,33 @@ hardware/software context и низкие накладные расходы.
 - **Verification:** `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --offline -- -D warnings` и `cargo run -p rusty-compositor --offline -- --check` завершились с кодом 0 без предупреждений; 131/131 тестов workspace прошли без пропусков (`rusty_animation` 4/4, `rusty_compositor` 102/102, `rusty_ipc` 3/3, `rusty_services` 10/10, `rusty_shell` 5/5, `rusty_wm` 7/7); живая проверка `rusty-compositor --winit` (Mesa Intel(R) Graphics RPL-U, OpenGL ES 3.2) и визуальная инспекция скриншотов `rustyos_054_lock_full.png`, `rustyos_054_lock_topright.png`, `rustyos_054_lock_users.png` и `rustyos_054_lock_powermenu.png` подтвердили 1:1 соответствие макету и отцентрированную композицию экрана блокировки macOS 27.
 - **Risks:** Нулевые новые внешние Rust-зависимости и ноль `unsafe`; встроенный Lock Screen остается без PAM-проверки пароля (внешний PAM-локер может подключаться через сохранённый протокол `ext_session_lock_v1`).
 
+### RUSTYOS-055 — Display Output Rotation (0/90/180/270°) & Pointer Coordinate Mapping
+- **Status:** done
+- **Priority:** P1
+- **Phase:** Фаза 7 / Display & Input
+- **Scope:**
+  - В `crates/rusty-compositor/src/config.rs` добавлен enum `DisplayRotation` (`Rotate0`/`Rotate90`/`Rotate180`/`Rotate270`), парсинг `[display].rotation`, inline- и секционных таблиц `rotations`, а также `[display.outputs."<NAME>"]` (`rotation` и `scale`), единый helper `lookup_per_output` и `UserConfig::rotation_for_output`.
+  - В `crates/rusty-compositor/src/lib.rs` добавлен CLI-флаг `--rotate <0|90|180|270>` (`CompositorConfig::rotation_override`), применено переопределение и в `--check` режиме.
+  - В `crates/rusty-compositor/src/outputs.rs`, `state.rs`, `winit_backend.rs` и `drm_backend.rs` добавлены `compute_logical_size_for_rotation`, `OutputEntry::{rotation, with_rotation, unrotated_logical_size, transformed_physical_size}`, `OutputMap::update_entry_rotation`, `RustyCompositorState::set_output_rotation`, `relayout_wm_for_all_outputs`, FBO-компенсированная матрица Winit (`to_winit_transform`) и DRM/KMS-трансформация (`to_wl_transform`), а также корректировка размера захвата скриншота в `process_pending_screenshot`.
+  - В `crates/rusty-compositor/src/input.rs` добавлена функция `transform_screen_point_to_output_logical` и обновлена маршрутизация `handle_pointer_motion_absolute` (одиночный и multi-output случай), добавлены модульные тесты парсинга/геометрии/ввода и тесты `parse_args`.
+  - Обновлены `docs/adr/0024-display-output-rotation.md`, запись `D-032` в `DECISIONS.md` и статус задачи в `TASKS.md`.
+- **Verification:** `cargo fmt --all --check`, `cargo clippy --workspace --all-targets --offline -- -D warnings` и `cargo run -p rusty-compositor --offline -- --check --rotate 180` завершились с кодом 0 без предупреждений; 134/134 тестов workspace прошли без пропусков (`rusty_animation` 4/4, `rusty_compositor` 105/105, `rusty_ipc` 3/3, `rusty_services` 10/10, `rusty_shell` 5/5, `rusty_wm` 7/7); живой рендер `--winit --rotate 180` и `--winit --rotate 90` (скриншоты `rustyos_055_rot180.png`, `rustyos_055_rot90.png` на Mesa Intel(R) Graphics RPL-U) и `--winit --rotate 270 --max-frames 2` подтвердили корректную ориентацию без зеркалирования, пересчёт портретной области `800×1280` и стабильный старт/выход; переустановлены release-бинарники в `~/.local` (`./scripts/install.sh`) и проверен запуск `~/.local/bin/rustyos-session --winit --rotate 180 --max-frames 3`.
+- **Risks:** Нулевые новые внешние зависимости и ноль `unsafe`; аппаратная ротация плоскостей DRM/KMS и direct scanout при `90°`/`180°`/`270°` на реальном железе зависят от возможностей конкретного драйвера GPU (при ограничении KMS-плоскости Smithay `DrmCompositor` использует GLES-композитинг; требует отдельной проверки в живой TTY `--drm` сессии).
+
+### RUSTYOS-056 — PAM Lock Screen Authentication, `systemd-logind` Bridge & Native Polkit Agent
+- **Status:** done
+- **Priority:** P1
+- **Phase:** Фаза 7 / Security & Session Integration
+- **Scope:**
+  - В `crates/rusty-services/src/auth.rs` добавлены `SecretText` (512 Б преаллокация, зануление на `clear`/`Drop`, `[REDACTED]` в `Debug`), `AuthOutcome`, `AsyncAuthHandle` и проверка пароля текущего пользователя через `/usr/bin/unix_chkpwd` (`/sbin/unix_chkpwd`) без блокировки event loop.
+  - В `crates/rusty-services/src/logind.rs` добавлены `LogindEvent` (`PrepareForSleep`, `SessionLock`, `SessionUnlock`), `LogindMonitorHandle` (подписка System D-Bus на `org.freedesktop.login1` с `delay` sleep-ингибитором и освобождением через `ack_prepare_for_sleep`) и асинхронный `SetLockedHint`.
+  - В `crates/rusty-services/src/polkit.rs` реализован `PolkitAgentHandle` (экспорт `org.freedesktop.PolicyKit1.AuthenticationAgent` через `zbus` 5, клиент `/run/polkit/agent-helper.socket` и fallback `/usr/lib/polkit-1/polkit-agent-helper-1`, отмена и повторные попытки).
+  - В `crates/rusty-compositor/src/config.rs` добавлена секция `[security]` (`require_password_on_lock = true`, `lock_on_sleep = true`, `enable_polkit_agent = true`).
+  - В `crates/rusty-compositor/src/{state,shell_render,input,winit_backend,drm_backend}.rs` добавлены маскированное Liquid Glass поле пароля (`•`) на Lock Screen, центрированный Liquid Glass модал `ShellOverlayView::Polkit`, эксклюзивный перехват клавиатуры/указателя/жестов и общее дренирование очередей в Winit и DRM бэкендах.
+  - Обновлены `docs/adr/0025-pam-logind-polkit-integration.md`, запись `D-033` в `DECISIONS.md` и статус задачи в `TASKS.md`.
+- **Verification:** `cargo fmt --all --check` и `cargo clippy --workspace --all-targets --offline -- -D warnings` завершились с кодом 0 без предупреждений; 147/147 тестов workspace прошли без пропусков (`rusty_animation` 4/4, `rusty_compositor` 109/109, `rusty_ipc` 3/3, `rusty_services` 19/19, `rusty_shell` 5/5, `rusty_wm` 7/7); выполнены `cargo run -p rusty-compositor --offline -- --check` и живой smoke-запуск `cargo run -p rusty-compositor --offline -- --winit --max-frames 3` (Mesa Intel(R) Graphics RPL-U, выход с кодом 0).
+- **Risks:** Нулевые новые внешние зависимости и ноль `unsafe`; во вложенном `--winit` запуске под хост-сессией (KDE Plasma) регистрация системного Polkit-агента может быть отклонена `polkitd`, так как один PID/сессия уже владеет агентом на D-Bus (сквозная регистрация агента и реальный `pkexec`/sleep с TTY требуют проверки в standalone `--drm` сессии RustyOS).
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

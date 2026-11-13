@@ -1123,6 +1123,10 @@ fn try_run_native_drm_session(
 
     let refresh_milli_hz = i32::try_from(setup.vrefresh.saturating_mul(1000)).unwrap_or(60_000);
     let primary_scale = state.user_config.scale_for_output(&setup.connector_name);
+    state.rotation_override = config.rotation_override;
+    let primary_rotation = state
+        .user_config
+        .rotation_for_output(&setup.connector_name, config.rotation_override);
     state
         .output_map
         .primary_mut()
@@ -1134,6 +1138,7 @@ fn try_run_native_drm_session(
         primary_scale,
         refresh_milli_hz,
     );
+    state.set_output_rotation(PRIMARY_OUTPUT_ID, primary_rotation, false);
     let logical_size = state.output_map.primary().logical_geometry().size;
     state.pointer_location = Point::<f64, Logical>::from((
         f64::from(logical_size.w) / 2.0,
@@ -1143,10 +1148,7 @@ fn try_run_native_drm_session(
     state
         .animations
         .set_reduced_motion(state.user_config.reduced_motion || config.reduced_motion);
-    state.telemetry = crate::telemetry::SystemMetricsHandle::start_background();
-    state.dbus_notifications =
-        crate::dbus_notifications::DbusNotificationHandle::start_background();
-    state.tray = crate::tray::TrayWatcherHandle::start_background();
+    state.start_background_services();
 
     let client_dmabuf_formats = renderer.dmabuf_formats();
     let scanout_formats: Vec<_> = primary_surface
@@ -1421,7 +1423,7 @@ fn try_run_native_drm_session(
                 ipc_server.as_mut(),
                 app_state,
             );
-            if app_state.take_syncobj_unblocked() {
+            if app_state.take_syncobj_unblocked() || app_state.take_shell_redraw_needed() {
                 let mut rt = rt_dispatch.borrow_mut();
                 rt.mark_all_dirty();
                 rt.render_ready_outputs(app_state, false);

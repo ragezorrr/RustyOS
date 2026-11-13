@@ -259,6 +259,29 @@ pub struct WindowSwitcherState {
     pub selected: usize,
 }
 
+/// Active native `PolicyKit` authentication prompt rendered as a Liquid Glass modal (`RUSTYOS-056`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PolkitPromptState {
+    /// Opaque `PolicyKit` cookie identifying the active authorization session.
+    pub cookie: String,
+    /// Action identifier requested by the client (e.g. `org.freedesktop.policykit.exec`).
+    pub action_id: String,
+    /// Human-readable message describing the privileged operation.
+    pub message: String,
+    /// Target UNIX account display label (`"root"`, etc.).
+    pub identity_user: String,
+    /// Current helper prompt text (`"Password"` / PAM prompt).
+    pub prompt_label: String,
+    /// `true` when the helper requested visible input (`PAM_PROMPT_ECHO_ON`).
+    pub echo_on: bool,
+    /// `true` while submitted credentials are being verified asynchronously.
+    pub checking: bool,
+    /// Last authentication failure or warning from the helper (`PAM_ERROR_MSG` / `FAILURE`).
+    pub error_message: Option<String>,
+    /// Informational message emitted by the PAM stack (`PAM_TEXT_INFO`).
+    pub info_message: Option<String>,
+}
+
 /// Compositor-level action recognized from a completed 3-finger touchpad swipe (`RUSTYOS-047`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThreeFingerSwipeAction {
@@ -465,6 +488,28 @@ pub struct RustyCompositorState {
     pub lock_selected_user: usize,
     /// Whether the Lock Screen top-right power popover (`Sleep`/`Restart`/`Shut Down`) is open (`RUSTYOS-054`).
     pub lock_power_menu_open: bool,
+    /// Zeroizing masked Lock Screen password input buffer (`RUSTYOS-056`).
+    pub lock_password: rusty_services::SecretText,
+    /// `true` while background `unix_chkpwd` verification is running (`RUSTYOS-056`).
+    pub lock_auth_checking: bool,
+    /// Request identifier matching the active in-flight Lock Screen authentication check (`RUSTYOS-056`).
+    pub lock_pending_request_id: Option<u64>,
+    /// Monotonic counter generating Lock Screen authentication request IDs (`RUSTYOS-056`).
+    pub lock_next_request_id: u64,
+    /// Last PAM rejection or service error message shown on the Lock Screen (`RUSTYOS-056`).
+    pub lock_auth_error: Option<String>,
+    /// Non-blocking PAM verification worker handle (`RUSTYOS-056`).
+    pub auth: rusty_services::AsyncAuthHandle,
+    /// Non-blocking `systemd-logind` sleep and session lock/unlock monitor (`RUSTYOS-056`).
+    pub logind: rusty_services::LogindMonitorHandle,
+    /// Non-blocking native `org.freedesktop.PolicyKit1.AuthenticationAgent` (`RUSTYOS-056`).
+    pub polkit: rusty_services::PolkitAgentHandle,
+    /// Active `PolicyKit` prompt displayed above normal windows (`RUSTYOS-056`).
+    pub polkit_prompt: Option<PolkitPromptState>,
+    /// Zeroizing secret input buffer typed into `polkit_prompt` (`RUSTYOS-056`).
+    pub polkit_password: rusty_services::SecretText,
+    /// Signals DRM/Winit loops that asynchronous auth/logind/polkit updates need a frame (`RUSTYOS-056`).
+    pub shell_redraw_needed: bool,
     /// Count of active notifications held in compositor HUD queue (`RUSTYOS-009`/`010`/`024`).
     pub notification_count: u32,
     /// Active desktop notification queue rendered in Notification HUD & exposed via IPC (`RUSTYOS-024`).
@@ -511,6 +556,8 @@ pub struct RustyCompositorState {
     pub window_toplevel_icons: HashMap<WindowId, crate::icons::ShmToplevelIcon>,
     /// Active 3-finger touchpad gesture accumulator (`RUSTYOS-047`).
     pub touchpad_swipe: TouchpadSwipeState,
+    /// Optional CLI `--rotate` override applied across outputs (`RUSTYOS-055`).
+    pub rotation_override: Option<crate::config::DisplayRotation>,
     toplevel_icons: HashMap<ObjectId, ToplevelIconEntry>,
     next_toplevel_icon_rev: u64,
     next_notification_id: u64,
@@ -608,19 +655,28 @@ impl RustyCompositorState {
 
         let user_config = crate::config::UserConfig::load_default();
         let initial_scale = user_config.scale_for_output("winit-0");
+        let initial_rotation = user_config.rotation_for_output("winit-0", None);
         let mut seat_state = SeatState::new();
         let mut seat = seat_state.new_wl_seat(&display_handle, "rusty-seat-0");
 
         let keyboard = Self::init_seat_keyboard(&mut seat, &user_config)?;
         let pointer = seat.add_pointer();
 
-        let (output, primary_global) =
-            Self::create_initial_output(&display_handle, initial_size, initial_scale);
+        let (output, primary_global) = Self::create_initial_output(
+            &display_handle,
+            initial_size,
+            initial_scale,
+            initial_rotation,
+        );
 
         let mut space = Space::default();
         space.map_output(&output, (0, 0));
 
-        let logical_size = crate::outputs::compute_logical_size(initial_size, initial_scale);
+        let logical_size = crate::outputs::compute_logical_size_for_rotation(
+            initial_size,
+            initial_scale,
+            initial_rotation,
+        );
         let logical_phys_typed =
             Size::<i32, smithay::utils::Physical>::from((logical_size.w, logical_size.h));
         let work_area = crate::shell_render::usable_work_area(logical_phys_typed);
@@ -637,7 +693,8 @@ impl RustyCompositorState {
             initial_scale,
             60_000,
             true,
-        );
+        )
+        .with_rotation(initial_rotation);
         primary_entry.global_id = Some(primary_global);
         let output_map = crate::outputs::OutputMap::new(primary_entry);
 
@@ -737,6 +794,17 @@ impl RustyCompositorState {
             lock_screen_anim: AnimatedValue::new_settled(0.0),
             lock_selected_user: 0,
             lock_power_menu_open: false,
+            lock_password: rusty_services::SecretText::new(),
+            lock_auth_checking: false,
+            lock_pending_request_id: None,
+            lock_next_request_id: 1,
+            lock_auth_error: None,
+            auth: rusty_services::AsyncAuthHandle::default(),
+            logind: rusty_services::LogindMonitorHandle::default(),
+            polkit: rusty_services::PolkitAgentHandle::default(),
+            polkit_prompt: None,
+            polkit_password: rusty_services::SecretText::new(),
+            shell_redraw_needed: false,
             notification_count: 0,
             notifications: Vec::new(),
             dbus_notifications: crate::dbus_notifications::DbusNotificationHandle::default(),
@@ -760,6 +828,7 @@ impl RustyCompositorState {
             xdg_toplevel_icon_manager,
             window_toplevel_icons: HashMap::new(),
             touchpad_swipe: TouchpadSwipeState::default(),
+            rotation_override: None,
             toplevel_icons: HashMap::new(),
             next_toplevel_icon_rev: 0,
             next_notification_id: 0,
@@ -775,6 +844,7 @@ impl RustyCompositorState {
         display_handle: &DisplayHandle,
         initial_size: Size<i32, smithay::utils::Physical>,
         initial_scale: f64,
+        initial_rotation: crate::config::DisplayRotation,
     ) -> (
         Output,
         smithay::reexports::wayland_server::backend::GlobalId,
@@ -796,7 +866,7 @@ impl RustyCompositorState {
         };
         output.change_current_state(
             Some(mode),
-            Some(Transform::Flipped180),
+            Some(initial_rotation.to_winit_transform()),
             Some(Scale::Fractional(crate::config::clamp_display_scale(
                 initial_scale,
             ))),
@@ -817,11 +887,14 @@ impl RustyCompositorState {
     ) -> OutputId {
         let name_str = name.into();
         let new_id = self.output_map.next_output_id();
+        let rotation = self
+            .user_config
+            .rotation_for_output(&name_str, self.rotation_override);
         let output = Output::new(name_str.clone(), physical_props);
         let output_global = output.create_global::<Self>(&self.display_handle);
         output.change_current_state(
             Some(mode),
-            Some(Transform::Normal),
+            Some(rotation.to_wl_transform()),
             Some(scale),
             Some(location),
         );
@@ -834,7 +907,8 @@ impl RustyCompositorState {
             Scale::Integer(i) => f64::from(i),
             Scale::Custom { .. } => 1.0,
         });
-        let logical_size = crate::outputs::compute_logical_size(mode.size, scale_val);
+        let logical_size =
+            crate::outputs::compute_logical_size_for_rotation(mode.size, scale_val, rotation);
 
         let work_area = Rect::new(
             location.x,
@@ -854,7 +928,8 @@ impl RustyCompositorState {
             scale_val,
             mode.refresh,
             false,
-        );
+        )
+        .with_rotation(rotation);
         entry.global_id = Some(output_global);
         self.output_map.add(entry);
 
@@ -896,6 +971,37 @@ impl RustyCompositorState {
             target_output.set_preferred(mode);
         }
 
+        self.relayout_wm_for_all_outputs();
+        true
+    }
+
+    /// Updates display rotation for `output_id` and re-packs output/WM layout (`RUSTYOS-055`).
+    ///
+    /// Pass `use_winit_fbo_flip = true` for nested Winit OpenGL FBO outputs and `false` for DRM/KMS.
+    pub fn set_output_rotation(
+        &mut self,
+        output_id: OutputId,
+        rotation: crate::config::DisplayRotation,
+        use_winit_fbo_flip: bool,
+    ) -> bool {
+        if !self.output_map.update_entry_rotation(output_id, rotation) {
+            return false;
+        }
+
+        let wl_transform = if use_winit_fbo_flip {
+            rotation.to_winit_transform()
+        } else {
+            rotation.to_wl_transform()
+        };
+        if let Some(target_output) = self.output_map.get(output_id).map(|e| e.output.clone()) {
+            target_output.change_current_state(None, Some(wl_transform), None, None);
+        }
+
+        self.relayout_wm_for_all_outputs();
+        true
+    }
+
+    fn relayout_wm_for_all_outputs(&mut self) {
         let entries: Vec<_> = self.output_map.entries().to_vec();
         for entry in entries {
             entry
@@ -924,10 +1030,19 @@ impl RustyCompositorState {
             layer_map_for_output(&entry.output).arrange();
         }
 
+        let total = self.output_map.total_bounds();
+        self.pointer_location.x = self.pointer_location.x.clamp(
+            f64::from(total.loc.x),
+            f64::from(total.loc.x + total.size.w.saturating_sub(1)),
+        );
+        self.pointer_location.y = self.pointer_location.y.clamp(
+            f64::from(total.loc.y),
+            f64::from(total.loc.y + total.size.h.saturating_sub(1)),
+        );
+
         self.reconfigure_ext_lock_surfaces();
         let serial = smithay::utils::SERIAL_COUNTER.next_serial();
         self.sync_space_with_wm(serial);
-        true
     }
 
     /// Resolves the active display scale factor for `surface` (`RUSTYOS-043`).
@@ -1016,6 +1131,7 @@ impl RustyCompositorState {
     #[must_use]
     pub fn has_blocking_shell_overlay(&self) -> bool {
         self.is_session_locked()
+            || self.polkit_prompt.is_some()
             || self.launcher_active
             || self.overview_active
             || self.quick_settings_active
@@ -1819,7 +1935,12 @@ impl RustyCompositorState {
         self.screen_locked = locked;
         self.lock_power_menu_open = false;
         self.lock_selected_user = 0;
+        self.lock_password.clear();
+        self.lock_auth_checking = false;
+        self.lock_pending_request_id = None;
+        self.lock_auth_error = None;
         if locked {
+            self.polkit_password.clear();
             self.window_switcher = None;
             self.dnd_icon = None;
             self.close_launcher();
@@ -1837,7 +1958,13 @@ impl RustyCompositorState {
         } else {
             self.suppressed_inhibitor_surface = None;
             self.sync_space_with_wm(serial);
+            if self.polkit_prompt.is_some() {
+                let keyboard = self.keyboard.clone();
+                keyboard.set_focus(self, None, serial);
+            }
         }
+        self.logind.set_locked_hint(locked);
+        self.shell_redraw_needed = true;
         let now = self.elapsed();
         let tokens = MotionTokens::default();
         self.lock_screen_anim.retarget(
@@ -1849,6 +1976,42 @@ impl RustyCompositorState {
         );
     }
 
+    /// Builds a [`LockScreenRenderState`] borrowing the current telemetry snapshot and password length (`RUSTYOS-056`).
+    #[must_use]
+    pub fn lock_screen_render_state<'a>(
+        &'a self,
+        tel: &'a crate::telemetry::SystemTelemetry,
+        progress: f64,
+    ) -> crate::shell_render::LockScreenRenderState<'a> {
+        let lock_clock = if self.clock_24h {
+            &tel.lock_time_24h
+        } else {
+            &tel.lock_time_hhmm
+        };
+        crate::shell_render::LockScreenRenderState {
+            date_label: &tel.lock_date,
+            clock_hhmm: lock_clock,
+            keyboard_layout: &self.active_kbd_layout,
+            has_battery: tel.power.has_battery,
+            battery_percent: tel.power.percentage,
+            battery_charging: tel.power.ac_online
+                || tel.power.state == rusty_services::BatteryState::Charging,
+            wifi_connected: tel.network.connected,
+            wifi_signal_percent: tel.network.wifi_signal_percent,
+            wallpaper_path: self.user_config.wallpaper.as_deref(),
+            users: &tel.users,
+            selected_user: self.lock_selected_user,
+            power_menu_open: self.lock_power_menu_open,
+            require_password: self.user_config.require_password_on_lock,
+            password_len: self.lock_password.char_len(),
+            auth_checking: self.lock_auth_checking,
+            auth_error: self.lock_auth_error.as_deref(),
+            glass_opacity: self.glass_opacity,
+            reduce_transparency: self.reduce_transparency,
+            progress,
+        }
+    }
+
     /// Toggles the Lock Screen top-right power popover (`RUSTYOS-054`).
     pub fn toggle_lock_power_menu(&mut self) {
         self.lock_power_menu_open = !self.lock_power_menu_open;
@@ -1857,7 +2020,14 @@ impl RustyCompositorState {
     /// Selects an interactive user row index on the Lock Screen (`RUSTYOS-054`).
     pub fn select_lock_user(&mut self, idx: usize) {
         let user_count = self.telemetry.snapshot().users.len().max(1);
-        self.lock_selected_user = idx.min(user_count - 1);
+        let next = idx.min(user_count - 1);
+        if next != self.lock_selected_user {
+            self.lock_selected_user = next;
+            self.lock_password.clear();
+            self.lock_auth_checking = false;
+            self.lock_pending_request_id = None;
+            self.lock_auth_error = None;
+        }
     }
 
     /// Updates accessibility `reduced_motion` and snaps in-flight shell transitions if enabled (`RUSTYOS-025`).
@@ -2040,6 +2210,233 @@ impl RustyCompositorState {
         if let Some(items) = self.tray.drain_latest() {
             self.tray_items = items;
         }
+    }
+
+    /// Starts non-blocking background system integration threads shared across Winit and DRM (`RUSTYOS-056`).
+    pub fn start_background_services(&mut self) {
+        self.telemetry = crate::telemetry::SystemMetricsHandle::start_background();
+        self.dbus_notifications =
+            crate::dbus_notifications::DbusNotificationHandle::start_background();
+        self.tray = crate::tray::TrayWatcherHandle::start_background();
+        self.auth = rusty_services::AsyncAuthHandle::start_background();
+        if self.user_config.lock_on_sleep {
+            self.logind = rusty_services::LogindMonitorHandle::start_background();
+        }
+        if self.user_config.enable_polkit_agent {
+            self.polkit = rusty_services::PolkitAgentHandle::start_background();
+        }
+    }
+
+    /// Returns `true` and clears the pending shell redraw flag when async security events updated UI state.
+    pub fn take_shell_redraw_needed(&mut self) -> bool {
+        std::mem::take(&mut self.shell_redraw_needed)
+    }
+
+    /// Resolves the active account username selected on the Lock Screen (`RUSTYOS-056`).
+    #[must_use]
+    pub fn selected_lock_username(&self) -> String {
+        let users = self.telemetry.snapshot().users;
+        if let Some(user) = users.get(self.lock_selected_user)
+            && !user.username.trim().is_empty()
+        {
+            return user.username.clone();
+        }
+        if let Ok(user) = std::env::var("USER")
+            && rusty_services::is_valid_unix_username(user.trim())
+        {
+            return user.trim().to_owned();
+        }
+        "user".to_owned()
+    }
+
+    /// Submits the Lock Screen password asynchronously to `unix_chkpwd` (or unlocks directly if disabled).
+    pub fn submit_lock_password(&mut self, serial: Serial) {
+        if !self.screen_locked {
+            return;
+        }
+        if !self.user_config.require_password_on_lock {
+            self.set_screen_locked(false, serial);
+            return;
+        }
+        if self.lock_auth_checking {
+            return;
+        }
+        let req_id = self.lock_next_request_id;
+        self.lock_next_request_id = self.lock_next_request_id.saturating_add(1);
+        let username = self.selected_lock_username();
+        let secret = self.lock_password.take();
+        if self.auth.submit_check(req_id, username, secret) {
+            self.lock_auth_checking = true;
+            self.lock_pending_request_id = Some(req_id);
+            self.lock_auth_error = None;
+        } else {
+            self.lock_auth_error = Some("Authentication service unavailable".to_owned());
+        }
+        self.shell_redraw_needed = true;
+    }
+
+    /// Submits typed credentials from the active `PolicyKit` dialog (`RUSTYOS-056`).
+    pub fn submit_polkit_password(&mut self) {
+        let Some(prompt) = self.polkit_prompt.as_mut() else {
+            return;
+        };
+        if prompt.checking {
+            return;
+        }
+        let cookie = prompt.cookie.clone();
+        prompt.checking = true;
+        prompt.error_message = None;
+        let secret = self.polkit_password.take();
+        self.polkit.submit_password(cookie, secret);
+        self.shell_redraw_needed = true;
+    }
+
+    /// Cancels the active `PolicyKit` authentication prompt and notifies the D-Bus caller (`RUSTYOS-056`).
+    pub fn cancel_polkit_prompt(&mut self, serial: Serial) {
+        let Some(prompt) = self.polkit_prompt.take() else {
+            return;
+        };
+        self.polkit_password.clear();
+        self.polkit.cancel(prompt.cookie);
+        if !self.is_session_locked() {
+            self.sync_space_with_wm(serial);
+        }
+        self.shell_redraw_needed = true;
+    }
+
+    /// Non-blockingly drains PAM auth, `systemd-logind`, and `PolicyKit` agent event queues (`RUSTYOS-056`).
+    pub fn drain_system_integration_events(&mut self, serial: Serial) -> bool {
+        let a = self.drain_lock_auth_results(serial);
+        let l = self.drain_logind_events(serial);
+        let p = self.drain_polkit_events(serial);
+        let changed = a || l || p;
+        if changed {
+            self.shell_redraw_needed = true;
+        }
+        changed
+    }
+
+    fn drain_lock_auth_results(&mut self, serial: Serial) -> bool {
+        let mut changed = false;
+        for res in self.auth.drain_results() {
+            if !self.screen_locked || self.lock_pending_request_id != Some(res.request_id) {
+                continue;
+            }
+            self.lock_auth_checking = false;
+            self.lock_pending_request_id = None;
+            changed = true;
+            match res.outcome {
+                rusty_services::AuthOutcome::Verified => {
+                    self.set_screen_locked(false, serial);
+                    info!("Verified session Lock Screen credentials via PAM helper");
+                }
+                rusty_services::AuthOutcome::InvalidCredentials => {
+                    self.lock_password.clear();
+                    self.lock_auth_error = Some("Incorrect password".to_owned());
+                    warn!("Lock Screen password check rejected");
+                }
+                rusty_services::AuthOutcome::Unavailable(msg) => {
+                    self.lock_password.clear();
+                    self.lock_auth_error = Some(msg);
+                    warn!("Lock Screen PAM helper unavailable");
+                }
+            }
+        }
+        changed
+    }
+
+    fn drain_logind_events(&mut self, serial: Serial) -> bool {
+        let mut changed = false;
+        for event in self.logind.drain_events() {
+            match event {
+                rusty_services::LogindEvent::PrepareForSleep {
+                    sleep_starting: true,
+                } => {
+                    if self.user_config.lock_on_sleep && !self.is_session_locked() {
+                        self.set_screen_locked(true, serial);
+                        info!("Locked desktop session on systemd-logind PrepareForSleep");
+                    }
+                    self.logind.ack_prepare_for_sleep();
+                    changed = true;
+                }
+                rusty_services::LogindEvent::PrepareForSleep {
+                    sleep_starting: false,
+                } => {
+                    self.telemetry.request_refresh();
+                    changed = true;
+                }
+                rusty_services::LogindEvent::SessionLock => {
+                    if !self.is_session_locked() {
+                        self.set_screen_locked(true, serial);
+                        info!("Locked desktop session on systemd-logind Session.Lock");
+                        changed = true;
+                    }
+                }
+                rusty_services::LogindEvent::SessionUnlock => {
+                    if self.screen_locked {
+                        self.set_screen_locked(false, serial);
+                        info!("Unlocked desktop session on systemd-logind Session.Unlock");
+                        changed = true;
+                    }
+                }
+            }
+        }
+        changed
+    }
+
+    fn drain_polkit_events(&mut self, serial: Serial) -> bool {
+        let mut changed = false;
+        for event in self.polkit.drain_events() {
+            changed = true;
+            match event {
+                rusty_services::PolkitEvent::BeginPrompt(req) => {
+                    self.window_switcher = None;
+                    self.close_launcher();
+                    self.close_quick_settings();
+                    self.close_top_bar_menu();
+                    self.polkit_password.clear();
+                    self.deactivate_focused_shortcut_inhibitor();
+                    if !self.is_session_locked() {
+                        let keyboard = self.keyboard.clone();
+                        keyboard.set_focus(self, None, serial);
+                    }
+                    self.polkit_prompt = Some(PolkitPromptState {
+                        cookie: req.cookie,
+                        action_id: req.action_id,
+                        message: req.message,
+                        identity_user: req.username,
+                        prompt_label: req.prompt_label,
+                        echo_on: req.echo_on,
+                        checking: false,
+                        error_message: None,
+                        info_message: None,
+                    });
+                }
+                rusty_services::PolkitEvent::PromptError { cookie, message } => {
+                    if let Some(active) = self.polkit_prompt.as_mut()
+                        && active.cookie == cookie
+                    {
+                        active.error_message = Some(message);
+                        active.checking = false;
+                        self.polkit_password.clear();
+                    }
+                }
+                rusty_services::PolkitEvent::ClosePrompt { cookie } => {
+                    if self
+                        .polkit_prompt
+                        .as_ref()
+                        .is_some_and(|active| active.cookie == cookie)
+                    {
+                        self.polkit_prompt = None;
+                        self.polkit_password.clear();
+                        if !self.is_session_locked() {
+                            self.sync_space_with_wm(serial);
+                        }
+                    }
+                }
+            }
+        }
+        changed
     }
 
     /// Returns `true` if `win_id` is currently minimized to the Dock (`RUSTYOS-032`).

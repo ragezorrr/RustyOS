@@ -3,6 +3,20 @@
 //! Provides zero-panic, least-privilege adapters for power/battery, network,
 //! audio, and session management with graceful fallback if services are absent.
 
+pub mod auth;
+pub mod logind;
+pub mod polkit;
+
+pub use auth::{
+    AsyncAuthHandle, AuthCheckResult, AuthOutcome, SecretText, is_valid_unix_username,
+    verify_current_user_password,
+};
+pub use logind::{LogindEvent, LogindMonitorHandle, notify_session_locked_hint};
+pub use polkit::{
+    HelperLine, PolkitAgentError, PolkitAgentHandle, PolkitEvent, PolkitPromptRequest,
+    PolkitUserReply, parse_helper_line,
+};
+
 use std::fs;
 use std::path::Path;
 use std::process::Command;

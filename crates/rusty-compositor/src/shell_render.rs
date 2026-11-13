@@ -608,6 +608,14 @@ pub struct LockScreenRenderState<'a> {
     pub selected_user: usize,
     /// True while the top-right power actions popover is open.
     pub power_menu_open: bool,
+    /// Require PAM password verification on Lock Screen (`RUSTYOS-056`).
+    pub require_password: bool,
+    /// Character length of typed secret (only dots `•` rendered, never plaintext) (`RUSTYOS-056`).
+    pub password_len: usize,
+    /// True while background `unix_chkpwd` verification is in flight (`RUSTYOS-056`).
+    pub auth_checking: bool,
+    /// Last PAM rejection or error status rendered below the password pill (`RUSTYOS-056`).
+    pub auth_error: Option<&'a str>,
     /// User `[ui] glass_opacity` setting (`0.35..=1.0`).
     pub glass_opacity: f32,
     /// High-contrast opaque mode (`reduce_transparency`).
@@ -619,8 +627,10 @@ pub struct LockScreenRenderState<'a> {
 /// Interactive click targets on the macOS-style Lock Screen (`RUSTYOS-054`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LockScreenHit {
-    /// Unlock the desktop session as user `usize`.
+    /// Unlock the desktop session as user `usize` (instant when password disabled).
     UnlockUser(usize),
+    /// Submit the typed password via the pill submit button (`RUSTYOS-056`).
+    SubmitPassword,
     /// Select another account `usize` in the multi-user stack.
     SelectUser(usize),
     /// Cycle active XKB keyboard layout (`U.S.` / `RU`).
@@ -633,6 +643,40 @@ pub enum LockScreenHit {
     DismissPowerMenu,
     /// Non-interactive Lock Screen wallpaper/clock region.
     None,
+}
+
+/// Active native `PolicyKit` authentication modal render state (`RUSTYOS-056`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PolkitPromptRenderState<'a> {
+    /// Human-readable action prompt description.
+    pub message: &'a str,
+    /// Privilege action identifier (`org.freedesktop.policykit.exec`, etc.).
+    pub action_id: &'a str,
+    /// Target UNIX user display name (`"root"`, etc.).
+    pub identity_user: &'a str,
+    /// Active prompt label (`"Password"` / helper prompt).
+    pub prompt_label: &'a str,
+    /// Masked dots (`••••`) or visible echo-on text; empty if nothing typed.
+    pub input_display: &'a str,
+    /// True while submitted credentials are being checked.
+    pub checking: bool,
+    /// Optional authentication error banner shown above action buttons.
+    pub error_message: Option<&'a str>,
+    /// Optional PAM informational message.
+    pub info_message: Option<&'a str>,
+}
+
+/// Interactive click targets inside the centered `PolicyKit` Liquid Glass modal (`RUSTYOS-056`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PolkitHit {
+    /// Clicked the password / verification field.
+    PasswordField,
+    /// Clicked `Authenticate` submit button.
+    Submit,
+    /// Clicked `Cancel` button.
+    Cancel,
+    /// Clicked elsewhere inside or outside the modal without cancelling.
+    Outside,
 }
 
 /// Interactive click target while Workspace Overview is open (`RUSTYOS-023` / `RUSTYOS-051`).
@@ -685,6 +729,8 @@ pub enum ShellOverlayView<'a> {
     Overview(&'a OverviewRenderState<'a>),
     /// Interactive `Alt+Tab` window switcher HUD (`RUSTYOS-033`).
     Switcher(&'a WindowSwitcherRenderState<'a>),
+    /// Native `PolicyKit` authentication modal (`RUSTYOS-056`).
+    Polkit(&'a PolkitPromptRenderState<'a>),
 }
 
 /// Active transient On-Screen Display (OSD) indicator pill (`RUSTYOS-031`).
@@ -816,6 +862,105 @@ struct LockScreenLayout {
     avatar_x: i32,
     name_x: i32,
     unlock_hint_rect: Option<Rectangle<i32, smithay::utils::Physical>>,
+    password_pill_rect: Option<Rectangle<i32, smithay::utils::Physical>>,
+    password_submit_rect: Option<Rectangle<i32, smithay::utils::Physical>>,
+    auth_status_rect: Option<Rectangle<i32, smithay::utils::Physical>>,
+}
+
+struct LockUserStackLayout {
+    user_row_rects: Vec<Rectangle<i32, smithay::utils::Physical>>,
+    avatar_x: i32,
+    name_x: i32,
+    unlock_hint_rect: Option<Rectangle<i32, smithay::utils::Physical>>,
+    password_pill_rect: Option<Rectangle<i32, smithay::utils::Physical>>,
+    password_submit_rect: Option<Rectangle<i32, smithay::utils::Physical>>,
+    auth_status_rect: Option<Rectangle<i32, smithay::utils::Physical>>,
+}
+
+#[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+fn compute_lock_user_stack_rects(
+    w: i32,
+    h: i32,
+    user_names: &[&str],
+    slide_dy: i32,
+    require_password: bool,
+) -> LockUserStackLayout {
+    let avatar_d = 38;
+    let row_gap = 12;
+    let step = avatar_d + row_gap;
+    let count = user_names.len().max(1);
+    let single_user = count == 1;
+    let count_i32 = i32::try_from(count).unwrap_or(1);
+    let users_h = count_i32 * avatar_d + (count_i32 - 1) * row_gap;
+    let extra_h = if require_password {
+        58
+    } else if single_user {
+        26
+    } else {
+        0
+    };
+    let stack_h = users_h + extra_h;
+    let stack_top_y = (h - 68 - stack_h).min((f64::from(h) * 0.745).round() as i32) + slide_dy;
+
+    let mut max_name_w = 24;
+    for name in user_names {
+        let nw = crate::text::measure_ui_text_width(name, 13.5, crate::text::FontWeight::Bold);
+        max_name_w = max_name_w.max(nw.min(220));
+    }
+    let group_w = (avatar_d + 10 + max_name_w).clamp(64, 300);
+    let avatar_x = (w - group_w) / 2;
+    let name_x = avatar_x + avatar_d + 10;
+
+    let mut user_row_rects = Vec::with_capacity(count);
+    for idx in 0..count {
+        let row_y = stack_top_y + i32::try_from(idx).unwrap_or(0) * step;
+        user_row_rects.push(Rectangle::new(
+            Point::from((avatar_x - 8, row_y - 4)),
+            Size::from((group_w + 16, avatar_d + 8)),
+        ));
+    }
+
+    let unlock_hint_rect = (!require_password && single_user).then(|| {
+        let hint_w = 224.min(w - 32);
+        Rectangle::new(
+            Point::from(((w - hint_w) / 2, stack_top_y + users_h + 10)),
+            Size::from((hint_w, 22)),
+        )
+    });
+
+    let (password_pill_rect, password_submit_rect, auth_status_rect) = if require_password {
+        let pill_w = 228.min(w - 32);
+        let pill_h = 30;
+        let pill_x = (w - pill_w) / 2;
+        let pill_y = stack_top_y + users_h + 10;
+        let status_w = 340.min(w - 32);
+        (
+            Some(Rectangle::new(
+                Point::from((pill_x, pill_y)),
+                Size::from((pill_w, pill_h)),
+            )),
+            Some(Rectangle::new(
+                Point::from((pill_x + pill_w - 29, pill_y + 1)),
+                Size::from((28, 28)),
+            )),
+            Some(Rectangle::new(
+                Point::from(((w - status_w) / 2, pill_y + pill_h + 6)),
+                Size::from((status_w, 18)),
+            )),
+        )
+    } else {
+        (None, None, None)
+    };
+
+    LockUserStackLayout {
+        user_row_rects,
+        avatar_x,
+        name_x,
+        unlock_hint_rect,
+        password_pill_rect,
+        password_submit_rect,
+        auth_status_rect,
+    }
 }
 
 #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
@@ -825,6 +970,7 @@ fn compute_lock_screen_layout(
     has_battery: bool,
     user_names: &[&str],
     slide_dy: i32,
+    require_password: bool,
 ) -> LockScreenLayout {
     let w = screen_size.w.max(320);
     let h = screen_size.h.max(240);
@@ -881,42 +1027,7 @@ fn compute_lock_screen_layout(
     let clock_size = (f64::from(h) * 0.136).clamp(66.0, 132.0) as f32;
     let date_y = (f64::from(h) * 0.088).round() as i32 + slide_dy;
     let clock_y = date_y + (date_size * 0.92).round() as i32;
-
-    let avatar_d = 38;
-    let row_gap = 12;
-    let step = avatar_d + row_gap;
-    let count = user_names.len().max(1);
-    let single_user = count == 1;
-    let stack_h = i32::try_from(count).unwrap_or(1) * avatar_d
-        + (i32::try_from(count).unwrap_or(1) - 1) * row_gap
-        + if single_user { 26 } else { 0 };
-    let stack_top_y = (h - 68 - stack_h).min((f64::from(h) * 0.745).round() as i32) + slide_dy;
-
-    let mut max_name_w = 24;
-    for name in user_names {
-        let nw = crate::text::measure_ui_text_width(name, 13.5, crate::text::FontWeight::Bold);
-        max_name_w = max_name_w.max(nw.min(220));
-    }
-    let group_w = (avatar_d + 10 + max_name_w).clamp(64, 300);
-    let avatar_x = (w - group_w) / 2;
-    let name_x = avatar_x + avatar_d + 10;
-
-    let mut user_row_rects = Vec::with_capacity(count);
-    for idx in 0..count {
-        let row_y = stack_top_y + i32::try_from(idx).unwrap_or(0) * step;
-        user_row_rects.push(Rectangle::new(
-            Point::from((avatar_x - 8, row_y - 4)),
-            Size::from((group_w + 16, avatar_d + 8)),
-        ));
-    }
-
-    let unlock_hint_rect = single_user.then(|| {
-        let hint_w = 224.min(w - 32);
-        Rectangle::new(
-            Point::from(((w - hint_w) / 2, stack_top_y + avatar_d + 10)),
-            Size::from((hint_w, 22)),
-        )
-    });
+    let stack = compute_lock_user_stack_rects(w, h, user_names, slide_dy, require_password);
 
     LockScreenLayout {
         kbd_hit_rect,
@@ -931,10 +1042,13 @@ fn compute_lock_screen_layout(
         date_size,
         clock_y,
         clock_size,
-        user_row_rects,
-        avatar_x,
-        name_x,
-        unlock_hint_rect,
+        user_row_rects: stack.user_row_rects,
+        avatar_x: stack.avatar_x,
+        name_x: stack.name_x,
+        unlock_hint_rect: stack.unlock_hint_rect,
+        password_pill_rect: stack.password_pill_rect,
+        password_submit_rect: stack.password_submit_rect,
+        auth_status_rect: stack.auth_status_rect,
     }
 }
 
@@ -959,6 +1073,7 @@ pub fn hit_test_lock_screen(
         lock.has_battery,
         &names,
         0,
+        lock.require_password,
     );
 
     if rect_contains(layout.power_btn_rect, x, y) {
@@ -984,6 +1099,18 @@ pub fn hit_test_lock_screen(
 
     if rect_contains(layout.kbd_hit_rect, x, y) {
         return LockScreenHit::ToggleKeyboardLayout;
+    }
+
+    if let Some(submit_rect) = layout.password_submit_rect
+        && rect_contains(submit_rect, x, y)
+    {
+        return LockScreenHit::SubmitPassword;
+    }
+
+    if let Some(pill_rect) = layout.password_pill_rect
+        && rect_contains(pill_rect, x, y)
+    {
+        return LockScreenHit::None;
     }
 
     let selected = lock.selected_user.min(users.len().saturating_sub(1));
@@ -1026,6 +1153,10 @@ pub fn check_lock_screen_unlock_click(
         users: &[],
         selected_user: 0,
         power_menu_open: false,
+        require_password: false,
+        password_len: 0,
+        auth_checking: false,
+        auth_error: None,
         glass_opacity: 0.78,
         reduce_transparency: false,
         progress: 1.0,
@@ -1042,12 +1173,65 @@ pub(crate) fn lock_screen_primary_row_center(
     screen_size: Size<i32, smithay::utils::Physical>,
     user_names: &[&str],
 ) -> (f64, f64) {
-    let layout = compute_lock_screen_layout(screen_size, "EN", true, user_names, 0);
+    let layout = compute_lock_screen_layout(screen_size, "EN", true, user_names, 0, false);
     let row = layout.user_row_rects[0];
     (
         f64::from(row.loc.x + row.size.w / 2),
         f64::from(row.loc.y + row.size.h / 2),
     )
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PolkitModalLayout {
+    modal: Rectangle<i32, smithay::utils::Physical>,
+    badge: Rectangle<i32, smithay::utils::Physical>,
+    input: Rectangle<i32, smithay::utils::Physical>,
+    status: Rectangle<i32, smithay::utils::Physical>,
+    cancel: Rectangle<i32, smithay::utils::Physical>,
+    submit: Rectangle<i32, smithay::utils::Physical>,
+}
+
+fn polkit_modal_layout(screen_size: Size<i32, smithay::utils::Physical>) -> PolkitModalLayout {
+    let w = screen_size.w.max(280);
+    let h = screen_size.h.max(320);
+    let mw = 420.min(w - 32).max(248);
+    let mh = 278;
+    let mx = (w - mw) / 2;
+    let my = ((h - mh) / 2 - 12).max(TOP_BAR_HEIGHT + 16);
+    let btn_w = ((mw - 60) / 2).clamp(88, 136);
+    let btn_y = my + mh - 50;
+
+    PolkitModalLayout {
+        modal: Rectangle::new(Point::from((mx, my)), Size::from((mw, mh))),
+        badge: Rectangle::new(Point::from((mx + 22, my + 20)), Size::from((38, 38))),
+        input: Rectangle::new(Point::from((mx + 22, my + 126)), Size::from((mw - 44, 38))),
+        status: Rectangle::new(Point::from((mx + 22, my + 174)), Size::from((mw - 44, 36))),
+        cancel: Rectangle::new(Point::from((mx + 22, btn_y)), Size::from((btn_w, 32))),
+        submit: Rectangle::new(
+            Point::from((mx + mw - 22 - btn_w, btn_y)),
+            Size::from((btn_w, 32)),
+        ),
+    }
+}
+
+/// Hit-tests `(x, y)` inside the centered Liquid Glass `PolicyKit` dialog (`RUSTYOS-056`).
+#[must_use]
+pub fn hit_test_polkit_dialog(
+    screen_size: Size<i32, smithay::utils::Physical>,
+    x: f64,
+    y: f64,
+) -> PolkitHit {
+    let layout = polkit_modal_layout(screen_size);
+    if rect_contains(layout.submit, x, y) {
+        return PolkitHit::Submit;
+    }
+    if rect_contains(layout.cancel, x, y) {
+        return PolkitHit::Cancel;
+    }
+    if rect_contains(layout.input, x, y) {
+        return PolkitHit::PasswordField;
+    }
+    PolkitHit::Outside
 }
 
 /// Dynamic left-side geometry for `TopBar` app name, global menus, optional workspace strip, and layout badge (`RUSTYOS-048`/`049`).
@@ -3296,7 +3480,10 @@ pub fn generate_shell_render_elements(
     );
 
     match overlay {
-        ShellOverlayView::None | ShellOverlayView::Overview(_) | ShellOverlayView::Switcher(_) => {}
+        ShellOverlayView::None
+        | ShellOverlayView::Overview(_)
+        | ShellOverlayView::Switcher(_)
+        | ShellOverlayView::Polkit(_) => {}
         ShellOverlayView::Spotlight(spot) => {
             render_spotlight_modal(&mut elements, width, height, spot, has_text);
         }
@@ -3747,6 +3934,9 @@ pub fn generate_shell_text_elements(
                 &mut elements,
             );
         }
+        ShellOverlayView::Polkit(pk) => {
+            render_polkit_text(text_cache, renderer, screen_size, pk, &mut elements);
+        }
     }
 
     // 1b. TopBar Left Active App & Global Menus (`RUSTYOS-038`, `RUSTYOS-048`, `RUSTYOS-049`)
@@ -4010,7 +4200,9 @@ pub fn generate_shell_text_elements(
     // 4b. Floating top-right Notification HUD toast labels (`RUSTYOS-024`/`051`)
     if !matches!(
         overlay,
-        ShellOverlayView::Spotlight(_) | ShellOverlayView::QuickSettings(_)
+        ShellOverlayView::Spotlight(_)
+            | ShellOverlayView::QuickSettings(_)
+            | ShellOverlayView::Polkit(_)
     ) && !notifications.is_empty()
     {
         let rects = notification_toast_rects(screen_size, notifications.len());
@@ -4048,6 +4240,7 @@ pub fn generate_shell_text_elements(
         ShellOverlayView::Spotlight(_)
             | ShellOverlayView::QuickSettings(_)
             | ShellOverlayView::Switcher(_)
+            | ShellOverlayView::Polkit(_)
     ) && let Some((tooltip_rect, tooltip_label)) =
         dock_tooltip_rect_and_label(width, height, dock_view)
         && let Some(el) = text_cache.render_label_centered_weighted(
@@ -5510,12 +5703,24 @@ pub fn generate_shell_composite_elements(
                 push_soft_shadow(&mut out, shape_cache, renderer, panel_rect, 14, 14, 52);
             }
         }
+        ShellOverlayView::Polkit(pk) => {
+            render_polkit_composite(
+                &mut out,
+                shape_cache,
+                renderer,
+                screen_size,
+                top_telemetry,
+                pk,
+            );
+        }
     }
 
     // 2b. Floating top-right Notification HUD toasts (`RUSTYOS-024`/`051`)
     if !matches!(
         overlay,
-        ShellOverlayView::Spotlight(_) | ShellOverlayView::QuickSettings(_)
+        ShellOverlayView::Spotlight(_)
+            | ShellOverlayView::QuickSettings(_)
+            | ShellOverlayView::Polkit(_)
     ) && !notifications.is_empty()
     {
         let rects = notification_toast_rects(screen_size, notifications.len());
@@ -5828,6 +6033,7 @@ pub fn generate_shell_composite_elements(
         ShellOverlayView::Spotlight(_)
             | ShellOverlayView::QuickSettings(_)
             | ShellOverlayView::Switcher(_)
+            | ShellOverlayView::Polkit(_)
     ) && let Some((tooltip_rect, _)) = dock_tooltip_rect_and_label(width, height, dock_view)
     {
         push_rounded_glass_box(
@@ -6418,6 +6624,157 @@ fn render_lock_users_section(
             out.push(CompositorRenderElement::Memory(el));
         }
     }
+
+    if lock.require_password {
+        render_lock_password_pill(out, text_cache, shape_cache, renderer, layout, lock, fade);
+    }
+}
+
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn render_lock_password_pill(
+    out: &mut Vec<CompositorRenderElement>,
+    text_cache: &mut crate::text::TextCache,
+    shape_cache: &mut crate::surfaces::UiShapeCache,
+    renderer: &mut GlesRenderer,
+    layout: &LockScreenLayout,
+    lock: &LockScreenRenderState<'_>,
+    fade: f32,
+) {
+    let Some(pill_rect) = layout.password_pill_rect else {
+        return;
+    };
+    let dot_count = lock.password_len.min(36);
+    let dots = "•".repeat(dot_count);
+    if text_cache.has_font() {
+        let (pill_label, pill_color) = if lock.auth_checking {
+            (
+                "Verifying...",
+                [232, 236, 252, (215.0 * fade).round() as u8],
+            )
+        } else if dot_count == 0 {
+            (
+                "Enter Password",
+                [240, 244, 252, (165.0 * fade).round() as u8],
+            )
+        } else {
+            (dots.as_str(), [255, 255, 255, (245.0 * fade).round() as u8])
+        };
+        let text_bounds = Rectangle::new(
+            Point::from((pill_rect.loc.x + 12, pill_rect.loc.y)),
+            Size::from(((pill_rect.size.w - 42).max(24), pill_rect.size.h)),
+        );
+        if let Some(el) = text_cache.render_label_centered_weighted(
+            renderer,
+            pill_label,
+            crate::text::FontWeight::Regular,
+            12.5,
+            pill_color,
+            text_bounds,
+        ) {
+            out.push(CompositorRenderElement::Memory(el));
+        }
+    }
+
+    if let Some(submit_rect) = layout.password_submit_rect {
+        if let Some(arrow) = shape_cache.ui_glyph_element(
+            renderer,
+            crate::surfaces::UiGlyphKind::ArrowNext,
+            12,
+            [250, 250, 255, (240.0 * fade).round() as u8],
+            Point::from((submit_rect.loc.x + 8, submit_rect.loc.y + 8)),
+        ) {
+            out.push(CompositorRenderElement::Memory(arrow));
+        }
+        let btn_alpha = if dot_count > 0 { 68.0 } else { 36.0 };
+        if let Some(circle) = shape_cache.circle_element(
+            renderer,
+            22,
+            [255, 255, 255, (btn_alpha * fade).round() as u8],
+            Some([255, 255, 255, (92.0 * fade).round() as u8]),
+            Point::from((submit_rect.loc.x + 3, submit_rect.loc.y + 3)),
+        ) {
+            out.push(CompositorRenderElement::Memory(circle));
+        }
+    }
+
+    let border_rgba = if lock.auth_error.is_some() {
+        [255, 132, 138, (195.0 * fade).round() as u8]
+    } else {
+        [255, 255, 255, (112.0 * fade).round() as u8]
+    };
+    push_rounded_glass_box(
+        out,
+        shape_cache,
+        renderer,
+        pill_rect,
+        15,
+        [255, 255, 255, (42.0 * fade).round() as u8],
+        Some(border_rgba),
+    );
+
+    render_lock_auth_status_label(out, text_cache, renderer, layout, lock, fade);
+}
+
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn render_lock_auth_status_label(
+    out: &mut Vec<CompositorRenderElement>,
+    text_cache: &mut crate::text::TextCache,
+    renderer: &mut GlesRenderer,
+    layout: &LockScreenLayout,
+    lock: &LockScreenRenderState<'_>,
+    fade: f32,
+) {
+    let shadow_alpha = (64.0 * fade).round() as u8;
+    if let Some(status_rect) = layout.auth_status_rect
+        && text_cache.has_font()
+    {
+        let status_owned;
+        let (status_label, status_color) = if lock.auth_checking {
+            (
+                "Checking credentials...",
+                [236, 240, 252, (205.0 * fade).round() as u8],
+            )
+        } else if let Some(err) = lock.auth_error {
+            status_owned = truncate_ascii(err, 48);
+            (
+                status_owned.as_str(),
+                [255, 152, 152, (245.0 * fade).round() as u8],
+            )
+        } else {
+            (
+                "Enter password and press Return",
+                [244, 247, 252, (176.0 * fade).round() as u8],
+            )
+        };
+        let status_bounds = Rectangle::new(
+            Point::from((status_rect.loc.x, status_rect.loc.y)),
+            Size::from((status_rect.size.w, status_rect.size.h)),
+        );
+        if let Some(el) = text_cache.render_label_centered_weighted(
+            renderer,
+            status_label,
+            crate::text::FontWeight::Regular,
+            11.0,
+            status_color,
+            status_bounds,
+        ) {
+            out.push(CompositorRenderElement::Memory(el));
+        }
+        let shadow_bounds = Rectangle::new(
+            Point::from((status_rect.loc.x, status_rect.loc.y + 1)),
+            Size::from((status_rect.size.w, status_rect.size.h)),
+        );
+        if let Some(el) = text_cache.render_label_centered_weighted(
+            renderer,
+            status_label,
+            crate::text::FontWeight::Regular,
+            11.0,
+            [0, 0, 0, shadow_alpha],
+            shadow_bounds,
+        ) {
+            out.push(CompositorRenderElement::Memory(el));
+        }
+    }
 }
 
 /// Generates topmost front-to-back macOS-style Lock Screen backdrop, frosted clock,
@@ -6450,6 +6807,7 @@ pub fn generate_lock_screen_elements(
         lock.has_battery,
         &names,
         slide_dy,
+        lock.require_password,
     );
     let fade = p as f32;
 
@@ -6505,6 +6863,309 @@ pub fn generate_lock_screen_elements(
     }
 
     out
+}
+
+fn wrap_polkit_two_lines(message: &str, max_chars: usize) -> (String, Option<String>) {
+    let mut line1 = String::new();
+    let mut line2 = String::new();
+    let mut on_second = false;
+    for word in message.split_whitespace() {
+        if !on_second {
+            let needed = if line1.is_empty() {
+                word.chars().count()
+            } else {
+                line1.chars().count() + 1 + word.chars().count()
+            };
+            if needed <= max_chars || line1.is_empty() {
+                if !line1.is_empty() {
+                    line1.push(' ');
+                }
+                line1.push_str(word);
+                continue;
+            }
+            on_second = true;
+        }
+        let needed = if line2.is_empty() {
+            word.chars().count()
+        } else {
+            line2.chars().count() + 1 + word.chars().count()
+        };
+        if needed <= max_chars {
+            if !line2.is_empty() {
+                line2.push(' ');
+            }
+            line2.push_str(word);
+        } else {
+            if !line2.ends_with("...") && line2.len() + 3 <= max_chars + 3 {
+                line2.push_str("...");
+            }
+            break;
+        }
+    }
+    (
+        truncate_ascii(&line1, max_chars),
+        (!line2.is_empty()).then(|| truncate_ascii(&line2, max_chars)),
+    )
+}
+
+fn render_polkit_text(
+    text_cache: &mut crate::text::TextCache,
+    renderer: &mut GlesRenderer,
+    screen_size: Size<i32, smithay::utils::Physical>,
+    pk: &PolkitPromptRenderState<'_>,
+    elements: &mut Vec<MemoryRenderBufferRenderElement<GlesRenderer>>,
+) {
+    let layout = polkit_modal_layout(screen_size);
+    render_polkit_header_text(text_cache, renderer, layout.modal, pk, elements);
+    render_polkit_controls_text(text_cache, renderer, layout, pk, elements);
+}
+
+fn render_polkit_header_text(
+    text_cache: &mut crate::text::TextCache,
+    renderer: &mut GlesRenderer,
+    modal: Rectangle<i32, smithay::utils::Physical>,
+    pk: &PolkitPromptRenderState<'_>,
+    elements: &mut Vec<MemoryRenderBufferRenderElement<GlesRenderer>>,
+) {
+    let mx = modal.loc.x;
+    let my = modal.loc.y;
+    if let Some(el) = text_cache.render_label_weighted(
+        renderer,
+        "Authentication Required",
+        crate::text::FontWeight::Bold,
+        14.5,
+        [248, 245, 255, 255],
+        Point::from((mx + 70, my + 20)),
+    ) {
+        elements.push(el);
+    }
+    let user_line = truncate_ascii(&format!("Authenticating as {}", pk.identity_user), 38);
+    if let Some(el) = text_cache.render_label(
+        renderer,
+        &user_line,
+        11.5,
+        [188, 178, 212, 255],
+        Point::from((mx + 70, my + 40)),
+    ) {
+        elements.push(el);
+    }
+
+    let (line1, line2) = wrap_polkit_two_lines(pk.message, 46);
+    if !line1.is_empty()
+        && let Some(el) = text_cache.render_label(
+            renderer,
+            &line1,
+            12.0,
+            [236, 230, 248, 255],
+            Point::from((mx + 22, my + 72)),
+        )
+    {
+        elements.push(el);
+    }
+    if let Some(ref l2) = line2
+        && let Some(el) = text_cache.render_label(
+            renderer,
+            l2,
+            12.0,
+            [236, 230, 248, 255],
+            Point::from((mx + 22, my + 92)),
+        )
+    {
+        elements.push(el);
+    }
+}
+
+fn render_polkit_controls_text(
+    text_cache: &mut crate::text::TextCache,
+    renderer: &mut GlesRenderer,
+    layout: PolkitModalLayout,
+    pk: &PolkitPromptRenderState<'_>,
+    elements: &mut Vec<MemoryRenderBufferRenderElement<GlesRenderer>>,
+) {
+    let input = layout.input;
+    if pk.input_display.is_empty() {
+        let placeholder = truncate_ascii(pk.prompt_label.trim_end_matches(':').trim(), 36);
+        let label = if placeholder.is_empty() {
+            "Password"
+        } else {
+            placeholder.as_str()
+        };
+        if let Some(el) = text_cache.render_label(
+            renderer,
+            label,
+            13.0,
+            [172, 162, 194, 230],
+            Point::from((input.loc.x + 12, input.loc.y + 10)),
+        ) {
+            elements.push(el);
+        }
+    } else if let Some(el) = text_cache.render_label(
+        renderer,
+        pk.input_display,
+        13.5,
+        [250, 248, 255, 255],
+        Point::from((input.loc.x + 12, input.loc.y + 10)),
+    ) {
+        elements.push(el);
+    }
+
+    let (status_text, status_color) = if pk.checking {
+        ("Verifying credentials...".to_owned(), [210, 185, 255, 255])
+    } else if let Some(err) = pk.error_message {
+        (truncate_ascii(err, 48), [255, 138, 142, 255])
+    } else if let Some(info) = pk.info_message {
+        (truncate_ascii(info, 48), [212, 206, 232, 240])
+    } else {
+        (truncate_ascii(pk.action_id, 48), [166, 155, 188, 210])
+    };
+    if !status_text.is_empty()
+        && let Some(el) = text_cache.render_label(
+            renderer,
+            &status_text,
+            11.0,
+            status_color,
+            Point::from((layout.status.loc.x, layout.status.loc.y + 4)),
+        )
+    {
+        elements.push(el);
+    }
+
+    let cancel_bounds = Rectangle::new(
+        Point::from((layout.cancel.loc.x, layout.cancel.loc.y)),
+        Size::from((layout.cancel.size.w, layout.cancel.size.h)),
+    );
+    if let Some(el) = text_cache.render_label_centered_weighted(
+        renderer,
+        "Cancel",
+        crate::text::FontWeight::Bold,
+        12.0,
+        [240, 236, 248, 255],
+        cancel_bounds,
+    ) {
+        elements.push(el);
+    }
+    let submit_label = if pk.checking {
+        "Verifying..."
+    } else {
+        "Authenticate"
+    };
+    let submit_bounds = Rectangle::new(
+        Point::from((layout.submit.loc.x, layout.submit.loc.y)),
+        Size::from((layout.submit.size.w, layout.submit.size.h)),
+    );
+    if let Some(el) = text_cache.render_label_centered_weighted(
+        renderer,
+        submit_label,
+        crate::text::FontWeight::Bold,
+        12.0,
+        [252, 250, 255, 255],
+        submit_bounds,
+    ) {
+        elements.push(el);
+    }
+}
+
+fn render_polkit_composite(
+    out: &mut Vec<CompositorRenderElement>,
+    shape_cache: &mut crate::surfaces::UiShapeCache,
+    renderer: &mut GlesRenderer,
+    screen_size: Size<i32, smithay::utils::Physical>,
+    top_telemetry: &TopBarTelemetry<'_>,
+    pk: &PolkitPromptRenderState<'_>,
+) {
+    let layout = polkit_modal_layout(screen_size);
+    let badge = layout.badge;
+    if let Some(el) = shape_cache.ui_glyph_element(
+        renderer,
+        crate::surfaces::UiGlyphKind::Lock,
+        18,
+        [248, 244, 255, 255],
+        Point::from((badge.loc.x + 10, badge.loc.y + 10)),
+    ) {
+        out.push(CompositorRenderElement::Memory(el));
+    }
+
+    let input = layout.input;
+    let typed_w = crate::text::measure_ui_text_width(
+        pk.input_display,
+        13.5,
+        crate::text::FontWeight::Regular,
+    );
+    let caret_x = (input.loc.x + 13 + typed_w).min(input.loc.x + input.size.w - 10);
+    out.push(CompositorRenderElement::Solid(make_solid_element(
+        Rectangle::new(Point::from((caret_x, input.loc.y + 8)), Size::from((2, 22))),
+        COLOR_ACCENT,
+    )));
+
+    push_rounded_glass_box(
+        out,
+        shape_cache,
+        renderer,
+        badge,
+        11,
+        [165, 110, 255, 205],
+        Some([215, 185, 255, 155]),
+    );
+
+    let input_border = if pk.error_message.is_some() {
+        [255, 130, 136, 220]
+    } else {
+        [192, 148, 255, 225]
+    };
+    push_rounded_glass_box(
+        out,
+        shape_cache,
+        renderer,
+        input,
+        11,
+        scale_glass_rgba(
+            [24, 18, 38, 198],
+            top_telemetry.glass_opacity,
+            top_telemetry.reduce_transparency,
+        ),
+        Some(input_border),
+    );
+
+    push_rounded_glass_box(
+        out,
+        shape_cache,
+        renderer,
+        layout.cancel,
+        10,
+        RGBA_SURFACE,
+        Some(RGBA_BORDER),
+    );
+    let submit_fill = if pk.checking {
+        [124, 92, 184, 170]
+    } else {
+        [165, 110, 255, 224]
+    };
+    push_rounded_glass_box(
+        out,
+        shape_cache,
+        renderer,
+        layout.submit,
+        10,
+        submit_fill,
+        Some([215, 185, 255, 185]),
+    );
+
+    push_liquid_glass_panel(
+        out,
+        shape_cache,
+        renderer,
+        layout.modal,
+        WINDOW_RADIUS,
+        crate::surfaces::GlassPanelStyle::Popover,
+        top_telemetry.glass_opacity,
+        top_telemetry.reduce_transparency,
+        Some((22, 62)),
+    );
+
+    out.push(CompositorRenderElement::Solid(make_solid_element(
+        Rectangle::new(Point::from((0, 0)), screen_size),
+        premul(0.059, 0.039, 0.098, 0.44),
+    )));
 }
 
 /// Generates rounded SSD titlebar, gel-lit macOS traffic lights (with optional hover glyphs),
@@ -7327,7 +7988,7 @@ mod tests {
             uid: 1000,
             avatar_path: None,
         }];
-        let single_layout = compute_lock_screen_layout(size, "EN", true, &["anc"], 0);
+        let single_layout = compute_lock_screen_layout(size, "EN", true, &["anc"], 0, false);
         let single_state = LockScreenRenderState {
             date_label: "Thu Sep 10",
             clock_hhmm: "8:52",
@@ -7341,6 +8002,10 @@ mod tests {
             users: &single_users,
             selected_user: 0,
             power_menu_open: false,
+            require_password: false,
+            password_len: 0,
+            auth_checking: false,
+            auth_error: None,
             glass_opacity: 0.78,
             reduce_transparency: false,
             progress: 1.0,
@@ -7401,7 +8066,7 @@ mod tests {
             },
         ];
         let multi_layout =
-            compute_lock_screen_layout(size, "RU", true, &["anc", "Stephen Hackett"], 0);
+            compute_lock_screen_layout(size, "RU", true, &["anc", "Stephen Hackett"], 0, false);
         let mut multi_state = LockScreenRenderState {
             date_label: "Thu Sep 10",
             clock_hhmm: "8:52",
@@ -7415,6 +8080,10 @@ mod tests {
             users: &multi_users,
             selected_user: 0,
             power_menu_open: false,
+            require_password: false,
+            password_len: 0,
+            auth_checking: false,
+            auth_error: None,
             glass_opacity: 0.78,
             reduce_transparency: false,
             progress: 1.0,
@@ -7847,5 +8516,82 @@ mod tests {
             osd_glyph_kind("Screenshot Saved", None, false),
             crate::surfaces::UiGlyphKind::Info
         );
+    }
+
+    #[test]
+    fn lock_screen_password_pill_and_polkit_modal_hit_testing() {
+        let size = Size::from((1280, 800));
+        let layout = compute_lock_screen_layout(size, "EN", true, &["anc"], 0, true);
+        assert!(layout.password_submit_rect.is_some());
+        assert!(layout.password_pill_rect.is_some());
+        if let (Some(submit), Some(pill)) = (layout.password_submit_rect, layout.password_pill_rect)
+        {
+            let lock_state = LockScreenRenderState {
+                date_label: "Thu Sep 10",
+                clock_hhmm: "8:52",
+                keyboard_layout: "EN",
+                has_battery: true,
+                battery_percent: 100,
+                battery_charging: false,
+                wifi_connected: true,
+                wifi_signal_percent: Some(88),
+                wallpaper_path: None,
+                users: &[],
+                selected_user: 0,
+                power_menu_open: false,
+                require_password: true,
+                password_len: 5,
+                auth_checking: false,
+                auth_error: None,
+                glass_opacity: 0.78,
+                reduce_transparency: false,
+                progress: 1.0,
+            };
+            assert_eq!(
+                hit_test_lock_screen(
+                    size,
+                    &lock_state,
+                    f64::from(submit.loc.x + submit.size.w / 2),
+                    f64::from(submit.loc.y + submit.size.h / 2)
+                ),
+                LockScreenHit::SubmitPassword
+            );
+            assert_eq!(
+                hit_test_lock_screen(
+                    size,
+                    &lock_state,
+                    f64::from(pill.loc.x + 24),
+                    f64::from(pill.loc.y + 12)
+                ),
+                LockScreenHit::None
+            );
+        }
+
+        let pk_layout = polkit_modal_layout(size);
+        assert_eq!(
+            hit_test_polkit_dialog(
+                size,
+                f64::from(pk_layout.submit.loc.x + 20),
+                f64::from(pk_layout.submit.loc.y + 14)
+            ),
+            PolkitHit::Submit
+        );
+        assert_eq!(
+            hit_test_polkit_dialog(
+                size,
+                f64::from(pk_layout.cancel.loc.x + 20),
+                f64::from(pk_layout.cancel.loc.y + 14)
+            ),
+            PolkitHit::Cancel
+        );
+        assert_eq!(
+            hit_test_polkit_dialog(
+                size,
+                f64::from(pk_layout.input.loc.x + 30),
+                f64::from(pk_layout.input.loc.y + 14)
+            ),
+            PolkitHit::PasswordField
+        );
+        assert_eq!(hit_test_polkit_dialog(size, 20.0, 20.0), PolkitHit::Outside);
     }
 }
