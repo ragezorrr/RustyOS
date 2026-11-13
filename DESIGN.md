@@ -364,11 +364,17 @@ layout and material behavior follow macOS 27. No Apple assets or branding.
   `[ui]` in `config.toml` (`menubar_show_workspaces`, `menubar_show_tray`,
   `menubar_show_input_source`, `menubar_show_volume`); workspaces and window layout remain directly
   accessible via `Go`/`Window` menus, Overview, Control Center, and keyboard shortcuts.
-- Right (`4x4` SSAA SDF monochrome glyphs, `10 px` gaps in macOS order):
-  `Battery` (`26x20 px` monochrome white capsule; red `<= 20%`, omitted when absent) -> `Wi-Fi`
-  (`20 px`) -> `Search` (`18 px`, bright white) -> `Control Center` (`20 px`, translucent pill
-  highlight when open) -> neutral locale plain Clock (`"Wed Apr 1  9:41 AM"`, or 24h
-  `"Wed Apr 1  09:41"` with `clock_24h = true`).
+- Right (`4x4` SSAA SDF monochrome glyphs, `10 px` icon gaps / `6 px` before Clock, macOS order):
+  `Battery` (`26x20 px` solid monochrome white pill capsule at `100%` or translucent glass track
+  with proportional fill `5..=97%`, separated right terminal nub, and sharp white lightning bolt
+  surrounded by a transparent cutout halo whenever AC power is connected or charging including
+  `99–100% Full`, red `<= 20%` on battery, omitted when absent) -> `Wi-Fi` (`20 px` 1:1 3-band
+  fan — rounded pie-wedge anchor + 2 wide concentric arcs — reflecting live `0..=3` signal bars
+  from NetworkManager D-Bus / `/proc/net/wireless` / `nmcli` with dimmed inactive upper arcs or
+  muted slash when offline) -> `Search` (`18 px`, bright white) -> `Control Center` (`20 px`: top
+  hollow outline capsule with left knob ring + bottom solid white capsule with right cutout circle,
+  translucent pill highlight when open) -> neutral locale plain Clock (`"Wed Apr 1  9:41 AM"`, or
+  24h `"Wed Apr 1  09:41"` with `clock_24h = true`).
 
 ### 12.2 Dock
 

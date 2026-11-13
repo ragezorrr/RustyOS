@@ -74,8 +74,14 @@ pub struct TopBarState {
     pub clock_label: String,
     /// Battery percentage (`0..=100`).
     pub battery_percent: u8,
+    /// True if AC power is connected (`RUSTYOS-052`).
+    pub ac_online: bool,
+    /// True if battery is actively charging (`RUSTYOS-052`).
+    pub battery_charging: bool,
     /// Network connectivity label.
     pub network_label: String,
+    /// Live Wi-Fi signal percentage (`0..=100`, `RUSTYOS-052`).
+    pub wifi_signal_percent: Option<u8>,
     /// Median frame interval reported by the compositor (`us`).
     pub frame_interval_p50_us: u64,
     /// 95th percentile input latency reported by the compositor (`us`).
@@ -91,7 +97,10 @@ impl Default for TopBarState {
             layout_mode: "floating".to_owned(),
             clock_label: "Wed Apr 1  9:41 AM".to_owned(),
             battery_percent: 100,
+            ac_online: false,
+            battery_charging: false,
             network_label: "Wi-Fi Connected".to_owned(),
+            wifi_signal_percent: None,
             frame_interval_p50_us: 16_667,
             input_latency_p95_us: 0,
             notification_count: 0,
@@ -476,9 +485,12 @@ impl DesktopShell {
         // Update system hardware status in TopBar and QuickSettings
         let pwr = self.services.power.query_status();
         self.top_bar.battery_percent = pwr.percentage;
+        self.top_bar.ac_online = pwr.ac_online;
+        self.top_bar.battery_charging = pwr.state == rusty_services::BatteryState::Charging;
 
         let net = self.services.network.query_status();
         self.top_bar.network_label = net.status_label;
+        self.top_bar.wifi_signal_percent = net.wifi_signal_percent;
         self.quick_settings.wifi_enabled = net.connected;
 
         let aud = self.services.audio.query_status();

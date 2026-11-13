@@ -738,6 +738,21 @@ hardware/software context и низкие накладные расходы.
 - **Verification:** `cargo fmt --all --check` и `cargo clippy --workspace --all-targets --offline -- -D warnings` завершились с кодом 0 без предупреждений; 123/123 тестов workspace прошли без пропусков (`rusty_animation` 4/4, `rusty_compositor` 98/98, `rusty_ipc` 3/3, `rusty_services` 6/6, `rusty_shell` 5/5, `rusty_wm` 7/7); `cargo run --package rusty-compositor --offline -- --check` и дымовой запуск `timeout -s INT 3s target/debug/rusty-compositor --winit` инициализировали OpenGL ES 3.2 (Mesa Intel(R) Graphics), шрифты Inter, XWayland и рендер 1280×800 без ошибок.
 - **Risks:** Многопроходный GLES FBO blur-behind по Утверждённому Варианту 1 остаётся будущей задачей; интерактивные состояния оверлеев при реальном пользовательском вводе покрыты тестами `input.rs` и `shell_render.rs` (визуальная инспекция живых оверлеев в окне не запускалась автоматически из CLI без интерактивного скрипта ввода).
 
+## RUSTYOS-052 --- 1:1 macOS TopBar Live Wi-Fi Signal (3 Bands) & AC Battery Lightning Cutout
+
+- **Owner:** AI Agent + User
+- **Status:** done
+- **Priority:** P0
+- **Phase:** 7 / UX
+- **ADR / Decision:** ADR-0021 / D-029
+- **Acceptance Criteria:**
+  - В `crates/rusty-services/src/lib.rs` расширен `NetworkStatus` (`wifi_signal_percent: Option<u8>`), добавлены `wifi_signal_bars(connected, signal_percent)`, `parse_proc_net_wireless_signal`, `format_nm_network_status_with_signal`, чтение живого сигнала через NetworkManager D-Bus (`PrimaryConnection -> Devices -> Wireless -> ActiveAccessPoint.Strength`) с fallback на `/proc/net/wireless` и `nmcli`, а в `PowerService::query_status` устранено перетирание активного `Mains`/`ACAD` неактивными USB-PD портами и поддержано `BatteryState::Charging`.
+  - В `crates/rusty-compositor/src/surfaces.rs` расширен `UiGlyphKind::Wifi { connected, signal_percent }`, `sample_wifi_glyph_uv` приведён к 1:1 3-полосному вееру macOS (скруглённый сектор-клин `sd_pie_up` + 2 широкие концентрические дуги) с динамической индикацией `0..=3` полос и приглушением неактивных верхних полос; `sample_battery_glyph_uv` приведён к сплошной белой капсуле при `100%` (и стеклянному треку с пропорциональным заполнением `5..=97%`), отделённому зазором `D`-носику и белой наклонной молнии с прозрачным вырезным ореолом; `sample_control_center_glyph_uv` обновлён под верхнюю контурную и нижнюю сплошную пилюлю.
+  - В `crates/rusty-compositor/src/shell_render.rs` (`TopBarTelemetry`, `QuickSettingsRenderState`, `compute_top_bar_right_layout_with_options`, `push_top_bar_right_glyphs`, Control Center), `crates/rusty-compositor/src/winit_backend.rs` и `apps/rusty-shell/src/lib.rs` (`TopBarState`, `DesktopShell::tick`) прокинуты `wifi_signal_percent`, `ac_online` и `battery_charging`, убрана отсечка `< 99` для молнии (`t.ac_online || t.battery_charging`) и убран лишний отступ перед часами.
+  - Обновлены `DESIGN.md` §12.1, `docs/adr/0021-topbar-live-battery-wifi-parity.md`, запись `D-029` в `DECISIONS.md` и статус задачи в `TASKS.md`.
+- **Verification:** `cargo fmt --all --check` и `cargo clippy --workspace --all-targets --offline -- -D warnings` завершились с кодом 0 без предупреждений; 127/127 тестов workspace прошли без пропусков (`rusty_animation` 4/4, `rusty_compositor` 100/100, `rusty_ipc` 3/3, `rusty_services` 8/8, `rusty_shell` 5/5, `rusty_wm` 7/7); живая проверка `rusty-compositor --winit` (Mesa Intel(R) Graphics, EGL/OpenGL ES 3.2) и инспекция финального 500%-кропа подтвердили 1:1 соответствие иконок `Battery`, `Wi-Fi` и `Control Center` с референсом macOS 27.
+- **Risks:** Нулевые новые внешние Rust-зависимости и ноль `unsafe`; обновление телеметрии при изменении уровня сигнала выполняется с интервалом опроса `POLL_INTERVAL = 3s`.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

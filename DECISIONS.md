@@ -200,6 +200,13 @@
                           Overview Spaces &       
                           Window Chrome           
                           (ADR-0020)              
+
+  D-029                   Фаза 7/UX               accepted
+                          (RUSTYOS-052):          
+                          1:1 macOS TopBar 3-Band 
+                          Live Wi-Fi & AC Cutout  
+                          Battery Bolt            
+                          (ADR-0021)              
   -----------------------------------------------------------------------
 
 ## Открытые решения

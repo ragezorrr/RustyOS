@@ -56,6 +56,8 @@ pub struct NetworkStatus {
     pub interface: Option<String>,
     /// Wi-Fi SSID if connected via wireless.
     pub wifi_ssid: Option<String>,
+    /// Live Wi-Fi signal strength percentage (`0..=100`) when connected over wireless (`RUSTYOS-052`).
+    pub wifi_signal_percent: Option<u8>,
     /// Human-readable status label for `TopBar`.
     pub status_label: String,
 }
@@ -66,6 +68,7 @@ impl Default for NetworkStatus {
             connected: false,
             interface: None,
             wifi_ssid: None,
+            wifi_signal_percent: None,
             status_label: "Disconnected".to_owned(),
         }
     }
@@ -177,6 +180,8 @@ impl PowerService {
         let Ok(entries) = fs::read_dir(p) else {
             return status;
         };
+        let mut saw_adapter = false;
+        let mut any_ac_online = false;
 
         for entry in entries.flatten() {
             let path = entry.path();
@@ -185,16 +190,24 @@ impl PowerService {
                 .unwrap_or_default()
                 .to_string_lossy()
                 .to_lowercase();
+            let supply_type = fs::read_to_string(path.join("type"))
+                .map(|s| s.trim().to_lowercase())
+                .unwrap_or_default();
 
-            // Check AC adapter (AC, ACAD, ADP1, etc.)
-            if (name.starts_with("ac") || name.starts_with("adp"))
+            let is_mains =
+                supply_type == "mains" || name.starts_with("ac") || name.starts_with("adp");
+            let is_usb_pd = name.starts_with("ucsi") || supply_type.starts_with("usb");
+            if (is_mains || is_usb_pd)
                 && let Ok(online_str) = fs::read_to_string(path.join("online"))
             {
-                status.ac_online = online_str.trim() == "1";
+                saw_adapter = true;
+                if online_str.trim() == "1" {
+                    any_ac_online = true;
+                }
             }
 
             // Check Battery (BAT0, BAT1, etc.)
-            if name.starts_with("bat") {
+            if supply_type == "battery" || name.starts_with("bat") {
                 status.has_battery = true;
                 if let Ok(cap_str) = fs::read_to_string(path.join("capacity"))
                     && let Ok(val) = cap_str.trim().parse::<u8>()
@@ -210,6 +223,13 @@ impl PowerService {
                     };
                 }
             }
+        }
+
+        if status.state == BatteryState::Charging {
+            any_ac_online = true;
+        }
+        if saw_adapter || status.has_battery {
+            status.ac_online = any_ac_online;
         }
 
         status
@@ -260,19 +280,33 @@ impl NetworkService {
             }
         }
 
-        if status.connected
-            && let Ok(output) = Command::new("nmcli")
-                .args(["-t", "-f", "active,ssid", "dev", "wifi"])
+        if status.connected {
+            let is_wifi_iface = status
+                .interface
+                .as_deref()
+                .is_some_and(|iface| iface.starts_with('w'));
+            if is_wifi_iface && let Ok(wireless) = fs::read_to_string("/proc/net/wireless") {
+                status.wifi_signal_percent =
+                    parse_proc_net_wireless_signal(&wireless, status.interface.as_deref());
+            }
+            if let Ok(output) = Command::new("nmcli")
+                .args(["-t", "-f", "active,signal,ssid", "dev", "wifi"])
                 .output()
-            && output.status.success()
-        {
-            let text = String::from_utf8_lossy(&output.stdout);
-            for line in text.lines() {
-                if let Some(ssid) = line.strip_prefix("yes:") {
-                    let trimmed = ssid.trim();
-                    if !trimmed.is_empty() {
-                        status.wifi_ssid = Some(trimmed.to_owned());
-                        status.status_label = format!("Wi-Fi: {trimmed}");
+                && output.status.success()
+            {
+                let text = String::from_utf8_lossy(&output.stdout);
+                for line in text.lines() {
+                    if let Some(rest) = line.strip_prefix("yes:")
+                        && let Some((sig_raw, ssid_raw)) = rest.split_once(':')
+                    {
+                        if let Ok(sig) = sig_raw.trim().parse::<u8>() {
+                            status.wifi_signal_percent = Some(sig.min(100));
+                        }
+                        let trimmed = ssid_raw.trim();
+                        if !trimmed.is_empty() {
+                            status.wifi_ssid = Some(trimmed.to_owned());
+                            status.status_label = format!("Wi-Fi: {trimmed}");
+                        }
                         break;
                     }
                 }
@@ -281,6 +315,134 @@ impl NetworkService {
 
         status
     }
+}
+
+/// Parses Linux `/proc/net/wireless` link quality (`0..=70` or percentage) into `0..=100` (`RUSTYOS-052`).
+#[must_use]
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+pub fn parse_proc_net_wireless_signal(contents: &str, iface_hint: Option<&str>) -> Option<u8> {
+    for line in contents.lines().skip(2) {
+        let Some((iface_part, rest)) = line.split_once(':') else {
+            continue;
+        };
+        let iface = iface_part.trim();
+        if let Some(hint) = iface_hint
+            && iface != hint
+        {
+            continue;
+        }
+        let mut fields = rest.split_whitespace();
+        let _status_hex = fields.next()?;
+        let Some(link_raw) = fields.next() else {
+            continue;
+        };
+        let cleaned = link_raw.trim_end_matches('.');
+        if let Ok(link_val) = cleaned.parse::<f32>() {
+            let pct = if link_val > 70.0 {
+                link_val.clamp(0.0, 100.0)
+            } else {
+                (link_val / 70.0 * 100.0).clamp(0.0, 100.0)
+            };
+            return Some(pct.round() as u8);
+        }
+    }
+    None
+}
+
+/// Maps live Wi-Fi connectivity and signal percentage (`0..=100`) to `0..=3` macOS Wi-Fi bars (`RUSTYOS-052`).
+#[must_use]
+pub const fn wifi_signal_bars(connected: bool, signal_percent: Option<u8>) -> u8 {
+    if !connected {
+        return 0;
+    }
+    let Some(pct) = signal_percent else {
+        return 3;
+    };
+    if pct == 0 {
+        0
+    } else if pct <= 28 {
+        1
+    } else if pct <= 54 {
+        2
+    } else {
+        3
+    }
+}
+
+fn query_wireless_signal_dbus(
+    conn: &zbus::blocking::Connection,
+    ac_props: &zbus::blocking::fdo::PropertiesProxy<'_>,
+    ac_iface: &zbus::names::InterfaceName<'_>,
+) -> (Option<String>, Option<u8>) {
+    let Ok(devs_val) = ac_props.get(ac_iface.clone(), "Devices") else {
+        return (None, None);
+    };
+    let Value::Array(arr) = &*devs_val else {
+        return (None, None);
+    };
+    let Some(Value::ObjectPath(dev_path)) = arr.first() else {
+        return (None, None);
+    };
+    let Ok(dev_iface) =
+        zbus::names::InterfaceName::from_static_str("org.freedesktop.NetworkManager.Device")
+    else {
+        return (None, None);
+    };
+    let Ok(wifi_iface) = zbus::names::InterfaceName::from_static_str(
+        "org.freedesktop.NetworkManager.Device.Wireless",
+    ) else {
+        return (None, None);
+    };
+    let Ok(access_point_iface) =
+        zbus::names::InterfaceName::from_static_str("org.freedesktop.NetworkManager.AccessPoint")
+    else {
+        return (None, None);
+    };
+    let Ok(dev_builder) = zbus::blocking::fdo::PropertiesProxy::builder(conn)
+        .destination("org.freedesktop.NetworkManager")
+        .and_then(|b| b.path(dev_path.as_str().to_owned()))
+    else {
+        return (None, None);
+    };
+    let Ok(dev_props) = dev_builder.build() else {
+        return (None, None);
+    };
+    let iface_name = dev_props.get(dev_iface, "Interface").ok().and_then(|v| {
+        if let Value::Str(s) = &*v {
+            Some(s.as_str().to_owned())
+        } else {
+            None
+        }
+    });
+    let Ok(access_point_val) = dev_props.get(wifi_iface, "ActiveAccessPoint") else {
+        return (iface_name, None);
+    };
+    let Value::ObjectPath(access_point_path) = &*access_point_val else {
+        return (iface_name, None);
+    };
+    if access_point_path.as_str() == "/" {
+        return (iface_name, None);
+    }
+    let Ok(access_point_builder) = zbus::blocking::fdo::PropertiesProxy::builder(conn)
+        .destination("org.freedesktop.NetworkManager")
+        .and_then(|b| b.path(access_point_path.as_str().to_owned()))
+    else {
+        return (iface_name, None);
+    };
+    let Ok(access_point_props) = access_point_builder.build() else {
+        return (iface_name, None);
+    };
+    let strength = access_point_props
+        .get(access_point_iface, "Strength")
+        .ok()
+        .and_then(|v| {
+            if let Value::U8(s) = &*v {
+                Some((*s).min(100))
+            } else {
+                None
+            }
+        });
+    (iface_name, strength)
 }
 
 fn query_network_via_dbus() -> Option<NetworkStatus> {
@@ -309,8 +471,11 @@ fn query_network_via_dbus() -> Option<NetworkStatus> {
         Some(Value::Str(s)) => s.as_str().to_owned(),
         _ => String::new(),
     };
+    let is_wifi = conn_type.contains("wireless") || conn_type.contains("wifi");
 
     let mut active_id = None;
+    let mut active_iface = None;
+    let mut wifi_signal_percent = None;
     if let Some(Value::ObjectPath(primary_path)) = all.get("PrimaryConnection").map(|v| &**v)
         && primary_path.as_str() != "/"
         && let Ok(ac_iface) = zbus::names::InterfaceName::from_static_str(
@@ -320,19 +485,47 @@ fn query_network_via_dbus() -> Option<NetworkStatus> {
             .destination("org.freedesktop.NetworkManager")
             .and_then(|b| b.path(primary_path.as_str().to_owned()))
         && let Ok(ac_props) = path_builder.build()
-        && let Ok(id_val) = ac_props.get(ac_iface, "Id")
-        && let Value::Str(id_str) = &*id_val
-        && !id_str.as_str().trim().is_empty()
     {
-        active_id = Some(id_str.as_str().to_owned());
+        if let Ok(id_val) = ac_props.get(ac_iface.clone(), "Id")
+            && let Value::Str(id_str) = &*id_val
+            && !id_str.as_str().trim().is_empty()
+        {
+            active_id = Some(id_str.as_str().to_owned());
+        }
+        if is_wifi {
+            (active_iface, wifi_signal_percent) =
+                query_wireless_signal_dbus(&conn, &ac_props, &ac_iface);
+        }
+    }
+    if is_wifi
+        && wifi_signal_percent.is_none()
+        && let Ok(wireless) = fs::read_to_string("/proc/net/wireless")
+    {
+        wifi_signal_percent = parse_proc_net_wireless_signal(&wireless, active_iface.as_deref());
     }
 
-    Some(format_nm_network_status(&conn_type, active_id))
+    Some(format_nm_network_status_with_signal(
+        &conn_type,
+        active_id,
+        active_iface,
+        wifi_signal_percent,
+    ))
 }
 
 /// Formats NetworkManager connection type & profile ID into [`NetworkStatus`].
 #[must_use]
 pub fn format_nm_network_status(conn_type: &str, active_id: Option<String>) -> NetworkStatus {
+    format_nm_network_status_with_signal(conn_type, active_id, None, None)
+}
+
+/// Formats NetworkManager connection metadata and live Wi-Fi signal strength into [`NetworkStatus`] (`RUSTYOS-052`).
+#[must_use]
+pub fn format_nm_network_status_with_signal(
+    conn_type: &str,
+    active_id: Option<String>,
+    interface: Option<String>,
+    wifi_signal_percent: Option<u8>,
+) -> NetworkStatus {
     let clean_id = active_id.filter(|s| !s.trim().is_empty());
     let is_wifi = conn_type.contains("wireless") || conn_type.contains("wifi");
     let status_label = match (&clean_id, is_wifi) {
@@ -343,8 +536,13 @@ pub fn format_nm_network_status(conn_type: &str, active_id: Option<String>) -> N
     };
     NetworkStatus {
         connected: true,
-        interface: None,
+        interface,
         wifi_ssid: if is_wifi { clean_id } else { None },
+        wifi_signal_percent: if is_wifi {
+            wifi_signal_percent.map(|p| p.min(100))
+        } else {
+            None
+        },
         status_label,
     }
 }
@@ -1011,12 +1209,84 @@ mod tests {
         assert!(wifi.connected);
         assert_eq!(wifi.wifi_ssid.as_deref(), Some("Studio5G"));
         assert_eq!(wifi.status_label, "Wi-Fi: Studio5G");
+        assert_eq!(wifi.wifi_signal_percent, None);
+
+        let wifi_live = format_nm_network_status_with_signal(
+            "802-11-wireless",
+            Some("Studio5G".to_owned()),
+            Some("wlan0".to_owned()),
+            Some(57),
+        );
+        assert_eq!(wifi_live.wifi_signal_percent, Some(57));
+        assert_eq!(wifi_live.interface.as_deref(), Some("wlan0"));
+
+        let proc_wireless = "\
+Inter-| sta-|   Quality        |   Discarded packets               | Missed | WE
+ face | tus | link level noise |  nwid  crypt   frag  retry   misc | beacon | 22
+ wlan0: 0000   56.  -54.  -256        0      0      0      0    830        0
+";
+        assert_eq!(
+            parse_proc_net_wireless_signal(proc_wireless, Some("wlan0")),
+            Some(80)
+        );
+        assert_eq!(wifi_signal_bars(false, Some(90)), 0);
+        assert_eq!(wifi_signal_bars(true, Some(15)), 1);
+        assert_eq!(wifi_signal_bars(true, Some(42)), 2);
+        assert_eq!(wifi_signal_bars(true, Some(57)), 3);
+        assert_eq!(wifi_signal_bars(true, None), 3);
 
         let eth = format_nm_network_status("802-3-ethernet", None);
         assert!(eth.connected);
         assert_eq!(eth.wifi_ssid, None);
         assert_eq!(eth.status_label, "Ethernet Connected");
+    }
 
+    #[test]
+    fn power_service_reads_ac_full_charging_and_discharging_accurately() {
+        let base = std::env::temp_dir().join(format!("rustyos_power_test_{}", std::process::id()));
+        let ac = base.join("ACAD");
+        let bat = base.join("BAT1");
+        let usbc = base.join("ucsi-source-psy-USBC000:001");
+        let _ = fs::create_dir_all(&ac);
+        let _ = fs::create_dir_all(&bat);
+        let _ = fs::create_dir_all(&usbc);
+
+        let _ = fs::write(ac.join("type"), "Mains\n");
+        let _ = fs::write(ac.join("online"), "1\n");
+        let _ = fs::write(usbc.join("type"), "USB\n");
+        let _ = fs::write(usbc.join("online"), "0\n");
+        let _ = fs::write(bat.join("type"), "Battery\n");
+        let _ = fs::write(bat.join("status"), "Full\n");
+        let _ = fs::write(bat.join("capacity"), "100\n");
+
+        let svc = PowerService {
+            base_path: base.to_string_lossy().into_owned(),
+        };
+        let plugged_full = svc.query_status();
+        assert!(plugged_full.has_battery);
+        assert!(plugged_full.ac_online);
+        assert_eq!(plugged_full.percentage, 100);
+        assert_eq!(plugged_full.state, BatteryState::Full);
+
+        let _ = fs::write(ac.join("online"), "0\n");
+        let _ = fs::write(bat.join("status"), "Discharging\n");
+        let _ = fs::write(bat.join("capacity"), "62\n");
+        let on_battery = svc.query_status();
+        assert!(on_battery.has_battery);
+        assert!(!on_battery.ac_online);
+        assert_eq!(on_battery.percentage, 62);
+        assert_eq!(on_battery.state, BatteryState::Discharging);
+
+        let _ = fs::write(bat.join("status"), "Charging\n");
+        let charging = svc.query_status();
+        assert!(charging.ac_online);
+        assert_eq!(charging.state, BatteryState::Charging);
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn bluetooth_status_label_formats_gracefully() {
         assert_eq!(
             format_bluetooth_label(false, false, None),
             "BT: Unavailable"

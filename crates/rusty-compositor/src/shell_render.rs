@@ -196,8 +196,12 @@ pub struct TopBarTelemetry<'a> {
     pub has_battery: bool,
     /// Whether AC adapter is plugged in (`RUSTYOS-049`).
     pub ac_online: bool,
+    /// Whether battery is actively charging (`RUSTYOS-052`).
+    pub battery_charging: bool,
     /// Whether an active network interface is up.
     pub net_connected: bool,
+    /// Live Wi-Fi signal strength percentage (`0..=100`, `RUSTYOS-052`).
+    pub wifi_signal_percent: Option<u8>,
     /// Master output volume (`0..=100`).
     pub volume_percent: u8,
     /// Master audio output is muted.
@@ -250,7 +254,9 @@ impl Default for TopBarTelemetry<'static> {
             battery_percent: 100,
             has_battery: false,
             ac_online: false,
+            battery_charging: false,
             net_connected: true,
+            wifi_signal_percent: Some(100),
             volume_percent: 75,
             audio_muted: false,
             quick_settings_open: false,
@@ -296,6 +302,8 @@ pub struct QuickSettingsRenderState<'a> {
     pub network_label: &'a str,
     /// Whether network interface is up.
     pub net_connected: bool,
+    /// Live Wi-Fi signal strength percentage (`0..=100`, `RUSTYOS-052`).
+    pub wifi_signal_percent: Option<u8>,
     /// Whether a Bluetooth adapter is available (`RUSTYOS-027`).
     pub bt_available: bool,
     /// Whether Bluetooth adapter power is enabled (`RUSTYOS-027`).
@@ -308,6 +316,8 @@ pub struct QuickSettingsRenderState<'a> {
     pub has_battery: bool,
     /// Whether AC adapter is connected.
     pub ac_online: bool,
+    /// Whether battery is actively charging (`RUSTYOS-052`).
+    pub battery_charging: bool,
     /// Master output volume percentage (`0..=100`).
     pub volume_percent: u8,
     /// Master audio mute flag.
@@ -875,17 +885,17 @@ pub fn compute_top_bar_right_layout_with_options(
     clock_text: &str,
     opts: TopBarLayoutOptions,
 ) -> TopBarRightLayout {
-    let clock_w = (crate::text::measure_ui_text_width(
+    let clock_w = crate::text::measure_ui_text_width(
         clock_text,
         TOP_BAR_FONT_SIZE,
         crate::text::FontWeight::Regular,
-    ) + 8)
-        .clamp(42, 220);
+    )
+    .clamp(42, 220);
     let right_edge = screen_width - 10;
     let clock_x = (right_edge - clock_w).max(screen_width - 236);
 
     let control_center_w = 20;
-    let control_center_x = clock_x - 10 - control_center_w;
+    let control_center_x = clock_x - 6 - control_center_w;
 
     let search_w = 18;
     let search_x = control_center_x - 10 - search_w;
@@ -4350,7 +4360,7 @@ fn push_top_bar_right_glyphs(
             renderer,
             UiGlyphKind::Battery {
                 percent: t.battery_percent,
-                charging: t.ac_online && t.battery_percent < 99,
+                charging: t.ac_online || t.battery_charging,
             },
             26,
             20,
@@ -4364,6 +4374,7 @@ fn push_top_bar_right_glyphs(
         renderer,
         UiGlyphKind::Wifi {
             connected: t.net_connected,
+            signal_percent: t.wifi_signal_percent,
         },
         20,
         white,
@@ -4566,6 +4577,7 @@ fn render_quick_settings_composite(
         renderer,
         crate::surfaces::UiGlyphKind::Wifi {
             connected: qs.net_connected,
+            signal_percent: qs.wifi_signal_percent,
         },
         16,
         white,
@@ -4730,7 +4742,7 @@ fn render_quick_settings_composite(
         renderer,
         crate::surfaces::UiGlyphKind::Battery {
             percent: qs.battery_percent,
-            charging: qs.ac_online,
+            charging: qs.ac_online || qs.battery_charging,
         },
         16,
         white,
@@ -6149,12 +6161,14 @@ mod tests {
             reduced_motion: false,
             network_label: "Wi-Fi Connected",
             net_connected: true,
+            wifi_signal_percent: Some(80),
             bt_available: true,
             bt_powered: true,
             bt_label: "BT: On",
             battery_percent: 88,
             has_battery: true,
             ac_online: true,
+            battery_charging: true,
             volume_percent: 75,
             audio_muted: false,
             frame_p50_us: 16_667,

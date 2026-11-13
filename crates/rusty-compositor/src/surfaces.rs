@@ -102,8 +102,11 @@ struct CachedCursor {
 pub enum UiGlyphKind {
     /// Faceted RustyOS diamond/prism emblem replacing missing fallback glyphs.
     RustyLogo,
-    /// Smooth concentric Wi-Fi arcs + anchor dot.
-    Wifi { connected: bool },
+    /// Smooth 3-band concentric Wi-Fi fan with live signal bar indication.
+    Wifi {
+        connected: bool,
+        signal_percent: Option<u8>,
+    },
     /// Speaker cone + wave arcs or mute slash.
     Volume { level_percent: u8, muted: bool },
     /// Rounded pill battery outline + level fill + optional charging bolt.
@@ -1142,6 +1145,26 @@ fn sd_arc_up(
     dist - stroke
 }
 
+/// Signed distance to an upward-opening circular pie sector (`half_angle_rad`, rounded by `corner`).
+fn sd_pie_up(
+    u: f32,
+    v: f32,
+    cx: f32,
+    cy: f32,
+    radius: f32,
+    half_angle_rad: f32,
+    corner: f32,
+) -> f32 {
+    let px = (u - cx).abs();
+    let py = cy - v;
+    let (sin_a, cos_a) = half_angle_rad.sin_cos();
+    let radial_d = px.hypot(py) - radius;
+    let proj = (px * sin_a + py * cos_a).clamp(0.0, radius);
+    let ray_dist = (px - sin_a * proj).hypot(py - cos_a * proj);
+    let outside_sign = if px * cos_a > py * sin_a { 1.0 } else { -1.0 };
+    radial_d.max(ray_dist * outside_sign) - corner
+}
+
 fn sample_rusty_logo_uv(u: f32, v: f32, edge: f32, tint: [f32; 4]) -> [f32; 4] {
     // Original sleek chamfered hexagonal crest for RustyOS, pure monochrome with transparent inner cutout.
     const CREST: [(f32, f32); 6] = [
@@ -1159,25 +1182,50 @@ fn sample_rusty_logo_uv(u: f32, v: f32, edge: f32, tint: [f32; 4]) -> [f32; 4] {
     premul_tint(tint, cov)
 }
 
-fn sample_wifi_glyph_uv(u: f32, v: f32, edge: f32, tint: [f32; 4], connected: bool) -> [f32; 4] {
+fn sample_wifi_glyph_uv(
+    u: f32,
+    v: f32,
+    edge: f32,
+    tint: [f32; 4],
+    connected: bool,
+    signal_percent: Option<u8>,
+) -> [f32; 4] {
+    // macOS 1:1 3-band Wi-Fi fan: rounded wedge anchor (band 1) + 2 wide concentric arcs (bands 2 & 3).
     let cx = 0.50;
-    let cy = 0.80;
-    let half_angle = 0.77_f32; // ~44 deg per side -> bold crisp macOS fan
-    let stroke = 0.056;
+    let cy = 0.785;
+    let half_angle = 0.805_f32;
+    let stroke = 0.064;
 
-    let mut sd = sd_circle(u, v, cx, cy, 0.078);
-    for radius in [0.245_f32, 0.425, 0.605] {
-        sd = sd.min(sd_arc_up(u, v, cx, cy, radius, half_angle, stroke));
+    let sd_b1 = sd_pie_up(u, v, cx, cy, 0.132, 0.75, 0.026);
+    let sd_b2 = sd_arc_up(u, v, cx, cy, 0.315, half_angle, stroke);
+    let sd_b3 = sd_arc_up(u, v, cx, cy, 0.530, half_angle, stroke);
+
+    let active_bars = rusty_services::wifi_signal_bars(connected, signal_percent);
+    let mut out = [0.0_f32; 4];
+    for (band_idx, band_sd) in [(1_u8, sd_b1), (2, sd_b2), (3, sd_b3)] {
+        let cov = sd_cov(band_sd, edge);
+        if cov <= 0.0 {
+            continue;
+        }
+        let band_opacity = if !connected {
+            0.38
+        } else if band_idx <= active_bars {
+            1.0
+        } else {
+            0.28
+        };
+        out = blend_premul_over(
+            out,
+            [tint[0], tint[1], tint[2]],
+            tint[3] * cov * band_opacity,
+        );
     }
 
-    let base_alpha = if connected { tint[3] } else { tint[3] * 0.42 };
-    let cov = sd_cov(sd, edge);
-    let base = premul_tint([tint[0], tint[1], tint[2], base_alpha], cov);
     if connected {
-        return base;
+        return out;
     }
     let slash_cov = sd_cov(sd_segment(u, v, 0.20, 0.20, 0.80, 0.80, 0.044), edge);
-    blend_premul_over(base, [tint[0], tint[1], tint[2]], tint[3] * slash_cov)
+    blend_premul_over(out, [tint[0], tint[1], tint[2]], tint[3] * slash_cov)
 }
 
 fn sample_volume_glyph_uv(
@@ -1224,39 +1272,43 @@ fn sample_battery_glyph_uv(
     percent: u8,
     charging: bool,
 ) -> [f32; 4] {
-    let cx = aspect * 0.465;
-    let hw = aspect * 0.395;
-    let hh = 0.295;
-    let body_outer = sd_rounded_box(u_iso, v, cx, 0.50, hw, hh, 0.115);
-    let nub = sd_rounded_box(u_iso, v, cx + hw + 0.068, 0.50, 0.026, 0.105, 0.022);
-    let shell_ring = body_outer.abs() - 0.036;
+    // 1:1 macOS 27 battery: smooth pill silhouette (solid at 100%, translucent track when partial),
+    // separated soft terminal nub, and white tilted lightning bolt with transparent cutout halo.
+    let cx = aspect * 0.445;
+    let hw = aspect * 0.388;
+    let hh = 0.305;
+    let body_outer = sd_rounded_box(u_iso, v, cx, 0.50, hw, hh, 0.165);
+    let nub = sd_rounded_box(u_iso, v, cx + hw + 0.072, 0.50, 0.030, 0.098, 0.028);
 
-    // Clean macOS wide monochrome pill: crisp shell + solid fill + subtle dark bolt when charging.
     let mut out = [0.0_f32; 4];
-    let interior_cov = sd_cov(body_outer + 0.036, edge);
-    if interior_cov > 0.0 {
-        out = blend_premul_over(
-            out,
-            [tint[0], tint[1], tint[2]],
-            tint[3] * interior_cov * 0.24,
-        );
+    let body_cov = sd_cov(body_outer, edge);
+    if body_cov > 0.0 {
+        out = blend_premul_over(out, [tint[0], tint[1], tint[2]], tint[3] * body_cov * 0.32);
     }
 
-    let frame_cov = sd_cov(shell_ring.min(nub), edge);
-    if frame_cov > 0.0 {
-        out = blend_premul_over(out, [tint[0], tint[1], tint[2]], tint[3] * frame_cov * 0.94);
-    }
-
-    let frac = if percent >= 92 {
+    let frac = if percent >= 98 {
         1.0_f32
     } else {
-        f32::from(percent.clamp(8, 100)) / 100.0
+        f32::from(percent.clamp(5, 100)) / 100.0
     };
-    let fill_max_half_w = (hw - 0.072).max(0.05);
-    let fill_half_h = (hh - 0.074).max(0.05);
-    let fill_half_w = fill_max_half_w * frac;
-    let fill_cx = (cx - fill_max_half_w) + fill_half_w;
-    let fill_sd = sd_rounded_box(u_iso, v, fill_cx, 0.50, fill_half_w, fill_half_h, 0.052);
+    if frac < 1.0 {
+        let rim_cov = sd_cov(body_outer.abs() - 0.026, edge);
+        if rim_cov > 0.0 {
+            out = blend_premul_over(out, [tint[0], tint[1], tint[2]], tint[3] * rim_cov * 0.55);
+        }
+    }
+
+    let nub_cov = sd_cov(nub, edge);
+    if nub_cov > 0.0 {
+        out = blend_premul_over(out, [tint[0], tint[1], tint[2]], tint[3] * nub_cov * 0.68);
+    }
+
+    let fill_sd = if frac >= 1.0 {
+        body_outer
+    } else {
+        let fill_right = (cx - hw) + 2.0 * hw * frac;
+        body_outer.max(u_iso - fill_right)
+    };
     let fill_cov = sd_cov(fill_sd, edge);
     if fill_cov > 0.0 {
         let fill_rgb = if !charging && percent <= 20 {
@@ -1264,16 +1316,31 @@ fn sample_battery_glyph_uv(
         } else {
             [tint[0], tint[1], tint[2]]
         };
-        out = blend_premul_over(out, fill_rgb, tint[3] * fill_cov);
+        out = blend_premul_over(out, fill_rgb, tint[3] * fill_cov * 0.94);
     }
 
     if charging {
-        let b1 = sd_segment(u_iso, v, cx + 0.04, 0.28, cx - 0.06, 0.51, 0.030);
-        let b2 = sd_segment(u_iso, v, cx - 0.06, 0.51, cx + 0.06, 0.51, 0.028);
-        let b3 = sd_segment(u_iso, v, cx + 0.06, 0.51, cx - 0.04, 0.72, 0.030);
-        let bolt_cov = sd_cov(b1.min(b2).min(b3), edge);
+        let upper: [(f32, f32); 3] = [
+            (cx + 0.075, 0.155),
+            (cx - 0.185, 0.535),
+            (cx + 0.040, 0.535),
+        ];
+        let lower: [(f32, f32); 3] = [
+            (cx - 0.075, 0.845),
+            (cx + 0.185, 0.465),
+            (cx - 0.040, 0.465),
+        ];
+        let bolt_sd = signed_distance_polygon(u_iso, v, &upper)
+            .min(signed_distance_polygon(u_iso, v, &lower))
+            - 0.013;
+        let halo_cov = sd_cov(bolt_sd - 0.042, edge * 0.85);
+        if halo_cov > 0.0 {
+            let keep = 1.0 - halo_cov;
+            out = [out[0] * keep, out[1] * keep, out[2] * keep, out[3] * keep];
+        }
+        let bolt_cov = sd_cov(bolt_sd, edge * 0.85);
         if bolt_cov > 0.0 {
-            out = blend_premul_over(out, [18.0, 14.0, 28.0], tint[3] * bolt_cov * 0.90);
+            out = blend_premul_over(out, [tint[0], tint[1], tint[2]], tint[3] * bolt_cov);
         }
     }
     out
@@ -1287,24 +1354,24 @@ fn sample_search_glyph_uv(u: f32, v: f32, edge: f32, tint: [f32; 4]) -> [f32; 4]
 }
 
 fn sample_control_center_glyph_uv(u: f32, v: f32, edge: f32, tint: [f32; 4]) -> [f32; 4] {
-    let top_capsule = sd_rounded_box(u, v, 0.50, 0.30, 0.37, 0.14, 0.14);
-    let bot_capsule = sd_rounded_box(u, v, 0.50, 0.70, 0.37, 0.14, 0.14);
-    let track_outline = (top_capsule.abs() - 0.036).min(bot_capsule.abs() - 0.036);
-    let track_fill = top_capsule.min(bot_capsule);
-    let knobs = sd_circle(u, v, 0.31, 0.30, 0.092).min(sd_circle(u, v, 0.69, 0.70, 0.092));
+    // macOS 1:1 Control Center: top hollow outline pill + outline knob on left; bottom solid pill + cutout knob on right.
+    let top_capsule = sd_rounded_box(u, v, 0.50, 0.310, 0.37, 0.140, 0.140);
+    let top_ring = top_capsule.abs() - 0.028;
+    let top_knob_ring = sd_circle(u, v, 0.310, 0.310, 0.112).abs() - 0.028;
+
+    let bot_capsule = sd_rounded_box(u, v, 0.50, 0.690, 0.37, 0.140, 0.140);
+    let bot_knob_cut = sd_circle(u, v, 0.678, 0.690, 0.088);
 
     let mut out = [0.0_f32; 4];
-    let fill_cov = sd_cov(track_fill, edge);
-    if fill_cov > 0.0 {
-        out = blend_premul_over(out, [tint[0], tint[1], tint[2]], tint[3] * fill_cov * 0.28);
+    let top_cov = sd_cov(top_ring.min(top_knob_ring), edge);
+    if top_cov > 0.0 {
+        out = blend_premul_over(out, [tint[0], tint[1], tint[2]], tint[3] * top_cov * 0.92);
     }
-    let rim_cov = sd_cov(track_outline, edge);
-    if rim_cov > 0.0 {
-        out = blend_premul_over(out, [tint[0], tint[1], tint[2]], tint[3] * rim_cov * 0.94);
-    }
-    let knob_cov = sd_cov(knobs, edge);
-    if knob_cov > 0.0 {
-        out = blend_premul_over(out, [tint[0], tint[1], tint[2]], tint[3] * knob_cov);
+
+    let bot_fill_sd = bot_capsule.max(-bot_knob_cut);
+    let bot_cov = sd_cov(bot_fill_sd, edge);
+    if bot_cov > 0.0 {
+        out = blend_premul_over(out, [tint[0], tint[1], tint[2]], tint[3] * bot_cov * 0.95);
     }
     out
 }
@@ -1543,9 +1610,10 @@ fn sample_ui_glyph_pixel_rect(
             let v = (py as f32 + sy) / dim_h;
             let s = match kind {
                 UiGlyphKind::RustyLogo => sample_rusty_logo_uv(u, v, edge, tint),
-                UiGlyphKind::Wifi { connected } => {
-                    sample_wifi_glyph_uv(u, v, edge, tint, connected)
-                }
+                UiGlyphKind::Wifi {
+                    connected,
+                    signal_percent,
+                } => sample_wifi_glyph_uv(u, v, edge, tint, connected, signal_percent),
                 UiGlyphKind::Volume {
                     level_percent,
                     muted,
@@ -2546,8 +2614,14 @@ mod tests {
         let white = [245, 240, 255, 255];
         for kind in [
             UiGlyphKind::RustyLogo,
-            UiGlyphKind::Wifi { connected: true },
-            UiGlyphKind::Wifi { connected: false },
+            UiGlyphKind::Wifi {
+                connected: true,
+                signal_percent: Some(85),
+            },
+            UiGlyphKind::Wifi {
+                connected: false,
+                signal_percent: None,
+            },
             UiGlyphKind::Volume {
                 level_percent: 80,
                 muted: false,
@@ -2630,6 +2704,165 @@ mod tests {
             )[3],
             0
         );
+    }
+
+    #[test]
+    fn topbar_wifi_and_battery_glyphs_match_live_state() {
+        let white = [245, 240, 255, 255];
+
+        // RUSTYOS-052: 3-band Wi-Fi fan (wedge anchor + 2 arcs) reacts dynamically to live signal bars
+        let band1 = |sig| {
+            sample_ui_glyph_pixel(
+                10,
+                14,
+                20,
+                UiGlyphKind::Wifi {
+                    connected: true,
+                    signal_percent: sig,
+                },
+                white,
+            )[3]
+        };
+        let band2 = |sig| {
+            sample_ui_glyph_pixel(
+                10,
+                9,
+                20,
+                UiGlyphKind::Wifi {
+                    connected: true,
+                    signal_percent: sig,
+                },
+                white,
+            )[3]
+        };
+        let band3 = |sig| {
+            sample_ui_glyph_pixel(
+                10,
+                5,
+                20,
+                UiGlyphKind::Wifi {
+                    connected: true,
+                    signal_percent: sig,
+                },
+                white,
+            )[3]
+        };
+        assert!(band1(Some(15)) > 180 && band2(Some(15)) < 120 && band3(Some(15)) < 120);
+        assert!(band1(Some(42)) > 180 && band2(Some(42)) > 180 && band3(Some(42)) < 120);
+        assert!(band1(Some(85)) > 180 && band2(Some(85)) > 180 && band3(Some(85)) > 180);
+        let gap23 = sample_ui_glyph_pixel(
+            10,
+            7,
+            20,
+            UiGlyphKind::Wifi {
+                connected: true,
+                signal_percent: Some(100),
+            },
+            white,
+        )[3];
+        assert!(
+            gap23 < 30,
+            "expected clear gap between bands 2 and 3, got alpha={gap23}"
+        );
+
+        // macOS Control Center glyph: hollow top outline capsule + solid bottom capsule with right cutout
+        let cc_top_hollow = sample_ui_glyph_pixel(8, 5, 16, UiGlyphKind::ControlCenter, white);
+        let cc_bot_solid = sample_ui_glyph_pixel(5, 11, 16, UiGlyphKind::ControlCenter, white);
+        let cc_bot_cutout = sample_ui_glyph_pixel(11, 11, 16, UiGlyphKind::ControlCenter, white);
+        assert!(cc_top_hollow[3] < 90);
+        assert!(cc_bot_solid[0] > 180 && cc_bot_solid[3] > 180);
+        assert!(cc_bot_cutout[3] < 90);
+    }
+
+    #[test]
+    fn topbar_battery_charging_cutout_and_charge_fill() {
+        let white = [245, 240, 255, 255];
+        let bat_charging_core = sample_ui_glyph_pixel_rect(
+            11,
+            10,
+            26,
+            20,
+            UiGlyphKind::Battery {
+                percent: 100,
+                charging: true,
+            },
+            white,
+        );
+        let bat_charging_side = sample_ui_glyph_pixel_rect(
+            5,
+            10,
+            26,
+            20,
+            UiGlyphKind::Battery {
+                percent: 100,
+                charging: true,
+            },
+            white,
+        );
+        let mut charging_halo_min_alpha = u8::MAX;
+        let mut unplugged_min_alpha = u8::MAX;
+        for py in 7..=13 {
+            for px in 8..=15 {
+                let p_chg = sample_ui_glyph_pixel_rect(
+                    px,
+                    py,
+                    26,
+                    20,
+                    UiGlyphKind::Battery {
+                        percent: 100,
+                        charging: true,
+                    },
+                    white,
+                );
+                let p_dc = sample_ui_glyph_pixel_rect(
+                    px,
+                    py,
+                    26,
+                    20,
+                    UiGlyphKind::Battery {
+                        percent: 100,
+                        charging: false,
+                    },
+                    white,
+                );
+                charging_halo_min_alpha = charging_halo_min_alpha.min(p_chg[3]);
+                unplugged_min_alpha = unplugged_min_alpha.min(p_dc[3]);
+            }
+        }
+        assert!(bat_charging_side[0] > 200 && bat_charging_core[0] > 180);
+        assert!(
+            charging_halo_min_alpha < 170,
+            "expected transparent cutout moat around white charging bolt: min_a={charging_halo_min_alpha}"
+        );
+        assert!(
+            unplugged_min_alpha > 210,
+            "expected solid white 100% fill when unplugged: min_a={unplugged_min_alpha}"
+        );
+
+        // Low charge shows proportional fill (bright left vs empty translucent right track)
+        let bat_25_left = sample_ui_glyph_pixel_rect(
+            5,
+            10,
+            26,
+            20,
+            UiGlyphKind::Battery {
+                percent: 25,
+                charging: false,
+            },
+            white,
+        );
+        let bat_25_right = sample_ui_glyph_pixel_rect(
+            18,
+            10,
+            26,
+            20,
+            UiGlyphKind::Battery {
+                percent: 25,
+                charging: false,
+            },
+            white,
+        );
+        assert!(bat_25_left[0] > 200 && bat_25_right[3] < 100);
     }
 
     #[test]
