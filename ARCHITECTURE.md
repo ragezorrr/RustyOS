@@ -31,9 +31,9 @@ socket IPC (`rusty-ipc`) и `zwlr_layer_shell_v1`.
   и `Refresh::Variable`/`Fixed`), `wp_cursor_shape_v1`, `xdg_activation_v1`,
   `ext_idle_notify_v1` + `zwp_idle_inhibit_manager_v1`, `ext_session_lock_v1`;
 - `XWayland` интеграция и синхронизация clipboard (`xwayland.rs`);
-- рендер-инструментация (`frame_timing.rs`), конфигурация
-  (`~/.config/rustyos/config.toml` в `config.rs`), скриншоты, лончер,
-  OSD/уведомления и `StatusNotifierItem` трей.
+- рендер-инструментация (`frame_timing.rs`), конфигурация с атомарным
+  сохранением и live reload (`~/.config/rustyos/config.toml` в `config.rs`),
+  скриншоты, лончер, OSD/уведомления и `StatusNotifierItem` трей.
 
 Event loop не должен блокироваться тяжёлыми операциями и внешним D-Bus IO.
 
@@ -73,7 +73,7 @@ Event loop не должен блокироваться тяжёлыми опе�
   (`shell_render/`: `tokens`, `top_bar`, `dock`, `quick_settings`,
   `spotlight_overview`, `lock_screen`, `modals`, `ssd`) для low-latency
   взаимодействия (TopBar, Dock, Spotlight Launcher, Overview, Quick Settings,
-  Lock Screen, Notifications, Alt+Tab HUD, Polkit/Portal/PickColor modals).
+  Lock Screen, Notifications, Alt+Tab HUD, Polkit/Portal/PickColor/Settings modals).
 
 ### System Services (`crates/rusty-services`)
 
@@ -117,7 +117,7 @@ RustyOS/
 ├── scripts/
 │   └── install.sh
 └── docs/
-    ├── adr/                   # ADR-0001 .. ADR-0027
+    ├── adr/                   # ADR-0001 .. ADR-0028
     ├── DEVELOPMENT_ENVIRONMENT.md
     ├── GETTING_STARTED.md
     └── HARDWARE_MATRIX.md
@@ -136,7 +136,7 @@ RustyOS/
   Event loop             `calloop`                          Без блокировок presentation path
   Text / Geometry        `fontdue` + SDF/pixel caches       Независимо от host GUI toolkits
   Services               `zbus` (D-Bus), `wpctl`, `sysfs`   BlueZ, NM, notifications, SNI
-  Config                 TOML (`~/.config/rustyos/config.toml`) Display scales, VRR, XKB, UI
+  Config                 TOML (`~/.config/rustyos/config.toml`) Display scales, VRR, XKB, UI, live save/reload
   Session                `systemd/logind` + `rustyos-session` В разработке Фаза 10 (packaging)
 
 ## 5. Потоки и ошибки

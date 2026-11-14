@@ -242,5 +242,103 @@ fn fullscreen_unoccluded_bypass_yields_for_polkit_portal_and_pick_color_without_
     assert_eq!(compositor.active_unoccluded_fullscreen_window(), Some(w1));
     assert!(compositor.should_hide_shell_chrome_for_fullscreen());
 
+    // System Settings modal also overrides fullscreen chrome hiding and direct scanout.
+    compositor.open_settings();
+    assert!(compositor.settings_active);
+    assert!(compositor.has_blocking_shell_overlay());
+    assert_eq!(compositor.active_unoccluded_fullscreen_window(), None);
+    assert!(!compositor.should_hide_shell_chrome_for_fullscreen());
+    compositor.close_settings();
+    assert_eq!(compositor.active_unoccluded_fullscreen_window(), Some(w1));
+
+    Ok(())
+}
+
+#[test]
+fn persistent_config_save_reload_and_settings_toggles_roundtrip() -> Result<(), Box<dyn Error>> {
+    use crate::shell_render::{SettingsHit, SettingsTab};
+
+    let mut display: Display<RustyCompositorState> = Display::new()?;
+    let mut event_loop: EventLoop<RustyCompositorState> = EventLoop::try_new()?;
+    let mut compositor = RustyCompositorState::new(
+        &display,
+        "wayland-rustyos-settings-test".to_owned(),
+        event_loop.get_signal(),
+        event_loop.handle(),
+        smithay::utils::Size::from((1280, 800)),
+    )?;
+    let _ = (&mut display, &mut event_loop);
+
+    let temp_dir =
+        std::env::temp_dir().join(format!("rustyos-state-settings-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    let cfg_path = temp_dir.join("config.toml");
+    compositor.config_path = Some(cfg_path.clone());
+
+    let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+    compositor
+        .dispatch_top_bar_menu_action(crate::shell_render::TopBarMenuAction::OpenSettings, serial);
+    assert!(compositor.settings_active);
+
+    for hit in [
+        SettingsHit::SelectTab(SettingsTab::Appearance),
+        SettingsHit::GlassOpacityUp,
+        SettingsHit::ToggleReduceTransparency,
+        SettingsHit::ToggleReducedMotion,
+        SettingsHit::SelectTab(SettingsTab::MenuBar),
+        SettingsHit::ToggleMenuWorkspaces,
+        SettingsHit::ToggleClock24h,
+        SettingsHit::SelectTab(SettingsTab::Displays),
+        SettingsHit::ScaleUp,
+        SettingsHit::CycleRotation,
+        SettingsHit::CycleVrrMode,
+        SettingsHit::TogglePreferMaxRefresh,
+        SettingsHit::SelectTab(SettingsTab::Security),
+        SettingsHit::ToggleRequirePassword,
+        SettingsHit::ToggleLockOnSleep,
+        SettingsHit::TogglePolkitAgent,
+    ] {
+        compositor.apply_settings_hit(hit);
+    }
+
+    assert_eq!(compositor.config_status_label, "Saved");
+    let disk_cfg = crate::config::UserConfig::load_from_path(&cfg_path);
+    assert!((disk_cfg.glass_opacity - 0.83).abs() < 0.01);
+    assert!(disk_cfg.reduce_transparency && disk_cfg.reduced_motion);
+    assert!(disk_cfg.menubar_show_workspaces && disk_cfg.clock_24h);
+    assert!((disk_cfg.display_scale - 1.25).abs() < 1e-4);
+    assert_eq!(
+        disk_cfg.display_rotation,
+        crate::config::DisplayRotation::Rotate90
+    );
+    assert_eq!(disk_cfg.vrr_mode, crate::config::VrrMode::Always);
+    assert!(!disk_cfg.prefer_max_refresh && !disk_cfg.require_password_on_lock);
+    assert!(!disk_cfg.lock_on_sleep && !disk_cfg.enable_polkit_agent);
+
+    std::fs::write(
+        &cfg_path,
+        "[keyboard]\nlayout = \"us,ru\"\nrepeat_delay = 310\nrepeat_rate = 40\n\
+         [ui]\nreduced_motion = false\nglass_opacity = 0.55\nreduce_transparency = false\n\
+         menubar_show_workspaces = false\nmenubar_show_volume = true\nclock_24h = false\n\
+         [display]\nscale = 1.5\nrotation = \"180\"\nvrr_mode = \"off\"\nprefer_max_refresh = true\n\
+         [security]\nrequire_password_on_lock = true\nlock_on_sleep = true\nenable_polkit_agent = true\n",
+    )?;
+    compositor.handle_ipc_request(rusty_ipc::ShellRequest::ReloadConfig);
+    assert_eq!(compositor.config_status_label, "Reloaded");
+    assert!((compositor.glass_opacity - 0.55).abs() < 0.01);
+    assert!(!compositor.reduce_transparency && !compositor.animations.reduced_motion());
+    assert!(!compositor.menubar_show_workspaces && compositor.menubar_show_volume);
+    assert!(!compositor.clock_24h);
+    assert!((compositor.output_map.primary().scale - 1.5).abs() < 1e-4);
+    assert_eq!(
+        compositor.output_map.primary().rotation,
+        crate::config::DisplayRotation::Rotate180
+    );
+    assert_eq!(compositor.user_config.vrr_mode, crate::config::VrrMode::Off);
+    assert!(compositor.user_config.require_password_on_lock);
+
+    compositor.apply_settings_hit(SettingsHit::Close);
+    assert!(!compositor.settings_active);
+    let _ = std::fs::remove_dir_all(&temp_dir);
     Ok(())
 }

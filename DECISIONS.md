@@ -260,6 +260,22 @@
                           RUSTYOS_EXTERNAL_SHELL= 
                           1 (ADR-0027)            
   -----------------------------------------------------------------------
+  D-036                   Фаза 8/Core UX &        accepted
+                          Settings (RUSTYOS-061): 
+                          Сериализация UserConfig 
+                          и атомарное сохранение  
+                          в config.toml, горячая  
+                          перезагрузка            
+                          конфигурации            
+                          (ReloadConfig в System  
+                          Menu, Super+Shift+R и   
+                          rusty-ipc) и            
+                          встроенная панель       
+                          System Settings         
+                          (Appearance, Menu Bar,  
+                          Displays, Security)     
+                          (ADR-0028)              
+  -----------------------------------------------------------------------
 
 ## Открытые решения
 

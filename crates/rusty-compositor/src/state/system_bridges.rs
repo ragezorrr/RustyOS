@@ -807,6 +807,11 @@ impl RustyCompositorState {
                 persist_mode,
             ),
         };
+        self.close_launcher();
+        self.close_quick_settings();
+        self.close_overview();
+        self.close_settings();
+        self.close_top_bar_menu();
         self.portal_prompt = Some(PortalPromptState {
             request_id: req.request_id,
             app_id: req.app_id,
@@ -899,6 +904,8 @@ impl RustyCompositorState {
                     self.window_switcher = None;
                     self.close_launcher();
                     self.close_quick_settings();
+                    self.close_overview();
+                    self.close_settings();
                     self.close_top_bar_menu();
                     self.polkit_password.clear();
                     self.deactivate_focused_shortcut_inhibitor();

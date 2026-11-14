@@ -1134,6 +1134,7 @@ fn try_run_native_drm_session(
         event_loop.handle(),
         setup.pixel_size,
     )?;
+    state.config_path = crate::config::default_user_config_path();
 
     let refresh_milli_hz = i32::try_from(setup.vrefresh.saturating_mul(1000)).unwrap_or(60_000);
     let primary_scale = state.user_config.scale_for_output(&setup.connector_name);

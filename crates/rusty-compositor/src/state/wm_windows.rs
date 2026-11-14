@@ -1246,6 +1246,10 @@ impl RustyCompositorState {
                 self.clear_notifications();
                 info!("Cleared all active notifications via IPC");
             }
+            ShellRequest::ReloadConfig => {
+                let reloaded = self.reload_user_config();
+                info!(reloaded, "Processed ReloadConfig request via IPC");
+            }
         }
         CompositorEvent::StateSnapshot(self.build_ipc_snapshot())
     }

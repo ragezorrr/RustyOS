@@ -1202,4 +1202,116 @@ fn overlay_and_chrome_visibility_predicates_isolate_modals() {
     assert!(dock_tooltip_hidden_by_overlay(ShellOverlayView::Portal(
         &portal
     )));
+
+    let settings_state = SettingsRenderState {
+        active_tab: SettingsTab::Appearance,
+        glass_opacity: crate::config::DEFAULT_GLASS_OPACITY,
+        reduce_transparency: false,
+        reduced_motion: false,
+        menubar_show_workspaces: false,
+        menubar_show_tray: false,
+        menubar_show_input_source: false,
+        menubar_show_volume: false,
+        clock_24h: false,
+        primary_connector: "eDP-1",
+        display_scale: 1.5,
+        display_rotation: crate::config::DisplayRotation::Rotate0,
+        vrr_mode: crate::config::VrrMode::Fullscreen,
+        prefer_max_refresh: true,
+        require_password_on_lock: true,
+        lock_on_sleep: true,
+        enable_polkit_agent: true,
+        config_status_label: "Saved",
+    };
+    assert!(notifications_hidden_by_overlay(ShellOverlayView::Settings(
+        &settings_state
+    )));
+    assert!(dock_tooltip_hidden_by_overlay(ShellOverlayView::Settings(
+        &settings_state
+    )));
+}
+
+#[test]
+fn settings_modal_hit_testing_covers_tabs_controls_and_buttons() {
+    let size = Size::from((1280, 800));
+    let mut state = SettingsRenderState {
+        active_tab: SettingsTab::Appearance,
+        glass_opacity: 0.78,
+        reduce_transparency: false,
+        reduced_motion: false,
+        menubar_show_workspaces: false,
+        menubar_show_tray: false,
+        menubar_show_input_source: false,
+        menubar_show_volume: false,
+        clock_24h: false,
+        primary_connector: "Winit-1",
+        display_scale: 1.0,
+        display_rotation: crate::config::DisplayRotation::Rotate0,
+        vrr_mode: crate::config::VrrMode::Fullscreen,
+        prefer_max_refresh: true,
+        require_password_on_lock: true,
+        lock_on_sleep: true,
+        enable_polkit_agent: true,
+        config_status_label: "",
+    };
+
+    // Centered modal box (580x432) -> (350, 184) .. (930, 616)
+    assert_eq!(
+        hit_test_settings_modal(size, &state, 20.0, 20.0),
+        SettingsHit::Outside
+    );
+    assert_eq!(
+        hit_test_settings_modal(size, &state, f64::from(350 + 24), f64::from(184 + 122)),
+        SettingsHit::SelectTab(SettingsTab::MenuBar)
+    );
+    assert_eq!(
+        hit_test_settings_modal(size, &state, f64::from(350 + 24), f64::from(184 + 210)),
+        SettingsHit::SelectTab(SettingsTab::Security)
+    );
+    assert_eq!(
+        hit_test_settings_modal(size, &state, f64::from(350 + 580 - 30), f64::from(184 + 30)),
+        SettingsHit::Close
+    );
+    assert_eq!(
+        hit_test_settings_modal(
+            size,
+            &state,
+            f64::from(350 + 580 - 150),
+            f64::from(184 + 432 - 35)
+        ),
+        SettingsHit::ReloadConfig
+    );
+
+    // Row 0 glass opacity stepper '+' is near right edge of row 0 (y ~ 184 + 98 + 20 = 302)
+    let content_right = 350 + 198 + (580 - 218);
+    assert_eq!(
+        hit_test_settings_modal(size, &state, f64::from(content_right - 20), 302.0),
+        SettingsHit::GlassOpacityUp
+    );
+    assert_eq!(
+        hit_test_settings_modal(size, &state, f64::from(content_right - 115), 302.0),
+        SettingsHit::GlassOpacityDown
+    );
+
+    state.active_tab = SettingsTab::MenuBar;
+    assert_eq!(
+        hit_test_settings_modal(size, &state, f64::from(content_right - 40), 302.0),
+        SettingsHit::ToggleMenuWorkspaces
+    );
+
+    state.active_tab = SettingsTab::Displays;
+    assert_eq!(
+        hit_test_settings_modal(size, &state, f64::from(content_right - 20), 302.0),
+        SettingsHit::ScaleUp
+    );
+    assert_eq!(
+        hit_test_settings_modal(size, &state, f64::from(content_right - 40), 354.0),
+        SettingsHit::CycleRotation
+    );
+
+    state.active_tab = SettingsTab::Security;
+    assert_eq!(
+        hit_test_settings_modal(size, &state, f64::from(content_right - 40), 302.0),
+        SettingsHit::ToggleRequirePassword
+    );
 }

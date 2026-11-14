@@ -188,6 +188,8 @@ pub enum ShellRequest {
     },
     /// Clears all active notifications (`RUSTYOS-024`).
     ClearNotifications,
+    /// Reloads `~/.config/rustyos/config.toml` into the running compositor (`RUSTYOS-061`).
+    ReloadConfig,
 }
 
 /// Events/responses sent from `rusty-compositor` (server) to `rusty-shell` (client).
@@ -310,6 +312,9 @@ impl ShellRequest {
             }
             Self::ClearNotifications => {
                 let _ = writeln!(out, "CLEAR_NOTIFICATIONS");
+            }
+            Self::ReloadConfig => {
+                let _ = writeln!(out, "RELOAD_CONFIG");
             }
         }
         out
@@ -443,6 +448,7 @@ impl ShellRequest {
                 Ok(Self::DismissNotification { id })
             }
             "CLEAR_NOTIFICATIONS" => Ok(Self::ClearNotifications),
+            "RELOAD_CONFIG" => Ok(Self::ReloadConfig),
             other => Err(IpcError::InvalidFrame(format!(
                 "unknown request command '{other}'"
             ))),
@@ -976,6 +982,7 @@ mod tests {
             },
             ShellRequest::DismissNotification { id: 7 },
             ShellRequest::ClearNotifications,
+            ShellRequest::ReloadConfig,
         ];
 
         for req in requests {

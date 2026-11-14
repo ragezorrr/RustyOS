@@ -61,6 +61,7 @@ pub fn run_nested_winit(config: &CompositorConfig) -> Result<BootstrapReport, Co
         event_loop.handle(),
         initial_size,
     )?;
+    state.config_path = crate::config::default_user_config_path();
     state.rotation_override = config.rotation_override;
     let winit_rotation = state
         .user_config

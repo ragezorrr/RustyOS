@@ -859,6 +859,19 @@ hardware/software context и низкие накладные расходы.
 - **Verification:** `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --offline -- -D warnings` (0 предупреждений), `cargo test --workspace --offline` (160 passed, 0 failed, 0 ignored: `rusty_animation` 4, `rusty_compositor` 115, `rusty_ipc` 3, `rusty_services` 26, `rusty_shell` 5, `rusty_wm` 7), `cargo run -p rusty-compositor --offline -- --check`, `cargo run -p rusty-compositor --offline -- --winit --max-frames 3` (`rendered_frames=3`) и `sh -n bin/rustyos-session` завершены с кодом 0.
 - **Risks:** Обновлённый workflow `.github/workflows/ci.yml` проверяется на GitHub Actions runner только после `git push`; `frame_composer.rs` консолидирует уже существующую композиционную логику без изменения форматов IPC или Wayland-протоколов.
 
+### RUSTYOS-061 — Сериализация `UserConfig`, live config reload и встроенная панель System Settings
+- **Status:** done
+- **Priority:** P1
+- **Phase:** Фаза 8 / Core UX & Settings
+- **Scope:**
+  - В `crates/rusty-compositor/src/config.rs` реализованы `VrrMode::as_str`, `escape_toml_string`, `UserConfig::to_toml_string`, атомарное сохранение `UserConfig::save_to_path` через временный файл и `fs::rename`, а также сохранение исходного регистра имени коннектора в `[display.outputs."..."]` при парсинге; добавлен тест `toml_serialization_and_atomic_save_roundtrip_all_sections`.
+  - В `RustyCompositorState` (`state/mod.rs`, `state/shell_actions.rs`, `winit_backend.rs`, `drm_backend.rs`) добавлены `config_path: Option<PathBuf>` (`None` в unit-тестах, `default_user_config_path()` в runtime бэкендах), `sync_and_save_user_config`, `apply_user_config` и `reload_user_config` с живым применением UI/Menu Bar/дисплейных (`scale`, `rotation`, `VrrMode`, `prefer_max_refresh`), security-политик и keyboard repeat/XKB параметров.
+  - В `crates/rusty-ipc/src/lib.rs` и `state/wm_windows.rs` добавлен запрос `ShellRequest::ReloadConfig` (`RELOAD_CONFIG`), в `shell_render/top_bar.rs` — пункты System Menu `System Settings...` (`Super+,`) и `Reload Config` (`Super+Shift+R`), а в `input/{mod.rs,keyboard.rs,pointer.rs,shell_pointer.rs}` — клавиатурная и pointer-обработка.
+  - В `crates/rusty-compositor/src/shell_render/{modals.rs,mod.rs,tests.rs}` и `frame_composer.rs` реализован Liquid Glass модал `ShellOverlayView::Settings` с четырьмя вкладками (`SettingsTab::{Appearance, MenuBar, Displays, Security}`), кнопками `Reload TOML` и `Done`/`×`, изоляцией полноэкранного bypass/поверхностей и unit-тестом `settings_modal_hit_testing_covers_tabs_controls_and_buttons`.
+  - Добавлен интеграционный тест `state::tests::persistent_config_save_reload_and_settings_toggles_roundtrip`; оформлены `docs/adr/0028-persistent-user-config-and-system-settings.md`, запись `D-036` в `DECISIONS.md`, обновлены `ARCHITECTURE.md` и `TASKS.md`.
+- **Verification:** `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --offline -- -D warnings` (0 предупреждений), `cargo test --workspace --offline` (163 passed, 0 failed, 0 ignored: `rusty_animation` 4, `rusty_compositor` 118, `rusty_ipc` 3, `rusty_services` 26, `rusty_shell` 5, `rusty_wm` 7), `cargo run -p rusty-compositor --offline -- --check` и `cargo run -p rusty-compositor --offline -- --winit --max-frames 3` завершены с кодом 0.
+- **Risks:** Новые зависимости и `unsafe` не добавлялись (`unsafe_code = "deny"` сохранён); во вложенном Winit-режиме `--winit` изменение XKB-раскладки и repeat-параметров передаётся Wayland-клиентам, тогда как аппаратный перебор DRM/KMS-режимов (`prefer_max_refresh` / `vrr_mode`) проявляется на нативном `--drm` бэкенде.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

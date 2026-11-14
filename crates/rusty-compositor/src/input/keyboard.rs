@@ -79,6 +79,29 @@ impl RustyCompositorState {
                     "Toggled Quick Settings popover"
                 );
             }
+            KeyIntercept::ToggleSettings => {
+                self.toggle_settings();
+                info!(
+                    settings_active = self.settings_active,
+                    "Toggled System Settings overlay"
+                );
+            }
+            KeyIntercept::SettingsClose => {
+                self.close_settings();
+                info!("Closed System Settings overlay");
+            }
+            KeyIntercept::SettingsNextTab => {
+                self.settings_tab = self.settings_tab.next();
+                self.shell_redraw_needed = true;
+            }
+            KeyIntercept::SettingsPrevTab => {
+                self.settings_tab = self.settings_tab.prev();
+                self.shell_redraw_needed = true;
+            }
+            KeyIntercept::ReloadConfig => {
+                let reloaded = self.reload_user_config();
+                info!(reloaded, "Processed ReloadConfig keyboard shortcut");
+            }
             KeyIntercept::ToggleOverview => {
                 self.toggle_overview();
                 info!(
@@ -371,6 +394,22 @@ pub(super) fn classify_keyboard_input(
     if state.quick_settings_active && sym.raw() == Keysym::Escape.raw() {
         return FilterResult::Intercept(KeyIntercept::QuickSettingsClose);
     }
+    if state.settings_active {
+        if sym.raw() == Keysym::Escape.raw() {
+            return FilterResult::Intercept(KeyIntercept::SettingsClose);
+        }
+        if !modifiers.ctrl && !modifiers.alt && !modifiers.logo {
+            match sym {
+                Keysym::Tab | Keysym::Down => {
+                    return FilterResult::Intercept(KeyIntercept::SettingsNextTab);
+                }
+                Keysym::ISO_Left_Tab | Keysym::Up => {
+                    return FilterResult::Intercept(KeyIntercept::SettingsPrevTab);
+                }
+                _ => {}
+            }
+        }
+    }
     if state.active_top_bar_menu.is_some() && sym.raw() == Keysym::Escape.raw() {
         return FilterResult::Intercept(KeyIntercept::TopBarMenuClose);
     }
@@ -478,6 +517,22 @@ pub(super) fn match_shortcut(modifiers: ModifiersState, sym: Keysym) -> Option<K
     if (modifiers.logo || (modifiers.ctrl && modifiers.alt)) && matches!(sym, Keysym::l | Keysym::L)
     {
         return Some(KeyIntercept::LockScreen);
+    }
+    if modifiers.logo
+        && !modifiers.shift
+        && !modifiers.alt
+        && !modifiers.ctrl
+        && sym.raw() == Keysym::comma.raw()
+    {
+        return Some(KeyIntercept::ToggleSettings);
+    }
+    if modifiers.logo
+        && modifiers.shift
+        && !modifiers.alt
+        && !modifiers.ctrl
+        && matches!(sym, Keysym::r | Keysym::R)
+    {
+        return Some(KeyIntercept::ReloadConfig);
     }
 
     if let Some(hw) = match_hardware_shortcut(modifiers, sym) {

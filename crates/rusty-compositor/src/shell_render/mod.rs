@@ -51,7 +51,8 @@ pub use lock_screen::{
 };
 pub use modals::{
     PolkitHit, PolkitPromptRenderState, PortalHit, PortalPromptRenderState, PortalSourceRow,
-    hit_test_polkit_dialog, hit_test_portal_dialog,
+    SettingsHit, SettingsRenderState, SettingsTab, hit_test_polkit_dialog, hit_test_portal_dialog,
+    hit_test_settings_modal,
 };
 pub use quick_settings::{
     QuickSettingsHit, QuickSettingsRenderState, QuickSettingsSliderDrag,
@@ -105,7 +106,8 @@ pub use top_bar::{
 use dock::{dock_layout_bounds, dock_slot_rect, dock_tooltip_rect_and_label, render_dock};
 use modals::{
     render_pick_color_composite, render_pick_color_text, render_polkit_composite,
-    render_polkit_text, render_portal_composite, render_portal_text,
+    render_polkit_text, render_portal_composite, render_portal_text, render_settings_composite,
+    render_settings_text,
 };
 use quick_settings::{
     render_quick_settings_composite, render_quick_settings_popover, render_quick_settings_text,
@@ -143,6 +145,8 @@ pub enum ShellOverlayView<'a> {
     Portal(&'a PortalPromptRenderState<'a>),
     /// Non-dimming interactive `PickColor` sampling banner pill (`RUSTYOS-057`).
     PickColor(&'a str),
+    /// Built-in System Settings modal (`RUSTYOS-061`).
+    Settings(&'a SettingsRenderState<'a>),
 }
 
 /// Generates custom GLES render elements for `TopBar`, `Dock`, and active shell overlays.
@@ -184,7 +188,8 @@ pub fn generate_shell_render_elements(
         | ShellOverlayView::Switcher(_)
         | ShellOverlayView::Polkit(_)
         | ShellOverlayView::Portal(_)
-        | ShellOverlayView::PickColor(_) => {}
+        | ShellOverlayView::PickColor(_)
+        | ShellOverlayView::Settings(_) => {}
         ShellOverlayView::Spotlight(spot) => {
             render_spotlight_modal(&mut elements, width, height, spot, has_text);
         }
@@ -208,6 +213,7 @@ const fn notifications_hidden_by_overlay(overlay: ShellOverlayView<'_>) -> bool 
             | ShellOverlayView::QuickSettings(_)
             | ShellOverlayView::Polkit(_)
             | ShellOverlayView::Portal(_)
+            | ShellOverlayView::Settings(_)
     )
 }
 
@@ -219,6 +225,7 @@ const fn dock_tooltip_hidden_by_overlay(overlay: ShellOverlayView<'_>) -> bool {
             | ShellOverlayView::Switcher(_)
             | ShellOverlayView::Polkit(_)
             | ShellOverlayView::Portal(_)
+            | ShellOverlayView::Settings(_)
     )
 }
 
@@ -350,6 +357,9 @@ fn append_foreground_overlay_text(
         }
         ShellOverlayView::PickColor(app_id) => {
             render_pick_color_text(text_cache, renderer, screen_size, app_id, elements);
+        }
+        ShellOverlayView::Settings(st) => {
+            render_settings_text(text_cache, renderer, screen_size, st, elements);
         }
     }
 
@@ -1111,6 +1121,16 @@ fn build_foreground_overlay_shapes(
                 renderer,
                 screen_size,
                 top_telemetry,
+            );
+        }
+        ShellOverlayView::Settings(st) => {
+            render_settings_composite(
+                &mut out,
+                shape_cache,
+                renderer,
+                screen_size,
+                top_telemetry,
+                st,
             );
         }
     }

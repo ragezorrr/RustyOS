@@ -435,6 +435,22 @@ impl RustyCompositorState {
         }
     }
 
+    pub(crate) fn handle_settings_pointer_click(
+        &mut self,
+        output_phys: Size<i32, smithay::utils::Physical>,
+    ) {
+        let hit = {
+            let view = self.settings_render_state();
+            crate::shell_render::hit_test_settings_modal(
+                output_phys,
+                &view,
+                self.pointer_location.x,
+                self.pointer_location.y,
+            )
+        };
+        self.apply_settings_hit(hit);
+    }
+
     pub(crate) fn handle_portal_pointer_click(
         &mut self,
         output_phys: Size<i32, smithay::utils::Physical>,

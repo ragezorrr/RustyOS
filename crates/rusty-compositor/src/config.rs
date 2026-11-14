@@ -125,6 +125,16 @@ impl VrrMode {
             _ => None,
         }
     }
+
+    /// Canonical lowercase string representation (`"off"`, `"fullscreen"`, `"always"`).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Fullscreen => "fullscreen",
+            Self::Always => "always",
+        }
+    }
 }
 
 /// Default frosted glass opacity factor across macOS 27 shell surfaces (`RUSTYOS-048`).
@@ -310,7 +320,15 @@ impl UserConfig {
             }
 
             if line.starts_with('[') && line.ends_with(']') && line.len() >= 2 {
-                section = line[1..line.len() - 1].trim().to_ascii_lowercase();
+                const OUTPUTS_PREFIX: &str = "display.outputs.";
+                let raw_section = line[1..line.len() - 1].trim();
+                section = if raw_section.is_char_boundary(OUTPUTS_PREFIX.len())
+                    && raw_section[..OUTPUTS_PREFIX.len()].eq_ignore_ascii_case(OUTPUTS_PREFIX)
+                {
+                    format!("{OUTPUTS_PREFIX}{}", &raw_section[OUTPUTS_PREFIX.len()..])
+                } else {
+                    raw_section.to_ascii_lowercase()
+                };
                 continue;
             }
 
@@ -543,6 +561,153 @@ impl UserConfig {
             options,
         }
     }
+
+    /// Serializes [`UserConfig`] to canonical TOML matching [`Self::parse_toml`] (`RUSTYOS-061`).
+    #[must_use]
+    pub fn to_toml_string(&self) -> String {
+        use std::collections::BTreeSet;
+        use std::fmt::Write as _;
+
+        let mut out = String::from("# RustyOS compositor configuration\n\n");
+        let _ = writeln!(out, "[keyboard]");
+        let _ = writeln!(
+            out,
+            "layout = \"{}\"",
+            escape_toml_string(&self.keyboard_layout)
+        );
+        let _ = writeln!(
+            out,
+            "variant = \"{}\"",
+            escape_toml_string(&self.keyboard_variant)
+        );
+        let _ = writeln!(
+            out,
+            "options = \"{}\"",
+            escape_toml_string(&self.keyboard_options)
+        );
+        let _ = writeln!(out, "repeat_delay = {}", self.repeat_delay.clamp(50, 2000));
+        let _ = writeln!(out, "repeat_rate = {}", self.repeat_rate.clamp(1, 120));
+
+        let _ = writeln!(out, "\n[ui]");
+        let _ = writeln!(out, "reduced_motion = {}", self.reduced_motion);
+        let _ = writeln!(
+            out,
+            "glass_opacity = {}",
+            clamp_glass_opacity(self.glass_opacity)
+        );
+        let _ = writeln!(out, "reduce_transparency = {}", self.reduce_transparency);
+        let _ = writeln!(
+            out,
+            "menubar_show_workspaces = {}",
+            self.menubar_show_workspaces
+        );
+        let _ = writeln!(out, "menubar_show_tray = {}", self.menubar_show_tray);
+        let _ = writeln!(
+            out,
+            "menubar_show_input_source = {}",
+            self.menubar_show_input_source
+        );
+        let _ = writeln!(out, "menubar_show_volume = {}", self.menubar_show_volume);
+        let _ = writeln!(out, "clock_24h = {}", self.clock_24h);
+        if let Some(wallpaper) = self.wallpaper.as_ref() {
+            let _ = writeln!(
+                out,
+                "wallpaper = \"{}\"",
+                escape_toml_string(&wallpaper.to_string_lossy())
+            );
+        }
+        if let Some(cursor_theme) = self.cursor_theme.as_deref() {
+            let trimmed = cursor_theme.trim();
+            if !trimmed.is_empty() {
+                let _ = writeln!(out, "cursor_theme = \"{}\"", escape_toml_string(trimmed));
+            }
+        }
+
+        let _ = writeln!(out, "\n[display]");
+        let _ = writeln!(out, "prefer_max_refresh = {}", self.prefer_max_refresh);
+        let _ = writeln!(out, "vrr_mode = \"{}\"", self.vrr_mode.as_str());
+        let _ = writeln!(out, "scale = {}", clamp_display_scale(self.display_scale));
+        let _ = writeln!(out, "rotation = \"{}\"", self.display_rotation.as_str());
+
+        let connectors: BTreeSet<&str> = self
+            .output_scales
+            .keys()
+            .chain(self.output_rotations.keys())
+            .map(String::as_str)
+            .collect();
+        for connector in connectors {
+            let _ = writeln!(
+                out,
+                "\n[display.outputs.\"{}\"]",
+                escape_toml_string(connector)
+            );
+            if let Some(scale) = self.output_scales.get(connector) {
+                let _ = writeln!(out, "scale = {}", clamp_display_scale(*scale));
+            }
+            if let Some(rot) = self.output_rotations.get(connector) {
+                let _ = writeln!(out, "rotation = \"{}\"", rot.as_str());
+            }
+        }
+
+        let _ = writeln!(out, "\n[security]");
+        let _ = writeln!(
+            out,
+            "require_password_on_lock = {}",
+            self.require_password_on_lock
+        );
+        let _ = writeln!(out, "lock_on_sleep = {}", self.lock_on_sleep);
+        let _ = writeln!(out, "enable_polkit_agent = {}", self.enable_polkit_agent);
+
+        let _ = writeln!(out, "\n[autostart]");
+        let escaped_cmds: Vec<String> = self
+            .autostart
+            .iter()
+            .map(|cmd| format!("\"{}\"", escape_toml_string(cmd)))
+            .collect();
+        let _ = writeln!(out, "commands = [{}]", escaped_cmds.join(", "));
+
+        out
+    }
+
+    /// Atomically persists [`UserConfig`] to `path` via a sibling temp file + rename (`RUSTYOS-061`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error if creating the parent directory, writing the temporary file,
+    /// or renaming it into `path` fails.
+    pub fn save_to_path(&self, path: &Path) -> std::io::Result<()> {
+        let dir = match path.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => {
+                fs::create_dir_all(parent)?;
+                parent
+            }
+            _ => Path::new("."),
+        };
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("config.toml");
+        let tmp_path = dir.join(format!(".{file_name}.tmp.{}", std::process::id()));
+        fs::write(&tmp_path, self.to_toml_string())?;
+        if let Err(err) = fs::rename(&tmp_path, path) {
+            let _ = fs::remove_file(&tmp_path);
+            return Err(err);
+        }
+        Ok(())
+    }
+}
+
+fn escape_toml_string(raw: &str) -> String {
+    let mut escaped = String::with_capacity(raw.len());
+    for ch in raw.chars() {
+        match ch {
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            '\n' | '\r' => escaped.push(' '),
+            other => escaped.push(other),
+        }
+    }
+    escaped
 }
 
 /// Resolves the canonical path `~/.config/rustyos/config.toml` (honoring `XDG_CONFIG_HOME`).
@@ -981,5 +1146,59 @@ mod tests {
         assert!(!cfg.require_password_on_lock);
         assert!(!cfg.lock_on_sleep);
         assert!(!cfg.enable_polkit_agent);
+    }
+
+    #[test]
+    fn toml_serialization_and_atomic_save_roundtrip_all_sections()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut cfg = UserConfig {
+            keyboard_layout: "us,ua".to_owned(),
+            keyboard_variant: ",phonetic".to_owned(),
+            keyboard_options: "grp:caps_toggle".to_owned(),
+            repeat_delay: 280,
+            repeat_rate: 42,
+            reduced_motion: true,
+            glass_opacity: 0.62,
+            reduce_transparency: true,
+            menubar_show_workspaces: true,
+            menubar_show_tray: true,
+            menubar_show_input_source: true,
+            menubar_show_volume: true,
+            clock_24h: true,
+            prefer_max_refresh: false,
+            vrr_mode: VrrMode::Always,
+            display_scale: 1.5,
+            display_rotation: DisplayRotation::Rotate90,
+            wallpaper: Some(PathBuf::from("/usr/share/wallpapers/rustyos.png")),
+            cursor_theme: Some("Adwaita".to_owned()),
+            autostart: vec![
+                "foot --server".to_owned(),
+                "nm-applet \"quoted\"".to_owned(),
+            ],
+            require_password_on_lock: false,
+            lock_on_sleep: false,
+            enable_polkit_agent: false,
+            ..UserConfig::default()
+        };
+        cfg.output_scales.insert("eDP-1".to_owned(), 1.75);
+        cfg.output_scales.insert("DP-1".to_owned(), 2.0);
+        cfg.output_rotations
+            .insert("DP-1".to_owned(), DisplayRotation::Rotate270);
+
+        let serialized = cfg.to_toml_string();
+        let reparsed = UserConfig::parse_toml(&serialized);
+        assert_eq!(reparsed, cfg);
+
+        let temp_dir = std::env::temp_dir().join(format!(
+            "rustyos-config-test-{}-{}",
+            std::process::id(),
+            reparsed.repeat_delay
+        ));
+        let path = temp_dir.join("nested/config.toml");
+        cfg.save_to_path(&path)?;
+        let reloaded = UserConfig::load_from_path(&path);
+        assert_eq!(reloaded, cfg);
+        let _ = fs::remove_dir_all(&temp_dir);
+        Ok(())
     }
 }

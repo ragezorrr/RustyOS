@@ -28,6 +28,7 @@ impl RustyCompositorState {
             self.window_switcher = None;
             self.close_quick_settings();
             self.close_overview();
+            self.close_settings();
         }
         self.launcher.reset();
         self.retarget_launcher_anim();
@@ -49,6 +50,7 @@ impl RustyCompositorState {
             self.window_switcher = None;
             self.close_launcher();
             self.close_overview();
+            self.close_settings();
             self.telemetry.request_refresh();
         }
         self.retarget_quick_settings_anim();
@@ -106,6 +108,7 @@ impl RustyCompositorState {
     /// Updates shell glass opacity clamped to `0.35..=1.0` (`RUSTYOS-048`).
     pub fn set_glass_opacity(&mut self, opacity: f32) {
         self.glass_opacity = crate::config::clamp_glass_opacity(opacity);
+        self.sync_and_save_user_config();
     }
 
     /// Toggles Focus (Do Not Disturb) notification popup suppression (`RUSTYOS-053`).
@@ -120,6 +123,7 @@ impl RustyCompositorState {
     /// Toggles opaque high-contrast shell panels (`reduce_transparency`) (`RUSTYOS-048`).
     pub fn toggle_reduce_transparency(&mut self) {
         self.reduce_transparency = !self.reduce_transparency;
+        self.sync_and_save_user_config();
     }
 
     /// Executes an action chosen from an open `TopBar` menu dropdown (`RUSTYOS-048`).
@@ -140,6 +144,12 @@ impl RustyCompositorState {
             crate::shell_render::TopBarMenuAction::OpenOverview => self.toggle_overview(),
             crate::shell_render::TopBarMenuAction::OpenControlCenter => {
                 self.toggle_quick_settings();
+            }
+            crate::shell_render::TopBarMenuAction::OpenSettings => {
+                self.open_settings();
+            }
+            crate::shell_render::TopBarMenuAction::ReloadConfig => {
+                let _ = self.reload_user_config();
             }
             crate::shell_render::TopBarMenuAction::OpenSpotlight => self.toggle_launcher(),
             crate::shell_render::TopBarMenuAction::NewTerminal => {
@@ -206,6 +216,7 @@ impl RustyCompositorState {
         if locked {
             self.polkit_password.clear();
             self.abort_portal_activity_for_lock();
+            self.close_settings();
             self.window_switcher = None;
             self.dnd_icon = None;
             self.close_launcher();
@@ -299,6 +310,7 @@ impl RustyCompositorState {
     /// Updates accessibility `reduced_motion` and snaps in-flight shell transitions if enabled (`RUSTYOS-025`).
     pub fn set_reduced_motion_pref(&mut self, enabled: bool) {
         self.animations.set_reduced_motion(enabled);
+        self.sync_and_save_user_config();
         if enabled {
             self.overview_anim.snap_to_target();
             self.launcher_anim.snap_to_target();
@@ -592,6 +604,7 @@ impl RustyCompositorState {
         if self.overview_active {
             self.close_launcher();
             self.close_quick_settings();
+            self.close_settings();
             self.active_window_drag = None;
             self.active_window_resize = None;
         }
@@ -831,5 +844,314 @@ impl RustyCompositorState {
                 .launch_command(&cmd, &self.socket_name, &ipc_path);
         }
         self.close_launcher();
+    }
+
+    /// Opens the built-in System Settings modal overlay (`RUSTYOS-061`).
+    pub fn open_settings(&mut self) {
+        if self.is_session_locked() {
+            return;
+        }
+        self.settings_active = true;
+        self.close_launcher();
+        self.close_quick_settings();
+        self.close_overview();
+        self.close_top_bar_menu();
+        self.shell_redraw_needed = true;
+    }
+
+    /// Closes the built-in System Settings modal overlay (`RUSTYOS-061`).
+    pub fn close_settings(&mut self) {
+        if self.settings_active {
+            self.settings_active = false;
+            self.shell_redraw_needed = true;
+        }
+    }
+
+    /// Toggles the built-in System Settings modal overlay (`Super+,`) (`RUSTYOS-061`).
+    pub fn toggle_settings(&mut self) {
+        if self.settings_active {
+            self.close_settings();
+        } else {
+            self.open_settings();
+        }
+    }
+
+    /// Builds a snapshot of live settings & config state for [`crate::shell_render::ShellOverlayView::Settings`].
+    #[must_use]
+    pub fn settings_render_state(&self) -> crate::shell_render::SettingsRenderState<'_> {
+        let primary = self.output_map.primary();
+        crate::shell_render::SettingsRenderState {
+            active_tab: self.settings_tab,
+            glass_opacity: self.glass_opacity,
+            reduce_transparency: self.reduce_transparency,
+            reduced_motion: self.animations.reduced_motion(),
+            menubar_show_workspaces: self.menubar_show_workspaces,
+            menubar_show_tray: self.menubar_show_tray,
+            menubar_show_input_source: self.menubar_show_input_source,
+            menubar_show_volume: self.menubar_show_volume,
+            clock_24h: self.clock_24h,
+            primary_connector: &primary.name,
+            display_scale: primary.scale,
+            display_rotation: primary.rotation,
+            vrr_mode: self.user_config.vrr_mode,
+            prefer_max_refresh: self.user_config.prefer_max_refresh,
+            require_password_on_lock: self.user_config.require_password_on_lock,
+            lock_on_sleep: self.user_config.lock_on_sleep,
+            enable_polkit_agent: self.user_config.enable_polkit_agent,
+            config_status_label: self.config_status_label,
+        }
+    }
+
+    /// Synchronizes runtime UI/menu preferences back into [`Self::user_config`] and persists
+    /// atomically when [`Self::config_path`] is configured (`RUSTYOS-061`).
+    pub fn sync_and_save_user_config(&mut self) {
+        self.user_config.reduced_motion = self.animations.reduced_motion();
+        self.user_config.glass_opacity = crate::config::clamp_glass_opacity(self.glass_opacity);
+        self.user_config.reduce_transparency = self.reduce_transparency;
+        self.user_config.menubar_show_workspaces = self.menubar_show_workspaces;
+        self.user_config.menubar_show_tray = self.menubar_show_tray;
+        self.user_config.menubar_show_input_source = self.menubar_show_input_source;
+        self.user_config.menubar_show_volume = self.menubar_show_volume;
+        self.user_config.clock_24h = self.clock_24h;
+
+        if let Some(path) = self.config_path.as_deref() {
+            match self.user_config.save_to_path(path) {
+                Ok(()) => {
+                    self.config_status_label = "Saved";
+                    info!(path = %path.display(), "Saved RustyOS user configuration");
+                }
+                Err(err) => {
+                    self.config_status_label = "Save Err";
+                    tracing::warn!(
+                        ?err,
+                        path = %path.display(),
+                        "Failed to persist RustyOS user configuration"
+                    );
+                }
+            }
+        } else {
+            self.config_status_label = "Saved";
+        }
+        self.shell_redraw_needed = true;
+    }
+
+    /// Applies an updated [`crate::config::UserConfig`] to live compositor subsystems without writing disk (`RUSTYOS-061`).
+    pub fn apply_user_config(&mut self, cfg: crate::config::UserConfig) {
+        let repeat_changed = cfg.repeat_delay != self.user_config.repeat_delay
+            || cfg.repeat_rate != self.user_config.repeat_rate;
+        let xkb_changed = cfg.keyboard_layout != self.user_config.keyboard_layout
+            || cfg.keyboard_variant != self.user_config.keyboard_variant
+            || cfg.keyboard_options != self.user_config.keyboard_options;
+
+        self.animations.set_reduced_motion(cfg.reduced_motion);
+        self.glass_opacity = crate::config::clamp_glass_opacity(cfg.glass_opacity);
+        self.reduce_transparency = cfg.reduce_transparency;
+        self.menubar_show_workspaces = cfg.menubar_show_workspaces;
+        self.menubar_show_tray = cfg.menubar_show_tray;
+        self.menubar_show_input_source = cfg.menubar_show_input_source;
+        self.menubar_show_volume = cfg.menubar_show_volume;
+        self.clock_24h = cfg.clock_24h;
+
+        let output_snapshots: Vec<_> = self
+            .output_map
+            .entries()
+            .iter()
+            .map(|entry| {
+                (
+                    entry.id,
+                    entry.name.clone(),
+                    entry.physical_size,
+                    entry.refresh_milli_hz,
+                    entry.scale,
+                    entry.rotation,
+                )
+            })
+            .collect();
+        for (id, name, phys_size, refresh_milli_hz, cur_scale, cur_rot) in output_snapshots {
+            let target_scale = cfg.scale_for_output(&name);
+            if (target_scale - cur_scale).abs() > 1e-4 {
+                self.update_output_geometry(id, phys_size, target_scale, refresh_milli_hz);
+            }
+            let target_rot = cfg.rotation_for_output(&name, self.rotation_override);
+            if target_rot != cur_rot {
+                let use_winit_flip = name.eq_ignore_ascii_case("winit-0");
+                self.set_output_rotation(id, target_rot, use_winit_flip);
+            }
+        }
+
+        let keyboard = self.keyboard.clone();
+        if repeat_changed {
+            keyboard.change_repeat_info(cfg.repeat_rate, cfg.repeat_delay);
+        }
+        if xkb_changed {
+            if let Err(err) = keyboard.set_xkb_config(self, cfg.xkb_config()) {
+                tracing::warn!(
+                    layout = %cfg.keyboard_layout,
+                    ?err,
+                    "Failed to apply reloaded XKB config; keeping existing keymap"
+                );
+            } else {
+                self.refresh_keyboard_layout_label();
+            }
+        }
+
+        self.user_config = cfg;
+        self.shell_redraw_needed = true;
+    }
+
+    /// Reloads [`Self::config_path`] from disk and applies it live (`RUSTYOS-061`).
+    pub fn reload_user_config(&mut self) -> bool {
+        let Some(path) = self.config_path.clone() else {
+            return false;
+        };
+        match std::fs::read_to_string(&path) {
+            Ok(contents) => {
+                let parsed = crate::config::UserConfig::parse_toml(&contents);
+                self.apply_user_config(parsed);
+                self.config_status_label = "Reloaded";
+                self.show_osd("Config Reloaded", None, false);
+                info!(path = %path.display(), "Reloaded RustyOS configuration from disk");
+                true
+            }
+            Err(err) => {
+                self.config_status_label = "Reload Err";
+                self.shell_redraw_needed = true;
+                tracing::warn!(
+                    ?err,
+                    path = %path.display(),
+                    "Failed to reload RustyOS configuration"
+                );
+                false
+            }
+        }
+    }
+
+    /// Executes an interactive control hit inside the System Settings modal (`RUSTYOS-061`).
+    pub fn apply_settings_hit(&mut self, hit: crate::shell_render::SettingsHit) {
+        use crate::config::{DisplayRotation, VrrMode};
+        use crate::shell_render::SettingsHit;
+
+        match hit {
+            SettingsHit::SelectTab(tab) => {
+                self.settings_tab = tab;
+                self.shell_redraw_needed = true;
+            }
+            SettingsHit::GlassOpacityDown => {
+                self.set_glass_opacity(self.glass_opacity - 0.05);
+            }
+            SettingsHit::GlassOpacityUp => {
+                self.set_glass_opacity(self.glass_opacity + 0.05);
+            }
+            SettingsHit::ToggleReduceTransparency => self.toggle_reduce_transparency(),
+            SettingsHit::ToggleReducedMotion => {
+                let next = !self.animations.reduced_motion();
+                self.set_reduced_motion_pref(next);
+            }
+            SettingsHit::ToggleMenuWorkspaces => {
+                self.menubar_show_workspaces = !self.menubar_show_workspaces;
+                self.sync_and_save_user_config();
+            }
+            SettingsHit::ToggleMenuTray => {
+                self.menubar_show_tray = !self.menubar_show_tray;
+                self.sync_and_save_user_config();
+            }
+            SettingsHit::ToggleMenuInputSource => {
+                self.menubar_show_input_source = !self.menubar_show_input_source;
+                self.sync_and_save_user_config();
+            }
+            SettingsHit::ToggleMenuVolume => {
+                self.menubar_show_volume = !self.menubar_show_volume;
+                self.sync_and_save_user_config();
+            }
+            SettingsHit::ToggleClock24h => {
+                self.clock_24h = !self.clock_24h;
+                self.sync_and_save_user_config();
+            }
+            SettingsHit::ScaleDown | SettingsHit::ScaleUp => {
+                self.step_primary_display_scale(matches!(hit, SettingsHit::ScaleUp));
+            }
+            SettingsHit::CycleRotation => {
+                let primary = self.output_map.primary();
+                let id = primary.id;
+                let name = primary.name.clone();
+                let next_rot = match primary.rotation {
+                    DisplayRotation::Rotate0 => DisplayRotation::Rotate90,
+                    DisplayRotation::Rotate90 => DisplayRotation::Rotate180,
+                    DisplayRotation::Rotate180 => DisplayRotation::Rotate270,
+                    DisplayRotation::Rotate270 => DisplayRotation::Rotate0,
+                };
+                self.rotation_override = None;
+                let use_winit_flip = name.eq_ignore_ascii_case("winit-0");
+                self.user_config.output_rotations.insert(name, next_rot);
+                if self.output_map.entries().len() == 1 {
+                    self.user_config.display_rotation = next_rot;
+                }
+                self.set_output_rotation(id, next_rot, use_winit_flip);
+                self.sync_and_save_user_config();
+            }
+            SettingsHit::CycleVrrMode => {
+                self.user_config.vrr_mode = match self.user_config.vrr_mode {
+                    VrrMode::Off => VrrMode::Fullscreen,
+                    VrrMode::Fullscreen => VrrMode::Always,
+                    VrrMode::Always => VrrMode::Off,
+                };
+                self.sync_and_save_user_config();
+            }
+            SettingsHit::TogglePreferMaxRefresh => {
+                self.user_config.prefer_max_refresh = !self.user_config.prefer_max_refresh;
+                self.sync_and_save_user_config();
+            }
+            SettingsHit::ToggleRequirePassword => {
+                self.user_config.require_password_on_lock =
+                    !self.user_config.require_password_on_lock;
+                self.sync_and_save_user_config();
+            }
+            SettingsHit::ToggleLockOnSleep => {
+                self.user_config.lock_on_sleep = !self.user_config.lock_on_sleep;
+                self.sync_and_save_user_config();
+            }
+            SettingsHit::TogglePolkitAgent => {
+                self.user_config.enable_polkit_agent = !self.user_config.enable_polkit_agent;
+                self.sync_and_save_user_config();
+            }
+            SettingsHit::ReloadConfig => {
+                let _ = self.reload_user_config();
+            }
+            SettingsHit::Close | SettingsHit::Outside => self.close_settings(),
+            SettingsHit::ModalBody => {}
+        }
+    }
+
+    fn step_primary_display_scale(&mut self, increase: bool) {
+        const SCALE_PRESETS: [f64; 4] = [1.0, 1.25, 1.5, 2.0];
+        let primary = self.output_map.primary();
+        let id = primary.id;
+        let name = primary.name.clone();
+        let phys = primary.physical_size;
+        let refresh = primary.refresh_milli_hz;
+        let cur = primary.scale;
+
+        let nearest = SCALE_PRESETS
+            .iter()
+            .enumerate()
+            .min_by(|(_, a), (_, b)| {
+                (*a - cur)
+                    .abs()
+                    .partial_cmp(&(*b - cur).abs())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .map_or(0, |(idx, _)| idx);
+        let next_idx = if increase {
+            (nearest + 1).min(SCALE_PRESETS.len() - 1)
+        } else {
+            nearest.saturating_sub(1)
+        };
+        let next_scale = SCALE_PRESETS[next_idx];
+        self.user_config.output_scales.insert(name, next_scale);
+        if self.output_map.entries().len() == 1 {
+            self.user_config.display_scale = next_scale;
+        }
+        self.update_output_geometry(id, phys, next_scale, refresh);
+        self.sync_and_save_user_config();
     }
 }

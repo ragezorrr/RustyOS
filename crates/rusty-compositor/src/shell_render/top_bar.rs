@@ -180,6 +180,10 @@ pub enum TopBarMenuHit {
 pub enum TopBarMenuAction {
     /// Show concise RustyOS notification card.
     AboutRustyOs,
+    /// Open built-in System Settings overlay (`Super+,`) (`RUSTYOS-061`).
+    OpenSettings,
+    /// Reload `~/.config/rustyos/config.toml` immediately (`Super+Shift+R`) (`RUSTYOS-061`).
+    ReloadConfig,
     /// Show concise keyboard shortcuts reference card (`RUSTYOS-049`).
     ShowShortcuts,
     /// Toggle Workspace Overview.
@@ -859,6 +863,19 @@ pub(super) const MENU_SYSTEM: &[TopBarMenuEntry] = &[
     },
     TopBarMenuEntry::Separator,
     TopBarMenuEntry::Item {
+        label: "System Settings...",
+        icon: crate::surfaces::UiGlyphKind::ControlCenter,
+        shortcut: Some("Super+,"),
+        action: TopBarMenuAction::OpenSettings,
+    },
+    TopBarMenuEntry::Item {
+        label: "Reload Config",
+        icon: crate::surfaces::UiGlyphKind::Refresh,
+        shortcut: Some("Super+Shift+R"),
+        action: TopBarMenuAction::ReloadConfig,
+    },
+    TopBarMenuEntry::Separator,
+    TopBarMenuEntry::Item {
         label: "Workspace Overview",
         icon: crate::surfaces::UiGlyphKind::Grid,
         shortcut: Some("Super+Tab"),
@@ -1076,6 +1093,8 @@ pub const fn top_bar_menu_items(
     match menu {
         TopBarMenuHit::SystemLogo => &[
             ("About RustyOS", TopBarMenuAction::AboutRustyOs),
+            ("System Settings...", TopBarMenuAction::OpenSettings),
+            ("Reload Config", TopBarMenuAction::ReloadConfig),
             ("Workspace Overview", TopBarMenuAction::OpenOverview),
             ("Control Center", TopBarMenuAction::OpenControlCenter),
             ("Lock Screen", TopBarMenuAction::LockSession),

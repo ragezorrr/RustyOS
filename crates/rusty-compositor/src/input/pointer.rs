@@ -333,6 +333,16 @@ impl RustyCompositorState {
                 return;
             }
 
+            if self.settings_active {
+                let output_phys = self
+                    .space
+                    .output_geometry(&self.output)
+                    .map_or_else(|| Size::from((1280, 800)), |geo| geo.size)
+                    .to_physical(1);
+                self.handle_settings_pointer_click(output_phys);
+                return;
+            }
+
             let output_width = self
                 .space
                 .output_geometry(&self.output)

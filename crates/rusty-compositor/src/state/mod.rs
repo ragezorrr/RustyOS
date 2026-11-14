@@ -355,6 +355,8 @@ pub struct RustyCompositorState {
     pub xwayland_display: Option<u32>,
     /// Persistent user configuration loaded from `~/.config/rustyos/config.toml` (`RUSTYOS-029`).
     pub user_config: crate::config::UserConfig,
+    /// Path used for atomic persistence and live reload (`None` in unit tests) (`RUSTYOS-061`).
+    pub config_path: Option<std::path::PathBuf>,
     /// Short active XKB layout label (`"EN"`, `"RU"`, etc.) displayed in `TopBar` (`RUSTYOS-029`).
     pub active_kbd_layout: String,
     /// `wl_shm` shared-memory buffer state.
@@ -467,6 +469,12 @@ pub struct RustyCompositorState {
     pub quick_settings_active: bool,
     /// Animated Quick Settings transition progress (`0.0` closed -> `1.0` open) (`RUSTYOS-025`).
     pub quick_settings_anim: AnimatedValue,
+    /// Whether the built-in System Settings modal overlay is open (`RUSTYOS-061`).
+    pub settings_active: bool,
+    /// Active left-sidebar category in System Settings (`RUSTYOS-061`).
+    pub settings_tab: crate::shell_render::SettingsTab,
+    /// Footer persistence badge (`""`, `"Saved"`, `"Reloaded"`, or `"Error"`) (`RUSTYOS-061`).
+    pub config_status_label: &'static str,
     /// Whether Focus (Do Not Disturb) notification popup suppression is active (`RUSTYOS-053`).
     pub focus_mode: bool,
     /// Non-blocking system telemetry & quick audio controls (`RUSTYOS-021`).
@@ -733,6 +741,7 @@ impl RustyCompositorState {
             x11_loop_handle: None,
             xwayland_display: None,
             user_config,
+            config_path: None,
             active_kbd_layout: "EN".to_owned(),
             shm_state,
             viewporter_state,
@@ -789,6 +798,9 @@ impl RustyCompositorState {
             launcher: crate::launcher::LauncherState::new(),
             quick_settings_active: false,
             quick_settings_anim: AnimatedValue::new_settled(0.0),
+            settings_active: false,
+            settings_tab: crate::shell_render::SettingsTab::Appearance,
+            config_status_label: "",
             focus_mode: false,
             telemetry: crate::telemetry::SystemMetricsHandle::static_default(),
             screen_locked: false,
@@ -1142,6 +1154,7 @@ impl RustyCompositorState {
             || self.launcher_active
             || self.overview_active
             || self.quick_settings_active
+            || self.settings_active
             || self.window_switcher.is_some()
             || self.active_window_drag.is_some()
             || self.active_window_resize.is_some()
@@ -1716,6 +1729,7 @@ impl RustyCompositorState {
             let interactive_shell_open = self.launcher_active
                 || self.quick_settings_active
                 || self.overview_active
+                || self.settings_active
                 || self.launcher_anim.current() > 0.01
                 || self.quick_settings_anim.current() > 0.01
                 || self.overview_anim.current() > 0.01;
@@ -1743,6 +1757,7 @@ impl RustyCompositorState {
             let overlay_active = self.launcher_active
                 || self.quick_settings_active
                 || self.overview_active
+                || self.settings_active
                 || self.window_switcher.is_some()
                 || self.polkit_prompt.is_some()
                 || self.portal_prompt.is_some()

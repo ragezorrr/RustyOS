@@ -883,3 +883,783 @@ pub(super) fn render_pick_color_composite(
         Some((12, 42)),
     );
 }
+
+/// Active sidebar category inside the built-in System Settings modal (`RUSTYOS-061`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SettingsTab {
+    /// Frosted glass opacity, reduce transparency, and reduced motion.
+    #[default]
+    Appearance,
+    /// Menu Bar indicators and clock format.
+    MenuBar,
+    /// `HiDPI` scale presets, output rotation, VRR policy, and max refresh rate.
+    Displays,
+    /// Lock screen authentication, lock-on-sleep, and `PolicyKit` agent.
+    Security,
+}
+
+impl SettingsTab {
+    /// Ordered sidebar tabs displayed in System Settings.
+    pub const ALL: [Self; 4] = [
+        Self::Appearance,
+        Self::MenuBar,
+        Self::Displays,
+        Self::Security,
+    ];
+
+    /// Human-readable sidebar & header title.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Appearance => "Appearance",
+            Self::MenuBar => "Menu Bar",
+            Self::Displays => "Displays",
+            Self::Security => "Security",
+        }
+    }
+
+    const fn icon(self) -> crate::surfaces::UiGlyphKind {
+        match self {
+            Self::Appearance => crate::surfaces::UiGlyphKind::Transparency,
+            Self::MenuBar => crate::surfaces::UiGlyphKind::ControlCenter,
+            Self::Displays => crate::surfaces::UiGlyphKind::WindowMax,
+            Self::Security => crate::surfaces::UiGlyphKind::Lock,
+        }
+    }
+
+    /// Next category in wrap-around order.
+    #[must_use]
+    pub const fn next(self) -> Self {
+        match self {
+            Self::Appearance => Self::MenuBar,
+            Self::MenuBar => Self::Displays,
+            Self::Displays => Self::Security,
+            Self::Security => Self::Appearance,
+        }
+    }
+
+    /// Previous category in wrap-around order.
+    #[must_use]
+    pub const fn prev(self) -> Self {
+        match self {
+            Self::Appearance => Self::Security,
+            Self::MenuBar => Self::Appearance,
+            Self::Displays => Self::MenuBar,
+            Self::Security => Self::Displays,
+        }
+    }
+}
+
+/// Snapshot passed to the System Settings renderer (`RUSTYOS-061`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct SettingsRenderState<'a> {
+    /// Active left-sidebar category tab.
+    pub active_tab: SettingsTab,
+    /// Shell glass opacity factor (`0.35..=1.0`).
+    pub glass_opacity: f32,
+    /// High-contrast opaque shell panels toggle.
+    pub reduce_transparency: bool,
+    /// Reduced motion / instant animations toggle.
+    pub reduced_motion: bool,
+    /// Show Menu Bar workspace strip.
+    pub menubar_show_workspaces: bool,
+    /// Show Menu Bar `StatusNotifier` tray icons.
+    pub menubar_show_tray: bool,
+    /// Show Menu Bar input source indicator (`EN`/`RU`).
+    pub menubar_show_input_source: bool,
+    /// Show Menu Bar standalone volume glyph.
+    pub menubar_show_volume: bool,
+    /// Use 24-hour Menu Bar clock format.
+    pub clock_24h: bool,
+    /// Primary connected display name (e.g. `"Winit-1"` or `"eDP-1"`).
+    pub primary_connector: &'a str,
+    /// Active `HiDPI` scale for the primary output.
+    pub display_scale: f64,
+    /// Active orientation for the primary output.
+    pub display_rotation: crate::config::DisplayRotation,
+    /// Global Adaptive Sync / VRR policy.
+    pub vrr_mode: crate::config::VrrMode,
+    /// Prefer max supported mode refresh rate on DRM/KMS.
+    pub prefer_max_refresh: bool,
+    /// Require PAM password when unlocking the Lock Screen.
+    pub require_password_on_lock: bool,
+    /// Automatically lock session on logind sleep.
+    pub lock_on_sleep: bool,
+    /// Enable native `PolicyKit` authentication agent.
+    pub enable_polkit_agent: bool,
+    /// Footer persistence badge (e.g. `"Saved"`, `"Reloaded"`, or `""`).
+    pub config_status_label: &'a str,
+}
+
+/// Interactive click targets inside the System Settings modal (`RUSTYOS-061`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsHit {
+    /// Switch active sidebar category.
+    SelectTab(SettingsTab),
+    /// Decrease frosted glass opacity.
+    GlassOpacityDown,
+    /// Increase frosted glass opacity.
+    GlassOpacityUp,
+    /// Toggle `reduce_transparency`.
+    ToggleReduceTransparency,
+    /// Toggle `reduced_motion`.
+    ToggleReducedMotion,
+    /// Toggle `menubar_show_workspaces`.
+    ToggleMenuWorkspaces,
+    /// Toggle `menubar_show_tray`.
+    ToggleMenuTray,
+    /// Toggle `menubar_show_input_source`.
+    ToggleMenuInputSource,
+    /// Toggle `menubar_show_volume`.
+    ToggleMenuVolume,
+    /// Toggle `clock_24h`.
+    ToggleClock24h,
+    /// Step display `HiDPI` scale down.
+    ScaleDown,
+    /// Step display `HiDPI` scale up.
+    ScaleUp,
+    /// Cycle display rotation (`0° -> 90° -> 180° -> 270°`).
+    CycleRotation,
+    /// Cycle Adaptive Sync / VRR mode (`Off -> Fullscreen -> Always`).
+    CycleVrrMode,
+    /// Toggle `prefer_max_refresh`.
+    TogglePreferMaxRefresh,
+    /// Toggle `require_password_on_lock`.
+    ToggleRequirePassword,
+    /// Toggle `lock_on_sleep`.
+    ToggleLockOnSleep,
+    /// Toggle `enable_polkit_agent`.
+    TogglePolkitAgent,
+    /// Reload `~/.config/rustyos/config.toml` from disk.
+    ReloadConfig,
+    /// Close System Settings overlay (`×` or `Done`).
+    Close,
+    /// Empty space inside the settings window (does not dismiss).
+    ModalBody,
+    /// Click outside the modal bounds (dismisses overlay).
+    Outside,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SettingsModalLayout {
+    modal: Rectangle<i32, smithay::utils::Physical>,
+    badge: Rectangle<i32, smithay::utils::Physical>,
+    close_btn: Rectangle<i32, smithay::utils::Physical>,
+    tabs: [Rectangle<i32, smithay::utils::Physical>; 4],
+    divider_x: i32,
+    content_x: i32,
+    rows: [Rectangle<i32, smithay::utils::Physical>; 5],
+    reload_btn: Rectangle<i32, smithay::utils::Physical>,
+    done_btn: Rectangle<i32, smithay::utils::Physical>,
+}
+
+fn settings_modal_layout(screen_size: Size<i32, smithay::utils::Physical>) -> SettingsModalLayout {
+    let w = 580.min((screen_size.w - 32).max(380));
+    let h = 432.min((screen_size.h - TOP_BAR_HEIGHT - 24).max(320));
+    let x = (screen_size.w - w) / 2;
+    let y = ((screen_size.h - h) / 2).max(TOP_BAR_HEIGHT + 10);
+
+    let modal = Rectangle::new(Point::from((x, y)), Size::from((w, h)));
+    let badge = Rectangle::new(Point::from((x + 20, y + 16)), Size::from((34, 34)));
+    let close_btn = Rectangle::new(Point::from((x + w - 44, y + 20)), Size::from((26, 26)));
+
+    let tabs = std::array::from_fn(|idx| {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        let ry = y + 70 + (idx as i32) * 44;
+        Rectangle::new(Point::from((x + 18, ry)), Size::from((152, 36)))
+    });
+
+    let divider_x = x + 184;
+    let content_x = x + 198;
+    let content_w = (w - 218).max(160);
+    let rows = std::array::from_fn(|idx| {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+        let ry = y + 98 + (idx as i32) * 52;
+        Rectangle::new(Point::from((content_x, ry)), Size::from((content_w, 44)))
+    });
+
+    let done_btn = Rectangle::new(Point::from((x + w - 98, y + h - 50)), Size::from((78, 32)));
+    let reload_btn = Rectangle::new(
+        Point::from((done_btn.loc.x - 122, y + h - 50)),
+        Size::from((112, 32)),
+    );
+
+    SettingsModalLayout {
+        modal,
+        badge,
+        close_btn,
+        tabs,
+        divider_x,
+        content_x,
+        rows,
+        reload_btn,
+        done_btn,
+    }
+}
+
+fn settings_row_pill_rect(
+    row: Rectangle<i32, smithay::utils::Physical>,
+) -> Rectangle<i32, smithay::utils::Physical> {
+    Rectangle::new(
+        Point::from((row.loc.x + row.size.w - 110, row.loc.y + 8)),
+        Size::from((100, 28)),
+    )
+}
+
+fn settings_row_stepper_rects(
+    row: Rectangle<i32, smithay::utils::Physical>,
+) -> (
+    Rectangle<i32, smithay::utils::Physical>,
+    Rectangle<i32, smithay::utils::Physical>,
+    Rectangle<i32, smithay::utils::Physical>,
+) {
+    let plus = Rectangle::new(
+        Point::from((row.loc.x + row.size.w - 38, row.loc.y + 8)),
+        Size::from((28, 28)),
+    );
+    let value_box = Rectangle::new(
+        Point::from((plus.loc.x - 62, row.loc.y + 8)),
+        Size::from((56, 28)),
+    );
+    let minus = Rectangle::new(
+        Point::from((value_box.loc.x - 34, row.loc.y + 8)),
+        Size::from((28, 28)),
+    );
+    (minus, value_box, plus)
+}
+
+enum SettingsRowKind {
+    Stepper {
+        down: SettingsHit,
+        up: SettingsHit,
+        value: String,
+    },
+    Toggle {
+        hit: SettingsHit,
+        value: &'static str,
+        active: bool,
+    },
+}
+
+struct SettingsRowEntry {
+    label: String,
+    kind: SettingsRowKind,
+}
+
+fn toggle_row(label: impl Into<String>, hit: SettingsHit, active: bool) -> SettingsRowEntry {
+    SettingsRowEntry {
+        label: label.into(),
+        kind: SettingsRowKind::Toggle {
+            hit,
+            value: if active { "On" } else { "Off" },
+            active,
+        },
+    }
+}
+
+fn settings_tab_rows(st: &SettingsRenderState<'_>) -> Vec<SettingsRowEntry> {
+    match st.active_tab {
+        SettingsTab::Appearance => settings_appearance_rows(st),
+        SettingsTab::MenuBar => vec![
+            toggle_row(
+                "Workspace Strip",
+                SettingsHit::ToggleMenuWorkspaces,
+                st.menubar_show_workspaces,
+            ),
+            toggle_row(
+                "Tray Applets",
+                SettingsHit::ToggleMenuTray,
+                st.menubar_show_tray,
+            ),
+            toggle_row(
+                "Input Source Badge",
+                SettingsHit::ToggleMenuInputSource,
+                st.menubar_show_input_source,
+            ),
+            toggle_row(
+                "Volume Indicator",
+                SettingsHit::ToggleMenuVolume,
+                st.menubar_show_volume,
+            ),
+            toggle_row("24-Hour Clock", SettingsHit::ToggleClock24h, st.clock_24h),
+        ],
+        SettingsTab::Displays => settings_display_rows(st),
+        SettingsTab::Security => vec![
+            toggle_row(
+                "Require Password on Lock",
+                SettingsHit::ToggleRequirePassword,
+                st.require_password_on_lock,
+            ),
+            toggle_row(
+                "Lock Screen on Sleep",
+                SettingsHit::ToggleLockOnSleep,
+                st.lock_on_sleep,
+            ),
+            toggle_row(
+                "Built-in Polkit Agent",
+                SettingsHit::TogglePolkitAgent,
+                st.enable_polkit_agent,
+            ),
+        ],
+    }
+}
+
+fn settings_appearance_rows(st: &SettingsRenderState<'_>) -> Vec<SettingsRowEntry> {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let pct = (crate::config::clamp_glass_opacity(st.glass_opacity) * 100.0).round() as u32;
+    vec![
+        SettingsRowEntry {
+            label: "Glass Opacity".to_owned(),
+            kind: SettingsRowKind::Stepper {
+                down: SettingsHit::GlassOpacityDown,
+                up: SettingsHit::GlassOpacityUp,
+                value: format!("{pct}%"),
+            },
+        },
+        toggle_row(
+            "Reduce Transparency",
+            SettingsHit::ToggleReduceTransparency,
+            st.reduce_transparency,
+        ),
+        toggle_row(
+            "Reduce Motion",
+            SettingsHit::ToggleReducedMotion,
+            st.reduced_motion,
+        ),
+    ]
+}
+
+fn settings_display_rows(st: &SettingsRenderState<'_>) -> Vec<SettingsRowEntry> {
+    let conn = truncate_ascii(st.primary_connector, 12);
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let scale_pct = (crate::config::clamp_display_scale(st.display_scale) * 100.0).round() as u32;
+    let vrr_label = match st.vrr_mode {
+        crate::config::VrrMode::Off => "Off",
+        crate::config::VrrMode::Fullscreen => "Fullscreen",
+        crate::config::VrrMode::Always => "Always",
+    };
+    let rot_label = match st.display_rotation {
+        crate::config::DisplayRotation::Rotate0 => "0°",
+        crate::config::DisplayRotation::Rotate90 => "90°",
+        crate::config::DisplayRotation::Rotate180 => "180°",
+        crate::config::DisplayRotation::Rotate270 => "270°",
+    };
+    vec![
+        SettingsRowEntry {
+            label: format!("HiDPI Scale ({conn})"),
+            kind: SettingsRowKind::Stepper {
+                down: SettingsHit::ScaleDown,
+                up: SettingsHit::ScaleUp,
+                value: format!("{scale_pct}%"),
+            },
+        },
+        SettingsRowEntry {
+            label: "Rotation".to_owned(),
+            kind: SettingsRowKind::Toggle {
+                hit: SettingsHit::CycleRotation,
+                value: rot_label,
+                active: st.display_rotation != crate::config::DisplayRotation::Rotate0,
+            },
+        },
+        SettingsRowEntry {
+            label: "Adaptive Sync (VRR)".to_owned(),
+            kind: SettingsRowKind::Toggle {
+                hit: SettingsHit::CycleVrrMode,
+                value: vrr_label,
+                active: st.vrr_mode != crate::config::VrrMode::Off,
+            },
+        },
+        toggle_row(
+            "Prefer Max Refresh",
+            SettingsHit::TogglePreferMaxRefresh,
+            st.prefer_max_refresh,
+        ),
+    ]
+}
+
+/// Hit-tests pointer coordinates against the System Settings modal (`RUSTYOS-061`).
+#[must_use]
+pub fn hit_test_settings_modal(
+    screen_size: Size<i32, smithay::utils::Physical>,
+    state: &SettingsRenderState<'_>,
+    x: f64,
+    y: f64,
+) -> SettingsHit {
+    let layout = settings_modal_layout(screen_size);
+    if !rect_contains(layout.modal, x, y) {
+        return SettingsHit::Outside;
+    }
+    if rect_contains(layout.close_btn, x, y) || rect_contains(layout.done_btn, x, y) {
+        return SettingsHit::Close;
+    }
+    if rect_contains(layout.reload_btn, x, y) {
+        return SettingsHit::ReloadConfig;
+    }
+    for (tab, rect) in SettingsTab::ALL.iter().zip(layout.tabs) {
+        if rect_contains(rect, x, y) {
+            return SettingsHit::SelectTab(*tab);
+        }
+    }
+    for (entry, row_rect) in settings_tab_rows(state).iter().zip(layout.rows) {
+        match &entry.kind {
+            SettingsRowKind::Stepper { down, up, .. } => {
+                let (minus, _, plus) = settings_row_stepper_rects(row_rect);
+                if rect_contains(minus, x, y) {
+                    return *down;
+                }
+                if rect_contains(plus, x, y) {
+                    return *up;
+                }
+            }
+            SettingsRowKind::Toggle { hit, .. } => {
+                if rect_contains(settings_row_pill_rect(row_rect), x, y) {
+                    return *hit;
+                }
+            }
+        }
+    }
+    SettingsHit::ModalBody
+}
+
+pub(super) fn render_settings_text(
+    text_cache: &mut crate::text::TextCache,
+    renderer: &mut GlesRenderer,
+    screen_size: Size<i32, smithay::utils::Physical>,
+    st: &SettingsRenderState<'_>,
+    elements: &mut Vec<MemoryRenderBufferRenderElement<GlesRenderer>>,
+) {
+    let layout = settings_modal_layout(screen_size);
+    let modal = layout.modal;
+
+    if let Some(el) = text_cache.render_label_weighted(
+        renderer,
+        "System Settings",
+        crate::text::FontWeight::Bold,
+        15.0,
+        [248, 244, 255, 255],
+        Point::from((layout.badge.loc.x + 44, layout.badge.loc.y + 8)),
+    ) {
+        elements.push(el);
+    }
+
+    for (tab, rect) in SettingsTab::ALL.iter().zip(layout.tabs) {
+        let selected = *tab == st.active_tab;
+        let col = if selected {
+            [250, 248, 255, 255]
+        } else {
+            [202, 194, 224, 235]
+        };
+        if let Some(el) = text_cache.render_label_weighted(
+            renderer,
+            tab.label(),
+            if selected {
+                crate::text::FontWeight::Bold
+            } else {
+                crate::text::FontWeight::Regular
+            },
+            12.5,
+            col,
+            Point::from((rect.loc.x + 34, rect.loc.y + 10)),
+        ) {
+            elements.push(el);
+        }
+    }
+
+    if let Some(el) = text_cache.render_label_weighted(
+        renderer,
+        st.active_tab.label(),
+        crate::text::FontWeight::Bold,
+        14.0,
+        [248, 244, 255, 255],
+        Point::from((layout.content_x + 2, modal.loc.y + 68)),
+    ) {
+        elements.push(el);
+    }
+
+    render_settings_rows_text(text_cache, renderer, &layout, st, elements);
+    render_settings_footer_text(text_cache, renderer, &layout, st, elements);
+}
+
+fn render_settings_rows_text(
+    text_cache: &mut crate::text::TextCache,
+    renderer: &mut GlesRenderer,
+    layout: &SettingsModalLayout,
+    st: &SettingsRenderState<'_>,
+    elements: &mut Vec<MemoryRenderBufferRenderElement<GlesRenderer>>,
+) {
+    for (entry, row) in settings_tab_rows(st).iter().zip(layout.rows) {
+        if let Some(el) = text_cache.render_label(
+            renderer,
+            &entry.label,
+            12.5,
+            [236, 230, 248, 255],
+            Point::from((row.loc.x + 14, row.loc.y + 14)),
+        ) {
+            elements.push(el);
+        }
+        match &entry.kind {
+            SettingsRowKind::Stepper { value, .. } => {
+                let (minus, value_box, plus) = settings_row_stepper_rects(row);
+                for (rect, label) in [(minus, "-"), (value_box, value.as_str()), (plus, "+")] {
+                    if let Some(el) = text_cache.render_label_centered_weighted(
+                        renderer,
+                        label,
+                        crate::text::FontWeight::Bold,
+                        12.0,
+                        [248, 244, 255, 255],
+                        phys_to_logical_rect(rect),
+                    ) {
+                        elements.push(el);
+                    }
+                }
+            }
+            SettingsRowKind::Toggle { value, active, .. } => {
+                let pill = settings_row_pill_rect(row);
+                let fg = if *active {
+                    [252, 250, 255, 255]
+                } else {
+                    [214, 206, 232, 240]
+                };
+                if let Some(el) = text_cache.render_label_centered_weighted(
+                    renderer,
+                    value,
+                    crate::text::FontWeight::Bold,
+                    11.5,
+                    fg,
+                    phys_to_logical_rect(pill),
+                ) {
+                    elements.push(el);
+                }
+            }
+        }
+    }
+}
+
+fn render_settings_footer_text(
+    text_cache: &mut crate::text::TextCache,
+    renderer: &mut GlesRenderer,
+    layout: &SettingsModalLayout,
+    st: &SettingsRenderState<'_>,
+    elements: &mut Vec<MemoryRenderBufferRenderElement<GlesRenderer>>,
+) {
+    let status = if st.config_status_label.is_empty() {
+        "~/.config/rustyos/config.toml".to_owned()
+    } else {
+        truncate_ascii(&format!("config.toml · {}", st.config_status_label), 38)
+    };
+    if let Some(el) = text_cache.render_label(
+        renderer,
+        &status,
+        11.0,
+        [176, 166, 204, 225],
+        Point::from((
+            layout.modal.loc.x + 22,
+            layout.modal.loc.y + layout.modal.size.h - 40,
+        )),
+    ) {
+        elements.push(el);
+    }
+
+    for (rect, label, bold_fg) in [
+        (layout.reload_btn, "Reload TOML", [238, 232, 248, 255]),
+        (layout.done_btn, "Done", [252, 250, 255, 255]),
+    ] {
+        if let Some(el) = text_cache.render_label_centered_weighted(
+            renderer,
+            label,
+            crate::text::FontWeight::Bold,
+            12.0,
+            bold_fg,
+            phys_to_logical_rect(rect),
+        ) {
+            elements.push(el);
+        }
+    }
+}
+
+pub(super) fn render_settings_composite(
+    out: &mut Vec<CompositorRenderElement>,
+    shape_cache: &mut crate::surfaces::UiShapeCache,
+    renderer: &mut GlesRenderer,
+    screen_size: Size<i32, smithay::utils::Physical>,
+    top_telemetry: &TopBarTelemetry<'_>,
+    st: &SettingsRenderState<'_>,
+) {
+    let layout = settings_modal_layout(screen_size);
+    let modal = layout.modal;
+
+    // Icons pushed before panel boxes so glyphs composite above backgrounds.
+    if let Some(el) = shape_cache.ui_glyph_element(
+        renderer,
+        crate::surfaces::UiGlyphKind::ControlCenter,
+        18,
+        [248, 244, 255, 255],
+        Point::from((layout.badge.loc.x + 8, layout.badge.loc.y + 8)),
+    ) {
+        out.push(CompositorRenderElement::Memory(el));
+    }
+    if let Some(el) = shape_cache.ui_glyph_element(
+        renderer,
+        crate::surfaces::UiGlyphKind::Close,
+        12,
+        [240, 234, 248, 240],
+        Point::from((layout.close_btn.loc.x + 7, layout.close_btn.loc.y + 7)),
+    ) {
+        out.push(CompositorRenderElement::Memory(el));
+    }
+    for (tab, rect) in SettingsTab::ALL.iter().zip(layout.tabs) {
+        let fg = if *tab == st.active_tab {
+            [252, 250, 255, 255]
+        } else {
+            [196, 188, 220, 230]
+        };
+        if let Some(el) = shape_cache.ui_glyph_element(
+            renderer,
+            tab.icon(),
+            16,
+            fg,
+            Point::from((rect.loc.x + 10, rect.loc.y + 10)),
+        ) {
+            out.push(CompositorRenderElement::Memory(el));
+        }
+    }
+
+    push_rounded_glass_box(
+        out,
+        shape_cache,
+        renderer,
+        layout.badge,
+        10,
+        [165, 110, 255, 210],
+        Some([215, 185, 255, 160]),
+    );
+    push_rounded_glass_box(
+        out,
+        shape_cache,
+        renderer,
+        layout.close_btn,
+        13,
+        RGBA_SURFACE,
+        Some(RGBA_BORDER),
+    );
+
+    render_settings_controls_composite(out, shape_cache, renderer, &layout, top_telemetry, st);
+
+    push_rounded_glass_box(
+        out,
+        shape_cache,
+        renderer,
+        layout.reload_btn,
+        10,
+        RGBA_SURFACE,
+        Some(RGBA_BORDER),
+    );
+    push_rounded_glass_box(
+        out,
+        shape_cache,
+        renderer,
+        layout.done_btn,
+        10,
+        [165, 110, 255, 224],
+        Some([215, 185, 255, 185]),
+    );
+
+    out.push(CompositorRenderElement::Solid(make_solid_element(
+        Rectangle::new(
+            Point::from((layout.divider_x, modal.loc.y + 66)),
+            Size::from((1, (modal.size.h - 130).max(40))),
+        ),
+        premul(1.0, 1.0, 1.0, 0.12),
+    )));
+
+    push_liquid_glass_panel(
+        out,
+        shape_cache,
+        renderer,
+        modal,
+        WINDOW_RADIUS,
+        crate::surfaces::GlassPanelStyle::Popover,
+        top_telemetry.glass_opacity,
+        top_telemetry.reduce_transparency,
+        Some((22, 62)),
+    );
+
+    out.push(CompositorRenderElement::Solid(make_solid_element(
+        Rectangle::new(Point::from((0, 0)), screen_size),
+        premul(0.059, 0.039, 0.098, 0.42),
+    )));
+}
+
+fn render_settings_controls_composite(
+    out: &mut Vec<CompositorRenderElement>,
+    shape_cache: &mut crate::surfaces::UiShapeCache,
+    renderer: &mut GlesRenderer,
+    layout: &SettingsModalLayout,
+    top_telemetry: &TopBarTelemetry<'_>,
+    st: &SettingsRenderState<'_>,
+) {
+    for (entry, row) in settings_tab_rows(st).iter().zip(layout.rows) {
+        match &entry.kind {
+            SettingsRowKind::Stepper { .. } => {
+                let (minus, value_box, plus) = settings_row_stepper_rects(row);
+                for (btn, fill) in [
+                    (minus, [56, 46, 82, 220]),
+                    (value_box, [34, 26, 52, 210]),
+                    (plus, [56, 46, 82, 220]),
+                ] {
+                    push_rounded_glass_box(
+                        out,
+                        shape_cache,
+                        renderer,
+                        btn,
+                        8,
+                        fill,
+                        Some(RGBA_BORDER),
+                    );
+                }
+            }
+            SettingsRowKind::Toggle { active, .. } => {
+                let pill = settings_row_pill_rect(row);
+                let (fill, border) = if *active {
+                    ([165, 110, 255, 220], [215, 185, 255, 185])
+                } else {
+                    ([46, 38, 66, 205], RGBA_BORDER)
+                };
+                push_rounded_glass_box(out, shape_cache, renderer, pill, 10, fill, Some(border));
+            }
+        }
+        push_rounded_glass_box(
+            out,
+            shape_cache,
+            renderer,
+            row,
+            11,
+            scale_glass_rgba(
+                [30, 23, 46, 175],
+                top_telemetry.glass_opacity,
+                top_telemetry.reduce_transparency,
+            ),
+            Some(RGBA_BORDER),
+        );
+    }
+
+    for (tab, rect) in SettingsTab::ALL.iter().zip(layout.tabs) {
+        let selected = *tab == st.active_tab;
+        let fill = if selected {
+            [165, 110, 255, 195]
+        } else {
+            scale_glass_rgba(
+                [34, 26, 52, 120],
+                top_telemetry.glass_opacity,
+                top_telemetry.reduce_transparency,
+            )
+        };
+        let border = if selected {
+            Some([215, 185, 255, 175])
+        } else {
+            None
+        };
+        push_rounded_glass_box(out, shape_cache, renderer, rect, 10, fill, border);
+    }
+}

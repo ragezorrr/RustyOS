@@ -791,6 +791,8 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
                 selected: p.selected,
             });
 
+        let settings_view = state.settings_active.then(|| state.settings_render_state());
+
         let overlay = if let Some(pk) = polkit_view.as_ref() {
             ShellOverlayView::Polkit(pk)
         } else if let Some(pt) = portal_view.as_ref() {
@@ -799,6 +801,8 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
             ShellOverlayView::Switcher(sw)
         } else if let Some(spot) = spotlight_view.as_ref() {
             ShellOverlayView::Spotlight(spot)
+        } else if let Some(settings) = settings_view.as_ref() {
+            ShellOverlayView::Settings(settings)
         } else if let Some(qs) = qs_view.as_ref() {
             ShellOverlayView::QuickSettings(qs)
         } else if let Some(ov) = ov_view.as_ref() {
