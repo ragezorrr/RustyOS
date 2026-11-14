@@ -148,6 +148,8 @@ impl CompositorHandler for RustyCompositorState {
         self.popups.commit(surface);
         self.cleanup_ime_popups();
         self.commit_layer_surface(surface);
+        self.shell_redraw_needed = true;
+        self.client_surface_committed = true;
     }
 }
 

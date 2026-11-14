@@ -35,6 +35,11 @@ impl RustyCompositorState {
         std::mem::take(&mut self.shell_redraw_needed)
     }
 
+    /// Returns `true` and clears the pending Wayland client surface commit flag.
+    pub(crate) fn take_client_surface_committed(&mut self) -> bool {
+        std::mem::take(&mut self.client_surface_committed)
+    }
+
     /// Resolves the active account username selected on the Lock Screen (`RUSTYOS-056`).
     #[must_use]
     pub fn selected_lock_username(&self) -> String {

@@ -855,3 +855,31 @@ fn dock_and_context_menu_route_file_management_to_rusty_files() -> Result<(), Bo
     let _ = std::fs::remove_dir_all(&temp_dir);
     Ok(())
 }
+
+#[test]
+fn has_active_compositor_animations_tracks_control_center_and_lock_screen()
+-> Result<(), Box<dyn Error>> {
+    let mut display: Display<RustyCompositorState> = Display::new()?;
+    let mut event_loop: EventLoop<RustyCompositorState> = EventLoop::try_new()?;
+    let mut compositor = RustyCompositorState::new(
+        &display,
+        "wayland-rustyos-shell-anim-test".to_owned(),
+        event_loop.get_signal(),
+        event_loop.handle(),
+        (1280, 800).into(),
+    )?;
+    let _ = (&mut display, &mut event_loop);
+
+    assert!(!compositor.has_active_compositor_animations());
+
+    compositor.toggle_quick_settings();
+    assert!(compositor.quick_settings_anim.is_active());
+    assert!(compositor.has_active_compositor_animations());
+    compositor.quick_settings_anim = rusty_animation::AnimatedValue::new_settled(1.0);
+    assert!(!compositor.has_active_compositor_animations());
+
+    compositor.set_screen_locked(true, smithay::utils::SERIAL_COUNTER.next_serial());
+    assert!(compositor.lock_screen_anim.is_active());
+    assert!(compositor.has_active_compositor_animations());
+    Ok(())
+}

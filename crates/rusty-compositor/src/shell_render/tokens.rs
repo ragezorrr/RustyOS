@@ -1,5 +1,8 @@
 //! Liquid Glass design tokens, layout constants, geometry helpers, and SDF panel primitives.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+
 use smithay::backend::renderer::Color32F;
 use smithay::backend::renderer::element::solid::SolidColorRenderElement;
 use smithay::backend::renderer::element::{Id, Kind};
@@ -8,6 +11,53 @@ use smithay::backend::renderer::utils::CommitCounter;
 use smithay::utils::{Point, Rectangle, Size};
 
 use super::CompositorRenderElement;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct SolidSlotKey {
+    output_id: u32,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    occurrence: u16,
+}
+
+#[derive(Debug)]
+struct CachedSolidEntry {
+    id: Id,
+    commit: CommitCounter,
+    color_bits: [u32; 4],
+    last_epoch: u64,
+}
+
+#[derive(Debug, Default)]
+struct SolidElementCache {
+    active_output_id: u32,
+    epoch: u64,
+    frame_counts: HashMap<(i32, i32, i32, i32), u16>,
+    entries: HashMap<SolidSlotKey, CachedSolidEntry>,
+}
+
+thread_local! {
+    static SOLID_ELEMENT_CACHE: RefCell<SolidElementCache> = RefCell::new(SolidElementCache::default());
+}
+
+/// Resets per-frame solid element occurrence counters for `output_id` so unchanged shell chrome
+/// rectangles keep stable [`Id`] and [`CommitCounter`] values across frames.
+pub(crate) fn begin_solid_element_frame(output_id: u32) {
+    SOLID_ELEMENT_CACHE.with(|cache| {
+        let mut guard = cache.borrow_mut();
+        guard.active_output_id = output_id;
+        guard.epoch = guard.epoch.wrapping_add(1);
+        guard.frame_counts.clear();
+        let current_epoch = guard.epoch;
+        if current_epoch.is_multiple_of(32) {
+            guard
+                .entries
+                .retain(|_, entry| current_epoch.wrapping_sub(entry.last_epoch) <= 16);
+        }
+    });
+}
 
 pub(super) fn resolved_icon_to_element(
     icon: crate::icons::ResolvedIconElement,
@@ -117,17 +167,52 @@ pub fn usable_work_area(screen_size: Size<i32, smithay::utils::Physical>) -> rus
     rusty_wm::Rect::new(0, top_margin, screen_size.w, h)
 }
 
-pub(super) fn make_solid_element(
+pub(crate) fn make_solid_element(
     geo: Rectangle<i32, smithay::utils::Physical>,
     color: Color32F,
 ) -> SolidColorRenderElement {
-    SolidColorRenderElement::new(
-        Id::new(),
-        geo,
-        CommitCounter::default(),
-        color,
-        Kind::Unspecified,
-    )
+    let comps = color.components();
+    let color_bits = [
+        comps[0].to_bits(),
+        comps[1].to_bits(),
+        comps[2].to_bits(),
+        comps[3].to_bits(),
+    ];
+    let (id, commit) = SOLID_ELEMENT_CACHE.with(|cache| {
+        let mut guard = cache.borrow_mut();
+        let rect_tuple = (geo.loc.x, geo.loc.y, geo.size.w, geo.size.h);
+        let occ = {
+            let count = guard.frame_counts.entry(rect_tuple).or_insert(0);
+            let current = *count;
+            *count = count.saturating_add(1);
+            current
+        };
+        let key = SolidSlotKey {
+            output_id: guard.active_output_id,
+            x: geo.loc.x,
+            y: geo.loc.y,
+            w: geo.size.w,
+            h: geo.size.h,
+            occurrence: occ,
+        };
+        let epoch = guard.epoch;
+        let entry = guard
+            .entries
+            .entry(key)
+            .or_insert_with(|| CachedSolidEntry {
+                id: Id::new(),
+                commit: CommitCounter::default(),
+                color_bits,
+                last_epoch: epoch,
+            });
+        if entry.color_bits != color_bits {
+            entry.commit.increment();
+            entry.color_bits = color_bits;
+        }
+        entry.last_epoch = epoch;
+        (entry.id.clone(), entry.commit)
+    });
+    SolidColorRenderElement::new(id, geo, commit, color, Kind::Unspecified)
 }
 
 /// Scales panel glass RGBA alpha by `glass_opacity` and `reduce_transparency` (`RUSTYOS-048`).

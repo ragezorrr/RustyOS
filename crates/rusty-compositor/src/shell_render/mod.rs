@@ -125,10 +125,11 @@ use spotlight_overview::{
 };
 use tokens::{
     RGBA_ACCENT, RGBA_ACCENT_MUTED, RGBA_BORDER, RGBA_BORDER_HIGHLIGHT, RGBA_DANGER, RGBA_SURFACE,
-    RGBA_SURFACE_ELEVATED, RGBA_SURFACE_OVERLAY, anim_offset, make_solid_element, premul,
-    push_liquid_glass_panel, push_rounded_glass_box, push_soft_shadow, resolved_icon_to_element,
-    rgba_to_premul_color32f, title_hue_seed, truncate_ascii,
+    RGBA_SURFACE_ELEVATED, RGBA_SURFACE_OVERLAY, anim_offset, premul, push_liquid_glass_panel,
+    push_rounded_glass_box, push_soft_shadow, resolved_icon_to_element, rgba_to_premul_color32f,
+    title_hue_seed, truncate_ascii,
 };
+pub(crate) use tokens::{begin_solid_element_frame, make_solid_element};
 use top_bar::{
     MENU_ITEM_HEIGHT, MENU_POPOVER_PAD_Y, MENU_SEPARATOR_HEIGHT, notification_app_icon,
     push_top_bar_right_glyphs, render_top_bar,

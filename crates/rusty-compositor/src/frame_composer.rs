@@ -10,13 +10,10 @@ use smithay::{
         Color32F,
         element::AsRenderElements,
         element::Element,
-        element::Id,
         element::Kind,
-        element::solid::SolidColorRenderElement,
         element::surface::{WaylandSurfaceRenderElement, render_elements_from_surface_tree},
         element::utils::{Relocate, RelocateRenderElement, RescaleRenderElement},
         gles::GlesRenderer,
-        utils::CommitCounter,
     },
     input::pointer::{CursorIcon, CursorImageStatus, CursorImageSurfaceData},
     reexports::wayland_server::{Display, protocol::wl_surface::WlSurface},
@@ -289,15 +286,12 @@ fn push_ext_session_lock_elements(
             .map(CompositorRenderElement::Surface),
         );
     }
-    let backdrop = SolidColorRenderElement::new(
-        Id::new(),
+    let backdrop = crate::shell_render::make_solid_element(
         Rectangle::new(
             (0, 0).into(),
             (logical_size.w.max(1), logical_size.h.max(1)).into(),
         ),
-        CommitCounter::default(),
         Color32F::BLACK,
-        Kind::Unspecified,
     );
     render_list.extend(scale_render_elements_for_output(
         vec![CompositorRenderElement::Solid(backdrop)],
@@ -442,6 +436,7 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
         .get(output_id)
         .cloned()
         .unwrap_or_else(|| state.output_map.primary().clone());
+    crate::shell_render::begin_solid_element_frame(output_entry.id.0);
     let output_loc = output_entry.location;
     let output_geo = output_entry.logical_geometry();
     let output_scale = output_entry.scale;

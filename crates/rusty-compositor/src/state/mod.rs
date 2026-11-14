@@ -526,6 +526,8 @@ pub struct RustyCompositorState {
     pub active_screencasts: Vec<ActiveScreencastSession>,
     /// Signals DRM/Winit loops that asynchronous auth/logind/polkit updates need a frame (`RUSTYOS-056`).
     pub shell_redraw_needed: bool,
+    /// Signals DRM output scheduling that a Wayland client committed a new surface buffer.
+    pub(crate) client_surface_committed: bool,
     /// Count of active notifications held in compositor HUD queue (`RUSTYOS-009`/`010`/`024`).
     pub notification_count: u32,
     /// Active desktop notification queue rendered in Notification HUD & exposed via IPC (`RUSTYOS-024`).
@@ -842,6 +844,7 @@ impl RustyCompositorState {
             pending_portal_capture: None,
             active_screencasts: Vec::new(),
             shell_redraw_needed: false,
+            client_surface_committed: false,
             notification_count: 0,
             notifications: Vec::new(),
             dbus_notifications: crate::dbus_notifications::DbusNotificationHandle::default(),

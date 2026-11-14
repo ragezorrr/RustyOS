@@ -1057,6 +1057,18 @@ impl RustyCompositorState {
         keyboard.set_focus(self, focus_surface, serial);
     }
 
+    /// Returns `true` if any compositor window, workspace, dock hover, or shell overlay animation
+    /// (`Overview`, `Spotlight`, `Quick Settings / Control Center`, `Lock Screen`) is currently in flight.
+    #[must_use]
+    pub fn has_active_compositor_animations(&self) -> bool {
+        self.overview_anim.is_active()
+            || self.launcher_anim.is_active()
+            || self.quick_settings_anim.is_active()
+            || self.lock_screen_anim.is_active()
+            || self.dock_hover_anim.is_active()
+            || self.animations.has_active_animations()
+    }
+
     /// Advances active window, workspace, and shell overlay transitions to the current monotonic timestamp
     /// and updates window positions in [`Space<Window>`].
     pub fn tick_animations(&mut self) {

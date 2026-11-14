@@ -47,7 +47,8 @@ use smithay::{
     output::{Mode as OutputMode, Scale},
     reexports::{
         calloop::{
-            EventLoop,
+            EventLoop, Interest, Mode, PostAction,
+            generic::Generic,
             timer::{TimeoutAction, Timer},
         },
         drm::{
@@ -269,12 +270,12 @@ struct DrmOutputState {
     vblank_pending: bool,
     vblank_queued_at: Option<Instant>,
     needs_redraw: bool,
+    requeue_delay_until: Option<Instant>,
     last_frame_direct_scanout: bool,
     cursor_plane_count: usize,
     hw_cursor_enabled: bool,
     last_frame_hw_cursor: bool,
     frame_start: Option<Instant>,
-    next_frame_at: Instant,
     pending_presentation_feedback: Option<OutputPresentationFeedback>,
     vblank_seq: u64,
 }
@@ -403,12 +404,12 @@ fn build_drm_output_state(
         vblank_pending: false,
         vblank_queued_at: None,
         needs_redraw: true,
+        requeue_delay_until: None,
         last_frame_direct_scanout: false,
         cursor_plane_count,
         hw_cursor_enabled,
         last_frame_hw_cursor: false,
         frame_start: None,
-        next_frame_at: Instant::now(),
         pending_presentation_feedback: None,
         vblank_seq: 0,
     })
@@ -429,6 +430,7 @@ impl DrmOutputState {
             );
             self.vblank_pending = false;
             self.vblank_queued_at = None;
+            self.requeue_delay_until = None;
             if let Some(mut stale) = self.pending_presentation_feedback.take() {
                 stale.discarded();
             }
@@ -485,6 +487,7 @@ impl DrmOutputState {
             Ok(result) => {
                 if result.is_empty {
                     self.needs_redraw = false;
+                    self.requeue_delay_until = None;
                     self.last_frame_direct_scanout = false;
                     self.last_frame_hw_cursor = false;
                     if state.ext_session_locked {
@@ -514,6 +517,7 @@ impl DrmOutputState {
                     self.vblank_pending = true;
                     self.vblank_queued_at = Some(Instant::now());
                     self.needs_redraw = false;
+                    self.requeue_delay_until = None;
                     self.frame_start = Some(render_start);
                     self.last_frame_direct_scanout = direct_scanout;
                     self.last_frame_hw_cursor = hw_cursor;
@@ -557,6 +561,56 @@ pub(crate) fn output_ids_affected_by_pointer_motion(
     ids
 }
 
+/// Computes the post-VBlank client commit grace window for `vrefresh_hz` so active Wayland
+/// clients woken by `wl_surface.frame()` can commit their next buffer before KMS locks the flip.
+#[must_use]
+pub(crate) fn vblank_client_grace_duration(vrefresh_hz: u32) -> Duration {
+    let grace_us = (mode_refresh_interval_us(vrefresh_hz) / 4).clamp(1_000, 4_000);
+    Duration::from_micros(grace_us)
+}
+
+fn surface_tree_has_pending_frame_callbacks(
+    surface: &smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
+) -> bool {
+    use smithay::wayland::compositor::{
+        SurfaceAttributes, TraversalAction, with_surface_tree_downward,
+    };
+    let mut has_callbacks = false;
+    with_surface_tree_downward(
+        surface,
+        (),
+        |_, _, &()| TraversalAction::DoChildren(()),
+        |_, states, &()| {
+            if !states
+                .cached_state
+                .get::<SurfaceAttributes>()
+                .current()
+                .frame_callbacks
+                .is_empty()
+            {
+                has_callbacks = true;
+            }
+        },
+        |_, _, &()| true,
+    );
+    has_callbacks
+}
+
+fn output_has_pending_frame_callbacks(
+    state: &RustyCompositorState,
+    target_output: &smithay::output::Output,
+) -> bool {
+    if state.ext_session_locked {
+        return state
+            .ext_lock_surface_for_output(target_output)
+            .is_some_and(|lock| surface_tree_has_pending_frame_callbacks(lock.wl_surface()));
+    }
+    state.space.elements().any(|window| {
+        smithay::wayland::seat::WaylandFocus::wl_surface(window)
+            .is_some_and(|root| surface_tree_has_pending_frame_callbacks(&root))
+    })
+}
+
 impl DrmRuntime {
     fn fastest_refresh_interval(&self) -> Duration {
         let min_us = self
@@ -566,6 +620,47 @@ impl DrmRuntime {
             .min()
             .unwrap_or(16_667);
         Duration::from_micros(min_us)
+    }
+
+    fn clear_requeue_delays(&mut self) {
+        for out in self.outputs.values_mut() {
+            out.requeue_delay_until = None;
+        }
+    }
+
+    fn has_ready_delayed_requeue(&self, now: Instant) -> bool {
+        self.outputs.values().any(|out| {
+            !out.vblank_pending
+                && out.needs_redraw
+                && out
+                    .requeue_delay_until
+                    .is_some_and(|deadline| now >= deadline)
+        })
+    }
+
+    fn next_timer_duration(&self, state: &RustyCompositorState) -> Duration {
+        let now = Instant::now();
+        let mut earliest_ready: Option<Duration> = None;
+        for out in self.outputs.values() {
+            if out.vblank_pending || !out.needs_redraw {
+                continue;
+            }
+            let wait = out
+                .requeue_delay_until
+                .map_or(Duration::from_micros(250), |deadline| {
+                    deadline
+                        .saturating_duration_since(now)
+                        .max(Duration::from_micros(250))
+                });
+            earliest_ready = Some(earliest_ready.map_or(wait, |prev| prev.min(wait)));
+        }
+        if let Some(wait) = earliest_ready {
+            return wait;
+        }
+        if state.has_active_compositor_animations() || self.max_frames.is_some() {
+            return self.fastest_refresh_interval();
+        }
+        Duration::from_millis(50)
     }
 
     fn mark_all_dirty(&mut self) {
@@ -608,13 +703,23 @@ impl DrmRuntime {
         if !state.running || self.paused {
             return;
         }
+        if force_timer {
+            state.expire_notifications();
+            if state.take_shell_redraw_needed()
+                || state.has_active_compositor_animations()
+                || self.max_frames.is_some()
+                || state.pending_screenshot.is_some()
+            {
+                self.mark_all_dirty();
+            }
+        }
         let now = Instant::now();
         let crtcs = self.output_order.clone();
         for crtc in crtcs {
-            let should_draw = self
-                .outputs
-                .get(&crtc)
-                .is_some_and(|out| out.needs_redraw || (force_timer && now >= out.next_frame_at));
+            let should_draw = self.outputs.get(&crtc).is_some_and(|out| {
+                (out.needs_redraw && out.requeue_delay_until.is_none_or(|d| now >= d))
+                    || (force_timer && out.vblank_pending)
+            });
             if should_draw {
                 self.render_and_queue_output(crtc, state);
             }
@@ -651,7 +756,6 @@ impl DrmRuntime {
         let want_vrr;
         let output_id;
         let pixel_size;
-        let interval;
         let hw_cursor_allowed;
         {
             let Some(out) = self.outputs.get_mut(&crtc) else {
@@ -662,7 +766,6 @@ impl DrmRuntime {
             }
             output_id = out.output_id;
             pixel_size = out.pixel_size;
-            interval = Duration::from_micros(mode_refresh_interval_us(out.vrefresh));
             hw_cursor_allowed = out.hw_cursor_enabled && !self.hw_cursor_disabled;
             want_vrr = want_vrr_for_output(state.user_config.vrr_mode, state, output_id);
             out.apply_runtime_vrr(want_vrr);
@@ -702,7 +805,6 @@ impl DrmRuntime {
         let Some(out) = self.outputs.get_mut(&crtc) else {
             return;
         };
-        out.next_frame_at = Instant::now() + interval;
         out.submit_rendered_frame(
             &mut self.renderer,
             &render_list,
@@ -743,6 +845,7 @@ impl DrmRuntime {
             .record_hw_cursor(out.last_frame_hw_cursor);
 
         let output_id = out.output_id;
+        let vrefresh = out.vrefresh;
         let should_requeue = out.needs_redraw;
         out.vblank_seq = out.vblank_seq.saturating_add(1);
         let vblank_seq = out.vblank_seq;
@@ -755,6 +858,7 @@ impl DrmRuntime {
             .output_map
             .get(output_id)
             .map_or_else(|| state.output.clone(), |entry| entry.output.clone());
+        let had_frame_callbacks = output_has_pending_frame_callbacks(state, &target_output);
 
         let elapsed = state.elapsed();
         if state.ext_session_locked {
@@ -793,8 +897,21 @@ impl DrmRuntime {
             return;
         }
 
-        if should_requeue && !self.paused && state.running {
-            self.render_and_queue_output(crtc, state);
+        let active_comp_anim = state.has_active_compositor_animations();
+        let wants_next_frame = should_requeue || active_comp_anim || self.max_frames.is_some();
+        if wants_next_frame && !self.paused && state.running {
+            if had_frame_callbacks && !active_comp_anim {
+                if let Some(out) = self.outputs.get_mut(&crtc) {
+                    out.needs_redraw = true;
+                    out.requeue_delay_until =
+                        Some(Instant::now() + vblank_client_grace_duration(vrefresh));
+                }
+            } else {
+                if let Some(out) = self.outputs.get_mut(&crtc) {
+                    out.requeue_delay_until = None;
+                }
+                self.render_and_queue_output(crtc, state);
+            }
         }
     }
 
@@ -1254,6 +1371,20 @@ fn try_run_native_drm_session(
     let loop_handle = event_loop.handle();
     let _xwayland_started = crate::xwayland::spawn_xwayland_source(&display.handle(), &loop_handle);
 
+    let wayland_fd = display
+        .backend()
+        .poll_fd()
+        .try_clone_to_owned()
+        .map_err(|err| {
+            CompositorError::EventLoop(format!("clone Wayland poll_fd failed: {err}"))
+        })?;
+    loop_handle
+        .insert_source(
+            Generic::new(wayland_fd, Interest::READ, Mode::Level),
+            |_events, _fd, _app_state| Ok(PostAction::Continue),
+        )
+        .map_err(|err| CompositorError::EventLoop(err.to_string()))?;
+
     loop_handle
         .insert_source(listening_socket, |client_stream, _metadata, app_state| {
             info!("Accepted new Wayland client connection (DRM/KMS)");
@@ -1268,8 +1399,10 @@ fn try_run_native_drm_session(
                 event,
                 InputEvent::PointerMotion { .. } | InputEvent::PointerMotionAbsolute { .. }
             );
+            let is_axis_only = matches!(event, InputEvent::PointerAxis { .. });
             let prev_ptr = app_state.pointer_location;
             app_state.process_input_event(event);
+            let _ = app_state.display_handle.flush_clients();
             if let Some(vt) = app_state.pending_vt_switch.take() {
                 info!(vt, "Switching virtual terminal via libseat");
                 if let Err(err) = session.change_vt(vt) {
@@ -1288,10 +1421,11 @@ fn try_run_native_drm_session(
                     app_state.pointer_location,
                 );
                 rt.mark_outputs_dirty(&dirty_ids);
-            } else {
+                rt.render_ready_outputs(app_state, false);
+            } else if !is_axis_only || app_state.take_shell_redraw_needed() {
                 rt.mark_all_dirty();
+                rt.render_ready_outputs(app_state, false);
             }
-            rt.render_ready_outputs(app_state, false);
         })
         .map_err(|err| CompositorError::EventLoop(err.to_string()))?;
 
@@ -1328,6 +1462,7 @@ fn try_run_native_drm_session(
                     for out in rt.outputs.values_mut() {
                         out.vblank_pending = false;
                         out.vblank_queued_at = None;
+                        out.requeue_delay_until = None;
                         out.frame_start = None;
                     }
                     app_state.active_window_drag = None;
@@ -1360,6 +1495,7 @@ fn try_run_native_drm_session(
                         out.drm_compositor.reset_buffer_ages();
                         out.vblank_pending = false;
                         out.vblank_queued_at = None;
+                        out.requeue_delay_until = None;
                         out.needs_redraw = true;
                     }
                     rt.paused = false;
@@ -1394,7 +1530,7 @@ fn try_run_native_drm_session(
                 }
                 let mut rt = rt_timer.borrow_mut();
                 rt.render_ready_outputs(app_state, true);
-                TimeoutAction::ToDuration(rt.fastest_refresh_interval())
+                TimeoutAction::ToDuration(rt.next_timer_duration(app_state))
             },
         )
         .map_err(|err| CompositorError::EventLoop(err.to_string()))?;
@@ -1439,9 +1575,21 @@ fn try_run_native_drm_session(
                 ipc_server.as_mut(),
                 app_state,
             );
-            if app_state.take_syncobj_unblocked() || app_state.take_shell_redraw_needed() {
+            let client_committed =
+                app_state.take_client_surface_committed() || app_state.take_syncobj_unblocked();
+            let shell_dirty = app_state.take_shell_redraw_needed();
+            let active_comp_anim = app_state.has_active_compositor_animations();
+            let delayed_ready = rt_dispatch
+                .borrow()
+                .has_ready_delayed_requeue(Instant::now());
+            if client_committed || shell_dirty || active_comp_anim || delayed_ready {
                 let mut rt = rt_dispatch.borrow_mut();
-                rt.mark_all_dirty();
+                if client_committed || active_comp_anim {
+                    rt.clear_requeue_delays();
+                }
+                if client_committed || shell_dirty || active_comp_anim {
+                    rt.mark_all_dirty();
+                }
                 rt.render_ready_outputs(app_state, false);
             }
             if app_state.pending_portal_capture.is_some()
@@ -2059,5 +2207,51 @@ mod tests {
             compute_presentation_refresh(false, 144),
             Refresh::Fixed(_)
         ));
+    }
+
+    #[test]
+    fn vblank_client_grace_duration_scales_with_refresh_rate_and_clamps_bounds() {
+        assert_eq!(vblank_client_grace_duration(60), Duration::from_millis(4));
+        assert_eq!(
+            vblank_client_grace_duration(120),
+            Duration::from_micros(2_083)
+        );
+        assert_eq!(
+            vblank_client_grace_duration(144),
+            Duration::from_micros(1_736)
+        );
+        assert_eq!(
+            vblank_client_grace_duration(240),
+            Duration::from_micros(1_041)
+        );
+        assert_eq!(
+            vblank_client_grace_duration(480),
+            Duration::from_micros(1_000)
+        );
+    }
+
+    #[test]
+    fn solid_element_cache_preserves_id_and_commit_across_unchanged_frames() {
+        use smithay::backend::renderer::element::Element;
+        use smithay::utils::Rectangle;
+
+        let geo = Rectangle::new((16, 24).into(), (240, 32).into());
+        let color_a = Color32F::new(0.2, 0.3, 0.4, 1.0);
+        let color_b = Color32F::new(0.5, 0.3, 0.4, 1.0);
+
+        crate::shell_render::begin_solid_element_frame(1);
+        let f1_first = crate::shell_render::make_solid_element(geo, color_a);
+        let f1_second_same_rect = crate::shell_render::make_solid_element(geo, color_a);
+        assert_ne!(f1_first.id(), f1_second_same_rect.id());
+
+        crate::shell_render::begin_solid_element_frame(1);
+        let f2_first = crate::shell_render::make_solid_element(geo, color_a);
+        assert_eq!(f1_first.id(), f2_first.id());
+        assert_eq!(f1_first.current_commit(), f2_first.current_commit());
+
+        crate::shell_render::begin_solid_element_frame(1);
+        let f3_recolored = crate::shell_render::make_solid_element(geo, color_b);
+        assert_eq!(f1_first.id(), f3_recolored.id());
+        assert_ne!(f2_first.current_commit(), f3_recolored.current_commit());
     }
 }
