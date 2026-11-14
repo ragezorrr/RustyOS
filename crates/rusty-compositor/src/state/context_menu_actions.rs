@@ -852,7 +852,7 @@ impl RustyCompositorState {
             .launch_command(&cmd, &self.socket_name, &ipc_path);
     }
 
-    fn create_desktop_folder_action(&mut self) {
+    pub(in crate::state) fn create_desktop_folder_action(&mut self) {
         let Some(desktop_dir) = resolve_desktop_dir() else {
             self.show_osd("Desktop path unavailable", None, false);
             return;
@@ -897,7 +897,7 @@ impl RustyCompositorState {
         self.sync_and_save_user_config();
     }
 
-    fn close_window_by_id(&mut self, win_id: WindowId) {
+    pub(in crate::state) fn close_window_by_id(&mut self, win_id: WindowId) {
         if let Some(win) = self.smithay_window_for_id(win_id) {
             if let Some(toplevel) = win.toplevel() {
                 info!(
@@ -932,7 +932,7 @@ impl RustyCompositorState {
         None
     }
 
-    fn force_quit_window_by_id(&mut self, win_id: WindowId) {
+    pub(in crate::state) fn force_quit_window_by_id(&mut self, win_id: WindowId) {
         let self_pid = std::process::id();
         let Some(pid) = self.window_client_pid(win_id).filter(|&p| p != self_pid) else {
             self.close_window_by_id(win_id);
@@ -989,7 +989,7 @@ impl RustyCompositorState {
         }
     }
 
-    fn spawn_empty_trash_worker(&mut self) {
+    pub(in crate::state) fn spawn_empty_trash_worker(&mut self) {
         let Some(trash_root) = resolve_trash_root() else {
             self.show_osd("Trash unavailable", None, false);
             return;

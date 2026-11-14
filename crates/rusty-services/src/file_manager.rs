@@ -19,17 +19,20 @@ pub use crate::image_decode::{
     DecodedPreviewImage, load_raster_preview_bgra as load_image_preview_bgra,
 };
 
-/// Visual theme mode for `rusty-files` (`RUSTYOS-065`).
+/// Visual theme mode for `rusty-files` (`RUSTYOS-065`, `RUSTYOS-067`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FilesThemeMode {
     /// Golden Gate frosted light appearance (default).
     #[default]
     LightGoldenGate,
-    /// RustyOS Purple Glass dark appearance (`DESIGN.md`).
+    /// Golden Gate dark graphite appearance (`DESIGN.md`).
     DarkPurpleGlass,
 }
 
 impl FilesThemeMode {
+    /// Alias for Golden Gate dark appearance (`RUSTYOS-067`).
+    pub const DARK_GOLDEN_GATE: Self = Self::DarkPurpleGlass;
+
     /// Toggles between light and dark themes.
     #[must_use]
     pub const fn toggle(self) -> Self {
@@ -53,10 +56,34 @@ impl FilesThemeMode {
     pub fn from_config_str(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
             "light" | "light_golden_gate" => Some(Self::LightGoldenGate),
-            "dark" | "dark_purple_glass" => Some(Self::DarkPurpleGlass),
+            "dark" | "dark_golden_gate" | "dark_purple_glass" => Some(Self::DarkPurpleGlass),
             _ => None,
         }
     }
+}
+
+/// Parses `[ui] theme` from a RustyOS `config.toml` content string if present (`RUSTYOS-067`).
+#[must_use]
+pub fn detect_system_theme_from_toml(content: &str) -> Option<FilesThemeMode> {
+    let mut in_ui = false;
+    for raw_line in content.lines() {
+        let line = strip_toml_comment(raw_line).trim();
+        if line.is_empty() {
+            continue;
+        }
+        if line.starts_with('[') {
+            in_ui = line == "[ui]";
+            continue;
+        }
+        if in_ui && let Some((raw_k, raw_v)) = line.split_once('=') {
+            let key = raw_k.trim();
+            if key == "theme" || key == "appearance" {
+                let val = raw_v.trim().trim_matches('"').trim_matches('\'');
+                return FilesThemeMode::from_config_str(val);
+            }
+        }
+    }
+    None
 }
 
 /// Content view modes presented in the Golden Gate view switcher pill.
@@ -554,6 +581,14 @@ impl UserFileLocations {
     #[must_use]
     pub fn tags_config_path(&self) -> PathBuf {
         self.config_dir.join("file_tags.toml")
+    }
+
+    /// Detects the active system theme from `~/.config/rustyos/config.toml` if present (`RUSTYOS-067`).
+    #[must_use]
+    pub fn detect_system_theme(&self) -> Option<FilesThemeMode> {
+        let path = self.config_dir.join("config.toml");
+        let content = fs::read_to_string(path).ok()?;
+        detect_system_theme_from_toml(&content)
     }
 }
 

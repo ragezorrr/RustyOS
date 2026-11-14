@@ -225,10 +225,10 @@ fn draw_home_house_icon(c: &mut Canvas<'_>, cx: f32, cy: f32, col: [u8; 4]) {
 fn draw_drive_volume_icon(c: &mut Canvas<'_>, cx: f32, cy: f32, pal: &Palette) {
     let (top, bot, border, led) = if pal.is_dark {
         (
-            rgba(104, 93, 130, 255),
-            rgba(74, 65, 96, 255),
-            rgba(156, 144, 184, 255),
-            rgba(196, 185, 224, 255),
+            rgba(110, 114, 122, 255),
+            rgba(74, 78, 86, 255),
+            rgba(164, 168, 178, 255),
+            rgba(210, 214, 224, 255),
         )
     } else {
         (
@@ -442,10 +442,10 @@ fn draw_entry_icon_uncached(
                 )
             } else if pal.is_dark {
                 (
-                    rgba(116, 100, 214, 255),
-                    rgba(160, 146, 252, 255),
-                    rgba(124, 108, 230, 255),
-                    rgba(196, 186, 255, 190),
+                    rgba(44, 134, 228, 255),
+                    rgba(112, 192, 255, 255),
+                    rgba(52, 148, 244, 255),
+                    rgba(182, 226, 255, 215),
                 )
             } else {
                 (
@@ -700,12 +700,12 @@ fn folder_palette_for(
     }
     if pal.is_dark {
         (
-            rgba(102, 86, 198, 255),
-            rgba(156, 140, 252, 255),
-            rgba(116, 98, 224, 255),
-            rgba(220, 212, 255, 220),
-            rgba(182, 168, 255, 130),
-            rgba(62, 48, 138, 130),
+            rgba(46, 136, 228, 255),
+            rgba(118, 198, 255, 255),
+            rgba(56, 156, 244, 255),
+            rgba(218, 242, 255, 230),
+            rgba(72, 162, 248, 135),
+            rgba(26, 94, 172, 120),
         )
     } else {
         (
@@ -974,12 +974,12 @@ fn draw_large_document_artwork(
     let top = (cy - h * 0.5).round();
     let fold = (w * 0.26).round();
     let fill = if pal.is_dark {
-        rgba(47, 38, 66, 255)
+        rgba(46, 46, 52, 255)
     } else {
         rgba(255, 255, 255, 255)
     };
     let fold_col = if pal.is_dark {
-        rgba(71, 58, 98, 255)
+        rgba(68, 68, 76, 255)
     } else {
         rgba(232, 236, 244, 255)
     };

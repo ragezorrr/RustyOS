@@ -116,12 +116,15 @@ fn top_bar_hit_testing_works_accurately() {
     assert!(!check_top_bar_layout_click(50.0, 12.0));
     assert!(!check_top_bar_layout_click(300.0, 12.0));
 
-    // Test TopBar Left Menu hits (`RUSTYOS-038`, `RUSTYOS-049`: macOS File/Edit/View/Go/Window/Help)
-    let left = compute_top_bar_left_layout("RustyOS");
+    // Test TopBar Left Menu hits (`RUSTYOS-038`, `RUSTYOS-049`, `RUSTYOS-067`):
+    // In authentic macOS Menu Bar behavior, `Files` (Finder equivalent) is the active frontmost
+    // application when on the Desktop, and all menus (`SystemLogo`, `ActiveApp`, `File..Help`) are clickable.
     assert_eq!(
         check_top_bar_menu_click(f64::from(TOP_BAR_LOGO_X + TOP_BAR_LOGO_W / 2), 12.0),
         Some(TopBarMenuHit::SystemLogo)
     );
+
+    let left = compute_top_bar_left_layout("Files");
     for (hit, bx, bw) in [
         (TopBarMenuHit::ActiveApp, left.app_x, left.app_w),
         (TopBarMenuHit::File, left.file_x, left.file_w),
@@ -132,12 +135,12 @@ fn top_bar_hit_testing_works_accurately() {
         (TopBarMenuHit::Help, left.help_x, left.help_w),
     ] {
         assert_eq!(
-            check_top_bar_menu_click(f64::from(bx + bw / 2), 12.0),
+            check_top_bar_menu_click_for_app("Files", f64::from(bx + bw / 2), 12.0),
             Some(hit)
         );
     }
     assert_eq!(
-        check_top_bar_menu_click(f64::from(left.help_x + left.help_w + 15), 12.0),
+        check_top_bar_menu_click_for_app("Files", f64::from(left.help_x + left.help_w + 15), 12.0),
         None
     );
     assert_eq!(
@@ -246,6 +249,11 @@ fn spotlight_click_detects_rows_inside_and_outside_modal() {
     assert_eq!(
         check_spotlight_click(size, f64::from(mx + 40), f64::from(my + 30)),
         SpotlightHit::InsideModal
+    );
+    // Transparent gap between search pill (h=54) and results card (y=my+64) closes Spotlight.
+    assert_eq!(
+        check_spotlight_click(size, f64::from(mx + 40), f64::from(my + 58)),
+        SpotlightHit::OutsideModal
     );
     assert_eq!(
         check_spotlight_click(size, f64::from(mx + mw + 20), f64::from(my + 30)),
@@ -813,37 +821,46 @@ fn macos27_top_bar_dynamic_left_right_and_menu_popover_hit_testing() {
         12.0
     ));
 
-    let (mx, my, _mw, _mh) = top_bar_menu_popover_rect("RustyOS", TopBarMenuHit::File);
+    let (mx, my, _mw, _mh) = top_bar_menu_popover_rect("Files", TopBarMenuHit::File);
     assert_eq!(
         check_top_bar_menu_popover_click(
-            "RustyOS",
+            "Files",
             TopBarMenuHit::File,
             f64::from(mx + 24),
             f64::from(my + 16),
         ),
-        TopBarMenuPopoverClick::Action(TopBarMenuAction::NewTerminal)
+        TopBarMenuPopoverClick::Action(TopBarMenuAction::OpenFiles)
     );
-    let (gx, gy, _gw, _gh) = top_bar_menu_popover_rect("RustyOS", TopBarMenuHit::Go);
     assert_eq!(
         check_top_bar_menu_popover_click(
-            "RustyOS",
+            "Files",
+            TopBarMenuHit::File,
+            f64::from(mx + 24),
+            f64::from(my + 44),
+        ),
+        TopBarMenuPopoverClick::Action(TopBarMenuAction::NewDesktopFolder)
+    );
+    let (gx, gy, _gw, _gh) = top_bar_menu_popover_rect("Files", TopBarMenuHit::Go);
+    assert_eq!(
+        check_top_bar_menu_popover_click(
+            "Files",
             TopBarMenuHit::Go,
             f64::from(gx + 24),
             f64::from(gy + 16),
         ),
-        TopBarMenuPopoverClick::Action(TopBarMenuAction::OpenOverview)
+        TopBarMenuPopoverClick::Action(TopBarMenuAction::GoRecents)
     );
     assert_eq!(
         check_top_bar_menu_popover_click(
-            "RustyOS",
+            "Files",
             TopBarMenuHit::Go,
             f64::from(gx + 24),
             f64::from(gy + 44),
         ),
-        TopBarMenuPopoverClick::Action(TopBarMenuAction::NextWorkspace)
+        TopBarMenuPopoverClick::Action(TopBarMenuAction::GoDesktop)
     );
     assert_eq!(
-        check_top_bar_menu_popover_click("RustyOS", TopBarMenuHit::File, 800.0, 400.0),
+        check_top_bar_menu_popover_click("Files", TopBarMenuHit::File, 800.0, 400.0),
         TopBarMenuPopoverClick::Outside
     );
 }
@@ -1295,6 +1312,10 @@ fn settings_modal_hit_testing_covers_tabs_controls_and_buttons() {
         hit_test_settings_modal(size, &state, f64::from(content_right - 40), 458.0),
         SettingsHit::ToggleWallpaper
     );
+    assert_eq!(
+        hit_test_settings_modal(size, &state, f64::from(content_right - 40), 510.0),
+        SettingsHit::ToggleAppearance
+    );
 
     state.active_tab = SettingsTab::MenuBar;
     assert_eq!(
@@ -1549,5 +1570,148 @@ fn context_menu_keyboard_navigation_skips_separators_and_handles_submenus() {
     assert_eq!(
         handle_context_menu_key(&mut state, Keysym::Escape),
         ContextMenuKeyOutcome::Close
+    );
+}
+
+#[test]
+fn app_aware_topbar_classification_and_layout_hides_go_for_non_files() {
+    assert_eq!(
+        classify_top_bar_app(Some("org.rustyos.Files"), "Downloads"),
+        ("Files".to_owned(), TopBarAppProfile::Files)
+    );
+    assert_eq!(
+        classify_top_bar_app(Some("firefox"), "YouTube — Mozilla Firefox"),
+        ("Firefox".to_owned(), TopBarAppProfile::Browser)
+    );
+    assert_eq!(
+        classify_top_bar_app(Some("org.mozilla.firefox"), "New Tab"),
+        ("Firefox".to_owned(), TopBarAppProfile::Browser)
+    );
+    assert_eq!(
+        classify_top_bar_app(Some("Navigator"), "Mozilla Firefox"),
+        ("Firefox".to_owned(), TopBarAppProfile::Browser)
+    );
+    assert_eq!(
+        classify_top_bar_app(Some("org.kde.konsole"), "anc@rustyos: ~"),
+        ("Konsole".to_owned(), TopBarAppProfile::Terminal)
+    );
+    assert_eq!(
+        classify_top_bar_app(Some("code"), "lib.rs - Visual Studio Code"),
+        ("VS Code".to_owned(), TopBarAppProfile::Editor)
+    );
+    assert_eq!(
+        classify_top_bar_app(Some("org.gimp.GIMP"), "Canvas - GIMP"),
+        ("GIMP".to_owned(), TopBarAppProfile::GenericApp)
+    );
+
+    let files_left =
+        compute_top_bar_left_layout_for_profile(TopBarAppProfile::Files, "Files", true);
+    assert!(files_left.has_go);
+    assert!(files_left.go_w > 0);
+    assert_eq!(
+        check_top_bar_menu_click_for_profile(
+            TopBarAppProfile::Files,
+            "Files",
+            f64::from(files_left.go_x + files_left.go_w / 2),
+            12.0,
+        ),
+        Some(TopBarMenuHit::Go)
+    );
+
+    let ff_left =
+        compute_top_bar_left_layout_for_profile(TopBarAppProfile::Browser, "Firefox", true);
+    assert!(!ff_left.has_go);
+    assert_eq!(ff_left.go_w, 0);
+    assert_eq!(ff_left.win_x, ff_left.view_x + ff_left.view_w);
+    assert!(ff_left.ws_start_x < files_left.ws_start_x);
+    assert_eq!(
+        check_top_bar_menu_click_for_profile(
+            TopBarAppProfile::Browser,
+            "Firefox",
+            f64::from(ff_left.win_x + 4),
+            12.0,
+        ),
+        Some(TopBarMenuHit::Window)
+    );
+    assert_eq!(
+        check_top_bar_workspace_click_for_profile(
+            TopBarAppProfile::Browser,
+            "Firefox",
+            true,
+            f64::from(ff_left.ws_start_x + 4),
+            12.0,
+        ),
+        Some(1)
+    );
+    assert!(check_top_bar_layout_click_for_profile(
+        TopBarAppProfile::Browser,
+        "Firefox",
+        true,
+        f64::from(ff_left.layout_x + 8),
+        12.0,
+    ));
+}
+
+#[test]
+fn app_aware_topbar_dropdowns_and_popover_hit_testing_match_profile() {
+    let labels_of = |profile, app, menu| -> Vec<String> {
+        resolve_top_bar_menu_entries(profile, app, menu)
+            .into_iter()
+            .filter_map(|e| match e {
+                ResolvedTopBarMenuItem::Item { label, .. } => Some(label.into_owned()),
+                ResolvedTopBarMenuItem::Separator => None,
+            })
+            .collect()
+    };
+
+    let ff_app_labels = labels_of(
+        TopBarAppProfile::Browser,
+        "Firefox",
+        TopBarMenuHit::ActiveApp,
+    );
+    assert!(ff_app_labels.iter().any(|l| l == "About Firefox"));
+    assert!(ff_app_labels.iter().any(|l| l == "Minimize Firefox"));
+    assert!(ff_app_labels.iter().any(|l| l == "Quit Firefox"));
+    assert!(ff_app_labels.iter().any(|l| l == "Force Quit Firefox"));
+    assert!(!ff_app_labels.iter().any(|l| l == "Empty Trash..."));
+
+    let files_app_labels = labels_of(TopBarAppProfile::Files, "Files", TopBarMenuHit::ActiveApp);
+    assert!(files_app_labels.iter().any(|l| l == "About Files"));
+    assert!(files_app_labels.iter().any(|l| l == "Empty Trash..."));
+
+    let ff_file_labels = labels_of(TopBarAppProfile::Browser, "Firefox", TopBarMenuHit::File);
+    assert!(ff_file_labels.iter().any(|l| l == "New Tab"));
+    assert!(ff_file_labels.iter().any(|l| l == "Open Location..."));
+    assert!(!ff_file_labels.iter().any(|l| l == "New Desktop Folder"));
+
+    let term_edit =
+        resolve_top_bar_menu_entries(TopBarAppProfile::Terminal, "Konsole", TopBarMenuHit::Edit);
+    assert!(term_edit.iter().any(|e| matches!(
+        e,
+        ResolvedTopBarMenuItem::Item {
+            action: TopBarMenuAction::AppShortcut(AppShortcutAction::CopyShift),
+            ..
+        }
+    )));
+
+    assert_eq!(
+        resolve_top_bar_menu_entries(TopBarAppProfile::Browser, "Firefox", TopBarMenuHit::Go),
+        Vec::new()
+    );
+
+    let (mx, my, _mw, _mh) = top_bar_menu_popover_rect_for_profile(
+        TopBarAppProfile::Browser,
+        "Firefox",
+        TopBarMenuHit::File,
+    );
+    assert_eq!(
+        check_top_bar_menu_popover_click_for_profile(
+            TopBarAppProfile::Browser,
+            "Firefox",
+            TopBarMenuHit::File,
+            f64::from(mx + 24),
+            f64::from(my + MENU_POPOVER_PAD_Y + 8),
+        ),
+        TopBarMenuPopoverClick::Action(TopBarMenuAction::AppShortcut(AppShortcutAction::NewTab))
     );
 }

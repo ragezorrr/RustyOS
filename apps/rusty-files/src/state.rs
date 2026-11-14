@@ -457,7 +457,10 @@ impl FilesAppState {
         let (transfer_tx, transfer_rx) = mpsc::channel();
         let sidebar_items = build_sidebar_items(&locations, &volumes);
 
-        let theme = opts.theme_override.unwrap_or(tags_config.theme);
+        let theme = opts
+            .theme_override
+            .or_else(|| locations.detect_system_theme())
+            .unwrap_or(tags_config.theme);
         let view_mode = tags_config.view_mode;
 
         let mut app = Self {
@@ -1021,14 +1024,14 @@ impl FilesAppState {
         }
     }
 
-    /// Toggles Light Golden Gate <-> Dark Purple Glass theme and saves `file_tags.toml`.
+    /// Toggles Golden Gate Light <-> Dark theme and saves `file_tags.toml`.
     pub(crate) fn toggle_theme(&mut self) {
         self.theme = self.theme.toggle();
         self.tags_config.theme = self.theme;
         self.persist_preferences();
         self.status_message = Some(match self.theme {
             FilesThemeMode::LightGoldenGate => String::from("Light Golden Gate appearance"),
-            FilesThemeMode::DarkPurpleGlass => String::from("Dark Purple Glass appearance"),
+            FilesThemeMode::DarkPurpleGlass => String::from("Dark Golden Gate appearance"),
         });
         self.dirty = true;
     }

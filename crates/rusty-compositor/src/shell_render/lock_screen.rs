@@ -815,20 +815,40 @@ pub(super) fn render_lock_password_pill(
         }
     }
 
-    let border_rgba = if lock.auth_error.is_some() {
-        [255, 132, 138, (195.0 * fade).round() as u8]
+    if lock.auth_error.is_some() {
+        push_rounded_glass_box(
+            out,
+            shape_cache,
+            renderer,
+            pill_rect,
+            15,
+            [0, 0, 0, 0],
+            Some([255, 132, 138, (205.0 * fade).round() as u8]),
+        );
+    }
+    if fade >= 0.96 && !lock.reduce_transparency {
+        push_liquid_glass_panel(
+            out,
+            shape_cache,
+            renderer,
+            pill_rect,
+            15,
+            crate::surfaces::GlassPanelStyle::ControlModule,
+            lock.glass_opacity,
+            lock.reduce_transparency,
+            Some((12, 42)),
+        );
     } else {
-        [255, 255, 255, (112.0 * fade).round() as u8]
-    };
-    push_rounded_glass_box(
-        out,
-        shape_cache,
-        renderer,
-        pill_rect,
-        15,
-        [255, 255, 255, (42.0 * fade).round() as u8],
-        Some(border_rgba),
-    );
+        push_rounded_glass_box(
+            out,
+            shape_cache,
+            renderer,
+            pill_rect,
+            15,
+            [255, 255, 255, (42.0 * fade).round() as u8],
+            Some([255, 255, 255, (112.0 * fade).round() as u8]),
+        );
+    }
 
     render_lock_auth_status_label(out, text_cache, renderer, layout, lock, fade);
 }

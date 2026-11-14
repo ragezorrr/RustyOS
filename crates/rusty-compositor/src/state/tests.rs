@@ -883,3 +883,37 @@ fn has_active_compositor_animations_tracks_control_center_and_lock_screen()
     assert!(compositor.has_active_compositor_animations());
     Ok(())
 }
+
+#[test]
+fn top_bar_active_app_context_and_about_action_default_to_files() -> Result<(), Box<dyn Error>> {
+    let mut display: Display<RustyCompositorState> = Display::new()?;
+    let mut event_loop: EventLoop<RustyCompositorState> = EventLoop::try_new()?;
+    let mut compositor = RustyCompositorState::new(
+        &display,
+        "wayland-rustyos-topbar-context-test".to_owned(),
+        event_loop.get_signal(),
+        event_loop.handle(),
+        (1280, 800).into(),
+    )?;
+    let _ = (&mut display, &mut event_loop);
+
+    assert_eq!(
+        compositor.active_top_bar_app_context(),
+        (
+            "Files".to_owned(),
+            crate::shell_render::TopBarAppProfile::Files
+        )
+    );
+    let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+    compositor.dispatch_top_bar_menu_action(
+        crate::shell_render::TopBarMenuAction::AboutActiveApp,
+        serial,
+    );
+    assert!(
+        compositor
+            .notifications
+            .iter()
+            .any(|n| n.title == "About Files")
+    );
+    Ok(())
+}

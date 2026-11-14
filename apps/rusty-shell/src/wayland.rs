@@ -98,19 +98,19 @@ impl From<WaylandError> for WaylandClientError {
     }
 }
 
-/// Premultiplied ARGB8888 design token colors (`DESIGN.md` v2.0 "RustyOS Purple Glass").
+/// Premultiplied ARGB8888 design token colors (`DESIGN.md` "Golden Gate Dark & Light").
 pub mod colors {
     // 0xAARRGGBB in little-endian premultiplied byte representation: [B, G, R, A]
-    pub const SURFACE_ELEVATED: [u8; 4] = [0x2C, 0x17, 0x1E, 0xF5]; // #20182E @ 96%
-    pub const SURFACE_OVERLAY: [u8; 4] = [0x36, 0x1F, 0x28, 0xFA]; // #292037 @ 98%
+    pub const SURFACE_ELEVATED: [u8; 4] = [0x28, 0x24, 0x24, 0xF5]; // #26262A @ 96%
+    pub const SURFACE_OVERLAY: [u8; 4] = [0x35, 0x2F, 0x2F, 0xFA]; // #303036 @ 98%
     pub const BORDER_HIGHLIGHT: [u8; 4] = [0x38, 0x38, 0x38, 0x38]; // 22% white glass rim
     pub const BORDER_SUBTLE: [u8; 4] = [0x1F, 0x1F, 0x1F, 0x1F]; // 12% white
-    pub const ACCENT_NEON: [u8; 4] = [0xFF, 0x6E, 0xA5, 0xFF]; // #A56EFF
-    pub const ACCENT_MUTED: [u8; 4] = [0xB5, 0x50, 0x76, 0xFF]; // #7650B5
-    pub const TEXT_BRIGHT: [u8; 4] = [0xFA, 0xF0, 0xF4, 0xFF]; // #F4F0FA
-    pub const TEXT_MUTED: [u8; 4] = [0xB5, 0x9B, 0xA6, 0xFF]; // #A69BB5
-    pub const TEXT_SUBTLE: [u8; 4] = [0x85, 0x6B, 0x76, 0xFF]; // #766B85
-    pub const SUCCESS_GREEN: [u8; 4] = [0xA0, 0xD6, 0x83, 0xFF]; // #83D6A0
+    pub const ACCENT_NEON: [u8; 4] = [0xFF, 0x84, 0x0A, 0xFF]; // #0A84FF
+    pub const ACCENT_MUTED: [u8; 4] = [0xCC, 0x62, 0x00, 0xFF]; // #0062CC
+    pub const TEXT_BRIGHT: [u8; 4] = [0xF7, 0xF2, 0xF2, 0xFF]; // #F2F2F7
+    pub const TEXT_MUTED: [u8; 4] = [0xB6, 0xAE, 0xAE, 0xFF]; // #AEAEB6
+    pub const TEXT_SUBTLE: [u8; 4] = [0x8C, 0x84, 0x84, 0xFF]; // #84848C
+    pub const SUCCESS_GREEN: [u8; 4] = [0x58, 0xD1, 0x30, 0xFF]; // #30D158
 }
 
 /// Internal state for SCTK event dispatch.

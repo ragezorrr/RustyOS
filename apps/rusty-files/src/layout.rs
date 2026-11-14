@@ -223,7 +223,6 @@ pub(crate) enum FilesHit {
     PreviewTrashOrRestore,
     PreviewTag { path: PathBuf, color: FileTagColor },
     PopupItem(PopupCommand),
-    ThemeFooterToggle,
 }
 
 /// Complete computed UI geometry for one frame.
@@ -261,7 +260,6 @@ pub(crate) struct FilesLayout {
     pub list_rows: Vec<(usize, Rect)>,
     pub status_bar_rect: Rect,
     pub path_crumbs: Vec<PathCrumbLayout>,
-    pub theme_toggle_rect: Rect,
     pub tab_bar: Option<TabBarLayout>,
     pub icons_grid: Option<IconsGridLayout>,
     pub gallery: Option<GalleryLayout>,
@@ -333,9 +331,8 @@ pub(crate) fn compute_layout(state: &FilesAppState, surface_w: u32, surface_h: u
     };
 
     let status_bar_rect = Rect::new(toolbar_x, height - 28, width - toolbar_x - 10, 24);
-    let theme_toggle_rect = Rect::new(status_bar_rect.right() - 104, status_bar_rect.y + 3, 98, 19);
     let status_w = crate::render::Canvas::measure_text(&state.status_summary(), 11.5, false);
-    let crumbs_limit_x = (theme_toggle_rect.x - status_w - 22).max(status_bar_rect.x + 12);
+    let crumbs_limit_x = (status_bar_rect.right() - status_w - 22).max(status_bar_rect.x + 12);
     let path_crumbs = compute_path_breadcrumbs_layout(state, status_bar_rect, crumbs_limit_x);
     let content_rect = Rect::new(
         toolbar_x,
@@ -381,7 +378,6 @@ pub(crate) fn compute_layout(state: &FilesAppState, surface_w: u32, surface_h: u
         list_rows: content.list_rows,
         status_bar_rect,
         path_crumbs,
-        theme_toggle_rect,
         tab_bar,
         icons_grid: content.icons_grid,
         gallery: content.gallery,
@@ -893,7 +889,7 @@ fn actions_menu_rows(state: &FilesAppState) -> Vec<PopupRowSpec> {
         Some(PopupCommand::ToggleShowHidden),
     ));
     let theme_label = match state.theme {
-        rusty_services::file_manager::FilesThemeMode::LightGoldenGate => "Dark Purple Glass Theme",
+        rusty_services::file_manager::FilesThemeMode::LightGoldenGate => "Dark Golden Gate Theme",
         rusty_services::file_manager::FilesThemeMode::DarkPurpleGlass => "Light Golden Gate Theme",
     };
     rows.push((
@@ -1205,9 +1201,6 @@ fn hit_test_chrome(layout: &FilesLayout, px: f64, py: f64) -> Option<FilesHit> {
     }
     if let Some(hit) = hit_test_path_bar(&layout.path_crumbs, px, py) {
         return Some(hit);
-    }
-    if layout.theme_toggle_rect.contains_f64(px, py) {
-        return Some(FilesHit::ThemeFooterToggle);
     }
     if layout.toolbar_rect.contains_f64(px, py)
         || (layout.sidebar_rect.contains_f64(px, py) && py < 48.0)

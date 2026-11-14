@@ -1,7 +1,7 @@
 //! Pure CPU premultiplied `ARGB8888` renderer for `rusty-files` (`RUSTYOS-065`, ADR-0030).
 //!
-//! Implements the macOS 27 Golden Gate light appearance (default) and RustyOS
-//! Purple Glass dark appearance using bundled `Inter` fonts (`fontdue`) and
+//! Implements the macOS 27 Golden Gate light appearance (default) and Golden Gate
+//! dark graphite appearance using bundled `Inter` fonts (`fontdue`) and
 //! subpixel SDF / supersampled vector icons with strict scissor clipping.
 
 use std::cell::RefCell;
@@ -176,25 +176,25 @@ pub(crate) const fn palette_for(theme: FilesThemeMode) -> Palette {
             is_dark: false,
         },
         FilesThemeMode::DarkPurpleGlass => Palette {
-            window_bg: rgba(29, 22, 43, 255),
-            window_border: rgba(76, 63, 102, 255),
-            sidebar_bg: rgba(41, 32, 58, 252),
-            sidebar_border: rgba(69, 56, 94, 255),
-            sidebar_active: rgba(65, 52, 91, 255),
-            pill_bg: rgba(46, 36, 65, 255),
-            pill_border: rgba(82, 68, 110, 255),
-            pill_active: rgba(75, 61, 103, 255),
-            divider: rgba(54, 43, 74, 255),
-            scrollbar: rgba(176, 162, 208, 115),
-            accent: rgba(165, 110, 255, 255),
+            window_bg: rgba(30, 30, 32, 255),
+            window_border: rgba(68, 68, 74, 255),
+            sidebar_bg: rgba(38, 38, 42, 252),
+            sidebar_border: rgba(58, 58, 64, 255),
+            sidebar_active: rgba(58, 58, 66, 255),
+            pill_bg: rgba(44, 44, 49, 255),
+            pill_border: rgba(72, 72, 80, 255),
+            pill_active: rgba(64, 64, 72, 255),
+            divider: rgba(52, 52, 58, 255),
+            scrollbar: rgba(160, 160, 170, 115),
+            accent: rgba(10, 132, 255, 255),
             accent_text: rgba(255, 255, 255, 255),
-            secondary_select: rgba(57, 45, 79, 255),
-            text_primary: rgba(244, 240, 250, 255),
-            text_secondary: rgba(184, 175, 201, 255),
-            text_muted: rgba(141, 130, 164, 255),
-            row_alt: rgba(34, 27, 50, 255),
-            popup_bg: rgba(44, 34, 62, 255),
-            popup_border: rgba(94, 78, 124, 255),
+            secondary_select: rgba(54, 54, 62, 255),
+            text_primary: rgba(242, 242, 247, 255),
+            text_secondary: rgba(174, 174, 182, 255),
+            text_muted: rgba(132, 132, 140, 255),
+            row_alt: rgba(35, 35, 38, 255),
+            popup_bg: rgba(40, 40, 44, 255),
+            popup_border: rgba(78, 78, 86, 255),
             is_dark: true,
         },
     }
@@ -2049,8 +2049,9 @@ fn render_status_bar(
         pal.divider,
     );
     let summary = state.status_summary();
+    let status_right = layout.status_bar_rect.right() - 8;
     if layout.path_crumbs.is_empty() {
-        let max_text_w = (layout.theme_toggle_rect.x - layout.status_bar_rect.x - 16).max(40);
+        let max_text_w = (status_right - layout.status_bar_rect.x - 12).max(40);
         let fitted = Canvas::fit_text(&summary, max_text_w, 11.5, false);
         c.draw_text(
             &fitted,
@@ -2069,13 +2070,13 @@ fn render_status_bar(
             .map_or(layout.status_bar_rect.x + 12, |crumb| {
                 crumb.rect.right() + 12
             });
-        let avail_summary = (layout.theme_toggle_rect.x - right_edge - 10).max(0);
+        let avail_summary = (status_right - right_edge - 8).max(0);
         if avail_summary >= 36 {
             let fitted = Canvas::fit_text(&summary, avail_summary, 11.5, false);
             let sum_w = Canvas::measure_text(&fitted, 11.5, false);
             c.draw_text(
                 &fitted,
-                layout.theme_toggle_rect.x - sum_w - 10,
+                status_right - sum_w,
                 layout.status_bar_rect.y + 6,
                 11.5,
                 false,
@@ -2084,23 +2085,6 @@ fn render_status_bar(
             );
         }
     }
-
-    c.fill_rounded_rect(layout.theme_toggle_rect, 9, pal.pill_bg);
-    c.stroke_rounded_rect(layout.theme_toggle_rect, 9, pal.pill_border);
-    let label = match state.theme {
-        FilesThemeMode::LightGoldenGate => "Theme: Light",
-        FilesThemeMode::DarkPurpleGlass => "Theme: Dark",
-    };
-    let lbl_w = Canvas::measure_text(label, 11.0, true);
-    c.draw_text(
-        label,
-        layout.theme_toggle_rect.x + (layout.theme_toggle_rect.w - lbl_w) / 2,
-        layout.theme_toggle_rect.y + 4,
-        11.0,
-        true,
-        pal.text_secondary,
-        layout.theme_toggle_rect,
-    );
 }
 
 /// Renders a standalone native `xdg_popup` surface buffer (`ARGB8888`) with soft outer shadow
@@ -2222,11 +2206,11 @@ mod tests {
         let bg_idx = ((120 * w + 650) * 4) as usize;
         assert_eq!(&buf[bg_idx..bg_idx + 4], &[255, 255, 255, 255]);
 
-        // Toggle to DarkPurpleGlass and re-render
+        // Toggle to Dark Golden Gate and re-render (`#1E1E20` -> BGRA [32, 30, 30, 255])
         state.toggle_theme();
         let layout_dark = compute_layout(&state, w, h);
         render_window_pixels(&mut buf, w, h, &state, &layout_dark);
-        assert_eq!(&buf[bg_idx..bg_idx + 4], &[43, 22, 29, 255]);
+        assert_eq!(&buf[bg_idx..bg_idx + 4], &[32, 30, 30, 255]);
 
         let _ = fs::remove_dir_all(&root);
     }

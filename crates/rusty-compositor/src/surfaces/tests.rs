@@ -39,11 +39,14 @@ fn circle_and_corner_sdf_preserve_clean_edges_and_opaque_interior() {
     assert_eq!(inside_glass[3], 0);
     assert!(outside_halo[3] > 0 && outside_halo[3] <= 96);
 
-    // Ambient wallpaper gradient is opaque and modulated smoothly around aurora glow
-    let glow_px = sample_wallpaper_pixel(62, 35, 256, 160);
-    let dark_px = sample_wallpaper_pixel(250, 10, 256, 160);
+    // Ambient Golden Gate silk wallpaper gradient is opaque and modulated smoothly
+    let glow_px = sample_wallpaper_pixel(62, 110, 256, 160);
+    let corner_px = sample_wallpaper_pixel(250, 10, 256, 160);
+    let dark_px = sample_wallpaper_pixel_themed(62, 110, 256, 160, true);
     assert_eq!(glow_px[3], 255);
+    assert_eq!(corner_px[3], 255);
     assert_eq!(dark_px[3], 255);
+    assert_ne!(glow_px, corner_px);
     assert!(glow_px[0] > dark_px[0]);
 
     // Desktop arrow cursor: opaque dark interior, bright rim, and transparent empty corner
@@ -417,6 +420,30 @@ fn popover_glass_and_traffic_lights_rasterize_cleanly() {
     assert!(pop_center[3] > 120 && pop_center[3] < 240);
     assert!(pop_top_rim[3] > 0);
 
+    let pop_light = sample_glass_panel_pixel_themed(
+        124,
+        110,
+        248,
+        220,
+        16,
+        0.78,
+        false,
+        GlassPanelStyle::Popover,
+        false,
+    );
+    let pop_dark = sample_glass_panel_pixel_themed(
+        124,
+        110,
+        248,
+        220,
+        16,
+        0.78,
+        false,
+        GlassPanelStyle::Popover,
+        true,
+    );
+    assert!(pop_light[0] > pop_dark[0] && pop_light[1] > pop_dark[1]);
+
     let mod_center = sample_glass_panel_pixel(
         70,
         32,
@@ -488,7 +515,7 @@ fn dock_glass_and_icon_shadow_rasterize_cleanly() {
     assert!(top_rim[3] > center[3]);
     assert!(center[3] > 20 && center[3] <= 120);
 
-    // Reduce-transparency mode falls back to opaque dark plum-slate container.
+    // Reduce-transparency mode falls back to opaque high-contrast obsidian-slate container.
     let opaque_center =
         sample_dock_glass_pixel(width / 2, height / 2, width, height, radius, 0.78, true);
     assert!(opaque_center[3] >= 245);

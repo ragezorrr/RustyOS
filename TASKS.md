@@ -958,6 +958,69 @@ hardware/software context и низкие накладные расходы.
   - `cargo run -p rusty-files --offline -- --help` — pass (`Usage: rusty-files [--path <dir>] [--trash] [--recents] [--light | --dark]`).
 - **Risks:** Новые внешние зависимости и `unsafe` не добавлялись (`unsafe_code = "deny"` сохранён); встроенный декодер превью покрывает PNG, PPM (`P3`/`P6`) и UTF-8 текст (дополнительные форматы вроде SVG/PDF/JPEG потребуют отдельных декодеров в следующих задачах); интерактивный запуск живого окна `rusty-files` в Wayland-сессии `--winit` отдельно не снимался скриншотом — отрисовка проверена offscreen unit-тестами `rusty_files` (`stage_b_icons_gallery_tabs_and_overlays_render_within_rounded_clip`, `renders_golden_gate_light_and_dark_themes_cleanly`).
 
+### RUSTYOS-067 — Отказ от темы Purple Glass и реализация светлой и тёмной тем Golden Gate (Light & Dark)
+
+- **Status:** Done (`RUSTYOS-067` Вариант 1 — утверждённый объём выполнен)
+- **Scope:**
+  - Полностью удалена старая фиолетовая палитра `RustyOS Purple Glass` (`#0F0A19`, `#161023`, `#20182E`, `#292037`, `#A56EFF`, `#7650B5`) из `crates/rusty-compositor`, `apps/rusty-files`, `apps/rusty-shell` и `DESIGN.md`.
+  - В `crates/rusty-compositor/src/config.rs` добавлен `AppearanceMode::{Light, Dark}` (по умолчанию `Light`), сохраняемый как `theme = "light" | "dark"` в `[ui]` файла `~/.config/rustyos/config.toml`; во вкладку `System Settings -> Appearance` (`modals.rs`, `state/shell_actions.rs`) добавлен переключатель `Appearance Theme` (`SettingsHit::ToggleAppearance`).
+  - В `crates/rusty-compositor/src/shell_render/tokens.rs` реализована палитра `ThemePalette::{current_for, active}` для `Golden Gate Light` (`#F5F6F8` стекло, `#1D1F24` текст, `#007AFF` акцент) и `Golden Gate Dark` (`#262629` графит, `#F2F2F7` текст, `#0A84FF` акцент); в `frame_composer.rs` активная тема синхронизируется с `state.user_config.appearance`.
+  - В `crates/rusty-compositor/src/surfaces/{mod,sdf}.rs` ключ `GlassPanelKey` дополнен признаком `is_dark`, реализована генерация матового светлого и тёмного жидкого стекла (`sample_glass_panel_pixel_themed`) и процедурных шёлковых обоев `Golden Gate` (`sample_wallpaper_pixel_themed` по референсу `desktop.jpeg`).
+  - Контекстные меню (`context_menu.rs`), выпадающие меню `TopBar` (`shell_render/mod.rs`), `Control Center` (`quick_settings.rs`), `Spotlight`/`Overview` (`spotlight_overview.rs`), `System Settings`/`Polkit`/`Portal` (`modals.rs`) и `SSD` заголовки (`ssd.rs`) переведены на `ThemePalette::active()` в точном соответствии с `context-menu.jpeg` и референсами `macOS 27 Golden Gate`.
+  - В `apps/rusty-files` тёмная тема переведена на нейтральный графит `Golden Gate Dark` (`#1E1E20` окно, `#26262A` сайдбар/попапы, `#0A84FF` акцент по референсу `finder-window-dark.jpeg`) с автоопределением `[ui] theme` из `~/.config/rustyos/config.toml` (`UserFileLocations::detect_system_theme`).
+  - Оформлены `docs/adr/0032-golden-gate-light-dark-themes.md`, `D-040` в `DECISIONS.md` и обновлён `DESIGN.md` (v3.0).
+
+### RUSTYOS-068 — Динамическое app-aware меню TopBar по профилю активного окна
+
+- **Goal:** Сделать меню `TopBar` по-настоящему контекстным к активному приложению (как в macOS Menu Bar): при фокусе сторонних приложений менять не только заголовок приложения, но и набор категорий и команд выпадающих меню.
+- **Status:** Done (`RUSTYOS-068` Вариант 1 — утверждённый объём выполнен)
+- **Dependencies:** `RUSTYOS-067`, `ADR-0033`
+- **Scope:**
+  - В `crates/rusty-compositor/src/shell_render/top_bar_menus.rs` введены `TopBarAppProfile::{Files, Browser, Terminal, Editor, GenericApp}`, `AppShortcutAction`, `ResolvedTopBarMenuItem`, классификатор `classify_top_bar_app(app_id, title)` и резолвер `resolve_top_bar_menu_entries(profile, active_app_name, menu)`.
+  - В `crates/rusty-compositor/src/shell_render/top_bar.rs` и `shell_render/mod.rs` добавлены профильные поля `TopBarTelemetry::{active_app_name, app_profile}`, `TopBarLeftLayout::has_go` (скрытие `Go` вне `Files` со сдвигом `Window`/`Help` и workspace/layout-полосы), профильные функции геометрии и hit-testing (`*_for_profile`) и варианты действий `AboutActiveApp`, `ToggleFullscreenFocused`, `QuitActiveApp`, `ForceQuitActiveApp`, `AppShortcut(AppShortcutAction)`.
+  - В `crates/rusty-compositor/src/state/{shell_actions,context_menu_actions}.rs`, `frame_composer.rs` и `input/{shell_pointer,keyboard}.rs` подключён единый источник `active_top_bar_app_context`, защита от устаревшего меню `Go` и раскладконезависимая (zero-`unsafe`) отправка `Ctrl+[Shift+]<Key>` через `KeyboardHandle::with_xkb_state` (`raw_syms_for_key_in_layout`) + `input_intercept` / `input_forward`.
+  - Оформлены `docs/adr/0033-app-aware-topbar-menus.md` и запись `D-041` в `DECISIONS.md`.
+- **Tests:**
+  - `shell_render::tests::{app_aware_topbar_classification_and_layout_hides_go_for_non_files, app_aware_topbar_dropdowns_and_popover_hit_testing_match_profile}`
+  - `input::tests::app_shortcut_resolves_across_non_latin_xkb_layouts_and_guards_focus`
+  - `state::tests::top_bar_active_app_context_and_about_action_default_to_files`
+- **Risks:** Сторонние приложения, не поддерживающие стандартные комбинации `Ctrl+...` или имеющие нестандартные XKB-keymap, в профильном режиме опираются на эвристику `app_id`/`title`; при необходимости точной синхронизации произвольных пунктов в будущем может быть добавлен опциональный DBus menu export поверх `TopBarAppProfile`.
+
+### RUSTYOS-069 — GLES Dual-Kawase Backdrop Blur + Liquid Glass шейдер, зачистка остатков purple и обновление документации/скиллов
+
+- **Goal:** Обеспечить аппаратное многопроходное размытие фона (Dual-Kawase) и краевую оптику Liquid Glass для панелей оболочки поверх реальных окон и обоев, завершить зачистку остатков фиолетовой палитры и синхронизировать документацию/скиллы с темой `Golden Gate Light & Dark`.
+- **Status:** Done (`RUSTYOS-069` Вариант 1 — утверждённый объём выполнен)
+- **Dependencies:** `RUSTYOS-067`, `ADR-0034`
+- **Scope:**
+  - В `crates/rusty-compositor/src/surfaces/liquid_glass.rs` без `unsafe` (`unsafe_code = "deny"`) реализован `LiquidGlassPipeline`: шейдеры GLSL ES 1.00 `KAWASE_DOWN_FRAG`, `KAWASE_UP_FRAG`, `LIQUID_GLASS_FRAG` (analytical rounded-box SDF, edge lensing/dispersion, vibrance boost, theme-aware Light/Dark tint, directional specular rim), 5-проходный ping-pong FBO (`1 -> 1/2 -> 1/4 -> 1/8 -> 1/4 -> 1/2`), `OutputDamageTracker` для пропуска проходов при отсутствии damage за стеклом, `LiquidGlassElement` со стабильными per-slot `Id` и расширенным `DamageBag`.
+  - В `crates/rusty-compositor/src/surfaces/mod.rs`, `shell_render/mod.rs`, `shell_render/tokens.rs` и `frame_composer.rs` подключены `CompositorRenderElement::{ShaderTexture, ScaledShaderTexture}`, helper `build_backdrop_render_elements` и переключение на GLES Liquid Glass для `Dock` (`GlassPanelStyle::Dock`), меню/оверлеев (`Popover`) и плиток `Control Center` (`ControlModule`) с прозрачным runtime CPU fallback при `screen_locked`, `ext_session_locked`, `reduce_transparency = true` или недоступности FBO/шейдеров.
+  - В `apps/rusty-files/src/views.rs` удалены оставшиеся фиолетовые RGBA (`rgba(38, 29, 54, 255)` -> нейтральный графит `rgba(48, 48, 54, 255)` и `rgba(148, 134, 248, 255)` -> `rgba(72, 164, 255, 255)`), в `surfaces/tests.rs` обновлён устаревший комментарий про plum-slate.
+  - Обновлены `DESIGN.md §12`, скиллы `.agents/skills/{ui-ux-design,desktop-shell,gpu-rendering}/SKILL.md`, оформлены `docs/adr/0034-gles-liquid-glass-backdrop-blur.md` и запись `D-042` в `DECISIONS.md`.
+- **Tests:**
+  - `surfaces::liquid_glass::tests::{shader_sources_include_smithay_contract_defines_and_uniforms, blur_fbo_ladder_scales_down_and_never_underflows, panel_src_and_uv_respects_hidpi_scale_and_safe_bounds, backdrop_damage_expansion_covers_blur_pad_and_clamps_to_half_fbo, liquid_glass_pipeline_defaults_to_cpu_fallback_when_inactive}`
+  - Внешняя проверка синтаксиса всех GLSL ES 1.00 вариантов (`NO_ALPHA`, `DEBUG_FLAGS`, `EXTERNAL`) через `/usr/bin/glslangValidator`.
+  - `cargo clippy --workspace --all-targets -- -D warnings` и workspace tests (`rusty-compositor`, `rusty-files`).
+- **Risks:** Реальный рендеринг GLES FBO требует активного GPU/EGL-контекста (в headless CI проверяется математика FBO/UV/damage, валидность GLSL-вариантов и переключение в CPU fallback; визуальная подстройка интенсивности преломления/тинта поверх живых обоев выполняется на реальном `--winit` / `--drm` дисплее).
+
+### RUSTYOS-070 — Визуальная доводка 1:1 к macOS 27 Golden Gate (`Light & Dark`)
+
+- **Goal:** Довести композитинг Liquid Glass (`Light` и `Dark`), оверлеи оболочки (`Spotlight`, `WindowSwitcher`, `LockScreen`, `Settings`, `TopBar`) и окно `rusty-files` до визуального соответствия референсам `macOS 27 Golden Gate`.
+- **Status:** Done (`RUSTYOS-070` Вариант 1 — утверждённый объём выполнен)
+- **Dependencies:** `RUSTYOS-067`, `RUSTYOS-069`, `ADR-0027`, `ADR-0032`, `ADR-0034`
+- **Scope:**
+  - В `crates/rusty-compositor/src/surfaces/liquid_glass.rs` и `sdf.rs` откалиброваны `Light`/`Dark` профили `compute_glass_material` (`Dock`, `Popover`, `ControlModule`) и `LIQUID_GLASS_FRAG` (rim/meniscus caustic и ослабленный CPU fallback без белёсой пелены в Light mode), усилен S-curve контраст обоев (`golden_gate_sky_rgb`, `apply_golden_gate_folds`), а также зачищен legacy purple в fallback-аватаре `sample_fallback_avatar_pixel`.
+  - В `crates/rusty-compositor/src/shell_render/spotlight_overview.rs`, `mod.rs` и `tests.rs` реализован двухкапсульный `Spotlight` (`spotlight_search_pill_rect` h=54 r=27 + 10 px gap + `spotlight_results_rect` r=22) на GPU `LiquidGlassElement` с иконками приложений и обновлённым hit-testing; `WindowSwitcher` переведён на единый `LiquidGlassElement` (`24 px`) с theme-aware текстом (`ThemePalette::active()`), без рамочных карточек и с мягкой безрамочной капсулой выделения.
+  - В `crates/rusty-compositor/src/frame_composer.rs` и `shell_render/lock_screen.rs` для `LockScreen` подключён изолированный wallpaper-only GLES blur backdrop (`wallpaper_only`) и GPU `LiquidGlassElement` для поля ввода пароля без утечки окон рабочего стола.
+  - В `crates/rusty-compositor/src/shell_render/modals.rs`, `frame_composer.rs` и `input/pointer.rs` снят полноэкранный затемняющий scrim для `Settings` и выстроен z-order/hit-testing под `TopBar`, открытыми меню и `Dock`.
+  - В `crates/rusty-compositor/src/shell_render/top_bar.rs`, `mod.rs`, `ssd.rs` и `tokens.rs` убраны подложки за `TopBar`-индикаторами, рамки у пунктов меню, purple-tinted белые оттенки, а индикаторы запущенных приложений Dock переведены на нейтральный графит (`Light`) и светло-серый (`Dark`).
+  - В `apps/rusty-files/src/{icons,views,layout,render,wayland}.rs` палитры тёмных папок/дисков переведены на `Sky Blue` без legacy purple и удалена отладочная кнопка переключения темы из `render_status_bar`.
+- **Tests:**
+  - `shell_render::tests::{spotlight_click_detects_rows_inside_and_outside_modal, switcher_layout_and_click_hit_testing_match_bounds, settings_modal_hit_testing_covers_tabs_controls_and_buttons}`
+  - `surfaces::liquid_glass::tests::shader_sources_include_smithay_contract_defines_and_uniforms` + `/usr/bin/glslangValidator` проверка всех `#define` вариантов `KAWASE_DOWN_FRAG`, `KAWASE_UP_FRAG`, `LIQUID_GLASS_FRAG`
+  - `rusty-files` render tests (`renders_golden_gate_light_and_dark_themes_cleanly`, `stage_b_icons_gallery_tabs_and_overlays_render_within_rounded_clip`)
+  - Живой `--winit` прогон на `PLATFORM_WAYLAND_KHR` и `PLATFORM_X11_KHR` в `Light` и `Dark` + визуальная приёмка скриншотов `Desktop`, `TopBar Menu`, `Settings`, `Control Center`, `Spotlight`, `WindowSwitcher` и `LockScreen`.
+- **Risks:** На X11 под управлением хостового KWin комбинация `Alt+Tab` перехватывается хостовым WM до XWayland, поэтому в автоматическом X11 скриншот-QA использовался `Ctrl+Alt+Tab`; визуальная приёмка на чистом DRM/KMS (`--drm`) остаётся отдельным этапом.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

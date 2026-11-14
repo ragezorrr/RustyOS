@@ -293,8 +293,147 @@ pub(super) fn rasterize_shadow_corner_buffer(
     mem_buf
 }
 
+#[cfg(test)]
 #[allow(clippy::cast_precision_loss, clippy::cast_sign_loss)]
 pub(super) fn sample_wallpaper_pixel(px: i32, py: i32, width: i32, height: i32) -> [u8; 4] {
+    sample_wallpaper_pixel_themed(
+        px,
+        py,
+        width,
+        height,
+        crate::shell_render::active_appearance().is_dark(),
+    )
+}
+
+fn smoothstep01(edge0: f32, edge1: f32, x: f32) -> f32 {
+    let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+fn fold_blend_rgb(a: [f32; 3], b: [f32; 3], k: f32) -> [f32; 3] {
+    [
+        a[0] + (b[0] - a[0]) * k,
+        a[1] + (b[1] - a[1]) * k,
+        a[2] + (b[2] - a[2]) * k,
+    ]
+}
+
+fn golden_gate_sky_rgb(norm_x: f32, norm_y: f32, is_dark: bool) -> [f32; 3] {
+    let top_horizon = 1.0 - smoothstep01(0.0, 0.42, norm_y);
+    let right_cool = smoothstep01(0.28, 0.95, norm_x * 0.72 + norm_y * 0.28);
+    if is_dark {
+        [
+            20.0 + 18.0 * (1.0 - norm_y) - 6.0 * right_cool + 6.0 * top_horizon,
+            24.0 + 16.0 * (1.0 - norm_y) - 4.0 * right_cool + 8.0 * top_horizon,
+            34.0 + 18.0 * norm_x + 12.0 * right_cool + 10.0 * top_horizon,
+        ]
+    } else {
+        let sky = [
+            92.0 - 18.0 * right_cool - 14.0 * top_horizon,
+            116.0 - 14.0 * right_cool - 10.0 * top_horizon,
+            148.0 + 16.0 * right_cool - 8.0 * top_horizon,
+        ];
+        let warm_field = [
+            196.0 + 34.0 * (1.0 - norm_x),
+            174.0 + 28.0 * (1.0 - norm_x),
+            146.0 - 8.0 * norm_x,
+        ];
+        fold_blend_rgb(
+            warm_field,
+            sky,
+            (0.58 * top_horizon + 0.34 * right_cool).clamp(0.0, 1.0),
+        )
+    }
+}
+
+fn apply_golden_gate_folds(mut rgb: [f32; 3], norm_x: f32, norm_y: f32, is_dark: bool) -> [f32; 3] {
+    let s1_y = 0.26 + 0.22 * norm_x + 0.11 * ((norm_x - 0.35) * 4.2).sin();
+    let d1 = norm_y - s1_y;
+    let sheet1 = smoothstep01(-0.018, 0.032, d1);
+    let s1_shade = (d1.max(0.0) / 0.36).clamp(0.0, 1.0);
+    let s1_color = if is_dark {
+        [
+            78.0 - 42.0 * s1_shade + 18.0 * (1.0 - norm_x),
+            64.0 - 30.0 * s1_shade + 10.0 * (1.0 - norm_x),
+            54.0 - 14.0 * s1_shade,
+        ]
+    } else {
+        [
+            228.0 - 54.0 * s1_shade,
+            204.0 - 52.0 * s1_shade,
+            168.0 - 42.0 * s1_shade + 18.0 * norm_x,
+        ]
+    };
+    rgb = fold_blend_rgb(rgb, s1_color, sheet1);
+    let crest1 = (-(d1 / 0.022).powi(2)).exp() * (0.45 + 0.55 * (1.0 - norm_x));
+    let c1_amp = if is_dark { 38.0 } else { 32.0 };
+    rgb[0] += c1_amp * crest1;
+    rgb[1] += (c1_amp * 0.90) * crest1;
+    rgb[2] += (c1_amp * 0.72) * crest1;
+
+    let s2_y = 0.68 - 0.30 * norm_x + 0.095 * ((norm_x * 3.8) + 0.6).cos();
+    let d2 = norm_y - s2_y;
+    let sheet2 = smoothstep01(-0.016, 0.028, d2);
+    let s2_shade = (d2.max(0.0) / 0.32).clamp(0.0, 1.0);
+    let s2_color = if is_dark {
+        [
+            36.0 + 30.0 * (1.0 - s2_shade) * (1.0 - norm_x),
+            40.0 + 24.0 * (1.0 - s2_shade) * (1.0 - norm_x),
+            56.0 + 18.0 * (1.0 - s2_shade),
+        ]
+    } else {
+        [
+            144.0 + 68.0 * (1.0 - s2_shade) * (1.0 - 0.55 * norm_x) - 34.0 * s2_shade * norm_x,
+            152.0 + 46.0 * (1.0 - s2_shade) * (1.0 - 0.55 * norm_x) - 18.0 * s2_shade * norm_x,
+            174.0 - 14.0 * (1.0 - norm_x) + 22.0 * s2_shade * norm_x,
+        ]
+    };
+    rgb = fold_blend_rgb(rgb, s2_color, sheet2);
+    let shadow2 = (-((d2 + 0.032) / 0.048).powi(2)).exp();
+    let s2_dark = if is_dark { 0.24 } else { 0.22 };
+    rgb[0] *= 1.0 - s2_dark * shadow2;
+    rgb[1] *= 1.0 - s2_dark * shadow2;
+    rgb[2] *= 1.0 - (s2_dark * 0.72) * shadow2;
+
+    let crest2 = (-(d2 / 0.018).powi(2)).exp() * (0.40 + 0.60 * (1.0 - (norm_x - 0.42).abs()));
+    let c2_amp = if is_dark { 52.0 } else { 42.0 };
+    rgb[0] += c2_amp * crest2;
+    rgb[1] += (c2_amp * 0.92) * crest2;
+    rgb[2] += (c2_amp * 0.78) * crest2;
+
+    let s3_y = 0.86 - 0.24 * (norm_x - 0.25) - 0.045 * ((norm_x - 0.55) * 4.5).sin();
+    let d3 = norm_y - s3_y;
+    let sheet3 = smoothstep01(-0.022, 0.040, d3);
+    let s3_color = if is_dark {
+        [
+            16.0 + 10.0 * (1.0 - norm_x),
+            22.0 + 10.0 * (1.0 - norm_x),
+            36.0 + 14.0 * norm_x,
+        ]
+    } else {
+        [
+            84.0 + 38.0 * (1.0 - norm_x),
+            106.0 + 32.0 * (1.0 - norm_x),
+            138.0 + 26.0 * norm_x,
+        ]
+    };
+    rgb = fold_blend_rgb(rgb, s3_color, sheet3 * 0.92);
+    let crest3 = (-(d3 / 0.020).powi(2)).exp() * norm_x;
+    [
+        rgb[0] + 28.0 * crest3,
+        rgb[1] + 32.0 * crest3,
+        rgb[2] + 38.0 * crest3,
+    ]
+}
+
+#[allow(clippy::cast_precision_loss, clippy::cast_sign_loss)]
+pub(super) fn sample_wallpaper_pixel_themed(
+    px: i32,
+    py: i32,
+    width: i32,
+    height: i32,
+    is_dark: bool,
+) -> [u8; 4] {
     const BAYER_4X4: [[f32; 4]; 4] = [
         [0.0 / 16.0, 8.0 / 16.0, 2.0 / 16.0, 10.0 / 16.0],
         [12.0 / 16.0, 4.0 / 16.0, 14.0 / 16.0, 6.0 / 16.0],
@@ -304,52 +443,17 @@ pub(super) fn sample_wallpaper_pixel(px: i32, py: i32, width: i32, height: i32) 
 
     let norm_x = (px as f32 + 0.5) / width.max(1) as f32;
     let norm_y = (py as f32 + 0.5) / height.max(1) as f32;
+    let base = golden_gate_sky_rgb(norm_x, norm_y, is_dark);
+    let rgb = apply_golden_gate_folds(base, norm_x, norm_y, is_dark);
 
-    // Deep Purple Glass velvety base (#0E0918 -> #1A102B)
-    let mut red = 14.0 + 11.0 * norm_y + 4.0 * (1.0 - norm_x);
-    let mut green = 9.0 + 8.0 * norm_y;
-    let mut blue = 24.0 + 18.0 * norm_y + 6.0 * (1.0 - norm_x);
-
-    // Primary upper-left violet aurora bloom
-    let dist1 = (norm_x - 0.23).hypot((norm_y - 0.22) * 0.88);
-    let glow1 = (1.0 - (dist1 / 0.56)).clamp(0.0, 1.0);
-    let amp1 = glow1 * glow1 * (3.0 - 2.0 * glow1) * 0.27;
-    red += 168.0 * amp1;
-    green += 110.0 * amp1;
-    blue += 255.0 * amp1;
-
-    // Secondary bottom-right orchid-amethyst sweep
-    let dist2 = (norm_x - 0.78).hypot((norm_y - 0.77) * 0.90);
-    let glow2 = (1.0 - (dist2 / 0.64)).clamp(0.0, 1.0);
-    let amp2 = glow2 * glow2 * (3.0 - 2.0 * glow2) * 0.29;
-    red += 108.0 * amp2;
-    green += 56.0 * amp2;
-    blue += 188.0 * amp2;
-
-    // Subtle macOS-style layered diagonal silk ribbon across center-lower field
-    let ribbon_center = 0.62 - 0.24 * norm_x + 0.09 * (norm_x * 4.2 + 0.4).sin();
-    let ribbon_dist = ((norm_y - ribbon_center).abs() / 0.22).clamp(0.0, 1.0);
-    let ribbon = (1.0 - ribbon_dist * ribbon_dist) * (1.0 - ribbon_dist);
-    let ribbon_amp = ribbon * (0.14 + 0.08 * (norm_x * 2.2).cos());
-    red += 155.0 * ribbon_amp;
-    green += 82.0 * ribbon_amp;
-    blue += 235.0 * ribbon_amp;
-
-    // Soft rose-lilac crest rim near the top of the silk fold
-    let crest_dist = ((norm_y - (ribbon_center - 0.035)).abs() / 0.055).clamp(0.0, 1.0);
-    let crest = (1.0 - crest_dist) * (1.0 - crest_dist) * 0.075 * (1.0 - (norm_x - 0.48).abs());
-    red += 210.0 * crest;
-    green += 130.0 * crest;
-    blue += 245.0 * crest;
-
-    // Ordered 4x4 Bayer dithering to eliminate 8-bit dark gradient banding
+    // Ordered 4x4 Bayer dithering to eliminate 8-bit gradient banding
     let bx = usize::try_from(px.rem_euclid(4)).unwrap_or(0);
     let by = usize::try_from(py.rem_euclid(4)).unwrap_or(0);
-    let dither = (BAYER_4X4[by][bx] - 0.5) * 1.35;
-    premul_pixel(red + dither, green + dither, blue + dither, 1.0)
+    let dither = (BAYER_4X4[by][bx] - 0.5) * 1.45;
+    premul_pixel(rgb[0] + dither, rgb[1] + dither, rgb[2] + dither, 1.0)
 }
 
-pub(super) fn rasterize_wallpaper_buffer(w: i32, h: i32) -> MemoryRenderBuffer {
+pub(super) fn rasterize_wallpaper_buffer(w: i32, h: i32, is_dark: bool) -> MemoryRenderBuffer {
     let mut mem_buf = MemoryRenderBuffer::new(Fourcc::Argb8888, (w, h), 1, Transform::Normal, None);
     {
         let mut ctx = mem_buf.render();
@@ -361,7 +465,7 @@ pub(super) fn rasterize_wallpaper_buffer(w: i32, h: i32) -> MemoryRenderBuffer {
                     let col = usize::try_from(px).unwrap_or(0);
                     let idx = (row * w_u + col) * 4;
                     if idx + 4 <= pixels.len() {
-                        let p = sample_wallpaper_pixel(px, py, w, h);
+                        let p = sample_wallpaper_pixel_themed(px, py, w, h, is_dark);
                         pixels[idx..idx + 4].copy_from_slice(&p);
                     }
                 }
@@ -471,9 +575,9 @@ pub(super) fn sample_fallback_avatar_pixel(
     let dim = diameter.max(1) as f32;
     let edge = 1.05 / dim;
     let palette = match seed % 4 {
-        0 => ([122.0_f32, 92.0, 214.0], [238.0_f32, 198.0, 154.0]),
+        0 => ([74.0_f32, 118.0, 184.0], [182.0_f32, 212.0, 238.0]),
         1 => ([86.0_f32, 134.0, 224.0], [186.0_f32, 220.0, 250.0]),
-        2 => ([168.0_f32, 92.0, 166.0], [244.0_f32, 186.0, 206.0]),
+        2 => ([158.0_f32, 128.0, 96.0], [232.0_f32, 214.0, 188.0]),
         _ => ([94.0_f32, 148.0, 142.0], [214.0_f32, 232.0, 194.0]),
     };
     let mut sum = [0.0_f32; 4];
@@ -496,16 +600,16 @@ pub(super) fn sample_fallback_avatar_pixel(
             let fig = sd_cov(head.min(shoulders), edge);
             if fig > 0.001 {
                 let fa = fig * 0.90;
-                red = red * (1.0 - fa) + 252.0 * fa;
-                green = green * (1.0 - fa) + 248.0 * fa;
-                blue = blue * (1.0 - fa) + 255.0 * fa;
+                red = red * (1.0 - fa) + 248.0 * fa;
+                green = green * (1.0 - fa) + 250.0 * fa;
+                blue = blue * (1.0 - fa) + 254.0 * fa;
             }
 
             let rim_sd = (outer + 0.018).abs() - 0.016;
             let rim_cov = sd_cov(rim_sd, edge) * if selected { 0.92 } else { 0.62 };
             if rim_cov > 0.001 {
                 red = red * (1.0 - rim_cov) + 255.0 * rim_cov;
-                green = green * (1.0 - rim_cov) + 252.0 * rim_cov;
+                green = green * (1.0 - rim_cov) + 255.0 * rim_cov;
                 blue = blue * (1.0 - rim_cov) + 255.0 * rim_cov;
             }
 
@@ -613,6 +717,7 @@ pub(super) fn sample_dock_glass_pixel(
     )
 }
 
+#[cfg(test)]
 #[allow(clippy::cast_precision_loss, clippy::too_many_arguments)]
 pub(super) fn sample_glass_panel_pixel(
     px: i32,
@@ -623,6 +728,72 @@ pub(super) fn sample_glass_panel_pixel(
     glass_opacity: f32,
     reduce_transparency: bool,
     style: GlassPanelStyle,
+) -> [u8; 4] {
+    sample_glass_panel_pixel_themed(
+        px,
+        py,
+        width,
+        height,
+        radius,
+        glass_opacity,
+        reduce_transparency,
+        style,
+        crate::shell_render::active_appearance().is_dark(),
+    )
+}
+
+fn base_glass_layer(
+    style: GlassPanelStyle,
+    is_dark: bool,
+    t_v: f32,
+    dither: f32,
+    glass_scale: f32,
+) -> [f32; 4] {
+    let (base_a, rgb) = match (is_dark, style) {
+        (true, GlassPanelStyle::Dock) => (
+            (0.34 - 0.08 * t_v) * (0.42 + 0.58 * glass_scale),
+            [96.0 - 24.0 * t_v, 98.0 - 24.0 * t_v, 108.0 - 24.0 * t_v],
+        ),
+        (true, GlassPanelStyle::Popover) => (
+            (0.82 - 0.06 * t_v) * (0.50 + 0.50 * glass_scale),
+            [40.0 - 8.0 * t_v, 40.0 - 8.0 * t_v, 44.0 - 8.0 * t_v],
+        ),
+        (true, GlassPanelStyle::ControlModule) => (
+            (0.24 - 0.04 * t_v) * (0.48 + 0.52 * glass_scale),
+            [144.0 - 18.0 * t_v, 146.0 - 18.0 * t_v, 156.0 - 18.0 * t_v],
+        ),
+        (false, GlassPanelStyle::Dock) => (
+            (0.24 - 0.05 * t_v) * (0.44 + 0.56 * glass_scale),
+            [244.0 - 12.0 * t_v, 246.0 - 10.0 * t_v, 250.0 - 8.0 * t_v],
+        ),
+        (false, GlassPanelStyle::Popover) => (
+            (0.68 - 0.05 * t_v) * (0.52 + 0.48 * glass_scale),
+            [246.0 - 5.0 * t_v, 247.0 - 5.0 * t_v, 250.0 - 4.0 * t_v],
+        ),
+        (false, GlassPanelStyle::ControlModule) => (
+            (0.26 - 0.04 * t_v) * (0.48 + 0.52 * glass_scale),
+            [242.0 - 10.0 * t_v, 244.0 - 10.0 * t_v, 248.0 - 8.0 * t_v],
+        ),
+    };
+    [
+        (rgb[0] + dither) * base_a,
+        (rgb[1] + dither) * base_a,
+        (rgb[2] + dither) * base_a,
+        base_a,
+    ]
+}
+
+#[allow(clippy::cast_precision_loss, clippy::too_many_arguments)]
+pub(super) fn sample_glass_panel_pixel_themed(
+    px: i32,
+    py: i32,
+    width: i32,
+    height: i32,
+    radius: i32,
+    glass_opacity: f32,
+    reduce_transparency: bool,
+    style: GlassPanelStyle,
+    is_dark: bool,
 ) -> [u8; 4] {
     const BAYER4: [[u8; 4]; 4] = [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]];
 
@@ -650,48 +821,23 @@ pub(super) fn sample_glass_panel_pixel(
     let dir_light = (1.0 - t_v * 0.72).clamp(0.26, 1.0);
 
     if reduce_transparency {
-        let (base_rgb, rim_scale, alpha) = match style {
-            GlassPanelStyle::Dock => ([31.0, 25.0, 45.0], 1.0, 246.0 / 255.0),
-            GlassPanelStyle::Popover => ([34.0, 27.0, 50.0], 1.15, 248.0 / 255.0),
-            GlassPanelStyle::ControlModule => ([54.0, 44.0, 76.0], 0.90, 232.0 / 255.0),
+        let (base_rgb, rim_scale, alpha) = match (is_dark, style) {
+            (true, GlassPanelStyle::Dock) => ([34.0, 34.0, 38.0], 1.0, 246.0 / 255.0),
+            (true, GlassPanelStyle::Popover) => ([38.0, 38.0, 42.0], 1.15, 248.0 / 255.0),
+            (true, GlassPanelStyle::ControlModule) => ([54.0, 54.0, 60.0], 0.90, 232.0 / 255.0),
+            (false, GlassPanelStyle::Dock) => ([236.0, 238.0, 243.0], 1.0, 246.0 / 255.0),
+            (false, GlassPanelStyle::Popover) => ([246.0, 247.0, 250.0], 1.15, 248.0 / 255.0),
+            (false, GlassPanelStyle::ControlModule) => ([226.0, 230.0, 238.0], 0.90, 236.0 / 255.0),
         };
         let rim_mix = rim_band * (0.08 + 0.12 * dir_light) * rim_scale;
-        let r_col = (base_rgb[0] - 4.0 * t_v + dither) * (1.0 - rim_mix) + 244.0 * rim_mix;
-        let g_col = (base_rgb[1] - 4.0 * t_v + dither) * (1.0 - rim_mix) + 238.0 * rim_mix;
-        let b_col = (base_rgb[2] - 5.0 * t_v + dither) * (1.0 - rim_mix) + 255.0 * rim_mix;
+        let r_col = (base_rgb[0] - 4.0 * t_v + dither) * (1.0 - rim_mix) + 255.0 * rim_mix;
+        let g_col = (base_rgb[1] - 4.0 * t_v + dither) * (1.0 - rim_mix) + 255.0 * rim_mix;
+        let b_col = (base_rgb[2] - 4.0 * t_v + dither) * (1.0 - rim_mix) + 255.0 * rim_mix;
         return premul_pixel(r_col, g_col, b_col, alpha * cov);
     }
 
     let glass_scale = crate::config::clamp_glass_opacity(glass_opacity);
-    let mut layer = match style {
-        GlassPanelStyle::Dock => {
-            let base_a = (0.32 - 0.08 * t_v) * (0.42 + 0.58 * glass_scale);
-            [
-                (118.0 - 30.0 * t_v + dither) * base_a,
-                (112.0 - 30.0 * t_v + dither) * base_a,
-                (142.0 - 32.0 * t_v + dither) * base_a,
-                base_a,
-            ]
-        }
-        GlassPanelStyle::Popover => {
-            let base_a = (0.76 - 0.08 * t_v) * (0.48 + 0.52 * glass_scale);
-            [
-                (48.0 - 12.0 * t_v + dither) * base_a,
-                (37.0 - 10.0 * t_v + dither) * base_a,
-                (70.0 - 16.0 * t_v + dither) * base_a,
-                base_a,
-            ]
-        }
-        GlassPanelStyle::ControlModule => {
-            let base_a = (0.24 - 0.04 * t_v) * (0.48 + 0.52 * glass_scale);
-            [
-                (176.0 - 22.0 * t_v + dither) * base_a,
-                (166.0 - 20.0 * t_v + dither) * base_a,
-                (198.0 - 16.0 * t_v + dither) * base_a,
-                base_a,
-            ]
-        }
-    };
+    let mut layer = base_glass_layer(style, is_dark, t_v, dither, glass_scale);
 
     let sheen_limit = match style {
         GlassPanelStyle::Dock => 0.22,
@@ -704,17 +850,17 @@ pub(super) fn sample_glass_panel_pixel(
             GlassPanelStyle::ControlModule => 0.065,
         };
         let sheen_a = (1.0 - t_v / sheen_limit) * sheen_peak * glass_scale;
-        layer = blend_premul_over(layer, [255.0, 248.0, 255.0], sheen_a);
+        layer = blend_premul_over(layer, [255.0, 255.0, 255.0], sheen_a);
     }
 
     let mod_rim_light = dir_light.max(((t_v - 0.78) * 1.8).clamp(0.0, 0.55));
     let rim_alpha = match style {
-        GlassPanelStyle::Dock => rim_band * (0.08 + 0.30 * dir_light),
-        GlassPanelStyle::Popover => rim_band * (0.14 + 0.26 * dir_light),
-        GlassPanelStyle::ControlModule => rim_band * (0.10 + 0.28 * mod_rim_light),
+        GlassPanelStyle::Dock => rim_band * (0.10 + 0.30 * dir_light),
+        GlassPanelStyle::Popover => rim_band * (0.16 + 0.28 * dir_light),
+        GlassPanelStyle::ControlModule => rim_band * (0.12 + 0.28 * mod_rim_light),
     };
     if rim_alpha > 0.001 {
-        layer = blend_premul_over(layer, [255.0, 252.0, 255.0], rim_alpha);
+        layer = blend_premul_over(layer, [255.0, 255.0, 255.0], rim_alpha);
     }
 
     let out_a = (layer[3] * cov).clamp(0.0, 1.0);
@@ -765,10 +911,10 @@ pub(super) fn sample_traffic_light_pixel(
         }
     } else {
         (
-            [128.0, 118.0, 152.0],
-            [106.0, 96.0, 130.0],
-            [84.0, 74.0, 106.0],
-            [42.0, 36.0, 58.0],
+            [128.0, 130.0, 136.0],
+            [106.0, 108.0, 114.0],
+            [84.0, 86.0, 92.0],
+            [42.0, 44.0, 48.0],
         )
     };
 
@@ -864,5 +1010,5 @@ pub(super) fn sample_dock_icon_shadow_pixel(px: i32, py: i32, icon_size: i32, pa
     } else {
         0.10 * falloff * falloff * falloff
     };
-    premul_pixel(10.0, 6.0, 18.0, alpha)
+    premul_pixel(6.0, 8.0, 14.0, alpha)
 }

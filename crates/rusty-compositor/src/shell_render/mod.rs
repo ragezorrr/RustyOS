@@ -1,7 +1,7 @@
 //! Visual shell elements rendering (`TopBar`, `Dock`, Desktop background) (`RUSTYOS-012`, ADR-0007).
 //!
 //! Renders macOS-inspired top status bar and bottom floating dock using Smithay's
-//! solid color render elements, adhering to design tokens in `DESIGN.md` (Version 2.0 "RustyOS Purple Glass").
+//! solid color render elements, adhering to design tokens in `DESIGN.md` ("Golden Gate Light & Dark").
 
 use smithay::backend::renderer::element::memory::MemoryRenderBufferRenderElement;
 use smithay::backend::renderer::element::solid::SolidColorRenderElement;
@@ -28,6 +28,10 @@ smithay::backend::renderer::element::render_elements! {
     Texture = TextureRenderElement<GlesTexture>,
     /// Relocated Wayland texture element aligned to HiDPI physical output coordinates.
     ScaledTexture = RelocateRenderElement<TextureRenderElement<GlesTexture>>,
+    /// Hardware Dual-Kawase Liquid Glass panel element (`RUSTYOS-069`).
+    ShaderTexture = crate::surfaces::LiquidGlassElement,
+    /// Relocated Liquid Glass panel element aligned to HiDPI physical output coordinates (`RUSTYOS-069`).
+    ScaledShaderTexture = RelocateRenderElement<crate::surfaces::LiquidGlassElement>,
 }
 
 mod context_menu;
@@ -39,6 +43,7 @@ mod spotlight_overview;
 mod ssd;
 mod tokens;
 mod top_bar;
+mod top_bar_menus;
 
 pub use context_menu::{
     ContextMenuAction, ContextMenuEntry, ContextMenuHit, ContextMenuKeyOutcome, ContextMenuLayout,
@@ -94,20 +99,28 @@ pub use top_bar::{
     TopBarMenuHit, TopBarMenuPopoverClick, TopBarRightLayout, TopBarTelemetry, TopBarTrayItem,
     check_notification_click, check_top_bar_kbd_click, check_top_bar_kbd_click_for_options,
     check_top_bar_kbd_click_for_telemetry, check_top_bar_layout_click,
-    check_top_bar_layout_click_for_app, check_top_bar_layout_click_with_options,
-    check_top_bar_menu_click, check_top_bar_menu_click_for_app, check_top_bar_menu_popover_click,
-    check_top_bar_menu_popover_hover_row, check_top_bar_notification_click,
-    check_top_bar_notification_click_for_options, check_top_bar_notification_click_for_telemetry,
-    check_top_bar_search_click_for_options, check_top_bar_search_click_for_telemetry,
-    check_top_bar_status_click, check_top_bar_status_click_for_options,
-    check_top_bar_status_click_for_telemetry, check_top_bar_tray_click,
-    check_top_bar_tray_click_for_options, check_top_bar_tray_click_for_telemetry,
-    check_top_bar_workspace_click, check_top_bar_workspace_click_for_app,
+    check_top_bar_layout_click_for_app, check_top_bar_layout_click_for_profile,
+    check_top_bar_layout_click_with_options, check_top_bar_menu_click,
+    check_top_bar_menu_click_for_app, check_top_bar_menu_click_for_profile,
+    check_top_bar_menu_popover_click, check_top_bar_menu_popover_click_for_profile,
+    check_top_bar_menu_popover_hover_row, check_top_bar_menu_popover_hover_row_for_profile,
+    check_top_bar_notification_click, check_top_bar_notification_click_for_options,
+    check_top_bar_notification_click_for_telemetry, check_top_bar_search_click_for_options,
+    check_top_bar_search_click_for_telemetry, check_top_bar_status_click,
+    check_top_bar_status_click_for_options, check_top_bar_status_click_for_telemetry,
+    check_top_bar_tray_click, check_top_bar_tray_click_for_options,
+    check_top_bar_tray_click_for_telemetry, check_top_bar_workspace_click,
+    check_top_bar_workspace_click_for_app, check_top_bar_workspace_click_for_profile,
     check_top_bar_workspace_click_with_options, compute_top_bar_left_layout,
-    compute_top_bar_left_layout_with_options, compute_top_bar_right_layout,
-    compute_top_bar_right_layout_with_options, generate_osd_elements, notification_toast_rects,
-    osd_pill_rect, top_bar_menu_entries, top_bar_menu_items, top_bar_menu_popover_rect,
-    tray_slot_rects, tray_slot_rects_with_layout, tray_slot_rects_with_options,
+    compute_top_bar_left_layout_for_profile, compute_top_bar_left_layout_with_options,
+    compute_top_bar_right_layout, compute_top_bar_right_layout_with_options, generate_osd_elements,
+    notification_toast_rects, osd_pill_rect, top_bar_menu_entries, top_bar_menu_items,
+    top_bar_menu_popover_rect, top_bar_menu_popover_rect_for_profile, tray_slot_rects,
+    tray_slot_rects_with_layout, tray_slot_rects_with_options,
+};
+pub use top_bar_menus::{
+    AppShortcutAction, ResolvedTopBarMenuItem, TopBarAppProfile, classify_top_bar_app,
+    resolve_top_bar_menu_entries,
 };
 
 use context_menu::{render_context_menu_composite, render_context_menu_text};
@@ -121,15 +134,17 @@ use quick_settings::{
     render_quick_settings_composite, render_quick_settings_popover, render_quick_settings_text,
 };
 use spotlight_overview::{
-    render_overview_text, render_spotlight_modal, render_switcher_text, spotlight_modal_rect,
+    render_overview_text, render_spotlight_modal, render_switcher_text, spotlight_results_rect,
+    spotlight_search_pill_rect,
 };
 use tokens::{
-    RGBA_ACCENT, RGBA_ACCENT_MUTED, RGBA_BORDER, RGBA_BORDER_HIGHLIGHT, RGBA_DANGER, RGBA_SURFACE,
-    RGBA_SURFACE_ELEVATED, RGBA_SURFACE_OVERLAY, anim_offset, premul, push_liquid_glass_panel,
-    push_rounded_glass_box, push_soft_shadow, resolved_icon_to_element, rgba_to_premul_color32f,
-    title_hue_seed, truncate_ascii,
+    RGBA_ACCENT, RGBA_ACCENT_MUTED, RGBA_BORDER, RGBA_DANGER, ThemePalette, anim_offset, premul,
+    push_liquid_glass_panel, push_rounded_glass_box, push_soft_shadow, resolved_icon_to_element,
+    rgba_to_premul_color32f, title_hue_seed, truncate_ascii,
 };
-pub(crate) use tokens::{begin_solid_element_frame, make_solid_element};
+pub(crate) use tokens::{
+    active_appearance, begin_solid_element_frame, make_solid_element, set_active_appearance,
+};
 use top_bar::{
     MENU_ITEM_HEIGHT, MENU_POPOVER_PAD_Y, MENU_SEPARATOR_HEIGHT, notification_app_icon,
     push_top_bar_right_glyphs, render_top_bar,
@@ -215,8 +230,8 @@ pub fn generate_shell_render_elements(
     elements
 }
 
-const TEXT_BRIGHT: [u8; 4] = [244, 240, 250, 255]; // #F4F0FA
-const TEXT_MUTED: [u8; 4] = [166, 155, 181, 255]; // #A69BB5
+const TEXT_BRIGHT: [u8; 4] = [242, 242, 247, 255]; // #F2F2F7
+const TEXT_MUTED: [u8; 4] = [148, 148, 156, 255]; // #94949C
 
 const fn notifications_hidden_by_overlay(overlay: ShellOverlayView<'_>) -> bool {
     matches!(
@@ -259,21 +274,24 @@ fn append_foreground_overlay_text(
 
     let width = screen_size.w;
     let height = screen_size.h;
+    let pal = ThemePalette::active();
 
     match overlay {
         ShellOverlayView::None | ShellOverlayView::Overview(_) => {}
         ShellOverlayView::Spotlight(spot) => {
-            let (modal_x, base_modal_y, modal_width, _modal_height) =
-                spotlight_modal_rect(width, height);
-            let modal_y = base_modal_y + anim_offset(spot.progress, -22.0);
+            let dy = anim_offset(spot.progress, -22.0);
+            let (sx, search_top, _sw, _sh) = spotlight_search_pill_rect(width, height);
+            let (rx, results_top, rw, _rh) = spotlight_results_rect(width, height);
+            let sy = search_top + dy;
+            let ry = results_top + dy;
 
             if spot.query.is_empty() {
                 if let Some(el) = text_cache.render_label(
                     renderer,
                     "Spotlight Search",
                     14.5,
-                    TEXT_MUTED,
-                    Point::from((modal_x + 60, modal_y + 30)),
+                    pal.popover_text_muted,
+                    Point::from((sx + 50, sy + 18)),
                 ) {
                     elements.push(el);
                 }
@@ -281,13 +299,13 @@ fn append_foreground_overlay_text(
                 renderer,
                 spot.query,
                 14.5,
-                TEXT_BRIGHT,
-                Point::from((modal_x + 60, modal_y + 30)),
+                pal.popover_text_primary,
+                Point::from((sx + 50, sy + 18)),
             ) {
                 elements.push(el);
             }
 
-            let start_row_y = modal_y + 80;
+            let start_row_y = ry + 14;
             let row_h = 46;
             for (i, item) in spot.items.iter().take(5).enumerate() {
                 #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
@@ -299,27 +317,39 @@ fn append_foreground_overlay_text(
                     .as_deref()
                     .is_some_and(|name| shape_cache.icons.has_named_icon(name, 28));
                 if !has_icon {
-                    let badge_bounds = Rectangle::new(
-                        Point::from((modal_x + 28, row_y + 9)),
-                        Size::from((28, 28)),
-                    );
+                    let badge_bounds =
+                        Rectangle::new(Point::from((rx + 22, row_y + 9)), Size::from((28, 28)));
                     if let Some(el) = text_cache.render_label_centered(
                         renderer,
                         &item.badge,
                         11.0,
-                        TEXT_BRIGHT,
+                        if is_sel {
+                            [255, 255, 255, 255]
+                        } else {
+                            pal.popover_text_primary
+                        },
                         badge_bounds,
                     ) {
                         elements.push(el);
                     }
                 }
 
+                let row_title_fg = if is_sel {
+                    [255, 255, 255, 255]
+                } else {
+                    pal.popover_text_primary
+                };
+                let row_sub_fg = if is_sel {
+                    [236, 242, 255, 240]
+                } else {
+                    pal.popover_text_muted
+                };
                 if let Some(el) = text_cache.render_label(
                     renderer,
                     &item.name,
                     13.5,
-                    TEXT_BRIGHT,
-                    Point::from((modal_x + 68, row_y + 7)),
+                    row_title_fg,
+                    Point::from((rx + 60, row_y + 7)),
                 ) {
                     elements.push(el);
                 }
@@ -327,8 +357,8 @@ fn append_foreground_overlay_text(
                     renderer,
                     &item.subtitle,
                     10.5,
-                    TEXT_MUTED,
-                    Point::from((modal_x + 68, row_y + 26)),
+                    row_sub_fg,
+                    Point::from((rx + 60, row_y + 26)),
                 ) {
                     elements.push(el);
                 }
@@ -342,13 +372,13 @@ fn append_foreground_overlay_text(
                     "Application"
                 };
                 let cat_bounds = Rectangle::new(
-                    Point::from((modal_x + modal_width - 104, row_y + 14)),
+                    Point::from((rx + rw - 98, row_y + 14)),
                     Size::from((80, 18)),
                 );
                 let cat_color = if is_sel {
-                    [255, 252, 255, 255]
+                    [255, 255, 255, 255]
                 } else {
-                    TEXT_MUTED
+                    pal.popover_text_muted
                 };
                 if let Some(el) = text_cache
                     .render_label_centered(renderer, cat_label, 10.5, cat_color, cat_bounds)
@@ -391,7 +421,7 @@ fn append_foreground_overlay_text(
                 renderer,
                 &title_text,
                 12.5,
-                TEXT_BRIGHT,
+                pal.popover_text_primary,
                 Point::from((tx + 62, ty + 13)),
             ) {
                 elements.push(el);
@@ -402,7 +432,7 @@ fn append_foreground_overlay_text(
                 renderer,
                 &body_text,
                 10.5,
-                TEXT_MUTED,
+                pal.popover_text_muted,
                 Point::from((tx + 62, ty + 35)),
             ) {
                 elements.push(el);
@@ -477,6 +507,7 @@ fn append_chrome_text(
 
     let width = screen_size.w;
     let height = screen_size.h;
+    let pal = ThemePalette::active();
     let text_bright = TEXT_BRIGHT;
     let text_muted = TEXT_MUTED;
 
@@ -484,23 +515,23 @@ fn append_chrome_text(
     let ws_btn_height = TOP_BAR_ITEM_H;
     let ws_y = TOP_BAR_ITEM_Y;
 
-    let active_app_name = dock_view
-        .windows
-        .iter()
-        .find(|w| w.focused)
-        .map_or_else(|| "RustyOS".to_owned(), |w| extract_app_name(&w.title));
+    let active_app_name = top_telemetry.active_app_name;
+    let app_profile = top_telemetry.app_profile;
     let opts = top_telemetry.layout_options();
-    let left_layout =
-        compute_top_bar_left_layout_with_options(&active_app_name, top_telemetry.show_workspaces);
+    let left_layout = compute_top_bar_left_layout_for_profile(
+        app_profile,
+        active_app_name,
+        top_telemetry.show_workspaces,
+    );
 
     let app_bounds = Rectangle::new(
         Point::from((left_layout.app_x, ws_y)),
         Size::from((left_layout.app_w, ws_btn_height)),
     );
-    let pure_white = [252, 250, 255, 255];
+    let pure_white = [255, 255, 255, 255];
     if let Some(el) = text_cache.render_label_centered_weighted(
         renderer,
-        &active_app_name,
+        active_app_name,
         crate::text::FontWeight::Bold,
         TOP_BAR_FONT_SIZE,
         pure_white,
@@ -509,7 +540,7 @@ fn append_chrome_text(
         elements.push(el);
     }
 
-    let text_menu = [245, 242, 252, 245];
+    let text_menu = [246, 247, 250, 245];
     for (menu_kind, name, x, w) in [
         (
             TopBarMenuHit::File,
@@ -543,6 +574,9 @@ fn append_chrome_text(
             left_layout.help_w,
         ),
     ] {
+        if menu_kind == TopBarMenuHit::Go && !left_layout.has_go {
+            continue;
+        }
         let color = if top_telemetry.active_menu == Some(menu_kind) {
             [255, 255, 255, 255]
         } else {
@@ -561,24 +595,32 @@ fn append_chrome_text(
         }
     }
 
-    // Active TopBar left dropdown menu labels + right-aligned real shortcuts (`RUSTYOS-048`/`049`/`051`)
-    if let Some(open_menu) = top_telemetry.active_menu {
-        let (mx, my, mw, _) = top_bar_menu_popover_rect(&active_app_name, open_menu);
+    // Active TopBar left dropdown menu labels + right-aligned real shortcuts (`RUSTYOS-048`/`049`/`051`/`068`)
+    if let Some(open_menu) = top_telemetry
+        .active_menu
+        .filter(|m| *m != TopBarMenuHit::Go || left_layout.has_go)
+    {
+        let (mx, my, mw, _) =
+            top_bar_menu_popover_rect_for_profile(app_profile, active_app_name, open_menu);
         let mut row_y = my + MENU_POPOVER_PAD_Y;
-        for (entry_idx, entry) in top_bar_menu_entries(open_menu).iter().enumerate() {
+        for (entry_idx, entry) in
+            resolve_top_bar_menu_entries(app_profile, active_app_name, open_menu)
+                .into_iter()
+                .enumerate()
+        {
             match entry {
-                TopBarMenuEntry::Item {
+                ResolvedTopBarMenuItem::Item {
                     label, shortcut, ..
                 } => {
                     let hovered = top_telemetry.menu_hover_row == Some(entry_idx);
                     let fg = if hovered {
-                        [255, 252, 255, 255]
+                        [255, 255, 255, 255]
                     } else {
-                        text_bright
+                        pal.popover_text_primary
                     };
                     if let Some(el) = text_cache.render_label(
                         renderer,
-                        label,
+                        &label,
                         12.0,
                         fg,
                         Point::from((mx + 34, row_y + 6)),
@@ -588,9 +630,9 @@ fn append_chrome_text(
                     if let Some(hint) = shortcut {
                         let (hint_w, _) = text_cache.measure_text(hint, 11.0);
                         let hint_fg = if hovered {
-                            [248, 240, 255, 255]
+                            [245, 248, 255, 255]
                         } else {
-                            text_muted
+                            pal.popover_text_muted
                         };
                         if let Some(el) = text_cache.render_label(
                             renderer,
@@ -604,7 +646,7 @@ fn append_chrome_text(
                     }
                     row_y += MENU_ITEM_HEIGHT;
                 }
-                TopBarMenuEntry::Separator => {
+                ResolvedTopBarMenuItem::Separator => {
                     row_y += MENU_SEPARATOR_HEIGHT;
                 }
             }
@@ -618,7 +660,7 @@ fn append_chrome_text(
             let color = if ws == active_workspace {
                 [255, 255, 255, 255]
             } else {
-                [210, 202, 224, 220]
+                [214, 214, 222, 220]
             };
             let bounds = Rectangle::new(
                 Point::from((start_x, ws_y)),
@@ -747,7 +789,7 @@ fn append_chrome_text(
             &tooltip_label,
             crate::text::FontWeight::Bold,
             12.0,
-            [252, 250, 255, 255],
+            pal.popover_text_primary,
             Rectangle::new(
                 Point::from((tooltip_rect.loc.x, tooltip_rect.loc.y)),
                 Size::from((tooltip_rect.size.w, tooltip_rect.size.h)),
@@ -937,99 +979,109 @@ fn build_foreground_overlay_shapes(
     let mut out = Vec::new();
     let width = screen_size.w;
     let height = screen_size.h;
+    let pal = ThemePalette::active();
     match overlay {
         ShellOverlayView::None | ShellOverlayView::Overview(_) => {}
         ShellOverlayView::Spotlight(spot) => {
-            let (mx, base_my, mw, mh) = spotlight_modal_rect(width, height);
-            let my = base_my + anim_offset(spot.progress, -22.0);
+            let dy = anim_offset(spot.progress, -22.0);
+            let (sx, search_top, sw, sh) = spotlight_search_pill_rect(width, height);
+            let (rx, results_top, rw, rh) = spotlight_results_rect(width, height);
+            let sy = search_top + dy;
+            let ry = results_top + dy;
             let glass_op = top_telemetry.glass_opacity;
             let reduce_tr = top_telemetry.reduce_transparency;
 
-            // SDF Search loupe & cursor inside search input bar (`RUSTYOS-048`)
+            // Search pill foreground elements (front-to-back above glass capsule)
             if let Some(el) = shape_cache.ui_glyph_element(
                 renderer,
                 crate::surfaces::UiGlyphKind::Search,
                 18,
-                [215, 205, 235, 255],
-                Point::from((mx + 30, my + 31)),
+                pal.popover_icon,
+                Point::from((sx + 22, sy + 18)),
             ) {
                 out.push(CompositorRenderElement::Memory(el));
             }
-            let cursor_x = (mx + 60 + spot.cursor_offset_x).min(mx + mw - 28);
+            let cursor_x = (sx + 50 + spot.cursor_offset_x).min(sx + sw - 28);
             out.push(CompositorRenderElement::Solid(make_solid_element(
-                Rectangle::new(Point::from((cursor_x, my + 28)), Size::from((2, 24))),
+                Rectangle::new(Point::from((cursor_x, sy + 16)), Size::from((2, 22))),
                 COLOR_ACCENT,
             )));
             if !has_text {
                 out.push(CompositorRenderElement::Solid(make_solid_element(
-                    Rectangle::new(Point::from((mx + 64, my + 36)), Size::from((160, 8))),
+                    Rectangle::new(Point::from((sx + 54, sy + 23)), Size::from((160, 8))),
                     COLOR_MUTED,
                 )));
             }
-
-            // Search input bar plate (`macOS 27` Liquid Glass module, `RUSTYOS-039`/`051`)
             push_liquid_glass_panel(
                 &mut out,
                 shape_cache,
                 renderer,
-                Rectangle::new(Point::from((mx + 16, my + 16)), Size::from((mw - 32, 48))),
-                14,
-                crate::surfaces::GlassPanelStyle::ControlModule,
+                Rectangle::new(Point::from((sx, sy)), Size::from((sw, sh))),
+                27,
+                crate::surfaces::GlassPanelStyle::Popover,
                 glass_op,
                 reduce_tr,
-                None,
+                Some((18, 52)),
             );
-            out.push(CompositorRenderElement::Solid(make_solid_element(
-                Rectangle::new(Point::from((mx + 16, my + 72)), Size::from((mw - 32, 1))),
-                COLOR_BORDER,
-            )));
 
+            // Detached results capsule with 10 px breathing space below search pill
             let row_h = 46;
-            let start_row_y = my + 80;
-            for idx in 0..spot.items.len().min(5) {
+            let start_row_y = ry + 14;
+            for (idx, item) in spot.items.iter().take(5).enumerate() {
                 let i = i32::try_from(idx).unwrap_or(0);
                 let row_y = start_row_y + i * (row_h + 4);
                 let is_sel = idx == spot.selected_in_window;
 
-                let row_rgba = if is_sel {
-                    [165, 110, 255, 198]
+                let icon_x = rx + 22;
+                let icon_y = row_y + 9;
+                if let Some(icon_el) = item.icon.as_deref().and_then(|name| {
+                    shape_cache.icons.icon_element_by_name(
+                        renderer,
+                        name,
+                        28,
+                        Point::from((icon_x, icon_y)),
+                    )
+                }) {
+                    out.push(CompositorRenderElement::Memory(icon_el));
                 } else {
-                    RGBA_SURFACE
-                };
+                    push_rounded_glass_box(
+                        &mut out,
+                        shape_cache,
+                        renderer,
+                        Rectangle::new(Point::from((icon_x, icon_y)), Size::from((28, 28))),
+                        8,
+                        if is_sel {
+                            [255, 255, 255, 42]
+                        } else {
+                            pal.control_pill_off_rgba
+                        },
+                        None,
+                    );
+                }
+
                 if is_sel {
                     push_rounded_glass_box(
                         &mut out,
                         shape_cache,
                         renderer,
-                        Rectangle::new(Point::from((mx + 14, row_y)), Size::from((mw - 28, row_h))),
+                        Rectangle::new(Point::from((rx + 12, row_y)), Size::from((rw - 24, row_h))),
                         12,
-                        row_rgba,
-                        Some([215, 185, 255, 120]),
-                    );
-                } else {
-                    push_rounded_glass_box(
-                        &mut out,
-                        shape_cache,
-                        renderer,
-                        Rectangle::new(Point::from((mx + 16, row_y)), Size::from((mw - 32, row_h))),
-                        12,
-                        row_rgba,
+                        pal.accent_hover_fill,
                         None,
                     );
                 }
             }
 
-            let modal_rect = Rectangle::new(Point::from((mx, my)), Size::from((mw, mh)));
             push_liquid_glass_panel(
                 &mut out,
                 shape_cache,
                 renderer,
-                modal_rect,
-                WINDOW_RADIUS,
+                Rectangle::new(Point::from((rx, ry)), Size::from((rw, rh))),
+                22,
                 crate::surfaces::GlassPanelStyle::Popover,
                 glass_op,
                 reduce_tr,
-                Some((20, 58)),
+                Some((20, 56)),
             );
         }
         ShellOverlayView::QuickSettings(qs) => {
@@ -1039,32 +1091,31 @@ fn build_foreground_overlay_shapes(
             let (panel_rect, cards) = switcher_layout(screen_size, sw.cards.len());
             for (idx, (card_view, card)) in sw.cards.iter().zip(cards).enumerate() {
                 let is_sel = idx == sw.selected;
-                let icon_loc = Point::from((card.loc.x + (card.size.w - 36) / 2, card.loc.y + 18));
+                let icon_x = card.loc.x + (card.size.w - 44) / 2;
+                let icon_y = card.loc.y + 14;
                 let sw_key = format!("win-{}", card_view.window_id.0);
                 if let Some(icon_el) = shape_cache.icons.window_icon_element(
                     renderer,
                     &sw_key,
                     card_view.toplevel_icon,
                     card_view.icon_name,
-                    36,
-                    icon_loc,
+                    44,
+                    Point::from((icon_x, icon_y)),
                 ) {
                     out.push(resolved_icon_to_element(icon_el));
                 } else {
-                    let well_rect = Rectangle::new(
-                        Point::from((card.loc.x + (card.size.w - 44) / 2, card.loc.y + 14)),
-                        Size::from((44, 44)),
-                    );
+                    let well_rect =
+                        Rectangle::new(Point::from((icon_x, icon_y)), Size::from((44, 44)));
                     push_rounded_glass_box(
                         &mut out,
                         shape_cache,
                         renderer,
                         well_rect,
-                        10,
+                        12,
                         if is_sel {
-                            RGBA_ACCENT
+                            pal.accent_rgba
                         } else {
-                            RGBA_ACCENT_MUTED
+                            pal.control_pill_off_rgba
                         },
                         None,
                     );
@@ -1083,32 +1134,36 @@ fn build_foreground_overlay_shapes(
                     )));
                 }
 
-                push_rounded_glass_box(
-                    &mut out,
-                    shape_cache,
-                    renderer,
-                    card,
-                    10,
-                    if is_sel {
-                        RGBA_SURFACE_OVERLAY
+                if is_sel {
+                    let sel_fill = if pal.is_dark {
+                        [255, 255, 255, 36]
                     } else {
-                        RGBA_SURFACE
-                    },
-                    Some(if is_sel { RGBA_ACCENT } else { RGBA_BORDER }),
-                );
+                        [0, 0, 0, 22]
+                    };
+                    push_rounded_glass_box(
+                        &mut out,
+                        shape_cache,
+                        renderer,
+                        card,
+                        16,
+                        sel_fill,
+                        None,
+                    );
+                }
             }
 
             if panel_rect.size.w > 0 {
-                push_rounded_glass_box(
+                push_liquid_glass_panel(
                     &mut out,
                     shape_cache,
                     renderer,
                     panel_rect,
-                    14,
-                    RGBA_SURFACE_ELEVATED,
-                    Some(RGBA_BORDER_HIGHLIGHT),
+                    24,
+                    crate::surfaces::GlassPanelStyle::Popover,
+                    top_telemetry.glass_opacity,
+                    top_telemetry.reduce_transparency,
+                    Some((20, 58)),
                 );
-                push_soft_shadow(&mut out, shape_cache, renderer, panel_rect, 14, 14, 52);
             }
         }
         ShellOverlayView::Polkit(pk) => {
@@ -1177,7 +1232,7 @@ fn build_foreground_overlay_shapes(
                     renderer,
                     crate::surfaces::UiGlyphKind::Close,
                     10,
-                    [248, 244, 255, 255],
+                    [255, 255, 255, 255],
                     Point::from((tx + tw - 23, ty + 15)),
                 ) {
                     out.push(CompositorRenderElement::Memory(el));
@@ -1234,20 +1289,21 @@ fn build_chrome_shapes(
     let mut out = Vec::new();
     let width = screen_size.w;
     let height = screen_size.h;
+    let pal = ThemePalette::active();
 
-    // 3. TopBar macOS Menu Bar SDF glyphs, optional tray/workspaces, menu popover & transparent default (`RUSTYOS-048`, `RUSTYOS-049`)
-    let active_app_name = dock_view
-        .windows
-        .iter()
-        .find(|w| w.focused)
-        .map_or_else(|| "RustyOS".to_owned(), |w| extract_app_name(&w.title));
+    // 3. TopBar macOS Menu Bar SDF glyphs, optional tray/workspaces, menu popover & transparent default (`RUSTYOS-048`, `RUSTYOS-049`, `RUSTYOS-068`)
+    let active_app_name = top_telemetry.active_app_name;
+    let app_profile = top_telemetry.app_profile;
     let opts = top_telemetry.layout_options();
-    let left_layout =
-        compute_top_bar_left_layout_with_options(&active_app_name, top_telemetry.show_workspaces);
+    let left_layout = compute_top_bar_left_layout_for_profile(
+        app_profile,
+        active_app_name,
+        top_telemetry.show_workspaces,
+    );
     let right_layout =
         compute_top_bar_right_layout_with_options(width, top_telemetry.clock_hhmm, opts);
 
-    let pure_white = [252, 250, 255, 255];
+    let pure_white = [255, 255, 255, 255];
     let logo_loc = Point::from((TOP_BAR_LOGO_X + 1, TOP_BAR_ITEM_Y + 1));
     if let Some(el) = shape_cache.ui_glyph_element(
         renderer,
@@ -1266,7 +1322,10 @@ fn build_chrome_shapes(
         top_telemetry,
     );
 
-    if let Some(open_menu) = top_telemetry.active_menu {
+    if let Some(open_menu) = top_telemetry
+        .active_menu
+        .filter(|m| *m != TopBarMenuHit::Go || left_layout.has_go)
+    {
         let (anchor_x, anchor_w) = match open_menu {
             TopBarMenuHit::SystemLogo => (TOP_BAR_LOGO_X - 2, TOP_BAR_LOGO_W + 4),
             TopBarMenuHit::ActiveApp => (left_layout.app_x - 2, left_layout.app_w + 4),
@@ -1285,25 +1344,30 @@ fn build_chrome_shapes(
                 Point::from((anchor_x, TOP_BAR_ITEM_Y)),
                 Size::from((anchor_w, TOP_BAR_ITEM_H)),
             ),
-            5,
+            6,
             [255, 255, 255, 42],
             None,
         );
-        let (mx, my, mw, mh) = top_bar_menu_popover_rect(&active_app_name, open_menu);
+        let (mx, my, mw, mh) =
+            top_bar_menu_popover_rect_for_profile(app_profile, active_app_name, open_menu);
         let menu_rect = Rectangle::new(Point::from((mx, my)), Size::from((mw, mh)));
         let mut row_y = my + MENU_POPOVER_PAD_Y;
-        for (entry_idx, entry) in top_bar_menu_entries(open_menu).iter().enumerate() {
+        for (entry_idx, entry) in
+            resolve_top_bar_menu_entries(app_profile, active_app_name, open_menu)
+                .into_iter()
+                .enumerate()
+        {
             match entry {
-                TopBarMenuEntry::Item { icon, .. } => {
+                ResolvedTopBarMenuItem::Item { icon, .. } => {
                     let hovered = top_telemetry.menu_hover_row == Some(entry_idx);
                     let icon_tint = if hovered {
-                        [255, 252, 255, 255]
+                        [255, 255, 255, 255]
                     } else {
-                        [218, 208, 238, 240]
+                        pal.popover_icon
                     };
                     if let Some(el) = shape_cache.ui_glyph_element(
                         renderer,
-                        *icon,
+                        icon,
                         14,
                         icon_tint,
                         Point::from((mx + 14, row_y + 7)),
@@ -1320,16 +1384,16 @@ fn build_chrome_shapes(
                                 Size::from((mw - 12, MENU_ITEM_HEIGHT - 2)),
                             ),
                             8,
-                            [165, 110, 255, 200],
-                            Some([215, 185, 255, 110]),
+                            pal.accent_hover_fill,
+                            None,
                         );
                     }
                     row_y += MENU_ITEM_HEIGHT;
                 }
-                TopBarMenuEntry::Separator => {
+                ResolvedTopBarMenuItem::Separator => {
                     out.push(CompositorRenderElement::Solid(make_solid_element(
                         Rectangle::new(Point::from((mx + 12, row_y + 4)), Size::from((mw - 24, 1))),
-                        COLOR_BORDER,
+                        pal.popover_separator,
                     )));
                     row_y += MENU_SEPARATOR_HEIGHT;
                 }
@@ -1402,22 +1466,6 @@ fn build_chrome_shapes(
         }
     }
 
-    if top_telemetry.show_input_source
-        && let Some(kbd_x) = right_layout.kbd_x
-    {
-        push_rounded_glass_box(
-            &mut out,
-            shape_cache,
-            renderer,
-            Rectangle::new(
-                Point::from((kbd_x, TOP_BAR_ITEM_Y)),
-                Size::from((right_layout.kbd_w, TOP_BAR_ITEM_H)),
-            ),
-            6,
-            [255, 255, 255, 36],
-            Some([255, 255, 255, 42]),
-        );
-    }
     if top_telemetry.notification_count > 0 {
         push_rounded_glass_box(
             &mut out,
@@ -1442,8 +1490,8 @@ fn build_chrome_shapes(
                 Size::from((right_layout.control_center_w + 10, TOP_BAR_ITEM_H)),
             ),
             6,
-            [255, 255, 255, 58],
-            Some([255, 255, 255, 42]),
+            [255, 255, 255, 42],
+            None,
         );
     }
 
@@ -1477,18 +1525,20 @@ fn build_chrome_shapes(
             start_x += WS_BTN_STRIDE;
         }
 
-        push_rounded_glass_box(
-            &mut out,
-            shape_cache,
-            renderer,
-            Rectangle::new(
-                Point::from((left_layout.layout_x, ws_y)),
-                Size::from((left_layout.layout_w, ws_h)),
-            ),
-            9,
-            [255, 255, 255, 14],
-            (layout_mode == "master-stack").then_some(RGBA_ACCENT),
-        );
+        if layout_mode == "master-stack" {
+            push_rounded_glass_box(
+                &mut out,
+                shape_cache,
+                renderer,
+                Rectangle::new(
+                    Point::from((left_layout.layout_x, ws_y)),
+                    Size::from((left_layout.layout_w, ws_h)),
+                ),
+                9,
+                pal.accent_hover_fill,
+                None,
+            );
+        }
     }
 
     // Fully transparent TopBar by default (`reduce_transparency == false`);
@@ -1500,7 +1550,7 @@ fn build_chrome_shapes(
         )));
         out.push(CompositorRenderElement::Solid(make_solid_element(
             Rectangle::new(Point::from((0, 0)), Size::from((width, TOP_BAR_HEIGHT))),
-            rgba_to_premul_color32f([20, 15, 32, 245]),
+            rgba_to_premul_color32f([26, 26, 30, 245]),
         )));
     }
 
@@ -1515,11 +1565,11 @@ fn build_chrome_shapes(
             tooltip_rect,
             9,
             scale_glass_rgba(
-                [42, 34, 62, 224],
+                pal.surface_elevated_rgba,
                 top_telemetry.glass_opacity,
                 top_telemetry.reduce_transparency,
             ),
-            Some(RGBA_BORDER_HIGHLIGHT),
+            Some(pal.border_highlight_rgba),
         );
         push_soft_shadow(&mut out, shape_cache, renderer, tooltip_rect, 9, 8, 34);
     }
@@ -1595,10 +1645,16 @@ fn build_chrome_shapes(
         if has_running_dot {
             let pip_color = if is_minimized {
                 [232, 196, 119, 235]
+            } else if pal.is_dark {
+                if is_active {
+                    [246, 247, 250, 242]
+                } else {
+                    [220, 224, 232, 165]
+                }
             } else if is_active {
-                [248, 246, 255, 240]
+                [28, 30, 36, 228]
             } else {
-                [230, 224, 245, 165]
+                [44, 48, 56, 155]
             };
             if let Some(dot) = shape_cache.circle_element(
                 renderer,
@@ -1665,7 +1721,7 @@ fn build_chrome_shapes(
     out.extend(dock_icons);
     out.extend(dock_dots_and_divider);
 
-    if let Some(dock_glass) = shape_cache.dock_glass_panel_element(
+    if let Some(dock_glass) = shape_cache.dock_glass_render_element(
         renderer,
         dock_width,
         DOCK_HEIGHT,
@@ -1674,7 +1730,7 @@ fn build_chrome_shapes(
         top_telemetry.reduce_transparency,
         Point::from((dock_x, dock_y)),
     ) {
-        out.push(CompositorRenderElement::Memory(dock_glass));
+        out.push(dock_glass);
     }
 
     out
@@ -1720,21 +1776,21 @@ fn build_overview_shapes(
                     renderer,
                     Rectangle::new(Point::from((rx, ry)), Size::from((rw, rh))),
                     3,
-                    [224, 212, 248, 185],
-                    Some([255, 255, 255, 90]),
+                    [224, 232, 248, 190],
+                    Some([255, 255, 255, 95]),
                 );
             }
             let thumb_border = if space.active {
-                [185, 138, 255, 255]
+                RGBA_ACCENT
             } else {
                 RGBA_BORDER
             };
             let thumb_bg = if space.active {
-                [72, 42, 124, 228]
+                [26, 72, 138, 228]
             } else if space.window_count > 0 {
-                [50, 32, 86, 214]
+                [44, 48, 56, 214]
             } else {
-                [36, 24, 62, 196]
+                [32, 34, 40, 196]
             };
             push_rounded_glass_box(
                 &mut out,
@@ -1749,7 +1805,7 @@ fn build_overview_shapes(
         }
         out.push(CompositorRenderElement::Solid(make_solid_element(
             Rectangle::new(Point::from((0, TOP_BAR_HEIGHT)), Size::from((width, 98))),
-            premul(0.08, 0.05, 0.14, 0.28),
+            premul(0.08, 0.09, 0.11, 0.28),
         )));
     }
 
@@ -1780,8 +1836,8 @@ fn build_overview_shapes(
                     Size::from((card.size.w + 4, card.size.h + 4)),
                 ),
                 15,
-                [165, 110, 255, 68],
-                Some([198, 156, 255, 245]),
+                [10, 132, 255, 68],
+                Some([64, 156, 255, 245]),
             );
         }
         push_soft_shadow(&mut out, shape_cache, renderer, card, 14, 16, 50);
@@ -1793,7 +1849,7 @@ fn build_overview_shapes(
             Point::from((0, TOP_BAR_HEIGHT)),
             Size::from((width, (height - TOP_BAR_HEIGHT).max(0))),
         ),
-        premul(0.059, 0.039, 0.098, scrim_a),
+        premul(0.06, 0.07, 0.09, scrim_a),
     )));
 
     out

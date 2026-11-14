@@ -12,6 +12,9 @@ name: wayland-compositor
   responsibilities clear.
 - Validate protocol state and handle client disconnects.
 - Keep event-loop callbacks short and non-blocking.
-- Test with known Wayland clients and record environment.
+- Test with known Wayland clients (`rusty-files`, XWayland) and record environment.
+- When using offscreen FBO passes (`LiquidGlassPipeline`, capture), preserve the Winit EGL window
+  surface invariant on idle frames (`Damage == None`) by calling `renderer.render(...)` +
+  `frame.finish()` before `backend.submit()`.
 - Do not invent protocol behavior; consult protocol definitions.
 - Architecture and API changes require approval.

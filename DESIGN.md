@@ -1,6 +1,6 @@
 # RustyOS — Design System
 
-Version: 2.1 (macOS 27 alignment)  
+Version: 3.0 (macOS 27 Golden Gate Light & Dark)  
 Status: Active  
 Scope: Entire desktop environment
 
@@ -19,13 +19,13 @@ The goal is to create an independent Linux desktop environment with:
 
 ### Visual Identity
 
-**RustyOS Purple Glass**
+**RustyOS Golden Gate (Light & Dark)**
 
 The design combines:
 
-- macOS — layout, window composition, navigation and interaction patterns.
-- Liquid Glass — layered surfaces, translucency and visual depth.
-- RustyOS — deep purple palette, violet accents and custom identity.
+- macOS 27 Golden Gate — layout, window composition, navigation and interaction patterns.
+- Liquid Glass — layered frosted light (`#F5F6F8`) and neutral dark graphite (`#262629`) surfaces, translucency and visual depth.
+- RustyOS — dual Light (`#007AFF` accent) and Dark (`#0A84FF` accent) appearances with Golden Gate warm champagne/sand and coastal slate-blue procedural wallpapers.
 
 Do not directly copy Apple branding, logos, proprietary assets or exact interface implementations.
 
@@ -44,12 +44,13 @@ Before implementing or redesigning a UI component:
 1. Inspect the reference directory.
 2. Identify images relevant to the current component.
 3. Use those images as visual guidance.
-4. Apply RustyOS design tokens and interaction rules.
-5. Preserve consistency with existing RustyOS components.
+4. Apply RustyOS Golden Gate tokens and interaction rules.
+5. Preserve consistency across Light and Dark modes (zero legacy purple/lavender/plum tokens, including folder/selection icons).
+6. Capture and visually inspect a live `--winit` screenshot against the chosen Light and Dark reference PNGs.
 
 Do not load the entire reference collection for every task.
 
-Inspect only relevant screenshots.
+Inspect only the relevant Light and Dark screenshots listed in `docs/design/references/macos-27-golden-gate/INDEX.md`.
 
 ### Reference Priority
 
@@ -64,7 +65,7 @@ Use references to understand:
 - Visual depth, transparency and shadows.
 - Motion and interaction patterns.
 
-When references conflict with RustyOS design tokens, RustyOS tokens take priority.
+`macOS 27 Golden Gate` (`INDEX.md`) is the 1:1 visual parity target for layout, Liquid Glass clarity, shadows, and color polarity (using original RustyOS emblems/assets). Do not preserve legacy tokens when they visibly diverge from Golden Gate references; propose token/layout alignment cleanly through `APPROVE:`.
 
 ## 3. UX Principles
 
@@ -145,28 +146,45 @@ Colors, spacing, radius, typography and motion must have a single source of trut
 
 The following values are initial design tokens and may evolve as the visual system matures.
 
-### 5.1 Colors
+### 5.1 Colors (`Golden Gate Light & Dark`, `RUSTYOS-067`)
 
 ```toml
-[colors]
-background = "#0F0A19"
-surface = "#161023"
-surface_elevated = "#20182E"
-surface_overlay = "#292037"
+[colors.light]
+background = "#F5F6F8"
+surface = "#FFFFFF"
+surface_elevated = "#F5F6F8"
+surface_overlay = "#EBECEF"
 
-accent = "#A56EFF"
-accent_hover = "#B98AFF"
-accent_muted = "#7650B5"
+accent = "#007AFF"
+accent_hover = "#1A88FF"
+accent_muted = "#0062CC"
 
-text = "#F4F0FA"
-muted = "#A69BB5"
-subtle = "#766B85"
+text = "#1D1F24"
+muted = "#5A606E"
+subtle = "#868D9C"
 
+border = "#00000018"
+
+[colors.dark]
+background = "#141518"
+surface = "#1E1E21"
+surface_elevated = "#26262A"
+surface_overlay = "#303036"
+
+accent = "#0A84FF"
+accent_hover = "#409CFF"
+accent_muted = "#0062CC"
+
+text = "#F2F2F7"
+muted = "#AEAEB6"
+subtle = "#84848C"
+
+border = "#FFFFFF1F"
+
+[colors.semantic]
 danger = "#E56B75"
-success = "#83D6A0"
+success = "#30D158"
 warning = "#E8C477"
-
-border = "#FFFFFF12"
 ```
 
 ### 5.2 Radius
@@ -346,133 +364,116 @@ The design system should evolve incrementally, not through unrelated redesigns.
 
 ## 12. macOS 27 Alignment (Liquid Glass)
 
-Source: user-provided references in `docs/design/references/` (`desktop`, `context-menu`,
-`control-center-overview`, `finder-window-dark`, `window-management`) and public descriptions of
-macOS 26/27 Liquid Glass. Pixel values are approximate, measured from those screenshots at ~2x,
-and are targets in logical pixels. RustyOS keeps its purple palette (section 5.1); only geometry,
-layout and material behavior follow macOS 27. No Apple assets or branding.
+Source: local `macOS 27 Golden Gate` reference library in `docs/design/references/macos-27-golden-gate/`
+(`INDEX.md`, including `27-Golden-Gate-Desktop.png`, `27-Golden-Gate-Finder-Control-Center.png`,
+`27-Golden-Gate-About-This-Mac-Menu.png`, `27-Golden-Gate-Spotlight-Search-v2.png`,
+`27-Golden-Gate-Finder-Home-Folder.png`, `27-Golden-Gate-Settings-Appearance.png`,
+`27-Golden-Gate-Finder-App-Switcher.png`, `27-Golden-Gate-Mission-Control.png`,
+`27-Golden-Gate-Login-Window.png`, `27-Golden-Gate-Notification-Center.png`, and `appearance/*`).
+Pixel values are approximate targets in logical pixels. RustyOS follows neutral `Golden Gate Light & Dark`
+palettes (section 5.1); geometry, Liquid Glass clarity, and interactions target 1:1 parity with
+`macOS 27 Golden Gate` using original RustyOS emblems and artwork (no Apple branding).
 
 ### 12.1 Menu bar (top panel)
 
-- Completely transparent by default (`24 px` logical height, zero dark scrim stripe): crisp
-  shadowless white text and icons sit directly on the wallpaper. A high-contrast solid fallback
-  surface is enabled only by `reduce_transparency = true`.
+- Completely transparent by default (`24 px` logical height, zero dark scrim stripe and zero opaque
+  backing pill behind the right status icons or square backing block behind the logo): crisp text
+  and icons sit directly on the desktop/wallpaper with subtle shadow where needed for legibility.
+  A high-contrast solid fallback surface is enabled only by `reduce_transparency = true`.
 - Typography: bundled **Inter** (`Inter-SemiBold` for bold active-app name, `Inter-Regular` for
   menus and clock) at unified `13 px` on a shared optical baseline.
-- Left: pure monochrome white original RustyOS chamfered hexagon emblem (`18 px`, `#FCFAFF`), bold
-  active-app name, and global menus (`File`, `Edit`, `View`, `Go`, `Window`, `Help`).
+- Left: pure monochrome original RustyOS chamfered hexagon emblem (`18 px`), bold
+  active-app name (`Files` default when no app window owns focus, switching dynamically via
+  `TopBarAppProfile`), and app-aware menus (`File`, `Edit`, `View`, conditional `Go`, `Window`, `Help`).
 - Workspace strip (`1..=9` + `Float`/`Tile`), SNI tray icons, standalone `Volume` glyph, and
   keyboard badge (`EN`/`RU`) are hidden by default for 1:1 visual minimalism and enabled opt-in via
   `[ui]` in `config.toml` (`menubar_show_workspaces`, `menubar_show_tray`,
   `menubar_show_input_source`, `menubar_show_volume`); workspaces and window layout remain directly
   accessible via `Go`/`Window` menus, Overview, Control Center, and keyboard shortcuts.
 - Right (`4x4` SSAA SDF monochrome glyphs, `10 px` icon gaps / `6 px` before Clock, macOS order):
-  `Battery` (`26x20 px` solid monochrome white pill capsule at `100%` or translucent glass track
-  with proportional fill `5..=97%`, separated right terminal nub, and sharp white lightning bolt
-  surrounded by a transparent cutout halo whenever AC power is connected or charging including
-  `99–100% Full`, red `<= 20%` on battery, omitted when absent) -> `Wi-Fi` (`20 px` 1:1 3-band
-  fan — rounded pie-wedge anchor + 2 wide concentric arcs — reflecting live `0..=3` signal bars
-  from NetworkManager D-Bus / `/proc/net/wireless` / `nmcli` with dimmed inactive upper arcs or
-  muted slash when offline) -> `Search` (`18 px`, bright white) -> `Control Center` (`20 px`: top
-  hollow outline capsule with left knob ring + bottom solid white capsule with right cutout circle,
-  translucent pill highlight when open) -> neutral locale plain Clock (`"Wed Apr 1  9:41 AM"`, or
-  24h `"Wed Apr 1  09:41"` with `clock_24h = true`).
+  `Battery` -> `Wi-Fi` -> `Search` -> `Control Center` (two horizontal toggle capsules) -> plain
+  Clock (`"Wed Apr 1  9:41 AM"` or 24h with `clock_24h = true`).
 
-### 12.2 Dock
+### 12.2 Dock & Wallpaper
 
+- Built-in Golden Gate procedural wallpaper targets layered 3D S-curve silk folds with crisp luminous
+  crest highlights (matching `27-Golden-Gate-Desktop.png` Light/Dark contrast) so Liquid Glass edge
+  refraction reads clearly behind Dock and popovers.
 - Concentric rounded floating glass container (`DOCK_HEIGHT = 68 px`, `DOCK_RADIUS = 22 px`,
   `DOCK_MARGIN_BOTTOM = 8 px`), width dynamically fits `6` pinned apps + running windows + `2`
-  utility slots; light top-lit frosted fill (`sample_dock_glass_pixel`) with 4×4 Bayer dithering,
-  luminous 1 px top specular rim tapering softly along sides/bottom without a heavy outer shadow
-  halo, and an opaque high-contrast plum-slate fallback when `reduce_transparency = true`.
+  utility slots; clear top-lit `LiquidGlassElement` frosted fill (light, high background clarity with
+  directional corner caustics rather than heavy grey/milky tint), tapering specular rim, and an opaque
+  fallback when `reduce_transparency = true`.
 - Resting slots have zero grey box outlines or dark backing smudges: crisp `50 px` `4x4` SSAA
-  superellipse (exponent `4.8`) app icons sit cleanly on the translucent glass tray over `6 px` gaps
-  (`52 px` hit slots).
-- Default macOS cadence of original RustyOS artwork (`Files`, `Overview`, `Terminal`, `Browser`,
-  `Notes`, `Settings`) + running window slots (preferring real XDG PNG / SHM toplevel icons over
-  `WindowFallback`), followed by a centered `1 px` hairline vertical divider and free-standing
-  `Downloads` (stacked blue folder) and `Trash` (tapered frosted silver wastebasket) utility icons.
-- Running indicator: crisp `5x5` SDF circular dot (`#F8F6FF` active, amber `#E8C477` minimized,
-  muted translucent for inactive windows) anchored `7 px` above the Dock bottom edge.
+  superellipse app icons sit cleanly on the translucent glass tray over `6 px` gaps (`52 px` hit slots),
+  followed by a centered `1 px` hairline divider and glass-styled `Downloads` folder + translucent `Trash` icon.
+- Running indicator target: neutral circular `5x5` dot (dark/charcoal in Light mode, luminous white in
+  Dark mode; amber when minimized) anchored `7 px` above the Dock bottom edge.
 - Hover: quantized icon magnification (`50..=58 px`) and smooth upward lift (`+6 px`, `120 ms`
-  interruptible animation; subtle `2 px` static lift when `reduced_motion = true`), accompanied by
-  a floating frosted glass tooltip pill naming the hovered application above the Dock.
+  interruptible animation; `2 px` static lift when `reduced_motion = true`) with a floating frosted
+  glass tooltip pill naming the hovered application above the Dock.
 
-### 12.3 Windows, menus, Spotlight, Notifications, and OSD
+### 12.3 Windows, Finder (`rusty-files`), menus, Spotlight, Notifications, and OSD
 
-- Window chrome (`SSD`): `WINDOW_RADIUS = 20` rounded corners at both top (`TITLEBAR_HEIGHT`
-  titlebar) and bottom (1 px transparent-interior corner rim curves over client content), top
-  1 px specular rim, and multi-layer soft ambient + contact shadows (`generate_window_shadow_elements`,
-  stronger when focused, flatter when unfocused).
+- Window chrome (`SSD`): `WINDOW_RADIUS = 20` rounded corners at both top (`TITLEBAR_HEIGHT`) and
+  bottom, top 1 px specular rim, and deep soft multi-layer shadows (`generate_window_shadow_elements`).
+  Standard system windows (e.g., `System Settings`) should behave as movable desktop windows without a
+  full-screen modal scrim that darkens `TopBar` and `Dock`.
 - Titlebar traffic lights: `12 px` gel-lit buttons (`TrafficLightKind::{Close, Minimize, Maximize}`)
-  with subtle specular highlight and border, revealing `4x4` SSAA SDF hover glyphs (`×`, `−`, `+`)
-  across the button cluster when hovered (`hovered_traffic_light_window`).
-- Menu bar dropdowns (`MENU_POPOVER_RADIUS = 16`): `Popover` top-lit liquid glass (`pop_w = 256`),
-  leading `4x4` SSAA monochrome `UiGlyphKind` icons, hairline section dividers, right-aligned real
-  compositor shortcuts (`Super+Tab`, `Alt+S`, `Super+L`, `Super+Space`, `Alt+L`, `Alt+R`, `Alt+J`,
-  `Alt+M`, `Alt+H`, `Alt+W`), and a rounded accent pill highlight on the hovered row
-  (`top_bar_menu_hover_row`), anchored under a highlighted `TopBar` button when active.
-- Spotlight (`ShellOverlayView::Spotlight`): `Popover` modal with a `48 px` `ControlModule` search
-  field, full-width rounded accent pill highlight for the selected match, and a right-aligned
-  `"Open ↵"` action hint.
-- Notification HUD & OSD: `340x68` `Popover` (`radius = 16`) toast cards lead with a `38x38`
-  `BuiltinAppIcon` squircle (`Terminal`, `Files`, `Browser`, `Notes`, `Settings`, `RustySystem`)
-  and reveal a circular `20x20` close (`×`) button on hover (`hovered_notification_idx`); centered
-  OSD pills (`Popover`, `radius = 18`) pair a `22x22` `Sun` / `Volume` / `Info` SDF glyph with a
-  rounded `h = 8, r = 4` capsule level bar.
+  revealing `×`, `−`, `+` hover glyphs (`hovered_traffic_light_window`).
+- Finder / `rusty-files` 1:1 parity targets: Sky Blue folder icons in BOTH Light and Dark appearances
+  (never purple/lavender), floating rounded inset glass sidebar containing the traffic lights,
+  separated glass toolbar pills (`< | >`, view switcher, actions, search) above the tab bar, and clean
+  status bar without debug theme-toggle buttons.
+- Menu bar dropdowns (`MENU_POPOVER_RADIUS = 16–20`): clear `Popover` liquid glass with leading
+  `UiGlyphKind` icons, hairline dividers, right-aligned shortcut column (`⌘`/`⌥`/`⌃`/`⇧` or compositor
+  equivalents), submenu chevrons (`>`), and a rounded accent pill highlight on hover.
+- Spotlight (`ShellOverlayView::Spotlight`): dual-capsule layout matching `27-Golden-Gate-Spotlight-Search-v2.png`
+  — a floating rounded search pill (`ControlModule` / dark gloss) separated cleanly above the results
+  and category-filter `Popover` card.
+- App Switcher (`Alt/Super+Tab`): clear `LiquidGlassElement` bar with subtle rounded highlight on the
+  selected app icon (no opaque square boxes per slot).
+- Notification HUD & OSD: `Popover` toast cards (plus long-term right-edge `Notification Center` stack)
+  with `38x38` squircle app icons and hover close (`×`) circle; centered OSD pills pairing `22x22`
+  glyphs with rounded `h = 8, r = 4` level bars.
 
 ### 12.4 Control center and quick settings
 
-- Floating Liquid Glass islands anchored top-right (`316x456` bounding box at `TOP_BAR_HEIGHT + 10`
-  under the highlighted `TopBar` Control Center pill) with no outer dark container box; each
-  island uses individual `GlassPanelStyle::ControlModule` glass and drop shadow (`RUSTYOS-053`).
-- Upper grid pairs three full-pill connectivity/status capsules on the left (`Wi-Fi`, `Bluetooth`,
-  `Power` with inverted white active circles and live SSID/power state) beside a top-right square
-  `Now Playing` card backed by `MPRIS2` / `playerctl` (`Not Playing` or live track title with
-  working `Prev`/`PlayPause`/`Next` controls), two captionless `66x66` circular quick toggles
-  (`Tile`/`Float` Layout and `Overview`), two captionless circular toggles (`Reduced Motion` and
-  `Clear Glass`/`Opaque`), and a right `Focus` (`Do Not Disturb`) capsule suppressing visible toast
-  banners when active.
-- Lower section stacks two full-width `58px`-tall `ControlModule` sliders (`Display` backed by
-  `BrightnessService` when available with `glass_opacity` `35%..=100%` fallback, and `Sound`
-  `0%..=100%` with an integrated right-side `Mute` circular toggle, thin `6px` tracks without
-  percentage readouts), followed by a bottom centered `118x30` `Lock Screen` floating glass pill.
+- Floating Liquid Glass islands anchored top-right (`TOP_BAR_HEIGHT + 10`) with no outer dark container box;
+  each island uses individual `GlassPanelStyle::ControlModule` glass and drop shadow (`RUSTYOS-053`).
+- Matches `27-Golden-Gate-Finder-Control-Center.png` hierarchy: three stacked connectivity/status capsules
+  on the left (`Wi-Fi`, `Bluetooth`, `Power` / `AirDrop` equivalent), square `Now Playing` card backed by
+  `MPRIS2` / `playerctl` on top-right, circular quick toggles (`Layout`, `Overview`, `Reduced Motion`,
+  `Transparency`), right `Focus` capsule, full-width `Display` and `Sound` slider capsules (bright
+  active track over tinted glass), and bottom pill (`Lock Screen` / `Edit Controls` parity).
 
 ### 12.5 Material and depth
 
-- Multi-pass GLES FBO blur-behind remains deferred to a dedicated future hardware ADR; until then,
-  `UiShapeCache::glass_panel_element` (`GlassPanelStyle::{Dock, Popover, ControlModule}`) emulates
-  top-lit liquid glass with `4x4` Bayer dithering, directional alpha tinting, and crisp inner
-  specular rims.
+- Glass containers (`Dock`, `Popover`, `ControlModule`, `Switcher`, `LockScreen` input pill) render
+  through the 5-pass GLES Dual-Kawase backdrop blur FBO pipeline (`LiquidGlassPipeline`:
+  `1 -> 1/2 -> 1/4 -> 1/8 -> 1/4 -> 1/2`) using `OutputDamageTracker` on the backdrop scene so idle
+  frames incur zero extra GPU passes, composited via `LIQUID_GLASS_FRAG` (`TextureShaderElement`) with
+  analytical rounded-box SDF, edge optical lensing/dispersion, vibrance boost, directional specular
+  bevel rim, and restrained Light/Dark tinting (`ADR-0034`) so Light glass stays clear and luminous.
+- Automatic runtime CPU fallback (`UiShapeCache::glass_panel_element` with `4x4` Bayer dithering)
+  activates cleanly whenever `reduce_transparency = true`, the session/screen is locked, no glass UI
+  is visible, or GLES shader/FBO init fails.
 - User controls for `glass_opacity` (`0.35..=1.0`, default `0.78`) and `reduce_transparency`
   (`true` switches shell panels to opaque high-contrast surfaces) are configurable via `[ui]` in
   `config.toml` and live-adjustable in Control Center.
 
 ### 12.6 Mission Control / Overview
 
-- Top centered `Desktop 1..9` Spaces miniature strip (`overview_space_rects`) displays live
-  non-minimized normalized `preview_rects` inside each workspace thumbnail, highlights the active
-  workspace with accent fill/border, and switches directly to the clicked workspace
-  (`OverviewHit::SwitchWorkspace`).
-- A light `0.36` radial-style scrim preserves wallpaper depth while floating `Popover` preview cards
-  (and focused outline ring) arrange below the Spaces strip above the visible Dock.
+- Top centered `Desktop 1..9` Spaces strip + arranged window cards below; long-term 1:1 parity target
+  replaces static placeholder rectangles with live scaled desktop/window thumbnails (`27-Golden-Gate-Mission-Control.png`).
 
 ### 12.7 Lock Screen
 
-- Locking switches the topmost compositing layer (`generate_lock_screen_elements`, rendered in front
-  of all windows, `TopBar`, and `Dock` across `--winit` and `--drm`) to the full-screen desktop
-  wallpaper without a modal card or opaque dark veil (`RUSTYOS-054`).
-- Top-center header displays neutral C-locale date (`local_clock_lock_date`, e.g. `"Fri Nov 13"`)
-  over large frosted semi-translucent clock numerals (`local_clock_lock_hhmm`, respecting
-  `clock_24h`, without AM/PM suffix).
-- Top-right minimal status cluster renders on the clean wallpaper: interactive keyboard layout label
-  + `UiGlyphKind::Keyboard` (`U.S.`/`RU`), `UiGlyphKind::Battery`, 3-band `UiGlyphKind::Wifi`, and
-  `UiGlyphKind::PowerSymbol` opening a compact `Popover` menu (`Sleep`, `Restart...`,
-  `Shut Down...`) backed by `SessionService`.
-- Bottom centered user list (`UserService` reading `/etc/passwd` UID `1000..=60000` and `~/.face` /
-  `AccountsService` avatars or `4x4` SSAA silhouette badges) allows selecting an account
-  (`Up`/`Down`/`Tab`/click) and unlocking immediately via single-user click, clicking the active
-  selected user, `Enter`, `Space`, or `Escape`.
+- Locking renders the full-screen wallpaper in front of all windows, `TopBar`, and `Dock` without a modal
+  card or dark veil (`RUSTYOS-054`).
+- Top-center neutral C-locale date over large embossed/semi-translucent frosted clock numerals;
+  minimal top-right status cluster (`U.S.`/`RU` + keyboard, `Battery`, `Wifi`, `PowerSymbol` popover);
+  bottom centered user avatars and `LiquidGlassElement`-backed password input pill (`27-Golden-Gate-Login-Window.png`).
 
 ---
 
@@ -480,6 +481,6 @@ layout and material behavior follow macOS 27. No Apple assets or branding.
 
 Inspired by the clarity of macOS.  
 Enhanced by layered glass surfaces.  
-Defined by its own purple identity.
+Unified across Golden Gate Light and Dark appearances.
 
 **One system. One visual language. One consistent experience.**

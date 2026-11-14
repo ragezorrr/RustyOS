@@ -403,7 +403,7 @@ pub(crate) fn hit_test_gallery(gal: &GalleryLayout, px: f64, py: f64) -> Option<
 /// Renders the Golden Gate segmented `Tabs` bar beneath the toolbar.
 pub(crate) fn render_tab_bar(c: &mut Canvas<'_>, tb: &TabBarLayout, pal: &Palette) {
     let track_bg = if pal.is_dark {
-        rgba(38, 29, 54, 255)
+        rgba(48, 48, 54, 255)
     } else {
         rgba(232, 235, 241, 255)
     };
@@ -480,7 +480,7 @@ pub(crate) fn render_path_bar(c: &mut Canvas<'_>, crumbs: &[PathCrumbLayout], pa
         }
         // Mini Golden Gate folder glyph before label
         let icon_col = if pal.is_dark {
-            rgba(148, 134, 248, 255)
+            rgba(72, 164, 255, 255)
         } else {
             rgba(56, 152, 246, 255)
         };
@@ -801,7 +801,7 @@ fn render_gallery_inspector(
     pal: &Palette,
 ) {
     let info_bg = if pal.is_dark {
-        rgba(35, 27, 51, 255)
+        rgba(36, 36, 40, 255)
     } else {
         rgba(247, 248, 251, 255)
     };
@@ -1105,7 +1105,7 @@ pub(crate) fn render_text_preview_card(
         card_h,
     );
     let paper = if pal.is_dark {
-        rgba(38, 30, 56, 255)
+        rgba(38, 38, 44, 255)
     } else {
         rgba(253, 254, 255, 255)
     };

@@ -82,8 +82,9 @@ impl RustyCompositorState {
 
         self.top_bar_menu_hover_row = if is_on_primary && !chrome_hidden {
             if let Some(menu) = self.active_top_bar_menu {
-                let active_app = self.active_top_bar_app_name();
-                crate::shell_render::check_top_bar_menu_popover_hover_row(
+                let (active_app, app_profile) = self.active_top_bar_app_context();
+                crate::shell_render::check_top_bar_menu_popover_hover_row_for_profile(
+                    app_profile,
                     &active_app,
                     menu,
                     local_x,
@@ -141,13 +142,14 @@ impl RustyCompositorState {
         serial: smithay::utils::Serial,
         button: u32,
     ) -> bool {
-        let active_app_name = self.active_top_bar_app_name();
+        let (active_app_name, app_profile) = self.active_top_bar_app_context();
         let x = self.pointer_location.x;
         let y = self.pointer_location.y;
         let was_menu_open = self.active_top_bar_menu.is_some();
 
         if let Some(open_menu) = self.active_top_bar_menu {
-            match crate::shell_render::check_top_bar_menu_popover_click(
+            match crate::shell_render::check_top_bar_menu_popover_click_for_profile(
+                app_profile,
                 &active_app_name,
                 open_menu,
                 x,
@@ -169,9 +171,12 @@ impl RustyCompositorState {
             }
         }
 
-        if let Some(menu_hit) =
-            crate::shell_render::check_top_bar_menu_click_for_app(&active_app_name, x, y)
-        {
+        if let Some(menu_hit) = crate::shell_render::check_top_bar_menu_click_for_profile(
+            app_profile,
+            &active_app_name,
+            x,
+            y,
+        ) {
             self.toggle_top_bar_menu(menu_hit);
             return true;
         }
@@ -180,7 +185,8 @@ impl RustyCompositorState {
             self.close_top_bar_menu();
         }
 
-        if let Some(target_ws) = crate::shell_render::check_top_bar_workspace_click_with_options(
+        if let Some(target_ws) = crate::shell_render::check_top_bar_workspace_click_for_profile(
+            app_profile,
             &active_app_name,
             self.menubar_show_workspaces,
             x,
@@ -190,7 +196,8 @@ impl RustyCompositorState {
             self.apply_wm_action(WmAction::SwitchWorkspace(ws), serial);
             return true;
         }
-        if crate::shell_render::check_top_bar_layout_click_with_options(
+        if crate::shell_render::check_top_bar_layout_click_for_profile(
+            app_profile,
             &active_app_name,
             self.menubar_show_workspaces,
             x,

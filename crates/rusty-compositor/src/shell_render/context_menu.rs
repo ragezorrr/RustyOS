@@ -11,15 +11,11 @@ use crate::text::FontWeight;
 use super::CompositorRenderElement;
 use super::dock::DockHit;
 use super::tokens::{
-    COLOR_BORDER, MENU_POPOVER_RADIUS, TOP_BAR_HEIGHT, make_solid_element, push_liquid_glass_panel,
+    MENU_POPOVER_RADIUS, TOP_BAR_HEIGHT, ThemePalette, make_solid_element, push_liquid_glass_panel,
     push_rounded_glass_box, truncate_ascii,
 };
 use super::top_bar::{MENU_ITEM_HEIGHT, MENU_POPOVER_PAD_Y, MENU_SEPARATOR_HEIGHT};
 
-const MENU_TEXT_BRIGHT: [u8; 4] = [244, 240, 250, 255];
-const MENU_TEXT_MUTED: [u8; 4] = [166, 155, 181, 255];
-const MENU_TEXT_DISABLED: [u8; 4] = [132, 122, 148, 175];
-const MENU_TEXT_DANGER: [u8; 4] = [255, 134, 148, 255];
 const CONTEXT_MENU_MIN_WIDTH: i32 = 216;
 const CONTEXT_MENU_MAX_WIDTH: i32 = 296;
 const SUBMENU_GAP_PX: i32 = 4;
@@ -669,6 +665,7 @@ fn render_panel_text(
         smithay::backend::renderer::element::memory::MemoryRenderBufferRenderElement<GlesRenderer>,
     >,
 ) {
+    let pal = ThemePalette::active();
     let mx = panel_rect.loc.x;
     let mw = panel_rect.size.w;
     for (idx, (entry, row_rect)) in entries.iter().zip(rows).enumerate() {
@@ -685,13 +682,13 @@ fn render_panel_text(
         };
         let hovered = *enabled && selected_row == Some(idx);
         let fg = if !*enabled {
-            MENU_TEXT_DISABLED
+            pal.popover_text_disabled
         } else if hovered {
-            [255, 252, 255, 255]
+            [255, 255, 255, 255]
         } else if *danger {
-            MENU_TEXT_DANGER
+            pal.popover_danger
         } else {
-            MENU_TEXT_BRIGHT
+            pal.popover_text_primary
         };
         let shown = truncate_ascii(label, 28);
         if let Some(el) = text_cache.render_label(
@@ -708,9 +705,9 @@ fn render_panel_text(
         {
             let (hint_w, _) = text_cache.measure_text(hint, 11.0);
             let hint_fg = if hovered {
-                [248, 240, 255, 255]
+                [245, 248, 255, 255]
             } else {
-                MENU_TEXT_MUTED
+                pal.popover_text_muted
             };
             if let Some(el) = text_cache.render_label(
                 renderer,
@@ -737,6 +734,7 @@ fn render_panel_shapes(
     reduce_transparency: bool,
     out: &mut Vec<CompositorRenderElement>,
 ) {
+    let pal = ThemePalette::active();
     let mx = panel_rect.loc.x;
     let mw = panel_rect.size.w;
 
@@ -753,13 +751,13 @@ fn render_panel_shapes(
             } => {
                 let hovered = *enabled && selected_row == Some(idx);
                 let icon_tint = if !*enabled {
-                    MENU_TEXT_DISABLED
+                    pal.popover_text_disabled
                 } else if hovered {
-                    [255, 252, 255, 255]
+                    [255, 255, 255, 255]
                 } else if *danger {
-                    MENU_TEXT_DANGER
+                    pal.popover_danger
                 } else {
-                    [218, 208, 238, 240]
+                    pal.popover_icon
                 };
                 if let Some(el) = shape_cache.ui_glyph_element(
                     renderer,
@@ -786,9 +784,9 @@ fn render_panel_shapes(
                         UiGlyphKind::Check,
                         12,
                         if hovered {
-                            [255, 252, 255, 255]
+                            [255, 255, 255, 255]
                         } else {
-                            [198, 152, 255, 255]
+                            pal.accent_rgba
                         },
                         Point::from((mx + mw - 22, row_y + 8)),
                     )
@@ -805,15 +803,15 @@ fn render_panel_shapes(
                             Size::from((mw - 12, MENU_ITEM_HEIGHT - 2)),
                         ),
                         8,
-                        [165, 110, 255, 200],
-                        Some([215, 185, 255, 110]),
+                        pal.accent_hover_fill,
+                        Some(pal.accent_hover_border),
                     );
                 }
             }
             ContextMenuEntry::Separator => {
                 out.push(CompositorRenderElement::Solid(make_solid_element(
                     Rectangle::new(Point::from((mx + 12, row_y + 4)), Size::from((mw - 24, 1))),
-                    COLOR_BORDER,
+                    pal.popover_separator,
                 )));
             }
         }

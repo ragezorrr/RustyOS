@@ -438,6 +438,8 @@ pub struct RustyCompositorState {
     pub dock_hover_anim: AnimatedValue,
     /// Open `TopBar` left dropdown menu popover if any (`RUSTYOS-048`).
     pub active_top_bar_menu: Option<crate::shell_render::TopBarMenuHit>,
+    /// True when the user clicked the empty desktop background so `Files` is the active Menu Bar app (`RUSTYOS-067`).
+    pub desktop_focused: bool,
     /// Currently hovered row index inside an open `TopBar` dropdown menu (`RUSTYOS-051`).
     pub top_bar_menu_hover_row: Option<usize>,
     /// Active Control Center slider drag state (`RUSTYOS-051`).
@@ -800,6 +802,7 @@ impl RustyCompositorState {
             dock_hover_slot: None,
             dock_hover_anim: AnimatedValue::new_settled(0.0),
             active_top_bar_menu: None,
+            desktop_focused: false,
             top_bar_menu_hover_row: None,
             qs_slider_drag: None,
             hovered_notification_idx: None,

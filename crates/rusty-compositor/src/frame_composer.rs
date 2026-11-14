@@ -34,8 +34,8 @@ use crate::{
     state::RustyCompositorState,
 };
 
-/// Background clear color matching `background = "#0F0A19"` from `DESIGN.md` (Version 2.0).
-pub(crate) const BACKGROUND_COLOR: Color32F = Color32F::new(0.059, 0.039, 0.098, 1.0);
+/// Background clear color matching `background = "#141518"` from `DESIGN.md` (Golden Gate).
+pub(crate) const BACKGROUND_COLOR: Color32F = Color32F::new(0.078, 0.082, 0.094, 1.0);
 
 /// Controls cursor inclusion and hardware cursor plane candidacy per output frame (`RUSTYOS-046`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -217,6 +217,12 @@ pub(crate) fn scale_render_elements_for_output(
                 clamped,
                 CompositorRenderElement::ScaledTexture,
                 CompositorRenderElement::Texture,
+            ),
+            CompositorRenderElement::ShaderTexture(glass) => relocate_hi_dpi_element(
+                glass,
+                clamped,
+                CompositorRenderElement::ScaledShaderTexture,
+                CompositorRenderElement::ShaderTexture,
             ),
             other => other,
         })
@@ -420,6 +426,181 @@ fn collect_dock_windows(
     dock_windows
 }
 
+#[allow(clippy::too_many_arguments)]
+fn push_window_backdrop_elements(
+    backdrop_list: &mut Vec<CompositorRenderElement>,
+    renderer: &mut GlesRenderer,
+    text_cache: &mut crate::text::TextCache,
+    shape_cache: &mut crate::surfaces::UiShapeCache,
+    state: &RustyCompositorState,
+    win_id: rusty_wm::WindowId,
+    rect: rusty_wm::Rect,
+    output_loc: Point<i32, Logical>,
+    output_scale: f64,
+    is_focused: bool,
+    is_fullscreen: bool,
+) {
+    let global_origin = state
+        .animations
+        .animated_window_origin(win_id.0)
+        .unwrap_or((rect.x, rect.y));
+    let origin = (
+        global_origin.0 - output_loc.x,
+        global_origin.1 - output_loc.y,
+    );
+    let has_ssd = !is_fullscreen && !state.window_uses_csd(win_id);
+    let titlebar_h = if has_ssd {
+        crate::shell_render::TITLEBAR_HEIGHT
+    } else {
+        0
+    };
+    let actively_resizing = state
+        .active_window_resize
+        .is_some_and(|resize| resize.window_id == win_id);
+
+    let smithay_win = state.smithay_window_for_id(win_id);
+    let committed_size = smithay_win.as_ref().map(|w| w.geometry().size);
+    let frame_rect = match (state.wm.active_layout_mode(), committed_size) {
+        (rusty_wm::LayoutMode::Floating, Some(sz))
+            if !actively_resizing && sz.w >= 64 && sz.h >= 64 =>
+        {
+            rusty_wm::Rect::new(origin.0, origin.1, sz.w, sz.h + titlebar_h)
+        }
+        _ => rusty_wm::Rect::new(origin.0, origin.1, rect.width, rect.height),
+    };
+
+    let has_open_popup = smithay_win
+        .as_ref()
+        .and_then(smithay::wayland::seat::WaylandFocus::wl_surface)
+        .is_some_and(|root| {
+            smithay::desktop::PopupManager::popups_for_surface(&root)
+                .next()
+                .is_some()
+        });
+
+    let ssd_hovered = state.hovered_traffic_light_window == Some(win_id);
+    if has_ssd && !has_open_popup {
+        let title_text = state.window_title(win_id);
+        backdrop_list.extend(
+            crate::shell_render::generate_window_ssd_composite_elements_with_hover(
+                text_cache,
+                shape_cache,
+                renderer,
+                frame_rect,
+                &title_text,
+                is_focused,
+                ssd_hovered,
+            ),
+        );
+    }
+
+    if let Some(ref sw) = smithay_win {
+        let geo_loc = sw.geometry().loc;
+        let client_loc =
+            Point::<i32, Logical>::from((origin.0 - geo_loc.x, origin.1 + titlebar_h - geo_loc.y))
+                .to_physical_precise_round(output_scale);
+        backdrop_list.extend(
+            <smithay::desktop::Window as AsRenderElements<GlesRenderer>>::render_elements::<
+                WaylandSurfaceRenderElement<GlesRenderer>,
+            >(
+                sw,
+                renderer,
+                client_loc,
+                smithay::utils::Scale::from(output_scale),
+                1.0,
+            )
+            .into_iter()
+            .map(CompositorRenderElement::Surface),
+        );
+    }
+
+    if has_ssd && has_open_popup {
+        let title_text = state.window_title(win_id);
+        backdrop_list.extend(
+            crate::shell_render::generate_window_ssd_composite_elements_with_hover(
+                text_cache,
+                shape_cache,
+                renderer,
+                frame_rect,
+                &title_text,
+                is_focused,
+                ssd_hovered,
+            ),
+        );
+    }
+
+    if !is_fullscreen {
+        backdrop_list.extend(crate::shell_render::generate_window_shadow_elements(
+            shape_cache,
+            renderer,
+            frame_rect,
+            is_focused,
+        ));
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_backdrop_render_elements(
+    renderer: &mut GlesRenderer,
+    text_cache: &mut crate::text::TextCache,
+    shape_cache: &mut crate::surfaces::UiShapeCache,
+    state: &RustyCompositorState,
+    smithay_output: &smithay::output::Output,
+    output_geo: Rectangle<i32, Logical>,
+    output_loc: Point<i32, Logical>,
+    output_scale: f64,
+    output_windows: &[(rusty_wm::WindowId, rusty_wm::Rect)],
+    focused_win: Option<rusty_wm::WindowId>,
+    fullscreen_win: Option<rusty_wm::WindowId>,
+) -> Vec<CompositorRenderElement> {
+    let mut backdrop_list: Vec<CompositorRenderElement> = Vec::new();
+    for &(win_id, rect) in output_windows.iter().rev() {
+        if state.is_window_minimized(win_id) {
+            continue;
+        }
+        if let Some(fs_id) = fullscreen_win
+            && win_id != fs_id
+        {
+            continue;
+        }
+        let is_focused = focused_win == Some(win_id);
+        let is_fullscreen = fullscreen_win == Some(win_id) || state.is_window_fullscreen(win_id);
+        push_window_backdrop_elements(
+            &mut backdrop_list,
+            renderer,
+            text_cache,
+            shape_cache,
+            state,
+            win_id,
+            rect,
+            output_loc,
+            output_scale,
+            is_focused,
+            is_fullscreen,
+        );
+    }
+
+    let _ = push_layer_elements(
+        &mut backdrop_list,
+        smithay_output,
+        renderer,
+        &[Layer::Bottom, Layer::Background],
+        output_scale,
+    );
+
+    if fullscreen_win.is_none()
+        && let Some(wallpaper) = shape_cache.wallpaper_element(
+            renderer,
+            Size::<i32, Logical>::from((output_geo.size.w.max(1), output_geo.size.h.max(1))),
+            state.user_config.wallpaper.as_deref(),
+        )
+    {
+        backdrop_list.push(CompositorRenderElement::Memory(wallpaper));
+    }
+
+    scale_render_elements_for_output(backdrop_list, output_scale)
+}
+
 /// Builds the front-to-back composite render element list for `output_id` using `cursor_mode` (`RUSTYOS-046`, `RUSTYOS-060`).
 #[allow(clippy::too_many_lines)]
 pub(crate) fn build_frame_render_list_for_output_with_cursor(
@@ -436,7 +617,9 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
         .get(output_id)
         .cloned()
         .unwrap_or_else(|| state.output_map.primary().clone());
+    crate::shell_render::set_active_appearance(state.user_config.appearance);
     crate::shell_render::begin_solid_element_frame(output_entry.id.0);
+    shape_cache.clear_active_liquid_glass_backdrop();
     let output_loc = output_entry.location;
     let output_geo = output_entry.logical_geometry();
     let output_scale = output_entry.scale;
@@ -469,10 +652,14 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
         .iter()
         .filter(|(id, _)| !state.is_window_minimized(*id))
         .count();
-    let focused_win = state
-        .wm
-        .focused_window()
-        .filter(|id| !state.is_window_minimized(*id));
+    let focused_win = (!state.desktop_focused)
+        .then(|| {
+            state
+                .wm
+                .focused_window()
+                .filter(|id| !state.is_window_minimized(*id))
+        })
+        .flatten();
 
     let mut render_list: Vec<CompositorRenderElement> = Vec::new();
     let local_ptr = pointer_local_if_on_output(state.pointer_location, output_geo);
@@ -530,6 +717,29 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
     let lock_progress = state.lock_screen_anim.current();
     if state.screen_locked || lock_progress > 0.01 {
         let lock_view = state.lock_screen_render_state(&tel, lock_progress);
+        if lock_progress >= 0.96
+            && !state.reduce_transparency
+            && (lock_view.require_password || lock_view.power_menu_open)
+            && let Some(wp) = shape_cache.wallpaper_element(
+                renderer,
+                Size::<i32, Logical>::from((output_geo.size.w.max(1), output_geo.size.h.max(1))),
+                state.user_config.wallpaper.as_deref(),
+            )
+        {
+            // Lock Screen blur backdrop MUST contain ONLY the wallpaper — never desktop windows.
+            let wallpaper_only = scale_render_elements_for_output(
+                vec![CompositorRenderElement::Memory(wp)],
+                output_scale,
+            );
+            let backdrop_logical = Size::<i32, Logical>::from((logical_size.w, logical_size.h));
+            let _ = shape_cache.prepare_liquid_glass_backdrop(
+                renderer,
+                output_entry.id.0,
+                backdrop_logical,
+                output_scale,
+                &wallpaper_only,
+            );
+        }
         render_list.extend(crate::shell_render::generate_lock_screen_elements(
             text_cache,
             shape_cache,
@@ -546,6 +756,62 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
         state,
         output_scale,
     );
+
+    let mut top_layer_elements: Vec<CompositorRenderElement> = Vec::new();
+    let top_layer_surfaces_present = push_layer_elements(
+        &mut top_layer_elements,
+        &smithay_output,
+        renderer,
+        &[Layer::Overlay, Layer::Top],
+        output_scale,
+    );
+    let fullscreen_win = if top_layer_surfaces_present {
+        None
+    } else {
+        state.active_unoccluded_fullscreen_window_on(output_entry.id)
+    };
+    let backdrop_elements = build_backdrop_render_elements(
+        renderer,
+        text_cache,
+        shape_cache,
+        state,
+        &smithay_output,
+        output_geo,
+        output_loc,
+        output_scale,
+        &output_windows,
+        focused_win,
+        fullscreen_win,
+    );
+    let hide_chrome_for_fullscreen = fullscreen_win.is_some()
+        || state.should_hide_shell_chrome_for_fullscreen_on(output_entry.id);
+    let context_menu_here = state
+        .context_menu
+        .as_ref()
+        .is_some_and(|ctx| ctx.output_id == output_entry.id);
+    let needs_backdrop_blur = !state.screen_locked
+        && !state.ext_session_locked
+        && !state.reduce_transparency
+        && lock_progress <= 0.01
+        && if is_primary {
+            !hide_chrome_for_fullscreen
+                || state.osd.is_some()
+                || context_menu_here
+                || state.polkit_prompt.is_some()
+                || state.portal_prompt.is_some()
+        } else {
+            context_menu_here && !top_layer_surfaces_present && fullscreen_win.is_none()
+        };
+    if needs_backdrop_blur {
+        let backdrop_logical = Size::<i32, Logical>::from((logical_size.w, logical_size.h));
+        let _ = shape_cache.prepare_liquid_glass_backdrop(
+            renderer,
+            output_entry.id.0,
+            backdrop_logical,
+            output_scale,
+            &backdrop_elements,
+        );
+    }
 
     if is_primary
         && !state.screen_locked
@@ -565,7 +831,7 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
         ));
     }
 
-    let fullscreen_win = if is_primary {
+    if is_primary {
         let tray_views: Vec<TopBarTrayItem<'_>> = state
             .tray_items
             .iter()
@@ -584,6 +850,10 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
         } else {
             &tel.clock_date_hhmm
         };
+        let (active_app_name, app_profile) = state.active_top_bar_app_context();
+        let active_top_bar_menu = state
+            .active_top_bar_menu
+            .filter(|m| *m != crate::shell_render::TopBarMenuHit::Go || app_profile.has_go_menu());
         let top_telemetry = TopBarTelemetry {
             clock_hhmm: clock_label,
             battery_percent: tel.power.percentage,
@@ -598,8 +868,10 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
             notification_count: state.notification_count,
             kbd_layout: &state.active_kbd_layout,
             tray_items: &tray_views,
-            active_menu: state.active_top_bar_menu,
-            menu_hover_row: state.top_bar_menu_hover_row,
+            active_app_name: &active_app_name,
+            app_profile,
+            active_menu: active_top_bar_menu,
+            menu_hover_row: active_top_bar_menu.and(state.top_bar_menu_hover_row),
             glass_opacity: state.glass_opacity,
             reduce_transparency: state.reduce_transparency,
             show_workspaces: state.menubar_show_workspaces,
@@ -816,48 +1088,42 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
             ShellOverlayView::None
         };
 
-        // Render priority modals, interactive overlays, and notification toasts above Layer::Overlay/Top and fullscreen windows.
-        render_list.extend(
-            crate::shell_render::generate_shell_foreground_overlay_elements(
+        let settings_overlay = matches!(overlay, ShellOverlayView::Settings(_));
+        let overlay_elements = crate::shell_render::generate_shell_foreground_overlay_elements(
+            text_cache,
+            shape_cache,
+            renderer,
+            logical_size,
+            &top_telemetry,
+            overlay,
+            &toast_views,
+        );
+        let chrome_elements = if !top_layer_surfaces_present && !hide_chrome_for_fullscreen {
+            crate::shell_render::generate_shell_chrome_composite_elements(
                 text_cache,
                 shape_cache,
                 renderer,
                 logical_size,
+                active_ws,
+                layout_str,
+                &dock_view,
                 &top_telemetry,
                 overlay,
-                &toast_views,
-            ),
-        );
-
-        let top_layer_surfaces_present = push_layer_elements(
-            &mut render_list,
-            &smithay_output,
-            renderer,
-            &[Layer::Overlay, Layer::Top],
-            output_scale,
-        );
-        let fullscreen_win = if top_layer_surfaces_present {
-            None
+            )
         } else {
-            state.active_unoccluded_fullscreen_window_on(output_entry.id)
+            Vec::new()
         };
-        let hide_chrome_for_fullscreen = fullscreen_win.is_some()
-            || state.should_hide_shell_chrome_for_fullscreen_on(output_entry.id);
 
-        if !top_layer_surfaces_present && !hide_chrome_for_fullscreen {
-            render_list.extend(
-                crate::shell_render::generate_shell_chrome_composite_elements(
-                    text_cache,
-                    shape_cache,
-                    renderer,
-                    logical_size,
-                    active_ws,
-                    layout_str,
-                    &dock_view,
-                    &top_telemetry,
-                    overlay,
-                ),
-            );
+        // Settings behaves like a standard floating window under TopBar & Dock (no dimming scrim);
+        // priority modals/popovers (Polkit, Portal, Spotlight, QuickSettings, Switcher) stay above chrome.
+        if settings_overlay {
+            render_list.extend(chrome_elements);
+            render_list.extend(overlay_elements);
+            render_list.extend(top_layer_elements);
+        } else {
+            render_list.extend(overlay_elements);
+            render_list.extend(top_layer_elements);
+            render_list.extend(chrome_elements);
         }
 
         let overview_overlay = if matches!(overlay, ShellOverlayView::ContextMenu(_))
@@ -875,21 +1141,8 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
             &top_telemetry,
             overview_overlay,
         ));
-
-        fullscreen_win
     } else {
-        let top_layer_surfaces_present = push_layer_elements(
-            &mut render_list,
-            &smithay_output,
-            renderer,
-            &[Layer::Overlay, Layer::Top],
-            output_scale,
-        );
-        let fullscreen_win = if top_layer_surfaces_present {
-            None
-        } else {
-            state.active_unoccluded_fullscreen_window_on(output_entry.id)
-        };
+        render_list.extend(top_layer_elements);
         if !top_layer_surfaces_present
             && fullscreen_win.is_none()
             && !state.should_hide_shell_chrome_for_fullscreen_on(output_entry.id)
@@ -910,141 +1163,12 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
                 false,
             ));
         }
-        fullscreen_win
-    };
-
-    // Render managed windows belonging to this output and their SSD titlebars in top-to-bottom order
-    for &(win_id, rect) in output_windows.iter().rev() {
-        if state.is_window_minimized(win_id) {
-            continue;
-        }
-        if let Some(fs_id) = fullscreen_win
-            && win_id != fs_id
-        {
-            continue;
-        }
-        let global_origin = state
-            .animations
-            .animated_window_origin(win_id.0)
-            .unwrap_or((rect.x, rect.y));
-        let origin = (
-            global_origin.0 - output_loc.x,
-            global_origin.1 - output_loc.y,
-        );
-        let is_focused = focused_win == Some(win_id);
-        let is_fullscreen = fullscreen_win == Some(win_id) || state.is_window_fullscreen(win_id);
-        let has_ssd = !is_fullscreen && !state.window_uses_csd(win_id);
-        let titlebar_h = if has_ssd {
-            crate::shell_render::TITLEBAR_HEIGHT
-        } else {
-            0
-        };
-        let actively_resizing = state
-            .active_window_resize
-            .is_some_and(|resize| resize.window_id == win_id);
-
-        let smithay_win = state.smithay_window_for_id(win_id);
-        let committed_size = smithay_win.as_ref().map(|w| w.geometry().size);
-        let frame_rect = match (state.wm.active_layout_mode(), committed_size) {
-            (rusty_wm::LayoutMode::Floating, Some(sz))
-                if !actively_resizing && sz.w >= 64 && sz.h >= 64 =>
-            {
-                rusty_wm::Rect::new(origin.0, origin.1, sz.w, sz.h + titlebar_h)
-            }
-            _ => rusty_wm::Rect::new(origin.0, origin.1, rect.width, rect.height),
-        };
-
-        let has_open_popup = smithay_win
-            .as_ref()
-            .and_then(smithay::wayland::seat::WaylandFocus::wl_surface)
-            .is_some_and(|root| {
-                smithay::desktop::PopupManager::popups_for_surface(&root)
-                    .next()
-                    .is_some()
-            });
-
-        let ssd_hovered = state.hovered_traffic_light_window == Some(win_id);
-        if has_ssd && !has_open_popup {
-            let title_text = state.window_title(win_id);
-            render_list.extend(
-                crate::shell_render::generate_window_ssd_composite_elements_with_hover(
-                    text_cache,
-                    shape_cache,
-                    renderer,
-                    frame_rect,
-                    &title_text,
-                    is_focused,
-                    ssd_hovered,
-                ),
-            );
-        }
-
-        if let Some(ref sw) = smithay_win {
-            let geo_loc = sw.geometry().loc;
-            let client_loc = Point::<i32, Logical>::from((
-                origin.0 - geo_loc.x,
-                origin.1 + titlebar_h - geo_loc.y,
-            ))
-            .to_physical_precise_round(output_scale);
-            render_list.extend(
-                <smithay::desktop::Window as AsRenderElements<GlesRenderer>>::render_elements::<
-                    WaylandSurfaceRenderElement<GlesRenderer>,
-                >(
-                    sw,
-                    renderer,
-                    client_loc,
-                    smithay::utils::Scale::from(output_scale),
-                    1.0,
-                )
-                .into_iter()
-                .map(CompositorRenderElement::Surface),
-            );
-        }
-
-        if has_ssd && has_open_popup {
-            let title_text = state.window_title(win_id);
-            render_list.extend(
-                crate::shell_render::generate_window_ssd_composite_elements_with_hover(
-                    text_cache,
-                    shape_cache,
-                    renderer,
-                    frame_rect,
-                    &title_text,
-                    is_focused,
-                    ssd_hovered,
-                ),
-            );
-        }
-
-        if !is_fullscreen {
-            render_list.extend(crate::shell_render::generate_window_shadow_elements(
-                shape_cache,
-                renderer,
-                frame_rect,
-                is_focused,
-            ));
-        }
     }
 
-    let _ = push_layer_elements(
-        &mut render_list,
-        &smithay_output,
-        renderer,
-        &[Layer::Bottom, Layer::Background],
-        output_scale,
-    );
-
-    if fullscreen_win.is_none()
-        && let Some(wallpaper) = shape_cache.wallpaper_element(
-            renderer,
-            Size::<i32, Logical>::from((output_geo.size.w.max(1), output_geo.size.h.max(1))),
-            state.user_config.wallpaper.as_deref(),
-        )
-    {
-        render_list.push(CompositorRenderElement::Memory(wallpaper));
-    }
-
-    scale_render_elements_for_output(render_list, output_scale)
+    shape_cache.clear_active_liquid_glass_backdrop();
+    let mut final_list = scale_render_elements_for_output(render_list, output_scale);
+    final_list.extend(backdrop_elements);
+    final_list
 }
 
 pub(crate) fn process_pending_screenshot(

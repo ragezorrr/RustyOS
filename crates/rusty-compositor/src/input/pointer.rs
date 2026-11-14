@@ -340,16 +340,6 @@ impl RustyCompositorState {
                 return;
             }
 
-            if self.settings_active {
-                let output_phys = self
-                    .space
-                    .output_geometry(&self.output)
-                    .map_or_else(|| Size::from((1280, 800)), |geo| geo.size)
-                    .to_physical(1);
-                self.handle_settings_pointer_click(output_phys);
-                return;
-            }
-
             let output_width = self
                 .space
                 .output_geometry(&self.output)
@@ -362,6 +352,16 @@ impl RustyCompositorState {
             if shell_chrome_visible
                 && self.handle_top_bar_pointer_click(output_width, serial, button)
             {
+                return;
+            }
+
+            if self.settings_active {
+                let output_phys = self
+                    .space
+                    .output_geometry(&self.output)
+                    .map_or_else(|| Size::from((1280, 800)), |geo| geo.size)
+                    .to_physical(1);
+                self.handle_settings_pointer_click(output_phys);
                 return;
             }
 
@@ -572,6 +572,8 @@ impl RustyCompositorState {
                 });
                 let keyboard = self.keyboard.clone();
                 keyboard.set_focus(self, None, serial);
+                self.desktop_focused = true;
+                self.shell_redraw_needed = true;
                 if button == 273
                     && !self.has_foreground_layer_surfaces()
                     && (!is_on_primary

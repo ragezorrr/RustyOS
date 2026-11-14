@@ -329,6 +329,52 @@
                           rusty_services::image_d 
                           ecode (ADR-0031)        
   -----------------------------------------------------------------------
+  D-040                   Фаза 8/Design System &  accepted
+                          Shell (RUSTYOS-067):    
+                          Полный отказ от темы    
+                          Purple Glass и переход  
+                          на светлую и тёмную     
+                          темы Golden Gate        
+                          (AppearanceMode::Light/ 
+                          Dark, ThemePalette,     
+                          темизация контекстных   
+                          меню, меню TopBar,      
+                          панелей оболочки,       
+                          процедурных обоев и     
+                          apps/rusty-files по     
+                          референсам) (ADR-0032)  
+  -----------------------------------------------------------------------
+  D-041                   Фаза 8/Shell & TopBar   accepted
+                          (RUSTYOS-068):          
+                          Динамическое app-aware  
+                          меню TopBar по профилю  
+                          активного окна          
+                          (TopBarAppProfile:      
+                          Files, Browser,         
+                          Terminal, Editor,       
+                          GenericApp; скрытие Go  
+                          вне Files; реальное имя 
+                          в About/Minimize/Quit/  
+                          Force Quit; раскладко-  
+                          независимая отправка    
+                          шорткатов File/Edit/    
+                          View через XKB)         
+                          (ADR-0033)              
+  -----------------------------------------------------------------------
+  D-042                   Фаза 8/Compositor &     accepted
+                          Liquid Glass            
+                          (RUSTYOS-069): GLES     
+                          Dual-Kawase FBO         
+                          backdrop blur (5        
+                          проходов 1->1/2->1/4->  
+                          1/8->1/4->1/2) и шейдер 
+                          LIQUID_GLASS_FRAG с     
+                          edge lensing, damage-   
+                          gating и runtime CPU    
+                          fallback при lock /     
+                          reduce_transparency     
+                          (ADR-0034)              
+  -----------------------------------------------------------------------
 
 ## Открытые решения
 

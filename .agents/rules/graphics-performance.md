@@ -17,3 +17,6 @@ trigger: model_decision
 - Record GPU, kernel, driver, display mode and backend in benchmark
   reports.
 - Do not claim support without reproducible hardware tests.
+- When changing EGL/GLES, damage tracking, or frame loop paths, verify
+  live `--winit` runs on both Wayland and X11 with zero `EGL_BAD_SURFACE`
+  or fallback warnings, plus `--drm-probe` when DRM capabilities are touched.

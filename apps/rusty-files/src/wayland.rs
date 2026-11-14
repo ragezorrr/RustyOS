@@ -415,7 +415,6 @@ impl WaylandClientData {
             }
             FilesHit::SearchClear => self.app.set_search_query(String::new()),
             FilesHit::EmptyTrashBanner => self.app.action_empty_trash(),
-            FilesHit::ThemeFooterToggle => self.app.toggle_theme(),
             FilesHit::SidebarItem(loc) => self.app.navigate_sidebar(loc, true),
             FilesHit::ColumnRow { col_idx, row_idx } => {
                 self.app.select_entry(col_idx, row_idx, double_click);

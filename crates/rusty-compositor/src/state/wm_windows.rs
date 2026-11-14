@@ -942,6 +942,7 @@ impl RustyCompositorState {
     /// Synchronizes Smithay's [`Space<Window>`], `xdg_toplevel` pending configure geometry/states,
     /// and Wayland keyboard focus with the deterministic state in [`WindowManager`].
     pub fn sync_space_with_wm(&mut self, serial: Serial) {
+        self.desktop_focused = false;
         let now = self.elapsed();
         let visible: Vec<(WindowId, Rect, bool, bool)> = self
             .wm

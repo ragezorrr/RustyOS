@@ -18,18 +18,18 @@ use rusty_services::ServiceRegistry;
 
 pub mod wayland;
 
-/// Canonical design tokens from `DESIGN.md` (Section 3).
+/// Canonical design tokens from `DESIGN.md` (Section 3, Golden Gate).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DesignTokens {
-    /// Primary desktop background color (`#0F0A19`).
+    /// Primary desktop background color (`#141518`).
     pub color_background: &'static str,
-    /// Elevated panel/dock/card surface color (`#161023`).
+    /// Elevated panel/dock/card surface color (`#1E1E21`).
     pub color_surface: &'static str,
-    /// Primary interactive accent color (`#A56EFF`).
+    /// Primary interactive accent color (`#0A84FF`).
     pub color_accent: &'static str,
-    /// Primary foreground text color (`#F4F0FA`).
+    /// Primary foreground text color (`#F2F2F7`).
     pub color_text: &'static str,
-    /// Secondary muted text color (`#A69BB5`).
+    /// Secondary muted text color (`#AEAEB6`).
     pub color_muted: &'static str,
     /// Danger/critical state color (`#E56B75`).
     pub color_danger: &'static str,
@@ -48,11 +48,11 @@ pub struct DesignTokens {
 impl Default for DesignTokens {
     fn default() -> Self {
         Self {
-            color_background: "#0F0A19",
-            color_surface: "#161023",
-            color_accent: "#A56EFF",
-            color_text: "#F4F0FA",
-            color_muted: "#A69BB5",
+            color_background: "#141518",
+            color_surface: "#1E1E21",
+            color_accent: "#0A84FF",
+            color_text: "#F2F2F7",
+            color_muted: "#AEAEB6",
             color_danger: "#E56B75",
             radius_small: 6,
             radius_medium: 10,
@@ -339,9 +339,9 @@ impl Default for QuickSettingsState {
 /// Wallpaper configuration (`WallpaperConfig`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WallpaperConfig {
-    /// Solid or gradient primary color (`#0F0A19`).
+    /// Solid or gradient primary color (`#141518`).
     pub primary_color: String,
-    /// Secondary gradient accent (`#161023`).
+    /// Secondary gradient accent (`#1E1E21`).
     pub secondary_color: String,
     /// Optional image asset path.
     pub image_path: Option<String>,
@@ -350,8 +350,8 @@ pub struct WallpaperConfig {
 impl Default for WallpaperConfig {
     fn default() -> Self {
         Self {
-            primary_color: "#0F0A19".to_owned(),
-            secondary_color: "#161023".to_owned(),
+            primary_color: "#141518".to_owned(),
+            secondary_color: "#1E1E21".to_owned(),
             image_path: None,
         }
     }

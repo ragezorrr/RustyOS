@@ -284,9 +284,9 @@ pub fn generate_ssd_title_element(
         return None;
     }
     let color = if is_focused {
-        [244, 240, 250, 255] // #F4F0FA
+        [242, 242, 247, 255] // #F2F2F7
     } else {
-        [166, 155, 181, 255] // #A69BB5
+        [148, 148, 156, 255] // #94949C
     };
     let bounds = Rectangle::new(
         Point::from((rect.x + 70, rect.y)),
@@ -412,7 +412,7 @@ pub fn generate_window_ssd_composite_elements_with_hover(
         )));
         out.push(CompositorRenderElement::Solid(make_solid_element(
             Rectangle::new(Point::from((x + r, y + 1)), Size::from((w - 2 * r, 1))),
-            rgba_to_premul_color32f([255, 252, 255, if is_focused { 30 } else { 14 }]),
+            rgba_to_premul_color32f([255, 255, 255, if is_focused { 30 } else { 14 }]),
         )));
         if r > 2 {
             out.push(CompositorRenderElement::Solid(make_solid_element(

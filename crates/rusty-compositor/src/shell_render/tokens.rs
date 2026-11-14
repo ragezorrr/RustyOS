@@ -40,6 +40,88 @@ struct SolidElementCache {
 
 thread_local! {
     static SOLID_ELEMENT_CACHE: RefCell<SolidElementCache> = RefCell::new(SolidElementCache::default());
+    static ACTIVE_APPEARANCE: std::cell::Cell<crate::config::AppearanceMode> =
+        const { std::cell::Cell::new(crate::config::AppearanceMode::Light) };
+}
+
+/// Sets the active [`crate::config::AppearanceMode`] for the current render frame (`RUSTYOS-067`).
+pub(crate) fn set_active_appearance(mode: crate::config::AppearanceMode) {
+    ACTIVE_APPEARANCE.with(|cell| cell.set(mode));
+}
+
+/// Returns the active [`crate::config::AppearanceMode`] for the current render frame (`RUSTYOS-067`).
+#[must_use]
+pub(crate) fn active_appearance() -> crate::config::AppearanceMode {
+    ACTIVE_APPEARANCE.with(std::cell::Cell::get)
+}
+
+/// Dynamic Golden Gate Light/Dark color palette (`RUSTYOS-067`).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ThemePalette {
+    pub is_dark: bool,
+    pub popover_text_primary: [u8; 4],
+    pub popover_text_secondary: [u8; 4],
+    pub popover_text_muted: [u8; 4],
+    pub popover_text_disabled: [u8; 4],
+    pub popover_icon: [u8; 4],
+    pub popover_danger: [u8; 4],
+    pub popover_separator: Color32F,
+    pub accent_rgba: [u8; 4],
+    pub accent_hover_fill: [u8; 4],
+    pub accent_hover_border: [u8; 4],
+    pub surface_elevated_rgba: [u8; 4],
+    pub control_pill_off_rgba: [u8; 4],
+    pub border_rgba: [u8; 4],
+    pub border_highlight_rgba: [u8; 4],
+}
+
+impl ThemePalette {
+    /// Returns the Golden Gate [`ThemePalette`] for the currently active [`crate::config::AppearanceMode`].
+    #[must_use]
+    pub(crate) const fn current_for(mode: crate::config::AppearanceMode) -> Self {
+        match mode {
+            crate::config::AppearanceMode::Light => Self {
+                is_dark: false,
+                popover_text_primary: [29, 31, 36, 255],
+                popover_text_secondary: [72, 76, 86, 255],
+                popover_text_muted: [130, 136, 148, 255],
+                popover_text_disabled: [165, 170, 182, 185],
+                popover_icon: [44, 46, 53, 245],
+                popover_danger: [215, 48, 62, 255],
+                popover_separator: premul(0.0, 0.0, 0.0, 0.10),
+                accent_rgba: [0, 122, 255, 255],
+                accent_hover_fill: [0, 122, 255, 238],
+                accent_hover_border: [56, 152, 255, 160],
+                surface_elevated_rgba: [246, 247, 250, 246],
+                control_pill_off_rgba: [220, 224, 232, 224],
+                border_rgba: [0, 0, 0, 28],
+                border_highlight_rgba: [255, 255, 255, 185],
+            },
+            crate::config::AppearanceMode::Dark => Self {
+                is_dark: true,
+                popover_text_primary: [242, 242, 247, 255],
+                popover_text_secondary: [198, 198, 206, 255],
+                popover_text_muted: [148, 148, 156, 255],
+                popover_text_disabled: [118, 118, 126, 175],
+                popover_icon: [229, 229, 234, 245],
+                popover_danger: [255, 105, 97, 255],
+                popover_separator: premul(1.0, 1.0, 1.0, 0.12),
+                accent_rgba: [10, 132, 255, 255],
+                accent_hover_fill: [10, 132, 255, 234],
+                accent_hover_border: [74, 164, 255, 145],
+                surface_elevated_rgba: [38, 38, 42, 246],
+                control_pill_off_rgba: [56, 56, 62, 220],
+                border_rgba: [255, 255, 255, 31],
+                border_highlight_rgba: [255, 255, 255, 62],
+            },
+        }
+    }
+
+    /// Returns the active [`ThemePalette`] for the current thread's [`active_appearance`].
+    #[must_use]
+    pub(crate) fn active() -> Self {
+        Self::current_for(active_appearance())
+    }
 }
 
 /// Resets per-frame solid element occurrence counters for `output_id` so unchanged shell chrome
@@ -136,24 +218,24 @@ pub(super) const fn premul(r: f32, g: f32, b: f32, a: f32) -> Color32F {
     Color32F::new(r * a, g * a, b * a, a)
 }
 
-// Design tokens from `DESIGN.md` (Version 2.0 "RustyOS Purple Glass")
+// Design tokens from `DESIGN.md` (Version 3.0 "Golden Gate Light & Dark")
 // Smithay Color32F requires premultiplied RGBA components.
-pub const COLOR_BACKGROUND: Color32F = Color32F::new(0.059, 0.039, 0.098, 1.0); // #0F0A19
-pub const COLOR_SURFACE: Color32F = Color32F::new(0.086, 0.063, 0.137, 1.0); // #161023
-pub const COLOR_SURFACE_ELEVATED: Color32F = premul(0.125, 0.094, 0.180, 0.96); // #20182E
-pub const COLOR_SURFACE_OVERLAY: Color32F = premul(0.161, 0.125, 0.216, 0.98); // #292037
+pub const COLOR_BACKGROUND: Color32F = Color32F::new(0.078, 0.082, 0.094, 1.0); // #141518
+pub const COLOR_SURFACE: Color32F = Color32F::new(0.118, 0.118, 0.129, 1.0); // #1E1E21
+pub const COLOR_SURFACE_ELEVATED: Color32F = premul(0.149, 0.149, 0.165, 0.96); // #26262A
+pub const COLOR_SURFACE_OVERLAY: Color32F = premul(0.188, 0.188, 0.212, 0.98); // #303036
 
-pub const COLOR_ACCENT: Color32F = Color32F::new(0.647, 0.431, 1.0, 1.0); // #A56EFF
-pub const COLOR_ACCENT_HOVER: Color32F = Color32F::new(0.725, 0.541, 1.0, 1.0); // #B98AFF
-pub const COLOR_ACCENT_MUTED: Color32F = Color32F::new(0.463, 0.314, 0.710, 1.0); // #7650B5
+pub const COLOR_ACCENT: Color32F = Color32F::new(0.039, 0.518, 1.0, 1.0); // #0A84FF
+pub const COLOR_ACCENT_HOVER: Color32F = Color32F::new(0.251, 0.612, 1.0, 1.0); // #409CFF
+pub const COLOR_ACCENT_MUTED: Color32F = Color32F::new(0.0, 0.384, 0.800, 1.0); // #0062CC
 
-pub const COLOR_TEXT: Color32F = Color32F::new(0.957, 0.941, 0.980, 1.0); // #F4F0FA
-pub const COLOR_MUTED: Color32F = Color32F::new(0.651, 0.608, 0.710, 1.0); // #A69BB5
-pub const COLOR_SUBTLE: Color32F = Color32F::new(0.463, 0.420, 0.522, 1.0); // #766B85
+pub const COLOR_TEXT: Color32F = Color32F::new(0.949, 0.949, 0.969, 1.0); // #F2F2F7
+pub const COLOR_MUTED: Color32F = Color32F::new(0.580, 0.580, 0.612, 1.0); // #94949C
+pub const COLOR_SUBTLE: Color32F = Color32F::new(0.431, 0.431, 0.463, 1.0); // #6E6E76
 
-pub const COLOR_DANGER: Color32F = Color32F::new(0.898, 0.420, 0.459, 1.0); // #E56B75
-pub const COLOR_SUCCESS: Color32F = Color32F::new(0.514, 0.839, 0.627, 1.0); // #83D6A0
-pub const COLOR_WARNING: Color32F = Color32F::new(0.910, 0.769, 0.467, 1.0); // #E8C477
+pub const COLOR_DANGER: Color32F = Color32F::new(1.0, 0.271, 0.227, 1.0); // #FF453A
+pub const COLOR_SUCCESS: Color32F = Color32F::new(0.188, 0.820, 0.345, 1.0); // #30D158
+pub const COLOR_WARNING: Color32F = Color32F::new(1.0, 0.839, 0.039, 1.0); // #FFD60A
 
 pub const COLOR_BORDER: Color32F = premul(1.0, 1.0, 1.0, 0.12); // #FFFFFF12 border
 pub const COLOR_BORDER_HIGHLIGHT: Color32F = premul(1.0, 1.0, 1.0, 0.22); // outer glass rim
@@ -288,14 +370,13 @@ pub(super) fn truncate_ascii(text: &str, max_chars: usize) -> String {
     }
 }
 
-pub(super) const RGBA_SURFACE: [u8; 4] = [22, 16, 35, 255]; // #161023
-pub(super) const RGBA_SURFACE_ELEVATED: [u8; 4] = [32, 24, 46, 245]; // #20182E @ 0.96
-pub(super) const RGBA_SURFACE_OVERLAY: [u8; 4] = [41, 32, 55, 250]; // #292037 @ 0.98
-pub(super) const RGBA_ACCENT: [u8; 4] = [165, 110, 255, 255]; // #A56EFF
-pub(super) const RGBA_ACCENT_MUTED: [u8; 4] = [118, 80, 181, 255]; // #7650B5
+pub(super) const RGBA_SURFACE_ELEVATED: [u8; 4] = [38, 38, 42, 245]; // #26262A @ 0.96
+pub(super) const RGBA_SURFACE_OVERLAY: [u8; 4] = [48, 48, 54, 250]; // #303036 @ 0.98
+pub(super) const RGBA_ACCENT: [u8; 4] = [10, 132, 255, 255]; // #0A84FF
+pub(super) const RGBA_ACCENT_MUTED: [u8; 4] = [0, 98, 204, 255]; // #0062CC
 pub(super) const RGBA_BORDER: [u8; 4] = [255, 255, 255, 31];
 pub(super) const RGBA_BORDER_HIGHLIGHT: [u8; 4] = [255, 255, 255, 56];
-pub(super) const RGBA_DANGER: [u8; 4] = [229, 107, 117, 255];
+pub(super) const RGBA_DANGER: [u8; 4] = [255, 69, 58, 255];
 
 pub(super) fn rgba_to_premul_color32f(rgba: [u8; 4]) -> Color32F {
     let a = f32::from(rgba[3]) / 255.0;
@@ -439,7 +520,7 @@ pub(super) fn push_soft_shadow(
         return;
     }
 
-    let shadow_rgb = [5, 2, 12];
+    let shadow_rgb = [6, 8, 14];
     let corner_locs = [
         (
             CornerQuadrant::TopLeft,
@@ -484,7 +565,7 @@ pub(super) fn push_soft_shadow(
         let d_mid = (d0 + d1) as f32 * 0.5;
         let t = (d_mid / spread as f32).clamp(0.0, 1.0);
         let alpha = max_a * (1.0 - t) * (1.0 - t);
-        let col = premul(5.0 / 255.0, 2.0 / 255.0, 12.0 / 255.0, alpha);
+        let col = premul(6.0 / 255.0, 8.0 / 255.0, 14.0 / 255.0, alpha);
 
         if w > 2 * r {
             out.push(CompositorRenderElement::Solid(make_solid_element(
@@ -527,7 +608,7 @@ pub(super) fn push_liquid_glass_panel(
     reduce_transparency: bool,
     shadow: Option<(i32, u8)>,
 ) {
-    if let Some(el) = shape_cache.glass_panel_element(
+    if let Some(el) = shape_cache.glass_panel_render_element(
         renderer,
         style,
         rect.size.w,
@@ -537,7 +618,7 @@ pub(super) fn push_liquid_glass_panel(
         reduce_transparency,
         Point::from((rect.loc.x, rect.loc.y)),
     ) {
-        out.push(CompositorRenderElement::Memory(el));
+        out.push(el);
     }
     if let Some((spread, max_alpha)) = shadow {
         push_soft_shadow(out, shape_cache, renderer, rect, radius, spread, max_alpha);

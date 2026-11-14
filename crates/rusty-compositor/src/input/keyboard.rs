@@ -818,3 +818,203 @@ pub(super) const fn keysym_to_workspace_index(sym: Keysym) -> Option<u8> {
         _ => None,
     }
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ResolvedAppShortcut {
+    pub(crate) ctrl_keycode: smithay::input::keyboard::Keycode,
+    pub(crate) shift_keycode: Option<smithay::input::keyboard::Keycode>,
+    pub(crate) target_keycode: smithay::input::keyboard::Keycode,
+    pub(crate) target_layout: smithay::input::keyboard::Layout,
+    pub(crate) original_layout: smithay::input::keyboard::Layout,
+}
+
+const fn app_shortcut_key_spec(
+    action: crate::shell_render::AppShortcutAction,
+) -> (bool, &'static [Keysym]) {
+    use crate::shell_render::AppShortcutAction;
+    match action {
+        AppShortcutAction::NewTab => (false, &[Keysym::t, Keysym::T]),
+        AppShortcutAction::NewTabShift => (true, &[Keysym::t, Keysym::T]),
+        AppShortcutAction::NewWindow => (false, &[Keysym::n, Keysym::N]),
+        AppShortcutAction::OpenLocation => (false, &[Keysym::l, Keysym::L]),
+        AppShortcutAction::OpenFile => (false, &[Keysym::o, Keysym::O]),
+        AppShortcutAction::SaveFile => (false, &[Keysym::s, Keysym::S]),
+        AppShortcutAction::CloseTab => (false, &[Keysym::w, Keysym::W]),
+        AppShortcutAction::CloseTabShift => (true, &[Keysym::w, Keysym::W]),
+        AppShortcutAction::Undo => (false, &[Keysym::z, Keysym::Z]),
+        AppShortcutAction::Redo => (true, &[Keysym::z, Keysym::Z]),
+        AppShortcutAction::Cut => (false, &[Keysym::x, Keysym::X]),
+        AppShortcutAction::Copy => (false, &[Keysym::c, Keysym::C]),
+        AppShortcutAction::CopyShift => (true, &[Keysym::c, Keysym::C]),
+        AppShortcutAction::Paste => (false, &[Keysym::v, Keysym::V]),
+        AppShortcutAction::PasteShift => (true, &[Keysym::v, Keysym::V]),
+        AppShortcutAction::SelectAll => (false, &[Keysym::a, Keysym::A]),
+        AppShortcutAction::Find => (false, &[Keysym::f, Keysym::F]),
+        AppShortcutAction::FindShift => (true, &[Keysym::f, Keysym::F]),
+        AppShortcutAction::ReloadPage => (false, &[Keysym::r, Keysym::R]),
+        AppShortcutAction::ZoomIn => (false, &[Keysym::equal, Keysym::plus, Keysym::KP_Add]),
+        AppShortcutAction::ZoomOut => (false, &[Keysym::minus, Keysym::KP_Subtract]),
+        AppShortcutAction::ZoomReset => (false, &[Keysym::_0, Keysym::KP_0]),
+    }
+}
+
+fn find_key_in_layout(
+    xkb: &smithay::input::keyboard::Xkb,
+    layout: smithay::input::keyboard::Layout,
+    targets: &[Keysym],
+) -> Option<smithay::input::keyboard::Keycode> {
+    for raw in 8_u32..=255_u32 {
+        let kc = smithay::input::keyboard::Keycode::new(raw);
+        let syms = xkb.raw_syms_for_key_in_layout(kc, layout);
+        if targets.iter().any(|t| syms.contains(t)) {
+            return Some(kc);
+        }
+    }
+    None
+}
+
+fn find_key_across_layouts(
+    xkb: &smithay::input::keyboard::Xkb,
+    preferred: smithay::input::keyboard::Layout,
+    all_layouts: &[smithay::input::keyboard::Layout],
+    targets: &[Keysym],
+) -> Option<(
+    smithay::input::keyboard::Keycode,
+    smithay::input::keyboard::Layout,
+)> {
+    if let Some(kc) = find_key_in_layout(xkb, preferred, targets) {
+        return Some((kc, preferred));
+    }
+    for &layout in all_layouts {
+        if layout != preferred
+            && let Some(kc) = find_key_in_layout(xkb, layout, targets)
+        {
+            return Some((kc, layout));
+        }
+    }
+    None
+}
+
+impl RustyCompositorState {
+    pub(crate) fn resolve_app_shortcut(
+        &mut self,
+        action: crate::shell_render::AppShortcutAction,
+    ) -> Option<ResolvedAppShortcut> {
+        let (needs_shift, target_syms) = app_shortcut_key_spec(action);
+        let keyboard = self.keyboard.clone();
+        keyboard.with_xkb_state(self, |ctx| {
+            let xkb = ctx.xkb().lock().ok()?;
+            let original_layout = xkb.active_layout();
+            let layouts: Vec<_> = xkb.layouts().collect();
+            let (ctrl_keycode, _) = find_key_across_layouts(
+                &xkb,
+                original_layout,
+                &layouts,
+                &[Keysym::Control_L, Keysym::Control_R],
+            )?;
+            let shift_keycode = if needs_shift {
+                Some(
+                    find_key_across_layouts(
+                        &xkb,
+                        original_layout,
+                        &layouts,
+                        &[Keysym::Shift_L, Keysym::Shift_R],
+                    )?
+                    .0,
+                )
+            } else {
+                None
+            };
+            let (target_keycode, target_layout) =
+                find_key_across_layouts(&xkb, original_layout, &layouts, target_syms)?;
+            Some(ResolvedAppShortcut {
+                ctrl_keycode,
+                shift_keycode,
+                target_keycode,
+                target_layout,
+                original_layout,
+            })
+        })
+    }
+
+    fn send_synthetic_key_edge(
+        &mut self,
+        keyboard: &smithay::input::keyboard::KeyboardHandle<Self>,
+        keycode: smithay::input::keyboard::Keycode,
+        key_state: KeyState,
+        time_ms: u32,
+    ) {
+        let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+        let (_, mods_changed) = keyboard.input_intercept(self, keycode, key_state, |_, _, _| {
+            FilterResult::<()>::Forward
+        });
+        keyboard.input_forward(self, keycode, key_state, serial, time_ms, mods_changed);
+    }
+
+    /// Synthesizes a layout-independent `Ctrl+[Shift+]<Key>` chord to the focused client (`RUSTYOS-068`).
+    pub(crate) fn dispatch_app_shortcut(
+        &mut self,
+        action: crate::shell_render::AppShortcutAction,
+    ) -> bool {
+        if self.desktop_focused || self.keyboard.current_focus().is_none() {
+            return false;
+        }
+        let Some(seq) = self.resolve_app_shortcut(action) else {
+            return false;
+        };
+        let keyboard = self.keyboard.clone();
+        let pressed = keyboard.pressed_keys();
+        let press_ctrl = !pressed.contains(&seq.ctrl_keycode);
+        let press_shift = seq.shift_keycode.filter(|kc| !pressed.contains(kc));
+        let press_target = !pressed.contains(&seq.target_keycode);
+
+        #[allow(clippy::cast_possible_truncation)]
+        let time_ms = self.start_time.elapsed().as_millis() as u32;
+
+        let switched_layout = seq.target_layout != seq.original_layout;
+        if switched_layout {
+            keyboard.with_xkb_state(self, |mut ctx| {
+                ctx.set_layout(seq.target_layout);
+            });
+        }
+
+        if press_ctrl {
+            self.send_synthetic_key_edge(&keyboard, seq.ctrl_keycode, KeyState::Pressed, time_ms);
+        }
+        if let Some(shift_kc) = press_shift {
+            self.send_synthetic_key_edge(&keyboard, shift_kc, KeyState::Pressed, time_ms);
+        }
+        if press_target {
+            self.send_synthetic_key_edge(&keyboard, seq.target_keycode, KeyState::Pressed, time_ms);
+            self.send_synthetic_key_edge(
+                &keyboard,
+                seq.target_keycode,
+                KeyState::Released,
+                time_ms.saturating_add(1),
+            );
+        }
+        if let Some(shift_kc) = press_shift {
+            self.send_synthetic_key_edge(
+                &keyboard,
+                shift_kc,
+                KeyState::Released,
+                time_ms.saturating_add(1),
+            );
+        }
+        if press_ctrl {
+            self.send_synthetic_key_edge(
+                &keyboard,
+                seq.ctrl_keycode,
+                KeyState::Released,
+                time_ms.saturating_add(1),
+            );
+        }
+
+        if switched_layout {
+            keyboard.with_xkb_state(self, |mut ctx| {
+                ctx.set_layout(seq.original_layout);
+            });
+        }
+        true
+    }
+}

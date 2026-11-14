@@ -7,10 +7,9 @@ use smithay::utils::{Point, Rectangle, Size};
 
 use super::dock::DockWindowEntry;
 use super::tokens::{
-    COLOR_ACCENT, COLOR_ACCENT_MUTED, COLOR_BORDER, COLOR_BORDER_HIGHLIGHT, COLOR_MUTED,
-    COLOR_SUBTLE, COLOR_SURFACE, COLOR_SURFACE_ELEVATED, COLOR_SURFACE_OVERLAY, COLOR_TEXT,
-    DOCK_HEIGHT, DOCK_MARGIN_BOTTOM, TOP_BAR_HEIGHT, anim_offset, make_solid_element,
-    rect_contains, truncate_ascii,
+    COLOR_ACCENT, COLOR_ACCENT_MUTED, COLOR_BORDER_HIGHLIGHT, COLOR_MUTED, COLOR_SUBTLE,
+    COLOR_SURFACE_ELEVATED, COLOR_TEXT, DOCK_HEIGHT, DOCK_MARGIN_BOTTOM, TOP_BAR_HEIGHT,
+    anim_offset, make_solid_element, rect_contains, truncate_ascii,
 };
 
 /// Miniature workspace summary rendered in the top Spaces strip inside Overview (`RUSTYOS-051`).
@@ -296,41 +295,68 @@ pub enum SpotlightHit {
     OutsideModal,
 }
 
+const SPOTLIGHT_SEARCH_HEIGHT: i32 = 54;
+const SPOTLIGHT_CAPSULE_GAP: i32 = 10;
+const SPOTLIGHT_RESULTS_ROW_START_OFFSET: i32 = 78;
+const SPOTLIGHT_RESULTS_ROW_HEIGHT: i32 = 46;
+const SPOTLIGHT_RESULTS_ROW_STRIDE: i32 = 50;
+
 #[must_use]
 pub(super) fn spotlight_modal_rect(width: i32, height: i32) -> (i32, i32, i32, i32) {
-    let modal_width = 600.min(width - 48).max(320);
+    let modal_width = 620.min(width - 48).max(320);
     let modal_height = 350.min(height - 100).max(180);
     let modal_x = (width - modal_width) / 2;
     let modal_y = (height - modal_height) / 4;
     (modal_x, modal_y, modal_width, modal_height)
 }
 
-/// Hit-tests `(x, y)` against the open Spotlight modal and its up to 5 visible rows (`RUSTYOS-018b`, `RUSTYOS-039`).
+#[must_use]
+pub(super) fn spotlight_search_pill_rect(width: i32, height: i32) -> (i32, i32, i32, i32) {
+    let (mx, my, mw, _) = spotlight_modal_rect(width, height);
+    (mx, my, mw, SPOTLIGHT_SEARCH_HEIGHT)
+}
+
+#[must_use]
+pub(super) fn spotlight_results_rect(width: i32, height: i32) -> (i32, i32, i32, i32) {
+    let (mx, my, mw, mh) = spotlight_modal_rect(width, height);
+    let ry = my + SPOTLIGHT_SEARCH_HEIGHT + SPOTLIGHT_CAPSULE_GAP;
+    let rh = (mh - SPOTLIGHT_SEARCH_HEIGHT - SPOTLIGHT_CAPSULE_GAP).max(80);
+    (mx, ry, mw, rh)
+}
+
+fn tuple_rect_contains(rect: (i32, i32, i32, i32), x: f64, y: f64) -> bool {
+    rect_contains(
+        Rectangle::new(Point::from((rect.0, rect.1)), Size::from((rect.2, rect.3))),
+        x,
+        y,
+    )
+}
+
+/// Hit-tests `(x, y)` against the open dual-capsule Spotlight search bar, detached results card, and 5 rows (`RUSTYOS-018b`, `RUSTYOS-070`).
 #[must_use]
 pub fn check_spotlight_click(
     screen_size: Size<i32, smithay::utils::Physical>,
     x: f64,
     y: f64,
 ) -> SpotlightHit {
-    let (modal_x, modal_y, modal_width, modal_height) =
-        spotlight_modal_rect(screen_size.w, screen_size.h);
-    let mx = f64::from(modal_x);
-    let my = f64::from(modal_y);
-    let mw = f64::from(modal_width);
-    let mh = f64::from(modal_height);
+    let search_rect = spotlight_search_pill_rect(screen_size.w, screen_size.h);
+    if tuple_rect_contains(search_rect, x, y) {
+        return SpotlightHit::InsideModal;
+    }
 
-    if x < mx || x >= mx + mw || y < my || y >= my + mh {
+    let results_rect = spotlight_results_rect(screen_size.w, screen_size.h);
+    if !tuple_rect_contains(results_rect, x, y) {
         return SpotlightHit::OutsideModal;
     }
 
-    let row_h = 46;
-    let start_row_y = modal_y + 80;
-    let row_x_min = f64::from(modal_x + 16);
-    let row_x_max = f64::from(modal_x + modal_width - 16);
+    let (modal_x, modal_y, modal_width, _) = spotlight_modal_rect(screen_size.w, screen_size.h);
+    let start_row_y = modal_y + SPOTLIGHT_RESULTS_ROW_START_OFFSET;
+    let row_x_min = f64::from(modal_x + 12);
+    let row_x_max = f64::from(modal_x + modal_width - 12);
     if x >= row_x_min && x < row_x_max {
         for i in 0..5_i32 {
-            let ry = f64::from(start_row_y + i * (row_h + 4));
-            if y >= ry && y < ry + f64::from(row_h) {
+            let ry = f64::from(start_row_y + i * SPOTLIGHT_RESULTS_ROW_STRIDE);
+            if y >= ry && y < ry + f64::from(SPOTLIGHT_RESULTS_ROW_HEIGHT) {
                 return SpotlightHit::Row(usize::try_from(i).unwrap_or(0));
             }
         }
@@ -346,88 +372,63 @@ pub(super) fn render_spotlight_modal(
     spotlight: &SpotlightRenderState<'_>,
     has_text: bool,
 ) {
-    let (modal_x, modal_y, modal_width, modal_height) = spotlight_modal_rect(width, height);
+    let (sx, sy, sw, sh) = spotlight_search_pill_rect(width, height);
+    let (rx, ry, rw, rh) = spotlight_results_rect(width, height);
 
-    // 7. Spotlight Glass Box - Outer glass highlight rim
-    let rim_geo = Rectangle::new(
-        Point::from((modal_x - 1, modal_y - 1)),
-        Size::from((modal_width + 2, modal_height + 2)),
-    );
-    elements.push(make_solid_element(rim_geo, COLOR_BORDER_HIGHLIGHT));
-
-    // 7a. Modal elevated body
-    let modal_geo = Rectangle::new(
-        Point::from((modal_x, modal_y)),
-        Size::from((modal_width, modal_height)),
-    );
-    elements.push(make_solid_element(modal_geo, COLOR_SURFACE_ELEVATED));
-
-    // 7b. Search input bar plate (macOS 27 Liquid Glass style, RUSTYOS-039)
-    let search_bar_h = 52;
-    let search_bar_geo = Rectangle::new(
-        Point::from((modal_x + 16, modal_y + 14)),
-        Size::from((modal_width - 32, search_bar_h)),
-    );
-    elements.push(make_solid_element(search_bar_geo, COLOR_SURFACE_OVERLAY));
-
-    // 7c. Search bar accent indicator
-    let search_icon_geo = Rectangle::new(
-        Point::from((modal_x + 28, modal_y + 28)),
-        Size::from((24, 24)),
-    );
-    elements.push(make_solid_element(search_icon_geo, COLOR_ACCENT));
-
-    // 7d. Dynamic text input cursor placed after typed query
-    let cursor_x = (modal_x + 60 + spotlight.cursor_offset_x).min(modal_x + modal_width - 28);
-    let cursor_geo = Rectangle::new(Point::from((cursor_x, modal_y + 28)), Size::from((2, 24)));
-    elements.push(make_solid_element(cursor_geo, COLOR_TEXT));
-
+    elements.push(make_solid_element(
+        Rectangle::new(Point::from((sx - 1, sy - 1)), Size::from((sw + 2, sh + 2))),
+        COLOR_BORDER_HIGHLIGHT,
+    ));
+    elements.push(make_solid_element(
+        Rectangle::new(Point::from((sx, sy)), Size::from((sw, sh))),
+        COLOR_SURFACE_ELEVATED,
+    ));
+    elements.push(make_solid_element(
+        Rectangle::new(Point::from((sx + 20, sy + 15)), Size::from((24, 24))),
+        COLOR_ACCENT,
+    ));
+    let cursor_x = (sx + 50 + spotlight.cursor_offset_x).min(sx + sw - 28);
+    elements.push(make_solid_element(
+        Rectangle::new(Point::from((cursor_x, sy + 15)), Size::from((2, 24))),
+        COLOR_TEXT,
+    ));
     if !has_text {
-        // 7e. Placeholder text indicator when no font renderer is active
-        let placeholder_geo = Rectangle::new(
-            Point::from((modal_x + 64, modal_y + 36)),
-            Size::from((160, 8)),
-        );
-        elements.push(make_solid_element(placeholder_geo, COLOR_MUTED));
+        elements.push(make_solid_element(
+            Rectangle::new(Point::from((sx + 54, sy + 23)), Size::from((160, 8))),
+            COLOR_MUTED,
+        ));
     }
 
-    // 7f. Search divider
-    let divider_geo = Rectangle::new(
-        Point::from((modal_x + 16, modal_y + 72)),
-        Size::from((modal_width - 32, 1)),
-    );
-    elements.push(make_solid_element(divider_geo, COLOR_BORDER));
+    elements.push(make_solid_element(
+        Rectangle::new(Point::from((rx - 1, ry - 1)), Size::from((rw + 2, rh + 2))),
+        COLOR_BORDER_HIGHLIGHT,
+    ));
+    elements.push(make_solid_element(
+        Rectangle::new(Point::from((rx, ry)), Size::from((rw, rh))),
+        COLOR_SURFACE_ELEVATED,
+    ));
 
-    // 7g. Search results (up to 5 visible matching applications/commands)
-    let row_h = 46;
-    let start_row_y = modal_y + 80;
+    let row_h = SPOTLIGHT_RESULTS_ROW_HEIGHT;
+    let start_row_y = sy + SPOTLIGHT_RESULTS_ROW_START_OFFSET;
     let row_count = spotlight.items.len().min(5);
     for idx in 0..row_count {
         let i = i32::try_from(idx).unwrap_or(0);
-        let row_y = start_row_y + i * (row_h + 4);
+        let row_y = start_row_y + i * SPOTLIGHT_RESULTS_ROW_STRIDE;
         let is_selected = idx == spotlight.selected_in_window;
 
-        let row_bg = Rectangle::new(
-            Point::from((modal_x + 16, row_y)),
-            Size::from((modal_width - 32, row_h)),
-        );
-        let bg_color = if is_selected {
-            COLOR_ACCENT_MUTED
-        } else {
-            COLOR_SURFACE
-        };
-        elements.push(make_solid_element(row_bg, bg_color));
-
+        let row_bg = Rectangle::new(Point::from((rx + 12, row_y)), Size::from((rw - 24, row_h)));
+        if is_selected {
+            elements.push(make_solid_element(row_bg, COLOR_ACCENT_MUTED));
+        }
         if is_selected {
             let select_indicator = Rectangle::new(
-                Point::from((modal_x + 18, row_y + 8)),
+                Point::from((rx + 14, row_y + 8)),
                 Size::from((3, row_h - 16)),
             );
             elements.push(make_solid_element(select_indicator, COLOR_ACCENT));
         }
 
-        // App icon badge
-        let app_icon = Rectangle::new(Point::from((modal_x + 28, row_y + 9)), Size::from((28, 28)));
+        let app_icon = Rectangle::new(Point::from((rx + 22, row_y + 9)), Size::from((28, 28)));
         let icon_color = if is_selected {
             COLOR_ACCENT
         } else if idx == 1 {
@@ -438,16 +439,14 @@ pub(super) fn render_spotlight_modal(
         elements.push(make_solid_element(app_icon, icon_color));
 
         if !has_text {
-            // App title bar fallback
             let title_bar = Rectangle::new(
-                Point::from((modal_x + 66, row_y + 12)),
+                Point::from((rx + 60, row_y + 12)),
                 Size::from((120 + i * 20, 8)),
             );
             elements.push(make_solid_element(title_bar, COLOR_TEXT));
 
-            // App subtitle bar fallback
             let sub_bar = Rectangle::new(
-                Point::from((modal_x + 66, row_y + 26)),
+                Point::from((rx + 60, row_y + 26)),
                 Size::from((80 + i * 15, 6)),
             );
             elements.push(make_solid_element(sub_bar, COLOR_MUTED));
@@ -463,8 +462,9 @@ pub(super) fn render_switcher_text(
     sw: &WindowSwitcherRenderState<'_>,
     elements: &mut Vec<MemoryRenderBufferRenderElement<GlesRenderer>>,
 ) {
-    let text_bright = [244, 240, 250, 255];
-    let text_muted = [166, 155, 181, 255];
+    let pal = super::tokens::ThemePalette::active();
+    let text_bright = pal.popover_text_primary;
+    let text_muted = pal.popover_text_muted;
     let (_panel, cards) = switcher_layout(screen_size, sw.cards.len());
     for (idx, (card, rect)) in sw.cards.iter().zip(cards).enumerate() {
         let is_sel = idx == sw.selected;
@@ -474,15 +474,20 @@ pub(super) fn render_switcher_text(
             &sw_key,
             card.toplevel_icon,
             card.icon_name,
-            36,
+            44,
         );
         if !has_icon {
             let icon_box = Rectangle::new(
                 Point::from((rect.loc.x + (rect.size.w - 44) / 2, rect.loc.y + 14)),
                 Size::from((44, 44)),
             );
+            let badge_fg = if is_sel {
+                [255, 255, 255, 255]
+            } else {
+                pal.popover_text_primary
+            };
             if let Some(el) =
-                text_cache.render_label_centered(renderer, card.badge, 14.5, text_bright, icon_box)
+                text_cache.render_label_centered(renderer, card.badge, 15.0, badge_fg, icon_box)
             {
                 elements.push(el);
             }
@@ -494,8 +499,8 @@ pub(super) fn render_switcher_text(
         };
         let title_str = truncate_ascii(&raw_title, 13);
         let title_bounds = Rectangle::new(
-            Point::from((rect.loc.x + 6, rect.loc.y + rect.size.h - 30)),
-            Size::from((rect.size.w - 12, 22)),
+            Point::from((rect.loc.x + 6, rect.loc.y + rect.size.h - 28)),
+            Size::from((rect.size.w - 12, 20)),
         );
         if let Some(el) = text_cache.render_label_centered(
             renderer,
@@ -516,8 +521,8 @@ pub(super) fn render_overview_text(
     ov: &OverviewRenderState<'_>,
     elements: &mut Vec<MemoryRenderBufferRenderElement<GlesRenderer>>,
 ) {
-    let text_bright = [244, 240, 250, 255];
-    let text_muted = [188, 178, 206, 255];
+    let text_bright = [242, 242, 247, 255];
+    let text_muted = [180, 180, 190, 255];
     let width = screen_size.w;
     let heading_dy = anim_offset(ov.progress, 12.0);
 

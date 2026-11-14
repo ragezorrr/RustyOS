@@ -65,8 +65,14 @@ impl RustyCompositorState {
         self.retarget_quick_settings_anim();
     }
 
-    /// Toggles a `TopBar` left menu dropdown popover (`RUSTYOS-048`).
+    /// Toggles a `TopBar` left menu dropdown popover (`RUSTYOS-048`, `RUSTYOS-068`).
     pub fn toggle_top_bar_menu(&mut self, menu: crate::shell_render::TopBarMenuHit) {
+        if menu == crate::shell_render::TopBarMenuHit::Go
+            && !self.active_top_bar_app_context().1.has_go_menu()
+        {
+            self.close_top_bar_menu();
+            return;
+        }
         if self.active_top_bar_menu == Some(menu) {
             self.close_top_bar_menu();
         } else {
@@ -129,81 +135,173 @@ impl RustyCompositorState {
         self.sync_and_save_user_config();
     }
 
-    /// Executes an action chosen from an open `TopBar` menu dropdown (`RUSTYOS-048`).
+    /// Executes an action chosen from an open `TopBar` menu dropdown (`RUSTYOS-048`, `RUSTYOS-068`).
     pub fn dispatch_top_bar_menu_action(
         &mut self,
         action: crate::shell_render::TopBarMenuAction,
         serial: Serial,
     ) {
+        use crate::shell_render::TopBarMenuAction;
+
         self.close_top_bar_menu();
         match action {
-            crate::shell_render::TopBarMenuAction::AboutRustyOs => {
+            TopBarMenuAction::AboutRustyOs => {
                 let _ = self.push_notification(
                     Urgency::Low,
                     "RustyOS Desktop".to_owned(),
-                    "Wayland compositor • Purple Glass UI".to_owned(),
+                    "Wayland compositor • Golden Gate UI".to_owned(),
                 );
             }
-            crate::shell_render::TopBarMenuAction::OpenOverview => self.toggle_overview(),
-            crate::shell_render::TopBarMenuAction::OpenControlCenter => {
-                self.toggle_quick_settings();
-            }
-            crate::shell_render::TopBarMenuAction::OpenSettings => {
-                self.open_settings();
-            }
-            crate::shell_render::TopBarMenuAction::ReloadConfig => {
+            TopBarMenuAction::AboutActiveApp => self.dispatch_about_active_app(),
+            TopBarMenuAction::OpenOverview => self.toggle_overview(),
+            TopBarMenuAction::OpenControlCenter => self.toggle_quick_settings(),
+            TopBarMenuAction::OpenSettings => self.open_settings(),
+            TopBarMenuAction::ReloadConfig => {
                 let _ = self.reload_user_config();
             }
-            crate::shell_render::TopBarMenuAction::OpenSpotlight => self.toggle_launcher(),
-            crate::shell_render::TopBarMenuAction::NewTerminal => {
+            TopBarMenuAction::OpenSpotlight => self.toggle_launcher(),
+            TopBarMenuAction::NewTerminal => {
                 self.handle_dock_hit(crate::shell_render::DockHit::PinnedTerminal, serial);
             }
-            crate::shell_render::TopBarMenuAction::OpenFiles => {
+            TopBarMenuAction::OpenFiles => {
                 self.handle_dock_hit(crate::shell_render::DockHit::PinnedFiles, serial);
             }
-            crate::shell_render::TopBarMenuAction::ToggleLayout => {
-                self.apply_wm_action(WmAction::ToggleLayoutMode, serial);
-            }
-            crate::shell_render::TopBarMenuAction::ToggleReducedMotion => {
+            TopBarMenuAction::NewDesktopFolder => self.create_desktop_folder_action(),
+            TopBarMenuAction::GoRecents
+            | TopBarMenuAction::GoDesktop
+            | TopBarMenuAction::GoDocuments
+            | TopBarMenuAction::GoDownloads
+            | TopBarMenuAction::GoHome
+            | TopBarMenuAction::GoTrash => self.dispatch_top_bar_go_action(action),
+            TopBarMenuAction::EmptyTrash => self.spawn_empty_trash_worker(),
+            TopBarMenuAction::ToggleReducedMotion => {
                 let next = !self.animations.reduced_motion();
                 self.set_reduced_motion_pref(next);
             }
-            crate::shell_render::TopBarMenuAction::ToggleReduceTransparency => {
-                self.toggle_reduce_transparency();
-            }
-            crate::shell_render::TopBarMenuAction::RefreshMetrics => {
-                self.telemetry.request_refresh();
-            }
-            crate::shell_render::TopBarMenuAction::LockSession => {
-                self.set_screen_locked(true, serial);
-            }
-            crate::shell_render::TopBarMenuAction::FocusNextWindow => {
-                self.apply_wm_action(WmAction::FocusNext, serial);
-            }
-            crate::shell_render::TopBarMenuAction::NextWorkspace => {
-                self.switch_workspace_relative(1, serial);
-            }
-            crate::shell_render::TopBarMenuAction::PrevWorkspace => {
-                self.switch_workspace_relative(-1, serial);
-            }
-            crate::shell_render::TopBarMenuAction::ToggleMaximizeFocused => {
-                self.apply_wm_action(WmAction::ToggleMaximizeFocused, serial);
-            }
-            crate::shell_render::TopBarMenuAction::MinimizeFocused => {
-                if let Some(focused) = self.wm.focused_window() {
-                    self.minimize_window(focused, serial);
-                }
-            }
-            crate::shell_render::TopBarMenuAction::CloseFocused => {
-                self.apply_wm_action(WmAction::CloseFocused, serial);
-            }
-            crate::shell_render::TopBarMenuAction::ShowShortcuts => {
+            TopBarMenuAction::ToggleReduceTransparency => self.toggle_reduce_transparency(),
+            TopBarMenuAction::RefreshMetrics => self.telemetry.request_refresh(),
+            TopBarMenuAction::LockSession => self.set_screen_locked(true, serial),
+            TopBarMenuAction::ShowShortcuts => {
                 let _ = self.push_notification(
                     Urgency::Low,
                     "RustyOS Shortcuts".to_owned(),
                     "Super+Space: Search • Super+Tab: Switcher • Super+1..9: Workspaces".to_owned(),
                 );
             }
+            other => self.dispatch_top_bar_window_action(other, serial),
+        }
+    }
+
+    fn dispatch_top_bar_window_action(
+        &mut self,
+        action: crate::shell_render::TopBarMenuAction,
+        serial: Serial,
+    ) {
+        use crate::shell_render::TopBarMenuAction;
+
+        match action {
+            TopBarMenuAction::ToggleLayout => {
+                self.apply_wm_action(WmAction::ToggleLayoutMode, serial);
+            }
+            TopBarMenuAction::FocusNextWindow => {
+                self.apply_wm_action(WmAction::FocusNext, serial);
+            }
+            TopBarMenuAction::NextWorkspace => self.switch_workspace_relative(1, serial),
+            TopBarMenuAction::PrevWorkspace => self.switch_workspace_relative(-1, serial),
+            TopBarMenuAction::ToggleMaximizeFocused => {
+                self.apply_wm_action(WmAction::ToggleMaximizeFocused, serial);
+            }
+            TopBarMenuAction::ToggleFullscreenFocused => {
+                self.apply_wm_action(WmAction::ToggleFullscreen, serial);
+            }
+            TopBarMenuAction::MinimizeFocused => {
+                if let Some(focused) = self.wm.focused_window() {
+                    self.minimize_window(focused, serial);
+                }
+            }
+            TopBarMenuAction::CloseFocused => {
+                self.apply_wm_action(WmAction::CloseFocused, serial);
+            }
+            TopBarMenuAction::QuitActiveApp => {
+                if let Some(focused) = self.focused_top_bar_window_id() {
+                    self.close_window_by_id(focused);
+                }
+            }
+            TopBarMenuAction::ForceQuitActiveApp => {
+                if let Some(focused) = self.focused_top_bar_window_id() {
+                    self.force_quit_window_by_id(focused);
+                }
+            }
+            TopBarMenuAction::AppShortcut(shortcut) => {
+                let _ = self.dispatch_app_shortcut(shortcut);
+            }
+            _ => {}
+        }
+    }
+
+    fn focused_top_bar_window_id(&self) -> Option<rusty_wm::WindowId> {
+        if self.desktop_focused {
+            return None;
+        }
+        self.wm.focused_window().filter(|id| {
+            !self.is_window_minimized(*id) && self.wm.visible_windows().iter().any(|w| w.id == *id)
+        })
+    }
+
+    fn dispatch_about_active_app(&mut self) {
+        let (app_name, profile) = self.active_top_bar_app_context();
+        let (title, body) = if let Some(win_id) = self.focused_top_bar_window_id() {
+            let app_id = self.window_app_id(win_id);
+            let win_title = self.window_title(win_id);
+            let detail = match app_id.as_deref() {
+                Some(id) if !id.trim().is_empty() && !win_title.trim().is_empty() => {
+                    format!("{id} • {win_title}")
+                }
+                Some(id) if !id.trim().is_empty() => id.to_owned(),
+                _ if !win_title.trim().is_empty() => win_title,
+                _ => "Running in RustyOS Wayland".to_owned(),
+            };
+            (format!("About {app_name}"), detail)
+        } else if profile == crate::shell_render::TopBarAppProfile::Files {
+            (
+                "About Files".to_owned(),
+                "RustyOS Desktop & File Manager".to_owned(),
+            )
+        } else {
+            (
+                format!("About {app_name}"),
+                "Running in RustyOS Wayland".to_owned(),
+            )
+        };
+        let _ = self.push_notification(Urgency::Low, title, body);
+    }
+
+    fn dispatch_top_bar_go_action(&mut self, action: crate::shell_render::TopBarMenuAction) {
+        let launched = match action {
+            crate::shell_render::TopBarMenuAction::GoRecents => {
+                self.launch_rusty_files(&["--recents"])
+            }
+            crate::shell_render::TopBarMenuAction::GoDesktop => {
+                let desktop = super::context_menu_actions::resolve_desktop_dir();
+                self.launch_rusty_files_dir(desktop.as_deref())
+            }
+            crate::shell_render::TopBarMenuAction::GoDocuments => {
+                let locs = rusty_services::file_manager::UserFileLocations::detect();
+                self.launch_rusty_files_dir(Some(&locs.documents))
+            }
+            crate::shell_render::TopBarMenuAction::GoDownloads => {
+                let downloads = super::context_menu_actions::resolve_downloads_dir();
+                self.launch_rusty_files_dir(downloads.as_deref())
+            }
+            crate::shell_render::TopBarMenuAction::GoHome => {
+                let locs = rusty_services::file_manager::UserFileLocations::detect();
+                self.launch_rusty_files_dir(Some(&locs.home))
+            }
+            crate::shell_render::TopBarMenuAction::GoTrash => self.launch_rusty_files(&["--trash"]),
+            _ => false,
+        };
+        if !launched {
+            self.toggle_launcher();
         }
     }
 
@@ -635,16 +733,24 @@ impl RustyCompositorState {
         ids
     }
 
-    /// Returns the active frontmost application label shown beside the `RustyOS` emblem (`RUSTYOS-049`/`051`).
+    /// Returns the canonical active application name and profile for `TopBar` (`RUSTYOS-068`).
+    #[must_use]
+    pub fn active_top_bar_app_context(&self) -> (String, crate::shell_render::TopBarAppProfile) {
+        let Some(win_id) = self.focused_top_bar_window_id() else {
+            return (
+                "Files".to_owned(),
+                crate::shell_render::TopBarAppProfile::Files,
+            );
+        };
+        let app_id = self.window_app_id(win_id);
+        let title = self.window_title(win_id);
+        crate::shell_render::classify_top_bar_app(app_id.as_deref(), &title)
+    }
+
+    /// Returns the active frontmost application label shown beside the `RustyOS` emblem (`RUSTYOS-049`/`051`/`067`/`068`).
     #[must_use]
     pub fn active_top_bar_app_name(&self) -> String {
-        self.wm
-            .focused_window()
-            .filter(|id| self.wm.visible_windows().iter().any(|w| w.id == *id))
-            .map_or_else(
-                || "RustyOS".to_owned(),
-                |id| crate::shell_render::extract_app_name(&self.window_title(id)),
-            )
+        self.active_top_bar_app_context().0
     }
 
     /// Builds miniature Space entries (`Desktop 1..=9`) for Workspace Overview (`RUSTYOS-051`).
@@ -1027,6 +1133,7 @@ impl RustyCompositorState {
         }
 
         self.user_config = cfg;
+        crate::shell_render::set_active_appearance(self.user_config.appearance);
         if xkb_applied {
             self.refresh_keyboard_layout_label();
         }
@@ -1078,6 +1185,7 @@ impl RustyCompositorState {
                 self.set_reduced_motion_pref(next);
             }
             SettingsHit::ToggleWallpaper => self.toggle_wallpaper_setting(),
+            SettingsHit::ToggleAppearance => self.toggle_appearance_setting(),
             SettingsHit::ToggleMenuWorkspaces => {
                 self.menubar_show_workspaces = !self.menubar_show_workspaces;
                 self.sync_and_save_user_config();
@@ -1161,6 +1269,14 @@ impl RustyCompositorState {
             SettingsHit::Close | SettingsHit::Outside => self.close_settings(),
             SettingsHit::ModalBody => {}
         }
+    }
+
+    fn toggle_appearance_setting(&mut self) {
+        self.user_config.appearance = self.user_config.appearance.toggle();
+        crate::shell_render::set_active_appearance(self.user_config.appearance);
+        let label = self.user_config.appearance.label();
+        self.sync_and_save_user_config();
+        self.show_osd(format!("Appearance: {label}"), None, false);
     }
 
     fn cycle_target_settings_output(&mut self) {

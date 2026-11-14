@@ -9,7 +9,7 @@ use smithay::utils::{Point, Rectangle, Size};
 use super::CompositorRenderElement;
 use super::tokens::{
     COLOR_ACCENT, COLOR_ACCENT_HOVER, COLOR_ACCENT_MUTED, COLOR_SUBTLE, COLOR_SURFACE,
-    COLOR_SURFACE_OVERLAY, TOP_BAR_HEIGHT, anim_offset, make_solid_element,
+    COLOR_SURFACE_OVERLAY, TOP_BAR_HEIGHT, ThemePalette, anim_offset, make_solid_element,
     push_liquid_glass_panel, push_rounded_glass_box, rect_contains, rounded_rect_contains,
     truncate_ascii,
 };
@@ -447,9 +447,6 @@ pub(super) fn render_quick_settings_popover(
     );
 }
 
-pub(super) const QS_TEXT_BRIGHT: [u8; 4] = [255, 253, 255, 255];
-pub(super) const QS_TEXT_MUTED: [u8; 4] = [226, 222, 238, 240];
-
 pub(super) fn concise_wifi_subtitle(label: &str, connected: bool, wifi_enabled: bool) -> String {
     let cleaned = label
         .trim()
@@ -491,6 +488,7 @@ pub(super) fn render_control_center_capsule_text(
     bright: bool,
     elements: &mut Vec<MemoryRenderBufferRenderElement<GlesRenderer>>,
 ) {
+    let pal = ThemePalette::active();
     let top_y = pill.loc.y + (pill.size.h - 29) / 2;
     if let Some(el) = text_cache.render_label_weighted(
         renderer,
@@ -498,9 +496,9 @@ pub(super) fn render_control_center_capsule_text(
         crate::text::FontWeight::Bold,
         12.0,
         if bright {
-            QS_TEXT_BRIGHT
+            pal.popover_text_primary
         } else {
-            QS_TEXT_MUTED
+            pal.popover_text_muted
         },
         Point::from((pill.loc.x + 54, top_y)),
     ) {
@@ -510,7 +508,7 @@ pub(super) fn render_control_center_capsule_text(
         renderer,
         sub,
         10.5,
-        QS_TEXT_MUTED,
+        pal.popover_text_muted,
         Point::from((pill.loc.x + 54, top_y + 16)),
     ) {
         elements.push(el);
@@ -524,6 +522,7 @@ pub(super) fn render_cc_secondary_labels(
     qs: &QuickSettingsRenderState<'_>,
     elements: &mut Vec<MemoryRenderBufferRenderElement<GlesRenderer>>,
 ) {
+    let pal = ThemePalette::active();
     let media_label = if qs.media_active && !qs.media_title.trim().is_empty() {
         truncate_ascii(qs.media_title.trim(), 15)
     } else {
@@ -534,7 +533,7 @@ pub(super) fn render_cc_secondary_labels(
         &media_label,
         crate::text::FontWeight::Bold,
         12.0,
-        QS_TEXT_BRIGHT,
+        pal.popover_text_primary,
         Point::from((
             layout.now_playing_card.loc.x + 14,
             layout.now_playing_card.loc.y + 53,
@@ -558,7 +557,7 @@ pub(super) fn render_cc_secondary_labels(
         "Focus",
         crate::text::FontWeight::Bold,
         12.0,
-        QS_TEXT_BRIGHT,
+        pal.popover_text_primary,
         Point::from((
             layout.focus_pill.loc.x + 56,
             layout.focus_pill.loc.y + (layout.focus_pill.size.h - 15) / 2,
@@ -576,7 +575,7 @@ pub(super) fn render_cc_secondary_labels(
             title,
             crate::text::FontWeight::Bold,
             12.0,
-            QS_TEXT_BRIGHT,
+            pal.popover_text_primary,
             Point::from((card.loc.x + 14, card.loc.y + 9)),
         ) {
             elements.push(el);
@@ -588,7 +587,7 @@ pub(super) fn render_cc_secondary_labels(
         "Lock Screen",
         crate::text::FontWeight::Bold,
         11.0,
-        QS_TEXT_BRIGHT,
+        pal.popover_text_primary,
         Rectangle::new(
             Point::from((layout.lock_btn.loc.x, layout.lock_btn.loc.y)),
             Size::from((layout.lock_btn.size.w, layout.lock_btn.size.h)),
@@ -713,15 +712,16 @@ pub(super) fn push_cc_now_playing_contents(
     layout: &QuickSettingsLayout,
     qs: &QuickSettingsRenderState<'_>,
 ) {
+    let pal = ThemePalette::active();
     let card = layout.now_playing_card;
     let art_rect = Rectangle::new(
         Point::from((card.loc.x + 14, card.loc.y + 12)),
         Size::from((36, 36)),
     );
     let note_rgba = if qs.media_active {
-        [252, 250, 255, 245]
+        [255, 255, 255, 248]
     } else {
-        [244, 240, 255, 130]
+        pal.popover_text_muted
     };
     if let Some(el) = shape_cache.ui_glyph_element(
         renderer,
@@ -733,9 +733,11 @@ pub(super) fn push_cc_now_playing_contents(
         out.push(CompositorRenderElement::Memory(el));
     }
     let art_bg = if qs.media_active {
-        [108, 90, 224, 215]
-    } else {
+        pal.accent_hover_fill
+    } else if pal.is_dark {
         [255, 255, 255, 38]
+    } else {
+        [0, 0, 0, 22]
     };
     push_rounded_glass_box(
         out,
@@ -744,7 +746,7 @@ pub(super) fn push_cc_now_playing_contents(
         art_rect,
         9,
         art_bg,
-        Some([255, 255, 255, 44]),
+        Some(pal.border_rgba),
     );
 
     let play_kind = if qs.media_playing {
@@ -753,9 +755,9 @@ pub(super) fn push_cc_now_playing_contents(
         crate::surfaces::UiGlyphKind::MediaPlay
     };
     let transport_tint = if qs.media_active {
-        [255, 252, 255, 248]
+        pal.popover_text_primary
     } else {
-        [240, 236, 248, 200]
+        pal.popover_text_secondary
     };
     for (btn_rect, kind, g_size) in [
         (
@@ -793,6 +795,7 @@ pub(super) fn push_cc_thin_slider(
     norm: f32,
     active_fill: bool,
 ) {
+    let pal = ThemePalette::active();
     let bar_h = 6;
     let bar_y = track.loc.y + (track.size.h - bar_h) / 2;
     #[allow(
@@ -804,9 +807,18 @@ pub(super) fn push_cc_thin_slider(
         .round()
         .clamp(6.0, track.size.w as f32) as i32;
     let fill_rgba = if active_fill {
-        [255, 253, 255, 245]
+        if pal.is_dark {
+            [255, 255, 255, 245]
+        } else {
+            pal.accent_rgba
+        }
     } else {
-        [190, 184, 204, 185]
+        pal.popover_text_muted
+    };
+    let track_rgba = if pal.is_dark {
+        [255, 255, 255, 58]
+    } else {
+        [0, 0, 0, 26]
     };
     push_rounded_glass_box(
         out,
@@ -829,7 +841,7 @@ pub(super) fn push_cc_thin_slider(
             Size::from((track.size.w, bar_h)),
         ),
         bar_h / 2,
-        [255, 255, 255, 58],
+        track_rgba,
         None,
     );
 }
@@ -841,13 +853,13 @@ pub(super) fn push_cc_display_slider(
     layout: &QuickSettingsLayout,
     qs: &QuickSettingsRenderState<'_>,
 ) {
-    let white = [255, 253, 255, 245];
+    let icon_col = ThemePalette::active().popover_icon;
     let disp_cy = layout.display_track.loc.y + layout.display_track.size.h / 2;
     if let Some(el) = shape_cache.ui_glyph_element(
         renderer,
         crate::surfaces::UiGlyphKind::Sun,
         12,
-        white,
+        icon_col,
         Point::from((layout.display_card.loc.x + 14, disp_cy - 6)),
     ) {
         out.push(CompositorRenderElement::Memory(el));
@@ -856,7 +868,7 @@ pub(super) fn push_cc_display_slider(
         renderer,
         crate::surfaces::UiGlyphKind::Sun,
         16,
-        white,
+        icon_col,
         Point::from((
             layout.display_card.loc.x + layout.display_card.size.w - 28,
             disp_cy - 8,
@@ -887,7 +899,8 @@ pub(super) fn push_cc_sound_slider(
     layout: &QuickSettingsLayout,
     qs: &QuickSettingsRenderState<'_>,
 ) {
-    let white = [255, 253, 255, 245];
+    let pal = ThemePalette::active();
+    let icon_col = pal.popover_icon;
     let snd_cy = layout.sound_track.loc.y + layout.sound_track.size.h / 2;
     if let Some(el) = shape_cache.ui_glyph_element(
         renderer,
@@ -896,7 +909,7 @@ pub(super) fn push_cc_sound_slider(
             muted: false,
         },
         13,
-        white,
+        icon_col,
         Point::from((layout.sound_card.loc.x + 13, snd_cy - 6)),
     ) {
         out.push(CompositorRenderElement::Memory(el));
@@ -908,7 +921,7 @@ pub(super) fn push_cc_sound_slider(
             muted: false,
         },
         15,
-        white,
+        icon_col,
         Point::from((
             layout.sound_card.loc.x + layout.sound_card.size.w - 64,
             snd_cy - 7,
@@ -917,9 +930,9 @@ pub(super) fn push_cc_sound_slider(
         out.push(CompositorRenderElement::Memory(el));
     }
     let mute_fg = if qs.audio_muted {
-        [248, 86, 86, 255]
+        pal.popover_danger
     } else {
-        white
+        icon_col
     };
     if let Some(el) = shape_cache.ui_glyph_element(
         renderer,
@@ -938,14 +951,16 @@ pub(super) fn push_cc_sound_slider(
     }
     let mute_circle_bg = if qs.audio_muted {
         [252, 252, 255, 245]
-    } else {
+    } else if pal.is_dark {
         [255, 255, 255, 42]
+    } else {
+        [0, 0, 0, 18]
     };
     if let Some(el) = shape_cache.circle_element(
         renderer,
         layout.sound_mute_zone.size.w,
         mute_circle_bg,
-        Some([255, 255, 255, 68]),
+        Some(pal.border_rgba),
         Point::from((layout.sound_mute_zone.loc.x, layout.sound_mute_zone.loc.y)),
     ) {
         out.push(CompositorRenderElement::Memory(el));
@@ -968,7 +983,7 @@ pub(super) fn push_cc_round_toggle_buttons(
     layout: &QuickSettingsLayout,
     qs: &QuickSettingsRenderState<'_>,
 ) {
-    let white = [255, 252, 255, 255];
+    let pal = ThemePalette::active();
     let is_tile = qs.layout_mode == "master-stack";
     for (btn_rect, active, kind) in [
         (
@@ -993,11 +1008,16 @@ pub(super) fn push_cc_round_toggle_buttons(
         ),
     ] {
         let g_size = 21;
+        let glyph_col = if active {
+            [255, 255, 255, 255]
+        } else {
+            pal.popover_icon
+        };
         if let Some(el) = shape_cache.ui_glyph_element(
             renderer,
             kind,
             g_size,
-            white,
+            glyph_col,
             Point::from((
                 btn_rect.loc.x + (btn_rect.size.w - g_size) / 2,
                 btn_rect.loc.y + (btn_rect.size.h - g_size) / 2,
@@ -1009,8 +1029,8 @@ pub(super) fn push_cc_round_toggle_buttons(
             && let Some(el) = shape_cache.circle_element(
                 renderer,
                 btn_rect.size.w,
-                [88, 134, 252, 118],
-                Some([255, 255, 255, 110]),
+                pal.accent_hover_fill,
+                Some(pal.accent_hover_border),
                 Point::from((btn_rect.loc.x, btn_rect.loc.y)),
             )
         {
@@ -1027,9 +1047,10 @@ pub(super) fn render_quick_settings_composite(
     height: i32,
     qs: &QuickSettingsRenderState<'_>,
 ) {
+    let pal = ThemePalette::active();
     let layout = quick_settings_layout(width, height, anim_offset(qs.progress, -16.0));
-    let white = [255, 252, 255, 255];
-    let blue_active = [24, 128, 250, 255];
+    let inactive_glyph = pal.popover_icon;
+    let blue_active = pal.accent_rgba;
 
     let wifi_active = qs.net_connected || qs.wifi_enabled;
     push_cc_capsule_icon(
@@ -1043,7 +1064,7 @@ pub(super) fn render_quick_settings_composite(
             signal_percent: qs.wifi_signal_percent,
         },
         blue_active,
-        white,
+        inactive_glyph,
     );
 
     let bt_active = qs.bt_available && qs.bt_powered;
@@ -1056,9 +1077,9 @@ pub(super) fn render_quick_settings_composite(
         crate::surfaces::UiGlyphKind::Bluetooth,
         blue_active,
         if qs.bt_available {
-            white
+            inactive_glyph
         } else {
-            [210, 204, 224, 170]
+            pal.popover_text_disabled
         },
     );
 
@@ -1081,7 +1102,7 @@ pub(super) fn render_quick_settings_composite(
             charging: qs.ac_online || qs.battery_charging,
         },
         power_icon_active,
-        white,
+        inactive_glyph,
     );
 
     push_cc_now_playing_contents(out, shape_cache, renderer, &layout, qs);
@@ -1094,8 +1115,8 @@ pub(super) fn render_quick_settings_composite(
         layout.focus_pill,
         qs.focus_mode,
         crate::surfaces::UiGlyphKind::Moon,
-        [106, 84, 212, 255],
-        white,
+        blue_active,
+        inactive_glyph,
     );
 
     push_cc_display_slider(out, shape_cache, renderer, &layout, qs);

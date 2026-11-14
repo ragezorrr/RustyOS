@@ -6,9 +6,9 @@ use smithay::utils::{Point, Rectangle, Size};
 
 use super::CompositorRenderElement;
 use super::tokens::{
-    COLOR_ACCENT, RGBA_BORDER, RGBA_SURFACE, TOP_BAR_HEIGHT, WINDOW_RADIUS, make_solid_element,
-    premul, push_liquid_glass_panel, push_rounded_glass_box, rect_contains, scale_glass_rgba,
-    truncate_ascii,
+    COLOR_ACCENT, TOP_BAR_HEIGHT, ThemePalette, WINDOW_RADIUS, active_appearance,
+    make_solid_element, premul, push_liquid_glass_panel, push_rounded_glass_box, rect_contains,
+    scale_glass_rgba, truncate_ascii,
 };
 use super::top_bar::TopBarTelemetry;
 
@@ -332,6 +332,7 @@ pub(super) fn render_polkit_header_text(
     pk: &PolkitPromptRenderState<'_>,
     elements: &mut Vec<MemoryRenderBufferRenderElement<GlesRenderer>>,
 ) {
+    let pal = ThemePalette::active();
     let mx = modal.loc.x;
     let my = modal.loc.y;
     if let Some(el) = text_cache.render_label_weighted(
@@ -339,7 +340,7 @@ pub(super) fn render_polkit_header_text(
         "Authentication Required",
         crate::text::FontWeight::Bold,
         14.5,
-        [248, 245, 255, 255],
+        pal.popover_text_primary,
         Point::from((mx + 70, my + 20)),
     ) {
         elements.push(el);
@@ -349,7 +350,7 @@ pub(super) fn render_polkit_header_text(
         renderer,
         &user_line,
         11.5,
-        [188, 178, 212, 255],
+        pal.popover_text_muted,
         Point::from((mx + 70, my + 40)),
     ) {
         elements.push(el);
@@ -361,7 +362,7 @@ pub(super) fn render_polkit_header_text(
             renderer,
             &line1,
             12.0,
-            [236, 230, 248, 255],
+            pal.popover_text_secondary,
             Point::from((mx + 22, my + 72)),
         )
     {
@@ -372,7 +373,7 @@ pub(super) fn render_polkit_header_text(
             renderer,
             l2,
             12.0,
-            [236, 230, 248, 255],
+            pal.popover_text_secondary,
             Point::from((mx + 22, my + 92)),
         )
     {
@@ -387,6 +388,7 @@ pub(super) fn render_polkit_controls_text(
     pk: &PolkitPromptRenderState<'_>,
     elements: &mut Vec<MemoryRenderBufferRenderElement<GlesRenderer>>,
 ) {
+    let pal = ThemePalette::active();
     let input = layout.input;
     if pk.input_display.is_empty() {
         let placeholder = truncate_ascii(pk.prompt_label.trim_end_matches(':').trim(), 36);
@@ -399,7 +401,7 @@ pub(super) fn render_polkit_controls_text(
             renderer,
             label,
             13.0,
-            [172, 162, 194, 230],
+            pal.popover_text_muted,
             Point::from((input.loc.x + 12, input.loc.y + 10)),
         ) {
             elements.push(el);
@@ -408,20 +410,20 @@ pub(super) fn render_polkit_controls_text(
         renderer,
         pk.input_display,
         13.5,
-        [250, 248, 255, 255],
+        pal.popover_text_primary,
         Point::from((input.loc.x + 12, input.loc.y + 10)),
     ) {
         elements.push(el);
     }
 
     let (status_text, status_color) = if pk.checking {
-        ("Verifying credentials...".to_owned(), [210, 185, 255, 255])
+        ("Verifying credentials...".to_owned(), pal.accent_rgba)
     } else if let Some(err) = pk.error_message {
-        (truncate_ascii(err, 48), [255, 138, 142, 255])
+        (truncate_ascii(err, 48), pal.popover_danger)
     } else if let Some(info) = pk.info_message {
-        (truncate_ascii(info, 48), [212, 206, 232, 240])
+        (truncate_ascii(info, 48), pal.popover_text_secondary)
     } else {
-        (truncate_ascii(pk.action_id, 48), [166, 155, 188, 210])
+        (truncate_ascii(pk.action_id, 48), pal.popover_text_muted)
     };
     if !status_text.is_empty()
         && let Some(el) = text_cache.render_label(
@@ -444,7 +446,7 @@ pub(super) fn render_polkit_controls_text(
         "Cancel",
         crate::text::FontWeight::Bold,
         12.0,
-        [240, 236, 248, 255],
+        pal.popover_text_primary,
         cancel_bounds,
     ) {
         elements.push(el);
@@ -463,7 +465,7 @@ pub(super) fn render_polkit_controls_text(
         submit_label,
         crate::text::FontWeight::Bold,
         12.0,
-        [252, 250, 255, 255],
+        [255, 255, 255, 255],
         submit_bounds,
     ) {
         elements.push(el);
@@ -478,13 +480,14 @@ pub(super) fn render_polkit_composite(
     top_telemetry: &TopBarTelemetry<'_>,
     pk: &PolkitPromptRenderState<'_>,
 ) {
+    let pal = ThemePalette::active();
     let layout = polkit_modal_layout(screen_size);
     let badge = layout.badge;
     if let Some(el) = shape_cache.ui_glyph_element(
         renderer,
         crate::surfaces::UiGlyphKind::Lock,
         18,
-        [248, 244, 255, 255],
+        [255, 255, 255, 255],
         Point::from((badge.loc.x + 10, badge.loc.y + 10)),
     ) {
         out.push(CompositorRenderElement::Memory(el));
@@ -508,14 +511,14 @@ pub(super) fn render_polkit_composite(
         renderer,
         badge,
         11,
-        [165, 110, 255, 205],
-        Some([215, 185, 255, 155]),
+        pal.accent_hover_fill,
+        Some(pal.accent_hover_border),
     );
 
     let input_border = if pk.error_message.is_some() {
-        [255, 130, 136, 220]
+        pal.popover_danger
     } else {
-        [192, 148, 255, 225]
+        pal.accent_hover_border
     };
     push_rounded_glass_box(
         out,
@@ -524,7 +527,7 @@ pub(super) fn render_polkit_composite(
         input,
         11,
         scale_glass_rgba(
-            [24, 18, 38, 198],
+            pal.control_pill_off_rgba,
             top_telemetry.glass_opacity,
             top_telemetry.reduce_transparency,
         ),
@@ -537,13 +540,13 @@ pub(super) fn render_polkit_composite(
         renderer,
         layout.cancel,
         10,
-        RGBA_SURFACE,
-        Some(RGBA_BORDER),
+        pal.control_pill_off_rgba,
+        Some(pal.border_rgba),
     );
     let submit_fill = if pk.checking {
-        [124, 92, 184, 170]
+        [68, 128, 210, 180]
     } else {
-        [165, 110, 255, 224]
+        pal.accent_hover_fill
     };
     push_rounded_glass_box(
         out,
@@ -552,7 +555,7 @@ pub(super) fn render_polkit_composite(
         layout.submit,
         10,
         submit_fill,
-        Some([215, 185, 255, 185]),
+        Some(pal.accent_hover_border),
     );
 
     push_liquid_glass_panel(
@@ -569,7 +572,7 @@ pub(super) fn render_polkit_composite(
 
     out.push(CompositorRenderElement::Solid(make_solid_element(
         Rectangle::new(Point::from((0, 0)), screen_size),
-        premul(0.059, 0.039, 0.098, 0.44),
+        premul(0.05, 0.06, 0.08, 0.44),
     )));
 }
 
@@ -589,6 +592,7 @@ pub(super) fn render_portal_text(
     portal: &PortalPromptRenderState<'_>,
     elements: &mut Vec<MemoryRenderBufferRenderElement<GlesRenderer>>,
 ) {
+    let pal = ThemePalette::active();
     let layout = portal_modal_layout(
         screen_size,
         portal.rows.len(),
@@ -607,7 +611,7 @@ pub(super) fn render_portal_text(
         title,
         crate::text::FontWeight::Bold,
         14.5,
-        [248, 245, 255, 255],
+        pal.popover_text_primary,
         Point::from((mx + 70, my + 20)),
     ) {
         elements.push(el);
@@ -627,7 +631,7 @@ pub(super) fn render_portal_text(
         renderer,
         &subtitle,
         11.5,
-        [188, 178, 212, 255],
+        pal.popover_text_muted,
         Point::from((mx + 70, my + 40)),
     ) {
         elements.push(el);
@@ -643,13 +647,18 @@ pub(super) fn render_portal_text(
         let Some(row) = portal.rows.get(row_idx) else {
             continue;
         };
+        let is_selected = row_idx == portal.selected;
         let label = truncate_ascii(row.label, 38);
         if let Some(el) = text_cache.render_label_weighted(
             renderer,
             &label,
             crate::text::FontWeight::Bold,
             12.0,
-            [248, 244, 255, 255],
+            if is_selected {
+                [255, 255, 255, 255]
+            } else {
+                pal.popover_text_primary
+            },
             Point::from((row_rect.loc.x + 36, row_rect.loc.y + 5)),
         ) {
             elements.push(el);
@@ -659,7 +668,11 @@ pub(super) fn render_portal_text(
             renderer,
             &detail,
             10.0,
-            [176, 166, 200, 255],
+            if is_selected {
+                [236, 242, 255, 245]
+            } else {
+                pal.popover_text_muted
+            },
             Point::from((row_rect.loc.x + 36, row_rect.loc.y + 22)),
         ) {
             elements.push(el);
@@ -676,6 +689,7 @@ pub(super) fn render_portal_footer_text(
     portal: &PortalPromptRenderState<'_>,
     elements: &mut Vec<MemoryRenderBufferRenderElement<GlesRenderer>>,
 ) {
+    let pal = ThemePalette::active();
     let layout = portal_modal_layout(
         screen_size,
         portal.rows.len(),
@@ -693,7 +707,7 @@ pub(super) fn render_portal_footer_text(
             renderer,
             mark,
             11.5,
-            [232, 224, 248, 255],
+            pal.popover_text_secondary,
             Point::from((toggle_rect.loc.x + 6, toggle_rect.loc.y + 5)),
         ) {
             elements.push(el);
@@ -705,7 +719,7 @@ pub(super) fn render_portal_footer_text(
         "Cancel",
         crate::text::FontWeight::Regular,
         12.5,
-        [240, 236, 248, 255],
+        pal.popover_text_primary,
         phys_to_logical_rect(layout.cancel),
     ) {
         elements.push(el);
@@ -720,7 +734,7 @@ pub(super) fn render_portal_footer_text(
         accept_label,
         crate::text::FontWeight::Bold,
         12.5,
-        [252, 249, 255, 255],
+        [255, 255, 255, 255],
         phys_to_logical_rect(layout.accept),
     ) {
         elements.push(el);
@@ -735,6 +749,7 @@ pub(super) fn render_portal_composite(
     top_telemetry: &TopBarTelemetry<'_>,
     portal: &PortalPromptRenderState<'_>,
 ) {
+    let pal = ThemePalette::active();
     let layout = portal_modal_layout(
         screen_size,
         portal.rows.len(),
@@ -746,7 +761,7 @@ pub(super) fn render_portal_composite(
         renderer,
         crate::surfaces::UiGlyphKind::Grid,
         18,
-        [248, 244, 255, 255],
+        [255, 255, 255, 255],
         Point::from((badge.loc.x + 10, badge.loc.y + 10)),
     ) {
         out.push(CompositorRenderElement::Memory(el));
@@ -757,8 +772,8 @@ pub(super) fn render_portal_composite(
         renderer,
         badge,
         11,
-        [165, 110, 255, 205],
-        Some([215, 185, 255, 155]),
+        pal.accent_hover_fill,
+        Some(pal.accent_hover_border),
     );
 
     for (vis_idx, row_rect) in layout
@@ -778,15 +793,19 @@ pub(super) fn render_portal_composite(
             renderer,
             glyph,
             14,
-            [244, 238, 255, 255],
+            if is_selected {
+                [255, 255, 255, 255]
+            } else {
+                pal.popover_icon
+            },
             Point::from((row_rect.loc.x + 12, row_rect.loc.y + 13)),
         ) {
             out.push(CompositorRenderElement::Memory(el));
         }
         let (fill, border) = if is_selected {
-            ([165, 110, 255, 138], [215, 185, 255, 225])
+            (pal.accent_hover_fill, pal.accent_hover_border)
         } else {
-            (RGBA_SURFACE, RGBA_BORDER)
+            (pal.control_pill_off_rgba, pal.border_rgba)
         };
         push_rounded_glass_box(
             out,
@@ -805,8 +824,8 @@ pub(super) fn render_portal_composite(
         renderer,
         layout.cancel,
         10,
-        RGBA_SURFACE,
-        Some(RGBA_BORDER),
+        pal.control_pill_off_rgba,
+        Some(pal.border_rgba),
     );
     push_rounded_glass_box(
         out,
@@ -814,8 +833,8 @@ pub(super) fn render_portal_composite(
         renderer,
         layout.accept,
         10,
-        [165, 110, 255, 224],
-        Some([215, 185, 255, 185]),
+        pal.accent_hover_fill,
+        Some(pal.accent_hover_border),
     );
 
     push_liquid_glass_panel(
@@ -832,7 +851,7 @@ pub(super) fn render_portal_composite(
 
     out.push(CompositorRenderElement::Solid(make_solid_element(
         Rectangle::new(Point::from((0, 0)), screen_size),
-        premul(0.059, 0.039, 0.098, 0.44),
+        premul(0.05, 0.06, 0.08, 0.44),
     )));
 }
 
@@ -843,6 +862,7 @@ pub(super) fn render_pick_color_text(
     app_id: &str,
     elements: &mut Vec<MemoryRenderBufferRenderElement<GlesRenderer>>,
 ) {
+    let pal = ThemePalette::active();
     let pill = pick_color_pill_rect(screen_size);
     let msg = truncate_ascii(
         &format!(
@@ -856,7 +876,7 @@ pub(super) fn render_pick_color_text(
         &msg,
         crate::text::FontWeight::Bold,
         12.0,
-        [248, 244, 255, 255],
+        pal.popover_text_primary,
         phys_to_logical_rect(pill),
     ) {
         elements.push(el);
@@ -1034,8 +1054,10 @@ pub enum SettingsHit {
     ToggleReduceTransparency,
     /// Toggle `reduced_motion`.
     ToggleReducedMotion,
-    /// Toggle between custom `.png` wallpaper and built-in Tahoe gradient.
+    /// Toggle between custom `.png` wallpaper and built-in Golden Gate gradient.
     ToggleWallpaper,
+    /// Toggle between Golden Gate `Light` and `Dark` appearance (`RUSTYOS-067`).
+    ToggleAppearance,
     /// Toggle `menubar_show_workspaces`.
     ToggleMenuWorkspaces,
     /// Toggle `menubar_show_tray`.
@@ -1256,6 +1278,7 @@ fn settings_tab_rows(st: &SettingsRenderState<'_>) -> Vec<SettingsRowEntry> {
 fn settings_appearance_rows(st: &SettingsRenderState<'_>) -> Vec<SettingsRowEntry> {
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let pct = (crate::config::clamp_glass_opacity(st.glass_opacity) * 100.0).round() as u32;
+    let mode = active_appearance();
     vec![
         SettingsRowEntry {
             label: "Glass Opacity".to_owned(),
@@ -1282,9 +1305,17 @@ fn settings_appearance_rows(st: &SettingsRenderState<'_>) -> Vec<SettingsRowEntr
                 value: std::borrow::Cow::Borrowed(if st.has_custom_wallpaper {
                     "Custom PNG"
                 } else {
-                    "Tahoe"
+                    "Golden Gate"
                 }),
                 active: st.has_custom_wallpaper,
+            },
+        },
+        SettingsRowEntry {
+            label: "Appearance Theme".to_owned(),
+            kind: SettingsRowKind::Toggle {
+                hit: SettingsHit::ToggleAppearance,
+                value: std::borrow::Cow::Borrowed(mode.label()),
+                active: mode.is_dark(),
             },
         },
     ]
@@ -1461,6 +1492,7 @@ pub(super) fn render_settings_text(
     st: &SettingsRenderState<'_>,
     elements: &mut Vec<MemoryRenderBufferRenderElement<GlesRenderer>>,
 ) {
+    let pal = ThemePalette::active();
     let layout = settings_modal_layout(screen_size);
     let modal = layout.modal;
 
@@ -1469,7 +1501,7 @@ pub(super) fn render_settings_text(
         "System Settings",
         crate::text::FontWeight::Bold,
         15.0,
-        [248, 244, 255, 255],
+        pal.popover_text_primary,
         Point::from((layout.badge.loc.x + 44, layout.badge.loc.y + 8)),
     ) {
         elements.push(el);
@@ -1478,9 +1510,9 @@ pub(super) fn render_settings_text(
     for (tab, rect) in SettingsTab::ALL.iter().zip(layout.tabs) {
         let selected = *tab == st.active_tab;
         let col = if selected {
-            [250, 248, 255, 255]
+            [255, 255, 255, 255]
         } else {
-            [202, 194, 224, 235]
+            pal.popover_text_secondary
         };
         if let Some(el) = text_cache.render_label_weighted(
             renderer,
@@ -1503,7 +1535,7 @@ pub(super) fn render_settings_text(
         st.active_tab.label(),
         crate::text::FontWeight::Bold,
         14.0,
-        [248, 244, 255, 255],
+        pal.popover_text_primary,
         Point::from((layout.content_x + 2, modal.loc.y + 68)),
     ) {
         elements.push(el);
@@ -1520,12 +1552,13 @@ fn render_settings_rows_text(
     st: &SettingsRenderState<'_>,
     elements: &mut Vec<MemoryRenderBufferRenderElement<GlesRenderer>>,
 ) {
+    let pal = ThemePalette::active();
     for (entry, row) in settings_tab_rows(st).iter().zip(layout.rows) {
         if let Some(el) = text_cache.render_label(
             renderer,
             &entry.label,
             12.5,
-            [236, 230, 248, 255],
+            pal.popover_text_primary,
             Point::from((row.loc.x + 14, row.loc.y + 14)),
         ) {
             elements.push(el);
@@ -1539,7 +1572,7 @@ fn render_settings_rows_text(
                         label,
                         crate::text::FontWeight::Bold,
                         12.0,
-                        [248, 244, 255, 255],
+                        pal.popover_text_primary,
                         phys_to_logical_rect(rect),
                     ) {
                         elements.push(el);
@@ -1549,9 +1582,9 @@ fn render_settings_rows_text(
             SettingsRowKind::Toggle { value, active, .. } => {
                 let pill = settings_row_pill_rect(row);
                 let fg = if *active {
-                    [252, 250, 255, 255]
+                    [255, 255, 255, 255]
                 } else {
-                    [214, 206, 232, 240]
+                    pal.popover_text_secondary
                 };
                 if let Some(el) = text_cache.render_label_centered_weighted(
                     renderer,
@@ -1575,6 +1608,7 @@ fn render_settings_footer_text(
     st: &SettingsRenderState<'_>,
     elements: &mut Vec<MemoryRenderBufferRenderElement<GlesRenderer>>,
 ) {
+    let pal = ThemePalette::active();
     let status = if st.config_status_label.is_empty() {
         "~/.config/rustyos/config.toml".to_owned()
     } else {
@@ -1584,7 +1618,7 @@ fn render_settings_footer_text(
         renderer,
         &status,
         11.0,
-        [176, 166, 204, 225],
+        pal.popover_text_muted,
         Point::from((
             layout.modal.loc.x + 22,
             layout.modal.loc.y + layout.modal.size.h - 40,
@@ -1594,8 +1628,8 @@ fn render_settings_footer_text(
     }
 
     for (rect, label, bold_fg) in [
-        (layout.reload_btn, "Reload TOML", [238, 232, 248, 255]),
-        (layout.done_btn, "Done", [252, 250, 255, 255]),
+        (layout.reload_btn, "Reload TOML", pal.popover_text_primary),
+        (layout.done_btn, "Done", [255, 255, 255, 255]),
     ] {
         if let Some(el) = text_cache.render_label_centered_weighted(
             renderer,
@@ -1618,6 +1652,7 @@ pub(super) fn render_settings_composite(
     top_telemetry: &TopBarTelemetry<'_>,
     st: &SettingsRenderState<'_>,
 ) {
+    let pal = ThemePalette::active();
     let layout = settings_modal_layout(screen_size);
     let modal = layout.modal;
 
@@ -1626,7 +1661,7 @@ pub(super) fn render_settings_composite(
         renderer,
         crate::surfaces::UiGlyphKind::ControlCenter,
         18,
-        [248, 244, 255, 255],
+        [255, 255, 255, 255],
         Point::from((layout.badge.loc.x + 8, layout.badge.loc.y + 8)),
     ) {
         out.push(CompositorRenderElement::Memory(el));
@@ -1635,16 +1670,16 @@ pub(super) fn render_settings_composite(
         renderer,
         crate::surfaces::UiGlyphKind::Close,
         12,
-        [240, 234, 248, 240],
+        pal.popover_icon,
         Point::from((layout.close_btn.loc.x + 7, layout.close_btn.loc.y + 7)),
     ) {
         out.push(CompositorRenderElement::Memory(el));
     }
     for (tab, rect) in SettingsTab::ALL.iter().zip(layout.tabs) {
         let fg = if *tab == st.active_tab {
-            [252, 250, 255, 255]
+            [255, 255, 255, 255]
         } else {
-            [196, 188, 220, 230]
+            pal.popover_icon
         };
         if let Some(el) = shape_cache.ui_glyph_element(
             renderer,
@@ -1663,8 +1698,8 @@ pub(super) fn render_settings_composite(
         renderer,
         layout.badge,
         10,
-        [165, 110, 255, 210],
-        Some([215, 185, 255, 160]),
+        pal.accent_hover_fill,
+        Some(pal.accent_hover_border),
     );
     push_rounded_glass_box(
         out,
@@ -1672,8 +1707,8 @@ pub(super) fn render_settings_composite(
         renderer,
         layout.close_btn,
         13,
-        RGBA_SURFACE,
-        Some(RGBA_BORDER),
+        pal.control_pill_off_rgba,
+        Some(pal.border_rgba),
     );
 
     render_settings_controls_composite(out, shape_cache, renderer, &layout, top_telemetry, st);
@@ -1684,8 +1719,8 @@ pub(super) fn render_settings_composite(
         renderer,
         layout.reload_btn,
         10,
-        RGBA_SURFACE,
-        Some(RGBA_BORDER),
+        pal.control_pill_off_rgba,
+        Some(pal.border_rgba),
     );
     push_rounded_glass_box(
         out,
@@ -1693,8 +1728,8 @@ pub(super) fn render_settings_composite(
         renderer,
         layout.done_btn,
         10,
-        [165, 110, 255, 224],
-        Some([215, 185, 255, 185]),
+        pal.accent_hover_fill,
+        Some(pal.accent_hover_border),
     );
 
     out.push(CompositorRenderElement::Solid(make_solid_element(
@@ -1702,7 +1737,7 @@ pub(super) fn render_settings_composite(
             Point::from((layout.divider_x, modal.loc.y + 66)),
             Size::from((1, (modal.size.h - 130).max(40))),
         ),
-        premul(1.0, 1.0, 1.0, 0.12),
+        pal.popover_separator,
     )));
 
     push_liquid_glass_panel(
@@ -1714,13 +1749,8 @@ pub(super) fn render_settings_composite(
         crate::surfaces::GlassPanelStyle::Popover,
         top_telemetry.glass_opacity,
         top_telemetry.reduce_transparency,
-        Some((22, 62)),
+        Some((24, 68)),
     );
-
-    out.push(CompositorRenderElement::Solid(make_solid_element(
-        Rectangle::new(Point::from((0, 0)), screen_size),
-        premul(0.059, 0.039, 0.098, 0.42),
-    )));
 }
 
 fn render_settings_controls_composite(
@@ -1731,14 +1761,35 @@ fn render_settings_controls_composite(
     top_telemetry: &TopBarTelemetry<'_>,
     st: &SettingsRenderState<'_>,
 ) {
+    let pal = ThemePalette::active();
+    let stepper_btn_fill = if pal.is_dark {
+        [62, 62, 70, 224]
+    } else {
+        [214, 218, 228, 224]
+    };
+    let stepper_val_fill = if pal.is_dark {
+        [44, 44, 50, 214]
+    } else {
+        [232, 235, 242, 224]
+    };
+    let row_card_fill = if pal.is_dark {
+        [32, 32, 36, 178]
+    } else {
+        [236, 239, 245, 196]
+    };
+    let inactive_tab_fill = if pal.is_dark {
+        [36, 36, 40, 120]
+    } else {
+        [228, 232, 240, 145]
+    };
     for (entry, row) in settings_tab_rows(st).iter().zip(layout.rows) {
         match &entry.kind {
             SettingsRowKind::Stepper { .. } => {
                 let (minus, value_box, plus) = settings_row_stepper_rects(row);
                 for (btn, fill) in [
-                    (minus, [56, 46, 82, 220]),
-                    (value_box, [34, 26, 52, 210]),
-                    (plus, [56, 46, 82, 220]),
+                    (minus, stepper_btn_fill),
+                    (value_box, stepper_val_fill),
+                    (plus, stepper_btn_fill),
                 ] {
                     push_rounded_glass_box(
                         out,
@@ -1747,16 +1798,16 @@ fn render_settings_controls_composite(
                         btn,
                         8,
                         fill,
-                        Some(RGBA_BORDER),
+                        Some(pal.border_rgba),
                     );
                 }
             }
             SettingsRowKind::Toggle { active, .. } => {
                 let pill = settings_row_pill_rect(row);
                 let (fill, border) = if *active {
-                    ([165, 110, 255, 220], [215, 185, 255, 185])
+                    (pal.accent_hover_fill, pal.accent_hover_border)
                 } else {
-                    ([46, 38, 66, 205], RGBA_BORDER)
+                    (pal.control_pill_off_rgba, pal.border_rgba)
                 };
                 push_rounded_glass_box(out, shape_cache, renderer, pill, 10, fill, Some(border));
             }
@@ -1768,27 +1819,27 @@ fn render_settings_controls_composite(
             row,
             11,
             scale_glass_rgba(
-                [30, 23, 46, 175],
+                row_card_fill,
                 top_telemetry.glass_opacity,
                 top_telemetry.reduce_transparency,
             ),
-            Some(RGBA_BORDER),
+            Some(pal.border_rgba),
         );
     }
 
     for (tab, rect) in SettingsTab::ALL.iter().zip(layout.tabs) {
         let selected = *tab == st.active_tab;
         let fill = if selected {
-            [165, 110, 255, 195]
+            pal.accent_hover_fill
         } else {
             scale_glass_rgba(
-                [34, 26, 52, 120],
+                inactive_tab_fill,
                 top_telemetry.glass_opacity,
                 top_telemetry.reduce_transparency,
             )
         };
         let border = if selected {
-            Some([215, 185, 255, 175])
+            Some(pal.accent_hover_border)
         } else {
             None
         };

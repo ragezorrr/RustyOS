@@ -14,17 +14,20 @@ use smithay::input::pointer::CursorIcon;
 use smithay::utils::{Buffer as BufferCoord, Logical, Point, Rectangle, Size, Transform};
 
 mod glyphs;
+mod liquid_glass;
 mod sdf;
 #[cfg(test)]
 mod tests;
 mod xcursor;
+
+pub use liquid_glass::LiquidGlassElement;
 
 use glyphs::rasterize_ui_glyph_buffer_rect;
 pub(crate) use sdf::signed_distance_polygon;
 use sdf::{
     rasterize_circle_buffer, rasterize_corner_buffer, rasterize_rgba_rect,
     rasterize_shadow_corner_buffer, rasterize_wallpaper_buffer, sample_dock_icon_shadow_pixel,
-    sample_fallback_avatar_pixel, sample_glass_panel_pixel, sample_traffic_light_pixel,
+    sample_fallback_avatar_pixel, sample_glass_panel_pixel_themed, sample_traffic_light_pixel,
 };
 use xcursor::{load_xcursor_for_icon, rasterize_cursor_arrow_buffer};
 pub(crate) use xcursor::{
@@ -95,6 +98,7 @@ struct GlassPanelKey {
     radius: u16,
     glass_pct: u8,
     reduce_transparency: bool,
+    is_dark: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -214,7 +218,8 @@ struct CachedWallpaper {
     revision: u64,
     custom_key: Option<(PathBuf, Size<i32, Logical>)>,
     custom_buffer: Option<MemoryRenderBuffer>,
-    fallback_buffer: Option<MemoryRenderBuffer>,
+    fallback_buffer_light: Option<MemoryRenderBuffer>,
+    fallback_buffer_dark: Option<MemoryRenderBuffer>,
 }
 
 /// CPU-rasterized, GPU-cached cache of SDF rounded corners, circles, shadow patches, cursors, glyphs, and wallpaper.
@@ -231,6 +236,7 @@ pub struct UiShapeCache {
     wallpaper: CachedWallpaper,
     cursor_arrow: Option<MemoryRenderBuffer>,
     xcursors: HashMap<(Option<String>, &'static str, u32), Option<CachedCursor>>,
+    liquid_glass: liquid_glass::LiquidGlassPipeline,
     /// Decoded & GPU-cached application and tray icon textures (`RUSTYOS-033`).
     pub icons: crate::icons::IconCache,
 }
@@ -362,6 +368,95 @@ impl UiShapeCache {
         .ok()
     }
 
+    /// Prepares offscreen Dual-Kawase backdrop blur for Liquid Glass panels on `output_id` (`RUSTYOS-069`).
+    pub(crate) fn prepare_liquid_glass_backdrop(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        output_id: u32,
+        logical_size: Size<i32, Logical>,
+        output_scale: f64,
+        backdrop_elements: &[crate::shell_render::CompositorRenderElement],
+    ) -> bool {
+        self.liquid_glass.prepare_backdrop(
+            renderer,
+            output_id,
+            logical_size,
+            output_scale,
+            backdrop_elements,
+        )
+    }
+
+    /// Clears the active blurred backdrop reference after an output's shell elements are built (`RUSTYOS-069`).
+    pub(crate) fn clear_active_liquid_glass_backdrop(&mut self) {
+        self.liquid_glass.clear_active();
+    }
+
+    /// Returns a Liquid Glass Dock container element, preferring the GLES multi-pass backdrop blur
+    /// shader when an active backdrop is prepared and falling back to CPU glass otherwise (`RUSTYOS-069`).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn dock_glass_render_element(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        width: i32,
+        height: i32,
+        radius: i32,
+        glass_opacity: f32,
+        reduce_transparency: bool,
+        loc: Point<i32, Logical>,
+    ) -> Option<crate::shell_render::CompositorRenderElement> {
+        self.glass_panel_render_element(
+            renderer,
+            GlassPanelStyle::Dock,
+            width,
+            height,
+            radius,
+            glass_opacity,
+            reduce_transparency,
+            loc,
+        )
+    }
+
+    /// Returns a Liquid Glass container element, using GLES Dual-Kawase backdrop blur when active
+    /// or falling back automatically to CPU-rasterized glass (`RUSTYOS-069`).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn glass_panel_render_element(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        style: GlassPanelStyle,
+        width: i32,
+        height: i32,
+        radius: i32,
+        glass_opacity: f32,
+        reduce_transparency: bool,
+        loc: Point<i32, Logical>,
+    ) -> Option<crate::shell_render::CompositorRenderElement> {
+        if let Some(el) = self.liquid_glass.make_glass_element(
+            renderer,
+            style,
+            width,
+            height,
+            radius,
+            glass_opacity,
+            reduce_transparency,
+            loc,
+        ) {
+            return Some(crate::shell_render::CompositorRenderElement::ShaderTexture(
+                el,
+            ));
+        }
+        self.glass_panel_element(
+            renderer,
+            style,
+            width,
+            height,
+            radius,
+            glass_opacity,
+            reduce_transparency,
+            loc,
+        )
+        .map(crate::shell_render::CompositorRenderElement::Memory)
+    }
+
     /// Returns a GPU-cached macOS-style translucent top-lit frosted glass Dock container (`RUSTYOS-050`).
     #[allow(
         clippy::too_many_arguments,
@@ -415,6 +510,7 @@ impl UiShapeCache {
         let h_u16 = u16::try_from(height).ok()?;
         let r_u16 = u16::try_from(radius.clamp(0, width.min(height) / 2)).ok()?;
         let glass_pct = (crate::config::clamp_glass_opacity(glass_opacity) * 100.0).round() as u8;
+        let is_dark = crate::shell_render::active_appearance().is_dark();
         let key = GlassPanelKey {
             style,
             width: w_u16,
@@ -422,6 +518,7 @@ impl UiShapeCache {
             radius: r_u16,
             glass_pct,
             reduce_transparency,
+            is_dark,
         };
         if !self.glass_panels.contains_key(&key) {
             if self.glass_panels.len() >= 48 {
@@ -429,7 +526,7 @@ impl UiShapeCache {
             }
             let clamped_glass = f32::from(glass_pct) / 100.0;
             let buf = rasterize_rgba_rect(width, height, |px, py| {
-                sample_glass_panel_pixel(
+                sample_glass_panel_pixel_themed(
                     px,
                     py,
                     width,
@@ -438,6 +535,7 @@ impl UiShapeCache {
                     clamped_glass,
                     reduce_transparency,
                     style,
+                    is_dark,
                 )
             });
             self.glass_panels.insert(key, buf);
@@ -533,7 +631,7 @@ impl UiShapeCache {
     }
 
     /// Returns a GPU-cached wallpaper scaled cleanly to `screen_size`, preferring `custom_path` (`.png`)
-    /// from `[ui] wallpaper` and falling back to the ambient Purple Glass gradient (`RUSTYOS-034`).
+    /// from `[ui] wallpaper` and falling back to the built-in Golden Gate silk gradient (`RUSTYOS-034`, `RUSTYOS-067`).
     pub fn wallpaper_element(
         &mut self,
         renderer: &mut GlesRenderer,
@@ -596,10 +694,14 @@ impl UiShapeCache {
             self.wallpaper.custom_buffer = None;
         }
 
-        let buf = self
-            .wallpaper
-            .fallback_buffer
-            .get_or_insert_with(|| rasterize_wallpaper_buffer(WALLPAPER_W, WALLPAPER_H));
+        let is_dark = crate::shell_render::active_appearance().is_dark();
+        let slot = if is_dark {
+            &mut self.wallpaper.fallback_buffer_dark
+        } else {
+            &mut self.wallpaper.fallback_buffer_light
+        };
+        let buf = slot
+            .get_or_insert_with(|| rasterize_wallpaper_buffer(WALLPAPER_W, WALLPAPER_H, is_dark));
         MemoryRenderBufferRenderElement::from_buffer(
             renderer,
             Point::<f64, smithay::utils::Physical>::from((0.0, 0.0)),

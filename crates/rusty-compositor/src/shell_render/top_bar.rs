@@ -9,7 +9,7 @@ use super::tokens::{
     COLOR_ACCENT, COLOR_ACCENT_MUTED, COLOR_BORDER, COLOR_MUTED, COLOR_SUBTLE, COLOR_SUCCESS,
     COLOR_SURFACE_ELEVATED, COLOR_SURFACE_OVERLAY, COLOR_WARNING, DOCK_HEIGHT, DOCK_MARGIN_BOTTOM,
     TOP_BAR_APP_X, TOP_BAR_FONT_SIZE, TOP_BAR_HEIGHT, TOP_BAR_ITEM_H, TOP_BAR_ITEM_Y,
-    TOP_BAR_LOGO_W, TOP_BAR_LOGO_X, WS_BTN_STRIDE, WS_BTN_WIDTH, make_solid_element,
+    TOP_BAR_LOGO_W, TOP_BAR_LOGO_X, ThemePalette, WS_BTN_STRIDE, WS_BTN_WIDTH, make_solid_element,
     push_liquid_glass_panel, push_rounded_glass_box,
 };
 
@@ -78,6 +78,10 @@ pub struct TopBarTelemetry<'a> {
     pub kbd_layout: &'a str,
     /// Registered `StatusNotifierItem` tray badges rendered when `show_tray == true` (`RUSTYOS-032`).
     pub tray_items: &'a [TopBarTrayItem<'a>],
+    /// Canonical active application title in `TopBar` (`RUSTYOS-068`).
+    pub active_app_name: &'a str,
+    /// Functional profile driving dynamic `TopBar` categories and shortcuts (`RUSTYOS-068`).
+    pub app_profile: super::top_bar_menus::TopBarAppProfile,
     /// Currently open `TopBar` left menu dropdown if any (`RUSTYOS-048`).
     pub active_menu: Option<TopBarMenuHit>,
     /// Currently hovered item index (`0..`) inside the open `TopBar` dropdown (`RUSTYOS-051`).
@@ -127,6 +131,8 @@ impl Default for TopBarTelemetry<'static> {
             notification_count: 0,
             kbd_layout: "EN",
             tray_items: &[],
+            active_app_name: "Files",
+            app_profile: super::top_bar_menus::TopBarAppProfile::Files,
             active_menu: None,
             menu_hover_row: None,
             glass_opacity: crate::config::DEFAULT_GLASS_OPACITY,
@@ -194,8 +200,24 @@ pub enum TopBarMenuAction {
     OpenSpotlight,
     /// Launch preferred terminal emulator.
     NewTerminal,
-    /// Launch preferred file manager.
+    /// Launch preferred file manager (`rusty-files`).
     OpenFiles,
+    /// Create a new folder on `~/Desktop` (`RUSTYOS-067`).
+    NewDesktopFolder,
+    /// Open `rusty-files --recents` (`RUSTYOS-067`).
+    GoRecents,
+    /// Open `rusty-files` in `~/Desktop` (`RUSTYOS-067`).
+    GoDesktop,
+    /// Open `rusty-files` in `~/Documents` (`RUSTYOS-067`).
+    GoDocuments,
+    /// Open `rusty-files` in `~/Downloads` (`RUSTYOS-067`).
+    GoDownloads,
+    /// Open `rusty-files` in `~` (`Home`) (`RUSTYOS-067`).
+    GoHome,
+    /// Open `rusty-files --trash` (`RUSTYOS-067`).
+    GoTrash,
+    /// Empty the Freedesktop Trash directory asynchronously (`RUSTYOS-067`).
+    EmptyTrash,
     /// Switch to next workspace (`RUSTYOS-049`).
     NextWorkspace,
     /// Switch to previous workspace (`RUSTYOS-049`).
@@ -216,6 +238,16 @@ pub enum TopBarMenuAction {
     ToggleMaximizeFocused,
     /// Minimize focused window.
     MinimizeFocused,
+    /// Show "About <ActiveApp>" notification/banner (`RUSTYOS-068`).
+    AboutActiveApp,
+    /// Toggle fullscreen on the focused window (`RUSTYOS-068`).
+    ToggleFullscreenFocused,
+    /// Gracefully quit the focused application (`RUSTYOS-068`).
+    QuitActiveApp,
+    /// Terminate the focused application process (`RUSTYOS-068`).
+    ForceQuitActiveApp,
+    /// Dispatch a synthetic shortcut to the focused application (`RUSTYOS-068`).
+    AppShortcut(super::top_bar_menus::AppShortcutAction),
     /// Close focused window.
     CloseFocused,
 }
@@ -274,6 +306,7 @@ pub struct TopBarLeftLayout {
     pub edit_w: i32,
     pub view_x: i32,
     pub view_w: i32,
+    pub has_go: bool,
     pub go_x: i32,
     pub go_w: i32,
     pub win_x: i32,
@@ -296,12 +329,30 @@ pub(super) fn measure_menu_box_width(label: &str) -> i32 {
 /// Computes `TopBar` left-side x coordinates (`macOS` Menu Bar rhythm: `Logo  App  File  Edit  View  Go  Window  Help`) (`RUSTYOS-048`/`049`).
 #[must_use]
 pub fn compute_top_bar_left_layout(active_app_name: &str) -> TopBarLeftLayout {
-    compute_top_bar_left_layout_with_options(active_app_name, false)
+    compute_top_bar_left_layout_for_profile(
+        super::top_bar_menus::TopBarAppProfile::Files,
+        active_app_name,
+        false,
+    )
 }
 
-/// Computes `TopBar` left-side layout with explicit workspace-strip visibility (`RUSTYOS-049`).
+/// Computes `TopBar` left-side layout with explicit workspace-strip visibility (`RUSTYOS-049`, `RUSTYOS-067`).
 #[must_use]
 pub fn compute_top_bar_left_layout_with_options(
+    active_app_name: &str,
+    show_workspaces: bool,
+) -> TopBarLeftLayout {
+    compute_top_bar_left_layout_for_profile(
+        super::top_bar_menus::TopBarAppProfile::Files,
+        active_app_name,
+        show_workspaces,
+    )
+}
+
+/// Computes `TopBar` left-side layout adapted to `profile` (e.g., hiding `Go` outside `Files`) (`RUSTYOS-068`).
+#[must_use]
+pub fn compute_top_bar_left_layout_for_profile(
+    profile: super::top_bar_menus::TopBarAppProfile,
     active_app_name: &str,
     show_workspaces: bool,
 ) -> TopBarLeftLayout {
@@ -317,8 +368,13 @@ pub fn compute_top_bar_left_layout_with_options(
     let edit_w = measure_menu_box_width("Edit");
     let view_x = edit_x + edit_w;
     let view_w = measure_menu_box_width("View");
+    let has_go = profile.has_go_menu();
     let go_x = view_x + view_w;
-    let go_w = measure_menu_box_width("Go");
+    let go_w = if has_go {
+        measure_menu_box_width("Go")
+    } else {
+        0
+    };
     let win_x = go_x + go_w;
     let win_w = measure_menu_box_width("Window");
     let help_x = win_x + win_w;
@@ -335,6 +391,7 @@ pub fn compute_top_bar_left_layout_with_options(
         edit_w,
         view_x,
         view_w,
+        has_go,
         go_x,
         go_w,
         win_x,
@@ -898,38 +955,57 @@ pub(super) const MENU_SYSTEM: &[TopBarMenuEntry] = &[
 
 pub(super) const MENU_ACTIVE_APP: &[TopBarMenuEntry] = &[
     TopBarMenuEntry::Item {
-        label: "New Terminal",
-        icon: crate::surfaces::UiGlyphKind::TerminalPrompt,
+        label: "About Files",
+        icon: crate::surfaces::UiGlyphKind::Info,
         shortcut: None,
-        action: TopBarMenuAction::NewTerminal,
-    },
-    TopBarMenuEntry::Item {
-        label: "Open Files",
-        icon: crate::surfaces::UiGlyphKind::Folder,
-        shortcut: None,
-        action: TopBarMenuAction::OpenFiles,
+        action: TopBarMenuAction::AboutRustyOs,
     },
     TopBarMenuEntry::Separator,
     TopBarMenuEntry::Item {
-        label: "Control Center",
+        label: "System Settings...",
         icon: crate::surfaces::UiGlyphKind::ControlCenter,
-        shortcut: Some("Alt+S"),
-        action: TopBarMenuAction::OpenControlCenter,
+        shortcut: Some("Super+,"),
+        action: TopBarMenuAction::OpenSettings,
+    },
+    TopBarMenuEntry::Item {
+        label: "Empty Trash...",
+        icon: crate::surfaces::UiGlyphKind::Trash,
+        shortcut: None,
+        action: TopBarMenuAction::EmptyTrash,
+    },
+    TopBarMenuEntry::Separator,
+    TopBarMenuEntry::Item {
+        label: "Minimize Window",
+        icon: crate::surfaces::UiGlyphKind::WindowMin,
+        shortcut: Some("Alt+H"),
+        action: TopBarMenuAction::MinimizeFocused,
+    },
+    TopBarMenuEntry::Item {
+        label: "Close Window",
+        icon: crate::surfaces::UiGlyphKind::Close,
+        shortcut: Some("Alt+W"),
+        action: TopBarMenuAction::CloseFocused,
     },
 ];
 
 pub(super) const MENU_FILE: &[TopBarMenuEntry] = &[
     TopBarMenuEntry::Item {
+        label: "New Files Window",
+        icon: crate::surfaces::UiGlyphKind::Folder,
+        shortcut: None,
+        action: TopBarMenuAction::OpenFiles,
+    },
+    TopBarMenuEntry::Item {
+        label: "New Desktop Folder",
+        icon: crate::surfaces::UiGlyphKind::Folder,
+        shortcut: None,
+        action: TopBarMenuAction::NewDesktopFolder,
+    },
+    TopBarMenuEntry::Item {
         label: "New Terminal",
         icon: crate::surfaces::UiGlyphKind::TerminalPrompt,
         shortcut: None,
         action: TopBarMenuAction::NewTerminal,
-    },
-    TopBarMenuEntry::Item {
-        label: "Open Files",
-        icon: crate::surfaces::UiGlyphKind::Folder,
-        shortcut: None,
-        action: TopBarMenuAction::OpenFiles,
     },
     TopBarMenuEntry::Separator,
     TopBarMenuEntry::Item {
@@ -937,6 +1013,13 @@ pub(super) const MENU_FILE: &[TopBarMenuEntry] = &[
         icon: crate::surfaces::UiGlyphKind::Search,
         shortcut: Some("Super+Space"),
         action: TopBarMenuAction::OpenSpotlight,
+    },
+    TopBarMenuEntry::Separator,
+    TopBarMenuEntry::Item {
+        label: "Close Window",
+        icon: crate::surfaces::UiGlyphKind::Close,
+        shortcut: Some("Alt+W"),
+        action: TopBarMenuAction::CloseFocused,
     },
 ];
 
@@ -986,12 +1069,48 @@ pub(super) const MENU_VIEW: &[TopBarMenuEntry] = &[
 
 pub(super) const MENU_GO: &[TopBarMenuEntry] = &[
     TopBarMenuEntry::Item {
+        label: "Recents",
+        icon: crate::surfaces::UiGlyphKind::Search,
+        shortcut: None,
+        action: TopBarMenuAction::GoRecents,
+    },
+    TopBarMenuEntry::Item {
+        label: "Desktop",
+        icon: crate::surfaces::UiGlyphKind::Folder,
+        shortcut: None,
+        action: TopBarMenuAction::GoDesktop,
+    },
+    TopBarMenuEntry::Item {
+        label: "Documents",
+        icon: crate::surfaces::UiGlyphKind::Folder,
+        shortcut: None,
+        action: TopBarMenuAction::GoDocuments,
+    },
+    TopBarMenuEntry::Item {
+        label: "Downloads",
+        icon: crate::surfaces::UiGlyphKind::Folder,
+        shortcut: None,
+        action: TopBarMenuAction::GoDownloads,
+    },
+    TopBarMenuEntry::Item {
+        label: "Home",
+        icon: crate::surfaces::UiGlyphKind::Folder,
+        shortcut: None,
+        action: TopBarMenuAction::GoHome,
+    },
+    TopBarMenuEntry::Item {
+        label: "Trash",
+        icon: crate::surfaces::UiGlyphKind::Trash,
+        shortcut: None,
+        action: TopBarMenuAction::GoTrash,
+    },
+    TopBarMenuEntry::Separator,
+    TopBarMenuEntry::Item {
         label: "Workspace Overview",
         icon: crate::surfaces::UiGlyphKind::Grid,
         shortcut: Some("Super+Tab"),
         action: TopBarMenuAction::OpenOverview,
     },
-    TopBarMenuEntry::Separator,
     TopBarMenuEntry::Item {
         label: "Next Workspace",
         icon: crate::surfaces::UiGlyphKind::ArrowNext,
@@ -1003,13 +1122,6 @@ pub(super) const MENU_GO: &[TopBarMenuEntry] = &[
         icon: crate::surfaces::UiGlyphKind::ArrowPrev,
         shortcut: None,
         action: TopBarMenuAction::PrevWorkspace,
-    },
-    TopBarMenuEntry::Separator,
-    TopBarMenuEntry::Item {
-        label: "Spotlight Search",
-        icon: crate::surfaces::UiGlyphKind::Search,
-        shortcut: Some("Super+Space"),
-        action: TopBarMenuAction::OpenSpotlight,
     },
 ];
 
@@ -1100,14 +1212,18 @@ pub const fn top_bar_menu_items(
             ("Lock Screen", TopBarMenuAction::LockSession),
         ],
         TopBarMenuHit::ActiveApp => &[
-            ("New Terminal", TopBarMenuAction::NewTerminal),
-            ("Open Files", TopBarMenuAction::OpenFiles),
-            ("Control Center", TopBarMenuAction::OpenControlCenter),
+            ("About Files", TopBarMenuAction::AboutRustyOs),
+            ("System Settings...", TopBarMenuAction::OpenSettings),
+            ("Empty Trash...", TopBarMenuAction::EmptyTrash),
+            ("Minimize Window", TopBarMenuAction::MinimizeFocused),
+            ("Close Window", TopBarMenuAction::CloseFocused),
         ],
         TopBarMenuHit::File => &[
+            ("New Files Window", TopBarMenuAction::OpenFiles),
+            ("New Desktop Folder", TopBarMenuAction::NewDesktopFolder),
             ("New Terminal", TopBarMenuAction::NewTerminal),
-            ("Open Files", TopBarMenuAction::OpenFiles),
             ("Spotlight Search", TopBarMenuAction::OpenSpotlight),
+            ("Close Window", TopBarMenuAction::CloseFocused),
         ],
         TopBarMenuHit::Edit => &[
             ("Toggle Float / Tile", TopBarMenuAction::ToggleLayout),
@@ -1126,10 +1242,15 @@ pub const fn top_bar_menu_items(
             ("Refresh Metrics", TopBarMenuAction::RefreshMetrics),
         ],
         TopBarMenuHit::Go => &[
+            ("Recents", TopBarMenuAction::GoRecents),
+            ("Desktop", TopBarMenuAction::GoDesktop),
+            ("Documents", TopBarMenuAction::GoDocuments),
+            ("Downloads", TopBarMenuAction::GoDownloads),
+            ("Home", TopBarMenuAction::GoHome),
+            ("Trash", TopBarMenuAction::GoTrash),
             ("Workspace Overview", TopBarMenuAction::OpenOverview),
             ("Next Workspace", TopBarMenuAction::NextWorkspace),
             ("Previous Workspace", TopBarMenuAction::PrevWorkspace),
-            ("Spotlight Search", TopBarMenuAction::OpenSpotlight),
         ],
         TopBarMenuHit::Window => &[
             ("Focus Next Window", TopBarMenuAction::FocusNextWindow),
@@ -1159,7 +1280,21 @@ pub fn top_bar_menu_popover_rect(
     active_app_name: &str,
     menu: TopBarMenuHit,
 ) -> (i32, i32, i32, i32) {
-    let left = compute_top_bar_left_layout(active_app_name);
+    top_bar_menu_popover_rect_for_profile(
+        super::top_bar_menus::TopBarAppProfile::Files,
+        active_app_name,
+        menu,
+    )
+}
+
+/// Computes the glass dropdown popover rectangle adapted to `profile` and `active_app_name` (`RUSTYOS-068`).
+#[must_use]
+pub fn top_bar_menu_popover_rect_for_profile(
+    profile: super::top_bar_menus::TopBarAppProfile,
+    active_app_name: &str,
+    menu: TopBarMenuHit,
+) -> (i32, i32, i32, i32) {
+    let left = compute_top_bar_left_layout_for_profile(profile, active_app_name, false);
     let anchor_x = match menu {
         TopBarMenuHit::SystemLogo => TOP_BAR_LOGO_X,
         TopBarMenuHit::ActiveApp => left.app_x,
@@ -1170,42 +1305,66 @@ pub fn top_bar_menu_popover_rect(
         TopBarMenuHit::Window => left.win_x,
         TopBarMenuHit::Help => left.help_x,
     };
+    let entries =
+        super::top_bar_menus::resolve_top_bar_menu_entries(profile, active_app_name, menu);
     let mut content_h = 0;
-    for entry in top_bar_menu_entries(menu) {
-        content_h += match entry {
-            TopBarMenuEntry::Item { .. } => MENU_ITEM_HEIGHT,
-            TopBarMenuEntry::Separator => MENU_SEPARATOR_HEIGHT,
-        };
+    let mut pop_w = 256;
+    for entry in &entries {
+        match entry {
+            super::top_bar_menus::ResolvedTopBarMenuItem::Item {
+                label, shortcut, ..
+            } => {
+                content_h += MENU_ITEM_HEIGHT;
+                let label_w = crate::text::measure_ui_text_width(
+                    label,
+                    12.0,
+                    crate::text::FontWeight::Regular,
+                );
+                let shortcut_w = shortcut.map_or(0, |s| {
+                    crate::text::measure_ui_text_width(s, 11.0, crate::text::FontWeight::Regular)
+                        + 18
+                });
+                pop_w = pop_w.max(34 + label_w + shortcut_w + 22);
+            }
+            super::top_bar_menus::ResolvedTopBarMenuItem::Separator => {
+                content_h += MENU_SEPARATOR_HEIGHT;
+            }
+        }
     }
-    let pop_w = 256;
     let pop_h = MENU_POPOVER_PAD_Y * 2 + content_h;
     (anchor_x, TOP_BAR_HEIGHT + 6, pop_w, pop_h)
 }
 
-pub(super) fn top_bar_menu_entry_at(
+pub(super) fn top_bar_menu_entry_at_for_profile(
+    profile: super::top_bar_menus::TopBarAppProfile,
     active_app_name: &str,
     menu: TopBarMenuHit,
     x: f64,
     y: f64,
 ) -> Option<(usize, TopBarMenuAction)> {
-    let (px, py, pw, ph) = top_bar_menu_popover_rect(active_app_name, menu);
+    let entries =
+        super::top_bar_menus::resolve_top_bar_menu_entries(profile, active_app_name, menu);
+    if entries.is_empty() {
+        return None;
+    }
+    let (px, py, pw, ph) = top_bar_menu_popover_rect_for_profile(profile, active_app_name, menu);
     let fx = f64::from(px);
     let fy = f64::from(py);
     if x < fx || x >= fx + f64::from(pw) || y < fy || y >= fy + f64::from(ph) {
         return None;
     }
     let mut cursor_y = py + MENU_POPOVER_PAD_Y;
-    for (entry_idx, entry) in top_bar_menu_entries(menu).iter().enumerate() {
+    for (entry_idx, entry) in entries.into_iter().enumerate() {
         match entry {
-            TopBarMenuEntry::Item { action, .. } => {
+            super::top_bar_menus::ResolvedTopBarMenuItem::Item { action, .. } => {
                 let top = f64::from(cursor_y);
                 let bot = f64::from(cursor_y + MENU_ITEM_HEIGHT);
                 if y >= top && y < bot {
-                    return Some((entry_idx, *action));
+                    return Some((entry_idx, action));
                 }
                 cursor_y += MENU_ITEM_HEIGHT;
             }
-            TopBarMenuEntry::Separator => {
+            super::top_bar_menus::ResolvedTopBarMenuItem::Separator => {
                 cursor_y += MENU_SEPARATOR_HEIGHT;
             }
         }
@@ -1221,20 +1380,43 @@ pub fn check_top_bar_menu_popover_click(
     x: f64,
     y: f64,
 ) -> TopBarMenuPopoverClick {
-    let (px, py, pw, ph) = top_bar_menu_popover_rect(active_app_name, menu);
+    check_top_bar_menu_popover_click_for_profile(
+        super::top_bar_menus::TopBarAppProfile::Files,
+        active_app_name,
+        menu,
+        x,
+        y,
+    )
+}
+
+/// Profile-aware popover click hit-test for `TopBar` dropdowns (`RUSTYOS-068`).
+#[must_use]
+pub fn check_top_bar_menu_popover_click_for_profile(
+    profile: super::top_bar_menus::TopBarAppProfile,
+    active_app_name: &str,
+    menu: TopBarMenuHit,
+    x: f64,
+    y: f64,
+) -> TopBarMenuPopoverClick {
+    if menu == TopBarMenuHit::Go && !profile.has_go_menu() {
+        return TopBarMenuPopoverClick::Outside;
+    }
+    let (px, py, pw, ph) = top_bar_menu_popover_rect_for_profile(profile, active_app_name, menu);
     let fx = f64::from(px);
     let fy = f64::from(py);
     if x < fx || x >= fx + f64::from(pw) || y < fy || y >= fy + f64::from(ph) {
         return TopBarMenuPopoverClick::Outside;
     }
-    if let Some((_, action)) = top_bar_menu_entry_at(active_app_name, menu, x, y) {
+    if let Some((_, action)) =
+        top_bar_menu_entry_at_for_profile(profile, active_app_name, menu, x, y)
+    {
         TopBarMenuPopoverClick::Action(action)
     } else {
         TopBarMenuPopoverClick::Inside
     }
 }
 
-/// Returns the hovered entry index (`0..top_bar_menu_entries(menu).len()`) inside an open menu popover (`RUSTYOS-051`).
+/// Returns the hovered entry index (`0..entries.len()`) inside an open menu popover (`RUSTYOS-051`).
 #[must_use]
 pub fn check_top_bar_menu_popover_hover_row(
     active_app_name: &str,
@@ -1242,18 +1424,60 @@ pub fn check_top_bar_menu_popover_hover_row(
     x: f64,
     y: f64,
 ) -> Option<usize> {
-    top_bar_menu_entry_at(active_app_name, menu, x, y).map(|(idx, _)| idx)
+    check_top_bar_menu_popover_hover_row_for_profile(
+        super::top_bar_menus::TopBarAppProfile::Files,
+        active_app_name,
+        menu,
+        x,
+        y,
+    )
+}
+
+/// Profile-aware hover row lookup for an open `TopBar` dropdown popover (`RUSTYOS-068`).
+#[must_use]
+pub fn check_top_bar_menu_popover_hover_row_for_profile(
+    profile: super::top_bar_menus::TopBarAppProfile,
+    active_app_name: &str,
+    menu: TopBarMenuHit,
+    x: f64,
+    y: f64,
+) -> Option<usize> {
+    if menu == TopBarMenuHit::Go && !profile.has_go_menu() {
+        return None;
+    }
+    top_bar_menu_entry_at_for_profile(profile, active_app_name, menu, x, y).map(|(idx, _)| idx)
 }
 
 /// Hit-tests `(x, y)` against the `TopBar` Left Menu (`Logo`, `App`, `File`, `Edit`, `View`, `Go`, `Window`, `Help`) (`RUSTYOS-038`/`049`).
 #[must_use]
 pub fn check_top_bar_menu_click(x: f64, y: f64) -> Option<TopBarMenuHit> {
-    check_top_bar_menu_click_for_app("RustyOS", x, y)
+    check_top_bar_menu_click_for_profile(
+        super::top_bar_menus::TopBarAppProfile::Files,
+        "Files",
+        x,
+        y,
+    )
 }
 
-/// Active-app-width-aware hit-test for the `TopBar` Left Menu (`RUSTYOS-048`/`049`).
+/// Active-app-width-aware hit-test for the `TopBar` Left Menu (`RUSTYOS-048`/`049`/`067`).
 #[must_use]
 pub fn check_top_bar_menu_click_for_app(
+    active_app_name: &str,
+    x: f64,
+    y: f64,
+) -> Option<TopBarMenuHit> {
+    check_top_bar_menu_click_for_profile(
+        super::top_bar_menus::TopBarAppProfile::Files,
+        active_app_name,
+        x,
+        y,
+    )
+}
+
+/// Profile-aware hit-test for `TopBar` Left Menu items (omits `Go` outside `Files`) (`RUSTYOS-068`).
+#[must_use]
+pub fn check_top_bar_menu_click_for_profile(
+    profile: super::top_bar_menus::TopBarAppProfile,
     active_app_name: &str,
     x: f64,
     y: f64,
@@ -1261,7 +1485,7 @@ pub fn check_top_bar_menu_click_for_app(
     if y < 0.0 || y > f64::from(TOP_BAR_HEIGHT) {
         return None;
     }
-    let left = compute_top_bar_left_layout(active_app_name);
+    let left = compute_top_bar_left_layout_for_profile(profile, active_app_name, false);
     if x >= f64::from(TOP_BAR_LOGO_X) && x < f64::from(TOP_BAR_LOGO_X + TOP_BAR_LOGO_W) {
         return Some(TopBarMenuHit::SystemLogo);
     }
@@ -1274,6 +1498,9 @@ pub fn check_top_bar_menu_click_for_app(
         (TopBarMenuHit::Window, left.win_x, left.win_w),
         (TopBarMenuHit::Help, left.help_x, left.help_w),
     ] {
+        if hit == TopBarMenuHit::Go && !left.has_go {
+            continue;
+        }
         if x >= f64::from(bx) && x < f64::from(bx + bw) {
             return Some(hit);
         }
@@ -1301,10 +1528,28 @@ pub fn check_top_bar_layout_click_with_options(
     x: f64,
     y: f64,
 ) -> bool {
+    check_top_bar_layout_click_for_profile(
+        super::top_bar_menus::TopBarAppProfile::Files,
+        active_app_name,
+        show_workspaces,
+        x,
+        y,
+    )
+}
+
+/// Profile-aware hit-test for the optional `TopBar` Layout badge (`RUSTYOS-068`).
+#[must_use]
+pub fn check_top_bar_layout_click_for_profile(
+    profile: super::top_bar_menus::TopBarAppProfile,
+    active_app_name: &str,
+    show_workspaces: bool,
+    x: f64,
+    y: f64,
+) -> bool {
     if !show_workspaces || y < 0.0 || y > f64::from(TOP_BAR_HEIGHT) {
         return false;
     }
-    let left = compute_top_bar_left_layout_with_options(active_app_name, show_workspaces);
+    let left = compute_top_bar_left_layout_for_profile(profile, active_app_name, show_workspaces);
     x >= f64::from(left.layout_x) && x < f64::from(left.layout_x + left.layout_w)
 }
 
@@ -1400,8 +1645,11 @@ pub(super) fn render_top_bar(
     telemetry: &TopBarTelemetry<'_>,
     has_text: bool,
 ) {
-    let left_layout =
-        compute_top_bar_left_layout_with_options("RustyOS", telemetry.show_workspaces);
+    let left_layout = compute_top_bar_left_layout_for_profile(
+        telemetry.app_profile,
+        telemetry.active_app_name,
+        telemetry.show_workspaces,
+    );
 
     // 1. TopBar Background (opaque only when reduce_transparency is requested)
     if telemetry.reduce_transparency {
@@ -1568,10 +1816,28 @@ pub fn check_top_bar_workspace_click_with_options(
     x: f64,
     y: f64,
 ) -> Option<u8> {
+    check_top_bar_workspace_click_for_profile(
+        super::top_bar_menus::TopBarAppProfile::Files,
+        active_app_name,
+        show_workspaces,
+        x,
+        y,
+    )
+}
+
+/// Profile-aware hit-test for the optional `TopBar` workspaces area (`RUSTYOS-068`).
+#[must_use]
+pub fn check_top_bar_workspace_click_for_profile(
+    profile: super::top_bar_menus::TopBarAppProfile,
+    active_app_name: &str,
+    show_workspaces: bool,
+    x: f64,
+    y: f64,
+) -> Option<u8> {
     if !show_workspaces || y < 0.0 || y > f64::from(TOP_BAR_HEIGHT) {
         return None;
     }
-    let left = compute_top_bar_left_layout_with_options(active_app_name, show_workspaces);
+    let left = compute_top_bar_left_layout_for_profile(profile, active_app_name, show_workspaces);
     let start_x = f64::from(left.ws_start_x);
     let stride = f64::from(WS_BTN_STRIDE);
     let total_width = stride * 9.0;
@@ -1662,14 +1928,15 @@ pub fn generate_osd_elements(
     let py = pill.loc.y;
     let pw = pill.size.w;
 
-    let text_bright = [248, 244, 255, 255];
-    let text_muted = [182, 172, 204, 255];
+    let pal = ThemePalette::active();
+    let text_bright = pal.popover_text_primary;
+    let text_muted = pal.popover_text_muted;
 
     if let Some(el) = shape_cache.ui_glyph_element(
         renderer,
         osd_glyph_kind(osd.label, osd.value_percent, osd.muted),
         22,
-        [250, 246, 255, 255],
+        pal.popover_icon,
         Point::from((px + 14, py + (pill.size.h - 22) / 2)),
     ) {
         out.push(CompositorRenderElement::Memory(el));
@@ -1700,37 +1967,7 @@ pub fn generate_osd_elements(
         ) {
             out.push(CompositorRenderElement::Memory(el));
         }
-
-        let bar_x = px + 44;
-        let bar_y = py + 34;
-        let bar_w = (pw - 58).max(24);
-        let bar_h = 8;
-        let fill_w = (bar_w * i32::from(pct.min(100))) / 100;
-        if fill_w > 0 {
-            let fill_rgba = if osd.muted {
-                [152, 140, 174, 180]
-            } else {
-                [246, 240, 255, 236]
-            };
-            push_rounded_glass_box(
-                &mut out,
-                shape_cache,
-                renderer,
-                Rectangle::new(Point::from((bar_x, bar_y)), Size::from((fill_w, bar_h))),
-                fill_w.min(4),
-                fill_rgba,
-                None,
-            );
-        }
-        push_rounded_glass_box(
-            &mut out,
-            shape_cache,
-            renderer,
-            Rectangle::new(Point::from((bar_x, bar_y)), Size::from((bar_w, bar_h))),
-            4,
-            [255, 255, 255, 30],
-            Some([255, 255, 255, 48]),
-        );
+        push_osd_level_bar(&mut out, shape_cache, renderer, pill, pct, osd.muted, &pal);
     } else if let Some(el) = text_cache.render_label_centered(
         renderer,
         osd.label,
@@ -1758,6 +1995,53 @@ pub fn generate_osd_elements(
     out
 }
 
+fn push_osd_level_bar(
+    out: &mut Vec<CompositorRenderElement>,
+    shape_cache: &mut crate::surfaces::UiShapeCache,
+    renderer: &mut GlesRenderer,
+    pill: Rectangle<i32, smithay::utils::Physical>,
+    pct: u8,
+    muted: bool,
+    pal: &ThemePalette,
+) {
+    let bar_x = pill.loc.x + 44;
+    let bar_y = pill.loc.y + 34;
+    let bar_w = (pill.size.w - 58).max(24);
+    let bar_h = 8;
+    let fill_w = (bar_w * i32::from(pct.min(100))) / 100;
+    if fill_w > 0 {
+        let fill_rgba = if muted {
+            pal.popover_text_muted
+        } else if pal.is_dark {
+            [246, 246, 252, 236]
+        } else {
+            pal.accent_rgba
+        };
+        push_rounded_glass_box(
+            out,
+            shape_cache,
+            renderer,
+            Rectangle::new(Point::from((bar_x, bar_y)), Size::from((fill_w, bar_h))),
+            fill_w.min(4),
+            fill_rgba,
+            None,
+        );
+    }
+    push_rounded_glass_box(
+        out,
+        shape_cache,
+        renderer,
+        Rectangle::new(Point::from((bar_x, bar_y)), Size::from((bar_w, bar_h))),
+        4,
+        if pal.is_dark {
+            [255, 255, 255, 30]
+        } else {
+            [0, 0, 0, 22]
+        },
+        Some(pal.border_rgba),
+    );
+}
+
 /// Draws monochrome macOS Menu Bar glyphs (`[Volume] · [Battery] · Wi-Fi · Search · Control Center`) (`RUSTYOS-036`, `RUSTYOS-049`).
 pub(super) fn push_top_bar_right_glyphs(
     out: &mut Vec<CompositorRenderElement>,
@@ -1768,7 +2052,7 @@ pub(super) fn push_top_bar_right_glyphs(
 ) {
     use crate::surfaces::UiGlyphKind;
 
-    let white = [252, 250, 255, 255];
+    let white = [255, 255, 255, 255];
 
     if let Some(vx) = right.volume_x
         && let Some(el) = shape_cache.ui_glyph_element(

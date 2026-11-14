@@ -6,7 +6,8 @@ use rusty_ipc::{IpcServer, default_ipc_socket_path};
 use smithay::{
     backend::{
         renderer::{
-            ImportDma, damage::OutputDamageTracker, element::AsRenderElements, gles::GlesRenderer,
+            Frame, ImportDma, Renderer, damage::OutputDamageTracker, element::AsRenderElements,
+            gles::GlesRenderer,
         },
         winit::{self, WinitEvent, WinitGraphicsBackend},
     },
@@ -20,7 +21,7 @@ use smithay::{
         wayland_protocols::wp::presentation_time::server::wp_presentation_feedback,
         wayland_server::Display,
     },
-    utils::{IsAlive, Point, Rectangle},
+    utils::{IsAlive, Point, Rectangle, Transform},
     wayland::{presentation::Refresh, socket::ListeningSocketSource},
 };
 use tracing::{info, warn};
@@ -252,6 +253,12 @@ fn render_winit_frame(
     let tracked_damage: Option<Vec<Rectangle<i32, smithay::utils::Physical>>>;
     let render_states;
 
+    let buffer_age = if force_full_damage || frame_seq == 0 {
+        0
+    } else {
+        backend.buffer_age().unwrap_or(0)
+    };
+
     if state.pending_screenshot.is_some() {
         let renderer = backend.renderer();
         let snap_list = frame_composer::build_frame_render_list(
@@ -276,14 +283,9 @@ fn render_winit_frame(
         );
     }
 
-    {
-        let buffer_age = if force_full_damage {
-            0
-        } else {
-            backend.buffer_age().unwrap_or(0)
-        };
-        let (renderer, mut framebuffer) = backend.bind().map_err(|err| err.to_string())?;
-        let mut render_list = frame_composer::build_frame_render_list(
+    let render_list = {
+        let renderer = backend.renderer();
+        let mut list = frame_composer::build_frame_render_list(
             renderer,
             text_cache,
             shape_cache,
@@ -311,10 +313,15 @@ fn render_winit_frame(
                 None,
             );
             if !cursor_elems.is_empty() {
-                cursor_elems.extend(render_list);
-                render_list = cursor_elems;
+                cursor_elems.extend(list);
+                list = cursor_elems;
             }
         }
+        list
+    };
+
+    {
+        let (renderer, mut framebuffer) = backend.bind().map_err(|err| err.to_string())?;
 
         let render_result = damage_tracker
             .render_output(
@@ -343,6 +350,13 @@ fn render_winit_frame(
                 .min(total_output_pixels);
             tracked_damage = Some(rects.clone());
         } else {
+            // Offscreen backdrop blur / capture passes bind texture FBOs and leave EGL surfaceless;
+            // re-make the window surface current so `backend.submit()` and next-frame `buffer_age()`
+            // never hit `EGL_BAD_SURFACE` when `OutputDamageTracker` skips rendering.
+            let frame = renderer
+                .render(&mut framebuffer, size, Transform::Normal)
+                .map_err(|err| err.to_string())?;
+            let _ = frame.finish().map_err(|err| err.to_string())?;
             damage_rects = 0;
             damaged_pixels = 0;
             tracked_damage = None;

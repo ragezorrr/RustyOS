@@ -886,8 +886,9 @@ fn macos27_pointer_hover_slider_drag_and_overview_space_switching()
 
     // 3. Open menu row hover tracks active row and resets on `close_top_bar_menu`.
     compositor.toggle_top_bar_menu(crate::shell_render::TopBarMenuHit::File);
+    let active_app = compositor.active_top_bar_app_name();
     let (pop_x, pop_y, _, _) = crate::shell_render::top_bar_menu_popover_rect(
-        "RustyOS",
+        &active_app,
         crate::shell_render::TopBarMenuHit::File,
     );
     compositor.apply_pointer_position((f64::from(pop_x + 24), f64::from(pop_y + 18)).into(), 4);
@@ -1474,5 +1475,36 @@ fn transform_screen_point_handles_all_rotations_and_abs_events()
     assert!((compositor.pointer_location.x - 270.0).abs() < 1e-4);
     assert!((compositor.pointer_location.y - 480.0).abs() < 1e-4);
 
+    Ok(())
+}
+
+#[test]
+fn app_shortcut_resolves_across_non_latin_xkb_layouts_and_guards_focus()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (_display, _event_loop, mut compositor) = test_compositor_state("rusty-test-app-shortcut")?;
+    let mut cfg = compositor.user_config.clone();
+    cfg.keyboard_layout = "us,ru".to_owned();
+    compositor.apply_user_config(cfg);
+    compositor.cycle_keyboard_layout();
+
+    let seq = compositor
+        .resolve_app_shortcut(crate::shell_render::AppShortcutAction::NewTab)
+        .ok_or("expected Ctrl+T keycode across us,ru XKB keymap")?;
+    assert_ne!(seq.target_layout, seq.original_layout);
+
+    let shift_seq = compositor
+        .resolve_app_shortcut(crate::shell_render::AppShortcutAction::CopyShift)
+        .ok_or("expected Ctrl+Shift+C keycode across us,ru XKB keymap")?;
+    assert!(shift_seq.shift_keycode.is_some());
+
+    // Without focused client (or on Desktop), dispatch_app_shortcut is a safe no-op and preserves active layout.
+    assert!(!compositor.dispatch_app_shortcut(crate::shell_render::AppShortcutAction::NewTab));
+    let keyboard = compositor.keyboard.clone();
+    let active_after = keyboard
+        .with_xkb_state(&mut compositor, |ctx| {
+            ctx.xkb().lock().map(|x| x.active_layout()).ok()
+        })
+        .ok_or("xkb mutex available")?;
+    assert_eq!(active_after, seq.original_layout);
     Ok(())
 }

@@ -208,6 +208,62 @@ impl DownloadsSortMode {
     }
 }
 
+/// Golden Gate system appearance mode (`RUSTYOS-067`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum AppearanceMode {
+    /// Golden Gate Light frosted milk-glass (`#F5F6F8` popovers, `#007AFF` blue accent).
+    #[default]
+    Light,
+    /// Golden Gate Dark neutral graphite (`#262629` popovers, `#0A84FF` blue accent).
+    Dark,
+}
+
+impl AppearanceMode {
+    /// Canonical TOML string (`"light"` or `"dark"`).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Light => "light",
+            Self::Dark => "dark",
+        }
+    }
+
+    /// Human-readable UI label (`"Light"` or `"Dark"`).
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Light => "Light",
+            Self::Dark => "Dark",
+        }
+    }
+
+    /// Returns `true` when in Dark mode.
+    #[must_use]
+    pub const fn is_dark(self) -> bool {
+        matches!(self, Self::Dark)
+    }
+
+    /// Toggles between `Light` and `Dark`.
+    #[must_use]
+    pub const fn toggle(self) -> Self {
+        match self {
+            Self::Light => Self::Dark,
+            Self::Dark => Self::Light,
+        }
+    }
+
+    /// Parses a theme string from `[ui].theme` or `[ui].appearance`.
+    #[must_use]
+    pub fn parse(raw: &str) -> Option<Self> {
+        let norm = strip_toml_quotes(raw).trim().to_ascii_lowercase();
+        match norm.as_str() {
+            "light" | "light_golden_gate" | "golden_gate_light" => Some(Self::Light),
+            "dark" | "dark_golden_gate" | "golden_gate_dark" => Some(Self::Dark),
+            _ => None,
+        }
+    }
+}
+
 /// Persistent user preferences loaded from `~/.config/rustyos/config.toml`.
 #[derive(Debug, Clone, PartialEq)]
 #[allow(clippy::struct_excessive_bools)]
@@ -222,6 +278,8 @@ pub struct UserConfig {
     pub repeat_delay: i32,
     /// Key repeat rate in keys/second (`1..=120`).
     pub repeat_rate: i32,
+    /// System UI theme (`Light` or `Dark`, default `Light`) (`RUSTYOS-067`).
+    pub appearance: AppearanceMode,
     /// Prefer instant transitions (`reduced_motion`).
     pub reduced_motion: bool,
     /// Shell frosted glass opacity scalar (`0.35..=1.0`, default `0.78`) (`RUSTYOS-048`).
@@ -275,6 +333,7 @@ impl Default for UserConfig {
             keyboard_options: "grp:alt_shift_toggle".to_owned(),
             repeat_delay: 200,
             repeat_rate: 25,
+            appearance: AppearanceMode::Light,
             reduced_motion: false,
             glass_opacity: DEFAULT_GLASS_OPACITY,
             reduce_transparency: false,
@@ -534,6 +593,11 @@ impl UserConfig {
 
     fn apply_ui_kv(&mut self, key: &str, val: &str) {
         match key {
+            "theme" | "appearance" => {
+                if let Some(mode) = AppearanceMode::parse(val) {
+                    self.appearance = mode;
+                }
+            }
             "wallpaper" => {
                 if let Some(s) = parse_toml_string(val) {
                     self.wallpaper = expand_user_path(&s);
@@ -643,6 +707,7 @@ impl UserConfig {
         let _ = writeln!(out, "repeat_rate = {}", self.repeat_rate.clamp(1, 120));
 
         let _ = writeln!(out, "\n[ui]");
+        let _ = writeln!(out, "theme = \"{}\"", self.appearance.as_str());
         let _ = writeln!(out, "reduced_motion = {}", self.reduced_motion);
         let _ = writeln!(
             out,
@@ -1268,6 +1333,7 @@ mod tests {
             keyboard_options: "grp:caps_toggle".to_owned(),
             repeat_delay: 280,
             repeat_rate: 42,
+            appearance: AppearanceMode::Dark,
             reduced_motion: true,
             glass_opacity: 0.62,
             reduce_transparency: true,
