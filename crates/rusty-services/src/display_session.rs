@@ -267,8 +267,7 @@ impl UserService {
             .map(|u| u.trim().to_owned())
             .filter(|u| !u.is_empty());
         let mut users = fs::read_to_string(&self.passwd_path)
-            .map(|raw| parse_passwd_users(&raw, current_user.as_deref()))
-            .unwrap_or_default();
+            .map_or_default(|raw| parse_passwd_users(&raw, current_user.as_deref()));
 
         if users.is_empty() {
             let fallback_name = current_user.unwrap_or_else(|| "User".to_owned());

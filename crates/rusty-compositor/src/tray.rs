@@ -241,8 +241,7 @@ impl StatusNotifierWatcherInterface {
     fn registered_status_notifier_items(&self) -> Vec<String> {
         self.registered_keys
             .lock()
-            .map(|guard| guard.clone())
-            .unwrap_or_default()
+            .map_or_default(|guard| guard.clone())
     }
 
     #[zbus(property)]

@@ -799,11 +799,7 @@ mod tests {
         let moved = compositor.move_focused_to_next_output(serial);
         assert_eq!(moved, Some(w1));
         assert_eq!(compositor.wm.focused_output(), rusty_wm::OutputId(2));
-        let win_geom = compositor
-            .wm
-            .window(w1)
-            .map(|w| w.geometry)
-            .unwrap_or_default();
+        let win_geom = compositor.wm.window(w1).map_or_default(|w| w.geometry);
         assert!(win_geom.x >= 1920);
 
         // Hotplug unplug of monitor 2: window migrates back to remaining monitor 1
@@ -1004,11 +1000,7 @@ mod tests {
         let _ = compositor.wm.map_window(w1, None);
         let serial = smithay::utils::SERIAL_COUNTER.next_serial();
         compositor.apply_wm_action(rusty_wm::WmAction::ToggleFullscreen, serial);
-        let fs_rect = compositor
-            .wm
-            .window(w1)
-            .map(|w| w.geometry)
-            .unwrap_or_default();
+        let fs_rect = compositor.wm.window(w1).map_or_default(|w| w.geometry);
         assert_eq!(fs_rect.width, 2560);
         assert_eq!(fs_rect.height, 1440);
 

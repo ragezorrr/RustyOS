@@ -657,10 +657,8 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
             overview_active: state.overview_active,
         };
 
-        let switcher_cards: Vec<WindowSwitcherCard<'_>> = state
-            .window_switcher
-            .as_ref()
-            .map(|sw| {
+        let switcher_cards: Vec<WindowSwitcherCard<'_>> =
+            state.window_switcher.as_ref().map_or_default(|sw| {
                 sw.window_ids
                     .iter()
                     .filter_map(|&win_id| {
@@ -677,8 +675,7 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
                             })
                     })
                     .collect()
-            })
-            .unwrap_or_default();
+            });
         let switcher_view = state.window_switcher.as_ref().and_then(|sw| {
             (!switcher_cards.is_empty()).then_some(WindowSwitcherRenderState {
                 cards: &switcher_cards,
@@ -771,10 +768,8 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
                 info_message: pk.info_message.as_deref(),
             });
 
-        let portal_rows: Vec<PortalSourceRow<'_>> = state
-            .portal_prompt
-            .as_ref()
-            .map(|p| {
+        let portal_rows: Vec<PortalSourceRow<'_>> =
+            state.portal_prompt.as_ref().map_or_default(|p| {
                 p.candidates
                     .iter()
                     .map(|c| PortalSourceRow {
@@ -783,8 +778,7 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
                         is_window: c.is_window,
                     })
                     .collect()
-            })
-            .unwrap_or_default();
+            });
         let portal_view = state
             .portal_prompt
             .as_ref()

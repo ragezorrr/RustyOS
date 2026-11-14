@@ -971,8 +971,8 @@ mod tests {
         wm.apply_action(WmAction::ToggleLayoutMode);
         assert_eq!(wm.active_layout_mode(), LayoutMode::MasterStack);
 
-        let g2 = wm.window(w2).map(|w| w.geometry).unwrap_or_default();
-        let g1 = wm.window(w1).map(|w| w.geometry).unwrap_or_default();
+        let g2 = wm.window(w2).map_or_default(|w| w.geometry);
+        let g1 = wm.window(w1).map_or_default(|w| w.geometry);
         // Topmost window (w2) is Master on the left; w1 is on the right stack.
         assert!(g2.x < g1.x);
         assert_eq!(g2.width, g1.width);
@@ -981,7 +981,7 @@ mod tests {
         wm.apply_action(WmAction::ToggleLayoutMode);
         assert_eq!(wm.active_layout_mode(), LayoutMode::Floating);
         wm.apply_action(WmAction::SnapFocused(SnapTarget::LeftHalf));
-        let snapped = wm.window(w2).map(|w| w.geometry).unwrap_or_default();
+        let snapped = wm.window(w2).map_or_default(|w| w.geometry);
         assert_eq!(snapped.x, wm.gap_px);
     }
 
@@ -998,7 +998,7 @@ mod tests {
         wm.apply_action(WmAction::MoveFocusedToNextOutput);
         assert_eq!(wm.focused_output(), OutputId(2));
         assert_eq!(wm.window(w1).map(|w| w.workspace), Some(WorkspaceId(2)));
-        let geom = wm.window(w1).map(|w| w.geometry).unwrap_or_default();
+        let geom = wm.window(w1).map_or_default(|w| w.geometry);
         assert!(geom.x >= 1920);
     }
 

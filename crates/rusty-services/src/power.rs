@@ -78,9 +78,8 @@ impl PowerService {
                 .unwrap_or_default()
                 .to_string_lossy()
                 .to_lowercase();
-            let supply_type = fs::read_to_string(path.join("type"))
-                .map(|s| s.trim().to_lowercase())
-                .unwrap_or_default();
+            let supply_type =
+                fs::read_to_string(path.join("type")).map_or_default(|s| s.trim().to_lowercase());
 
             let is_mains =
                 supply_type == "mains" || name.starts_with("ac") || name.starts_with("adp");

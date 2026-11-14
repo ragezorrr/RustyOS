@@ -947,16 +947,12 @@ impl PortalSharedState {
     }
 
     fn cancel_session_pending(&self, session_handle: &str) {
-        let matching_ids: Vec<u64> = self
-            .pending
-            .lock()
-            .map(|map| {
-                map.iter()
-                    .filter(|(_, e)| e.session_handle.as_deref() == Some(session_handle))
-                    .map(|(id, _)| *id)
-                    .collect()
-            })
-            .unwrap_or_default();
+        let matching_ids: Vec<u64> = self.pending.lock().map_or_default(|map| {
+            map.iter()
+                .filter(|(_, e)| e.session_handle.as_deref() == Some(session_handle))
+                .map(|(id, _)| *id)
+                .collect()
+        });
         for id in matching_ids {
             self.cancel_request(id);
         }
@@ -1625,8 +1621,7 @@ impl Drop for PortalHandle {
             .shared
             .pending
             .lock()
-            .map(|p| p.keys().copied().collect())
-            .unwrap_or_default();
+            .map_or_default(|p| p.keys().copied().collect());
         for id in ids {
             self.shared.cancel_request(id);
         }
@@ -1721,11 +1716,7 @@ impl PortalHandle {
     /// Returns a copy of the last desktop snapshot synchronized into the portal backend.
     #[must_use]
     pub fn snapshot(&self) -> PortalDesktopSnapshot {
-        self.shared
-            .snapshot
-            .lock()
-            .map(|s| s.clone())
-            .unwrap_or_default()
+        self.shared.snapshot.lock().map_or_default(|s| s.clone())
     }
 
     /// Non-blockingly drains pending portal events into the compositor event loop.
