@@ -1,0 +1,2116 @@
+//! Pure CPU premultiplied `ARGB8888` renderer for `rusty-files` (`RUSTYOS-065`, ADR-0030).
+//!
+//! Implements the macOS 27 Golden Gate light appearance (default) and RustyOS
+//! Purple Glass dark appearance using bundled `Inter` fonts (`fontdue`) and
+//! subpixel SDF / supersampled vector icons with strict scissor clipping.
+
+use std::sync::OnceLock;
+
+use fontdue::{Font, FontSettings};
+use rusty_services::file_manager::{
+    FileEntry, FileEntryKind, FileSortField, FileSortOrder, FileViewMode, FilesThemeMode,
+    format_byte_size, format_unix_timestamp,
+};
+
+use crate::layout::{
+    ColumnLayout, FilesLayout, PopupLayout, PreviewLayout, Rect, SIDEBAR_CORNER_RADIUS,
+    WINDOW_CORNER_RADIUS,
+};
+use crate::state::{
+    FilesAppState, LIST_ROW_HEIGHT, ROW_HEIGHT, SidebarIconKind, sidebar_total_height,
+};
+
+const INTER_REGULAR_BYTES: &[u8] = include_bytes!("../../../assets/fonts/Inter-Regular.ttf");
+const INTER_SEMIBOLD_BYTES: &[u8] = include_bytes!("../../../assets/fonts/Inter-SemiBold.ttf");
+
+/// 4x4 rotated-grid supersampling offsets in `[0.0, 1.0)` for polygon anti-aliasing.
+const RGSS_16: [(f32, f32); 16] = [
+    (0.125, 0.0625),
+    (0.375, 0.1875),
+    (0.625, 0.0625),
+    (0.875, 0.1875),
+    (0.0625, 0.375),
+    (0.3125, 0.3125),
+    (0.5625, 0.4375),
+    (0.8125, 0.3125),
+    (0.1875, 0.625),
+    (0.4375, 0.5625),
+    (0.6875, 0.6875),
+    (0.9375, 0.5625),
+    (0.0625, 0.875),
+    (0.3125, 0.9375),
+    (0.5625, 0.8125),
+    (0.8125, 0.9375),
+];
+
+fn regular_font() -> Option<&'static Font> {
+    static FONT: OnceLock<Option<Font>> = OnceLock::new();
+    FONT.get_or_init(|| Font::from_bytes(INTER_REGULAR_BYTES, FontSettings::default()).ok())
+        .as_ref()
+}
+
+fn semibold_font() -> Option<&'static Font> {
+    static FONT: OnceLock<Option<Font>> = OnceLock::new();
+    FONT.get_or_init(|| Font::from_bytes(INTER_SEMIBOLD_BYTES, FontSettings::default()).ok())
+        .as_ref()
+        .or_else(regular_font)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Palette {
+    window_bg: [u8; 4],
+    window_border: [u8; 4],
+    sidebar_bg: [u8; 4],
+    sidebar_border: [u8; 4],
+    sidebar_active: [u8; 4],
+    pill_bg: [u8; 4],
+    pill_border: [u8; 4],
+    pill_active: [u8; 4],
+    divider: [u8; 4],
+    scrollbar: [u8; 4],
+    accent: [u8; 4],
+    accent_text: [u8; 4],
+    secondary_select: [u8; 4],
+    text_primary: [u8; 4],
+    text_secondary: [u8; 4],
+    text_muted: [u8; 4],
+    row_alt: [u8; 4],
+    popup_bg: [u8; 4],
+    popup_border: [u8; 4],
+    is_dark: bool,
+}
+
+const fn rgba(r: u8, g: u8, b: u8, a: u8) -> [u8; 4] {
+    [r, g, b, a]
+}
+
+const fn palette_for(theme: FilesThemeMode) -> Palette {
+    match theme {
+        FilesThemeMode::LightGoldenGate => Palette {
+            window_bg: rgba(255, 255, 255, 255),
+            window_border: rgba(210, 213, 222, 255),
+            sidebar_bg: rgba(241, 243, 247, 252),
+            sidebar_border: rgba(224, 227, 234, 255),
+            sidebar_active: rgba(221, 226, 235, 255),
+            pill_bg: rgba(249, 250, 252, 255),
+            pill_border: rgba(218, 222, 230, 255),
+            pill_active: rgba(229, 232, 239, 255),
+            divider: rgba(232, 234, 240, 255),
+            scrollbar: rgba(140, 148, 162, 115),
+            accent: rgba(0, 122, 255, 255),
+            accent_text: rgba(255, 255, 255, 255),
+            secondary_select: rgba(229, 232, 239, 255),
+            text_primary: rgba(29, 31, 36, 255),
+            text_secondary: rgba(102, 110, 124, 255),
+            text_muted: rgba(145, 152, 166, 255),
+            row_alt: rgba(247, 248, 251, 255),
+            popup_bg: rgba(250, 251, 253, 255),
+            popup_border: rgba(204, 209, 219, 255),
+            is_dark: false,
+        },
+        FilesThemeMode::DarkPurpleGlass => Palette {
+            window_bg: rgba(29, 22, 43, 255),
+            window_border: rgba(76, 63, 102, 255),
+            sidebar_bg: rgba(41, 32, 58, 252),
+            sidebar_border: rgba(69, 56, 94, 255),
+            sidebar_active: rgba(65, 52, 91, 255),
+            pill_bg: rgba(46, 36, 65, 255),
+            pill_border: rgba(82, 68, 110, 255),
+            pill_active: rgba(75, 61, 103, 255),
+            divider: rgba(54, 43, 74, 255),
+            scrollbar: rgba(176, 162, 208, 115),
+            accent: rgba(165, 110, 255, 255),
+            accent_text: rgba(255, 255, 255, 255),
+            secondary_select: rgba(57, 45, 79, 255),
+            text_primary: rgba(244, 240, 250, 255),
+            text_secondary: rgba(184, 175, 201, 255),
+            text_muted: rgba(141, 130, 164, 255),
+            row_alt: rgba(34, 27, 50, 255),
+            popup_bg: rgba(44, 34, 62, 255),
+            popup_border: rgba(94, 78, 124, 255),
+            is_dark: true,
+        },
+    }
+}
+
+struct Canvas<'a> {
+    buf: &'a mut [u8],
+    w: i32,
+    h: i32,
+    clip: Option<Rect>,
+}
+
+impl<'a> Canvas<'a> {
+    fn new(buf: &'a mut [u8], width: u32, height: u32) -> Self {
+        Self {
+            buf,
+            w: i32::try_from(width).unwrap_or(0),
+            h: i32::try_from(height).unwrap_or(0),
+            clip: None,
+        }
+    }
+
+    fn clear(&mut self) {
+        self.buf.fill(0);
+    }
+
+    fn with_clip(&mut self, rect: Rect, f: impl FnOnce(&mut Self)) {
+        let next = match self.clip {
+            Some(prev) => intersect_rect(prev, rect),
+            None => rect,
+        };
+        let saved = self.clip;
+        self.clip = Some(next);
+        f(self);
+        self.clip = saved;
+    }
+
+    #[allow(clippy::cast_sign_loss)]
+    fn blend_pixel(&mut self, x: i32, y: i32, color: [u8; 4], cov: u8) {
+        if x < 0 || y < 0 || x >= self.w || y >= self.h || cov == 0 || color[3] == 0 {
+            return;
+        }
+        if let Some(clip) = self.clip
+            && (x < clip.x || y < clip.y || x >= clip.right() || y >= clip.bottom())
+        {
+            return;
+        }
+        let idx = ((y * self.w + x) * 4) as usize;
+        if idx + 3 >= self.buf.len() {
+            return;
+        }
+        let alpha = (u16::from(color[3]) * u16::from(cov)) / 255;
+        if alpha == 0 {
+            return;
+        }
+        let inv = 255 - alpha;
+        let sb = (u16::from(color[2]) * alpha) / 255;
+        let sg = (u16::from(color[1]) * alpha) / 255;
+        let sr = (u16::from(color[0]) * alpha) / 255;
+
+        let db = (u16::from(self.buf[idx]) * inv) / 255;
+        let dg = (u16::from(self.buf[idx + 1]) * inv) / 255;
+        let dr = (u16::from(self.buf[idx + 2]) * inv) / 255;
+        let da = (u16::from(self.buf[idx + 3]) * inv) / 255;
+
+        self.buf[idx] = u8::try_from((sb + db).min(255)).unwrap_or(255);
+        self.buf[idx + 1] = u8::try_from((sg + dg).min(255)).unwrap_or(255);
+        self.buf[idx + 2] = u8::try_from((sr + dr).min(255)).unwrap_or(255);
+        self.buf[idx + 3] = u8::try_from((alpha + da).min(255)).unwrap_or(255);
+    }
+
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    fn blend_sdf(&mut self, x: i32, y: i32, color: [u8; 4], signed_dist: f32) {
+        if signed_dist < 0.55 {
+            let cov = ((0.55 - signed_dist).clamp(0.0, 1.0) * 255.0).round() as u8;
+            self.blend_pixel(x, y, color, cov);
+        }
+    }
+
+    fn fill_rect(&mut self, rect: Rect, color: [u8; 4]) {
+        let x0 = rect.x.max(0);
+        let y0 = rect.y.max(0);
+        let x1 = rect.right().min(self.w);
+        let y1 = rect.bottom().min(self.h);
+        for y in y0..y1 {
+            for x in x0..x1 {
+                self.blend_pixel(x, y, color, 255);
+            }
+        }
+    }
+
+    fn fill_rounded_rect(&mut self, rect: Rect, radius: i32, color: [u8; 4]) {
+        if rect.w <= 0 || rect.h <= 0 {
+            return;
+        }
+        let r = radius.min(rect.w / 2).min(rect.h / 2).max(0);
+        let x0 = rect.x.max(0);
+        let y0 = rect.y.max(0);
+        let x1 = rect.right().min(self.w);
+        let y1 = rect.bottom().min(self.h);
+
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let cov = rounded_rect_coverage(x, y, rect, r);
+                if cov > 0 {
+                    self.blend_pixel(x, y, color, cov);
+                }
+            }
+        }
+    }
+
+    fn stroke_rounded_rect(&mut self, rect: Rect, radius: i32, color: [u8; 4]) {
+        if rect.w <= 2 || rect.h <= 2 {
+            return;
+        }
+        let r = radius.min(rect.w / 2).min(rect.h / 2).max(0);
+        let x0 = rect.x.max(0);
+        let y0 = rect.y.max(0);
+        let x1 = rect.right().min(self.w);
+        let y1 = rect.bottom().min(self.h);
+        let inner = Rect::new(rect.x + 1, rect.y + 1, rect.w - 2, rect.h - 2);
+        let ir = (r - 1).max(0);
+
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let outer_cov = rounded_rect_coverage(x, y, rect, r);
+                let inner_cov = rounded_rect_coverage(x, y, inner, ir);
+                let ring = outer_cov.saturating_sub(inner_cov);
+                if ring > 0 {
+                    self.blend_pixel(x, y, color, ring);
+                }
+            }
+        }
+    }
+
+    #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+    fn fill_rounded_rect_f(
+        &mut self,
+        left: f32,
+        top: f32,
+        width: f32,
+        height: f32,
+        radius: f32,
+        color: [u8; 4],
+    ) {
+        let cx = left + width * 0.5;
+        let cy = top + height * 0.5;
+        let x0 = (left.floor() as i32 - 1).max(0);
+        let y0 = (top.floor() as i32 - 1).max(0);
+        let x1 = ((left + width).ceil() as i32 + 1).min(self.w);
+        let y1 = ((top + height).ceil() as i32 + 1).min(self.h);
+        for py in y0..y1 {
+            for px in x0..x1 {
+                let dist = sd_rounded_box(
+                    px as f32 + 0.5 - cx,
+                    py as f32 + 0.5 - cy,
+                    width,
+                    height,
+                    radius,
+                );
+                self.blend_sdf(px, py, color, dist);
+            }
+        }
+    }
+
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_precision_loss,
+        clippy::too_many_arguments
+    )]
+    fn fill_rounded_rect_vgrad_f(
+        &mut self,
+        left: f32,
+        top: f32,
+        width: f32,
+        height: f32,
+        radius: f32,
+        top_col: [u8; 4],
+        bot_col: [u8; 4],
+    ) {
+        let cx = left + width * 0.5;
+        let cy = top + height * 0.5;
+        let x0 = (left.floor() as i32 - 1).max(0);
+        let y0 = (top.floor() as i32 - 1).max(0);
+        let x1 = ((left + width).ceil() as i32 + 1).min(self.w);
+        let y1 = ((top + height).ceil() as i32 + 1).min(self.h);
+        let inv_h = if height > 0.1 { 1.0 / height } else { 0.0 };
+        for py in y0..y1 {
+            let mix = (((py as f32 + 0.5) - top) * inv_h).clamp(0.0, 1.0);
+            let col = lerp_rgba(top_col, bot_col, mix);
+            for px in x0..x1 {
+                let dist = sd_rounded_box(
+                    px as f32 + 0.5 - cx,
+                    py as f32 + 0.5 - cy,
+                    width,
+                    height,
+                    radius,
+                );
+                self.blend_sdf(px, py, col, dist);
+            }
+        }
+    }
+
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_precision_loss,
+        clippy::too_many_arguments
+    )]
+    fn stroke_rounded_rect_f(
+        &mut self,
+        left: f32,
+        top: f32,
+        width: f32,
+        height: f32,
+        radius: f32,
+        thickness: f32,
+        color: [u8; 4],
+    ) {
+        let cx = left + width * 0.5;
+        let cy = top + height * 0.5;
+        let half_t = thickness * 0.5;
+        let pad = half_t.ceil() as i32 + 1;
+        let x0 = (left.floor() as i32 - pad).max(0);
+        let y0 = (top.floor() as i32 - pad).max(0);
+        let x1 = ((left + width).ceil() as i32 + pad).min(self.w);
+        let y1 = ((top + height).ceil() as i32 + pad).min(self.h);
+        for py in y0..y1 {
+            for px in x0..x1 {
+                let dist = sd_rounded_box(
+                    px as f32 + 0.5 - cx,
+                    py as f32 + 0.5 - cy,
+                    width,
+                    height,
+                    radius,
+                )
+                .abs()
+                    - half_t;
+                self.blend_sdf(px, py, color, dist);
+            }
+        }
+    }
+
+    #[allow(clippy::cast_precision_loss)]
+    fn fill_circle(&mut self, cx: i32, cy: i32, radius: f32, color: [u8; 4]) {
+        self.fill_circle_f(cx as f32, cy as f32, radius, color);
+    }
+
+    #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+    fn fill_circle_f(&mut self, cx: f32, cy: f32, radius: f32, color: [u8; 4]) {
+        let x0 = ((cx - radius).floor() as i32 - 1).max(0);
+        let y0 = ((cy - radius).floor() as i32 - 1).max(0);
+        let x1 = ((cx + radius).ceil() as i32 + 2).min(self.w);
+        let y1 = ((cy + radius).ceil() as i32 + 2).min(self.h);
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let dx = (x as f32 + 0.5) - cx;
+                let dy = (y as f32 + 0.5) - cy;
+                self.blend_sdf(x, y, color, dx.hypot(dy) - radius);
+            }
+        }
+    }
+
+    #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+    fn stroke_circle_f(&mut self, cx: f32, cy: f32, radius: f32, thickness: f32, color: [u8; 4]) {
+        let half_t = thickness * 0.5;
+        let bound = radius + half_t + 1.5;
+        let x0 = ((cx - bound).floor() as i32).max(0);
+        let y0 = ((cy - bound).floor() as i32).max(0);
+        let x1 = ((cx + bound).ceil() as i32 + 1).min(self.w);
+        let y1 = ((cy + bound).ceil() as i32 + 1).min(self.h);
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let dx = (x as f32 + 0.5) - cx;
+                let dy = (y as f32 + 0.5) - cy;
+                let dist = (dx.hypot(dy) - radius).abs() - half_t;
+                self.blend_sdf(x, y, color, dist);
+            }
+        }
+    }
+
+    #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+    fn stroke_ellipse_aa(
+        &mut self,
+        cx: f32,
+        cy: f32,
+        rx: f32,
+        ry: f32,
+        thickness: f32,
+        color: [u8; 4],
+    ) {
+        let half_t = thickness * 0.5;
+        let x0 = ((cx - rx - half_t - 1.5).floor() as i32).max(0);
+        let y0 = ((cy - ry - half_t - 1.5).floor() as i32).max(0);
+        let x1 = ((cx + rx + half_t + 2.0).ceil() as i32).min(self.w);
+        let y1 = ((cy + ry + half_t + 2.0).ceil() as i32).min(self.h);
+        let horiz_inv_sq = 1.0 / (rx * rx);
+        let vert_inv_sq = 1.0 / (ry * ry);
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let dx = (x as f32 + 0.5) - cx;
+                let dy = (y as f32 + 0.5) - cy;
+                let f = dx * dx * horiz_inv_sq + dy * dy * vert_inv_sq - 1.0;
+                let gx = 2.0 * dx * horiz_inv_sq;
+                let gy = 2.0 * dy * vert_inv_sq;
+                let grad = gx.hypot(gy).max(0.001);
+                self.blend_sdf(x, y, color, (f / grad).abs() - half_t);
+            }
+        }
+    }
+
+    fn stroke_line_aa(
+        &mut self,
+        ax: f32,
+        ay: f32,
+        bx: f32,
+        by: f32,
+        thickness: f32,
+        color: [u8; 4],
+    ) {
+        self.stroke_polyline_aa(&[(ax, ay), (bx, by)], false, thickness, color);
+    }
+
+    #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+    fn stroke_polyline_aa(
+        &mut self,
+        pts: &[(f32, f32)],
+        closed: bool,
+        thickness: f32,
+        color: [u8; 4],
+    ) {
+        if pts.len() < 2 {
+            return;
+        }
+        let (min_x, min_y, max_x, max_y) = poly_bounds(pts);
+        let half_t = thickness * 0.5;
+        let pad = half_t + 1.5;
+        let x0 = ((min_x - pad).floor() as i32).max(0);
+        let y0 = ((min_y - pad).floor() as i32).max(0);
+        let x1 = ((max_x + pad).ceil() as i32 + 1).min(self.w);
+        let y1 = ((max_y + pad).ceil() as i32 + 1).min(self.h);
+        let seg_count = if closed { pts.len() } else { pts.len() - 1 };
+
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let px = x as f32 + 0.5;
+                let py = y as f32 + 0.5;
+                let mut best = f32::MAX;
+                for i in 0..seg_count {
+                    let (ax, ay) = pts[i];
+                    let (bx, by) = pts[(i + 1) % pts.len()];
+                    best = best.min(dist_to_segment(px, py, ax, ay, bx, by));
+                }
+                self.blend_sdf(x, y, color, best - half_t);
+            }
+        }
+    }
+
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_precision_loss,
+        clippy::cast_sign_loss
+    )]
+    fn fill_poly_aa(&mut self, pts: &[(f32, f32)], color: [u8; 4]) {
+        if pts.len() < 3 {
+            return;
+        }
+        let (min_x, min_y, max_x, max_y) = poly_bounds(pts);
+        let x0 = (min_x.floor() as i32).max(0);
+        let y0 = (min_y.floor() as i32).max(0);
+        let x1 = (max_x.ceil() as i32 + 1).min(self.w);
+        let y1 = (max_y.ceil() as i32 + 1).min(self.h);
+
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let mut inside = 0_u16;
+                for &(ox, oy) in &RGSS_16 {
+                    if point_in_poly(x as f32 + ox, y as f32 + oy, pts) {
+                        inside += 1;
+                    }
+                }
+                if inside > 0 {
+                    let cov = ((inside * 255) / 16) as u8;
+                    self.blend_pixel(x, y, color, cov);
+                }
+            }
+        }
+    }
+
+    fn draw_scrollbar(&mut self, rect: Rect, scroll_y: i32, total_h: i32, color: [u8; 4]) {
+        if total_h <= rect.h || rect.h <= 16 {
+            return;
+        }
+        let track_h = rect.h - 8;
+        let thumb_h = ((rect.h * track_h) / total_h).max(20).min(track_h);
+        let max_scroll = (total_h - rect.h).max(1);
+        let offset = ((scroll_y.clamp(0, max_scroll) * (track_h - thumb_h)) / max_scroll)
+            .clamp(0, track_h - thumb_h);
+        let tx = rect.right() - 5;
+        let ty = rect.y + 4 + offset;
+        #[allow(clippy::cast_precision_loss)]
+        self.fill_rounded_rect_f(tx as f32, ty as f32, 2.6, thumb_h as f32, 1.3, color);
+    }
+
+    #[allow(clippy::cast_sign_loss)]
+    fn clip_rounded_corners(&mut self, rect: Rect, radius: i32) {
+        let r = radius.min(rect.w / 2).min(rect.h / 2).max(0);
+        if r <= 0 {
+            return;
+        }
+        let regions = [
+            (rect.x, rect.y, r, r),
+            (rect.right() - r, rect.y, r, r),
+            (rect.x, rect.bottom() - r, r, r),
+            (rect.right() - r, rect.bottom() - r, r, r),
+        ];
+        for (rx, ry, rw, rh) in regions {
+            let x0 = rx.max(0);
+            let y0 = ry.max(0);
+            let x1 = (rx + rw).min(self.w);
+            let y1 = (ry + rh).min(self.h);
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    let cov = rounded_rect_coverage(x, y, rect, r);
+                    if cov < 255 {
+                        let idx = ((y * self.w + x) * 4) as usize;
+                        if idx + 3 < self.buf.len() {
+                            for ch in 0..4 {
+                                self.buf[idx + ch] = u8::try_from(
+                                    (u16::from(self.buf[idx + ch]) * u16::from(cov)) / 255,
+                                )
+                                .unwrap_or(255);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_text(
+        &mut self,
+        text: &str,
+        x: i32,
+        y: i32,
+        size_px: f32,
+        bold: bool,
+        color: [u8; 4],
+        clip: Rect,
+    ) {
+        let Some(font) = (if bold {
+            semibold_font()
+        } else {
+            regular_font()
+        }) else {
+            return;
+        };
+        let mut cursor_x = x;
+        #[allow(clippy::cast_possible_truncation)]
+        let baseline_y = y + (size_px * 0.82).round() as i32;
+
+        for ch in text.chars() {
+            let (metrics, bitmap) = font.rasterize(ch, size_px);
+            let gx0 = cursor_x + metrics.xmin;
+            #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+            let gy0 = baseline_y - metrics.ymin - metrics.height as i32;
+
+            for row in 0..metrics.height {
+                #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+                let py = gy0 + row as i32;
+                if py < clip.y || py >= clip.bottom() {
+                    continue;
+                }
+                for col in 0..metrics.width {
+                    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+                    let px = gx0 + col as i32;
+                    if px < clip.x || px >= clip.right() {
+                        continue;
+                    }
+                    let cov = bitmap[row * metrics.width + col];
+                    if cov > 0 {
+                        self.blend_pixel(px, py, color, cov);
+                    }
+                }
+            }
+            #[allow(clippy::cast_possible_truncation)]
+            let adv = metrics.advance_width.round() as i32;
+            cursor_x += adv.max(1);
+        }
+    }
+
+    #[allow(clippy::cast_possible_truncation)]
+    fn measure_text(text: &str, size_px: f32, bold: bool) -> i32 {
+        let Some(font) = (if bold {
+            semibold_font()
+        } else {
+            regular_font()
+        }) else {
+            return i32::try_from(text.len()).unwrap_or(0) * 7;
+        };
+        text.chars()
+            .map(|ch| (font.metrics(ch, size_px).advance_width.round() as i32).max(1))
+            .sum()
+    }
+
+    fn fit_text(text: &str, max_w: i32, size_px: f32, bold: bool) -> String {
+        if max_w <= 10 {
+            return String::new();
+        }
+        if Self::measure_text(text, size_px, bold) <= max_w {
+            return text.to_owned();
+        }
+        let mut out = String::new();
+        let ellipsis = "...";
+        let ell_w = Self::measure_text(ellipsis, size_px, bold);
+        let mut acc = 0;
+        for ch in text.chars() {
+            let mut single = [0_u8; 4];
+            let s = ch.encode_utf8(&mut single);
+            let cw = Self::measure_text(s, size_px, bold);
+            if acc + cw + ell_w > max_w {
+                break;
+            }
+            out.push(ch);
+            acc += cw;
+        }
+        out.push_str(ellipsis);
+        out
+    }
+}
+
+fn intersect_rect(a: Rect, b: Rect) -> Rect {
+    let x0 = a.x.max(b.x);
+    let y0 = a.y.max(b.y);
+    let x1 = a.right().min(b.right());
+    let y1 = a.bottom().min(b.bottom());
+    Rect::new(x0, y0, (x1 - x0).max(0), (y1 - y0).max(0))
+}
+
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn lerp_rgba(a: [u8; 4], b: [u8; 4], t: f32) -> [u8; 4] {
+    let inv = 1.0 - t;
+    [
+        (f32::from(a[0]) * inv + f32::from(b[0]) * t).round() as u8,
+        (f32::from(a[1]) * inv + f32::from(b[1]) * t).round() as u8,
+        (f32::from(a[2]) * inv + f32::from(b[2]) * t).round() as u8,
+        (f32::from(a[3]) * inv + f32::from(b[3]) * t).round() as u8,
+    ]
+}
+
+fn sd_rounded_box(px: f32, py: f32, w: f32, h: f32, r: f32) -> f32 {
+    let r = r.min(w * 0.5).min(h * 0.5).max(0.0);
+    let qx = px.abs() - (w * 0.5 - r);
+    let qy = py.abs() - (h * 0.5 - r);
+    qx.max(0.0).hypot(qy.max(0.0)) + qx.max(qy).min(0.0) - r
+}
+
+fn dist_to_segment(px: f32, py: f32, ax: f32, ay: f32, bx: f32, by: f32) -> f32 {
+    let vx = bx - ax;
+    let vy = by - ay;
+    let len_sq = vx * vx + vy * vy;
+    let t = if len_sq > 1e-6 {
+        (((px - ax) * vx + (py - ay) * vy) / len_sq).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    (px - (ax + vx * t)).hypot(py - (ay + vy * t))
+}
+
+fn poly_bounds(pts: &[(f32, f32)]) -> (f32, f32, f32, f32) {
+    let mut min_x = f32::MAX;
+    let mut min_y = f32::MAX;
+    let mut max_x = f32::MIN;
+    let mut max_y = f32::MIN;
+    for &(x, y) in pts {
+        min_x = min_x.min(x);
+        min_y = min_y.min(y);
+        max_x = max_x.max(x);
+        max_y = max_y.max(y);
+    }
+    (min_x, min_y, max_x, max_y)
+}
+
+fn point_in_poly(px: f32, py: f32, pts: &[(f32, f32)]) -> bool {
+    let mut inside = false;
+    let mut j = pts.len().saturating_sub(1);
+    for (i, &(xi, yi)) in pts.iter().enumerate() {
+        let (xj, yj) = pts[j];
+        let crosses = ((yi > py) != (yj > py)) && (px < (xj - xi) * (py - yi) / (yj - yi) + xi);
+        if crosses {
+            inside = !inside;
+        }
+        j = i;
+    }
+    inside
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn rounded_rect_coverage(x: i32, y: i32, rect: Rect, r: i32) -> u8 {
+    if x < rect.x || y < rect.y || x >= rect.right() || y >= rect.bottom() {
+        return 0;
+    }
+    if r <= 0 {
+        return 255;
+    }
+    let rx0 = rect.x + r;
+    let rx1 = rect.right() - r;
+    let ry0 = rect.y + r;
+    let ry1 = rect.bottom() - r;
+
+    let offset_x = if x < rx0 {
+        (rx0 - x) as f32 - 0.5
+    } else if x >= rx1 {
+        (x - rx1) as f32 + 0.5
+    } else {
+        return 255;
+    };
+    let offset_y = if y < ry0 {
+        (ry0 - y) as f32 - 0.5
+    } else if y >= ry1 {
+        (y - ry1) as f32 + 0.5
+    } else {
+        return 255;
+    };
+    let dist = offset_x.hypot(offset_y) - (r as f32);
+    if dist <= -0.5 {
+        255
+    } else if dist >= 0.5 {
+        0
+    } else {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let cov = ((0.5 - dist) * 255.0).round() as u8;
+        cov
+    }
+}
+
+/// Renders one complete frame of `rusty-files` into a caller-provided `ARGB8888` SHM buffer.
+pub(crate) fn render_window_pixels(
+    buf: &mut [u8],
+    width: u32,
+    height: u32,
+    state: &FilesAppState,
+    layout: &FilesLayout,
+) {
+    let pal = palette_for(state.theme);
+    let mut c = Canvas::new(buf, width, height);
+    c.clear();
+
+    let win_rect = Rect::new(0, 0, layout.width, layout.height);
+    c.fill_rounded_rect(win_rect, WINDOW_CORNER_RADIUS, pal.window_bg);
+
+    render_sidebar(&mut c, state, layout, &pal);
+    render_toolbar(&mut c, state, layout, &pal);
+
+    if let Some(banner) = layout.trash_banner_rect {
+        render_trash_banner(&mut c, layout, banner, &pal);
+    }
+
+    if state.view_mode == FileViewMode::List {
+        render_list_view(&mut c, state, layout, &pal);
+    } else {
+        render_miller_columns(&mut c, state, layout, &pal);
+        if let Some(preview) = &layout.preview {
+            render_preview_inspector(&mut c, state, preview, &pal);
+        }
+    }
+
+    render_status_bar(&mut c, state, layout, &pal);
+
+    if let Some(popup) = &layout.popup {
+        render_popup(&mut c, popup, &pal);
+    }
+
+    // Clip any outer-edge corner bleed before drawing crisp CSD hairline ring.
+    c.clip_rounded_corners(win_rect, WINDOW_CORNER_RADIUS);
+    c.stroke_rounded_rect(win_rect, WINDOW_CORNER_RADIUS, pal.window_border);
+}
+
+fn render_sidebar(c: &mut Canvas<'_>, state: &FilesAppState, layout: &FilesLayout, pal: &Palette) {
+    c.fill_rounded_rect(layout.sidebar_rect, SIDEBAR_CORNER_RADIUS, pal.sidebar_bg);
+    c.stroke_rounded_rect(
+        layout.sidebar_rect,
+        SIDEBAR_CORNER_RADIUS,
+        pal.sidebar_border,
+    );
+
+    // Golden Gate traffic lights inside floating sidebar header (strictly above sidebar_clip_rect)
+    c.fill_circle_f(29.0, 30.0, 6.0, rgba(255, 95, 87, 255));
+    c.fill_circle_f(49.0, 30.0, 6.0, rgba(254, 188, 46, 255));
+    c.fill_circle_f(69.0, 30.0, 6.0, rgba(40, 200, 64, 255));
+
+    let clip = layout.sidebar_clip_rect;
+    c.with_clip(clip, |c| {
+        for row in &layout.sidebar_rows {
+            let item = &state.sidebar_items[row.index];
+            if let Some(hdr_y) = row.section_header_y
+                && let Some(section) = item.section
+            {
+                c.draw_text(
+                    section,
+                    row.rect.x + 8,
+                    hdr_y,
+                    11.0,
+                    true,
+                    pal.text_muted,
+                    clip,
+                );
+            }
+
+            let selected = state.active_sidebar.as_ref() == Some(&item.location);
+            if selected {
+                c.fill_rounded_rect(row.rect, 7, pal.sidebar_active);
+            }
+            #[allow(clippy::cast_precision_loss)]
+            draw_sidebar_icon(
+                c,
+                row.rect.x as f32 + 15.0,
+                row.rect.y as f32 + (row.rect.h as f32) * 0.5,
+                item.icon,
+                pal,
+            );
+            let label = Canvas::fit_text(&item.label, row.rect.w - 36, 13.0, selected);
+            c.draw_text(
+                &label,
+                row.rect.x + 29,
+                row.rect.y + 4,
+                13.0,
+                selected,
+                pal.text_primary,
+                clip,
+            );
+        }
+        let total_h = sidebar_total_height(&state.sidebar_items);
+        c.draw_scrollbar(clip, state.sidebar_scroll_y, total_h, pal.scrollbar);
+    });
+}
+
+fn render_toolbar(c: &mut Canvas<'_>, state: &FilesAppState, layout: &FilesLayout, pal: &Palette) {
+    c.fill_rounded_rect(layout.nav_pill_rect, 16, pal.pill_bg);
+    c.stroke_rounded_rect(layout.nav_pill_rect, 16, pal.pill_border);
+    c.fill_rect(
+        Rect::new(
+            layout.nav_pill_rect.x + 34,
+            layout.nav_pill_rect.y + 7,
+            1,
+            18,
+        ),
+        pal.divider,
+    );
+    let back_col = if state.can_go_back() {
+        pal.text_primary
+    } else {
+        pal.text_muted
+    };
+    let fwd_col = if state.can_go_forward() {
+        pal.text_primary
+    } else {
+        pal.text_muted
+    };
+    #[allow(clippy::cast_precision_loss)]
+    {
+        draw_chevron_aa(
+            c,
+            layout.nav_back_rect.x as f32 + 17.5,
+            layout.nav_back_rect.y as f32 + 16.0,
+            true,
+            2.6,
+            4.8,
+            1.5,
+            back_col,
+        );
+        draw_chevron_aa(
+            c,
+            layout.nav_forward_rect.x as f32 + 16.5,
+            layout.nav_forward_rect.y as f32 + 16.0,
+            false,
+            2.6,
+            4.8,
+            1.5,
+            fwd_col,
+        );
+    }
+
+    if layout.title_max_x - layout.title_x >= 28 {
+        let title_clip = Rect::new(layout.title_x, 12, layout.title_max_x - layout.title_x, 38);
+        let title = Canvas::fit_text(&state.window_title, title_clip.w, 15.0, true);
+        c.draw_text(
+            &title,
+            layout.title_x,
+            21,
+            15.0,
+            true,
+            pal.text_primary,
+            title_clip,
+        );
+    }
+    render_toolbar_right_cluster(c, state, layout, pal);
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn render_toolbar_right_cluster(
+    c: &mut Canvas<'_>,
+    state: &FilesAppState,
+    layout: &FilesLayout,
+    pal: &Palette,
+) {
+    // 4-segment View Switcher pill (`Icons` | `List` | `Columns` | `Gallery`)
+    c.fill_rounded_rect(layout.view_pill_rect, 16, pal.pill_bg);
+    c.stroke_rounded_rect(layout.view_pill_rect, 16, pal.pill_border);
+    for (mode, seg_rect) in layout.view_segments {
+        let active = state.view_mode == mode;
+        if active {
+            let pill = Rect::new(
+                seg_rect.x + 2,
+                seg_rect.y + 2,
+                seg_rect.w - 4,
+                seg_rect.h - 4,
+            );
+            c.fill_rounded_rect(pill, 14, pal.pill_active);
+            c.stroke_rounded_rect(pill, 14, pal.pill_border);
+        }
+        let col = if !mode.is_stage_a_supported() {
+            pal.text_muted
+        } else if active {
+            pal.text_primary
+        } else {
+            pal.text_secondary
+        };
+        draw_view_mode_icon(
+            c,
+            seg_rect.x as f32 + (seg_rect.w as f32) * 0.5,
+            seg_rect.y as f32 + (seg_rect.h as f32) * 0.5,
+            mode,
+            col,
+        );
+    }
+
+    // Sort pill
+    c.fill_rounded_rect(layout.sort_pill_rect, 16, pal.pill_bg);
+    c.stroke_rounded_rect(layout.sort_pill_rect, 16, pal.pill_border);
+    draw_sort_pill_glyph(
+        c,
+        layout.sort_pill_rect.x as f32,
+        layout.sort_pill_rect.y as f32 + 16.0,
+        pal.text_primary,
+    );
+
+    // Actions pill (`New Folder` | `Tag` | `...`)
+    c.fill_rounded_rect(layout.action_pill_rect, 16, pal.pill_bg);
+    c.stroke_rounded_rect(layout.action_pill_rect, 16, pal.pill_border);
+    draw_folder_plus_glyph(
+        c,
+        layout.action_primary_rect.x as f32 + 17.5,
+        layout.action_primary_rect.y as f32 + 16.0,
+        pal.text_primary,
+    );
+    draw_tag_outline_glyph(
+        c,
+        layout.action_tag_rect.x as f32 + 17.0,
+        layout.action_tag_rect.y as f32 + 16.0,
+        pal.text_primary,
+    );
+    draw_ellipsis_glyph(
+        c,
+        layout.action_more_rect.x as f32 + 16.5,
+        layout.action_more_rect.y as f32 + 16.0,
+        pal.text_primary,
+    );
+
+    render_toolbar_search_pill(c, state, layout, pal);
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn render_toolbar_search_pill(
+    c: &mut Canvas<'_>,
+    state: &FilesAppState,
+    layout: &FilesLayout,
+    pal: &Palette,
+) {
+    c.fill_rounded_rect(layout.search_pill_rect, 16, pal.pill_bg);
+    c.stroke_rounded_rect(layout.search_pill_rect, 16, pal.pill_border);
+    let icon_cx = if state.search_active {
+        layout.search_pill_rect.x as f32 + 14.5
+    } else {
+        layout.search_pill_rect.x as f32 + (layout.search_pill_rect.w as f32) * 0.5 - 0.5
+    };
+    draw_search_glyph(
+        c,
+        icon_cx,
+        layout.search_pill_rect.y as f32 + 15.5,
+        pal.text_primary,
+    );
+    if state.search_active {
+        let input_clip = Rect::new(
+            layout.search_pill_rect.x + 26,
+            layout.search_pill_rect.y + 2,
+            layout.search_pill_rect.w - 48,
+            28,
+        );
+        let (text, col) = if state.search_query.is_empty() {
+            ("Search...", pal.text_muted)
+        } else {
+            (state.search_query.as_str(), pal.text_primary)
+        };
+        let fitted = Canvas::fit_text(text, input_clip.w, 12.5, false);
+        c.draw_text(
+            &fitted,
+            input_clip.x,
+            layout.search_pill_rect.y + 8,
+            12.5,
+            false,
+            col,
+            input_clip,
+        );
+        if !state.search_query.is_empty() {
+            let cx = layout.search_clear_rect.x as f32 + 9.0;
+            let cy = layout.search_clear_rect.y as f32 + 10.0;
+            c.fill_circle_f(cx, cy, 6.2, pal.pill_active);
+            c.stroke_line_aa(
+                cx - 2.3,
+                cy - 2.3,
+                cx + 2.3,
+                cy + 2.3,
+                1.25,
+                pal.text_secondary,
+            );
+            c.stroke_line_aa(
+                cx + 2.3,
+                cy - 2.3,
+                cx - 2.3,
+                cy + 2.3,
+                1.25,
+                pal.text_secondary,
+            );
+        }
+    }
+}
+
+fn render_trash_banner(c: &mut Canvas<'_>, layout: &FilesLayout, banner: Rect, pal: &Palette) {
+    c.fill_rounded_rect(banner, 8, pal.row_alt);
+    c.draw_text(
+        "Trash — deleted files remain here until you empty Trash",
+        banner.x + 12,
+        banner.y + 8,
+        12.5,
+        false,
+        pal.text_secondary,
+        banner,
+    );
+    if let Some(btn) = layout.empty_trash_btn_rect {
+        c.fill_rounded_rect(btn, 12, pal.pill_bg);
+        c.stroke_rounded_rect(btn, 12, pal.pill_border);
+        c.draw_text(
+            "Empty",
+            btn.x + 16,
+            btn.y + 4,
+            12.0,
+            true,
+            pal.text_primary,
+            btn,
+        );
+    }
+}
+
+fn render_miller_columns(
+    c: &mut Canvas<'_>,
+    state: &FilesAppState,
+    layout: &FilesLayout,
+    pal: &Palette,
+) {
+    c.with_clip(layout.content_rect, |c| {
+        for col_layout in &layout.columns {
+            render_miller_column_pane(c, state, layout, col_layout, pal);
+        }
+    });
+}
+
+fn render_miller_column_pane(
+    c: &mut Canvas<'_>,
+    state: &FilesAppState,
+    layout: &FilesLayout,
+    col_layout: &ColumnLayout,
+    pal: &Palette,
+) {
+    let Some(col) = state.columns.get(col_layout.col_idx) else {
+        return;
+    };
+    let is_focused_col =
+        col_layout.col_idx == state.active_column || col_layout.col_idx + 1 == state.columns.len();
+
+    // Column divider stops strictly at content_rect.bottom(), above the status bar margin
+    c.fill_rect(
+        Rect::new(
+            col_layout.rect.right() - 1,
+            layout.content_rect.y,
+            1,
+            layout.content_rect.h,
+        ),
+        pal.divider,
+    );
+
+    let col_clip = Rect::new(
+        col_layout.rect.x,
+        layout.content_rect.y,
+        col_layout.rect.w - 1,
+        layout.content_rect.h,
+    );
+
+    c.with_clip(col_clip, |c| {
+        if col.loading {
+            c.draw_text(
+                "Loading...",
+                col_layout.rect.x + 14,
+                col_layout.rect.y + 12,
+                12.5,
+                false,
+                pal.text_muted,
+                col_clip,
+            );
+            return;
+        }
+        if let Some(err) = &col.error {
+            let msg = Canvas::fit_text(err, col_layout.rect.w - 24, 12.0, false);
+            c.draw_text(
+                &msg,
+                col_layout.rect.x + 12,
+                col_layout.rect.y + 12,
+                12.0,
+                false,
+                rgba(220, 72, 72, 255),
+                col_clip,
+            );
+            return;
+        }
+        if col.visible_entries.is_empty() {
+            c.draw_text(
+                "Empty",
+                col_layout.rect.x + 16,
+                col_layout.rect.y + 14,
+                12.5,
+                false,
+                pal.text_muted,
+                col_clip,
+            );
+            return;
+        }
+
+        for &(row_idx, row_rect) in &col_layout.rows {
+            let Some(entry) = col.visible_entries.get(row_idx) else {
+                continue;
+            };
+            let selected = col.selected_index == Some(row_idx);
+            let primary_active = selected && is_focused_col;
+            render_miller_column_row(
+                c,
+                state,
+                entry,
+                row_rect,
+                col_clip,
+                selected,
+                primary_active,
+                pal,
+            );
+        }
+
+        let total_h = i32::try_from(col.visible_entries.len()).unwrap_or(0) * ROW_HEIGHT + 12;
+        c.draw_scrollbar(col_clip, col.scroll_y, total_h, pal.scrollbar);
+    });
+}
+
+#[allow(clippy::too_many_arguments, clippy::cast_precision_loss)]
+fn render_miller_column_row(
+    c: &mut Canvas<'_>,
+    state: &FilesAppState,
+    entry: &FileEntry,
+    row_rect: Rect,
+    col_clip: Rect,
+    selected: bool,
+    primary_active: bool,
+    pal: &Palette,
+) {
+    if selected {
+        let bg = if primary_active {
+            pal.accent
+        } else {
+            pal.secondary_select
+        };
+        c.fill_rounded_rect(row_rect, 7, bg);
+    }
+    let fg = if primary_active {
+        pal.accent_text
+    } else {
+        pal.text_primary
+    };
+    draw_entry_icon(
+        c,
+        row_rect.x as f32 + 13.0,
+        row_rect.y as f32 + (row_rect.h as f32) * 0.5,
+        entry,
+        primary_active,
+        pal,
+    );
+
+    let tags = state.tags_for(&entry.path);
+    let tags_w = i32::try_from(tags.len().min(3)).unwrap_or(0) * 9;
+    let chev_w = if entry.is_navigable_dir() { 14 } else { 4 };
+    let text_w = (row_rect.w - 30 - tags_w - chev_w).max(20);
+    let label = Canvas::fit_text(&entry.name, text_w, 13.0, selected);
+    c.draw_text(
+        &label,
+        row_rect.x + 26,
+        row_rect.y + 5,
+        13.0,
+        selected,
+        fg,
+        col_clip,
+    );
+
+    let mut dot_x = row_rect.right() - chev_w - 6;
+    for tag in tags.iter().take(3).rev() {
+        let [r, g, b] = tag.rgb();
+        c.fill_circle(dot_x, row_rect.y + 13, 3.5, rgba(r, g, b, 255));
+        dot_x -= 9;
+    }
+    if entry.is_navigable_dir() {
+        let chev_col = if primary_active {
+            pal.accent_text
+        } else {
+            pal.text_muted
+        };
+        draw_chevron_aa(
+            c,
+            row_rect.right() as f32 - 8.5,
+            row_rect.y as f32 + 13.0,
+            false,
+            1.9,
+            3.5,
+            1.35,
+            chev_col,
+        );
+    }
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn render_preview_inspector(
+    c: &mut Canvas<'_>,
+    state: &FilesAppState,
+    preview: &PreviewLayout,
+    pal: &Palette,
+) {
+    let entry = &preview.entry;
+    let cx = preview.rect.x + preview.rect.w / 2;
+    let card_clip = preview.rect;
+
+    c.with_clip(card_clip, |c| {
+        let badge = Rect::new(cx - 32, preview.rect.y + 34, 64, 72);
+        c.fill_rounded_rect(badge, 12, pal.row_alt);
+        c.stroke_rounded_rect(badge, 12, pal.divider);
+        draw_entry_icon(
+            c,
+            badge.x as f32 + 32.0,
+            badge.y as f32 + 24.0,
+            entry,
+            false,
+            pal,
+        );
+        let kind_w = Canvas::measure_text(entry.kind_label(), 10.5, true);
+        c.draw_text(
+            entry.kind_label(),
+            cx - kind_w / 2,
+            badge.y + 44,
+            10.5,
+            true,
+            pal.text_secondary,
+            badge,
+        );
+
+        let name = Canvas::fit_text(&entry.name, preview.rect.w - 40, 15.0, true);
+        let name_w = Canvas::measure_text(&name, 15.0, true);
+        c.draw_text(
+            &name,
+            cx - name_w / 2,
+            preview.rect.y + 122,
+            15.0,
+            true,
+            pal.text_primary,
+            card_clip,
+        );
+
+        let meta_sub = format!(
+            "{}  -  {}",
+            entry.kind_label(),
+            format_byte_size(entry.size_bytes)
+        );
+        let meta_w = Canvas::measure_text(&meta_sub, 12.0, false);
+        c.draw_text(
+            &meta_sub,
+            cx - meta_w / 2,
+            preview.rect.y + 146,
+            12.0,
+            false,
+            pal.text_secondary,
+            card_clip,
+        );
+
+        if let Some(secs) = entry.modified_unix_secs {
+            let mod_text = format!("Modified: {}", format_unix_timestamp(secs));
+            let mw = Canvas::measure_text(&mod_text, 11.5, false);
+            c.draw_text(
+                &mod_text,
+                cx - mw / 2,
+                preview.rect.y + 174,
+                11.5,
+                false,
+                pal.text_muted,
+                card_clip,
+            );
+        }
+
+        render_preview_actions_and_tags(c, state, preview, pal);
+    });
+}
+
+fn render_preview_actions_and_tags(
+    c: &mut Canvas<'_>,
+    state: &FilesAppState,
+    preview: &PreviewLayout,
+    pal: &Palette,
+) {
+    c.fill_rounded_rect(preview.open_btn, 14, pal.pill_bg);
+    c.stroke_rounded_rect(preview.open_btn, 14, pal.pill_border);
+    let open_w = Canvas::measure_text("Open", 12.5, true);
+    c.draw_text(
+        "Open",
+        preview.open_btn.x + (preview.open_btn.w - open_w) / 2,
+        preview.open_btn.y + 7,
+        12.5,
+        true,
+        pal.text_primary,
+        preview.open_btn,
+    );
+
+    let trash_label = if state.is_trash_view() {
+        "Put Back"
+    } else {
+        "Move to Trash"
+    };
+    c.fill_rounded_rect(preview.trash_btn, 14, pal.pill_bg);
+    c.stroke_rounded_rect(preview.trash_btn, 14, pal.pill_border);
+    let tl_w = Canvas::measure_text(trash_label, 12.0, false);
+    c.draw_text(
+        trash_label,
+        preview.trash_btn.x + (preview.trash_btn.w - tl_w) / 2,
+        preview.trash_btn.y + 7,
+        12.0,
+        false,
+        pal.text_primary,
+        preview.trash_btn,
+    );
+
+    let active_tags = state.tags_for(&preview.entry.path);
+    for (color, rect) in &preview.tag_dots {
+        let [r, g, b] = color.rgb();
+        c.fill_circle(rect.x + 8, rect.y + 8, 6.0, rgba(r, g, b, 255));
+        if active_tags.contains(color) {
+            c.fill_circle(rect.x + 8, rect.y + 8, 2.2, rgba(255, 255, 255, 255));
+        }
+    }
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn render_list_view(
+    c: &mut Canvas<'_>,
+    state: &FilesAppState,
+    layout: &FilesLayout,
+    pal: &Palette,
+) {
+    let hdr_y = layout.content_rect.y;
+    for (field, rect) in &layout.list_headers {
+        c.draw_text(
+            field.label(),
+            rect.x + 12,
+            rect.y + 5,
+            11.5,
+            true,
+            pal.text_secondary,
+            *rect,
+        );
+        if state.sort_field == *field {
+            let label_w = Canvas::measure_text(field.label(), 11.5, true);
+            let cx = (rect.x + 18 + label_w) as f32;
+            let cy = rect.y as f32 + 12.5;
+            let pts = match state.sort_order {
+                FileSortOrder::Ascending => {
+                    [(cx - 3.0, cy + 1.5), (cx, cy - 1.5), (cx + 3.0, cy + 1.5)]
+                }
+                FileSortOrder::Descending => {
+                    [(cx - 3.0, cy - 1.5), (cx, cy + 1.5), (cx + 3.0, cy - 1.5)]
+                }
+            };
+            c.stroke_polyline_aa(&pts, false, 1.3, pal.text_secondary);
+        }
+    }
+    c.fill_rect(
+        Rect::new(
+            layout.content_rect.x + 8,
+            hdr_y + 25,
+            layout.content_rect.w - 16,
+            1,
+        ),
+        pal.divider,
+    );
+
+    let Some(col) = state.columns.first() else {
+        return;
+    };
+    let clip = Rect::new(
+        layout.content_rect.x,
+        hdr_y + 27,
+        layout.content_rect.w,
+        (layout.content_rect.h - 27).max(20),
+    );
+    let cols_x = list_column_offsets(layout);
+
+    c.with_clip(clip, |c| {
+        for &(row_idx, rect) in &layout.list_rows {
+            if let Some(entry) = col.visible_entries.get(row_idx) {
+                let selected = col.selected_index == Some(row_idx);
+                render_list_row(c, entry, rect, row_idx, selected, cols_x, clip, pal);
+            }
+        }
+        let total_h = i32::try_from(col.visible_entries.len()).unwrap_or(0) * LIST_ROW_HEIGHT + 8;
+        c.draw_scrollbar(clip, state.list_scroll_y, total_h, pal.scrollbar);
+    });
+}
+
+fn list_column_offsets(layout: &FilesLayout) -> (i32, i32, i32) {
+    let date_x = layout
+        .list_headers
+        .iter()
+        .find(|(f, _)| *f == FileSortField::DateModified)
+        .map_or(layout.content_rect.x + 280, |(_, r)| r.x);
+    let size_x = layout
+        .list_headers
+        .iter()
+        .find(|(f, _)| *f == FileSortField::Size)
+        .map_or(date_x + 140, |(_, r)| r.x);
+    let kind_x = layout
+        .list_headers
+        .iter()
+        .find(|(f, _)| *f == FileSortField::Kind)
+        .map_or(size_x + 78, |(_, r)| r.x);
+    (date_x, size_x, kind_x)
+}
+
+#[allow(clippy::cast_precision_loss, clippy::too_many_arguments)]
+fn render_list_row(
+    c: &mut Canvas<'_>,
+    entry: &FileEntry,
+    rect: Rect,
+    row_idx: usize,
+    selected: bool,
+    cols_x: (i32, i32, i32),
+    clip: Rect,
+    pal: &Palette,
+) {
+    let (date_x, size_x, kind_x) = cols_x;
+    if selected {
+        c.fill_rounded_rect(rect, 7, pal.accent);
+    } else if row_idx % 2 == 1 {
+        c.fill_rounded_rect(rect, 7, pal.row_alt);
+    }
+    let fg = if selected {
+        pal.accent_text
+    } else {
+        pal.text_primary
+    };
+    let sub_fg = if selected {
+        pal.accent_text
+    } else {
+        pal.text_secondary
+    };
+
+    draw_entry_icon(
+        c,
+        rect.x as f32 + 15.0,
+        rect.y as f32 + (rect.h as f32) * 0.5,
+        entry,
+        selected,
+        pal,
+    );
+    let name = Canvas::fit_text(&entry.name, (date_x - rect.x - 36).max(60), 13.0, selected);
+    c.draw_text(&name, rect.x + 30, rect.y + 7, 13.0, selected, fg, clip);
+
+    let date_str = entry
+        .modified_unix_secs
+        .map_or_else(|| String::from("--"), format_unix_timestamp);
+    c.draw_text(&date_str, date_x + 8, rect.y + 7, 12.0, false, sub_fg, clip);
+
+    let size_str = if entry.is_navigable_dir() {
+        String::from("--")
+    } else {
+        format_byte_size(entry.size_bytes)
+    };
+    c.draw_text(&size_str, size_x + 8, rect.y + 7, 12.0, false, sub_fg, clip);
+    c.draw_text(
+        entry.kind_label(),
+        kind_x + 8,
+        rect.y + 7,
+        12.0,
+        false,
+        sub_fg,
+        clip,
+    );
+}
+
+fn render_status_bar(
+    c: &mut Canvas<'_>,
+    state: &FilesAppState,
+    layout: &FilesLayout,
+    pal: &Palette,
+) {
+    c.fill_rect(
+        Rect::new(
+            layout.status_bar_rect.x + 4,
+            layout.status_bar_rect.y,
+            layout.status_bar_rect.w - 8,
+            1,
+        ),
+        pal.divider,
+    );
+    let summary = state.status_summary();
+    let max_text_w = (layout.theme_toggle_rect.x - layout.status_bar_rect.x - 16).max(40);
+    let fitted = Canvas::fit_text(&summary, max_text_w, 11.5, false);
+    c.draw_text(
+        &fitted,
+        layout.status_bar_rect.x + 8,
+        layout.status_bar_rect.y + 6,
+        11.5,
+        false,
+        pal.text_secondary,
+        layout.status_bar_rect,
+    );
+
+    c.fill_rounded_rect(layout.theme_toggle_rect, 9, pal.pill_bg);
+    c.stroke_rounded_rect(layout.theme_toggle_rect, 9, pal.pill_border);
+    let label = match state.theme {
+        FilesThemeMode::LightGoldenGate => "Theme: Light",
+        FilesThemeMode::DarkPurpleGlass => "Theme: Dark",
+    };
+    let lbl_w = Canvas::measure_text(label, 11.0, true);
+    c.draw_text(
+        label,
+        layout.theme_toggle_rect.x + (layout.theme_toggle_rect.w - lbl_w) / 2,
+        layout.theme_toggle_rect.y + 4,
+        11.0,
+        true,
+        pal.text_secondary,
+        layout.theme_toggle_rect,
+    );
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn render_popup(c: &mut Canvas<'_>, popup: &PopupLayout, pal: &Palette) {
+    let shadow = Rect::new(
+        popup.rect.x - 1,
+        popup.rect.y + 1,
+        popup.rect.w + 2,
+        popup.rect.h + 3,
+    );
+    c.fill_rounded_rect(shadow, 13, rgba(0, 0, 0, 18));
+    c.fill_rounded_rect(popup.rect, 12, pal.popup_bg);
+    c.stroke_rounded_rect(popup.rect, 12, pal.popup_border);
+
+    for item in &popup.items {
+        if item.command.is_none() {
+            c.fill_rect(
+                Rect::new(item.rect.x + 6, item.rect.y + 4, item.rect.w - 12, 1),
+                pal.divider,
+            );
+            continue;
+        }
+        if item.checked {
+            let cx = item.rect.x as f32 + 10.5;
+            let cy = item.rect.y as f32 + 14.5;
+            c.stroke_polyline_aa(
+                &[
+                    (cx - 3.2, cy - 0.3),
+                    (cx - 0.7, cy + 2.5),
+                    (cx + 3.8, cy - 2.8),
+                ],
+                false,
+                1.45,
+                pal.accent,
+            );
+        }
+        let text_x = if let Some([r, g, b]) = item.swatch_rgb {
+            c.fill_circle_f(
+                item.rect.x as f32 + 26.0,
+                item.rect.y as f32 + 14.0,
+                4.8,
+                rgba(r, g, b, 255),
+            );
+            item.rect.x + 38
+        } else {
+            item.rect.x + 22
+        };
+        let label = Canvas::fit_text(&item.label, item.rect.right() - text_x - 8, 12.5, false);
+        c.draw_text(
+            &label,
+            text_x,
+            item.rect.y + 6,
+            12.5,
+            false,
+            pal.text_primary,
+            item.rect,
+        );
+    }
+}
+
+fn draw_sidebar_icon(c: &mut Canvas<'_>, cx: f32, cy: f32, kind: SidebarIconKind, pal: &Palette) {
+    let accent = pal.accent;
+    let neutral = pal.text_secondary;
+    match kind {
+        SidebarIconKind::Tag(tag) => {
+            let [red, green, blue] = tag.rgb();
+            c.fill_circle_f(cx, cy, 4.8, rgba(red, green, blue, 255));
+        }
+        SidebarIconKind::Recents => {
+            c.stroke_circle_f(cx, cy, 5.6, 1.25, accent);
+            c.stroke_polyline_aa(
+                &[(cx, cy - 3.2), (cx, cy + 0.3), (cx + 2.5, cy + 1.8)],
+                false,
+                1.25,
+                accent,
+            );
+        }
+        SidebarIconKind::Shared => draw_shared_people_icon(c, cx, cy, accent),
+        SidebarIconKind::Applications => draw_applications_a_icon(c, cx, cy, accent),
+        SidebarIconKind::Desktop => {
+            c.stroke_rounded_rect_f(cx - 6.5, cy - 4.8, 13.0, 8.2, 1.5, 1.2, accent);
+            c.stroke_line_aa(cx - 4.2, cy + 1.4, cx + 4.2, cy + 1.4, 0.9, accent);
+            c.stroke_line_aa(cx, cy + 3.4, cx, cy + 5.2, 1.2, accent);
+            c.stroke_line_aa(cx - 3.0, cy + 5.3, cx + 3.0, cy + 5.3, 1.2, accent);
+        }
+        SidebarIconKind::Documents => draw_dogear_document_icon(c, cx, cy, accent, 1.2),
+        SidebarIconKind::Downloads => {
+            c.stroke_circle_f(cx, cy, 5.6, 1.2, accent);
+            c.stroke_line_aa(cx, cy - 2.9, cx, cy + 2.5, 1.25, accent);
+            c.stroke_polyline_aa(
+                &[(cx - 2.4, cy + 0.4), (cx, cy + 2.8), (cx + 2.4, cy + 0.4)],
+                false,
+                1.25,
+                accent,
+            );
+        }
+        SidebarIconKind::Home => draw_home_house_icon(c, cx, cy, neutral),
+        SidebarIconKind::Volume => draw_drive_volume_icon(c, cx, cy, pal),
+        SidebarIconKind::Network => draw_network_globe_icon(c, cx, cy, accent),
+        SidebarIconKind::Trash => draw_trash_can_icon(c, cx, cy, neutral),
+    }
+}
+
+fn draw_shared_people_icon(c: &mut Canvas<'_>, cx: f32, cy: f32, col: [u8; 4]) {
+    c.stroke_circle_f(cx - 1.8, cy - 2.2, 2.0, 1.15, col);
+    c.stroke_polyline_aa(
+        &[
+            (cx - 5.2, cy + 4.2),
+            (cx - 3.8, cy + 1.4),
+            (cx + 0.2, cy + 1.4),
+            (cx + 1.6, cy + 4.2),
+        ],
+        false,
+        1.15,
+        col,
+    );
+    c.stroke_circle_f(cx + 2.8, cy - 2.4, 1.7, 1.1, col);
+    c.stroke_polyline_aa(
+        &[
+            (cx + 2.0, cy + 1.4),
+            (cx + 4.2, cy + 1.4),
+            (cx + 5.5, cy + 4.0),
+        ],
+        false,
+        1.1,
+        col,
+    );
+}
+
+fn draw_applications_a_icon(c: &mut Canvas<'_>, cx: f32, cy: f32, col: [u8; 4]) {
+    c.stroke_line_aa(cx - 4.0, cy + 4.6, cx + 0.6, cy - 4.6, 1.25, col);
+    c.stroke_line_aa(cx - 0.6, cy - 4.6, cx + 4.0, cy + 4.6, 1.25, col);
+    c.stroke_line_aa(cx - 5.0, cy + 1.8, cx + 5.0, cy + 1.8, 1.25, col);
+}
+
+fn draw_dogear_document_icon(c: &mut Canvas<'_>, cx: f32, cy: f32, col: [u8; 4], weight: f32) {
+    c.stroke_polyline_aa(
+        &[
+            (cx - 4.5, cy - 5.5),
+            (cx + 1.4, cy - 5.5),
+            (cx + 4.5, cy - 2.4),
+            (cx + 4.5, cy + 5.5),
+            (cx - 4.5, cy + 5.5),
+        ],
+        true,
+        weight,
+        col,
+    );
+    c.stroke_polyline_aa(
+        &[
+            (cx + 1.4, cy - 5.5),
+            (cx + 1.4, cy - 2.4),
+            (cx + 4.5, cy - 2.4),
+        ],
+        false,
+        weight * 0.85,
+        col,
+    );
+    c.stroke_line_aa(cx - 2.4, cy + 0.4, cx + 2.4, cy + 0.4, 1.0, col);
+    c.stroke_line_aa(cx - 2.4, cy + 2.8, cx + 1.4, cy + 2.8, 1.0, col);
+}
+
+fn draw_home_house_icon(c: &mut Canvas<'_>, cx: f32, cy: f32, col: [u8; 4]) {
+    c.stroke_polyline_aa(
+        &[(cx - 6.2, cy - 0.3), (cx, cy - 5.5), (cx + 6.2, cy - 0.3)],
+        false,
+        1.35,
+        col,
+    );
+    c.stroke_line_aa(cx + 3.2, cy - 4.5, cx + 3.2, cy - 2.8, 1.2, col);
+    c.stroke_polyline_aa(
+        &[
+            (cx - 4.4, cy - 1.2),
+            (cx - 4.4, cy + 5.0),
+            (cx + 4.4, cy + 5.0),
+            (cx + 4.4, cy - 1.2),
+        ],
+        false,
+        1.2,
+        col,
+    );
+    c.stroke_rounded_rect_f(cx - 1.5, cy + 0.8, 3.0, 4.2, 1.0, 1.05, col);
+}
+
+fn draw_drive_volume_icon(c: &mut Canvas<'_>, cx: f32, cy: f32, pal: &Palette) {
+    let (top, bot, border, led) = if pal.is_dark {
+        (
+            rgba(104, 93, 130, 255),
+            rgba(74, 65, 96, 255),
+            rgba(156, 144, 184, 255),
+            rgba(196, 185, 224, 255),
+        )
+    } else {
+        (
+            rgba(232, 236, 242, 255),
+            rgba(198, 204, 214, 255),
+            rgba(110, 118, 132, 255),
+            rgba(92, 100, 114, 255),
+        )
+    };
+    c.fill_rounded_rect_vgrad_f(cx - 6.0, cy - 4.0, 12.0, 8.2, 2.0, top, bot);
+    c.stroke_rounded_rect_f(cx - 6.0, cy - 4.0, 12.0, 8.2, 2.0, 1.1, border);
+    c.stroke_line_aa(cx - 4.4, cy + 1.5, cx + 4.4, cy + 1.5, 0.9, border);
+    c.fill_circle_f(cx + 3.2, cy + 2.7, 0.75, led);
+}
+
+fn draw_network_globe_icon(c: &mut Canvas<'_>, cx: f32, cy: f32, col: [u8; 4]) {
+    c.stroke_circle_f(cx, cy, 5.5, 1.2, col);
+    c.stroke_line_aa(cx - 5.2, cy, cx + 5.2, cy, 1.05, col);
+    c.stroke_line_aa(cx, cy - 5.2, cx, cy + 5.2, 1.05, col);
+    c.stroke_ellipse_aa(cx, cy, 2.7, 5.4, 1.05, col);
+}
+
+fn draw_trash_can_icon(c: &mut Canvas<'_>, cx: f32, cy: f32, col: [u8; 4]) {
+    c.stroke_line_aa(cx - 5.0, cy - 3.5, cx + 5.0, cy - 3.5, 1.2, col);
+    c.stroke_polyline_aa(
+        &[
+            (cx - 2.0, cy - 3.5),
+            (cx - 1.4, cy - 5.2),
+            (cx + 1.4, cy - 5.2),
+            (cx + 2.0, cy - 3.5),
+        ],
+        false,
+        1.1,
+        col,
+    );
+    c.stroke_polyline_aa(
+        &[
+            (cx - 4.0, cy - 3.5),
+            (cx - 3.2, cy + 5.2),
+            (cx + 3.2, cy + 5.2),
+            (cx + 4.0, cy - 3.5),
+        ],
+        false,
+        1.15,
+        col,
+    );
+    c.stroke_line_aa(cx - 1.3, cy - 1.3, cx - 1.0, cy + 3.4, 1.0, col);
+    c.stroke_line_aa(cx + 1.3, cy - 1.3, cx + 1.0, cy + 3.4, 1.0, col);
+}
+
+fn draw_entry_icon(
+    c: &mut Canvas<'_>,
+    cx: f32,
+    cy: f32,
+    entry: &FileEntry,
+    selected_blue: bool,
+    pal: &Palette,
+) {
+    match entry.kind {
+        FileEntryKind::Directory | FileEntryKind::MountPoint => {
+            let (back_col, top_col, bot_col, hilite) = if selected_blue {
+                (
+                    rgba(210, 232, 255, 255),
+                    rgba(255, 255, 255, 250),
+                    rgba(232, 243, 255, 245),
+                    rgba(255, 255, 255, 255),
+                )
+            } else if pal.is_dark {
+                (
+                    rgba(116, 100, 214, 255),
+                    rgba(160, 146, 252, 255),
+                    rgba(124, 108, 230, 255),
+                    rgba(196, 186, 255, 190),
+                )
+            } else {
+                (
+                    rgba(48, 138, 234, 255),
+                    rgba(114, 194, 255, 255),
+                    rgba(54, 148, 246, 255),
+                    rgba(176, 224, 255, 220),
+                )
+            };
+            // Back folder flap with beveled top tab
+            c.fill_poly_aa(
+                &[
+                    (cx - 7.0, cy - 5.8),
+                    (cx - 2.0, cy - 5.8),
+                    (cx - 0.3, cy - 4.0),
+                    (cx + 6.8, cy - 4.0),
+                    (cx + 6.8, cy - 1.8),
+                    (cx - 7.0, cy - 1.8),
+                ],
+                back_col,
+            );
+            // Front folder body with subtle vertical gradient and crisp specular lip
+            c.fill_rounded_rect_vgrad_f(cx - 7.0, cy - 3.2, 14.0, 9.2, 1.8, top_col, bot_col);
+            c.stroke_line_aa(cx - 5.5, cy - 2.8, cx + 5.5, cy - 2.8, 0.85, hilite);
+        }
+        FileEntryKind::Application => {
+            let sq_col = if selected_blue {
+                rgba(255, 255, 255, 240)
+            } else {
+                pal.accent
+            };
+            c.fill_rounded_rect_f(cx - 6.0, cy - 6.0, 12.0, 12.0, 3.0, sq_col);
+            let fg = if selected_blue {
+                pal.accent
+            } else {
+                rgba(255, 255, 255, 245)
+            };
+            c.stroke_line_aa(cx - 2.5, cy + 2.8, cx + 0.3, cy - 2.8, 1.15, fg);
+            c.stroke_line_aa(cx - 0.3, cy - 2.8, cx + 2.5, cy + 2.8, 1.15, fg);
+            c.stroke_line_aa(cx - 3.2, cy + 1.0, cx + 3.2, cy + 1.0, 1.1, fg);
+        }
+        _ => {
+            let fg = if selected_blue {
+                rgba(255, 255, 255, 235)
+            } else {
+                pal.text_secondary
+            };
+            draw_dogear_document_icon(c, cx, cy, fg, 1.15);
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_chevron_aa(
+    c: &mut Canvas<'_>,
+    cx: f32,
+    cy: f32,
+    left: bool,
+    half_w: f32,
+    half_h: f32,
+    thickness: f32,
+    col: [u8; 4],
+) {
+    let dir = if left { 1.0 } else { -1.0 };
+    let pts = [
+        (cx + dir * half_w * 0.55, cy - half_h),
+        (cx - dir * half_w * 0.55, cy),
+        (cx + dir * half_w * 0.55, cy + half_h),
+    ];
+    c.stroke_polyline_aa(&pts, false, thickness, col);
+}
+
+fn draw_view_mode_icon(c: &mut Canvas<'_>, cx: f32, cy: f32, mode: FileViewMode, col: [u8; 4]) {
+    match mode {
+        FileViewMode::Icons => {
+            for dy in [-5.3_f32, 0.8] {
+                for dx in [-5.3_f32, 0.8] {
+                    c.stroke_rounded_rect_f(cx + dx, cy + dy, 4.5, 4.5, 1.0, 1.15, col);
+                }
+            }
+        }
+        FileViewMode::List => {
+            for dy in [-4.0_f32, 0.0, 4.0] {
+                c.fill_circle_f(cx - 5.2, cy + dy, 1.0, col);
+                c.stroke_line_aa(cx - 2.3, cy + dy, cx + 6.0, cy + dy, 1.3, col);
+            }
+        }
+        FileViewMode::Columns => {
+            c.stroke_rounded_rect_f(cx - 7.0, cy - 5.5, 14.0, 11.0, 2.0, 1.25, col);
+            c.stroke_line_aa(cx - 2.3, cy - 4.7, cx - 2.3, cy + 4.7, 1.15, col);
+            c.stroke_line_aa(cx + 2.3, cy - 4.7, cx + 2.3, cy + 4.7, 1.15, col);
+        }
+        FileViewMode::Gallery => {
+            c.stroke_rounded_rect_f(cx - 6.5, cy - 5.5, 13.0, 7.2, 1.4, 1.2, col);
+            for dx in [-5.4_f32, -2.1, 1.2, 4.5] {
+                c.fill_rounded_rect_f(cx + dx, cy + 3.3, 2.1, 2.1, 0.5, col);
+            }
+        }
+    }
+}
+
+fn draw_sort_pill_glyph(c: &mut Canvas<'_>, pill_x: f32, cy: f32, col: [u8; 4]) {
+    let gx = pill_x + 19.0;
+    for dy in [-4.5_f32, -1.0, 2.5] {
+        for dx in [-5.2_f32, -1.2, 2.8] {
+            c.fill_rounded_rect_f(gx + dx, cy + dy, 2.3, 2.2, 0.6, col);
+        }
+    }
+    let vx = pill_x + 38.5;
+    c.stroke_polyline_aa(
+        &[(vx - 3.0, cy - 1.3), (vx, cy + 1.8), (vx + 3.0, cy - 1.3)],
+        false,
+        1.35,
+        col,
+    );
+}
+
+fn draw_folder_plus_glyph(c: &mut Canvas<'_>, cx: f32, cy: f32, col: [u8; 4]) {
+    c.stroke_polyline_aa(
+        &[
+            (cx - 6.5, cy - 4.8),
+            (cx - 1.8, cy - 4.8),
+            (cx - 0.3, cy - 3.0),
+            (cx + 6.5, cy - 3.0),
+            (cx + 6.5, cy + 4.8),
+            (cx - 6.5, cy + 4.8),
+        ],
+        true,
+        1.25,
+        col,
+    );
+    c.stroke_line_aa(cx, cy - 0.8, cx, cy + 3.0, 1.2, col);
+    c.stroke_line_aa(cx - 1.9, cy + 1.1, cx + 1.9, cy + 1.1, 1.2, col);
+}
+
+fn draw_tag_outline_glyph(c: &mut Canvas<'_>, cx: f32, cy: f32, col: [u8; 4]) {
+    // 45-degree angled Golden Gate Finder tag outline with eyelet ring
+    c.stroke_polyline_aa(
+        &[
+            (cx - 5.2, cy - 5.2),
+            (cx - 0.6, cy - 5.5),
+            (cx + 5.6, cy + 0.7),
+            (cx + 0.7, cy + 5.6),
+            (cx - 5.5, cy - 0.6),
+        ],
+        true,
+        1.25,
+        col,
+    );
+    c.stroke_circle_f(cx - 2.3, cy - 2.3, 1.15, 0.95, col);
+}
+
+fn draw_ellipsis_glyph(c: &mut Canvas<'_>, cx: f32, cy: f32, col: [u8; 4]) {
+    for dx in [-4.5_f32, 0.0, 4.5] {
+        c.fill_circle_f(cx + dx, cy, 1.3, col);
+    }
+}
+
+fn draw_search_glyph(c: &mut Canvas<'_>, cx: f32, cy: f32, col: [u8; 4]) {
+    c.stroke_circle_f(cx - 1.2, cy - 1.2, 4.3, 1.4, col);
+    c.stroke_line_aa(cx + 1.9, cy + 1.9, cx + 5.2, cy + 5.2, 1.55, col);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::layout::compute_layout;
+    use crate::state::StartupOptions;
+    use rusty_services::file_manager::UserFileLocations;
+    use std::fs;
+
+    #[test]
+    fn renders_golden_gate_light_and_dark_themes_cleanly() {
+        let root =
+            std::env::temp_dir().join(format!("rustyos-files-render-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let locs = UserFileLocations::with_roots(
+            &root.join("home"),
+            &root.join("cfg"),
+            &root.join("data"),
+        );
+        let mut state = FilesAppState::new(locs, &StartupOptions::default());
+        state.complete_pending_loads_sync();
+
+        let (w, h) = (920_u32, 600_u32);
+        let mut buf = vec![0_u8; (w * h * 4) as usize];
+        let layout_light = compute_layout(&state, w, h);
+        render_window_pixels(&mut buf, w, h, &state, &layout_light);
+
+        // Rounded top-left pixel outside 20px radius remains transparent
+        assert_eq!(&buf[0..4], &[0, 0, 0, 0]);
+        // Traffic light close button inside floating sidebar is red (#FF5F57 -> BGRA [87, 95, 255, 255])
+        let red_idx = ((30 * w + 29) * 4) as usize;
+        assert_eq!(&buf[red_idx..red_idx + 4], &[87, 95, 255, 255]);
+        // Content background white (#FFFFFF)
+        let bg_idx = ((120 * w + 650) * 4) as usize;
+        assert_eq!(&buf[bg_idx..bg_idx + 4], &[255, 255, 255, 255]);
+
+        // Toggle to DarkPurpleGlass and re-render
+        state.toggle_theme();
+        let layout_dark = compute_layout(&state, w, h);
+        render_window_pixels(&mut buf, w, h, &state, &layout_dark);
+        assert_eq!(&buf[bg_idx..bg_idx + 4], &[43, 22, 29, 255]);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn scrolled_sidebar_and_overflowing_columns_never_bleed_outside_clips() {
+        let root =
+            std::env::temp_dir().join(format!("rustyos-files-clip-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let docs = root.join("home/Documents");
+        let _ = fs::create_dir_all(&docs);
+        for i in 0..25 {
+            let _ = fs::create_dir_all(docs.join(format!("Dir_{i:02}")));
+        }
+        let locs = UserFileLocations::with_roots(
+            &root.join("home"),
+            &root.join("cfg"),
+            &root.join("data"),
+        );
+        let mut state = FilesAppState::new(
+            locs,
+            &StartupOptions {
+                initial_path: Some(docs),
+                ..Default::default()
+            },
+        );
+        state.complete_pending_loads_sync();
+        let (w, h) = (768_u32, 461_u32);
+        let mut buf_unscrolled = vec![0_u8; (w * h * 4) as usize];
+        let layout_unscrolled = compute_layout(&state, w, h);
+        render_window_pixels(&mut buf_unscrolled, w, h, &state, &layout_unscrolled);
+
+        // Scroll sidebar far enough so top rows shift into traffic-light y=23..37 zone
+        state.sidebar_scroll_y = 85;
+        state.select_entry(0, 14, false);
+
+        let mut buf = vec![0_u8; (w * h * 4) as usize];
+        let layout = compute_layout(&state, w, h);
+        render_window_pixels(&mut buf, w, h, &state, &layout);
+
+        // Every pixel of traffic-light header band (y=18..45) stays identical to unscrolled frame
+        for py in 18..45_u32 {
+            for px in 16..180_u32 {
+                let idx = ((py * w + px) * 4) as usize;
+                assert_eq!(&buf[idx..idx + 4], &buf_unscrolled[idx..idx + 4]);
+            }
+        }
+
+        // Status bar top divider & 2px margin above it remain clean white without folder bleed
+        let gap_above_footer =
+            (((layout.status_bar_rect.y - 2).cast_unsigned() * w + 250) * 4) as usize;
+        assert_eq!(
+            &buf[gap_above_footer..gap_above_footer + 4],
+            &[255, 255, 255, 255]
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+}

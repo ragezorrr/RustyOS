@@ -341,6 +341,27 @@ impl LauncherState {
             .retain_mut(|child| matches!(child.try_wait(), Ok(None)));
     }
 
+    /// Spawns `program` with explicit `args`, resolving `PATH` or sibling workspace binaries.
+    ///
+    /// # Errors
+    ///
+    /// Returns a human-readable error string if `program` is empty or fails to spawn.
+    pub fn launch_program_with_args(
+        &mut self,
+        program: &str,
+        args: &[&str],
+        wayland_display: &str,
+        ipc_socket: &Path,
+    ) -> Result<u32, String> {
+        self.reap_children();
+        let trimmed = program.trim();
+        if trimmed.is_empty() {
+            return Err("empty application command".to_owned());
+        }
+        let arg_strings: Vec<String> = args.iter().map(|a| (*a).to_owned()).collect();
+        self.spawn_resolved_program(trimmed, &arg_strings, wayland_display, ipc_socket)
+    }
+
     /// Spawns a desktop `Exec=` command asynchronously with `WAYLAND_DISPLAY` and `RUSTYOS_IPC_SOCKET`.
     ///
     /// # Errors
@@ -357,8 +378,19 @@ impl LauncherState {
         let Some((program, args)) = tokens.split_first() else {
             return Err("empty application command".to_owned());
         };
+        self.spawn_resolved_program(program, args, wayland_display, ipc_socket)
+    }
 
-        let mut cmd = Command::new(program);
+    fn spawn_resolved_program(
+        &mut self,
+        program: &str,
+        args: &[String],
+        wayland_display: &str,
+        ipc_socket: &Path,
+    ) -> Result<u32, String> {
+        let resolved = resolve_program_path(program);
+        let program_path = resolved.as_deref().unwrap_or_else(|| Path::new(program));
+        let mut cmd = Command::new(program_path);
         cmd.args(args)
             .env("WAYLAND_DISPLAY", wayland_display)
             .env("RUSTYOS_IPC_SOCKET", ipc_socket)
@@ -375,9 +407,10 @@ impl LauncherState {
         let pid = child.id();
         info!(
             program = %program,
+            resolved = %program_path.display(),
             pid,
             wayland_display = %wayland_display,
-            "Launched application from Spotlight"
+            "Launched application"
         );
         self.children.push(child);
         Ok(pid)
@@ -442,7 +475,7 @@ fn priority_rank(app: &LauncherApp) -> u8 {
     match bin.as_str() {
         "foot" | "kitty" | "alacritty" | "wezterm" | "ghostty" | "weston-terminal" | "konsole"
         | "gnome-terminal" | "xfce4-terminal" => 0,
-        "nautilus" | "dolphin" | "thunar" | "nemo" | "pcmanfm" => 1,
+        "rusty-files" => 1,
         "firefox" | "chromium" | "google-chrome" | "brave" => 2,
         "es2gears_wayland" | "glmark2-wayland" => 3,
         "rusty-settings" => 4,
@@ -470,15 +503,55 @@ fn exec_basename(exec: &str) -> String {
 }
 
 fn command_exists_on_path(exec: &str) -> bool {
-    let Some(program) = parse_exec_argv(exec).into_iter().next() else {
-        return false;
-    };
-    let path = Path::new(&program);
-    if path.is_absolute() || program.contains('/') {
-        return path.is_file();
+    parse_exec_argv(exec)
+        .into_iter()
+        .next()
+        .is_some_and(|program| resolve_program_path(&program).is_some())
+}
+
+fn resolve_program_path(program: &str) -> Option<PathBuf> {
+    let exe_dir = env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf));
+    resolve_program_path_with(program, env::var_os("PATH").as_deref(), exe_dir.as_deref())
+}
+
+fn resolve_program_path_with(
+    program: &str,
+    path_env: Option<&std::ffi::OsStr>,
+    exe_dir: Option<&Path>,
+) -> Option<PathBuf> {
+    let trimmed = program.trim();
+    if trimmed.is_empty() {
+        return None;
     }
-    env::var_os("PATH")
-        .is_some_and(|paths| env::split_paths(&paths).any(|dir| dir.join(path).is_file()))
+    let candidate = Path::new(trimmed);
+    if candidate.is_absolute() || trimmed.contains('/') {
+        return candidate.is_file().then(|| candidate.to_path_buf());
+    }
+    if let Some(paths) = path_env {
+        for dir in env::split_paths(paths) {
+            let full = dir.join(candidate);
+            if full.is_file() {
+                return Some(full);
+            }
+        }
+    }
+    if let Some(dir) = exe_dir {
+        let sibling = dir.join(candidate);
+        if sibling.is_file() {
+            return Some(sibling);
+        }
+        if dir.file_name() == Some(std::ffi::OsStr::new("deps"))
+            && let Some(target_dir) = dir.parent()
+        {
+            let parent_sibling = target_dir.join(candidate);
+            if parent_sibling.is_file() {
+                return Some(parent_sibling);
+            }
+        }
+    }
+    None
 }
 
 fn discover_desktop_apps() -> Vec<LauncherApp> {
@@ -551,8 +624,8 @@ fn merge_builtin_fallbacks(catalog: &mut Vec<LauncherApp>) {
         LauncherApp {
             id: "org.rustyos.files".to_owned(),
             name: "Files".to_owned(),
-            subtitle: "Browse folders & documents".to_owned(),
-            exec: "nautilus".to_owned(),
+            subtitle: "Browse folders & documents (RustyOS Files)".to_owned(),
+            exec: "rusty-files".to_owned(),
             keywords: vec!["folder".to_owned(), "manager".to_owned()],
             badge: "Fi".to_owned(),
             icon: Some("system-file-manager".to_owned()),
@@ -801,7 +874,7 @@ Exec=firefox --private-window
                 id: "1".to_owned(),
                 name: "Files".to_owned(),
                 subtitle: "File Manager".to_owned(),
-                exec: "nautilus".to_owned(),
+                exec: "rusty-files".to_owned(),
                 keywords: vec!["folder".to_owned()],
                 badge: "Fi".to_owned(),
                 icon: Some("system-file-manager".to_owned()),
@@ -862,5 +935,24 @@ Exec=firefox --private-window
         assert_eq!(fallback.len(), 1);
         assert!(fallback[0].is_custom_command);
         assert_eq!(fallback[0].exec, "weston-terminal");
+    }
+
+    #[test]
+    fn resolves_sibling_rusty_files_binary_without_path_entry() -> Result<(), std::io::Error> {
+        let base = std::env::temp_dir().join(format!("rustyos-bin-resolve-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let deps = base.join("deps");
+        fs::create_dir_all(&deps)?;
+        let bin = base.join("rusty-files");
+        fs::write(&bin, b"#!/bin/sh\n")?;
+
+        let resolved_direct = resolve_program_path_with("rusty-files", None, Some(&base));
+        assert_eq!(resolved_direct.as_deref(), Some(bin.as_path()));
+
+        let resolved_from_deps = resolve_program_path_with("rusty-files", None, Some(&deps));
+        assert_eq!(resolved_from_deps.as_deref(), Some(bin.as_path()));
+
+        let _ = fs::remove_dir_all(&base);
+        Ok(())
     }
 }

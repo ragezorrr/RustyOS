@@ -673,7 +673,11 @@ impl RustyCompositorState {
             |_| true,
         );
 
-        let user_config = crate::config::UserConfig::load_default();
+        let user_config = if cfg!(test) {
+            crate::config::UserConfig::default()
+        } else {
+            crate::config::UserConfig::load_default()
+        };
         let initial_scale = user_config.scale_for_output("winit-0");
         let initial_rotation = user_config.rotation_for_output("winit-0", None);
         let mut seat_state = SeatState::new();

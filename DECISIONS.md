@@ -295,6 +295,25 @@
                           в UserConfig            
                           (ADR-0029)              
   -----------------------------------------------------------------------
+  D-038                   Фаза 8/Системные        accepted
+                          приложения              
+                          (RUSTYOS-065):          
+                          Самостоятельный Wayland 
+                          файловый менеджер       
+                          apps/rusty-files        
+                          (Этап A: Golden Gate    
+                          CSD, Columns/List,      
+                          Light по умолчанию <->  
+                          Dark Purple Glass) и    
+                          бэкенд                  
+                          rusty-services::file_ma 
+                          nager (XDG, Trash,      
+                          file_tags.toml); полный 
+                          перевод Dock/Desktop/   
+                          Launcher на rusty-files 
+                          без сторонних ФМ        
+                          (ADR-0030)              
+  -----------------------------------------------------------------------
 
 ## Открытые решения
 

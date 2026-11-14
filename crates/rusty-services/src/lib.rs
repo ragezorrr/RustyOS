@@ -4,6 +4,7 @@
 //! audio, and session management with graceful fallback if services are absent.
 
 pub mod auth;
+pub mod file_manager;
 pub mod logind;
 pub mod polkit;
 pub mod portal;

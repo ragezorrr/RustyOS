@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "apps/rusty-files",
     "apps/rusty-shell",
     "crates/rusty-animation",
     "crates/rusty-compositor",

@@ -740,8 +740,9 @@ impl RustyCompositorState {
         match action {
             ContextMenuAction::DesktopNewFolder => self.create_desktop_folder_action(),
             ContextMenuAction::DesktopOpenFiles => {
-                if let Some(dir) = resolve_desktop_dir() {
-                    self.launch_path_with_xdg_open(&dir);
+                let desktop = resolve_desktop_dir();
+                if !self.launch_rusty_files_dir(desktop.as_deref()) {
+                    self.show_osd("rusty-files unavailable", None, false);
                 }
             }
             ContextMenuAction::DesktopChangeWallpaper => {
@@ -805,7 +806,7 @@ impl RustyCompositorState {
             ContextMenuAction::DownloadsOpenFolder => {
                 self.handle_dock_hit(DockHit::PinnedDownloads, serial);
             }
-            ContextMenuAction::DownloadsOpenEntry(path) => self.launch_path_with_xdg_open(&path),
+            ContextMenuAction::DownloadsOpenEntry(path) => self.open_downloads_entry(&path),
             ContextMenuAction::DownloadsSetSort(mode) => {
                 self.user_config.downloads_sort = mode;
                 self.sync_and_save_user_config();
@@ -829,6 +830,14 @@ impl RustyCompositorState {
         }
         if !keep_open {
             self.close_context_menu();
+        }
+    }
+
+    fn open_downloads_entry(&mut self, path: &Path) {
+        if path.is_dir() {
+            let _ = self.launch_rusty_files_dir(Some(path));
+        } else {
+            self.launch_path_with_xdg_open(path);
         }
     }
 

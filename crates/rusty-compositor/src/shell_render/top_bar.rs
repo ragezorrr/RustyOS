@@ -1596,7 +1596,8 @@ pub(super) fn notification_app_icon(title: &str) -> crate::icons::BuiltinAppIcon
         || lower.contains("konsole")
     {
         crate::icons::BuiltinAppIcon::Terminal
-    } else if lower.contains("file") || lower.contains("download") || lower.contains("dolphin") {
+    } else if lower.contains("file") || lower.contains("download") || lower.contains("rusty-files")
+    {
         crate::icons::BuiltinAppIcon::Files
     } else if lower.contains("browser")
         || lower.contains("web")

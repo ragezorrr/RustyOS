@@ -647,10 +647,9 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
             ],
             "utilities-terminal",
         );
-        let files_icon = state.launcher.preferred_icon(
-            &["nautilus", "dolphin", "thunar", "nemo", "pcmanfm"],
-            "system-file-manager",
-        );
+        let files_icon = state
+            .launcher
+            .preferred_icon(&["rusty-files"], "system-file-manager");
         let dock_view = DockViewState {
             pinned_icons: [Some(terminal_icon), Some(files_icon)],
             windows: &dock_windows,

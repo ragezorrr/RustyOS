@@ -710,7 +710,7 @@ impl RustyCompositorState {
     pub(in crate::state) fn dock_preferred_candidates(
         hit: crate::shell_render::DockHit,
     ) -> Option<&'static [&'static str]> {
-        const FILES: &[&str] = &["nautilus", "dolphin", "thunar", "nemo", "pcmanfm"];
+        const FILES: &[&str] = &["rusty-files"];
         const TERMINAL: &[&str] = &[
             "foot",
             "kitty",
@@ -757,6 +757,24 @@ impl RustyCompositorState {
         }
     }
 
+    pub(in crate::state) fn launch_rusty_files(&mut self, args: &[&str]) -> bool {
+        self.close_overview();
+        let ipc_path = rusty_ipc::default_ipc_socket_path(&self.socket_name);
+        self.launcher
+            .launch_program_with_args("rusty-files", args, &self.socket_name, &ipc_path)
+            .is_ok()
+    }
+
+    pub(in crate::state) fn launch_rusty_files_dir(
+        &mut self,
+        dir: Option<&std::path::Path>,
+    ) -> bool {
+        match dir.and_then(|p| p.to_str()) {
+            Some(path_str) => self.launch_rusty_files(&["--path", path_str]),
+            None => self.launch_rusty_files(&[]),
+        }
+    }
+
     /// Executes an interactive Dock click action (`RUSTYOS-023` / `RUSTYOS-032` / `RUSTYOS-050`).
     pub fn handle_dock_hit(&mut self, hit: crate::shell_render::DockHit, serial: Serial) {
         let ipc_path = rusty_ipc::default_ipc_socket_path(&self.socket_name);
@@ -776,39 +794,14 @@ impl RustyCompositorState {
                 }
             }
             crate::shell_render::DockHit::PinnedDownloads => {
-                self.close_overview();
-                let opened = std::env::var_os("HOME")
-                    .map(|h| std::path::PathBuf::from(h).join("Downloads"))
-                    .filter(|p| p.exists())
-                    .and_then(|p| p.to_str().map(str::to_owned))
-                    .filter(|s| !s.chars().any(char::is_whitespace))
-                    .is_some_and(|dir| {
-                        self.launcher
-                            .launch_command(
-                                &format!("xdg-open {dir}"),
-                                &self.socket_name,
-                                &ipc_path,
-                            )
-                            .is_ok()
-                    });
-                if !opened {
-                    self.launch_dock_app_or_spotlight(
-                        &["nautilus", "dolphin", "thunar", "nemo", "pcmanfm"],
-                        &ipc_path,
-                    );
+                let downloads = super::context_menu_actions::resolve_downloads_dir();
+                if !self.launch_rusty_files_dir(downloads.as_deref()) {
+                    self.toggle_launcher();
                 }
             }
             crate::shell_render::DockHit::PinnedTrash => {
-                self.close_overview();
-                let opened = self
-                    .launcher
-                    .launch_command("xdg-open trash:///", &self.socket_name, &ipc_path)
-                    .is_ok();
-                if !opened {
-                    self.launch_dock_app_or_spotlight(
-                        &["nautilus", "dolphin", "thunar", "nemo", "pcmanfm"],
-                        &ipc_path,
-                    );
+                if !self.launch_rusty_files(&["--trash"]) {
+                    self.toggle_launcher();
                 }
             }
             crate::shell_render::DockHit::ToggleOverview => {

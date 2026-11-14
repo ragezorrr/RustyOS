@@ -165,7 +165,7 @@ impl Default for AppLauncher {
                     id: "org.rustyos.files".to_owned(),
                     name: "Files".to_owned(),
                     keywords: vec!["folder".to_owned(), "browser".to_owned()],
-                    exec: "nautilus".to_owned(),
+                    exec: "rusty-files".to_owned(),
                 },
                 LauncherEntry {
                     id: "org.rustyos.gears".to_owned(),

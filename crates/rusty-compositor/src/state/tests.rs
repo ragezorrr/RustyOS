@@ -811,3 +811,47 @@ fn context_menu_trash_safe_cleanup_worker_and_drain() -> Result<(), Box<dyn Erro
     let _ = std::fs::remove_dir_all(&temp_dir);
     Ok(())
 }
+
+#[test]
+fn dock_and_context_menu_route_file_management_to_rusty_files() -> Result<(), Box<dyn Error>> {
+    use crate::shell_render::{ContextMenuAction, DockHit};
+    use smithay::utils::Serial;
+
+    let mut display: Display<RustyCompositorState> = Display::new()?;
+    let mut event_loop: EventLoop<RustyCompositorState> = EventLoop::try_new()?;
+    let mut compositor = RustyCompositorState::new(
+        &display,
+        "wayland-rustyos-files-routing-test".to_owned(),
+        event_loop.get_signal(),
+        event_loop.handle(),
+        (1280, 800).into(),
+    )?;
+    let _ = (&mut display, &mut event_loop);
+
+    assert_eq!(
+        RustyCompositorState::dock_preferred_candidates(DockHit::PinnedFiles),
+        Some(["rusty-files"].as_slice())
+    );
+    assert_eq!(
+        compositor
+            .launcher
+            .preferred_icon(&["rusty-files"], "fallback-icon"),
+        "system-file-manager"
+    );
+
+    let temp_dir = std::env::temp_dir().join(format!("rustyos-files-cfg-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    std::fs::create_dir_all(&temp_dir)?;
+    compositor.config_path = Some(temp_dir.join("config.toml"));
+    compositor.execute_context_menu_action(
+        ContextMenuAction::DockToggleOpenAtLogin(DockHit::PinnedFiles),
+        Serial::from(1),
+    );
+    assert_eq!(
+        compositor.user_config.autostart,
+        vec!["rusty-files".to_owned()]
+    );
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    Ok(())
+}

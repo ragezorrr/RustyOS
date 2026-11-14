@@ -921,6 +921,23 @@ hardware/software context и низкие накладные расходы.
   - `cargo run -p rusty-compositor --offline -- --winit --max-frames 3` — pass (`rendered_frames=3`, `finished cleanly (mode: nested-winit)`).
 - **Risks:** Новые зависимости и `unsafe` не добавлялись (`unsafe_code = "deny"` сохранён); `Force Quit` (`kill -KILL`) защищён проверками `pid > 1` и `pid != self_pid`, а удаление корзины проверяет имя каталога `Trash` и удаляет симлинки без перехода по цели.
 
+### RUSTYOS-065 — Самостоятельный Wayland-файловый менеджер `apps/rusty-files` (Golden Gate, Этап A) и перевод композитора без сторонних ФМ
+
+- **Status:** Done (`RUSTYOS-065` Вариант 1 — утверждённый объём выполнен)
+- **Scope:**
+  - В `crates/rusty-services/src/file_manager.rs` реализован бэкенд файлового менеджера: XDG-каталоги и `user-dirs.dirs` (`UserFileLocations`), обнаружение томов `/proc/mounts` (`discover_mounts`, `parse_proc_mounts`), `.desktop`-приложения (`scan_applications_in`), недавние файлы (`.xbel` + shallow scan), сетевые/shared точки, `FreeDesktop` Trash (`list_trash_entries`, `move_to_trash`, `restore_from_trash`, `empty_trash`), `create_unique_folder`, фильтрация/сортировка (`filter_and_sort_entries`), форматтеры и атомарное хранение тегов/настроек в `~/.config/rustyos/file_tags.toml` (`FileTagsConfig`).
+  - Создано самостоятельное CSD Wayland-приложение `apps/rusty-files` (`src/{main.rs,wayland.rs,state.rs,layout.rs,render.rs}`) поверх уже имеющихся `smithay-client-toolkit`, `wayland-client` (`wl_keyboard` evdev без неблокирующей `xkbcommon 0.7`) и `fontdue` с неблокирующим фоновым чтением каталогов через `mpsc`.
+  - Реализована визуальная схема macOS 27 Golden Gate (`LightGoldenGate` по умолчанию + переключатель `DarkPurpleGlass`, `--light`/`--dark`/`--path`/`--trash`/`--recents`): плавающий sidebar с traffic lights и секциями *Recents / Shared / Favorites / Locations / Tags*, единый верхний toolbar (`< | >`, View Switcher с активными **Columns** (Miller Columns + Preview) и **List** и слотами **Icons**/**Gallery** под Этап B (`RUSTYOS-066`), Sort, Actions, Search `Ctrl+F`), баннер Trash (`Empty`), контекстные меню и персистентность тегов.
+  - В `crates/rusty-compositor` (`launcher.rs`, `frame_composer.rs`, `state/{mod.rs,shell_actions.rs,context_menu_actions.rs,tests.rs}`, `shell_render/top_bar.rs`) и `apps/rusty-shell/src/lib.rs` удалены ссылки на сторонние ФМ (`nautilus`, `dolphin`, `thunar`, `nemo`, `pcmanfm`), добавлен поиск бинарника рядом с композитором (`resolve_program_path_with`, `launch_program_with_args`), и все маршруты (`Dock::PinnedFiles`, `Dock::PinnedDownloads`, `Dock::PinnedTrash`, `DesktopOpenFiles`, каталоги `DownloadsOpenEntry`) переведены на `rusty-files` (плюс изоляция `UserConfig::default()` в `cfg!(test)` для воспроизводимости unit-тестов).
+  - Оформлены `docs/adr/0030-rusty-files-application.md`, `D-038` в `DECISIONS.md` и обновлена `ARCHITECTURE.md`.
+- **Verification:**
+  - `cargo fmt --all -- --check` — pass;
+  - `cargo clippy --workspace --all-targets --offline -- -D warnings` — pass (0 warnings);
+  - `cargo test --workspace --offline` — pass (185 passed, 0 failed, 0 ignored: `rusty_animation` 4, `rusty_compositor` 130, `rusty_files` 5, `rusty_ipc` 3, `rusty_services` 31, `rusty_shell` 5, `rusty_wm` 7);
+  - `cargo run -p rusty-compositor --offline -- --check` — pass (`finished cleanly (mode: check-only)`);
+  - `cargo run -p rusty-compositor --offline -- --winit --max-frames 3` — pass (`rendered_frames=3`, `finished cleanly (mode: nested-winit)`).
+- **Risks:** Новые внешние зависимости и `unsafe` не добавлялись (`unsafe_code = "deny"` сохранён); `Icons` grid и `Gallery` cover flow + `Quick Look` оставлены под Этап B (`RUSTYOS-066`) с явным статус-уведомлением при клике; визуальная отрисовка `rusty-files` в интерактивной Wayland-сессии проверялась unit-рендером светлой/тёмной тем (live окно `rusty-files` рекомендуется открыть вручную внутри `--winit`).
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

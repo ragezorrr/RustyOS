@@ -87,7 +87,18 @@ Event loop не должен блокироваться тяжёлыми опе�
   `zwp_text_input_v3`;
 - модульная структура `src/`: `lib.rs` (`ServiceRegistry`), `power`,
   `connectivity`, `media`, `display_session`, `auth`, `logind`, `polkit`,
-  `portal`.
+  `portal`, `file_manager`.
+
+### Системные приложения (`apps/rusty-files`)
+
+- Самостоятельный Wayland-клиент на базе `smithay-client-toolkit` и
+  `fontdue` в эстетике macOS 27 (Golden Gate, светлая палитра по умолчанию
+  и переключатель `Light <-> Dark`);
+- Этап A: плавающий sidebar (Favorites, Locations, Tags), Miller Columns +
+  List view, поиск, сортировка, `New Folder`, `FreeDesktop` Trash, теги в
+  `~/.config/rustyos/file_tags.toml` и неблокирующая фоновая загрузка;
+- композитор (`Dock`, `Desktop` ПКМ, `Launcher`, `Downloads`, `Trash`)
+  маршрутизирует работу с каталогами и корзиной напрямую в `rusty-files`.
 
 ## 3. Текущая структура Cargo workspace и сессии
 
@@ -106,9 +117,10 @@ RustyOS/
 │   ├── rusty-wm/              # Детерминированная модель WM и workspace 1..9
 │   ├── rusty-animation/       # Refresh-rate independent animation engine
 │   ├── rusty-ipc/             # Версионируемый IPC-протокол compositor <-> shell
-│   └── rusty-services/        # Адаптеры NetworkManager, BlueZ, PipeWire, UPower, sysfs, logind, Polkit, Portal
-│       └── src/               # lib (ServiceRegistry), power, connectivity, media, display_session, auth, logind, polkit, portal
+│   └── rusty-services/        # Адаптеры NetworkManager, BlueZ, PipeWire, UPower, sysfs, logind, Polkit, Portal, file_manager
+│       └── src/               # lib (ServiceRegistry), power, connectivity, media, display_session, auth, logind, polkit, portal, file_manager
 ├── apps/
+│   ├── rusty-files/           # Самостоятельный Wayland-файловый менеджер (Golden Gate CSD, Этап A)
 │   └── rusty-shell/           # Внешний процесс shell поверх Wayland layer-shell + IPC
 ├── bin/
 │   └── rustyos-session        # Лаунчер пользовательской сессии
@@ -117,7 +129,7 @@ RustyOS/
 ├── scripts/
 │   └── install.sh
 └── docs/
-    ├── adr/                   # ADR-0001 .. ADR-0029
+    ├── adr/                   # ADR-0001 .. ADR-0030
     ├── DEVELOPMENT_ENVIRONMENT.md
     ├── GETTING_STARTED.md
     └── HARDWARE_MATRIX.md
