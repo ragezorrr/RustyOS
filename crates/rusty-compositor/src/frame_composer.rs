@@ -62,6 +62,7 @@ pub(crate) fn dispatch_and_refresh_clients(
     app_state.drain_dbus_notifications();
     app_state.drain_tray_updates();
     app_state.drain_screenshot_results();
+    app_state.drain_trash_empty_results();
     let _ = app_state.drain_system_integration_events(smithay::utils::SERIAL_COUNTER.next_serial());
     if let Some(ipc) = ipc_server {
         ipc.poll_requests(|req| app_state.handle_ipc_request(req));
@@ -794,6 +795,10 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
             });
 
         let settings_view = state.settings_active.then(|| state.settings_render_state());
+        let context_menu_view = state
+            .context_menu
+            .as_ref()
+            .filter(|ctx| ctx.output_id == output_entry.id);
 
         let overlay = if let Some(pk) = polkit_view.as_ref() {
             ShellOverlayView::Polkit(pk)
@@ -807,6 +812,8 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
             ShellOverlayView::Settings(settings)
         } else if let Some(qs) = qs_view.as_ref() {
             ShellOverlayView::QuickSettings(qs)
+        } else if let Some(ctx) = context_menu_view {
+            ShellOverlayView::ContextMenu(ctx)
         } else if let Some(ov) = ov_view.as_ref() {
             ShellOverlayView::Overview(ov)
         } else if let Some(pick) = state.portal_pick_color.as_ref() {
@@ -859,13 +866,20 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
             );
         }
 
+        let overview_overlay = if matches!(overlay, ShellOverlayView::ContextMenu(_))
+            && let Some(ov) = ov_view.as_ref()
+        {
+            ShellOverlayView::Overview(ov)
+        } else {
+            overlay
+        };
         render_list.extend(crate::shell_render::generate_shell_overview_elements(
             text_cache,
             shape_cache,
             renderer,
             logical_size,
             &top_telemetry,
-            overlay,
+            overview_overlay,
         ));
 
         fullscreen_win
@@ -877,11 +891,32 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
             &[Layer::Overlay, Layer::Top],
             output_scale,
         );
-        if top_layer_surfaces_present {
+        let fullscreen_win = if top_layer_surfaces_present {
             None
         } else {
             state.active_unoccluded_fullscreen_window_on(output_entry.id)
+        };
+        if !top_layer_surfaces_present
+            && fullscreen_win.is_none()
+            && !state.should_hide_shell_chrome_for_fullscreen_on(output_entry.id)
+            && !state.is_session_locked()
+            && state.polkit_prompt.is_none()
+            && state.portal_prompt.is_none()
+            && let Some(ref ctx) = state.context_menu
+            && ctx.output_id == output_entry.id
+        {
+            render_list.extend(crate::shell_render::generate_context_menu_elements(
+                text_cache,
+                shape_cache,
+                renderer,
+                logical_size,
+                state.glass_opacity,
+                state.reduce_transparency,
+                ctx,
+                false,
+            ));
         }
+        fullscreen_win
     };
 
     // Render managed windows belonging to this output and their SSD titlebars in top-to-bottom order

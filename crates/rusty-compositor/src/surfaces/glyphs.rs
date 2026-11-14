@@ -518,6 +518,34 @@ pub(super) fn sample_power_symbol_glyph_uv(u: f32, v: f32, edge: f32, tint: [f32
     premul_tint(tint, sd_cov(arc.min(stem), edge))
 }
 
+pub(super) fn sample_plus_glyph_uv(u: f32, v: f32, edge: f32, tint: [f32; 4]) -> [f32; 4] {
+    let h = sd_segment(u, v, 0.22, 0.50, 0.78, 0.50, 0.050);
+    let vert = sd_segment(u, v, 0.50, 0.22, 0.50, 0.78, 0.050);
+    premul_tint(tint, sd_cov(h.min(vert), edge))
+}
+
+pub(super) fn sample_check_glyph_uv(u: f32, v: f32, edge: f32, tint: [f32; 4]) -> [f32; 4] {
+    let a = sd_segment(u, v, 0.20, 0.53, 0.42, 0.74, 0.054);
+    let b = sd_segment(u, v, 0.42, 0.74, 0.80, 0.28, 0.054);
+    premul_tint(tint, sd_cov(a.min(b), edge))
+}
+
+pub(super) fn sample_chevron_right_glyph_uv(u: f32, v: f32, edge: f32, tint: [f32; 4]) -> [f32; 4] {
+    let upper = sd_segment(u, v, 0.37, 0.24, 0.65, 0.50, 0.050);
+    let lower = sd_segment(u, v, 0.65, 0.50, 0.37, 0.76, 0.050);
+    premul_tint(tint, sd_cov(upper.min(lower), edge))
+}
+
+pub(super) fn sample_trash_glyph_uv(u: f32, v: f32, edge: f32, tint: [f32; 4]) -> [f32; 4] {
+    let lid = sd_segment(u, v, 0.22, 0.28, 0.78, 0.28, 0.045);
+    let handle = sd_rounded_box(u, v, 0.50, 0.20, 0.11, 0.045, 0.025).abs() - 0.032;
+    let body = sd_rounded_box(u, v, 0.50, 0.57, 0.22, 0.24, 0.05).abs() - 0.040;
+    let s1 = sd_segment(u, v, 0.42, 0.42, 0.42, 0.71, 0.030);
+    let s2 = sd_segment(u, v, 0.58, 0.42, 0.58, 0.71, 0.030);
+    let d = lid.min(handle).min(body).min(s1).min(s2);
+    premul_tint(tint, sd_cov(d, edge))
+}
+
 #[cfg(test)]
 #[allow(clippy::cast_precision_loss)]
 pub(super) fn sample_ui_glyph_pixel(
@@ -597,6 +625,10 @@ pub(super) fn sample_ui_glyph_pixel_rect(
                 UiGlyphKind::OverviewSpaces => sample_overview_spaces_glyph_uv(u, v, edge, tint),
                 UiGlyphKind::Keyboard => sample_keyboard_glyph_uv(u, v, edge, tint),
                 UiGlyphKind::PowerSymbol => sample_power_symbol_glyph_uv(u, v, edge, tint),
+                UiGlyphKind::Plus => sample_plus_glyph_uv(u, v, edge, tint),
+                UiGlyphKind::Check => sample_check_glyph_uv(u, v, edge, tint),
+                UiGlyphKind::ChevronRight => sample_chevron_right_glyph_uv(u, v, edge, tint),
+                UiGlyphKind::Trash => sample_trash_glyph_uv(u, v, edge, tint),
             };
             sum[0] += s[0];
             sum[1] += s[1];

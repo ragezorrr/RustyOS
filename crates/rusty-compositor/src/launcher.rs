@@ -320,7 +320,7 @@ impl LauncherState {
     }
 
     #[must_use]
-    fn find_available_command(&self, preferred_bins: &[&str]) -> Option<String> {
+    pub(crate) fn find_available_command(&self, preferred_bins: &[&str]) -> Option<String> {
         for app in &self.catalog {
             let bin = exec_basename(&app.exec);
             if preferred_bins.iter().any(|p| p.eq_ignore_ascii_case(&bin))

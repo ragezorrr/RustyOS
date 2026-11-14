@@ -141,7 +141,7 @@ pub(super) fn dock_layout_bounds(
 }
 
 #[must_use]
-pub(super) fn dock_slot_rect(
+pub fn dock_slot_rect(
     width: i32,
     height: i32,
     window_count: usize,

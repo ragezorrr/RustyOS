@@ -438,6 +438,10 @@ fn popover_glass_and_traffic_lights_rasterize_cleanly() {
         UiGlyphKind::OverviewSpaces,
         UiGlyphKind::Keyboard,
         UiGlyphKind::PowerSymbol,
+        UiGlyphKind::Plus,
+        UiGlyphKind::Check,
+        UiGlyphKind::ChevronRight,
+        UiGlyphKind::Trash,
     ] {
         let center = sample_ui_glyph_pixel(10, 10, 20, glyph, [255, 255, 255, 255]);
         let corner = sample_ui_glyph_pixel(0, 0, 20, glyph, [255, 255, 255, 255]);

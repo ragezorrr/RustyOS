@@ -162,6 +162,52 @@ pub fn clamp_display_scale(scale: f64) -> f64 {
     }
 }
 
+/// Sort order for the Dock `Downloads` stack context menu (`RUSTYOS-064`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DownloadsSortMode {
+    /// Sort newest modified items first.
+    #[default]
+    DateModified,
+    /// Sort case-insensitively by entry name (`A..Z`).
+    Name,
+    /// Sort largest files first.
+    Size,
+}
+
+impl DownloadsSortMode {
+    /// Canonical TOML key string.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::DateModified => "date_modified",
+            Self::Name => "name",
+            Self::Size => "size",
+        }
+    }
+
+    /// Human-readable label shown inside the `Downloads` context menu.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::DateModified => "Date Modified",
+            Self::Name => "Name",
+            Self::Size => "Size",
+        }
+    }
+
+    /// Parses a persisted string from `[dock].downloads_sort`.
+    #[must_use]
+    pub fn parse(raw: &str) -> Option<Self> {
+        let norm = strip_toml_quotes(raw).trim().to_ascii_lowercase();
+        match norm.as_str() {
+            "date" | "date_modified" | "modified" => Some(Self::DateModified),
+            "name" | "alpha" => Some(Self::Name),
+            "size" => Some(Self::Size),
+            _ => None,
+        }
+    }
+}
+
 /// Persistent user preferences loaded from `~/.config/rustyos/config.toml`.
 #[derive(Debug, Clone, PartialEq)]
 #[allow(clippy::struct_excessive_bools)]
@@ -217,6 +263,8 @@ pub struct UserConfig {
     pub lock_on_sleep: bool,
     /// Enable the native compositor `org.freedesktop.PolicyKit1.AuthenticationAgent` (`RUSTYOS-056`).
     pub enable_polkit_agent: bool,
+    /// Sort order used in the Dock `Downloads` context menu (`RUSTYOS-064`).
+    pub downloads_sort: DownloadsSortMode,
 }
 
 impl Default for UserConfig {
@@ -247,6 +295,7 @@ impl Default for UserConfig {
             require_password_on_lock: true,
             lock_on_sleep: true,
             enable_polkit_agent: true,
+            downloads_sort: DownloadsSortMode::DateModified,
         }
     }
 }
@@ -391,6 +440,11 @@ impl UserConfig {
                 self.autostart = parse_toml_string_array(val);
             }
             ("security", _) => self.apply_security_kv(key, val),
+            ("dock", "downloads_sort") => {
+                if let Some(mode) = DownloadsSortMode::parse(val) {
+                    self.downloads_sort = mode;
+                }
+            }
             _ => {
                 if let Some(raw_output) = section.strip_prefix("display.outputs.") {
                     self.apply_output_kv(strip_toml_quotes(raw_output), key, val);
@@ -657,6 +711,9 @@ impl UserConfig {
         );
         let _ = writeln!(out, "lock_on_sleep = {}", self.lock_on_sleep);
         let _ = writeln!(out, "enable_polkit_agent = {}", self.enable_polkit_agent);
+
+        let _ = writeln!(out, "\n[dock]");
+        let _ = writeln!(out, "downloads_sort = \"{}\"", self.downloads_sort.as_str());
 
         let _ = writeln!(out, "\n[autostart]");
         let escaped_cmds: Vec<String> = self
@@ -1232,6 +1289,7 @@ mod tests {
             require_password_on_lock: false,
             lock_on_sleep: false,
             enable_polkit_agent: false,
+            downloads_sort: DownloadsSortMode::Name,
             ..UserConfig::default()
         };
         cfg.output_scales.insert("eDP-1".to_owned(), 1.75);

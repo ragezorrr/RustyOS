@@ -900,6 +900,27 @@ hardware/software context и низкие накладные расходы.
   - `cargo run -p rusty-compositor --offline -- --winit --max-frames 3` — pass (`rendered_frames=3`, `finished cleanly (mode: nested-winit)`).
 - **Risks:** Новые зависимости и `unsafe` не добавлялись (`unsafe_code = "deny"` сохранён); переименование уже утверждённого scope отсутствует, а `Winit` и `DRM/KMS` используют единый `OutputMap` / `UserConfig` pipeline.
 
+### RUSTYOS-064 — Контекстные меню (ПКМ) на Desktop и Dock (`ShellOverlayView::ContextMenu`, секция `[dock]` в `UserConfig`)
+
+- **Status:** Done (`RUSTYOS-064` Вариант 1 — утверждённый объём выполнен)
+- **Scope:**
+  - В `crates/rusty-compositor/src/surfaces/{mod.rs,glyphs.rs,tests.rs}` добавлены глифы `UiGlyphKind::{Plus, Check, ChevronRight, Trash}` и их SDF-растеризаторы + покрытие тестами.
+  - В `crates/rusty-compositor/src/config.rs` добавлено перечисление `DownloadsSortMode::{DateModified, Name, Size}`, поле `UserConfig::downloads_sort` и опциональная секция `[dock]` (`downloads_sort`) с обратной совместимостью и roundtrip-тестом.
+  - В `crates/rusty-compositor/src/shell_render/context_menu.rs`, `tokens.rs`, `dock.rs` и `mod.rs` реализована единая подсистема `ShellOverlayView::ContextMenu` (Liquid Glass `Popover` с радиусом 16 px (`MENU_POPOVER_RADIUS`), ведущими иконками `UiGlyphKind`, 1 px разделителями, галочками, подсказками, каскадными подменю `>` с зазором 4 px и автопереворотом, мультимониторным clamping для primary и secondary выходов, hover/hit-test и клавиатурной навигацией `Up`/`Down`/`Left`/`Right`/`Return`/`Escape`).
+  - В `crates/rusty-compositor/src/state/context_menu_actions.rs`, `mod.rs`, `shell_actions.rs`, `launcher.rs`, `frame_composer.rs` и `input/{mod.rs,keyboard.rs,pointer.rs,shell_pointer.rs}` реализованы и подключены:
+    - ПКМ (`button == 273`) на пустом Desktop на основном и дополнительных мониторах (`New Folder`, `Open Desktop in Files`, `Change Wallpaper...`, `Display Settings...`, `Open Terminal`, `Mission Control`, `Tile Windows` с проверкой `TopBar`/fullscreen/layer-shell);
+    - ПКМ на всех слотах Dock (`PinnedFiles`, `PinnedTerminal`, `PinnedBrowser`, `PinnedNotes`, `PinnedSettings` с `Options > Open at Login` и `Show All Windows`; `ToggleOverview` с `Switch Desktop > Desktop 1..9`; `WindowSlot(idx)` с `Minimize`, `Move to Desktop >`, динамическим `Quit` ↔ `Force Quit` по `Alt`; `PinnedDownloads` с превью до 8 файлов, `Sort By >` и сохранением в `[dock].downloads_sort`; `PinnedTrash` с `Open Trash` и безопасным фоновым `Empty Trash...` через `std::thread::spawn` + `mpsc` + `drain_trash_empty_results()`);
+    - взаимное закрытие оверлеев и рендер поверх secondary output в `frame_composer.rs`.
+  - Оформлены `docs/adr/0029-context-menus-and-dock-actions.md`, `D-037` в `DECISIONS.md` и обновлена `ARCHITECTURE.md`.
+  - Добавлено 7 новых unit-тестов (`shell_render::tests`: 3 теста на clamping/cascading submenu/keyboard nav; `state::tests`: 4 теста на Desktop `New Folder` + multi-monitor + dismiss/reopen, Dock window `Alt -> Force Quit` + `Open at Login`, `Downloads` sort + `config.toml` persistence, и безопасный фоновый `Empty Trash`).
+- **Verification:**
+  - `cargo fmt --all -- --check` — pass;
+  - `cargo clippy --workspace --all-targets --offline -- -D warnings` — pass (0 warnings);
+  - `cargo test --workspace --offline` — pass (173 passed, 0 failed, 0 ignored: `rusty_animation` 4, `rusty_compositor` 128, `rusty_ipc` 3, `rusty_services` 26, `rusty_shell` 5, `rusty_wm` 7);
+  - `cargo run -p rusty-compositor --offline -- --check` — pass (`finished cleanly (mode: check-only)`);
+  - `cargo run -p rusty-compositor --offline -- --winit --max-frames 3` — pass (`rendered_frames=3`, `finished cleanly (mode: nested-winit)`).
+- **Risks:** Новые зависимости и `unsafe` не добавлялись (`unsafe_code = "deny"` сохранён); `Force Quit` (`kill -KILL`) защищён проверками `pid > 1` и `pid != self_pid`, а удаление корзины проверяет имя каталога `Trash` и удаляет симлинки без перехода по цели.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

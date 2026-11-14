@@ -1344,3 +1344,210 @@ fn settings_modal_hit_testing_covers_tabs_controls_and_buttons() {
         SettingsHit::ToggleRequirePassword
     );
 }
+
+#[test]
+fn context_menu_clamps_within_primary_and_secondary_outputs() {
+    use crate::surfaces::UiGlyphKind;
+    use rusty_wm::OutputId;
+
+    let entries = vec![
+        ContextMenuEntry::item(
+            "New Folder",
+            UiGlyphKind::Plus,
+            ContextMenuAction::DesktopNewFolder,
+        ),
+        ContextMenuEntry::Separator,
+        ContextMenuEntry::item(
+            "Display Settings...",
+            UiGlyphKind::ControlCenter,
+            ContextMenuAction::DesktopDisplaySettings,
+        ),
+    ];
+
+    let primary_size = Size::from((1280, 800));
+    let mut bottom_right = ContextMenuState::new(
+        OutputId(1),
+        Point::from((1270, 795)),
+        ContextMenuTarget::Desktop,
+        entries.clone(),
+    );
+    let br_layout = compute_context_menu_layout(primary_size, &bottom_right, true);
+    assert!(br_layout.primary_rect.loc.x + br_layout.primary_rect.size.w <= primary_size.w - 8);
+    assert!(br_layout.primary_rect.loc.y + br_layout.primary_rect.size.h <= primary_size.h - 8);
+    assert!(br_layout.primary_rect.loc.y >= TOP_BAR_HEIGHT + 6);
+
+    bottom_right.anchor_local = Point::from((2, 4));
+    let top_left_primary = compute_context_menu_layout(primary_size, &bottom_right, true);
+    assert_eq!(top_left_primary.primary_rect.loc.y, TOP_BAR_HEIGHT + 6);
+    assert!(top_left_primary.primary_rect.loc.x >= 8);
+
+    let secondary_size = Size::from((2560, 1440));
+    let top_left_secondary = ContextMenuState::new(
+        OutputId(2),
+        Point::from((2, 4)),
+        ContextMenuTarget::Desktop,
+        entries,
+    );
+    let sec_layout = compute_context_menu_layout(secondary_size, &top_left_secondary, false);
+    assert_eq!(sec_layout.primary_rect.loc.y, 8);
+    assert_eq!(sec_layout.primary_rect.loc.x, 8);
+}
+
+#[test]
+fn context_menu_cascade_submenu_hover_flip_and_hit_testing() -> Result<(), &'static str> {
+    use crate::surfaces::UiGlyphKind;
+    use rusty_wm::OutputId;
+
+    let sub_items = vec![
+        ContextMenuEntry::item(
+            "Desktop 1",
+            UiGlyphKind::OverviewSpaces,
+            ContextMenuAction::SwitchWorkspace(1),
+        )
+        .with_checked(true),
+        ContextMenuEntry::item(
+            "Desktop 2",
+            UiGlyphKind::OverviewSpaces,
+            ContextMenuAction::SwitchWorkspace(2),
+        ),
+    ];
+    let entries = vec![
+        ContextMenuEntry::submenu_item("Move to Desktop", UiGlyphKind::OverviewSpaces, sub_items),
+        ContextMenuEntry::Separator,
+        ContextMenuEntry::item(
+            "Disabled Item",
+            UiGlyphKind::Info,
+            ContextMenuAction::OpenSubmenu,
+        )
+        .with_enabled(false),
+    ];
+    let primary_size = Size::from((1280, 800));
+    let mut state = ContextMenuState::new(
+        OutputId(1),
+        Point::from((1250, 120)),
+        ContextMenuTarget::Desktop,
+        entries,
+    );
+    let initial = compute_context_menu_layout(primary_size, &state, true);
+    let row0 = initial.primary_rows[0];
+    let hover_x = f64::from(row0.loc.x + row0.size.w / 2);
+    let hover_y = f64::from(row0.loc.y + row0.size.h / 2);
+    assert!(update_context_menu_hover(
+        primary_size,
+        &mut state,
+        true,
+        hover_x,
+        hover_y
+    ));
+    assert_eq!(state.open_submenu_parent, Some(0));
+    assert_eq!(
+        hit_test_context_menu(primary_size, &state, true, hover_x, hover_y),
+        ContextMenuHit::ExpandSubmenu(0)
+    );
+
+    let with_sub = compute_context_menu_layout(primary_size, &state, true);
+    let (sub_rect, sub_rows) = with_sub.submenu.ok_or("expected expanded submenu layout")?;
+    assert!(sub_rect.loc.x + sub_rect.size.w <= with_sub.primary_rect.loc.x);
+    let child2 = sub_rows[1];
+    assert_eq!(
+        hit_test_context_menu(
+            primary_size,
+            &state,
+            true,
+            f64::from(child2.loc.x + 12),
+            f64::from(child2.loc.y + child2.size.h / 2),
+        ),
+        ContextMenuHit::Action(ContextMenuAction::SwitchWorkspace(2))
+    );
+    assert_eq!(
+        hit_test_context_menu(primary_size, &state, true, 12.0, 780.0),
+        ContextMenuHit::Outside
+    );
+    Ok(())
+}
+
+#[test]
+fn context_menu_keyboard_navigation_skips_separators_and_handles_submenus() {
+    use crate::surfaces::UiGlyphKind;
+    use rusty_wm::OutputId;
+    use smithay::input::keyboard::Keysym;
+
+    let sub_items = vec![
+        ContextMenuEntry::item(
+            "Name",
+            UiGlyphKind::LayoutSplit,
+            ContextMenuAction::DesktopToggleLayoutMode,
+        ),
+        ContextMenuEntry::item(
+            "Size",
+            UiGlyphKind::LayoutSplit,
+            ContextMenuAction::DesktopDisplaySettings,
+        ),
+    ];
+    let entries = vec![
+        ContextMenuEntry::submenu_item("Options", UiGlyphKind::ControlCenter, sub_items),
+        ContextMenuEntry::Separator,
+        ContextMenuEntry::item(
+            "Disabled",
+            UiGlyphKind::Info,
+            ContextMenuAction::OpenSubmenu,
+        )
+        .with_enabled(false),
+        ContextMenuEntry::item(
+            "Display Settings...",
+            UiGlyphKind::ControlCenter,
+            ContextMenuAction::DesktopDisplaySettings,
+        ),
+    ];
+    let mut state = ContextMenuState::new(
+        OutputId(1),
+        Point::from((100, 100)),
+        ContextMenuTarget::Desktop,
+        entries,
+    );
+
+    assert_eq!(
+        handle_context_menu_key(&mut state, Keysym::Down),
+        ContextMenuKeyOutcome::Redraw
+    );
+    assert_eq!(state.selected_row, Some(0));
+
+    assert_eq!(
+        handle_context_menu_key(&mut state, Keysym::Down),
+        ContextMenuKeyOutcome::Redraw
+    );
+    assert_eq!(state.selected_row, Some(3));
+
+    assert_eq!(
+        handle_context_menu_key(&mut state, Keysym::Up),
+        ContextMenuKeyOutcome::Redraw
+    );
+    assert_eq!(state.selected_row, Some(0));
+
+    assert_eq!(
+        handle_context_menu_key(&mut state, Keysym::Right),
+        ContextMenuKeyOutcome::Redraw
+    );
+    assert_eq!(state.open_submenu_parent, Some(0));
+    assert_eq!(state.submenu_selected_row, Some(0));
+
+    assert_eq!(
+        handle_context_menu_key(&mut state, Keysym::Down),
+        ContextMenuKeyOutcome::Redraw
+    );
+    assert_eq!(state.submenu_selected_row, Some(1));
+
+    assert_eq!(
+        handle_context_menu_key(&mut state, Keysym::Return),
+        ContextMenuKeyOutcome::Execute(ContextMenuAction::DesktopDisplaySettings)
+    );
+    assert_eq!(
+        handle_context_menu_key(&mut state, Keysym::Escape),
+        ContextMenuKeyOutcome::Redraw
+    );
+    assert_eq!(state.open_submenu_parent, None);
+    assert_eq!(
+        handle_context_menu_key(&mut state, Keysym::Escape),
+        ContextMenuKeyOutcome::Close
+    );
+}

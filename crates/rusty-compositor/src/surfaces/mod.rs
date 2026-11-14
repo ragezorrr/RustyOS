@@ -183,6 +183,14 @@ pub enum UiGlyphKind {
     Keyboard,
     /// Power `⏻` glyph for Lock Screen top-right power controls (`RUSTYOS-054`).
     PowerSymbol,
+    /// Plus `+` glyph for `New Folder` / `New Window` (`RUSTYOS-064`).
+    Plus,
+    /// Checkmark `✓` glyph for active context menu toggles (`RUSTYOS-064`).
+    Check,
+    /// Right chevron `>` glyph for submenu rows (`RUSTYOS-064`).
+    ChevronRight,
+    /// Minimal wastebasket outline for Trash actions (`RUSTYOS-064`).
+    Trash,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

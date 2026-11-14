@@ -69,6 +69,10 @@ impl RustyCompositorState {
     }
 
     pub(super) fn update_shell_hover_states(&mut self, pos: Point<f64, Logical>) {
+        if self.context_menu.is_some() {
+            self.update_context_menu_hover_at(pos);
+            return;
+        }
         let (primary_size, is_on_primary, local_x, local_y) = self.primary_local_coords(pos);
         let chrome_hidden =
             self.has_foreground_layer_surfaces() || self.should_hide_shell_chrome_for_fullscreen();

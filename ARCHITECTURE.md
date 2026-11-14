@@ -70,9 +70,9 @@ Event loop не должен блокироваться тяжёлыми опе�
 - `apps/rusty-shell`: опциональный внешний процесс shell-клиента
   (`--wayland`, opt-in через `RUSTYOS_EXTERNAL_SHELL=1` в `rustyos-session`),
   плюс канонические встроенные композиторные оверлеи
-  (`shell_render/`: `tokens`, `top_bar`, `dock`, `quick_settings`,
+  (`shell_render/`: `tokens`, `top_bar`, `dock`, `context_menu`, `quick_settings`,
   `spotlight_overview`, `lock_screen`, `modals`, `ssd`) для low-latency
-  взаимодействия (TopBar, Dock, Spotlight Launcher, Overview, Quick Settings,
+  взаимодействия (TopBar, Dock, Context Menus, Spotlight Launcher, Overview, Quick Settings,
   Lock Screen, Notifications, Alt+Tab HUD, Polkit/Portal/PickColor/Settings modals).
 
 ### System Services (`crates/rusty-services`)
@@ -99,8 +99,8 @@ RustyOS/
 │   ├── rusty-compositor/      # Wayland compositor, Winit & DRM/KMS backends, frame_composer, input/, state/, shell_render/, surfaces/
 │   │   └── src/
 │   │       ├── frame_composer.rs  # Backend-независимая сборка render list кадра, Z-order overlay/chrome/layer-shell, HiDPI scale, readback
-│   │       ├── state/         # RustyCompositorState, wm_windows, shell_actions, system_bridges, wayland_handlers/
-│   │       ├── shell_render/  # tokens, top_bar, dock, quick_settings, spotlight_overview, lock_screen, modals, ssd
+│   │       ├── state/         # RustyCompositorState, wm_windows, shell_actions, context_menu_actions, system_bridges, wayland_handlers/
+│   │       ├── shell_render/  # tokens, top_bar, dock, context_menu, quick_settings, spotlight_overview, lock_screen, modals, ssd
 │   │       ├── input/         # keyboard, pointer, shell_pointer, gestures
 │   │       └── surfaces/      # UiShapeCache, sdf, glyphs, xcursor
 │   ├── rusty-wm/              # Детерминированная модель WM и workspace 1..9
@@ -117,7 +117,7 @@ RustyOS/
 ├── scripts/
 │   └── install.sh
 └── docs/
-    ├── adr/                   # ADR-0001 .. ADR-0028
+    ├── adr/                   # ADR-0001 .. ADR-0029
     ├── DEVELOPMENT_ENVIRONMENT.md
     ├── GETTING_STARTED.md
     └── HARDWARE_MATRIX.md
@@ -136,7 +136,7 @@ RustyOS/
   Event loop             `calloop`                          Без блокировок presentation path
   Text / Geometry        `fontdue` + SDF/pixel caches       Независимо от host GUI toolkits
   Services               `zbus` (D-Bus), `wpctl`, `sysfs`   BlueZ, NM, notifications, SNI
-  Config                 TOML (`~/.config/rustyos/config.toml`) Display scales, VRR, XKB, UI, live save/reload
+  Config                 TOML (`~/.config/rustyos/config.toml`) Display scales, VRR, XKB, UI, `[dock]`, live save/reload
   Session                `systemd/logind` + `rustyos-session` В разработке Фаза 10 (packaging)
 
 ## 5. Потоки и ошибки
@@ -167,6 +167,8 @@ RustyOS/
   3. Клавиатура: `input/mod.rs` (`KeyIntercept`) -> `input/keyboard.rs` (`dispatch_key_intercept`, `classify_keyboard_input`, `match_shortcut`).
 - **Настройки `UserConfig` и live save/reload:**
   - `config.rs` (`UserConfig`, `parse_toml`, `to_toml_string`, `save_to_path`); `state/shell_actions.rs` (`sync_and_save_user_config`, `apply_user_config`, `reload_user_config`); `config_path` = `None` в тестах и `default_user_config_path()` в `winit_backend.rs`/`drm_backend.rs`.
+- **Контекстные меню (ПКМ Desktop / Dock):**
+  - `shell_render/context_menu.rs` (`ContextMenuState`, `ContextMenuEntry`, `ContextMenuAction`, `compute_context_menu_layout`, `generate_context_menu_elements`) + `ShellOverlayView::ContextMenu` в `shell_render/mod.rs`; `state/context_menu_actions.rs` (`open_desktop_context_menu`, `open_dock_context_menu`, `execute_context_menu_action`, `drain_trash_empty_results`) + `input/{pointer,shell_pointer,keyboard}.rs`.
 - **Нетривиальные сигнатуры и lint-правила:**
   - `KeyboardHandle::change_repeat_info(&self, rate: i32, delay: i32)` (порядок `(rate, delay)`, обратный к `seat.add_keyboard(xkb, delay, rate)`).
   - `set_output_rotation(id, rot, use_winit_fbo_flip)`: `use_winit_fbo_flip = name.eq_ignore_ascii_case("winit-0")` (`true` для Winit FBO, `false` для DRM/KMS).

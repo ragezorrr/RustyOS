@@ -70,6 +70,8 @@ pub(super) enum KeyIntercept {
     SettingsPrevTab,
     ReloadConfig,
     TopBarMenuClose,
+    ContextMenuAlt(bool),
+    ContextMenuKey(smithay::input::keyboard::Keysym),
     LauncherClose,
     LauncherActivate,
     LauncherMove(isize),

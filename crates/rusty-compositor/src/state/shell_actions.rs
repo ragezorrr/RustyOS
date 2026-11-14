@@ -24,6 +24,7 @@ impl RustyCompositorState {
     pub fn toggle_launcher(&mut self) {
         self.launcher_active = !self.launcher_active;
         if self.launcher_active {
+            self.close_context_menu();
             self.close_top_bar_menu();
             self.window_switcher = None;
             self.close_quick_settings();
@@ -46,6 +47,7 @@ impl RustyCompositorState {
         self.quick_settings_active = !self.quick_settings_active;
         self.qs_slider_drag = None;
         if self.quick_settings_active {
+            self.close_context_menu();
             self.close_top_bar_menu();
             self.window_switcher = None;
             self.close_launcher();
@@ -68,6 +70,7 @@ impl RustyCompositorState {
         if self.active_top_bar_menu == Some(menu) {
             self.close_top_bar_menu();
         } else {
+            self.close_context_menu();
             self.close_quick_settings();
             self.close_launcher();
             self.active_top_bar_menu = Some(menu);
@@ -217,6 +220,7 @@ impl RustyCompositorState {
             self.polkit_password.clear();
             self.abort_portal_activity_for_lock();
             self.close_settings();
+            self.close_context_menu();
             self.window_switcher = None;
             self.dnd_icon = None;
             self.close_launcher();
@@ -602,6 +606,7 @@ impl RustyCompositorState {
     pub fn toggle_overview(&mut self) {
         self.overview_active = !self.overview_active;
         if self.overview_active {
+            self.close_context_menu();
             self.close_launcher();
             self.close_quick_settings();
             self.close_settings();
@@ -702,7 +707,7 @@ impl RustyCompositorState {
         }
     }
 
-    fn dock_preferred_candidates(
+    pub(in crate::state) fn dock_preferred_candidates(
         hit: crate::shell_render::DockHit,
     ) -> Option<&'static [&'static str]> {
         const FILES: &[&str] = &["nautilus", "dolphin", "thunar", "nemo", "pcmanfm"];
@@ -852,6 +857,7 @@ impl RustyCompositorState {
             return;
         }
         self.settings_active = true;
+        self.close_context_menu();
         self.close_launcher();
         self.close_quick_settings();
         self.close_overview();

@@ -69,6 +69,9 @@ pub const DOCK_UTILITY_COUNT: usize = 2;
 /// SSD window frame & glass popover corner radius in logical pixels (`DESIGN.md` §12.3).
 pub const WINDOW_RADIUS: i32 = 20;
 
+/// Liquid Glass context/dropdown menu corner radius in logical pixels (`DESIGN.md` §12.3).
+pub(super) const MENU_POPOVER_RADIUS: i32 = 16;
+
 /// `TopBar` Left Menu metrics (`macOS` Menu Bar layout with `Inter` 13 px) (`RUSTYOS-038`/`049`).
 pub const TOP_BAR_LOGO_X: i32 = 12;
 pub const TOP_BAR_LOGO_W: i32 = 20;

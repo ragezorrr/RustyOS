@@ -30,6 +30,7 @@ smithay::backend::renderer::element::render_elements! {
     ScaledTexture = RelocateRenderElement<TextureRenderElement<GlesTexture>>,
 }
 
+mod context_menu;
 mod dock;
 mod lock_screen;
 mod modals;
@@ -39,9 +40,15 @@ mod ssd;
 mod tokens;
 mod top_bar;
 
+pub use context_menu::{
+    ContextMenuAction, ContextMenuEntry, ContextMenuHit, ContextMenuKeyOutcome, ContextMenuLayout,
+    ContextMenuState, ContextMenuSubmenuLayout, ContextMenuTarget, compute_context_menu_layout,
+    generate_context_menu_elements, handle_context_menu_key, hit_test_context_menu,
+    update_context_menu_hover,
+};
 pub use dock::{
-    DockHit, DockViewState, DockWindowEntry, check_dock_click, check_dock_slot, extract_app_name,
-    make_window_badge,
+    DockHit, DockViewState, DockWindowEntry, check_dock_click, check_dock_slot, dock_slot_rect,
+    extract_app_name, make_window_badge,
 };
 #[cfg(test)]
 pub(crate) use lock_screen::lock_screen_primary_row_center;
@@ -103,7 +110,8 @@ pub use top_bar::{
     tray_slot_rects, tray_slot_rects_with_layout, tray_slot_rects_with_options,
 };
 
-use dock::{dock_layout_bounds, dock_slot_rect, dock_tooltip_rect_and_label, render_dock};
+use context_menu::{render_context_menu_composite, render_context_menu_text};
+use dock::{dock_layout_bounds, dock_tooltip_rect_and_label, render_dock};
 use modals::{
     render_pick_color_composite, render_pick_color_text, render_polkit_composite,
     render_polkit_text, render_portal_composite, render_portal_text, render_settings_composite,
@@ -147,6 +155,8 @@ pub enum ShellOverlayView<'a> {
     PickColor(&'a str),
     /// Built-in System Settings modal (`RUSTYOS-061`).
     Settings(&'a SettingsRenderState<'a>),
+    /// macOS-aligned Liquid Glass right-click context menu (`RUSTYOS-064`).
+    ContextMenu(&'a ContextMenuState),
 }
 
 /// Generates custom GLES render elements for `TopBar`, `Dock`, and active shell overlays.
@@ -189,7 +199,8 @@ pub fn generate_shell_render_elements(
         | ShellOverlayView::Polkit(_)
         | ShellOverlayView::Portal(_)
         | ShellOverlayView::PickColor(_)
-        | ShellOverlayView::Settings(_) => {}
+        | ShellOverlayView::Settings(_)
+        | ShellOverlayView::ContextMenu(_) => {}
         ShellOverlayView::Spotlight(spot) => {
             render_spotlight_modal(&mut elements, width, height, spot, has_text);
         }
@@ -214,6 +225,7 @@ const fn notifications_hidden_by_overlay(overlay: ShellOverlayView<'_>) -> bool 
             | ShellOverlayView::Polkit(_)
             | ShellOverlayView::Portal(_)
             | ShellOverlayView::Settings(_)
+            | ShellOverlayView::ContextMenu(_)
     )
 }
 
@@ -226,6 +238,7 @@ const fn dock_tooltip_hidden_by_overlay(overlay: ShellOverlayView<'_>) -> bool {
             | ShellOverlayView::Polkit(_)
             | ShellOverlayView::Portal(_)
             | ShellOverlayView::Settings(_)
+            | ShellOverlayView::ContextMenu(_)
     )
 }
 
@@ -360,6 +373,9 @@ fn append_foreground_overlay_text(
         }
         ShellOverlayView::Settings(st) => {
             render_settings_text(text_cache, renderer, screen_size, st, elements);
+        }
+        ShellOverlayView::ContextMenu(ctx) => {
+            render_context_menu_text(text_cache, renderer, screen_size, ctx, true, elements);
         }
     }
 
@@ -1131,6 +1147,18 @@ fn build_foreground_overlay_shapes(
                 screen_size,
                 top_telemetry,
                 st,
+            );
+        }
+        ShellOverlayView::ContextMenu(ctx) => {
+            render_context_menu_composite(
+                &mut out,
+                shape_cache,
+                renderer,
+                screen_size,
+                top_telemetry.glass_opacity,
+                top_telemetry.reduce_transparency,
+                ctx,
+                true,
             );
         }
     }

@@ -276,6 +276,25 @@
                           Displays, Security)     
                           (ADR-0028)              
   -----------------------------------------------------------------------
+  D-037                   Фаза 8/Core UX &        accepted
+                          Desktop/Dock            
+                          (RUSTYOS-064): Единая   
+                          подсистема              
+                          ShellOverlayView::Conte 
+                          xtMenu (Liquid Glass    
+                          Popover, подменю >,     
+                          клавиатура,             
+                          мультимониторный        
+                          clamping), ПКМ-меню     
+                          Desktop и всех слотов   
+                          Dock (Open at Login,    
+                          Alt->Force Quit,        
+                          Downloads Sort By,      
+                          неблокирующий Empty     
+                          Trash) и секция [dock]  
+                          в UserConfig            
+                          (ADR-0029)              
+  -----------------------------------------------------------------------
 
 ## Открытые решения
 

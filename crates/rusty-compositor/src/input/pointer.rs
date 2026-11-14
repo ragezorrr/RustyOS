@@ -333,6 +333,13 @@ impl RustyCompositorState {
                 return;
             }
 
+            if self.context_menu.is_some()
+                && self.handle_context_menu_pointer_click(button, self.pointer_location, serial)
+                    == Some(true)
+            {
+                return;
+            }
+
             if self.settings_active {
                 let output_phys = self
                     .space
@@ -415,17 +422,30 @@ impl RustyCompositorState {
                 return;
             }
 
-            // Handle bottom Dock clicks (`RUSTYOS-023`) before Overview/windows when visible
+            // Handle bottom Dock clicks (`RUSTYOS-023` / `RUSTYOS-064`) before Overview/windows when visible
+            let (_, is_on_primary, primary_local_x, primary_local_y) =
+                self.primary_local_coords(self.pointer_location);
             let ordered_ids = self.ordered_visible_window_ids();
-            if shell_chrome_visible
+            if is_on_primary
+                && shell_chrome_visible
                 && let Some(dock_hit) = crate::shell_render::check_dock_click(
                     output_phys,
                     ordered_ids.len(),
-                    self.pointer_location.x,
-                    self.pointer_location.y,
+                    primary_local_x,
+                    primary_local_y,
                 )
             {
-                self.handle_dock_hit(dock_hit, serial);
+                if button == 273 {
+                    let alt_held = self.keyboard.modifier_state().alt;
+                    self.open_dock_context_menu(
+                        dock_hit,
+                        output_phys,
+                        self.pointer_location,
+                        alt_held,
+                    );
+                } else {
+                    self.handle_dock_hit(dock_hit, serial);
+                }
                 return;
             }
 
@@ -552,6 +572,20 @@ impl RustyCompositorState {
                 });
                 let keyboard = self.keyboard.clone();
                 keyboard.set_focus(self, None, serial);
+                if button == 273
+                    && !self.has_foreground_layer_surfaces()
+                    && (!is_on_primary
+                        || primary_local_y >= f64::from(crate::shell_render::TOP_BAR_HEIGHT))
+                {
+                    let hide_chrome = self
+                        .output_map
+                        .output_under(self.pointer_location)
+                        .is_some_and(|oid| self.should_hide_shell_chrome_for_fullscreen_on(oid));
+                    if !hide_chrome {
+                        self.open_desktop_context_menu(self.pointer_location);
+                        return;
+                    }
+                }
             }
         }
 

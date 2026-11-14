@@ -104,6 +104,7 @@ impl ClientData for ClientState {
     }
 }
 
+mod context_menu_actions;
 mod shell_actions;
 mod system_bridges;
 mod wayland_handlers;
@@ -541,6 +542,10 @@ pub struct RustyCompositorState {
     pub pending_screenshot: Option<crate::screenshot::ScreenshotRequest>,
     /// Async background PNG/clipboard completion queue (`RUSTYOS-031`).
     pub screenshot_results: crate::screenshot::ScreenshotResultQueue,
+    /// Active macOS-aligned Desktop/Dock right-click context menu (`RUSTYOS-064`).
+    pub context_menu: Option<crate::shell_render::ContextMenuState>,
+    /// Non-blocking completion channel for background `Empty Trash` cleanup (`RUSTYOS-064`).
+    pub(crate) trash_empty_rx: Option<std::sync::mpsc::Receiver<Result<usize, String>>>,
     /// Pending TTY virtual terminal switch (`Ctrl+Alt+F1..F12` -> `libseat::change_vt`).
     pub pending_vt_switch: Option<i32>,
     /// Active `Alt+Tab` window switcher HUD state (`RUSTYOS-033`).
@@ -841,6 +846,8 @@ impl RustyCompositorState {
             osd: None,
             pending_screenshot: None,
             screenshot_results: crate::screenshot::ScreenshotResultQueue::default(),
+            context_menu: None,
+            trash_empty_rx: None,
             pending_vt_switch: None,
             window_switcher: None,
             dnd_icon: None,
@@ -1173,6 +1180,7 @@ impl RustyCompositorState {
             || self.overview_active
             || self.quick_settings_active
             || self.settings_active
+            || self.context_menu.is_some()
             || self.window_switcher.is_some()
             || self.active_window_drag.is_some()
             || self.active_window_resize.is_some()
@@ -1748,6 +1756,10 @@ impl RustyCompositorState {
                 || self.quick_settings_active
                 || self.overview_active
                 || self.settings_active
+                || self
+                    .context_menu
+                    .as_ref()
+                    .is_some_and(|ctx| ctx.output_id == output_id)
                 || self.launcher_anim.current() > 0.01
                 || self.quick_settings_anim.current() > 0.01
                 || self.overview_anim.current() > 0.01;
@@ -1769,6 +1781,13 @@ impl RustyCompositorState {
     #[must_use]
     pub fn active_unoccluded_fullscreen_window_on(&self, output_id: OutputId) -> Option<WindowId> {
         if self.is_session_locked() || self.lock_screen_anim.current() > 0.01 {
+            return None;
+        }
+        if self
+            .context_menu
+            .as_ref()
+            .is_some_and(|ctx| ctx.output_id == output_id)
+        {
             return None;
         }
         if output_id == self.output_map.primary().id {

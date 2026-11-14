@@ -102,6 +102,12 @@ impl RustyCompositorState {
                 let reloaded = self.reload_user_config();
                 info!(reloaded, "Processed ReloadConfig keyboard shortcut");
             }
+            KeyIntercept::ContextMenuAlt(held) => {
+                self.sync_context_menu_alt_modifier(held);
+            }
+            KeyIntercept::ContextMenuKey(sym) => {
+                self.handle_context_menu_key_event(sym, serial);
+            }
             KeyIntercept::ToggleOverview => {
                 self.toggle_overview();
                 info!(
@@ -372,6 +378,9 @@ pub(super) fn classify_keyboard_input(
     {
         return FilterResult::Intercept(hw);
     }
+    if state.context_menu.is_some() {
+        return classify_context_menu_key(modifiers, sym, key_state);
+    }
     if key_state != KeyState::Pressed {
         return if state.window_switcher.is_some() {
             if modifiers.alt {
@@ -394,21 +403,10 @@ pub(super) fn classify_keyboard_input(
     if state.quick_settings_active && sym.raw() == Keysym::Escape.raw() {
         return FilterResult::Intercept(KeyIntercept::QuickSettingsClose);
     }
-    if state.settings_active {
-        if sym.raw() == Keysym::Escape.raw() {
-            return FilterResult::Intercept(KeyIntercept::SettingsClose);
-        }
-        if !modifiers.ctrl && !modifiers.alt && !modifiers.logo {
-            match sym {
-                Keysym::Tab | Keysym::Down => {
-                    return FilterResult::Intercept(KeyIntercept::SettingsNextTab);
-                }
-                Keysym::ISO_Left_Tab | Keysym::Up => {
-                    return FilterResult::Intercept(KeyIntercept::SettingsPrevTab);
-                }
-                _ => {}
-            }
-        }
+    if state.settings_active
+        && let Some(intercept) = classify_settings_key(modifiers, sym)
+    {
+        return FilterResult::Intercept(intercept);
     }
     if state.active_top_bar_menu.is_some() && sym.raw() == Keysym::Escape.raw() {
         return FilterResult::Intercept(KeyIntercept::TopBarMenuClose);
@@ -421,6 +419,38 @@ pub(super) fn classify_keyboard_input(
     }
     if let Some(action) = match_shortcut(modifiers, sym) {
         FilterResult::Intercept(action)
+    } else {
+        FilterResult::Forward
+    }
+}
+
+fn classify_settings_key(modifiers: ModifiersState, sym: Keysym) -> Option<KeyIntercept> {
+    if sym.raw() == Keysym::Escape.raw() {
+        return Some(KeyIntercept::SettingsClose);
+    }
+    if !modifiers.ctrl && !modifiers.alt && !modifiers.logo {
+        match sym {
+            Keysym::Tab | Keysym::Down => return Some(KeyIntercept::SettingsNextTab),
+            Keysym::ISO_Left_Tab | Keysym::Up => return Some(KeyIntercept::SettingsPrevTab),
+            _ => {}
+        }
+    }
+    None
+}
+
+fn classify_context_menu_key(
+    modifiers: ModifiersState,
+    sym: Keysym,
+    key_state: KeyState,
+) -> FilterResult<KeyIntercept> {
+    if matches!(
+        sym,
+        Keysym::Alt_L | Keysym::Alt_R | Keysym::Meta_L | Keysym::Meta_R
+    ) {
+        return FilterResult::Intercept(KeyIntercept::ContextMenuAlt(modifiers.alt));
+    }
+    if key_state == KeyState::Pressed {
+        FilterResult::Intercept(KeyIntercept::ContextMenuKey(sym))
     } else {
         FilterResult::Forward
     }

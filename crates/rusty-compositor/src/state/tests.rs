@@ -520,3 +520,294 @@ fn multi_output_settings_targets_each_display_independently_with_unplug_fallback
     let _ = std::fs::remove_dir_all(&temp_dir);
     Ok(())
 }
+
+#[test]
+fn context_menu_desktop_folder_multi_monitor_dismiss_and_actions() -> Result<(), Box<dyn Error>> {
+    use super::context_menu_actions::create_unique_desktop_folder;
+    use crate::shell_render::{ContextMenuAction, SettingsTab};
+    use rusty_wm::LayoutMode;
+    use smithay::output::{Mode, PhysicalProperties, Scale, Subpixel};
+
+    let mut display: Display<RustyCompositorState> = Display::new()?;
+    let mut event_loop: EventLoop<RustyCompositorState> = EventLoop::try_new()?;
+    let mut compositor = RustyCompositorState::new(
+        &display,
+        "wayland-rustyos-ctx-desktop-test".to_owned(),
+        event_loop.get_signal(),
+        event_loop.handle(),
+        (1280, 800).into(),
+    )?;
+    let _ = (&mut display, &mut event_loop);
+
+    let temp_dir = std::env::temp_dir().join(format!("rustyos-ctx-desk-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    let f1 = create_unique_desktop_folder(&temp_dir)?;
+    let f2 = create_unique_desktop_folder(&temp_dir)?;
+    assert_eq!(f1.file_name().and_then(|n| n.to_str()), Some("New Folder"));
+    assert_eq!(
+        f2.file_name().and_then(|n| n.to_str()),
+        Some("New Folder 2")
+    );
+
+    let dp1_id = compositor.add_output(
+        "DP-1",
+        PhysicalProperties {
+            size: (600, 340).into(),
+            subpixel: Subpixel::Unknown,
+            make: "RustyOS".to_owned(),
+            model: "DP-1".to_owned(),
+        },
+        Mode {
+            size: (2560, 1440).into(),
+            refresh: 144_000,
+        },
+        Scale::Integer(1),
+        (1280, 0).into(),
+    );
+
+    compositor.open_desktop_context_menu((1500.0, 200.0).into());
+    let ctx = compositor
+        .context_menu
+        .as_ref()
+        .ok_or("missing DP-1 menu")?;
+    assert_eq!(ctx.output_id, dp1_id);
+    assert_eq!(ctx.anchor_local, (220, 200).into());
+
+    let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+    // Outside PKM (`273`) closes old menu and returns `Some(false)` to allow immediate reopen.
+    assert_eq!(
+        compositor.handle_context_menu_pointer_click(273, (1300.0, 50.0).into(), serial),
+        Some(false)
+    );
+    assert!(compositor.context_menu.is_none());
+
+    compositor.open_desktop_context_menu((300.0, 300.0).into());
+    assert_eq!(
+        compositor.context_menu.as_ref().map(|c| c.output_id),
+        Some(compositor.output_map.primary().id)
+    );
+    // Outside LKM (`272`) dismisses cleanly and consumes the click (`Some(true)`).
+    assert_eq!(
+        compositor.handle_context_menu_pointer_click(272, (10.0, 750.0).into(), serial),
+        Some(true)
+    );
+    assert!(compositor.context_menu.is_none());
+
+    compositor.execute_context_menu_action(ContextMenuAction::DesktopDisplaySettings, serial);
+    assert!(compositor.settings_active);
+    assert_eq!(compositor.settings_tab, SettingsTab::Displays);
+    compositor.execute_context_menu_action(ContextMenuAction::DesktopChangeWallpaper, serial);
+    assert_eq!(compositor.settings_tab, SettingsTab::Appearance);
+    let initial_layout = compositor.wm.active_layout_mode();
+    compositor.execute_context_menu_action(ContextMenuAction::DesktopToggleLayoutMode, serial);
+    assert_ne!(compositor.wm.active_layout_mode(), initial_layout);
+    assert!(matches!(
+        compositor.wm.active_layout_mode(),
+        LayoutMode::Floating | LayoutMode::MasterStack
+    ));
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    Ok(())
+}
+
+#[test]
+fn context_menu_dock_window_alt_force_quit_and_open_at_login() -> Result<(), Box<dyn Error>> {
+    use crate::config::UserConfig;
+    use crate::shell_render::{ContextMenuAction, ContextMenuEntry, DockHit};
+
+    let mut display: Display<RustyCompositorState> = Display::new()?;
+    let mut event_loop: EventLoop<RustyCompositorState> = EventLoop::try_new()?;
+    let mut compositor = RustyCompositorState::new(
+        &display,
+        "wayland-rustyos-ctx-dock-test".to_owned(),
+        event_loop.get_signal(),
+        event_loop.handle(),
+        (1280, 800).into(),
+    )?;
+    let _ = (&mut display, &mut event_loop);
+
+    let temp_dir = std::env::temp_dir().join(format!("rustyos-ctx-dock-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    std::fs::create_dir_all(&temp_dir)?;
+    let cfg_path = temp_dir.join("config.toml");
+    compositor.config_path = Some(cfg_path.clone());
+
+    let w1 = compositor.wm.next_window_id();
+    let _ = compositor.wm.map_window(w1, Some((640, 480)));
+    let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+
+    compositor.open_dock_context_menu(
+        DockHit::WindowSlot(0),
+        (1280, 800).into(),
+        (640.0, 760.0).into(),
+        false,
+    );
+    let has_action = |ctx: &crate::shell_render::ContextMenuState, target: &ContextMenuAction| {
+        ctx.entries.iter().any(|entry| {
+            matches!(
+                entry,
+                ContextMenuEntry::Item { action, .. } if action == target
+            )
+        })
+    };
+    let ctx = compositor
+        .context_menu
+        .as_ref()
+        .ok_or("missing window menu")?;
+    assert!(has_action(ctx, &ContextMenuAction::WindowQuit(w1)));
+    assert!(!has_action(ctx, &ContextMenuAction::WindowForceQuit(w1)));
+
+    compositor.sync_context_menu_alt_modifier(true);
+    let ctx_alt = compositor.context_menu.as_ref().ok_or("missing alt menu")?;
+    assert!(has_action(ctx_alt, &ContextMenuAction::WindowForceQuit(w1)));
+
+    compositor.sync_context_menu_alt_modifier(false);
+    let ctx_rel = compositor
+        .context_menu
+        .as_ref()
+        .ok_or("missing norm menu")?;
+    assert!(has_action(ctx_rel, &ContextMenuAction::WindowQuit(w1)));
+
+    compositor.execute_context_menu_action(ContextMenuAction::WindowMinimize(w1), serial);
+    assert!(compositor.is_window_minimized(w1));
+    compositor.execute_context_menu_action(ContextMenuAction::WindowMoveToWorkspace(w1, 2), serial);
+    assert!(!compositor.is_window_minimized(w1));
+    assert_eq!(compositor.wm.window(w1).map(|w| w.workspace.0), Some(2));
+
+    compositor.execute_context_menu_action(
+        ContextMenuAction::DockToggleOpenAtLogin(DockHit::PinnedTerminal),
+        serial,
+    );
+    assert_eq!(compositor.user_config.autostart.len(), 1);
+    let reloaded = UserConfig::load_from_path(&cfg_path);
+    assert_eq!(reloaded.autostart, compositor.user_config.autostart);
+
+    compositor.execute_context_menu_action(
+        ContextMenuAction::DockToggleOpenAtLogin(DockHit::PinnedTerminal),
+        serial,
+    );
+    assert_eq!(compositor.user_config.autostart.len(), 0);
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    Ok(())
+}
+
+#[test]
+fn context_menu_downloads_sort_persists_toml_and_updates_items() -> Result<(), Box<dyn Error>> {
+    use crate::config::{DownloadsSortMode, UserConfig};
+    use crate::shell_render::{ContextMenuAction, ContextMenuEntry};
+
+    let mut display: Display<RustyCompositorState> = Display::new()?;
+    let mut event_loop: EventLoop<RustyCompositorState> = EventLoop::try_new()?;
+    let mut compositor = RustyCompositorState::new(
+        &display,
+        "wayland-rustyos-ctx-dl-test".to_owned(),
+        event_loop.get_signal(),
+        event_loop.handle(),
+        (1280, 800).into(),
+    )?;
+    let _ = (&mut display, &mut event_loop);
+
+    let temp_dir = std::env::temp_dir().join(format!("rustyos-ctx-dl-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    let downloads_dir = temp_dir.join("Downloads");
+    std::fs::create_dir_all(&downloads_dir)?;
+    std::fs::write(downloads_dir.join("zeta.txt"), b"tiny")?;
+    std::fs::write(downloads_dir.join("alpha.bin"), vec![42_u8; 4096])?;
+    std::fs::write(downloads_dir.join(".hidden"), b"skip")?;
+    let cfg_path = temp_dir.join("config.toml");
+    compositor.config_path = Some(cfg_path.clone());
+
+    let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+    compositor.execute_context_menu_action(
+        ContextMenuAction::DownloadsSetSort(DownloadsSortMode::Name),
+        serial,
+    );
+    assert_eq!(
+        compositor.user_config.downloads_sort,
+        DownloadsSortMode::Name
+    );
+    assert_eq!(
+        UserConfig::load_from_path(&cfg_path).downloads_sort,
+        DownloadsSortMode::Name
+    );
+
+    let by_name =
+        compositor.test_refresh_downloads_sort_and_entries(&downloads_dir, DownloadsSortMode::Name);
+    let labels: Vec<&str> = by_name
+        .iter()
+        .filter_map(|e| match e {
+            ContextMenuEntry::Item {
+                label,
+                action: ContextMenuAction::DownloadsOpenEntry(_),
+                ..
+            } => Some(label.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(labels, vec!["alpha.bin", "zeta.txt"]);
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    Ok(())
+}
+
+#[test]
+fn context_menu_trash_safe_cleanup_worker_and_drain() -> Result<(), Box<dyn Error>> {
+    use super::context_menu_actions::{empty_trash_dir_safely, trash_item_count};
+
+    let mut display: Display<RustyCompositorState> = Display::new()?;
+    let mut event_loop: EventLoop<RustyCompositorState> = EventLoop::try_new()?;
+    let mut compositor = RustyCompositorState::new(
+        &display,
+        "wayland-rustyos-ctx-trash-test".to_owned(),
+        event_loop.get_signal(),
+        event_loop.handle(),
+        (1280, 800).into(),
+    )?;
+    let _ = (&mut display, &mut event_loop);
+
+    let temp_dir = std::env::temp_dir().join(format!("rustyos-ctx-trash-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    let not_trash = temp_dir.join("NotTrash");
+    std::fs::create_dir_all(&not_trash)?;
+    assert!(empty_trash_dir_safely(&not_trash).is_err());
+
+    let outside_dir = temp_dir.join("protected_target");
+    std::fs::create_dir_all(&outside_dir)?;
+    let sentinel = outside_dir.join("keep.txt");
+    std::fs::write(&sentinel, b"must-survive")?;
+
+    let trash_root = temp_dir.join("Trash");
+    let files_dir = trash_root.join("files");
+    let info_dir = trash_root.join("info");
+    std::fs::create_dir_all(&files_dir)?;
+    std::fs::create_dir_all(&info_dir)?;
+    std::fs::write(files_dir.join("doc.txt"), b"bye")?;
+    std::fs::create_dir_all(files_dir.join("folder"))?;
+    std::fs::write(files_dir.join("folder/inner.txt"), b"nested")?;
+    std::os::unix::fs::symlink(&outside_dir, files_dir.join("link_out"))?;
+    std::fs::write(info_dir.join("doc.txt.trashinfo"), b"[Trash Info]")?;
+    assert_eq!(trash_item_count(&trash_root), 3);
+
+    compositor.spawn_empty_trash_worker_at(trash_root.clone());
+    assert!(compositor.trash_empty_rx.is_some());
+    for _ in 0..100 {
+        compositor.drain_trash_empty_results();
+        if compositor.trash_empty_rx.is_none() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(compositor.trash_empty_rx.is_none());
+    assert_eq!(trash_item_count(&trash_root), 0);
+    assert!(sentinel.exists());
+    assert!(
+        compositor
+            .notifications
+            .iter()
+            .any(|n| n.title == "Trash Emptied")
+    );
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    Ok(())
+}
