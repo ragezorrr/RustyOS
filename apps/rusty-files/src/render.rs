@@ -4,21 +4,28 @@
 //! Purple Glass dark appearance using bundled `Inter` fonts (`fontdue`) and
 //! subpixel SDF / supersampled vector icons with strict scissor clipping.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::sync::OnceLock;
 
 use fontdue::{Font, FontSettings};
 use rusty_services::file_manager::{
-    FileEntry, FileEntryKind, FileSortField, FileSortOrder, FileViewMode, FilesThemeMode,
+    DecodedPreviewImage, FileEntry, FileSortField, FileSortOrder, FileViewMode, FilesThemeMode,
     format_byte_size, format_unix_timestamp,
 };
 
+use crate::dialogs::render_dialog_overlays;
+use crate::icons::{
+    draw_chevron_aa, draw_ellipsis_glyph, draw_entry_icon, draw_folder_plus_glyph,
+    draw_search_glyph, draw_sidebar_icon, draw_sort_pill_glyph, draw_tag_outline_glyph,
+    draw_view_mode_icon,
+};
 use crate::layout::{
     ColumnLayout, FilesLayout, PopupLayout, PreviewLayout, Rect, SIDEBAR_CORNER_RADIUS,
     WINDOW_CORNER_RADIUS,
 };
-use crate::state::{
-    FilesAppState, LIST_ROW_HEIGHT, ROW_HEIGHT, SidebarIconKind, sidebar_total_height,
-};
+use crate::state::{FilesAppState, LIST_ROW_HEIGHT, ROW_HEIGHT, sidebar_total_height};
+use crate::views::{render_gallery_view, render_icons_grid, render_path_bar, render_tab_bar};
 
 const INTER_REGULAR_BYTES: &[u8] = include_bytes!("../../../assets/fonts/Inter-Regular.ttf");
 const INTER_SEMIBOLD_BYTES: &[u8] = include_bytes!("../../../assets/fonts/Inter-SemiBold.ttf");
@@ -56,35 +63,95 @@ fn semibold_font() -> Option<&'static Font> {
         .or_else(regular_font)
 }
 
-#[derive(Debug, Clone, Copy)]
-struct Palette {
-    window_bg: [u8; 4],
-    window_border: [u8; 4],
-    sidebar_bg: [u8; 4],
-    sidebar_border: [u8; 4],
-    sidebar_active: [u8; 4],
-    pill_bg: [u8; 4],
-    pill_border: [u8; 4],
-    pill_active: [u8; 4],
-    divider: [u8; 4],
-    scrollbar: [u8; 4],
-    accent: [u8; 4],
-    accent_text: [u8; 4],
-    secondary_select: [u8; 4],
-    text_primary: [u8; 4],
-    text_secondary: [u8; 4],
-    text_muted: [u8; 4],
-    row_alt: [u8; 4],
-    popup_bg: [u8; 4],
-    popup_border: [u8; 4],
-    is_dark: bool,
+#[derive(Clone, Copy, Hash, PartialEq, Eq)]
+struct GlyphKey {
+    ch: char,
+    bold: bool,
+    tenths_px: u16,
 }
 
-const fn rgba(r: u8, g: u8, b: u8, a: u8) -> [u8; 4] {
+struct CachedGlyph {
+    xmin: i32,
+    ymin: i32,
+    width: usize,
+    height: usize,
+    advance: i32,
+    bitmap: Vec<u8>,
+}
+
+thread_local! {
+    static GLYPH_CACHE: RefCell<HashMap<GlyphKey, CachedGlyph>> =
+        RefCell::new(HashMap::with_capacity(512));
+}
+
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn with_cached_glyph<R>(
+    ch: char,
+    size_px: f32,
+    bold: bool,
+    f: impl FnOnce(&CachedGlyph) -> R,
+) -> Option<R> {
+    let tenths_px = (size_px * 10.0).round().clamp(10.0, 2000.0) as u16;
+    let key = GlyphKey {
+        ch,
+        bold,
+        tenths_px,
+    };
+    GLYPH_CACHE.with(|cell| {
+        let mut map = cell.borrow_mut();
+        if map.len() > 4096 {
+            map.clear();
+        }
+        if let std::collections::hash_map::Entry::Vacant(entry) = map.entry(key) {
+            let font = if bold {
+                semibold_font()
+            } else {
+                regular_font()
+            }?;
+            let (metrics, bitmap) = font.rasterize(ch, f32::from(tenths_px) / 10.0);
+            let cached = CachedGlyph {
+                xmin: metrics.xmin,
+                ymin: metrics.ymin,
+                width: metrics.width,
+                height: metrics.height,
+                advance: (metrics.advance_width.round() as i32).max(1),
+                bitmap,
+            };
+            entry.insert(cached);
+        }
+        map.get(&key).map(f)
+    })
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Palette {
+    pub window_bg: [u8; 4],
+    pub window_border: [u8; 4],
+    pub sidebar_bg: [u8; 4],
+    pub sidebar_border: [u8; 4],
+    pub sidebar_active: [u8; 4],
+    pub pill_bg: [u8; 4],
+    pub pill_border: [u8; 4],
+    pub pill_active: [u8; 4],
+    pub divider: [u8; 4],
+    pub scrollbar: [u8; 4],
+    pub accent: [u8; 4],
+    pub accent_text: [u8; 4],
+    pub secondary_select: [u8; 4],
+    pub text_primary: [u8; 4],
+    pub text_secondary: [u8; 4],
+    pub text_muted: [u8; 4],
+    pub row_alt: [u8; 4],
+    pub popup_bg: [u8; 4],
+    pub popup_border: [u8; 4],
+    pub is_dark: bool,
+}
+
+pub(crate) const fn rgba(r: u8, g: u8, b: u8, a: u8) -> [u8; 4] {
     [r, g, b, a]
 }
 
-const fn palette_for(theme: FilesThemeMode) -> Palette {
+pub(crate) const fn palette_for(theme: FilesThemeMode) -> Palette {
     match theme {
         FilesThemeMode::LightGoldenGate => Palette {
             window_bg: rgba(255, 255, 255, 255),
@@ -133,15 +200,20 @@ const fn palette_for(theme: FilesThemeMode) -> Palette {
     }
 }
 
-struct Canvas<'a> {
-    buf: &'a mut [u8],
-    w: i32,
-    h: i32,
+pub(crate) struct Canvas<'a> {
+    pub(crate) buf: &'a mut [u8],
+    pub(crate) w: i32,
+    pub(crate) h: i32,
     clip: Option<Rect>,
 }
 
+#[inline]
+const fn div_255(v: u16) -> u16 {
+    (v + 1 + (v >> 8)) >> 8
+}
+
 impl<'a> Canvas<'a> {
-    fn new(buf: &'a mut [u8], width: u32, height: u32) -> Self {
+    pub(crate) fn new(buf: &'a mut [u8], width: u32, height: u32) -> Self {
         Self {
             buf,
             w: i32::try_from(width).unwrap_or(0),
@@ -150,11 +222,19 @@ impl<'a> Canvas<'a> {
         }
     }
 
+    fn effective_clip(&self, bounds: Rect) -> Rect {
+        let mut eff = intersect_rect(bounds, Rect::new(0, 0, self.w, self.h));
+        if let Some(sc) = self.clip {
+            eff = intersect_rect(eff, sc);
+        }
+        eff
+    }
+
     fn clear(&mut self) {
         self.buf.fill(0);
     }
 
-    fn with_clip(&mut self, rect: Rect, f: impl FnOnce(&mut Self)) {
+    pub(crate) fn with_clip(&mut self, rect: Rect, f: impl FnOnce(&mut Self)) {
         let next = match self.clip {
             Some(prev) => intersect_rect(prev, rect),
             None => rect,
@@ -163,6 +243,192 @@ impl<'a> Canvas<'a> {
         self.clip = Some(next);
         f(self);
         self.clip = saved;
+    }
+
+    /// Blits a premultiplied-BGRA sprite 1:1 without scaling inside the active clip and `bounds`.
+    #[allow(clippy::cast_sign_loss)]
+    pub(crate) fn blit_premul_sprite(
+        &mut self,
+        dst_x: i32,
+        dst_y: i32,
+        src_w: i32,
+        src_h: i32,
+        bgra_premul: &[u8],
+    ) {
+        self.blit_premul_sprite_clipped(
+            dst_x,
+            dst_y,
+            src_w,
+            src_h,
+            bgra_premul,
+            Rect::new(0, 0, self.w, self.h),
+        );
+    }
+
+    #[allow(clippy::cast_sign_loss)]
+    fn blit_premul_sprite_clipped(
+        &mut self,
+        dst_x: i32,
+        dst_y: i32,
+        src_w: i32,
+        src_h: i32,
+        bgra_premul: &[u8],
+        bounds: Rect,
+    ) {
+        if src_w <= 0 || src_h <= 0 {
+            return;
+        }
+        let eff = self.effective_clip(intersect_rect(
+            bounds,
+            Rect::new(dst_x, dst_y, src_w, src_h),
+        ));
+        if eff.w <= 0 || eff.h <= 0 {
+            return;
+        }
+        let dst_stride = usize::try_from(self.w).unwrap_or(0) * 4;
+        let src_stride = usize::try_from(src_w).unwrap_or(0) * 4;
+        let x_skip = usize::try_from(eff.x - dst_x).unwrap_or(0) * 4;
+        let row_bytes = usize::try_from(eff.w).unwrap_or(0) * 4;
+        let dst_x_bytes = usize::try_from(eff.x).unwrap_or(0) * 4;
+
+        for py in eff.y..eff.bottom() {
+            let src_off = usize::try_from(py - dst_y).unwrap_or(0) * src_stride + x_skip;
+            let dst_off = usize::try_from(py).unwrap_or(0) * dst_stride + dst_x_bytes;
+            if src_off + row_bytes > bgra_premul.len() || dst_off + row_bytes > self.buf.len() {
+                continue;
+            }
+            let src_row = &bgra_premul[src_off..src_off + row_bytes];
+            let dst_row = &mut self.buf[dst_off..dst_off + row_bytes];
+            for (dp, sp) in dst_row
+                .as_chunks_mut::<4>()
+                .0
+                .iter_mut()
+                .zip(src_row.as_chunks::<4>().0)
+            {
+                let [sb, sg, sr, sa] = *sp;
+                if sa == 0 {
+                    continue;
+                }
+                if sa == 255 {
+                    *dp = [sb, sg, sr, 255];
+                } else {
+                    let inv = 255 - u16::from(sa);
+                    let db = u16::from(dp[0]) * inv;
+                    let dg = u16::from(dp[1]) * inv;
+                    let dr = u16::from(dp[2]) * inv;
+                    let da = u16::from(dp[3]) * inv;
+                    dp[0] = (u16::from(sb) + ((db + 1 + (db >> 8)) >> 8)).min(255) as u8;
+                    dp[1] = (u16::from(sg) + ((dg + 1 + (dg >> 8)) >> 8)).min(255) as u8;
+                    dp[2] = (u16::from(sr) + ((dr + 1 + (dr >> 8)) >> 8)).min(255) as u8;
+                    dp[3] = (u16::from(sa) + ((da + 1 + (da >> 8)) >> 8)).min(255) as u8;
+                }
+            }
+        }
+    }
+
+    /// Blits a premultiplied-BGRA decoded preview image scaled smoothly inside `(dst_x, dst_y, dst_w, dst_h)`.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    pub(crate) fn blit_bgra_premul_fit(
+        &mut self,
+        dst_x: i32,
+        dst_y: i32,
+        dst_w: i32,
+        dst_h: i32,
+        img: &DecodedPreviewImage,
+        clip: Rect,
+    ) {
+        if dst_w <= 0 || dst_h <= 0 || img.width == 0 || img.height == 0 {
+            return;
+        }
+        let sw = i32::try_from(img.width).unwrap_or(0);
+        let sh = i32::try_from(img.height).unwrap_or(0);
+        if sw == dst_w && sh == dst_h {
+            self.blit_premul_sprite_clipped(dst_x, dst_y, sw, sh, &img.bgra_premul, clip);
+            return;
+        }
+        let eff = self.effective_clip(intersect_rect(clip, Rect::new(dst_x, dst_y, dst_w, dst_h)));
+        if eff.w <= 0 || eff.h <= 0 {
+            return;
+        }
+        let src_w_i64 = i64::from(sw);
+        let height_i64 = i64::from(sh);
+        let dw = i64::from(dst_w);
+        let dh = i64::from(dst_h);
+        let stride = img.width;
+        for py in eff.y..eff.bottom() {
+            let sy = usize::try_from(
+                ((i64::from(py - dst_y) * height_i64) / dh).clamp(0, height_i64 - 1),
+            )
+            .unwrap_or(0);
+            for px in eff.x..eff.right() {
+                let sx = usize::try_from(
+                    ((i64::from(px - dst_x) * src_w_i64) / dw).clamp(0, src_w_i64 - 1),
+                )
+                .unwrap_or(0);
+                let s_idx = (sy * stride + sx) * 4;
+                let d_idx = ((py * self.w + px) * 4) as usize;
+                if s_idx + 3 >= img.bgra_premul.len() || d_idx + 3 >= self.buf.len() {
+                    continue;
+                }
+                let sb = u16::from(img.bgra_premul[s_idx]);
+                let sg = u16::from(img.bgra_premul[s_idx + 1]);
+                let sr = u16::from(img.bgra_premul[s_idx + 2]);
+                let sa = u16::from(img.bgra_premul[s_idx + 3]);
+                if sa == 0 {
+                    continue;
+                }
+                if sa == 255 {
+                    self.buf[d_idx] = sb as u8;
+                    self.buf[d_idx + 1] = sg as u8;
+                    self.buf[d_idx + 2] = sr as u8;
+                    self.buf[d_idx + 3] = 255;
+                } else {
+                    let inv = 255 - sa;
+                    self.buf[d_idx] =
+                        (sb + div_255(u16::from(self.buf[d_idx]) * inv)).min(255) as u8;
+                    self.buf[d_idx + 1] =
+                        (sg + div_255(u16::from(self.buf[d_idx + 1]) * inv)).min(255) as u8;
+                    self.buf[d_idx + 2] =
+                        (sr + div_255(u16::from(self.buf[d_idx + 2]) * inv)).min(255) as u8;
+                    self.buf[d_idx + 3] =
+                        (sa + div_255(u16::from(self.buf[d_idx + 3]) * inv)).min(255) as u8;
+                }
+            }
+        }
+    }
+
+    #[inline]
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    fn blend_pixel_unchecked(&mut self, x: i32, y: i32, color: [u8; 4], cov: u8) {
+        let alpha = div_255(u16::from(color[3]) * u16::from(cov));
+        if alpha == 0 {
+            return;
+        }
+        let idx = ((y * self.w + x) * 4) as usize;
+        if idx + 3 >= self.buf.len() {
+            return;
+        }
+        if alpha == 255 {
+            self.buf[idx] = color[2];
+            self.buf[idx + 1] = color[1];
+            self.buf[idx + 2] = color[0];
+            self.buf[idx + 3] = 255;
+            return;
+        }
+        let inv = 255 - alpha;
+        let sb = div_255(u16::from(color[2]) * alpha);
+        let sg = div_255(u16::from(color[1]) * alpha);
+        let sr = div_255(u16::from(color[0]) * alpha);
+
+        let db = div_255(u16::from(self.buf[idx]) * inv);
+        let dg = div_255(u16::from(self.buf[idx + 1]) * inv);
+        let dr = div_255(u16::from(self.buf[idx + 2]) * inv);
+        let da = div_255(u16::from(self.buf[idx + 3]) * inv);
+
+        self.buf[idx] = (sb + db).min(255) as u8;
+        self.buf[idx + 1] = (sg + dg).min(255) as u8;
+        self.buf[idx + 2] = (sr + dr).min(255) as u8;
+        self.buf[idx + 3] = (alpha + da).min(255) as u8;
     }
 
     #[allow(clippy::cast_sign_loss)]
@@ -175,28 +441,7 @@ impl<'a> Canvas<'a> {
         {
             return;
         }
-        let idx = ((y * self.w + x) * 4) as usize;
-        if idx + 3 >= self.buf.len() {
-            return;
-        }
-        let alpha = (u16::from(color[3]) * u16::from(cov)) / 255;
-        if alpha == 0 {
-            return;
-        }
-        let inv = 255 - alpha;
-        let sb = (u16::from(color[2]) * alpha) / 255;
-        let sg = (u16::from(color[1]) * alpha) / 255;
-        let sr = (u16::from(color[0]) * alpha) / 255;
-
-        let db = (u16::from(self.buf[idx]) * inv) / 255;
-        let dg = (u16::from(self.buf[idx + 1]) * inv) / 255;
-        let dr = (u16::from(self.buf[idx + 2]) * inv) / 255;
-        let da = (u16::from(self.buf[idx + 3]) * inv) / 255;
-
-        self.buf[idx] = u8::try_from((sb + db).min(255)).unwrap_or(255);
-        self.buf[idx + 1] = u8::try_from((sg + dg).min(255)).unwrap_or(255);
-        self.buf[idx + 2] = u8::try_from((sr + dr).min(255)).unwrap_or(255);
-        self.buf[idx + 3] = u8::try_from((alpha + da).min(255)).unwrap_or(255);
+        self.blend_pixel_unchecked(x, y, color, cov);
     }
 
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -207,64 +452,165 @@ impl<'a> Canvas<'a> {
         }
     }
 
-    fn fill_rect(&mut self, rect: Rect, color: [u8; 4]) {
-        let x0 = rect.x.max(0);
-        let y0 = rect.y.max(0);
-        let x1 = rect.right().min(self.w);
-        let y1 = rect.bottom().min(self.h);
-        for y in y0..y1 {
-            for x in x0..x1 {
-                self.blend_pixel(x, y, color, 255);
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    fn blend_sdf_clipped(&mut self, x: i32, y: i32, color: [u8; 4], signed_dist: f32) {
+        if signed_dist < 0.55 {
+            let cov = ((0.55 - signed_dist).clamp(0.0, 1.0) * 255.0).round() as u8;
+            self.blend_pixel_unchecked(x, y, color, cov);
+        }
+    }
+
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    pub(crate) fn fill_rect(&mut self, rect: Rect, color: [u8; 4]) {
+        if color[3] == 0 || rect.w <= 0 || rect.h <= 0 {
+            return;
+        }
+        let eff = self.effective_clip(rect);
+        if eff.w <= 0 || eff.h <= 0 {
+            return;
+        }
+        let stride = usize::try_from(self.w).unwrap_or(0) * 4;
+        let x0 = usize::try_from(eff.x).unwrap_or(0) * 4;
+        let x1 = usize::try_from(eff.right()).unwrap_or(0) * 4;
+        if color[3] == 255 {
+            let px_bytes = [color[2], color[1], color[0], 255];
+            let first_row_off = usize::try_from(eff.y).unwrap_or(0) * stride;
+            if first_row_off + x1 > self.buf.len() {
+                return;
+            }
+            for chunk in self.buf[first_row_off + x0..first_row_off + x1]
+                .as_chunks_mut::<4>()
+                .0
+            {
+                chunk.copy_from_slice(&px_bytes);
+            }
+            let src_start = first_row_off + x0;
+            let src_end = first_row_off + x1;
+            for y in (eff.y + 1)..eff.bottom() {
+                let row_off = usize::try_from(y).unwrap_or(0) * stride;
+                if row_off + x1 > self.buf.len() {
+                    continue;
+                }
+                self.buf.copy_within(src_start..src_end, row_off + x0);
+            }
+            return;
+        }
+
+        let alpha = u16::from(color[3]);
+        let inv = 255 - alpha;
+        let sb = div_255(u16::from(color[2]) * alpha);
+        let sg = div_255(u16::from(color[1]) * alpha);
+        let sr = div_255(u16::from(color[0]) * alpha);
+        for y in eff.y..eff.bottom() {
+            let row_off = usize::try_from(y).unwrap_or(0) * stride;
+            if row_off + x1 > self.buf.len() {
+                continue;
+            }
+            for dp in self.buf[row_off + x0..row_off + x1].as_chunks_mut::<4>().0 {
+                dp[0] = (sb + div_255(u16::from(dp[0]) * inv)).min(255) as u8;
+                dp[1] = (sg + div_255(u16::from(dp[1]) * inv)).min(255) as u8;
+                dp[2] = (sr + div_255(u16::from(dp[2]) * inv)).min(255) as u8;
+                dp[3] = (alpha + div_255(u16::from(dp[3]) * inv)).min(255) as u8;
             }
         }
     }
 
-    fn fill_rounded_rect(&mut self, rect: Rect, radius: i32, color: [u8; 4]) {
-        if rect.w <= 0 || rect.h <= 0 {
+    pub(crate) fn fill_rounded_rect(&mut self, rect: Rect, radius: i32, color: [u8; 4]) {
+        if color[3] == 0 || rect.w <= 0 || rect.h <= 0 {
             return;
         }
         let r = radius.min(rect.w / 2).min(rect.h / 2).max(0);
-        let x0 = rect.x.max(0);
-        let y0 = rect.y.max(0);
-        let x1 = rect.right().min(self.w);
-        let y1 = rect.bottom().min(self.h);
+        if r == 0 {
+            self.fill_rect(rect, color);
+            return;
+        }
+        let mid_w = rect.w - 2 * r;
+        let mid_h = rect.h - 2 * r;
+        if mid_h > 0 {
+            self.fill_rect(Rect::new(rect.x, rect.y + r, rect.w, mid_h), color);
+        }
+        if mid_w > 0 {
+            self.fill_rect(Rect::new(rect.x + r, rect.y, mid_w, r), color);
+            self.fill_rect(Rect::new(rect.x + r, rect.bottom() - r, mid_w, r), color);
+        }
 
-        for y in y0..y1 {
-            for x in x0..x1 {
-                let cov = rounded_rect_coverage(x, y, rect, r);
-                if cov > 0 {
-                    self.blend_pixel(x, y, color, cov);
+        let corners = [
+            Rect::new(rect.x, rect.y, r, r),
+            Rect::new(rect.right() - r, rect.y, r, r),
+            Rect::new(rect.x, rect.bottom() - r, r, r),
+            Rect::new(rect.right() - r, rect.bottom() - r, r, r),
+        ];
+        for c_rect in corners {
+            let eff = self.effective_clip(c_rect);
+            if eff.w <= 0 || eff.h <= 0 {
+                continue;
+            }
+            for y in eff.y..eff.bottom() {
+                for x in eff.x..eff.right() {
+                    let cov = rounded_rect_coverage(x, y, rect, r);
+                    if cov > 0 {
+                        self.blend_pixel_unchecked(x, y, color, cov);
+                    }
                 }
             }
         }
     }
 
-    fn stroke_rounded_rect(&mut self, rect: Rect, radius: i32, color: [u8; 4]) {
-        if rect.w <= 2 || rect.h <= 2 {
+    pub(crate) fn stroke_rounded_rect(&mut self, rect: Rect, radius: i32, color: [u8; 4]) {
+        if color[3] == 0 || rect.w <= 2 || rect.h <= 2 {
             return;
         }
         let r = radius.min(rect.w / 2).min(rect.h / 2).max(0);
-        let x0 = rect.x.max(0);
-        let y0 = rect.y.max(0);
-        let x1 = rect.right().min(self.w);
-        let y1 = rect.bottom().min(self.h);
+        if r == 0 {
+            self.fill_rect(Rect::new(rect.x, rect.y, rect.w, 1), color);
+            self.fill_rect(Rect::new(rect.x, rect.bottom() - 1, rect.w, 1), color);
+            self.fill_rect(Rect::new(rect.x, rect.y + 1, 1, rect.h - 2), color);
+            self.fill_rect(
+                Rect::new(rect.right() - 1, rect.y + 1, 1, rect.h - 2),
+                color,
+            );
+            return;
+        }
+
+        let mid_w = rect.w - 2 * r;
+        let mid_h = rect.h - 2 * r;
+        if mid_w > 0 {
+            self.fill_rect(Rect::new(rect.x + r, rect.y, mid_w, 1), color);
+            self.fill_rect(Rect::new(rect.x + r, rect.bottom() - 1, mid_w, 1), color);
+        }
+        if mid_h > 0 {
+            self.fill_rect(Rect::new(rect.x, rect.y + r, 1, mid_h), color);
+            self.fill_rect(Rect::new(rect.right() - 1, rect.y + r, 1, mid_h), color);
+        }
+
         let inner = Rect::new(rect.x + 1, rect.y + 1, rect.w - 2, rect.h - 2);
         let ir = (r - 1).max(0);
-
-        for y in y0..y1 {
-            for x in x0..x1 {
-                let outer_cov = rounded_rect_coverage(x, y, rect, r);
-                let inner_cov = rounded_rect_coverage(x, y, inner, ir);
-                let ring = outer_cov.saturating_sub(inner_cov);
-                if ring > 0 {
-                    self.blend_pixel(x, y, color, ring);
+        let corners = [
+            Rect::new(rect.x, rect.y, r, r),
+            Rect::new(rect.right() - r, rect.y, r, r),
+            Rect::new(rect.x, rect.bottom() - r, r, r),
+            Rect::new(rect.right() - r, rect.bottom() - r, r, r),
+        ];
+        for c_rect in corners {
+            let eff = self.effective_clip(c_rect);
+            if eff.w <= 0 || eff.h <= 0 {
+                continue;
+            }
+            for y in eff.y..eff.bottom() {
+                for x in eff.x..eff.right() {
+                    let outer_cov = rounded_rect_coverage(x, y, rect, r);
+                    let inner_cov = rounded_rect_coverage(x, y, inner, ir);
+                    let ring = outer_cov.saturating_sub(inner_cov);
+                    if ring > 0 {
+                        self.blend_pixel_unchecked(x, y, color, ring);
+                    }
                 }
             }
         }
     }
 
     #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
-    fn fill_rounded_rect_f(
+    pub(crate) fn fill_rounded_rect_f(
         &mut self,
         left: f32,
         top: f32,
@@ -273,14 +619,18 @@ impl<'a> Canvas<'a> {
         radius: f32,
         color: [u8; 4],
     ) {
+        if color[3] == 0 {
+            return;
+        }
         let cx = left + width * 0.5;
         let cy = top + height * 0.5;
-        let x0 = (left.floor() as i32 - 1).max(0);
-        let y0 = (top.floor() as i32 - 1).max(0);
-        let x1 = ((left + width).ceil() as i32 + 1).min(self.w);
-        let y1 = ((top + height).ceil() as i32 + 1).min(self.h);
-        for py in y0..y1 {
-            for px in x0..x1 {
+        let bx0 = left.floor() as i32 - 1;
+        let by0 = top.floor() as i32 - 1;
+        let bx1 = (left + width).ceil() as i32 + 1;
+        let by1 = (top + height).ceil() as i32 + 1;
+        let eff = self.effective_clip(Rect::new(bx0, by0, bx1 - bx0, by1 - by0));
+        for py in eff.y..eff.bottom() {
+            for px in eff.x..eff.right() {
                 let dist = sd_rounded_box(
                     px as f32 + 0.5 - cx,
                     py as f32 + 0.5 - cy,
@@ -288,7 +638,7 @@ impl<'a> Canvas<'a> {
                     height,
                     radius,
                 );
-                self.blend_sdf(px, py, color, dist);
+                self.blend_sdf_clipped(px, py, color, dist);
             }
         }
     }
@@ -298,7 +648,7 @@ impl<'a> Canvas<'a> {
         clippy::cast_precision_loss,
         clippy::too_many_arguments
     )]
-    fn fill_rounded_rect_vgrad_f(
+    pub(crate) fn fill_rounded_rect_vgrad_f(
         &mut self,
         left: f32,
         top: f32,
@@ -310,15 +660,19 @@ impl<'a> Canvas<'a> {
     ) {
         let cx = left + width * 0.5;
         let cy = top + height * 0.5;
-        let x0 = (left.floor() as i32 - 1).max(0);
-        let y0 = (top.floor() as i32 - 1).max(0);
-        let x1 = ((left + width).ceil() as i32 + 1).min(self.w);
-        let y1 = ((top + height).ceil() as i32 + 1).min(self.h);
+        let bx0 = left.floor() as i32 - 1;
+        let by0 = top.floor() as i32 - 1;
+        let bx1 = (left + width).ceil() as i32 + 1;
+        let by1 = (top + height).ceil() as i32 + 1;
+        let eff = self.effective_clip(Rect::new(bx0, by0, bx1 - bx0, by1 - by0));
         let inv_h = if height > 0.1 { 1.0 / height } else { 0.0 };
-        for py in y0..y1 {
+        for py in eff.y..eff.bottom() {
             let mix = (((py as f32 + 0.5) - top) * inv_h).clamp(0.0, 1.0);
             let col = lerp_rgba(top_col, bot_col, mix);
-            for px in x0..x1 {
+            if col[3] == 0 {
+                continue;
+            }
+            for px in eff.x..eff.right() {
                 let dist = sd_rounded_box(
                     px as f32 + 0.5 - cx,
                     py as f32 + 0.5 - cy,
@@ -326,7 +680,7 @@ impl<'a> Canvas<'a> {
                     height,
                     radius,
                 );
-                self.blend_sdf(px, py, col, dist);
+                self.blend_sdf_clipped(px, py, col, dist);
             }
         }
     }
@@ -336,7 +690,7 @@ impl<'a> Canvas<'a> {
         clippy::cast_precision_loss,
         clippy::too_many_arguments
     )]
-    fn stroke_rounded_rect_f(
+    pub(crate) fn stroke_rounded_rect_f(
         &mut self,
         left: f32,
         top: f32,
@@ -346,16 +700,20 @@ impl<'a> Canvas<'a> {
         thickness: f32,
         color: [u8; 4],
     ) {
+        if color[3] == 0 {
+            return;
+        }
         let cx = left + width * 0.5;
         let cy = top + height * 0.5;
         let half_t = thickness * 0.5;
         let pad = half_t.ceil() as i32 + 1;
-        let x0 = (left.floor() as i32 - pad).max(0);
-        let y0 = (top.floor() as i32 - pad).max(0);
-        let x1 = ((left + width).ceil() as i32 + pad).min(self.w);
-        let y1 = ((top + height).ceil() as i32 + pad).min(self.h);
-        for py in y0..y1 {
-            for px in x0..x1 {
+        let bx0 = left.floor() as i32 - pad;
+        let by0 = top.floor() as i32 - pad;
+        let bx1 = (left + width).ceil() as i32 + pad;
+        let by1 = (top + height).ceil() as i32 + pad;
+        let eff = self.effective_clip(Rect::new(bx0, by0, bx1 - bx0, by1 - by0));
+        for py in eff.y..eff.bottom() {
+            for px in eff.x..eff.right() {
                 let dist = sd_rounded_box(
                     px as f32 + 0.5 - cx,
                     py as f32 + 0.5 - cy,
@@ -365,7 +723,7 @@ impl<'a> Canvas<'a> {
                 )
                 .abs()
                     - half_t;
-                self.blend_sdf(px, py, color, dist);
+                self.blend_sdf_clipped(px, py, color, dist);
             }
         }
     }
@@ -376,7 +734,7 @@ impl<'a> Canvas<'a> {
     }
 
     #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
-    fn fill_circle_f(&mut self, cx: f32, cy: f32, radius: f32, color: [u8; 4]) {
+    pub(crate) fn fill_circle_f(&mut self, cx: f32, cy: f32, radius: f32, color: [u8; 4]) {
         let x0 = ((cx - radius).floor() as i32 - 1).max(0);
         let y0 = ((cy - radius).floor() as i32 - 1).max(0);
         let x1 = ((cx + radius).ceil() as i32 + 2).min(self.w);
@@ -391,7 +749,14 @@ impl<'a> Canvas<'a> {
     }
 
     #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
-    fn stroke_circle_f(&mut self, cx: f32, cy: f32, radius: f32, thickness: f32, color: [u8; 4]) {
+    pub(crate) fn stroke_circle_f(
+        &mut self,
+        cx: f32,
+        cy: f32,
+        radius: f32,
+        thickness: f32,
+        color: [u8; 4],
+    ) {
         let half_t = thickness * 0.5;
         let bound = radius + half_t + 1.5;
         let x0 = ((cx - bound).floor() as i32).max(0);
@@ -409,7 +774,7 @@ impl<'a> Canvas<'a> {
     }
 
     #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
-    fn stroke_ellipse_aa(
+    pub(crate) fn stroke_ellipse_aa(
         &mut self,
         cx: f32,
         cy: f32,
@@ -438,7 +803,7 @@ impl<'a> Canvas<'a> {
         }
     }
 
-    fn stroke_line_aa(
+    pub(crate) fn stroke_line_aa(
         &mut self,
         ax: f32,
         ay: f32,
@@ -451,7 +816,7 @@ impl<'a> Canvas<'a> {
     }
 
     #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
-    fn stroke_polyline_aa(
+    pub(crate) fn stroke_polyline_aa(
         &mut self,
         pts: &[(f32, f32)],
         closed: bool,
@@ -490,7 +855,7 @@ impl<'a> Canvas<'a> {
         clippy::cast_precision_loss,
         clippy::cast_sign_loss
     )]
-    fn fill_poly_aa(&mut self, pts: &[(f32, f32)], color: [u8; 4]) {
+    pub(crate) fn fill_poly_aa(&mut self, pts: &[(f32, f32)], color: [u8; 4]) {
         if pts.len() < 3 {
             return;
         }
@@ -516,7 +881,13 @@ impl<'a> Canvas<'a> {
         }
     }
 
-    fn draw_scrollbar(&mut self, rect: Rect, scroll_y: i32, total_h: i32, color: [u8; 4]) {
+    pub(crate) fn draw_scrollbar(
+        &mut self,
+        rect: Rect,
+        scroll_y: i32,
+        total_h: i32,
+        color: [u8; 4],
+    ) {
         if total_h <= rect.h || rect.h <= 16 {
             return;
         }
@@ -555,9 +926,9 @@ impl<'a> Canvas<'a> {
                         let idx = ((y * self.w + x) * 4) as usize;
                         if idx + 3 < self.buf.len() {
                             for ch in 0..4 {
-                                self.buf[idx + ch] = u8::try_from(
-                                    (u16::from(self.buf[idx + ch]) * u16::from(cov)) / 255,
-                                )
+                                self.buf[idx + ch] = u8::try_from(div_255(
+                                    u16::from(self.buf[idx + ch]) * u16::from(cov),
+                                ))
                                 .unwrap_or(255);
                             }
                         }
@@ -567,8 +938,13 @@ impl<'a> Canvas<'a> {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn draw_text(
+    #[allow(
+        clippy::too_many_arguments,
+        clippy::cast_possible_truncation,
+        clippy::cast_possible_wrap,
+        clippy::cast_sign_loss
+    )]
+    pub(crate) fn draw_text(
         &mut self,
         text: &str,
         x: i32,
@@ -578,62 +954,106 @@ impl<'a> Canvas<'a> {
         color: [u8; 4],
         clip: Rect,
     ) {
-        let Some(font) = (if bold {
-            semibold_font()
-        } else {
-            regular_font()
-        }) else {
+        if text.is_empty() || color[3] == 0 {
             return;
-        };
+        }
+        let mut eff = intersect_rect(clip, Rect::new(0, 0, self.w, self.h));
+        if let Some(c) = self.clip {
+            eff = intersect_rect(eff, c);
+        }
+        if eff.w <= 0 || eff.h <= 0 || y >= eff.bottom() {
+            return;
+        }
         let mut cursor_x = x;
-        #[allow(clippy::cast_possible_truncation)]
         let baseline_y = y + (size_px * 0.82).round() as i32;
 
         for ch in text.chars() {
-            let (metrics, bitmap) = font.rasterize(ch, size_px);
-            let gx0 = cursor_x + metrics.xmin;
-            #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-            let gy0 = baseline_y - metrics.ymin - metrics.height as i32;
-
-            for row in 0..metrics.height {
-                #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-                let py = gy0 + row as i32;
-                if py < clip.y || py >= clip.bottom() {
-                    continue;
-                }
-                for col in 0..metrics.width {
-                    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-                    let px = gx0 + col as i32;
-                    if px < clip.x || px >= clip.right() {
-                        continue;
-                    }
-                    let cov = bitmap[row * metrics.width + col];
-                    if cov > 0 {
-                        self.blend_pixel(px, py, color, cov);
-                    }
-                }
+            if cursor_x >= eff.right() {
+                break;
             }
-            #[allow(clippy::cast_possible_truncation)]
-            let adv = metrics.advance_width.round() as i32;
-            cursor_x += adv.max(1);
+            let adv = with_cached_glyph(ch, size_px, bold, |g| {
+                let gx0 = cursor_x + g.xmin;
+                let gy0 = baseline_y - g.ymin - g.height as i32;
+                let x_start = gx0.max(eff.x);
+                let x_end = (gx0 + g.width as i32).min(eff.right());
+                let y_start = gy0.max(eff.y);
+                let y_end = (gy0 + g.height as i32).min(eff.bottom());
+
+                if x_start < x_end && y_start < y_end {
+                    let col_start = (x_start - gx0) as usize;
+                    let span = (x_end - x_start) as usize;
+                    let dst_x0 = (x_start as usize) * 4;
+                    let dst_x1 = dst_x0 + span * 4;
+                    let dst_stride = (self.w as usize) * 4;
+                    let ca = u16::from(color[3]);
+                    let cr = u16::from(color[0]);
+                    let cg = u16::from(color[1]);
+                    let cb = u16::from(color[2]);
+                    for py in y_start..y_end {
+                        let row = (py - gy0) as usize;
+                        let src_off = row * g.width + col_start;
+                        let dst_off = (py as usize) * dst_stride;
+                        if src_off + span > g.bitmap.len() || dst_off + dst_x1 > self.buf.len() {
+                            continue;
+                        }
+                        let cov_row = &g.bitmap[src_off..src_off + span];
+                        let dst_row = &mut self.buf[dst_off + dst_x0..dst_off + dst_x1];
+                        for (dp, &cov) in dst_row.as_chunks_mut::<4>().0.iter_mut().zip(cov_row) {
+                            if cov == 0 {
+                                continue;
+                            }
+                            let a_t = ca * u16::from(cov);
+                            let alpha = (a_t + 1 + (a_t >> 8)) >> 8;
+                            if alpha == 0 {
+                                continue;
+                            }
+                            if alpha == 255 {
+                                *dp = [color[2], color[1], color[0], 255];
+                                continue;
+                            }
+                            let inv = 255 - alpha;
+                            let blue_s = cb * alpha;
+                            let green_s = cg * alpha;
+                            let red_s = cr * alpha;
+                            let blue_d = u16::from(dp[0]) * inv;
+                            let green_d = u16::from(dp[1]) * inv;
+                            let red_d = u16::from(dp[2]) * inv;
+                            let alpha_d = u16::from(dp[3]) * inv;
+                            dp[0] = (((blue_s + 1 + (blue_s >> 8)) >> 8)
+                                + ((blue_d + 1 + (blue_d >> 8)) >> 8))
+                                .min(255) as u8;
+                            dp[1] = (((green_s + 1 + (green_s >> 8)) >> 8)
+                                + ((green_d + 1 + (green_d >> 8)) >> 8))
+                                .min(255) as u8;
+                            dp[2] = (((red_s + 1 + (red_s >> 8)) >> 8)
+                                + ((red_d + 1 + (red_d >> 8)) >> 8))
+                                .min(255) as u8;
+                            dp[3] = (alpha + ((alpha_d + 1 + (alpha_d >> 8)) >> 8)).min(255) as u8;
+                        }
+                    }
+                }
+                g.advance
+            });
+            let Some(step) = adv else {
+                return;
+            };
+            cursor_x += step;
         }
     }
 
-    #[allow(clippy::cast_possible_truncation)]
-    fn measure_text(text: &str, size_px: f32, bold: bool) -> i32 {
-        let Some(font) = (if bold {
-            semibold_font()
-        } else {
-            regular_font()
-        }) else {
-            return i32::try_from(text.len()).unwrap_or(0) * 7;
-        };
-        text.chars()
-            .map(|ch| (font.metrics(ch, size_px).advance_width.round() as i32).max(1))
-            .sum()
+    pub(crate) fn measure_text(text: &str, size_px: f32, bold: bool) -> i32 {
+        let mut total = 0_i32;
+        for ch in text.chars() {
+            if let Some(adv) = with_cached_glyph(ch, size_px, bold, |g| g.advance) {
+                total += adv;
+            } else {
+                return i32::try_from(text.len()).unwrap_or(0) * 7;
+            }
+        }
+        total
     }
 
-    fn fit_text(text: &str, max_w: i32, size_px: f32, bold: bool) -> String {
+    pub(crate) fn fit_text(text: &str, max_w: i32, size_px: f32, bold: bool) -> String {
         if max_w <= 10 {
             return String::new();
         }
@@ -657,6 +1077,36 @@ impl<'a> Canvas<'a> {
         out.push_str(ellipsis);
         out
     }
+
+    /// Fits the trailing end of `text` within `max_w` (prepending `...`) for active text inputs.
+    pub(crate) fn fit_text_tail(text: &str, max_w: i32, size_px: f32, bold: bool) -> String {
+        if max_w <= 10 {
+            return String::new();
+        }
+        if Self::measure_text(text, size_px, bold) <= max_w {
+            return text.to_owned();
+        }
+        let ellipsis = "...";
+        let ell_w = Self::measure_text(ellipsis, size_px, bold);
+        let mut kept: Vec<char> = Vec::new();
+        let mut acc = 0;
+        for ch in text.chars().rev() {
+            let mut single = [0_u8; 4];
+            let s = ch.encode_utf8(&mut single);
+            let cw = Self::measure_text(s, size_px, bold);
+            if acc + cw + ell_w > max_w {
+                break;
+            }
+            kept.push(ch);
+            acc += cw;
+        }
+        kept.reverse();
+        let mut out = String::from(ellipsis);
+        for ch in kept {
+            out.push(ch);
+        }
+        out
+    }
 }
 
 fn intersect_rect(a: Rect, b: Rect) -> Rect {
@@ -668,7 +1118,7 @@ fn intersect_rect(a: Rect, b: Rect) -> Rect {
 }
 
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-fn lerp_rgba(a: [u8; 4], b: [u8; 4], t: f32) -> [u8; 4] {
+pub(crate) fn lerp_rgba(a: [u8; 4], b: [u8; 4], t: f32) -> [u8; 4] {
     let inv = 1.0 - t;
     [
         (f32::from(a[0]) * inv + f32::from(b[0]) * t).round() as u8,
@@ -764,13 +1214,27 @@ fn rounded_rect_coverage(x: i32, y: i32, rect: Rect, r: i32) -> u8 {
     }
 }
 
-/// Renders one complete frame of `rusty-files` into a caller-provided `ARGB8888` SHM buffer.
+/// Renders one complete frame of `rusty-files` (including inline fallback popups) for tests.
+#[cfg(test)]
 pub(crate) fn render_window_pixels(
     buf: &mut [u8],
     width: u32,
     height: u32,
     state: &FilesAppState,
     layout: &FilesLayout,
+) {
+    render_window_pixels_with_popup(buf, width, height, state, layout, true);
+}
+
+/// Renders one complete frame of `rusty-files` into an `ARGB8888` SHM buffer, optionally
+/// omitting inline popups when native Wayland `xdg_popup` surfaces are active.
+pub(crate) fn render_window_pixels_with_popup(
+    buf: &mut [u8],
+    width: u32,
+    height: u32,
+    state: &FilesAppState,
+    layout: &FilesLayout,
+    include_inline_popup: bool,
 ) {
     let pal = palette_for(state.theme);
     let mut c = Canvas::new(buf, width, height);
@@ -782,23 +1246,41 @@ pub(crate) fn render_window_pixels(
     render_sidebar(&mut c, state, layout, &pal);
     render_toolbar(&mut c, state, layout, &pal);
 
+    if let Some(tb) = &layout.tab_bar {
+        render_tab_bar(&mut c, tb, &pal);
+    }
+
     if let Some(banner) = layout.trash_banner_rect {
         render_trash_banner(&mut c, layout, banner, &pal);
     }
 
-    if state.view_mode == FileViewMode::List {
-        render_list_view(&mut c, state, layout, &pal);
-    } else {
-        render_miller_columns(&mut c, state, layout, &pal);
-        if let Some(preview) = &layout.preview {
-            render_preview_inspector(&mut c, state, preview, &pal);
+    match state.view_mode {
+        FileViewMode::Icons => {
+            if let Some(grid) = &layout.icons_grid {
+                render_icons_grid(&mut c, state, grid, &pal);
+            }
+        }
+        FileViewMode::Gallery => {
+            if let Some(gal) = &layout.gallery {
+                render_gallery_view(&mut c, state, gal, &pal);
+            }
+        }
+        FileViewMode::List => {
+            render_list_view(&mut c, state, layout, &pal);
+        }
+        FileViewMode::Columns => {
+            render_miller_columns(&mut c, state, layout, &pal);
+            if let Some(preview) = &layout.preview {
+                render_preview_inspector(&mut c, state, preview, &pal);
+            }
         }
     }
 
     render_status_bar(&mut c, state, layout, &pal);
+    render_dialog_overlays(&mut c, state, layout, &pal);
 
-    if let Some(popup) = &layout.popup {
-        render_popup(&mut c, popup, &pal);
+    if include_inline_popup && let Some(popup) = &layout.popup {
+        render_popup(&mut c, popup, None, &pal);
     }
 
     // Clip any outer-edge corner bleed before drawing crisp CSD hairline ring.
@@ -949,9 +1431,7 @@ fn render_toolbar_right_cluster(
             c.fill_rounded_rect(pill, 14, pal.pill_active);
             c.stroke_rounded_rect(pill, 14, pal.pill_border);
         }
-        let col = if !mode.is_stage_a_supported() {
-            pal.text_muted
-        } else if active {
+        let col = if active {
             pal.text_primary
         } else {
             pal.text_secondary
@@ -1007,41 +1487,50 @@ fn render_toolbar_search_pill(
     layout: &FilesLayout,
     pal: &Palette,
 ) {
-    c.fill_rounded_rect(layout.search_pill_rect, 16, pal.pill_bg);
-    c.stroke_rounded_rect(layout.search_pill_rect, 16, pal.pill_border);
-    let icon_cx = if state.search_active {
-        layout.search_pill_rect.x as f32 + 14.5
-    } else {
-        layout.search_pill_rect.x as f32 + (layout.search_pill_rect.w as f32) * 0.5 - 0.5
-    };
-    draw_search_glyph(
-        c,
-        icon_cx,
-        layout.search_pill_rect.y as f32 + 15.5,
-        pal.text_primary,
-    );
+    let pill = layout.search_pill_rect;
     if state.search_active {
-        let input_clip = Rect::new(
-            layout.search_pill_rect.x + 26,
-            layout.search_pill_rect.y + 2,
-            layout.search_pill_rect.w - 48,
-            28,
+        c.fill_rounded_rect(
+            Rect::new(pill.x - 1, pill.y - 1, pill.w + 2, pill.h + 2),
+            17,
+            rgba(pal.accent[0], pal.accent[1], pal.accent[2], 70),
         );
-        let (text, col) = if state.search_query.is_empty() {
-            ("Search...", pal.text_muted)
+        c.fill_rounded_rect(pill, 16, pal.window_bg);
+        c.stroke_rounded_rect(pill, 16, pal.accent);
+    } else {
+        c.fill_rounded_rect(pill, 16, pal.pill_bg);
+        c.stroke_rounded_rect(pill, 16, pal.pill_border);
+    }
+    let icon_cx = if state.search_active {
+        pill.x as f32 + 14.5
+    } else {
+        pill.x as f32 + (pill.w as f32) * 0.5 - 0.5
+    };
+    let icon_col = if state.search_active {
+        pal.accent
+    } else {
+        pal.text_primary
+    };
+    draw_search_glyph(c, icon_cx, pill.y as f32 + 15.5, icon_col);
+    if state.search_active {
+        let input_clip = Rect::new(pill.x + 26, pill.y + 2, pill.w - 48, 28);
+        let (fitted, col, text_x, caret_x) = if state.search_query.is_empty() {
+            (
+                String::from("Search..."),
+                pal.text_muted,
+                input_clip.x + 3,
+                input_clip.x,
+            )
         } else {
-            (state.search_query.as_str(), pal.text_primary)
+            let fitted =
+                Canvas::fit_text_tail(&state.search_query, (input_clip.w - 4).max(10), 12.5, false);
+            let w = Canvas::measure_text(&fitted, 12.5, false);
+            let cx = (input_clip.x + w + 1).min(input_clip.right() - 2);
+            (fitted, pal.text_primary, input_clip.x, cx)
         };
-        let fitted = Canvas::fit_text(text, input_clip.w, 12.5, false);
-        c.draw_text(
-            &fitted,
-            input_clip.x,
-            layout.search_pill_rect.y + 8,
-            12.5,
-            false,
-            col,
-            input_clip,
-        );
+        c.draw_text(&fitted, text_x, pill.y + 8, 12.5, false, col, input_clip);
+        if state.caret_visible {
+            c.fill_rect(Rect::new(caret_x, pill.y + 8, 2, 16), pal.accent);
+        }
         if !state.search_query.is_empty() {
             let cx = layout.search_clear_rect.x as f32 + 9.0;
             let cy = layout.search_clear_rect.y as f32 + 10.0;
@@ -1560,17 +2049,41 @@ fn render_status_bar(
         pal.divider,
     );
     let summary = state.status_summary();
-    let max_text_w = (layout.theme_toggle_rect.x - layout.status_bar_rect.x - 16).max(40);
-    let fitted = Canvas::fit_text(&summary, max_text_w, 11.5, false);
-    c.draw_text(
-        &fitted,
-        layout.status_bar_rect.x + 8,
-        layout.status_bar_rect.y + 6,
-        11.5,
-        false,
-        pal.text_secondary,
-        layout.status_bar_rect,
-    );
+    if layout.path_crumbs.is_empty() {
+        let max_text_w = (layout.theme_toggle_rect.x - layout.status_bar_rect.x - 16).max(40);
+        let fitted = Canvas::fit_text(&summary, max_text_w, 11.5, false);
+        c.draw_text(
+            &fitted,
+            layout.status_bar_rect.x + 8,
+            layout.status_bar_rect.y + 6,
+            11.5,
+            false,
+            pal.text_secondary,
+            layout.status_bar_rect,
+        );
+    } else {
+        render_path_bar(c, &layout.path_crumbs, pal);
+        let right_edge = layout
+            .path_crumbs
+            .last()
+            .map_or(layout.status_bar_rect.x + 12, |crumb| {
+                crumb.rect.right() + 12
+            });
+        let avail_summary = (layout.theme_toggle_rect.x - right_edge - 10).max(0);
+        if avail_summary >= 36 {
+            let fitted = Canvas::fit_text(&summary, avail_summary, 11.5, false);
+            let sum_w = Canvas::measure_text(&fitted, 11.5, false);
+            c.draw_text(
+                &fitted,
+                layout.theme_toggle_rect.x - sum_w - 10,
+                layout.status_bar_rect.y + 6,
+                11.5,
+                false,
+                pal.text_secondary,
+                layout.status_bar_rect,
+            );
+        }
+    }
 
     c.fill_rounded_rect(layout.theme_toggle_rect, 9, pal.pill_bg);
     c.stroke_rounded_rect(layout.theme_toggle_rect, 9, pal.pill_border);
@@ -1590,19 +2103,44 @@ fn render_status_bar(
     );
 }
 
-#[allow(clippy::cast_precision_loss)]
-fn render_popup(c: &mut Canvas<'_>, popup: &PopupLayout, pal: &Palette) {
-    let shadow = Rect::new(
-        popup.rect.x - 1,
-        popup.rect.y + 1,
-        popup.rect.w + 2,
-        popup.rect.h + 3,
-    );
-    c.fill_rounded_rect(shadow, 13, rgba(0, 0, 0, 18));
-    c.fill_rounded_rect(popup.rect, 12, pal.popup_bg);
-    c.stroke_rounded_rect(popup.rect, 12, pal.popup_border);
+/// Renders a standalone native `xdg_popup` surface buffer (`ARGB8888`) with soft outer shadow
+/// and hover row highlighting.
+pub(crate) fn render_popup_surface_pixels(
+    buf: &mut [u8],
+    width: u32,
+    height: u32,
+    popup: &PopupLayout,
+    hover_idx: Option<usize>,
+    theme: FilesThemeMode,
+) {
+    let pal = palette_for(theme);
+    let mut c = Canvas::new(buf, width, height);
+    c.clear();
+    render_popup(&mut c, popup, hover_idx, &pal);
+}
 
-    for item in &popup.items {
+#[allow(clippy::cast_precision_loss)]
+fn render_popup(c: &mut Canvas<'_>, popup: &PopupLayout, hover_idx: Option<usize>, pal: &Palette) {
+    let r = popup.rect;
+    c.fill_rounded_rect(
+        Rect::new(r.x - 3, r.y - 1, r.w + 6, r.h + 6),
+        15,
+        rgba(0, 0, 0, 8),
+    );
+    c.fill_rounded_rect(
+        Rect::new(r.x - 2, r.y, r.w + 4, r.h + 4),
+        14,
+        rgba(0, 0, 0, 14),
+    );
+    c.fill_rounded_rect(
+        Rect::new(r.x - 1, r.y + 1, r.w + 2, r.h + 3),
+        13,
+        rgba(0, 0, 0, 20),
+    );
+    c.fill_rounded_rect(r, 12, pal.popup_bg);
+    c.stroke_rounded_rect(r, 12, pal.popup_border);
+
+    for (idx, item) in popup.items.iter().enumerate() {
         if item.command.is_none() {
             c.fill_rect(
                 Rect::new(item.rect.x + 6, item.rect.y + 4, item.rect.w - 12, 1),
@@ -1610,6 +2148,15 @@ fn render_popup(c: &mut Canvas<'_>, popup: &PopupLayout, pal: &Palette) {
             );
             continue;
         }
+        let hovered = hover_idx == Some(idx);
+        if hovered {
+            c.fill_rounded_rect(item.rect, 6, pal.accent);
+        }
+        let fg = if hovered {
+            pal.accent_text
+        } else {
+            pal.text_primary
+        };
         if item.checked {
             let cx = item.rect.x as f32 + 10.5;
             let cy = item.rect.y as f32 + 14.5;
@@ -1621,7 +2168,7 @@ fn render_popup(c: &mut Canvas<'_>, popup: &PopupLayout, pal: &Palette) {
                 ],
                 false,
                 1.45,
-                pal.accent,
+                if hovered { pal.accent_text } else { pal.accent },
             );
         }
         let text_x = if let Some([r, g, b]) = item.swatch_rgb {
@@ -1636,383 +2183,8 @@ fn render_popup(c: &mut Canvas<'_>, popup: &PopupLayout, pal: &Palette) {
             item.rect.x + 22
         };
         let label = Canvas::fit_text(&item.label, item.rect.right() - text_x - 8, 12.5, false);
-        c.draw_text(
-            &label,
-            text_x,
-            item.rect.y + 6,
-            12.5,
-            false,
-            pal.text_primary,
-            item.rect,
-        );
+        c.draw_text(&label, text_x, item.rect.y + 6, 12.5, false, fg, item.rect);
     }
-}
-
-fn draw_sidebar_icon(c: &mut Canvas<'_>, cx: f32, cy: f32, kind: SidebarIconKind, pal: &Palette) {
-    let accent = pal.accent;
-    let neutral = pal.text_secondary;
-    match kind {
-        SidebarIconKind::Tag(tag) => {
-            let [red, green, blue] = tag.rgb();
-            c.fill_circle_f(cx, cy, 4.8, rgba(red, green, blue, 255));
-        }
-        SidebarIconKind::Recents => {
-            c.stroke_circle_f(cx, cy, 5.6, 1.25, accent);
-            c.stroke_polyline_aa(
-                &[(cx, cy - 3.2), (cx, cy + 0.3), (cx + 2.5, cy + 1.8)],
-                false,
-                1.25,
-                accent,
-            );
-        }
-        SidebarIconKind::Shared => draw_shared_people_icon(c, cx, cy, accent),
-        SidebarIconKind::Applications => draw_applications_a_icon(c, cx, cy, accent),
-        SidebarIconKind::Desktop => {
-            c.stroke_rounded_rect_f(cx - 6.5, cy - 4.8, 13.0, 8.2, 1.5, 1.2, accent);
-            c.stroke_line_aa(cx - 4.2, cy + 1.4, cx + 4.2, cy + 1.4, 0.9, accent);
-            c.stroke_line_aa(cx, cy + 3.4, cx, cy + 5.2, 1.2, accent);
-            c.stroke_line_aa(cx - 3.0, cy + 5.3, cx + 3.0, cy + 5.3, 1.2, accent);
-        }
-        SidebarIconKind::Documents => draw_dogear_document_icon(c, cx, cy, accent, 1.2),
-        SidebarIconKind::Downloads => {
-            c.stroke_circle_f(cx, cy, 5.6, 1.2, accent);
-            c.stroke_line_aa(cx, cy - 2.9, cx, cy + 2.5, 1.25, accent);
-            c.stroke_polyline_aa(
-                &[(cx - 2.4, cy + 0.4), (cx, cy + 2.8), (cx + 2.4, cy + 0.4)],
-                false,
-                1.25,
-                accent,
-            );
-        }
-        SidebarIconKind::Home => draw_home_house_icon(c, cx, cy, neutral),
-        SidebarIconKind::Volume => draw_drive_volume_icon(c, cx, cy, pal),
-        SidebarIconKind::Network => draw_network_globe_icon(c, cx, cy, accent),
-        SidebarIconKind::Trash => draw_trash_can_icon(c, cx, cy, neutral),
-    }
-}
-
-fn draw_shared_people_icon(c: &mut Canvas<'_>, cx: f32, cy: f32, col: [u8; 4]) {
-    c.stroke_circle_f(cx - 1.8, cy - 2.2, 2.0, 1.15, col);
-    c.stroke_polyline_aa(
-        &[
-            (cx - 5.2, cy + 4.2),
-            (cx - 3.8, cy + 1.4),
-            (cx + 0.2, cy + 1.4),
-            (cx + 1.6, cy + 4.2),
-        ],
-        false,
-        1.15,
-        col,
-    );
-    c.stroke_circle_f(cx + 2.8, cy - 2.4, 1.7, 1.1, col);
-    c.stroke_polyline_aa(
-        &[
-            (cx + 2.0, cy + 1.4),
-            (cx + 4.2, cy + 1.4),
-            (cx + 5.5, cy + 4.0),
-        ],
-        false,
-        1.1,
-        col,
-    );
-}
-
-fn draw_applications_a_icon(c: &mut Canvas<'_>, cx: f32, cy: f32, col: [u8; 4]) {
-    c.stroke_line_aa(cx - 4.0, cy + 4.6, cx + 0.6, cy - 4.6, 1.25, col);
-    c.stroke_line_aa(cx - 0.6, cy - 4.6, cx + 4.0, cy + 4.6, 1.25, col);
-    c.stroke_line_aa(cx - 5.0, cy + 1.8, cx + 5.0, cy + 1.8, 1.25, col);
-}
-
-fn draw_dogear_document_icon(c: &mut Canvas<'_>, cx: f32, cy: f32, col: [u8; 4], weight: f32) {
-    c.stroke_polyline_aa(
-        &[
-            (cx - 4.5, cy - 5.5),
-            (cx + 1.4, cy - 5.5),
-            (cx + 4.5, cy - 2.4),
-            (cx + 4.5, cy + 5.5),
-            (cx - 4.5, cy + 5.5),
-        ],
-        true,
-        weight,
-        col,
-    );
-    c.stroke_polyline_aa(
-        &[
-            (cx + 1.4, cy - 5.5),
-            (cx + 1.4, cy - 2.4),
-            (cx + 4.5, cy - 2.4),
-        ],
-        false,
-        weight * 0.85,
-        col,
-    );
-    c.stroke_line_aa(cx - 2.4, cy + 0.4, cx + 2.4, cy + 0.4, 1.0, col);
-    c.stroke_line_aa(cx - 2.4, cy + 2.8, cx + 1.4, cy + 2.8, 1.0, col);
-}
-
-fn draw_home_house_icon(c: &mut Canvas<'_>, cx: f32, cy: f32, col: [u8; 4]) {
-    c.stroke_polyline_aa(
-        &[(cx - 6.2, cy - 0.3), (cx, cy - 5.5), (cx + 6.2, cy - 0.3)],
-        false,
-        1.35,
-        col,
-    );
-    c.stroke_line_aa(cx + 3.2, cy - 4.5, cx + 3.2, cy - 2.8, 1.2, col);
-    c.stroke_polyline_aa(
-        &[
-            (cx - 4.4, cy - 1.2),
-            (cx - 4.4, cy + 5.0),
-            (cx + 4.4, cy + 5.0),
-            (cx + 4.4, cy - 1.2),
-        ],
-        false,
-        1.2,
-        col,
-    );
-    c.stroke_rounded_rect_f(cx - 1.5, cy + 0.8, 3.0, 4.2, 1.0, 1.05, col);
-}
-
-fn draw_drive_volume_icon(c: &mut Canvas<'_>, cx: f32, cy: f32, pal: &Palette) {
-    let (top, bot, border, led) = if pal.is_dark {
-        (
-            rgba(104, 93, 130, 255),
-            rgba(74, 65, 96, 255),
-            rgba(156, 144, 184, 255),
-            rgba(196, 185, 224, 255),
-        )
-    } else {
-        (
-            rgba(232, 236, 242, 255),
-            rgba(198, 204, 214, 255),
-            rgba(110, 118, 132, 255),
-            rgba(92, 100, 114, 255),
-        )
-    };
-    c.fill_rounded_rect_vgrad_f(cx - 6.0, cy - 4.0, 12.0, 8.2, 2.0, top, bot);
-    c.stroke_rounded_rect_f(cx - 6.0, cy - 4.0, 12.0, 8.2, 2.0, 1.1, border);
-    c.stroke_line_aa(cx - 4.4, cy + 1.5, cx + 4.4, cy + 1.5, 0.9, border);
-    c.fill_circle_f(cx + 3.2, cy + 2.7, 0.75, led);
-}
-
-fn draw_network_globe_icon(c: &mut Canvas<'_>, cx: f32, cy: f32, col: [u8; 4]) {
-    c.stroke_circle_f(cx, cy, 5.5, 1.2, col);
-    c.stroke_line_aa(cx - 5.2, cy, cx + 5.2, cy, 1.05, col);
-    c.stroke_line_aa(cx, cy - 5.2, cx, cy + 5.2, 1.05, col);
-    c.stroke_ellipse_aa(cx, cy, 2.7, 5.4, 1.05, col);
-}
-
-fn draw_trash_can_icon(c: &mut Canvas<'_>, cx: f32, cy: f32, col: [u8; 4]) {
-    c.stroke_line_aa(cx - 5.0, cy - 3.5, cx + 5.0, cy - 3.5, 1.2, col);
-    c.stroke_polyline_aa(
-        &[
-            (cx - 2.0, cy - 3.5),
-            (cx - 1.4, cy - 5.2),
-            (cx + 1.4, cy - 5.2),
-            (cx + 2.0, cy - 3.5),
-        ],
-        false,
-        1.1,
-        col,
-    );
-    c.stroke_polyline_aa(
-        &[
-            (cx - 4.0, cy - 3.5),
-            (cx - 3.2, cy + 5.2),
-            (cx + 3.2, cy + 5.2),
-            (cx + 4.0, cy - 3.5),
-        ],
-        false,
-        1.15,
-        col,
-    );
-    c.stroke_line_aa(cx - 1.3, cy - 1.3, cx - 1.0, cy + 3.4, 1.0, col);
-    c.stroke_line_aa(cx + 1.3, cy - 1.3, cx + 1.0, cy + 3.4, 1.0, col);
-}
-
-fn draw_entry_icon(
-    c: &mut Canvas<'_>,
-    cx: f32,
-    cy: f32,
-    entry: &FileEntry,
-    selected_blue: bool,
-    pal: &Palette,
-) {
-    match entry.kind {
-        FileEntryKind::Directory | FileEntryKind::MountPoint => {
-            let (back_col, top_col, bot_col, hilite) = if selected_blue {
-                (
-                    rgba(210, 232, 255, 255),
-                    rgba(255, 255, 255, 250),
-                    rgba(232, 243, 255, 245),
-                    rgba(255, 255, 255, 255),
-                )
-            } else if pal.is_dark {
-                (
-                    rgba(116, 100, 214, 255),
-                    rgba(160, 146, 252, 255),
-                    rgba(124, 108, 230, 255),
-                    rgba(196, 186, 255, 190),
-                )
-            } else {
-                (
-                    rgba(48, 138, 234, 255),
-                    rgba(114, 194, 255, 255),
-                    rgba(54, 148, 246, 255),
-                    rgba(176, 224, 255, 220),
-                )
-            };
-            // Back folder flap with beveled top tab
-            c.fill_poly_aa(
-                &[
-                    (cx - 7.0, cy - 5.8),
-                    (cx - 2.0, cy - 5.8),
-                    (cx - 0.3, cy - 4.0),
-                    (cx + 6.8, cy - 4.0),
-                    (cx + 6.8, cy - 1.8),
-                    (cx - 7.0, cy - 1.8),
-                ],
-                back_col,
-            );
-            // Front folder body with subtle vertical gradient and crisp specular lip
-            c.fill_rounded_rect_vgrad_f(cx - 7.0, cy - 3.2, 14.0, 9.2, 1.8, top_col, bot_col);
-            c.stroke_line_aa(cx - 5.5, cy - 2.8, cx + 5.5, cy - 2.8, 0.85, hilite);
-        }
-        FileEntryKind::Application => {
-            let sq_col = if selected_blue {
-                rgba(255, 255, 255, 240)
-            } else {
-                pal.accent
-            };
-            c.fill_rounded_rect_f(cx - 6.0, cy - 6.0, 12.0, 12.0, 3.0, sq_col);
-            let fg = if selected_blue {
-                pal.accent
-            } else {
-                rgba(255, 255, 255, 245)
-            };
-            c.stroke_line_aa(cx - 2.5, cy + 2.8, cx + 0.3, cy - 2.8, 1.15, fg);
-            c.stroke_line_aa(cx - 0.3, cy - 2.8, cx + 2.5, cy + 2.8, 1.15, fg);
-            c.stroke_line_aa(cx - 3.2, cy + 1.0, cx + 3.2, cy + 1.0, 1.1, fg);
-        }
-        _ => {
-            let fg = if selected_blue {
-                rgba(255, 255, 255, 235)
-            } else {
-                pal.text_secondary
-            };
-            draw_dogear_document_icon(c, cx, cy, fg, 1.15);
-        }
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn draw_chevron_aa(
-    c: &mut Canvas<'_>,
-    cx: f32,
-    cy: f32,
-    left: bool,
-    half_w: f32,
-    half_h: f32,
-    thickness: f32,
-    col: [u8; 4],
-) {
-    let dir = if left { 1.0 } else { -1.0 };
-    let pts = [
-        (cx + dir * half_w * 0.55, cy - half_h),
-        (cx - dir * half_w * 0.55, cy),
-        (cx + dir * half_w * 0.55, cy + half_h),
-    ];
-    c.stroke_polyline_aa(&pts, false, thickness, col);
-}
-
-fn draw_view_mode_icon(c: &mut Canvas<'_>, cx: f32, cy: f32, mode: FileViewMode, col: [u8; 4]) {
-    match mode {
-        FileViewMode::Icons => {
-            for dy in [-5.3_f32, 0.8] {
-                for dx in [-5.3_f32, 0.8] {
-                    c.stroke_rounded_rect_f(cx + dx, cy + dy, 4.5, 4.5, 1.0, 1.15, col);
-                }
-            }
-        }
-        FileViewMode::List => {
-            for dy in [-4.0_f32, 0.0, 4.0] {
-                c.fill_circle_f(cx - 5.2, cy + dy, 1.0, col);
-                c.stroke_line_aa(cx - 2.3, cy + dy, cx + 6.0, cy + dy, 1.3, col);
-            }
-        }
-        FileViewMode::Columns => {
-            c.stroke_rounded_rect_f(cx - 7.0, cy - 5.5, 14.0, 11.0, 2.0, 1.25, col);
-            c.stroke_line_aa(cx - 2.3, cy - 4.7, cx - 2.3, cy + 4.7, 1.15, col);
-            c.stroke_line_aa(cx + 2.3, cy - 4.7, cx + 2.3, cy + 4.7, 1.15, col);
-        }
-        FileViewMode::Gallery => {
-            c.stroke_rounded_rect_f(cx - 6.5, cy - 5.5, 13.0, 7.2, 1.4, 1.2, col);
-            for dx in [-5.4_f32, -2.1, 1.2, 4.5] {
-                c.fill_rounded_rect_f(cx + dx, cy + 3.3, 2.1, 2.1, 0.5, col);
-            }
-        }
-    }
-}
-
-fn draw_sort_pill_glyph(c: &mut Canvas<'_>, pill_x: f32, cy: f32, col: [u8; 4]) {
-    let gx = pill_x + 19.0;
-    for dy in [-4.5_f32, -1.0, 2.5] {
-        for dx in [-5.2_f32, -1.2, 2.8] {
-            c.fill_rounded_rect_f(gx + dx, cy + dy, 2.3, 2.2, 0.6, col);
-        }
-    }
-    let vx = pill_x + 38.5;
-    c.stroke_polyline_aa(
-        &[(vx - 3.0, cy - 1.3), (vx, cy + 1.8), (vx + 3.0, cy - 1.3)],
-        false,
-        1.35,
-        col,
-    );
-}
-
-fn draw_folder_plus_glyph(c: &mut Canvas<'_>, cx: f32, cy: f32, col: [u8; 4]) {
-    c.stroke_polyline_aa(
-        &[
-            (cx - 6.5, cy - 4.8),
-            (cx - 1.8, cy - 4.8),
-            (cx - 0.3, cy - 3.0),
-            (cx + 6.5, cy - 3.0),
-            (cx + 6.5, cy + 4.8),
-            (cx - 6.5, cy + 4.8),
-        ],
-        true,
-        1.25,
-        col,
-    );
-    c.stroke_line_aa(cx, cy - 0.8, cx, cy + 3.0, 1.2, col);
-    c.stroke_line_aa(cx - 1.9, cy + 1.1, cx + 1.9, cy + 1.1, 1.2, col);
-}
-
-fn draw_tag_outline_glyph(c: &mut Canvas<'_>, cx: f32, cy: f32, col: [u8; 4]) {
-    // 45-degree angled Golden Gate Finder tag outline with eyelet ring
-    c.stroke_polyline_aa(
-        &[
-            (cx - 5.2, cy - 5.2),
-            (cx - 0.6, cy - 5.5),
-            (cx + 5.6, cy + 0.7),
-            (cx + 0.7, cy + 5.6),
-            (cx - 5.5, cy - 0.6),
-        ],
-        true,
-        1.25,
-        col,
-    );
-    c.stroke_circle_f(cx - 2.3, cy - 2.3, 1.15, 0.95, col);
-}
-
-fn draw_ellipsis_glyph(c: &mut Canvas<'_>, cx: f32, cy: f32, col: [u8; 4]) {
-    for dx in [-4.5_f32, 0.0, 4.5] {
-        c.fill_circle_f(cx + dx, cy, 1.3, col);
-    }
-}
-
-fn draw_search_glyph(c: &mut Canvas<'_>, cx: f32, cy: f32, col: [u8; 4]) {
-    c.stroke_circle_f(cx - 1.2, cy - 1.2, 4.3, 1.4, col);
-    c.stroke_line_aa(cx + 1.9, cy + 1.9, cx + 5.2, cy + 5.2, 1.55, col);
 }
 
 #[cfg(test)]
@@ -2110,6 +2282,144 @@ mod tests {
             &buf[gap_above_footer..gap_above_footer + 4],
             &[255, 255, 255, 255]
         );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn stage_b_icons_gallery_tabs_and_overlays_render_within_rounded_clip() {
+        let root = std::env::temp_dir().join(format!(
+            "rustyos-files-stageb-render-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let docs = root.join("home/Documents");
+        let _ = fs::create_dir_all(docs.join("SubFolder"));
+        let _ = fs::write(docs.join("readme.txt"), "hello rusty files\n");
+        let locs = UserFileLocations::with_roots(
+            &root.join("home"),
+            &root.join("cfg"),
+            &root.join("data"),
+        );
+        let mut state = FilesAppState::new(
+            locs,
+            &StartupOptions {
+                initial_path: Some(docs),
+                ..Default::default()
+            },
+        );
+        state.complete_pending_loads_sync();
+        let (w, h) = (960_u32, 620_u32);
+        let mut buf = vec![0_u8; (w * h * 4) as usize];
+
+        state.set_view_mode(FileViewMode::Icons);
+        state.new_tab(None);
+        let icons_layout = compute_layout(&state, w, h);
+        render_window_pixels(&mut buf, w, h, &state, &icons_layout);
+        assert_eq!(&buf[0..4], &[0, 0, 0, 0]);
+
+        state.set_view_mode(FileViewMode::Gallery);
+        state.toggle_quick_look_selected();
+        let gal_ql_layout = compute_layout(&state, w, h);
+        render_window_pixels(&mut buf, w, h, &state, &gal_ql_layout);
+        assert_eq!(&buf[0..4], &[0, 0, 0, 0]);
+
+        // Search active focus ring + visible caret (`|`) when focused
+        state.quick_look = None;
+        state.search_active = true;
+        state.caret_visible = true;
+        state.set_search_query(String::from("read"));
+        let search_layout = compute_layout(&state, w, h);
+        render_window_pixels_with_popup(&mut buf, w, h, &state, &search_layout, false);
+        let pal = palette_for(state.theme);
+        let pill = search_layout.search_pill_rect;
+        let caret_y = (pill.y + 12).cast_unsigned();
+        let has_accent_caret = ((pill.x + 26)..pill.right() - 22).any(|px| {
+            let idx = ((caret_y * w + px.cast_unsigned()) * 4) as usize;
+            buf[idx + 2] == pal.accent[0]
+                && buf[idx + 1] == pal.accent[1]
+                && buf[idx] == pal.accent[2]
+        });
+        assert!(
+            has_accent_caret,
+            "Search input caret must render in accent color"
+        );
+
+        // Standalone native xdg_popup buffer renders hover highlight row cleanly
+        let popup_menu = crate::state::OpenPopupMenu::SortMenu;
+        let spec =
+            crate::layout::compute_popup_surface_spec(&state, &search_layout, &popup_menu, 8);
+        let pw = spec.surface_width.cast_unsigned();
+        let ph = spec.surface_height.cast_unsigned();
+        let mut pbuf = vec![0_u8; (pw * ph * 4) as usize];
+        render_popup_surface_pixels(&mut pbuf, pw, ph, &spec.layout, Some(1), state.theme);
+        let hovered_row = &spec.layout.items[1].rect;
+        let mid_idx = (((hovered_row.y + hovered_row.h / 2).cast_unsigned() * pw
+            + (hovered_row.x + 12).cast_unsigned())
+            * 4) as usize;
+        assert_eq!(pbuf[mid_idx + 2], pal.accent[0]);
+        assert_eq!(pbuf[mid_idx + 1], pal.accent[1]);
+        assert_eq!(pbuf[mid_idx], pal.accent[2]);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn warm_scroll_frames_render_consistently_across_all_views() {
+        let root =
+            std::env::temp_dir().join(format!("rusty_files_scroll_bench_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let docs = root.join("home/Documents");
+        assert!(fs::create_dir_all(&docs).is_ok());
+        for i in 0..36 {
+            if i % 3 == 0 {
+                assert!(fs::create_dir_all(docs.join(format!("Folder_{i:02}"))).is_ok());
+            } else {
+                assert!(
+                    fs::write(
+                        docs.join(format!("note_{i:02}.rs")),
+                        b"fn main() { println!(\"hello\"); }\n",
+                    )
+                    .is_ok()
+                );
+            }
+        }
+        let locs = UserFileLocations::with_roots(
+            &root.join("home"),
+            &root.join("cfg"),
+            &root.join("data"),
+        );
+        let mut state = FilesAppState::new(
+            locs,
+            &StartupOptions {
+                initial_path: Some(docs),
+                ..Default::default()
+            },
+        );
+        state.complete_pending_loads_sync();
+        let (w, h) = (1060_u32, 660_u32);
+        let mut buf = vec![0_u8; (w * h * 4) as usize];
+        let mut buf2 = vec![0_u8; (w * h * 4) as usize];
+
+        for mode in [
+            FileViewMode::List,
+            FileViewMode::Icons,
+            FileViewMode::Columns,
+            FileViewMode::Gallery,
+        ] {
+            state.set_view_mode(mode);
+            let layout = compute_layout(&state, w, h);
+            // Warm icon/glyph caches then verify deterministic repeat & inspect speed.
+            render_window_pixels_with_popup(&mut buf, w, h, &state, &layout, false);
+            let warm_start = std::time::Instant::now();
+            for _ in 0..5 {
+                render_window_pixels_with_popup(&mut buf2, w, h, &state, &layout, false);
+            }
+            let avg_ms = warm_start.elapsed().as_secs_f64() * 1000.0 / 5.0;
+            eprintln!("bench {mode:?} {w}x{h}: warm_avg={avg_ms:.2} ms/frame");
+            assert_eq!(buf, buf2);
+            assert_eq!(&buf2[0..4], &[0, 0, 0, 0]);
+        }
 
         let _ = fs::remove_dir_all(&root);
     }

@@ -10,3 +10,4 @@
 !.env.example
 .idea/
 .vscode/
+/docs/design/references/macos-27-golden-gate/

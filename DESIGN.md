@@ -37,6 +37,8 @@ Visual references are stored in:
 
 `docs/design/references/`
 
+Full-resolution `macOS 27 Golden Gate` reference packs downloaded locally are stored under `docs/design/references/macos-27-golden-gate/` (gitignored to avoid binary repository bloat) and cataloged in `INDEX.md` inside that directory.
+
 Before implementing or redesigning a UI component:
 
 1. Inspect the reference directory.

@@ -5,11 +5,20 @@ use std::path::PathBuf;
 
 use rusty_services::file_manager::{
     FileEntry, FileSortField, FileSortOrder, FileTagColor, FileViewMode, SidebarLocation,
+    TransferConflictDecision,
 };
 
+use crate::dialogs::{
+    DialogOverlaysLayout, compute_dialog_overlays_layout, hit_test_dialog_overlays,
+};
 use crate::state::{
     FilesAppState, LIST_ROW_HEIGHT, MILLER_COLUMN_WIDTH, OpenPopupMenu, ROW_HEIGHT,
     SIDEBAR_ROW_HEIGHT, SIDEBAR_SECTION_HEIGHT, ScrollTargetArea,
+};
+use crate::views::{
+    GalleryLayout, IconsGridLayout, PathCrumbLayout, TabBarLayout, compute_gallery_layout,
+    compute_icons_grid_layout, compute_path_breadcrumbs_layout, compute_tab_bar_layout,
+    hit_test_gallery, hit_test_icons_grid, hit_test_path_bar, hit_test_tab_bar,
 };
 
 /// Window corner radius matching macOS 27 Golden Gate (`20 px`).
@@ -107,6 +116,18 @@ pub(crate) enum PopupCommand {
     SortBy(FileSortField),
     SetSortOrder(FileSortOrder),
     NewFolder,
+    NewTab,
+    NewTabIn(PathBuf),
+    ToggleTabBar,
+    QuickLook,
+    GetInfoSelected,
+    GetInfoPath(PathBuf),
+    GoToFolder,
+    CopySelected,
+    CutSelected,
+    PasteIntoActive,
+    DuplicateSelected,
+    RenameSelected,
     ToggleShowHidden,
     ToggleTheme,
     OpenEntry(FileEntry),
@@ -133,6 +154,17 @@ pub(crate) struct PopupLayout {
     pub items: Vec<PopupItemLayout>,
 }
 
+/// Unclamped native Wayland `xdg_popup` geometry relative to the parent window.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PopupSurfaceSpec {
+    pub anchor_x: i32,
+    pub anchor_y: i32,
+    pub surface_width: i32,
+    pub surface_height: i32,
+    pub shadow_pad: i32,
+    pub layout: PopupLayout,
+}
+
 /// Semantic hit result for any left/right click inside `rusty-files`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum FilesHit {
@@ -157,6 +189,36 @@ pub(crate) enum FilesHit {
     ListHeaderSort(FileSortField),
     ListRow { row_idx: usize },
     ListEmpty,
+    IconCell { idx: usize },
+    IconsEmpty,
+    GalleryThumb { idx: usize },
+    GalleryStageOpen,
+    GalleryShowMoreInfo,
+    GalleryQuickLookBtn,
+    GalleryInfoBtn,
+    GalleryOpenBtn,
+    GalleryTrashBtn,
+    GalleryTag { path: PathBuf, color: FileTagColor },
+    TabAdd,
+    TabSelect(usize),
+    TabClose(usize),
+    PathCrumb(PathBuf),
+    QuickLookClose,
+    QuickLookPrev,
+    QuickLookNext,
+    QuickLookOpen,
+    QuickLookModalBody,
+    GetInfoClose,
+    GetInfoMoreToggle,
+    GetInfoTag { path: PathBuf, color: FileTagColor },
+    GetInfoModalBody,
+    GoToClose,
+    GoToClear,
+    GoToSuggestion(usize),
+    GoToModalBody,
+    TransferStop,
+    ConflictDecision(TransferConflictDecision),
+    InlineRenameBox,
     PreviewOpen,
     PreviewTrashOrRestore,
     PreviewTag { path: PathBuf, color: FileTagColor },
@@ -198,8 +260,13 @@ pub(crate) struct FilesLayout {
     pub list_headers: Vec<(FileSortField, Rect)>,
     pub list_rows: Vec<(usize, Rect)>,
     pub status_bar_rect: Rect,
+    pub path_crumbs: Vec<PathCrumbLayout>,
     pub theme_toggle_rect: Rect,
+    pub tab_bar: Option<TabBarLayout>,
+    pub icons_grid: Option<IconsGridLayout>,
+    pub gallery: Option<GalleryLayout>,
     pub popup: Option<PopupLayout>,
+    pub overlays: DialogOverlaysLayout,
 }
 
 struct ToolbarRects {
@@ -225,6 +292,8 @@ struct ContentAreaLayout {
     preview: Option<PreviewLayout>,
     list_headers: Vec<(FileSortField, Rect)>,
     list_rows: Vec<(usize, Rect)>,
+    icons_grid: Option<IconsGridLayout>,
+    gallery: Option<GalleryLayout>,
 }
 
 struct ListAreaLayout {
@@ -252,17 +321,22 @@ pub(crate) fn compute_layout(state: &FilesAppState, surface_w: u32, surface_h: u
     let sidebar_rows = layout_sidebar_rows(state, sidebar_rect, sidebar_clip_rect);
     let toolbar_x = sidebar_rect.right() + 12;
     let tb = layout_toolbar(state, width, toolbar_x);
+    let tab_bar = compute_tab_bar_layout(state, toolbar_x, width);
+    let base_top = if tab_bar.is_some() { 88 } else { 58 };
 
     let (trash_banner_rect, empty_trash_btn_rect, content_top) = if state.is_trash_view() {
-        let banner = Rect::new(toolbar_x, 58, width - toolbar_x - 12, 32);
-        let btn = Rect::new(banner.right() - 78, 62, 72, 24);
-        (Some(banner), Some(btn), 92)
+        let banner = Rect::new(toolbar_x, base_top, width - toolbar_x - 12, 32);
+        let btn = Rect::new(banner.right() - 78, base_top + 4, 72, 24);
+        (Some(banner), Some(btn), base_top + 34)
     } else {
-        (None, None, 58)
+        (None, None, base_top)
     };
 
     let status_bar_rect = Rect::new(toolbar_x, height - 28, width - toolbar_x - 10, 24);
     let theme_toggle_rect = Rect::new(status_bar_rect.right() - 104, status_bar_rect.y + 3, 98, 19);
+    let status_w = crate::render::Canvas::measure_text(&state.status_summary(), 11.5, false);
+    let crumbs_limit_x = (theme_toggle_rect.x - status_w - 22).max(status_bar_rect.x + 12);
+    let path_crumbs = compute_path_breadcrumbs_layout(state, status_bar_rect, crumbs_limit_x);
     let content_rect = Rect::new(
         toolbar_x,
         content_top,
@@ -271,6 +345,8 @@ pub(crate) fn compute_layout(state: &FilesAppState, surface_w: u32, surface_h: u
     );
 
     let content = layout_content_area(state, content_rect);
+    let inline_anchor = compute_inline_rename_anchor(state, content_rect, &content);
+    let overlays = compute_dialog_overlays_layout(state, width, height, inline_anchor);
 
     let mut base = FilesLayout {
         width,
@@ -304,8 +380,13 @@ pub(crate) fn compute_layout(state: &FilesAppState, surface_w: u32, surface_h: u
         list_headers: content.list_headers,
         list_rows: content.list_rows,
         status_bar_rect,
+        path_crumbs,
         theme_toggle_rect,
+        tab_bar,
+        icons_grid: content.icons_grid,
+        gallery: content.gallery,
         popup: None,
+        overlays,
     };
 
     base.popup = state
@@ -313,6 +394,53 @@ pub(crate) fn compute_layout(state: &FilesAppState, surface_w: u32, surface_h: u
         .as_ref()
         .map(|popup| compute_popup_layout(state, &base, popup));
     base
+}
+
+fn compute_inline_rename_anchor(
+    state: &FilesAppState,
+    content_rect: Rect,
+    content: &ContentAreaLayout,
+) -> Option<Rect> {
+    let rn = state.inline_rename.as_ref()?;
+    if let Some(grid) = &content.icons_grid
+        && let Some(cell) = grid.cells.iter().find(|c| c.row_idx == rn.row_idx)
+    {
+        return Some(Rect::new(
+            (cell.rect.x - 10).max(content_rect.x + 4),
+            cell.label_rect.y,
+            (cell.rect.w + 20).clamp(132, 220),
+            24,
+        ));
+    }
+    if let Some(gal) = &content.gallery {
+        return Some(Rect::new(
+            gal.info_rect.x + 12,
+            gal.info_rect.y + 10,
+            (gal.info_rect.w - 24).max(120),
+            26,
+        ));
+    }
+    if !content.list_rows.is_empty()
+        && let Some((_, row)) = content.list_rows.iter().find(|(idx, _)| *idx == rn.row_idx)
+    {
+        return Some(Rect::new(
+            row.x + 28,
+            row.y + 2,
+            (row.w - 220).clamp(160, 320),
+            (row.h - 4).max(20),
+        ));
+    }
+    if let Some(col) = content.columns.iter().find(|c| c.col_idx == rn.col_idx)
+        && let Some((_, row)) = col.rows.iter().find(|(idx, _)| *idx == rn.row_idx)
+    {
+        return Some(Rect::new(
+            row.x + 24,
+            row.y + 2,
+            (row.w - 38).max(110),
+            (row.h - 4).max(20),
+        ));
+    }
+    None
 }
 
 fn layout_toolbar(state: &FilesAppState, width: i32, toolbar_x: i32) -> ToolbarRects {
@@ -417,6 +545,26 @@ fn layout_sidebar_rows(
 }
 
 fn layout_content_area(state: &FilesAppState, content_rect: Rect) -> ContentAreaLayout {
+    if state.view_mode == FileViewMode::Icons {
+        return ContentAreaLayout {
+            columns: Vec::new(),
+            preview: None,
+            list_headers: Vec::new(),
+            list_rows: Vec::new(),
+            icons_grid: Some(compute_icons_grid_layout(state, content_rect)),
+            gallery: None,
+        };
+    }
+    if state.view_mode == FileViewMode::Gallery {
+        return ContentAreaLayout {
+            columns: Vec::new(),
+            preview: None,
+            list_headers: Vec::new(),
+            list_rows: Vec::new(),
+            icons_grid: None,
+            gallery: Some(compute_gallery_layout(state, content_rect)),
+        };
+    }
     if state.view_mode == FileViewMode::List {
         let list = layout_list_view(state, content_rect);
         return ContentAreaLayout {
@@ -424,6 +572,8 @@ fn layout_content_area(state: &FilesAppState, content_rect: Rect) -> ContentArea
             preview: None,
             list_headers: list.headers,
             list_rows: list.rows,
+            icons_grid: None,
+            gallery: None,
         };
     }
 
@@ -439,10 +589,11 @@ fn layout_content_area(state: &FilesAppState, content_rect: Rect) -> ContentArea
     };
     let max_overflow = (total_cols_w + preview_reserve - content_rect.w).max(0);
     let scroll_x = if max_overflow > 0 {
-        state
-            .column_scroll_x
-            .clamp(0, max_overflow)
-            .max(max_overflow)
+        if state.follow_right_column {
+            max_overflow
+        } else {
+            state.column_scroll_x.clamp(0, max_overflow)
+        }
     } else {
         0
     };
@@ -473,6 +624,8 @@ fn layout_content_area(state: &FilesAppState, content_rect: Rect) -> ContentArea
         preview,
         list_headers: Vec::new(),
         list_rows: Vec::new(),
+        icons_grid: None,
+        gallery: None,
     }
 }
 
@@ -555,23 +708,26 @@ fn layout_list_view(state: &FilesAppState, content_rect: Rect) -> ListAreaLayout
     ListAreaLayout { headers, rows }
 }
 
-fn compute_popup_layout(
-    state: &FilesAppState,
-    layout: &FilesLayout,
-    popup: &OpenPopupMenu,
-) -> PopupLayout {
-    let (anchor_x, anchor_y, menu_w, entries) = build_popup_entries(state, layout, popup);
+fn measure_popup_height(entries: &[PopupRowSpec]) -> i32 {
     let row_h = 28_i32;
     let sep_h = 9_i32;
     let mut total_h = 12_i32;
-    for (_, _, _, cmd) in &entries {
+    for (_, _, _, cmd) in entries {
         total_h += if cmd.is_some() { row_h } else { sep_h };
     }
+    total_h
+}
 
-    let x = anchor_x.clamp(8, (layout.width - menu_w - 8).max(8));
-    let y = anchor_y.clamp(8, (layout.height - total_h - 8).max(8));
+fn build_popup_items(
+    x: i32,
+    y: i32,
+    menu_w: i32,
+    total_h: i32,
+    entries: Vec<PopupRowSpec>,
+) -> PopupLayout {
+    let row_h = 28_i32;
+    let sep_h = 9_i32;
     let rect = Rect::new(x, y, menu_w, total_h);
-
     let mut items = Vec::with_capacity(entries.len());
     let mut cy = y + 6;
     for (label, checked, swatch_rgb, command) in entries {
@@ -586,6 +742,39 @@ fn compute_popup_layout(
         cy += h;
     }
     PopupLayout { rect, items }
+}
+
+fn compute_popup_layout(
+    state: &FilesAppState,
+    layout: &FilesLayout,
+    popup: &OpenPopupMenu,
+) -> PopupLayout {
+    let (anchor_x, anchor_y, menu_w, entries) = build_popup_entries(state, layout, popup);
+    let total_h = measure_popup_height(&entries);
+    let x = anchor_x.clamp(8, (layout.width - menu_w - 8).max(8));
+    let y = anchor_y.clamp(8, (layout.height - total_h - 8).max(8));
+    build_popup_items(x, y, menu_w, total_h, entries)
+}
+
+/// Computes an unconstrained `xdg_popup` surface spec so menus can extend outside the parent window.
+pub(crate) fn compute_popup_surface_spec(
+    state: &FilesAppState,
+    layout: &FilesLayout,
+    popup: &OpenPopupMenu,
+    shadow_pad: i32,
+) -> PopupSurfaceSpec {
+    let (anchor_x, anchor_y, menu_w, entries) = build_popup_entries(state, layout, popup);
+    let total_h = measure_popup_height(&entries);
+    let pad = shadow_pad.max(0);
+    let popup_layout = build_popup_items(pad, pad, menu_w, total_h, entries);
+    PopupSurfaceSpec {
+        anchor_x,
+        anchor_y,
+        surface_width: menu_w + pad * 2,
+        surface_height: total_h + pad * 2,
+        shadow_pad: pad,
+        layout: popup_layout,
+    }
 }
 
 type PopupRowSpec = (String, bool, Option<[u8; 3]>, Option<PopupCommand>);
@@ -655,28 +844,40 @@ fn sort_menu_rows(state: &FilesAppState) -> Vec<PopupRowSpec> {
 }
 
 fn actions_menu_rows(state: &FilesAppState) -> Vec<PopupRowSpec> {
-    let mut rows = vec![(
-        String::from("New Folder"),
-        false,
-        None,
-        Some(PopupCommand::NewFolder),
-    )];
-    if let Some(entry) = state.selected_entry() {
-        if state.is_trash_view() {
-            rows.push((
-                String::from("Put Back"),
-                false,
-                None,
-                Some(PopupCommand::RestoreEntry(entry.clone())),
-            ));
-        } else {
-            rows.push((
-                String::from("Move to Trash"),
-                false,
-                None,
-                Some(PopupCommand::MoveToTrash(entry.clone())),
-            ));
-        }
+    let mut rows = vec![
+        (
+            String::from("New Folder"),
+            false,
+            None,
+            Some(PopupCommand::NewFolder),
+        ),
+        (
+            String::from("New Tab"),
+            false,
+            None,
+            Some(PopupCommand::NewTab),
+        ),
+        (
+            String::from("Go to Folder..."),
+            false,
+            None,
+            Some(PopupCommand::GoToFolder),
+        ),
+        (
+            String::from("Show Tab Bar"),
+            state.tab_bar_visible(),
+            None,
+            Some(PopupCommand::ToggleTabBar),
+        ),
+    ];
+    append_selection_action_rows(state, &mut rows);
+    if !state.is_trash_view() && state.clipboard.is_some() {
+        rows.push((
+            String::from("Paste Item"),
+            false,
+            None,
+            Some(PopupCommand::PasteIntoActive),
+        ));
     }
     rows.push((
         String::from("Empty Trash"),
@@ -704,6 +905,64 @@ fn actions_menu_rows(state: &FilesAppState) -> Vec<PopupRowSpec> {
     rows
 }
 
+fn append_selection_action_rows(state: &FilesAppState, rows: &mut Vec<PopupRowSpec>) {
+    let Some(entry) = state.selected_entry() else {
+        return;
+    };
+    rows.push((String::new(), false, None, None));
+    rows.push((
+        String::from("Quick Look"),
+        false,
+        None,
+        Some(PopupCommand::QuickLook),
+    ));
+    rows.push((
+        String::from("Get Info"),
+        false,
+        None,
+        Some(PopupCommand::GetInfoSelected),
+    ));
+    if state.is_trash_view() {
+        rows.push((
+            String::from("Put Back"),
+            false,
+            None,
+            Some(PopupCommand::RestoreEntry(entry.clone())),
+        ));
+    } else {
+        rows.push((
+            String::from("Rename..."),
+            false,
+            None,
+            Some(PopupCommand::RenameSelected),
+        ));
+        rows.push((
+            String::from("Copy"),
+            false,
+            None,
+            Some(PopupCommand::CopySelected),
+        ));
+        rows.push((
+            String::from("Cut"),
+            false,
+            None,
+            Some(PopupCommand::CutSelected),
+        ));
+        rows.push((
+            String::from("Duplicate"),
+            false,
+            None,
+            Some(PopupCommand::DuplicateSelected),
+        ));
+        rows.push((
+            String::from("Move to Trash"),
+            false,
+            None,
+            Some(PopupCommand::MoveToTrash(entry.clone())),
+        ));
+    }
+}
+
 fn tag_menu_rows(state: &FilesAppState, target_path: &std::path::Path) -> Vec<PopupRowSpec> {
     let assigned = state.tags_for(target_path);
     FileTagColor::ALL
@@ -725,35 +984,33 @@ fn tag_menu_rows(state: &FilesAppState, target_path: &std::path::Path) -> Vec<Po
 fn context_menu_rows(state: &FilesAppState, entry: Option<&FileEntry>) -> Vec<PopupRowSpec> {
     let mut rows = Vec::new();
     if let Some(item) = entry {
-        rows.push((
-            String::from("Open"),
-            false,
-            None,
-            Some(PopupCommand::OpenEntry(item.clone())),
-        ));
-        if state.is_trash_view() {
-            rows.push((
-                String::from("Put Back"),
-                false,
-                None,
-                Some(PopupCommand::RestoreEntry(item.clone())),
-            ));
-        } else {
-            rows.push((
-                String::from("Move to Trash"),
-                false,
-                None,
-                Some(PopupCommand::MoveToTrash(item.clone())),
-            ));
-            rows.push((String::new(), false, None, None));
-            rows.extend(tag_menu_rows(state, &item.path));
-        }
+        append_context_item_rows(state, item, &mut rows);
     } else {
         rows.push((
             String::from("New Folder"),
             false,
             None,
             Some(PopupCommand::NewFolder),
+        ));
+        rows.push((
+            String::from("New Tab"),
+            false,
+            None,
+            Some(PopupCommand::NewTab),
+        ));
+        if !state.is_trash_view() && state.clipboard.is_some() {
+            rows.push((
+                String::from("Paste Item"),
+                false,
+                None,
+                Some(PopupCommand::PasteIntoActive),
+            ));
+        }
+        rows.push((
+            String::from("Get Info"),
+            false,
+            None,
+            Some(PopupCommand::GetInfoSelected),
         ));
         rows.push((
             String::from("Show Hidden Files"),
@@ -772,6 +1029,77 @@ fn context_menu_rows(state: &FilesAppState, entry: Option<&FileEntry>) -> Vec<Po
         ));
     }
     rows
+}
+
+fn append_context_item_rows(state: &FilesAppState, item: &FileEntry, rows: &mut Vec<PopupRowSpec>) {
+    rows.push((
+        String::from("Open"),
+        false,
+        None,
+        Some(PopupCommand::OpenEntry(item.clone())),
+    ));
+    if item.is_navigable_dir() {
+        rows.push((
+            String::from("Open in New Tab"),
+            false,
+            None,
+            Some(PopupCommand::NewTabIn(item.path.clone())),
+        ));
+    }
+    rows.push((
+        String::from("Quick Look"),
+        false,
+        None,
+        Some(PopupCommand::QuickLook),
+    ));
+    rows.push((
+        String::from("Get Info"),
+        false,
+        None,
+        Some(PopupCommand::GetInfoPath(item.path.clone())),
+    ));
+    if state.is_trash_view() {
+        rows.push((
+            String::from("Put Back"),
+            false,
+            None,
+            Some(PopupCommand::RestoreEntry(item.clone())),
+        ));
+    } else {
+        rows.push((String::new(), false, None, None));
+        rows.push((
+            String::from("Rename..."),
+            false,
+            None,
+            Some(PopupCommand::RenameSelected),
+        ));
+        rows.push((
+            String::from("Copy"),
+            false,
+            None,
+            Some(PopupCommand::CopySelected),
+        ));
+        rows.push((
+            String::from("Cut"),
+            false,
+            None,
+            Some(PopupCommand::CutSelected),
+        ));
+        rows.push((
+            String::from("Duplicate"),
+            false,
+            None,
+            Some(PopupCommand::DuplicateSelected),
+        ));
+        rows.push((
+            String::from("Move to Trash"),
+            false,
+            None,
+            Some(PopupCommand::MoveToTrash(item.clone())),
+        ));
+        rows.push((String::new(), false, None, None));
+        rows.extend(tag_menu_rows(state, &item.path));
+    }
 }
 
 /// Resolves which resize edge (if any) covers `(px, py)`.
@@ -815,6 +1143,9 @@ pub(crate) fn hit_test(layout: &FilesLayout, px: f64, py: f64) -> Option<FilesHi
             }
         }
         return None;
+    }
+    if let Some(hit) = hit_test_dialog_overlays(&layout.overlays, px, py) {
+        return Some(hit);
     }
 
     if let Some(hit) = hit_test_chrome(layout, px, py) {
@@ -862,10 +1193,18 @@ fn hit_test_chrome(layout: &FilesLayout, px: f64, py: f64) -> Option<FilesHit> {
     if layout.search_pill_rect.contains_f64(px, py) {
         return Some(FilesHit::SearchToggle);
     }
+    if let Some(tb) = &layout.tab_bar
+        && let Some(hit) = hit_test_tab_bar(tb, px, py)
+    {
+        return Some(hit);
+    }
     if let Some(btn) = layout.empty_trash_btn_rect
         && btn.contains_f64(px, py)
     {
         return Some(FilesHit::EmptyTrashBanner);
+    }
+    if let Some(hit) = hit_test_path_bar(&layout.path_crumbs, px, py) {
+        return Some(hit);
     }
     if layout.theme_toggle_rect.contains_f64(px, py) {
         return Some(FilesHit::ThemeFooterToggle);
@@ -890,6 +1229,14 @@ fn hit_test_body(layout: &FilesLayout, px: f64, py: f64) -> Option<FilesHit> {
 
     if !layout.content_rect.contains_f64(px, py) {
         return None;
+    }
+
+    if let Some(grid) = &layout.icons_grid {
+        return hit_test_icons_grid(grid, px, py);
+    }
+
+    if let Some(gal) = &layout.gallery {
+        return hit_test_gallery(gal, px, py);
     }
 
     if let Some(preview) = &layout.preview
@@ -952,6 +1299,14 @@ pub(crate) fn scroll_area_at(layout: &FilesLayout, px: f64, py: f64) -> Option<S
     }
     if !layout.content_rect.contains_f64(px, py) {
         return None;
+    }
+    if layout.icons_grid.is_some() {
+        return Some(ScrollTargetArea::Icons);
+    }
+    if let Some(gal) = &layout.gallery
+        && !gal.info_rect.contains_f64(px, py)
+    {
+        return Some(ScrollTargetArea::GalleryStrip);
     }
     if !layout.list_headers.is_empty() {
         return Some(ScrollTargetArea::List);
@@ -1035,6 +1390,103 @@ mod tests {
         assert!(narrow.view_pill_rect.right() < narrow.sort_pill_rect.x);
         assert!(narrow.sort_pill_rect.right() < narrow.action_pill_rect.x);
         assert!(narrow.action_pill_rect.right() < narrow.search_pill_rect.x);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn stage_b_views_tabs_crumbs_and_overlays_hit_test() {
+        let (mut state, root) = test_state();
+        let docs = state.locations.home.join("Documents");
+        let _ = std::fs::create_dir_all(&docs);
+        state.navigate_to_directory(docs.clone());
+        state.complete_pending_loads_sync();
+
+        state.set_view_mode(FileViewMode::Icons);
+        let icons_layout = compute_layout(&state, 1060, 660);
+        assert!(icons_layout.icons_grid.is_some());
+        if let Some(crumb) = icons_layout.path_crumbs.last() {
+            assert_eq!(
+                hit_test(
+                    &icons_layout,
+                    f64::from(crumb.rect.x + 6),
+                    f64::from(crumb.rect.y + 6)
+                ),
+                Some(FilesHit::PathCrumb(crumb.path.clone()))
+            );
+        }
+
+        state.new_tab(None);
+        state.set_view_mode(FileViewMode::Gallery);
+        let gal_layout = compute_layout(&state, 1060, 660);
+        assert!(gal_layout.tab_bar.is_some());
+        if let Some(tb) = &gal_layout.tab_bar {
+            assert_eq!(
+                hit_test(
+                    &gal_layout,
+                    f64::from(tb.add_rect.x + 8),
+                    f64::from(tb.add_rect.y + 8)
+                ),
+                Some(FilesHit::TabAdd)
+            );
+        }
+        assert!(gal_layout.gallery.is_some());
+        if let Some(gal) = &gal_layout.gallery {
+            assert_eq!(
+                hit_test(
+                    &gal_layout,
+                    f64::from(gal.quick_look_btn.x + 8),
+                    f64::from(gal.quick_look_btn.y + 8)
+                ),
+                Some(FilesHit::GalleryQuickLookBtn)
+            );
+            assert_eq!(
+                scroll_area_at(
+                    &gal_layout,
+                    f64::from(gal.strip_rect.x + 12),
+                    f64::from(gal.strip_rect.y + 12)
+                ),
+                Some(ScrollTargetArea::GalleryStrip)
+            );
+        }
+
+        state.open_go_to_folder();
+        let goto_layout = compute_layout(&state, 1060, 660);
+        assert!(goto_layout.overlays.go_to_folder.is_some());
+        assert_eq!(
+            hit_test(&goto_layout, 80.0, 200.0),
+            Some(FilesHit::GoToClose)
+        );
+        if let Some(gt) = &goto_layout.overlays.go_to_folder {
+            assert_eq!(
+                hit_test(
+                    &goto_layout,
+                    f64::from(gt.clear_rect.x + 8),
+                    f64::from(gt.clear_rect.y + 8)
+                ),
+                Some(FilesHit::GoToClear)
+            );
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn xdg_popup_surface_spec_unclamped_for_outside_window_overflow() {
+        let (state, root) = test_state();
+        let layout = compute_layout(&state, 1060, 660);
+        let menu = OpenPopupMenu::ContextMenu {
+            x: 1020,
+            y: 620,
+            target_entry: None,
+            target_dir: Some(root.clone()),
+        };
+        let spec = compute_popup_surface_spec(&state, &layout, &menu, 8);
+        assert_eq!(spec.anchor_x, 1020);
+        assert_eq!(spec.anchor_y, 620);
+        assert_eq!(spec.shadow_pad, 8);
+        assert!(spec.anchor_x + spec.layout.rect.w > layout.width);
+        assert!(spec.anchor_y + spec.layout.rect.h > layout.height);
+        assert_eq!(spec.surface_width, spec.layout.rect.w + 16);
+        assert_eq!(spec.surface_height, spec.layout.rect.h + 16);
         let _ = std::fs::remove_dir_all(&root);
     }
 }

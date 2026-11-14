@@ -1,9 +1,12 @@
 //! Binary entry point for `rusty-files`, RustyOS's standalone Golden Gate file manager
 //! (`RUSTYOS-065`, ADR-0030).
 
+mod dialogs;
+mod icons;
 mod layout;
 mod render;
 mod state;
+mod views;
 mod wayland;
 
 use std::env;

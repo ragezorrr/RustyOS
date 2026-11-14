@@ -7,12 +7,17 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fmt::Write as _;
-use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
-use std::os::unix::fs::symlink;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, Read, Write};
+use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Component, Path, PathBuf};
 use std::process;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+pub use crate::image_decode::{
+    DecodedPreviewImage, load_raster_preview_bgra as load_image_preview_bgra,
+};
 
 /// Visual theme mode for `rusty-files` (`RUSTYOS-065`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -57,22 +62,23 @@ impl FilesThemeMode {
 /// Content view modes presented in the Golden Gate view switcher pill.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FileViewMode {
-    /// Icon grid view (Stage B slot `RUSTYOS-066`).
+    /// Icon grid view (`RUSTYOS-066`).
     Icons,
     /// Multi-column sortable list view.
     List,
-    /// Miller Columns hierarchical browser (default in Golden Gate Stage A).
+    /// Miller Columns hierarchical browser (default in Golden Gate).
     #[default]
     Columns,
-    /// Large preview gallery view (Stage B slot `RUSTYOS-066`).
+    /// Large preview gallery view with filmstrip & inspector (`RUSTYOS-066`).
     Gallery,
 }
 
 impl FileViewMode {
-    /// Returns whether this mode has active Stage A layout & rendering (`Columns`, `List`).
+    /// Returns whether this mode is active in the current build (all four modes supported in Stage B).
     #[must_use]
-    pub const fn is_stage_a_supported(self) -> bool {
-        matches!(self, Self::Columns | Self::List)
+    pub const fn is_supported(self) -> bool {
+        let _ = self;
+        true
     }
 
     /// Human-readable short label.
@@ -776,11 +782,7 @@ fn apply_preference_kv(cfg: &mut FileTagsConfig, key: &str, raw_val: &str) {
         }
         "view_mode" => {
             if let Some(v) = FileViewMode::from_config_str(&unquoted) {
-                cfg.view_mode = if v.is_stage_a_supported() {
-                    v
-                } else {
-                    FileViewMode::Columns
-                };
+                cfg.view_mode = v;
             }
         }
         "sort_field" => {
@@ -1720,18 +1722,39 @@ fn pick_non_colliding_restore_path(orig_path: &Path) -> PathBuf {
     if orig_path.symlink_metadata().is_err() {
         return orig_path.to_path_buf();
     }
-    let parent = orig_path.parent().unwrap_or_else(|| Path::new("/"));
-    let stem = orig_path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("restored");
-    let ext = orig_path.extension().and_then(|e| e.to_str());
-    for n in 1..=999_u32 {
-        let suffix = if n == 1 {
+    pick_unique_sibling_path(orig_path, "restored", |n| {
+        if n == 1 {
             String::from(" (restored)")
         } else {
             format!(" (restored {n})")
-        };
+        }
+    })
+}
+
+/// Computes a macOS-style duplicate sibling path (`"<stem> copy.<ext>"`, `"<stem> copy 2.<ext>"`).
+#[must_use]
+pub fn pick_duplicate_copy_path(dest: &Path) -> PathBuf {
+    pick_unique_sibling_path(dest, "copy", |n| {
+        if n == 1 {
+            String::from(" copy")
+        } else {
+            format!(" copy {n}")
+        }
+    })
+}
+
+fn pick_unique_sibling_path<F>(base_path: &Path, fallback_stem: &str, mut suffix_for: F) -> PathBuf
+where
+    F: FnMut(u32) -> String,
+{
+    let parent = base_path.parent().unwrap_or_else(|| Path::new("/"));
+    let stem = base_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(fallback_stem);
+    let ext = base_path.extension().and_then(|e| e.to_str());
+    for n in 1..=999_u32 {
+        let suffix = suffix_for(n);
         let file_name = match ext {
             Some(e) => format!("{stem}{suffix}.{e}"),
             None => format!("{stem}{suffix}"),
@@ -1741,7 +1764,7 @@ fn pick_non_colliding_restore_path(orig_path: &Path) -> PathBuf {
             return candidate;
         }
     }
-    orig_path.to_path_buf()
+    base_path.to_path_buf()
 }
 
 /// Permanently deletes all contents inside `<trash_dir>/files` and `<trash_dir>/info`.
@@ -1774,12 +1797,824 @@ pub fn empty_trash(trash_dir: &Path) -> io::Result<usize> {
     Ok(removed)
 }
 
-fn absolutize_path(path: &Path) -> io::Result<PathBuf> {
-    let raw = if path.is_absolute() {
-        path.to_path_buf()
+/// Detailed metadata displayed in Finder-style `Get Info` and `Gallery -> Information`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileDetailedInfo {
+    /// Display basename.
+    pub name: String,
+    /// Full entry path.
+    pub path: PathBuf,
+    /// Human-readable kind string (`Folder`, `Image`, `Source Code`, `Alias`, ...).
+    pub kind_label: String,
+    /// File length or bounded recursive directory byte total.
+    pub size_bytes: u64,
+    /// For directories: immediate direct child count.
+    pub item_count: Option<usize>,
+    /// True if folder stats hit the traversal safety cap.
+    pub size_truncated: bool,
+    /// Parent path formatted with `~` when under the user's home directory.
+    pub where_parent: String,
+    /// Creation timestamp (Unix seconds), when supported by filesystem.
+    pub created_unix_secs: Option<i64>,
+    /// Modification timestamp (Unix seconds).
+    pub modified_unix_secs: Option<i64>,
+    /// Image pixel dimensions `(width, height)` for valid PNG/PPM files.
+    pub dimensions: Option<(u32, u32)>,
+    /// Symbolic Unix permission string (`rwxr-xr-x`).
+    pub permissions: String,
+    /// Symlink target if the entry itself is a symlink.
+    pub symlink_target: Option<PathBuf>,
+    /// True when write bit / readonly flag denies mutation.
+    pub is_readonly: bool,
+}
+
+/// Inspects metadata for `Get Info` and the `Gallery` right-hand inspector pane.
+///
+/// Directory byte/item calculation is bounded to avoid blocking on massive trees.
+///
+/// # Errors
+/// Returns an `io::Error` if `path` cannot be `lstat`ed.
+pub fn inspect_entry_info(
+    path: &Path,
+    locations: &UserFileLocations,
+) -> io::Result<FileDetailedInfo> {
+    let sym_meta = fs::symlink_metadata(path)?;
+    let entry_stub = build_file_entry(path, None);
+    let name = entry_stub.as_ref().map_or_else(
+        || {
+            path.file_name()
+                .map_or_else(|| String::from("/"), |n| n.to_string_lossy().into_owned())
+        },
+        |e| e.name.clone(),
+    );
+    let kind_label = entry_stub
+        .as_ref()
+        .map_or("Item", FileEntry::kind_label)
+        .to_owned();
+
+    let is_symlink = sym_meta.file_type().is_symlink();
+    let symlink_target = if is_symlink {
+        fs::read_link(path).ok()
     } else {
-        env::current_dir()?.join(path)
+        None
     };
+    let resolved_meta = if is_symlink {
+        fs::metadata(path).ok()
+    } else {
+        Some(sym_meta.clone())
+    };
+    let effective_meta = resolved_meta.as_ref().unwrap_or(&sym_meta);
+
+    let (size_bytes, item_count, size_truncated) = if sym_meta.file_type().is_dir() {
+        let (total_bytes, direct_children, truncated) = collect_dir_stats_bounded(path, 5_000);
+        (total_bytes, Some(direct_children), truncated)
+    } else {
+        (effective_meta.len(), None, false)
+    };
+
+    let created_unix_secs = effective_meta
+        .created()
+        .ok()
+        .and_then(system_time_to_unix_i64);
+    let modified_unix_secs = effective_meta
+        .modified()
+        .ok()
+        .and_then(system_time_to_unix_i64);
+    let dimensions = if effective_meta.is_file() {
+        crate::image_decode::read_image_dimensions(path)
+    } else {
+        None
+    };
+
+    let where_parent = format_where_parent(path, &locations.home);
+    let permissions = format_unix_permissions(sym_meta.permissions().mode());
+    let is_readonly = effective_meta.permissions().readonly();
+
+    Ok(FileDetailedInfo {
+        name,
+        path: path.to_path_buf(),
+        kind_label,
+        size_bytes,
+        item_count,
+        size_truncated,
+        where_parent,
+        created_unix_secs,
+        modified_unix_secs,
+        dimensions,
+        permissions,
+        symlink_target,
+        is_readonly,
+    })
+}
+
+fn system_time_to_unix_i64(ts: SystemTime) -> Option<i64> {
+    ts.duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
+}
+
+fn format_where_parent(path: &Path, home: &Path) -> String {
+    let Some(parent) = path.parent() else {
+        return String::from("/");
+    };
+    if parent.as_os_str().is_empty() {
+        return String::from("/");
+    }
+    if let Ok(rel) = parent.strip_prefix(home) {
+        if rel.as_os_str().is_empty() {
+            return String::from("~");
+        }
+        return format!("~/{}", rel.display());
+    }
+    parent.display().to_string()
+}
+
+fn collect_dir_stats_bounded(root: &Path, max_entries: usize) -> (u64, usize, bool) {
+    let mut total_bytes = 0_u64;
+    let mut direct_children = 0_usize;
+    let mut visited = 0_usize;
+    let mut truncated = false;
+    let mut stack = vec![(root.to_path_buf(), true)];
+
+    while let Some((dir, is_root)) = stack.pop() {
+        let Ok(rd) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for item in rd.flatten() {
+            if is_root {
+                direct_children += 1;
+            }
+            visited += 1;
+            if visited > max_entries {
+                truncated = true;
+                return (total_bytes, direct_children, truncated);
+            }
+            let item_path = item.path();
+            let Ok(meta) = fs::symlink_metadata(&item_path) else {
+                continue;
+            };
+            let ft = meta.file_type();
+            if ft.is_file() {
+                total_bytes = total_bytes.saturating_add(meta.len());
+            } else if ft.is_dir() {
+                stack.push((item_path, false));
+            }
+        }
+    }
+    (total_bytes, direct_children, truncated)
+}
+
+fn format_unix_permissions(mode: u32) -> String {
+    let mut out = String::with_capacity(9);
+    let triples = [
+        (0o400, 0o200, 0o100),
+        (0o040, 0o020, 0o010),
+        (0o004, 0o002, 0o001),
+    ];
+    for (read_bit, write_bit, exec_bit) in triples {
+        out.push(if mode & read_bit != 0 { 'r' } else { '-' });
+        out.push(if mode & write_bit != 0 { 'w' } else { '-' });
+        out.push(if mode & exec_bit != 0 { 'x' } else { '-' });
+    }
+    out
+}
+
+/// UTF-8 plain-text snippet for `Quick Look` and `Gallery` previews.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TextPreview {
+    /// Normalized display lines (`\r` stripped).
+    pub lines: Vec<String>,
+    /// Total file size in bytes on disk.
+    pub total_bytes: u64,
+    /// True if capped by `max_bytes` or `max_lines`.
+    pub truncated: bool,
+}
+
+/// Reads a bounded UTF-8 text preview from `path`, returning `None` for missing or binary files.
+#[must_use]
+pub fn read_text_preview(path: &Path, max_bytes: usize, max_lines: usize) -> Option<TextPreview> {
+    let mut file = File::open(path).ok()?;
+    let meta = file.metadata().ok()?;
+    if !meta.is_file() {
+        return None;
+    }
+    let cap = max_bytes.clamp(1, 256 * 1024);
+    let line_cap = max_lines.max(1);
+    let mut buf = vec![0_u8; cap + 1];
+    let read_len = file.read(&mut buf).ok()?;
+    buf.truncate(read_len);
+
+    let bytes_truncated = buf.len() > cap;
+    if bytes_truncated {
+        buf.truncate(cap);
+    }
+    if buf.contains(&0) {
+        return None;
+    }
+    let text = match std::str::from_utf8(&buf) {
+        Ok(valid) => valid,
+        Err(err) => {
+            if err.error_len().is_none() && err.valid_up_to() > 0 {
+                std::str::from_utf8(&buf[..err.valid_up_to()]).ok()?
+            } else {
+                return None;
+            }
+        }
+    };
+
+    let ctrl_count = text
+        .bytes()
+        .filter(|b| *b < 0x20 && !matches!(b, b'\n' | b'\r' | b'\t'))
+        .count();
+    if !text.is_empty() && ctrl_count * 20 > text.len() {
+        return None;
+    }
+
+    let mut lines = Vec::new();
+    let mut lines_truncated = false;
+    for raw_line in text.lines() {
+        if lines.len() >= line_cap {
+            lines_truncated = true;
+            break;
+        }
+        lines.push(raw_line.trim_end_matches('\r').to_owned());
+    }
+
+    Some(TextPreview {
+        lines,
+        total_bytes: meta.len(),
+        truncated: bytes_truncated || lines_truncated,
+    })
+}
+
+/// Safely renames `source` inside its parent directory after component validation and collision checks.
+///
+/// # Errors
+/// Returns an `io::Error` if `new_name` is invalid, a target with that name already exists, or rename fails.
+pub fn rename_entry(source: &Path, new_name: &str) -> io::Result<PathBuf> {
+    let clean = validate_single_component_name(new_name)
+        .map_err(|msg| io::Error::new(io::ErrorKind::InvalidInput, msg))?;
+    let _src_meta = fs::symlink_metadata(source)?;
+    let parent = source.parent().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "Cannot rename filesystem root")
+    })?;
+    let dest = parent.join(clean);
+    if dest == source {
+        return Ok(dest);
+    }
+    if dest.symlink_metadata().is_ok() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("An item named '{clean}' already exists"),
+        ));
+    }
+    fs::rename(source, &dest)?;
+    Ok(dest)
+}
+
+/// File transfer operation kind (`Copy` vs `Move`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransferKind {
+    /// Copy entries cleanly without modifying sources.
+    Copy,
+    /// Move entries into destination (`fs::rename` fast path or chunked cross-device copy + delete).
+    Move,
+}
+
+/// User conflict resolution choice when a destination item already exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransferConflictDecision {
+    /// Remove the colliding destination item first and write the incoming item in its place.
+    Replace,
+    /// Keep the existing destination item and rename the incoming copy (`name copy`).
+    KeepBoth,
+    /// Leave the colliding destination untouched and skip this source item.
+    Skip,
+    /// Cancel/stop the entire transfer batch immediately.
+    Stop,
+}
+
+/// Live progress snapshot reported from [`copy_or_move_with_progress`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransferProgress {
+    /// Operation kind.
+    pub kind: TransferKind,
+    /// Basename of the entry currently being copied or moved.
+    pub current_item_name: String,
+    /// Target directory path.
+    pub destination_dir: PathBuf,
+    /// Total planned bytes across regular files.
+    pub total_bytes: u64,
+    /// Bytes completed so far.
+    pub completed_bytes: u64,
+    /// Planned item count.
+    pub total_items: usize,
+    /// Items processed so far.
+    pub completed_items: usize,
+}
+
+/// Summary returned when [`copy_or_move_with_progress`] completes or stops.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TransferOutcome {
+    /// Destination paths created or moved into `dest_dir`.
+    pub created_paths: Vec<PathBuf>,
+    /// Number of skipped or uncopied items.
+    pub skipped_items: usize,
+    /// True if halted early via `cancel` flag or [`TransferConflictDecision::Stop`].
+    pub cancelled: bool,
+}
+
+struct TransferPlanItem {
+    source: PathBuf,
+    bytes: u64,
+    items: usize,
+    is_dir: bool,
+}
+
+/// Copies or moves `sources` into `dest_dir` with chunked progress callbacks, cancellation,
+/// cycle protection, and interactive conflict handling.
+///
+/// # Errors
+/// Returns an `io::Error` if `dest_dir` is not an existing directory, a source would be copied
+/// into itself or a descendant, or an I/O failure occurs.
+pub fn copy_or_move_with_progress<P, C>(
+    sources: &[PathBuf],
+    dest_dir: &Path,
+    kind: TransferKind,
+    cancel: &AtomicBool,
+    mut on_progress: P,
+    mut on_conflict: C,
+) -> io::Result<TransferOutcome>
+where
+    P: FnMut(&TransferProgress),
+    C: FnMut(&Path, &Path) -> TransferConflictDecision,
+{
+    if !dest_dir.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "Destination directory does not exist",
+        ));
+    }
+    let canon_dest_dir = fs::canonicalize(dest_dir)?;
+    let (plan, total_bytes, total_items) = build_transfer_plan(sources, &canon_dest_dir)?;
+
+    let mut progress = TransferProgress {
+        kind,
+        current_item_name: String::new(),
+        destination_dir: dest_dir.to_path_buf(),
+        total_bytes,
+        completed_bytes: 0,
+        total_items,
+        completed_items: 0,
+    };
+    on_progress(&progress);
+
+    let mut created_paths = Vec::new();
+    let mut skipped_items = 0_usize;
+    let mut cancelled = false;
+
+    for (idx, item) in plan.iter().enumerate() {
+        if cancel.load(Ordering::Relaxed) {
+            cancelled = true;
+            skipped_items += plan.len().saturating_sub(idx);
+            break;
+        }
+        let Some(base_name) = item.source.file_name() else {
+            skipped_items += 1;
+            continue;
+        };
+        progress.current_item_name = base_name.to_string_lossy().into_owned();
+        let raw_dest = dest_dir.join(base_name);
+
+        match resolve_transfer_target(
+            &item.source,
+            &raw_dest,
+            &canon_dest_dir,
+            kind,
+            &mut on_conflict,
+        )? {
+            TransferTarget::Proceed(final_dest) => {
+                let done = execute_single_transfer(
+                    item,
+                    &final_dest,
+                    kind,
+                    cancel,
+                    &mut progress,
+                    &mut on_progress,
+                )?;
+                if done {
+                    created_paths.push(final_dest);
+                } else {
+                    cancelled = true;
+                    skipped_items += plan.len().saturating_sub(idx);
+                    break;
+                }
+            }
+            TransferTarget::Skip => {
+                skipped_items += 1;
+                progress.completed_items = progress.completed_items.saturating_add(item.items);
+                progress.completed_bytes = progress.completed_bytes.saturating_add(item.bytes);
+                on_progress(&progress);
+            }
+            TransferTarget::Stop => {
+                cancelled = true;
+                skipped_items += plan.len().saturating_sub(idx);
+                break;
+            }
+        }
+    }
+
+    on_progress(&progress);
+    Ok(TransferOutcome {
+        created_paths,
+        skipped_items,
+        cancelled,
+    })
+}
+
+enum TransferTarget {
+    Proceed(PathBuf),
+    Skip,
+    Stop,
+}
+
+fn build_transfer_plan(
+    sources: &[PathBuf],
+    canon_dest_dir: &Path,
+) -> io::Result<(Vec<TransferPlanItem>, u64, usize)> {
+    let mut plan = Vec::with_capacity(sources.len());
+    let mut total_bytes = 0_u64;
+    let mut total_items = 0_usize;
+
+    for src in sources {
+        let meta = fs::symlink_metadata(src)?;
+        let is_dir = meta.file_type().is_dir();
+        if is_dir {
+            let canon_src = fs::canonicalize(src)?;
+            if canon_dest_dir == canon_src || canon_dest_dir.starts_with(&canon_src) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Cannot copy or move a folder into itself",
+                ));
+            }
+        }
+        let (bytes, items) = measure_transfer_tree(src)?;
+        total_bytes = total_bytes.saturating_add(bytes);
+        total_items = total_items.saturating_add(items);
+        plan.push(TransferPlanItem {
+            source: src.clone(),
+            bytes,
+            items,
+            is_dir,
+        });
+    }
+    Ok((plan, total_bytes, total_items))
+}
+
+fn measure_transfer_tree(root: &Path) -> io::Result<(u64, usize)> {
+    let mut total_bytes = 0_u64;
+    let mut total_items = 0_usize;
+    let mut stack = vec![root.to_path_buf()];
+
+    while let Some(path) = stack.pop() {
+        let meta = fs::symlink_metadata(&path)?;
+        total_items = total_items.saturating_add(1);
+        let ft = meta.file_type();
+        if ft.is_file() {
+            total_bytes = total_bytes.saturating_add(meta.len());
+        } else if ft.is_dir() {
+            for entry_res in fs::read_dir(&path)? {
+                let entry = entry_res?;
+                stack.push(entry.path());
+            }
+        }
+    }
+    Ok((total_bytes, total_items))
+}
+
+fn resolve_transfer_target<C>(
+    source: &Path,
+    raw_dest: &Path,
+    canon_dest_dir: &Path,
+    kind: TransferKind,
+    on_conflict: &mut C,
+) -> io::Result<TransferTarget>
+where
+    C: FnMut(&Path, &Path) -> TransferConflictDecision,
+{
+    let same_dir = source
+        .parent()
+        .and_then(|p| fs::canonicalize(p).ok())
+        .is_some_and(|p| p == *canon_dest_dir);
+
+    if same_dir {
+        return Ok(match kind {
+            TransferKind::Move => TransferTarget::Skip,
+            TransferKind::Copy => TransferTarget::Proceed(pick_duplicate_copy_path(raw_dest)),
+        });
+    }
+
+    if raw_dest.symlink_metadata().is_err() {
+        return Ok(TransferTarget::Proceed(raw_dest.to_path_buf()));
+    }
+
+    match on_conflict(source, raw_dest) {
+        TransferConflictDecision::Replace => {
+            remove_path_no_follow(raw_dest)?;
+            Ok(TransferTarget::Proceed(raw_dest.to_path_buf()))
+        }
+        TransferConflictDecision::KeepBoth => {
+            Ok(TransferTarget::Proceed(pick_duplicate_copy_path(raw_dest)))
+        }
+        TransferConflictDecision::Skip => Ok(TransferTarget::Skip),
+        TransferConflictDecision::Stop => Ok(TransferTarget::Stop),
+    }
+}
+
+fn execute_single_transfer<P>(
+    item: &TransferPlanItem,
+    final_dest: &Path,
+    kind: TransferKind,
+    cancel: &AtomicBool,
+    progress: &mut TransferProgress,
+    on_progress: &mut P,
+) -> io::Result<bool>
+where
+    P: FnMut(&TransferProgress),
+{
+    if kind == TransferKind::Move {
+        match fs::rename(&item.source, final_dest) {
+            Ok(()) => {
+                progress.completed_bytes = progress.completed_bytes.saturating_add(item.bytes);
+                progress.completed_items = progress.completed_items.saturating_add(item.items);
+                on_progress(progress);
+                return Ok(true);
+            }
+            Err(err) if err.kind() == io::ErrorKind::CrossesDevices => {}
+            Err(err) => return Err(err),
+        }
+    }
+
+    let copied_all =
+        copy_tree_with_progress(&item.source, final_dest, cancel, progress, on_progress)?;
+    if !copied_all {
+        let _ = remove_path_no_follow(final_dest);
+        return Ok(false);
+    }
+    if kind == TransferKind::Move {
+        if item.is_dir {
+            fs::remove_dir_all(&item.source)?;
+        } else {
+            fs::remove_file(&item.source)?;
+        }
+    }
+    Ok(true)
+}
+
+fn copy_tree_with_progress<P>(
+    src_path: &Path,
+    dst_path: &Path,
+    cancel: &AtomicBool,
+    progress: &mut TransferProgress,
+    on_progress: &mut P,
+) -> io::Result<bool>
+where
+    P: FnMut(&TransferProgress),
+{
+    if cancel.load(Ordering::Relaxed) {
+        return Ok(false);
+    }
+    let meta = fs::symlink_metadata(src_path)?;
+    let ft = meta.file_type();
+    if ft.is_symlink() {
+        let target = fs::read_link(src_path)?;
+        symlink(&target, dst_path)?;
+        progress.completed_items = progress.completed_items.saturating_add(1);
+        on_progress(progress);
+        return Ok(true);
+    }
+    if ft.is_file() {
+        return copy_file_chunked(src_path, dst_path, &meta, cancel, progress, on_progress);
+    }
+    if ft.is_dir() {
+        fs::create_dir_all(dst_path)?;
+        progress.completed_items = progress.completed_items.saturating_add(1);
+        for entry_res in fs::read_dir(src_path)? {
+            let entry = entry_res?;
+            let child_src = entry.path();
+            let child_dst = dst_path.join(entry.file_name());
+            if !copy_tree_with_progress(&child_src, &child_dst, cancel, progress, on_progress)? {
+                return Ok(false);
+            }
+        }
+        let _ = fs::set_permissions(dst_path, meta.permissions());
+        on_progress(progress);
+        return Ok(true);
+    }
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "Cannot copy special filesystem node",
+    ))
+}
+
+fn copy_file_chunked<P>(
+    src_path: &Path,
+    dst_path: &Path,
+    src_meta: &fs::Metadata,
+    cancel: &AtomicBool,
+    progress: &mut TransferProgress,
+    on_progress: &mut P,
+) -> io::Result<bool>
+where
+    P: FnMut(&TransferProgress),
+{
+    let mut reader = File::open(src_path)?;
+    let mut writer = File::create(dst_path)?;
+    let mut chunk = vec![0_u8; 64 * 1024].into_boxed_slice();
+
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            drop(writer);
+            let _ = fs::remove_file(dst_path);
+            return Ok(false);
+        }
+        let read_bytes = reader.read(&mut chunk)?;
+        if read_bytes == 0 {
+            break;
+        }
+        writer.write_all(&chunk[..read_bytes])?;
+        progress.completed_bytes = progress.completed_bytes.saturating_add(read_bytes as u64);
+        on_progress(progress);
+    }
+    writer.flush()?;
+    let _ = fs::set_permissions(dst_path, src_meta.permissions());
+    progress.completed_items = progress.completed_items.saturating_add(1);
+    on_progress(progress);
+    Ok(true)
+}
+
+/// Expands `~`, `~/...`, or relative inputs against `current_dir` and `locations.home`.
+#[must_use]
+pub fn expand_go_to_input(
+    raw_input: &str,
+    current_dir: Option<&Path>,
+    locations: &UserFileLocations,
+) -> Option<PathBuf> {
+    let trimmed = raw_input.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let joined = if trimmed == "~" {
+        locations.home.clone()
+    } else if let Some(rest) = trimmed.strip_prefix("~/") {
+        locations.home.join(rest)
+    } else {
+        let candidate = Path::new(trimmed);
+        if candidate.is_absolute() {
+            candidate.to_path_buf()
+        } else {
+            let base = current_dir.unwrap_or(locations.home.as_path());
+            base.join(candidate)
+        }
+    };
+    Some(normalize_lexical_path(&joined))
+}
+
+/// Resolves a user-entered `Go to Folder` path when it exists on disk.
+#[must_use]
+pub fn resolve_go_to_path(
+    raw_input: &str,
+    current_dir: Option<&Path>,
+    locations: &UserFileLocations,
+) -> Option<PathBuf> {
+    let expanded = expand_go_to_input(raw_input, current_dir, locations)?;
+    expanded.exists().then_some(expanded)
+}
+
+/// Returns up to `limit` completion suggestions for the `Go to Folder` input sheet.
+#[must_use]
+pub fn suggest_go_to_paths(
+    raw_input: &str,
+    current_dir: Option<&Path>,
+    locations: &UserFileLocations,
+    limit: usize,
+) -> Vec<PathBuf> {
+    if limit == 0 {
+        return Vec::new();
+    }
+    let trimmed = raw_input.trim();
+    if trimmed.is_empty() {
+        return default_go_to_suggestions(current_dir, locations, limit);
+    }
+
+    let (search_dir, prefix) = if trimmed == "~" {
+        let mut out = vec![locations.home.clone()];
+        if let Ok(rd) = fs::read_dir(&locations.home) {
+            append_sorted_matching_entries(rd, "", false, &mut out);
+        }
+        out.truncate(limit);
+        return out;
+    } else if trimmed.ends_with('/') {
+        let Some(dir) = expand_go_to_input(trimmed, current_dir, locations) else {
+            return Vec::new();
+        };
+        (dir, "")
+    } else if let Some((parent_raw, name_prefix)) = trimmed.rsplit_once('/') {
+        let parent_spec = if parent_raw.is_empty() {
+            "/"
+        } else {
+            parent_raw
+        };
+        let Some(dir) = expand_go_to_input(parent_spec, current_dir, locations) else {
+            return Vec::new();
+        };
+        (dir, name_prefix)
+    } else {
+        let base = current_dir
+            .unwrap_or(locations.home.as_path())
+            .to_path_buf();
+        (base, trimmed)
+    };
+
+    let Ok(rd) = fs::read_dir(&search_dir) else {
+        return Vec::new();
+    };
+    let mut matches = Vec::new();
+    let include_hidden = prefix.starts_with('.');
+    append_sorted_matching_entries(rd, prefix, include_hidden, &mut matches);
+    matches.truncate(limit);
+    matches
+}
+
+fn default_go_to_suggestions(
+    current_dir: Option<&Path>,
+    locations: &UserFileLocations,
+    limit: usize,
+) -> Vec<PathBuf> {
+    let candidates = [
+        current_dir,
+        Some(locations.home.as_path()),
+        Some(locations.desktop.as_path()),
+        Some(locations.documents.as_path()),
+        Some(locations.downloads.as_path()),
+        Some(Path::new("/")),
+    ];
+    let mut out = Vec::new();
+    for dir in candidates.into_iter().flatten() {
+        let clean = normalize_lexical_path(dir);
+        if clean.is_dir() && !out.contains(&clean) {
+            out.push(clean);
+            if out.len() >= limit {
+                break;
+            }
+        }
+    }
+    out
+}
+
+fn append_sorted_matching_entries(
+    rd: fs::ReadDir,
+    prefix: &str,
+    include_hidden: bool,
+    out: &mut Vec<PathBuf>,
+) {
+    let prefix_lower = prefix.to_ascii_lowercase();
+    let mut dirs = Vec::new();
+    let mut files = Vec::new();
+
+    for entry in rd.flatten() {
+        let file_name = entry.file_name();
+        let name_str = file_name.to_string_lossy();
+        if !include_hidden && name_str.starts_with('.') {
+            continue;
+        }
+        if !prefix_lower.is_empty() && !name_str.to_ascii_lowercase().starts_with(&prefix_lower) {
+            continue;
+        }
+        let path = entry.path();
+        if path.is_dir() {
+            dirs.push(path);
+        } else {
+            files.push(path);
+        }
+    }
+
+    let cmp_name = |a: &PathBuf, b: &PathBuf| {
+        let an = a
+            .file_name()
+            .map_or_else(String::new, |s| s.to_string_lossy().to_ascii_lowercase());
+        let bn = b
+            .file_name()
+            .map_or_else(String::new, |s| s.to_string_lossy().to_ascii_lowercase());
+        an.cmp(&bn).then_with(|| a.cmp(b))
+    };
+    dirs.sort_by(cmp_name);
+    files.sort_by(cmp_name);
+    out.extend(dirs);
+    out.extend(files);
+}
+
+fn normalize_lexical_path(raw: &Path) -> PathBuf {
     let mut clean = PathBuf::new();
     for comp in raw.components() {
         match comp {
@@ -1790,7 +2625,16 @@ fn absolutize_path(path: &Path) -> io::Result<PathBuf> {
             other => clean.push(other.as_os_str()),
         }
     }
-    Ok(clean)
+    clean
+}
+
+fn absolutize_path(path: &Path) -> io::Result<PathBuf> {
+    let raw = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        env::current_dir()?.join(path)
+    };
+    Ok(normalize_lexical_path(&raw))
 }
 
 fn percent_encode_path(path: &str) -> String {
@@ -2108,6 +2952,187 @@ tmpfs /run tmpfs rw,nosuid,nodev 0 0
         assert_eq!(format_byte_size(2_400_000), "2.4 MB");
         assert_eq!(format_unix_timestamp(0), "1970-01-01 00:00");
         assert_eq!(format_unix_timestamp(1_763_114_400), "2025-11-14 10:00");
+        Ok(())
+    }
+
+    #[test]
+    fn stage_b_view_modes_roundtrip_in_tags_config() -> Result<(), Box<dyn std::error::Error>> {
+        let guard = TempDirGuard::new("view-modes-stage-b")?;
+        for mode in [
+            FileViewMode::Icons,
+            FileViewMode::List,
+            FileViewMode::Columns,
+            FileViewMode::Gallery,
+        ] {
+            assert!(mode.is_supported());
+            let cfg = FileTagsConfig {
+                view_mode: mode,
+                ..Default::default()
+            };
+            let cfg_path = guard.path.join(format!("{}.toml", mode.as_config_str()));
+            cfg.save_to_path(&cfg_path)?;
+            let loaded = FileTagsConfig::load_from_path(&cfg_path);
+            assert_eq!(loaded.view_mode, mode);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn inspect_entry_info_and_text_preview_work() -> Result<(), Box<dyn std::error::Error>> {
+        let guard = TempDirGuard::new("inspect-preview")?;
+        let home = guard.path.join("home/tester");
+        let docs = home.join("Documents");
+        fs::create_dir_all(&docs)?;
+        let locs =
+            UserFileLocations::with_roots(&home, &home.join(".config"), &home.join(".local/share"));
+
+        let text_file = docs.join("notes.md");
+        fs::write(&text_file, b"Line 1\nLine 2\nLine 3\n")?;
+        let ppm_file = docs.join("sample.ppm");
+        fs::write(&ppm_file, b"P6\n2 3\n255\n\x10\x20\x30\x40\x50\x60\x10\x20\x30\x40\x50\x60\x10\x20\x30\x40\x50\x60")?;
+        let bin_file = docs.join("blob.bin");
+        fs::write(&bin_file, b"\x00\xFF\x00\x01binary")?;
+
+        let dir_info = inspect_entry_info(&docs, &locs)?;
+        assert_eq!(dir_info.kind_label, "Folder");
+        assert_eq!(dir_info.item_count, Some(3));
+        assert_eq!(dir_info.where_parent, "~");
+        assert!(dir_info.size_bytes >= 30);
+
+        let img_info = inspect_entry_info(&ppm_file, &locs)?;
+        assert_eq!(img_info.dimensions, Some((2, 3)));
+        assert_eq!(img_info.where_parent, "~/Documents");
+
+        let preview = read_text_preview(&text_file, 1024, 2).ok_or("expected text preview")?;
+        assert_eq!(preview.lines, vec!["Line 1", "Line 2"]);
+        assert!(preview.truncated);
+        assert!(read_text_preview(&bin_file, 1024, 10).is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn rename_and_go_to_folder_work() -> Result<(), Box<dyn std::error::Error>> {
+        let guard = TempDirGuard::new("rename-goto")?;
+        let home = guard.path.join("home");
+        let downloads = home.join("Downloads");
+        let docs = home.join("Documents");
+        fs::create_dir_all(&downloads)?;
+        fs::create_dir_all(&docs)?;
+        let locs =
+            UserFileLocations::with_roots(&home, &home.join(".config"), &home.join(".local/share"));
+
+        let file_a = docs.join("draft.txt");
+        let file_b = docs.join("taken.txt");
+        fs::write(&file_a, b"alpha")?;
+        fs::write(&file_b, b"beta")?;
+
+        assert!(rename_entry(&file_a, "bad/name").is_err());
+        assert!(rename_entry(&file_a, "taken.txt").is_err());
+        let renamed = rename_entry(&file_a, "final.txt")?;
+        assert_eq!(renamed, docs.join("final.txt"));
+        assert!(!file_a.exists());
+        assert!(renamed.exists());
+
+        assert_eq!(resolve_go_to_path("~", None, &locs), Some(home.clone()));
+        assert_eq!(
+            resolve_go_to_path("~/Downloads/../Documents", None, &locs),
+            Some(docs.clone())
+        );
+        let suggestions = suggest_go_to_paths("~/Do", None, &locs, 8);
+        assert!(suggestions.contains(&docs));
+        assert!(suggestions.contains(&downloads));
+        Ok(())
+    }
+
+    #[test]
+    fn copy_move_conflict_and_cancel_work() -> Result<(), Box<dyn std::error::Error>> {
+        let guard = TempDirGuard::new("transfer-ops")?;
+        let src_dir = guard.path.join("src");
+        let dst_dir = guard.path.join("dst");
+        fs::create_dir_all(src_dir.join("folder"))?;
+        fs::create_dir_all(&dst_dir)?;
+
+        let f_alpha = src_dir.join("alpha.txt");
+        fs::write(&f_alpha, b"new-alpha")?;
+        fs::write(src_dir.join("folder/nested.txt"), b"nested-data")?;
+        let cancel = AtomicBool::new(false);
+
+        // Same-folder copy automatically chooses "<name> copy.<ext>".
+        let mut snapshots = Vec::new();
+        let dup = copy_or_move_with_progress(
+            std::slice::from_ref(&f_alpha),
+            &src_dir,
+            TransferKind::Copy,
+            &cancel,
+            |p| snapshots.push(p.completed_bytes),
+            |_, _| TransferConflictDecision::Stop,
+        )?;
+        assert_eq!(dup.created_paths, vec![src_dir.join("alpha copy.txt")]);
+        assert!(!dup.cancelled);
+        assert!(snapshots.last().copied().unwrap_or(0) >= 9);
+
+        // Cross-directory copy with KeepBoth, Replace, Skip, Stop.
+        fs::write(dst_dir.join("alpha.txt"), b"existing-alpha")?;
+        let keep_both = copy_or_move_with_progress(
+            std::slice::from_ref(&f_alpha),
+            &dst_dir,
+            TransferKind::Copy,
+            &cancel,
+            |_| {},
+            |_, _| TransferConflictDecision::KeepBoth,
+        )?;
+        assert_eq!(
+            keep_both.created_paths,
+            vec![dst_dir.join("alpha copy.txt")]
+        );
+        assert_eq!(fs::read(dst_dir.join("alpha.txt"))?, b"existing-alpha");
+
+        let replaced = copy_or_move_with_progress(
+            std::slice::from_ref(&f_alpha),
+            &dst_dir,
+            TransferKind::Copy,
+            &cancel,
+            |_| {},
+            |_, _| TransferConflictDecision::Replace,
+        )?;
+        assert_eq!(replaced.created_paths, vec![dst_dir.join("alpha.txt")]);
+        assert_eq!(fs::read(dst_dir.join("alpha.txt"))?, b"new-alpha");
+
+        let moved = copy_or_move_with_progress(
+            &[src_dir.join("folder")],
+            &dst_dir,
+            TransferKind::Move,
+            &cancel,
+            |_| {},
+            |_, _| TransferConflictDecision::Stop,
+        )?;
+        assert_eq!(moved.created_paths, vec![dst_dir.join("folder")]);
+        assert!(!src_dir.join("folder").exists());
+        assert_eq!(fs::read(dst_dir.join("folder/nested.txt"))?, b"nested-data");
+
+        // Self-nested copy guard.
+        let nested_err = copy_or_move_with_progress(
+            &[dst_dir.join("folder")],
+            &dst_dir.join("folder"),
+            TransferKind::Copy,
+            &cancel,
+            |_| {},
+            |_, _| TransferConflictDecision::Stop,
+        );
+        assert!(nested_err.is_err());
+
+        // Pre-cancelled flag stops immediately.
+        let stopped_cancel = AtomicBool::new(true);
+        let aborted = copy_or_move_with_progress(
+            std::slice::from_ref(&f_alpha),
+            &dst_dir,
+            TransferKind::Copy,
+            &stopped_cancel,
+            |_| {},
+            |_, _| TransferConflictDecision::KeepBoth,
+        )?;
+        assert!(aborted.cancelled);
+        assert_eq!(aborted.created_paths, Vec::<PathBuf>::new());
         Ok(())
     }
 }

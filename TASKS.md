@@ -938,6 +938,26 @@ hardware/software context и низкие накладные расходы.
   - `cargo run -p rusty-compositor --offline -- --winit --max-frames 3` — pass (`rendered_frames=3`, `finished cleanly (mode: nested-winit)`).
 - **Risks:** Новые внешние зависимости и `unsafe` не добавлялись (`unsafe_code = "deny"` сохранён); `Icons` grid и `Gallery` cover flow + `Quick Look` оставлены под Этап B (`RUSTYOS-066`) с явным статус-уведомлением при клике; визуальная отрисовка `rusty-files` в интерактивной Wayland-сессии проверялась unit-рендером светлой/тёмной тем (live окно `rusty-files` рекомендуется открыть вручную внутри `--winit`).
 
+### RUSTYOS-066 — Этап B `apps/rusty-files` до паритета Golden Gate и общий декодер `rusty_services::image_decode`
+
+- **Status:** Done (`RUSTYOS-066` Вариант 1 — утверждённый объём выполнен)
+- **Scope:**
+  - В `crates/rusty-services/src/image_decode.rs` вынесены из `crates/rusty-compositor/src/icons.rs` и дополнены pure-Rust декодер PNG/PPM (`decode_png_rgba`, `decode_png_rgba_limited`, `decode_ppm_rgba_limited`, `load_raster_preview_bgra`, `read_image_dimensions`), билинейный скейлер (`scale_rgba_to_premul_bgra`, `scale_rgba_rect_to_premul_bgra`, `scale_cover_rgba_to_premul_bgra`, `fit_aspect_dimensions`), загрузчики `load_png_wallpaper_bgra` и `load_circular_avatar_bgra`; `crates/rusty-compositor/src/icons.rs` переведён на `rusty_services::image_decode`.
+  - В `crates/rusty-services/src/file_manager.rs` включены все 4 режима `FileViewMode::{Icons, List, Columns, Gallery}` (`is_supported() == true`), добавлены `inspect_entry_info` (`FileDetailedInfo`), `read_text_preview` (`TextPreview`), `rename_entry`, `expand_go_to_input`/`resolve_go_to_path`/`suggest_go_to_paths` и chunked перенос `copy_or_move_with_progress` (`TransferKind`, `TransferConflictDecision::{Replace, KeepBoth, Skip, Stop}`, `TransferProgress`, `TransferOutcome`).
+  - В `apps/rusty-files` (`src/{views,dialogs,icons,layout,render,state,wayland}.rs`) реализованы:
+    - режим **Icons** (`IconsGridLayout`, сетка `100x104 px` с миниатюрами и бейджами тегов) и режим **Gallery** (`GalleryLayout`: крупное превью с фоновым декодированием PNG/PPM/текста, нижняя лента миниатюр, правая панель `Information` и кнопки действий);
+    - верхняя полоса вкладок (`TabBarLayout`, `+`, `Ctrl+T`, `Ctrl+W`, `Ctrl+Tab` / `Ctrl+Shift+Tab`), кликабельный нижний `Path Bar`, встроенный `Quick Look` (`Space`), `Get Info` (`Ctrl+I`), `Go to Folder...` (`Ctrl+Shift+G`), inline `Rename` (`F2`), буфер `Copy`/`Cut`/`Paste`/`Duplicate` (`Ctrl+C`/`X`/`V`/`D`) с фоновой пилюлей прогресса/отмены и модальным окном конфликта;
+    - чёткие pixel-aligned UI-иконки (`snap_half`/`snap_edge`), doc-иконки с загнутым углом (`draw_dogear_document_icon`) и 4x4 SSAA Golden Gate папки (`draw_entry_icon`, `draw_large_entry_artwork`) с гравировкой категорий и окраской тегами.
+  - Оформлены `docs/adr/0031-rusty-files-stage-b.md`, `D-039` в `DECISIONS.md` и обновлена `ARCHITECTURE.md`.
+- **Verification:**
+  - `cargo fmt --all -- --check` — pass;
+  - `cargo clippy --workspace --all-targets --offline -- -D warnings` — pass (0 warnings);
+  - `cargo test --workspace --offline` — pass (195 passed, 0 failed, 0 ignored: `rusty_animation` 4, `rusty_compositor` 130, `rusty_files` 9, `rusty_ipc` 3, `rusty_services` 37, `rusty_shell` 5, `rusty_wm` 7);
+  - `cargo run -p rusty-compositor --offline -- --check` — pass (`finished cleanly (mode: check-only)`);
+  - `cargo run -p rusty-compositor --offline -- --winit --max-frames 3` — pass (`rendered_frames=3`, `finished cleanly (mode: nested-winit)`);
+  - `cargo run -p rusty-files --offline -- --help` — pass (`Usage: rusty-files [--path <dir>] [--trash] [--recents] [--light | --dark]`).
+- **Risks:** Новые внешние зависимости и `unsafe` не добавлялись (`unsafe_code = "deny"` сохранён); встроенный декодер превью покрывает PNG, PPM (`P3`/`P6`) и UTF-8 текст (дополнительные форматы вроде SVG/PDF/JPEG потребуют отдельных декодеров в следующих задачах); интерактивный запуск живого окна `rusty-files` в Wayland-сессии `--winit` отдельно не снимался скриншотом — отрисовка проверена offscreen unit-тестами `rusty_files` (`stage_b_icons_gallery_tabs_and_overlays_render_within_rounded_clip`, `renders_golden_gate_light_and_dark_themes_cleanly`).
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

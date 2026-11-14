@@ -5,6 +5,7 @@
 
 pub mod auth;
 pub mod file_manager;
+pub mod image_decode;
 pub mod logind;
 pub mod polkit;
 pub mod portal;
