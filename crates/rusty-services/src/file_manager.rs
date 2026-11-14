@@ -89,12 +89,12 @@ pub fn detect_system_theme_from_toml(content: &str) -> Option<FilesThemeMode> {
 /// Content view modes presented in the Golden Gate view switcher pill.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FileViewMode {
-    /// Icon grid view (`RUSTYOS-066`).
+    /// Icon grid view (default Golden Gate Home view; `RUSTYOS-066`/`071`).
+    #[default]
     Icons,
     /// Multi-column sortable list view.
     List,
-    /// Miller Columns hierarchical browser (default in Golden Gate).
-    #[default]
+    /// Miller Columns hierarchical browser.
     Columns,
     /// Large preview gallery view with filmstrip & inspector (`RUSTYOS-066`).
     Gallery,
@@ -628,6 +628,8 @@ pub struct FileTagsConfig {
     pub sort_order: FileSortOrder,
     /// Whether dot-files are displayed.
     pub show_hidden: bool,
+    /// Whether the bottom Path Bar breadcrumb strip is displayed (`RUSTYOS-071`).
+    pub show_path_bar: bool,
     /// Ordered tag list per canonical/filesystem path.
     pub tags: BTreeMap<PathBuf, Vec<FileTagColor>>,
 }
@@ -718,6 +720,7 @@ impl FileTagsConfig {
         let _ = writeln!(out, "sort_field = \"{}\"", self.sort_field.as_config_str());
         let _ = writeln!(out, "sort_order = \"{}\"", self.sort_order.as_config_str());
         let _ = writeln!(out, "show_hidden = {}", self.show_hidden);
+        let _ = writeln!(out, "show_path_bar = {}", self.show_path_bar);
 
         for (path, colors) in &self.tags {
             if colors.is_empty() {
@@ -833,6 +836,11 @@ fn apply_preference_kv(cfg: &mut FileTagsConfig, key: &str, raw_val: &str) {
         "show_hidden" => match raw_val.trim() {
             "true" => cfg.show_hidden = true,
             "false" => cfg.show_hidden = false,
+            _ => {}
+        },
+        "show_path_bar" => match raw_val.trim() {
+            "true" => cfg.show_path_bar = true,
+            "false" => cfg.show_path_bar = false,
             _ => {}
         },
         _ => {}
@@ -1107,6 +1115,54 @@ pub fn list_directory_at(dir: &Path) -> io::Result<Vec<FileEntry>> {
         }
     }
     Ok(entries)
+}
+
+/// Bounded iterative search under `root` for entries matching `query` (`RUSTYOS-071`).
+#[must_use]
+pub fn search_directory_recursive(
+    root: &Path,
+    query: &str,
+    show_hidden: bool,
+    max_results: usize,
+) -> Vec<FileEntry> {
+    let needle = query.trim().to_ascii_lowercase();
+    if needle.is_empty() || max_results == 0 {
+        return Vec::new();
+    }
+    let mut results = Vec::new();
+    let mut queue = std::collections::VecDeque::from([(root.to_path_buf(), 0_u8)]);
+    let mut visited_dirs = 0_usize;
+    while let Some((dir, depth)) = queue.pop_front() {
+        if visited_dirs >= 1_500 || results.len() >= max_results {
+            break;
+        }
+        visited_dirs += 1;
+        let Ok(read) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry_res in read {
+            let Ok(entry) = entry_res else {
+                continue;
+            };
+            let path = entry.path();
+            let Some(item) = build_file_entry(&path, None) else {
+                continue;
+            };
+            if !show_hidden && item.hidden {
+                continue;
+            }
+            if item.name.to_ascii_lowercase().contains(&needle) {
+                results.push(item.clone());
+                if results.len() >= max_results {
+                    break;
+                }
+            }
+            if depth < 4 && item.kind == FileEntryKind::Directory {
+                queue.push_back((item.path, depth + 1));
+            }
+        }
+    }
+    results
 }
 
 fn build_file_entry(path: &Path, name_override: Option<String>) -> Option<FileEntry> {
@@ -2993,6 +3049,9 @@ tmpfs /run tmpfs rw,nosuid,nodev 0 0
     #[test]
     fn stage_b_view_modes_roundtrip_in_tags_config() -> Result<(), Box<dyn std::error::Error>> {
         let guard = TempDirGuard::new("view-modes-stage-b")?;
+        let defaults = FileTagsConfig::default();
+        assert_eq!(defaults.view_mode, FileViewMode::Icons);
+        assert!(!defaults.show_path_bar);
         for mode in [
             FileViewMode::Icons,
             FileViewMode::List,
@@ -3002,13 +3061,21 @@ tmpfs /run tmpfs rw,nosuid,nodev 0 0
             assert!(mode.is_supported());
             let cfg = FileTagsConfig {
                 view_mode: mode,
+                show_path_bar: mode == FileViewMode::Icons,
                 ..Default::default()
             };
             let cfg_path = guard.path.join(format!("{}.toml", mode.as_config_str()));
             cfg.save_to_path(&cfg_path)?;
             let loaded = FileTagsConfig::load_from_path(&cfg_path);
             assert_eq!(loaded.view_mode, mode);
+            assert_eq!(loaded.show_path_bar, mode == FileViewMode::Icons);
         }
+        let sub = guard.path.join("nested");
+        fs::create_dir_all(&sub)?;
+        fs::write(sub.join("needle_doc.txt"), b"ok")?;
+        let found = search_directory_recursive(&guard.path, "needle", false, 16);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].name, "needle_doc.txt");
         Ok(())
     }
 

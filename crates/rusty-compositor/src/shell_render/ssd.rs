@@ -470,19 +470,28 @@ pub fn generate_window_shadow_elements(
             &mut out,
             shape_cache,
             renderer,
-            Rectangle::new(Point::from((rect.x, rect.y + 2)), Size::from((w, h))),
+            Rectangle::new(Point::from((rect.x, rect.y + 1)), Size::from((w, h))),
             WINDOW_RADIUS,
-            8,
-            40,
+            6,
+            26,
         );
         push_soft_shadow(
             &mut out,
             shape_cache,
             renderer,
-            Rectangle::new(Point::from((rect.x, rect.y + 6)), Size::from((w, h))),
+            Rectangle::new(Point::from((rect.x, rect.y + 5)), Size::from((w, h))),
             WINDOW_RADIUS,
-            26,
-            36,
+            18,
+            34,
+        );
+        push_soft_shadow(
+            &mut out,
+            shape_cache,
+            renderer,
+            Rectangle::new(Point::from((rect.x, rect.y + 12)), Size::from((w, h))),
+            WINDOW_RADIUS,
+            40,
+            46,
         );
     } else {
         push_soft_shadow(
@@ -491,16 +500,16 @@ pub fn generate_window_shadow_elements(
             renderer,
             Rectangle::new(Point::from((rect.x, rect.y + 2)), Size::from((w, h))),
             WINDOW_RADIUS,
-            6,
+            10,
             20,
         );
         push_soft_shadow(
             &mut out,
             shape_cache,
             renderer,
-            Rectangle::new(Point::from((rect.x, rect.y + 4)), Size::from((w, h))),
+            Rectangle::new(Point::from((rect.x, rect.y + 6)), Size::from((w, h))),
             WINDOW_RADIUS,
-            14,
+            24,
             22,
         );
     }

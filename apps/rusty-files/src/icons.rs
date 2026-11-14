@@ -33,14 +33,14 @@ pub(crate) fn draw_sidebar_icon(
     match kind {
         SidebarIconKind::Tag(tag) => {
             let [red, green, blue] = tag.rgb();
-            c.fill_circle_f(sx, sy, 4.6, rgba(red, green, blue, 255));
+            c.fill_circle_f(sx, sy, 4.25, rgba(red, green, blue, 255));
         }
         SidebarIconKind::Recents => {
-            c.stroke_circle_f(sx, sy, 5.4, 1.25, accent);
+            c.stroke_circle_f(sx, sy, 5.2, 1.15, accent);
             c.stroke_polyline_aa(
-                &[(sx, sy - 3.0), (sx, sy), (sx + 2.5, sy + 1.5)],
+                &[(sx, sy - 2.8), (sx, sy), (sx + 2.3, sy + 1.4)],
                 false,
-                1.25,
+                1.15,
                 accent,
             );
         }
@@ -48,85 +48,85 @@ pub(crate) fn draw_sidebar_icon(
         SidebarIconKind::Applications => draw_applications_a_icon(c, sx, sy, accent),
         SidebarIconKind::Desktop => {
             c.stroke_rounded_rect_f(
-                snap_edge(sx - 6.0),
-                snap_edge(sy - 5.0),
-                12.0,
-                8.0,
-                1.5,
-                1.15,
+                snap_edge(sx - 5.5),
+                snap_edge(sy - 4.8),
+                11.0,
+                7.6,
+                1.4,
+                1.05,
                 accent,
             );
             c.stroke_line_aa(
-                sx - 4.0,
-                snap_half(sy + 1.0),
-                sx + 4.0,
-                snap_half(sy + 1.0),
-                1.0,
+                sx - 3.6,
+                snap_half(sy + 0.8),
+                sx + 3.6,
+                snap_half(sy + 0.8),
+                0.95,
                 accent,
             );
-            c.stroke_line_aa(sx, sy + 3.0, sx, sy + 5.0, 1.2, accent);
+            c.stroke_line_aa(sx, sy + 2.8, sx, sy + 4.8, 1.05, accent);
             c.stroke_line_aa(
-                sx - 3.0,
-                snap_half(sy + 5.0),
-                sx + 3.0,
-                snap_half(sy + 5.0),
-                1.2,
+                sx - 2.8,
+                snap_half(sy + 4.8),
+                sx + 2.8,
+                snap_half(sy + 4.8),
+                1.05,
                 accent,
             );
         }
-        SidebarIconKind::Documents => draw_dogear_document_icon(c, sx, sy, accent, 1.15),
+        SidebarIconKind::Documents => draw_dogear_document_icon(c, sx, sy, accent, 1.1),
         SidebarIconKind::Downloads => {
-            c.stroke_circle_f(sx, sy, 5.4, 1.2, accent);
-            c.stroke_line_aa(sx, sy - 2.8, sx, sy + 2.4, 1.25, accent);
+            c.stroke_circle_f(sx, sy, 5.2, 1.1, accent);
+            c.stroke_line_aa(sx, sy - 2.6, sx, sy + 2.2, 1.15, accent);
             c.stroke_polyline_aa(
-                &[(sx - 2.4, sy + 0.3), (sx, sy + 2.7), (sx + 2.4, sy + 0.3)],
+                &[(sx - 2.2, sy + 0.2), (sx, sy + 2.5), (sx + 2.2, sy + 0.2)],
                 false,
-                1.25,
+                1.15,
                 accent,
             );
         }
         SidebarIconKind::Home => draw_home_house_icon(c, sx, sy, neutral),
         SidebarIconKind::Volume => draw_drive_volume_icon(c, sx, sy, pal),
-        SidebarIconKind::Network => draw_network_globe_icon(c, sx, sy, accent),
+        SidebarIconKind::Network => draw_network_globe_icon(c, sx, sy, neutral),
         SidebarIconKind::Trash => draw_trash_can_icon(c, sx, sy, neutral),
     }
 }
 
 fn draw_shared_people_icon(c: &mut Canvas<'_>, cx: f32, cy: f32, col: [u8; 4]) {
-    c.stroke_circle_f(cx - 1.8, cy - 2.2, 1.9, 1.15, col);
+    c.stroke_circle_f(cx - 1.8, cy - 2.2, 1.8, 1.05, col);
     c.stroke_polyline_aa(
         &[
-            (cx - 5.0, cy + 4.2),
-            (cx - 3.6, cy + 1.5),
-            (cx, cy + 1.5),
-            (cx + 1.4, cy + 4.2),
+            (cx - 4.8, cy + 4.0),
+            (cx - 3.4, cy + 1.4),
+            (cx - 0.2, cy + 1.4),
+            (cx + 1.2, cy + 4.0),
         ],
         false,
-        1.15,
+        1.05,
         col,
     );
-    c.stroke_circle_f(cx + 2.7, cy - 2.4, 1.6, 1.1, col);
+    c.stroke_circle_f(cx + 2.6, cy - 2.4, 1.5, 1.0, col);
     c.stroke_polyline_aa(
         &[
-            (cx + 1.8, cy + 1.5),
-            (cx + 4.1, cy + 1.5),
-            (cx + 5.3, cy + 4.0),
+            (cx + 1.7, cy + 1.4),
+            (cx + 3.9, cy + 1.4),
+            (cx + 5.0, cy + 3.8),
         ],
         false,
-        1.1,
+        1.0,
         col,
     );
 }
 
 fn draw_applications_a_icon(c: &mut Canvas<'_>, cx: f32, cy: f32, col: [u8; 4]) {
-    c.stroke_line_aa(cx - 4.0, cy + 4.5, cx + 0.4, cy - 4.5, 1.25, col);
-    c.stroke_line_aa(cx - 0.4, cy - 4.5, cx + 4.0, cy + 4.5, 1.25, col);
+    c.stroke_line_aa(cx - 3.6, cy + 4.3, cx + 0.3, cy - 4.3, 1.15, col);
+    c.stroke_line_aa(cx - 0.3, cy - 4.3, cx + 3.6, cy + 4.3, 1.15, col);
     c.stroke_line_aa(
-        cx - 4.8,
-        snap_half(cy + 1.5),
-        cx + 4.8,
-        snap_half(cy + 1.5),
-        1.2,
+        cx - 4.5,
+        snap_half(cy + 1.4),
+        cx + 4.5,
+        snap_half(cy + 1.4),
+        1.05,
         col,
     );
 }
@@ -184,109 +184,98 @@ pub(crate) fn draw_dogear_document_icon(
 
 fn draw_home_house_icon(c: &mut Canvas<'_>, cx: f32, cy: f32, col: [u8; 4]) {
     c.stroke_polyline_aa(
-        &[(cx - 6.0, cy - 0.2), (cx, cy - 5.4), (cx + 6.0, cy - 0.2)],
+        &[(cx - 5.5, cy - 0.2), (cx, cy - 5.0), (cx + 5.5, cy - 0.2)],
         false,
-        1.3,
+        1.15,
         col,
     );
     c.stroke_line_aa(
-        snap_half(cx + 3.0),
-        cy - 4.4,
-        snap_half(cx + 3.0),
-        cy - 2.6,
-        1.2,
-        col,
-    );
-    let left = snap_half(cx - 4.2);
-    let right = snap_half(cx + 4.2);
-    let bot = snap_half(cy + 5.0);
-    c.stroke_polyline_aa(
-        &[
-            (left, cy - 1.2),
-            (left, bot),
-            (right, bot),
-            (right, cy - 1.2),
-        ],
-        false,
-        1.2,
-        col,
-    );
-    c.stroke_rounded_rect_f(
-        snap_edge(cx - 1.5),
-        snap_edge(cy + 0.8),
-        3.0,
-        4.2,
-        0.8,
+        snap_half(cx + 2.8),
+        cy - 4.1,
+        snap_half(cx + 2.8),
+        cy - 2.4,
         1.05,
         col,
     );
-}
-
-fn draw_drive_volume_icon(c: &mut Canvas<'_>, cx: f32, cy: f32, pal: &Palette) {
-    let (top, bot, border, led) = if pal.is_dark {
-        (
-            rgba(110, 114, 122, 255),
-            rgba(74, 78, 86, 255),
-            rgba(164, 168, 178, 255),
-            rgba(210, 214, 224, 255),
-        )
-    } else {
-        (
-            rgba(232, 236, 242, 255),
-            rgba(198, 204, 214, 255),
-            rgba(110, 118, 132, 255),
-            rgba(92, 100, 114, 255),
-        )
-    };
-    let left = snap_edge(cx - 6.0);
-    let upper = snap_edge(cy - 4.0);
-    c.fill_rounded_rect_vgrad_f(left, upper, 12.0, 8.0, 2.0, top, bot);
-    c.stroke_rounded_rect_f(left, upper, 12.0, 8.0, 2.0, 1.05, border);
-    c.stroke_line_aa(
-        left + 1.5,
-        snap_half(upper + 5.0),
-        left + 10.5,
-        snap_half(upper + 5.0),
-        0.9,
-        border,
-    );
-    c.fill_circle_f(left + 9.2, upper + 6.5, 0.75, led);
-}
-
-fn draw_network_globe_icon(c: &mut Canvas<'_>, cx: f32, cy: f32, col: [u8; 4]) {
-    c.stroke_circle_f(cx, cy, 5.4, 1.2, col);
-    c.stroke_line_aa(cx - 5.0, cy, cx + 5.0, cy, 1.0, col);
-    c.stroke_line_aa(cx, cy - 5.0, cx, cy + 5.0, 1.0, col);
-    c.stroke_ellipse_aa(cx, cy, 2.6, 5.3, 1.0, col);
-}
-
-fn draw_trash_can_icon(c: &mut Canvas<'_>, cx: f32, cy: f32, col: [u8; 4]) {
-    let lid_y = snap_half(cy - 3.5);
-    c.stroke_line_aa(cx - 5.0, lid_y, cx + 5.0, lid_y, 1.2, col);
+    let left = snap_half(cx - 3.9);
+    let right = snap_half(cx + 3.9);
+    let bot = snap_half(cy + 4.8);
     c.stroke_polyline_aa(
         &[
-            (cx - 2.0, lid_y),
-            (cx - 1.4, lid_y - 1.8),
-            (cx + 1.4, lid_y - 1.8),
-            (cx + 2.0, lid_y),
+            (left, cy - 1.1),
+            (left, bot),
+            (right, bot),
+            (right, cy - 1.1),
         ],
         false,
         1.1,
         col,
     );
-    c.stroke_polyline_aa(
-        &[
-            (cx - 3.9, lid_y),
-            (cx - 3.1, snap_half(cy + 5.2)),
-            (cx + 3.1, snap_half(cy + 5.2)),
-            (cx + 3.9, lid_y),
-        ],
-        false,
-        1.15,
+    c.stroke_rounded_rect_f(
+        snap_edge(cx - 1.4),
+        snap_edge(cy + 0.8),
+        2.8,
+        4.0,
+        0.7,
+        0.95,
         col,
     );
-    c.stroke_line_aa(cx - 1.3, cy - 1.2, cx - 1.0, cy + 3.3, 1.0, col);
-    c.stroke_line_aa(cx + 1.3, cy - 1.2, cx + 1.0, cy + 3.3, 1.0, col);
+}
+
+fn draw_drive_volume_icon(c: &mut Canvas<'_>, cx: f32, cy: f32, pal: &Palette) {
+    let (border, slot) = if pal.is_dark {
+        (rgba(174, 174, 182, 255), rgba(140, 140, 148, 220))
+    } else {
+        (pal.text_secondary, rgba(120, 122, 128, 220))
+    };
+    let left = snap_edge(cx - 5.8);
+    let upper = snap_edge(cy - 3.2);
+    c.stroke_rounded_rect_f(left, upper, 11.6, 6.4, 1.8, 1.05, border);
+    c.stroke_line_aa(
+        left + 1.5,
+        snap_half(upper + 4.1),
+        left + 10.1,
+        snap_half(upper + 4.1),
+        0.9,
+        slot,
+    );
+    c.fill_circle_f(left + 9.0, upper + 5.1, 0.65, border);
+}
+
+fn draw_network_globe_icon(c: &mut Canvas<'_>, cx: f32, cy: f32, col: [u8; 4]) {
+    c.stroke_circle_f(cx, cy, 5.2, 1.05, col);
+    c.stroke_line_aa(cx - 4.8, cy, cx + 4.8, cy, 0.95, col);
+    c.stroke_line_aa(cx, cy - 4.8, cx, cy + 4.8, 0.95, col);
+    c.stroke_ellipse_aa(cx, cy, 2.5, 5.1, 0.95, col);
+}
+
+fn draw_trash_can_icon(c: &mut Canvas<'_>, cx: f32, cy: f32, col: [u8; 4]) {
+    let lid_y = snap_half(cy - 3.3);
+    c.stroke_line_aa(cx - 4.7, lid_y, cx + 4.7, lid_y, 1.1, col);
+    c.stroke_polyline_aa(
+        &[
+            (cx - 1.9, lid_y),
+            (cx - 1.3, lid_y - 1.7),
+            (cx + 1.3, lid_y - 1.7),
+            (cx + 1.9, lid_y),
+        ],
+        false,
+        1.0,
+        col,
+    );
+    c.stroke_polyline_aa(
+        &[
+            (cx - 3.7, lid_y),
+            (cx - 2.9, snap_half(cy + 4.9)),
+            (cx + 2.9, snap_half(cy + 4.9)),
+            (cx + 3.7, lid_y),
+        ],
+        false,
+        1.05,
+        col,
+    );
+    c.stroke_line_aa(cx - 1.2, cy - 1.1, cx - 0.9, cy + 3.1, 0.95, col);
+    c.stroke_line_aa(cx + 1.2, cy - 1.1, cx + 0.9, cy + 3.1, 0.95, col);
 }
 
 /// Draws compact 14 px file/folder entry icons in Columns/List/Gallery header.
@@ -1126,12 +1115,12 @@ pub(crate) fn draw_view_mode_icon(
 pub(crate) fn draw_sort_pill_glyph(c: &mut Canvas<'_>, pill_x: f32, cy: f32, col: [u8; 4]) {
     let gx = snap_half(pill_x + 19.0);
     let gy = snap_half(cy);
-    for dy in [-4.5_f32, -1.0, 2.5] {
-        for dx in [-5.0_f32, -1.0, 3.0] {
-            c.fill_rounded_rect_f(snap_edge(gx + dx), snap_edge(gy + dy), 2.0, 2.0, 0.5, col);
+    for dy in [-2.6_f32, 0.8] {
+        for dx in [-5.8_f32, -1.5, 2.8] {
+            c.fill_rounded_rect_f(snap_edge(gx + dx), snap_edge(gy + dy), 3.0, 2.0, 0.7, col);
         }
     }
-    let vx = snap_half(pill_x + 38.5);
+    let vx = snap_half(pill_x + 39.0);
     c.stroke_polyline_aa(
         &[(vx - 3.0, gy - 1.5), (vx, gy + 1.5), (vx + 3.0, gy - 1.5)],
         false,
@@ -1140,29 +1129,30 @@ pub(crate) fn draw_sort_pill_glyph(c: &mut Canvas<'_>, pill_x: f32, cy: f32, col
     );
 }
 
-pub(crate) fn draw_folder_plus_glyph(c: &mut Canvas<'_>, cx: f32, cy: f32, col: [u8; 4]) {
+/// Draws the macOS Golden Gate `Share` tray + upward arrow toolbar glyph (`RUSTYOS-071`).
+pub(crate) fn draw_share_glyph(c: &mut Canvas<'_>, cx: f32, cy: f32, col: [u8; 4]) {
     let sx = snap_half(cx);
     let sy = snap_half(cy);
+    // Tray open at the top middle (`square.and.arrow.up`)
     c.stroke_polyline_aa(
         &[
-            (sx - 6.0, sy - 4.5),
-            (sx - 1.8, sy - 4.5),
-            (sx - 0.3, sy - 2.8),
-            (sx + 6.0, sy - 2.8),
-            (sx + 6.0, sy + 4.5),
-            (sx - 6.0, sy + 4.5),
+            (sx - 2.3, sy - 2.2),
+            (sx - 5.2, sy - 2.2),
+            (sx - 5.2, sy + 5.8),
+            (sx + 5.2, sy + 5.8),
+            (sx + 5.2, sy - 2.2),
+            (sx + 2.3, sy - 2.2),
         ],
-        true,
-        1.2,
+        false,
+        1.25,
         col,
     );
-    c.stroke_line_aa(sx, sy - 0.8, sx, sy + 2.8, 1.15, col);
-    c.stroke_line_aa(
-        sx - 1.8,
-        snap_half(sy + 1.0),
-        sx + 1.8,
-        snap_half(sy + 1.0),
-        1.15,
+    // Vertical stem + upward chevron arrow
+    c.stroke_line_aa(sx, sy + 2.2, sx, sy - 5.8, 1.25, col);
+    c.stroke_polyline_aa(
+        &[(sx - 2.8, sy - 3.2), (sx, sy - 6.0), (sx + 2.8, sy - 3.2)],
+        false,
+        1.25,
         col,
     );
 }

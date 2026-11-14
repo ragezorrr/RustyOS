@@ -16,7 +16,8 @@ use rusty_services::file_manager::{
     UserFileLocations, VolumeInfo, copy_or_move_with_progress, create_unique_folder,
     discover_mounts, empty_trash, filter_and_sort_entries, inspect_entry_info,
     list_entries_for_target, load_image_preview_bgra, move_to_trash, read_text_preview,
-    rename_entry, resolve_go_to_path, restore_from_trash, suggest_go_to_paths,
+    rename_entry, resolve_go_to_path, restore_from_trash, search_directory_recursive,
+    suggest_go_to_paths,
 };
 
 /// Fixed column width in Miller Columns mode.
@@ -24,9 +25,9 @@ pub(crate) const MILLER_COLUMN_WIDTH: i32 = 216;
 /// Row height for Miller column rows.
 pub(crate) const ROW_HEIGHT: i32 = 26;
 /// Row height for Golden Gate sidebar rows.
-pub(crate) const SIDEBAR_ROW_HEIGHT: i32 = 23;
-/// Section header height in the Golden Gate sidebar.
-pub(crate) const SIDEBAR_SECTION_HEIGHT: i32 = 18;
+pub(crate) const SIDEBAR_ROW_HEIGHT: i32 = 22;
+/// Section header + top inter-section gap height in the Golden Gate sidebar.
+pub(crate) const SIDEBAR_SECTION_HEIGHT: i32 = 24;
 /// List view row height.
 pub(crate) const LIST_ROW_HEIGHT: i32 = 28;
 /// Icon grid cell width.
@@ -208,11 +209,23 @@ pub(crate) struct NavigationHistoryEntry {
     pub sidebar: Option<SidebarLocation>,
 }
 
+/// Search scope selector shown in the Search Scope bar (`RUSTYOS-071`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum SearchScope {
+    /// Filter entries within the active folder / column.
+    #[default]
+    ThisFolder,
+    /// Recursive filename search across user Home directory.
+    Home,
+}
+
 /// Active floating popover menu inside `rusty-files`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum OpenPopupMenu {
     /// Sort criterion & order menu anchored below Sort pill.
     SortMenu,
+    /// Share menu anchored below left Share action button (`RUSTYOS-071`).
+    ShareMenu,
     /// Actions menu anchored below `...` More pill.
     ActionsMenu,
     /// Quick tag color assignment menu anchored below Tag pill.
@@ -224,6 +237,14 @@ pub(crate) enum OpenPopupMenu {
         target_entry: Option<FileEntry>,
         target_dir: Option<PathBuf>,
     },
+}
+
+/// Completed recursive Home search payload delivered over `mpsc` (`RUSTYOS-071`).
+#[derive(Debug)]
+struct HomeSearchResult {
+    generation: u64,
+    query: String,
+    entries: Vec<FileEntry>,
 }
 
 /// Completed background listing payload delivered over `mpsc`.
@@ -392,8 +413,16 @@ pub(crate) struct FilesAppState {
     pub sort_field: FileSortField,
     pub sort_order: FileSortOrder,
     pub show_hidden: bool,
+    pub show_path_bar: bool,
     pub search_active: bool,
     pub search_query: String,
+    pub search_scope: SearchScope,
+    saved_root_raw: Option<(ListingTarget, Vec<FileEntry>)>,
+    pending_home_search: bool,
+    home_search_tx: mpsc::Sender<HomeSearchResult>,
+    home_search_rx: mpsc::Receiver<HomeSearchResult>,
+    pub last_scroll_activity: Option<Instant>,
+    pub overlay_scrollbar_alpha: f32,
     pub columns: Vec<ColumnPane>,
     pub active_column: usize,
     pub column_scroll_x: i32,
@@ -455,6 +484,7 @@ impl FilesAppState {
         let (preview_tx, preview_rx) = mpsc::channel();
         let (info_tx, info_rx) = mpsc::channel();
         let (transfer_tx, transfer_rx) = mpsc::channel();
+        let (home_search_tx, home_search_rx) = mpsc::channel();
         let sidebar_items = build_sidebar_items(&locations, &volumes);
 
         let theme = opts
@@ -467,6 +497,7 @@ impl FilesAppState {
             sort_field: tags_config.sort_field,
             sort_order: tags_config.sort_order,
             show_hidden: tags_config.show_hidden,
+            show_path_bar: tags_config.show_path_bar,
             locations,
             tags_config,
             volumes,
@@ -476,6 +507,13 @@ impl FilesAppState {
             theme,
             search_active: false,
             search_query: String::new(),
+            search_scope: SearchScope::ThisFolder,
+            saved_root_raw: None,
+            pending_home_search: false,
+            home_search_tx,
+            home_search_rx,
+            last_scroll_activity: None,
+            overlay_scrollbar_alpha: 0.0,
             columns: Vec::new(),
             active_column: 0,
             column_scroll_x: 0,
@@ -608,6 +646,9 @@ impl FilesAppState {
         self.popup = None;
         self.inline_rename = None;
         self.loader_gen = self.loader_gen.wrapping_add(1);
+        self.search_scope = SearchScope::ThisFolder;
+        self.saved_root_raw = None;
+        self.pending_home_search = false;
         self.active_sidebar = sidebar;
         self.active_column = 0;
         self.column_scroll_x = 0;
@@ -670,6 +711,9 @@ impl FilesAppState {
     /// Polls completed background directory reads, previews, info inspection, and transfers.
     pub(crate) fn poll_background_loads(&mut self) -> bool {
         let mut changed = self.poll_directory_jobs();
+        if self.poll_home_search_jobs() {
+            changed = true;
+        }
         if self.poll_preview_jobs() {
             changed = true;
         }
@@ -681,6 +725,29 @@ impl FilesAppState {
         }
         if changed {
             self.dirty = true;
+        }
+        changed
+    }
+
+    fn poll_home_search_jobs(&mut self) -> bool {
+        let mut changed = false;
+        while let Ok(msg) = self.home_search_rx.try_recv() {
+            if msg.generation != self.loader_gen
+                || self.search_scope != SearchScope::Home
+                || msg.query != self.search_query
+            {
+                continue;
+            }
+            self.pending_home_search = false;
+            if let Some(col) = self.columns.first_mut() {
+                col.raw_entries = msg.entries;
+                col.error = None;
+            }
+            self.reapply_filters_all_columns();
+            changed = true;
+        }
+        if changed {
+            self.ensure_stage_b_assets_requested();
         }
         changed
     }
@@ -881,6 +948,24 @@ impl FilesAppState {
             }
         }
         while self.result_rx.try_recv().is_ok() {}
+        if self.pending_home_search
+            && self.search_scope == SearchScope::Home
+            && !self.search_query.trim().is_empty()
+        {
+            let found = search_directory_recursive(
+                &self.locations.home,
+                &self.search_query,
+                self.show_hidden,
+                250,
+            );
+            if let Some(col) = self.columns.first_mut() {
+                col.raw_entries = found;
+                col.error = None;
+            }
+            self.pending_home_search = false;
+            self.reapply_filters_all_columns();
+        }
+        while self.home_search_rx.try_recv().is_ok() {}
         self.ensure_stage_b_assets_requested();
     }
 
@@ -1072,12 +1157,106 @@ impl FilesAppState {
         self.dirty = true;
     }
 
-    /// Updates search filter query and refreshes visible column entries.
+    /// Toggles Path Bar breadcrumb visibility and persists preference (`RUSTYOS-071`).
+    pub(crate) fn toggle_path_bar(&mut self) {
+        self.show_path_bar = !self.show_path_bar;
+        self.tags_config.show_path_bar = self.show_path_bar;
+        self.persist_preferences();
+        self.popup = None;
+        self.dirty = true;
+    }
+
+    /// Updates search filter query and refreshes visible entries (including Home scope).
     pub(crate) fn set_search_query(&mut self, query: String) {
         self.search_query = query;
-        self.reapply_filters_all_columns();
+        self.refresh_search_results();
         self.reset_caret_blink();
         self.dirty = true;
+    }
+
+    /// Switches active search scope between active folder and recursive Home search (`RUSTYOS-071`).
+    pub(crate) fn set_search_scope(&mut self, scope: SearchScope) {
+        if self.search_scope != scope {
+            self.search_scope = scope;
+            self.refresh_search_results();
+            self.dirty = true;
+        }
+    }
+
+    /// Returns human label for the current-folder chip in the Search Scope bar.
+    #[must_use]
+    pub(crate) fn search_this_folder_label(&self) -> String {
+        self.columns
+            .first()
+            .map_or_else(|| String::from("This Folder"), |c| c.title.clone())
+    }
+
+    fn refresh_search_results(&mut self) {
+        if self.search_scope == SearchScope::Home && !self.search_query.trim().is_empty() {
+            if self.saved_root_raw.is_none()
+                && let Some(col) = self.columns.first()
+            {
+                self.saved_root_raw = Some((col.target.clone(), col.raw_entries.clone()));
+            }
+            self.columns.truncate(1);
+            self.active_column = 0;
+            self.spawn_home_search_job();
+            return;
+        }
+        self.pending_home_search = false;
+        if let Some((saved_target, saved_entries)) = self.saved_root_raw.take()
+            && let Some(col) = self.columns.first_mut()
+            && col.target == saved_target
+        {
+            col.raw_entries = saved_entries;
+        }
+        self.reapply_filters_all_columns();
+    }
+
+    fn spawn_home_search_job(&mut self) {
+        let tx = self.home_search_tx.clone();
+        let gen_id = self.loader_gen;
+        let root = self.locations.home.clone();
+        let query = self.search_query.clone();
+        let show_hidden = self.show_hidden;
+        self.pending_home_search = true;
+        thread::spawn(move || {
+            let entries = search_directory_recursive(&root, &query, show_hidden, 250);
+            let _ = tx.send(HomeSearchResult {
+                generation: gen_id,
+                query,
+                entries,
+            });
+        });
+    }
+
+    /// Resolves selected path or active directory for Share actions (`RUSTYOS-071`).
+    #[must_use]
+    pub(crate) fn share_target_path(&self) -> Option<PathBuf> {
+        self.selected_entry()
+            .map(|e| e.path.clone())
+            .or_else(|| self.active_writable_directory())
+    }
+
+    /// Copies text to Wayland clipboard via non-blocking `wl-copy` (if available) and updates status.
+    pub(crate) fn share_copy_text(&mut self, text: String, notice_prefix: &str) {
+        self.popup = None;
+        self.status_message = Some(format!("{notice_prefix}: {text}"));
+        self.dirty = true;
+        thread::spawn(move || {
+            use std::io::Write;
+            if let Ok(mut child) = Command::new("wl-copy")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                && let Some(mut stdin) = child.stdin.take()
+            {
+                let _ = stdin.write_all(text.as_bytes());
+                drop(stdin);
+                let _ = child.wait();
+            }
+        });
     }
 
     fn reapply_filters_all_columns(&mut self) {
@@ -1277,6 +1456,7 @@ impl FilesAppState {
             } else if self.search_active {
                 if self.search_query.is_empty() {
                     self.search_active = false;
+                    self.set_search_scope(SearchScope::ThisFolder);
                 } else {
                     self.set_search_query(String::new());
                 }
@@ -1287,7 +1467,7 @@ impl FilesAppState {
         if self.search_active {
             if key_name == "BackSpace" {
                 self.search_query.pop();
-                self.reapply_filters_all_columns();
+                self.refresh_search_results();
                 self.reset_caret_blink();
                 self.dirty = true;
                 return;
@@ -1298,7 +1478,7 @@ impl FilesAppState {
                 && !text.is_empty()
             {
                 self.search_query.push_str(text);
-                self.reapply_filters_all_columns();
+                self.refresh_search_results();
                 self.reset_caret_blink();
                 self.dirty = true;
                 return;
@@ -1667,10 +1847,16 @@ impl FilesAppState {
                 }
             }
         }
+        self.note_scroll_activity();
         if smooth {
             self.last_anim_tick.get_or_insert_with(Instant::now);
         }
         self.dirty = true;
+    }
+
+    fn note_scroll_activity(&mut self) {
+        self.last_scroll_activity = Some(Instant::now());
+        self.overlay_scrollbar_alpha = 1.0;
     }
 
     /// Scrolls Miller columns horizontally (`Columns` view) or gallery strip horizontally.
@@ -1700,84 +1886,116 @@ impl FilesAppState {
         self.column_scroll_x = self
             .column_scroll_x_anim
             .impulse(delta_px, max_overflow, smooth);
+        self.note_scroll_activity();
         if smooth {
             self.last_anim_tick.get_or_insert_with(Instant::now);
         }
         self.dirty = true;
     }
 
-    /// Advances smooth scroll animations aligned with compositor presentation cadence.
+    /// Advances smooth scroll animations and overlay scrollbar fade aligned with frame cadence.
     pub(crate) fn tick_animations(&mut self, now: Instant) -> bool {
-        let Some(prev) = self.last_anim_tick else {
-            self.last_anim_tick = Some(now);
-            return false;
-        };
-        let dt = now
-            .saturating_duration_since(prev)
-            .as_secs_f64()
-            .clamp(0.001, 0.033);
-        self.last_anim_tick = Some(now);
-
         let mut moved = false;
         let mut active = false;
 
-        let (v, m, a) = self.sidebar_scroll_anim.tick(dt);
-        if m {
-            self.sidebar_scroll_y = v;
-            moved = true;
-        }
-        active |= a;
+        if let Some(prev) = self.last_anim_tick {
+            let dt = now
+                .saturating_duration_since(prev)
+                .as_secs_f64()
+                .clamp(0.001, 0.033);
+            self.last_anim_tick = Some(now);
 
-        let (v, m, a) = self.list_scroll_anim.tick(dt);
-        if m {
-            self.list_scroll_y = v;
-            moved = true;
-        }
-        active |= a;
-
-        let (v, m, a) = self.icons_scroll_anim.tick(dt);
-        if m {
-            self.icons_scroll_y = v;
-            self.ensure_stage_b_assets_requested();
-            moved = true;
-        }
-        active |= a;
-
-        let (v, m, a) = self.gallery_strip_scroll_anim.tick(dt);
-        if m {
-            self.gallery_strip_scroll_x = v;
-            self.ensure_stage_b_assets_requested();
-            moved = true;
-        }
-        active |= a;
-
-        let (v, m, a) = self.column_scroll_x_anim.tick(dt);
-        if m {
-            self.column_scroll_x = v;
-            moved = true;
-        }
-        active |= a;
-
-        for col in &mut self.columns {
-            let (v, m, a) = col.scroll_anim.tick(dt);
+            let (v, m, a) = self.sidebar_scroll_anim.tick(dt);
             if m {
-                col.scroll_y = v;
+                self.sidebar_scroll_y = v;
                 moved = true;
             }
             active |= a;
+
+            let (v, m, a) = self.list_scroll_anim.tick(dt);
+            if m {
+                self.list_scroll_y = v;
+                moved = true;
+            }
+            active |= a;
+
+            let (v, m, a) = self.icons_scroll_anim.tick(dt);
+            if m {
+                self.icons_scroll_y = v;
+                self.ensure_stage_b_assets_requested();
+                moved = true;
+            }
+            active |= a;
+
+            let (v, m, a) = self.gallery_strip_scroll_anim.tick(dt);
+            if m {
+                self.gallery_strip_scroll_x = v;
+                self.ensure_stage_b_assets_requested();
+                moved = true;
+            }
+            active |= a;
+
+            let (v, m, a) = self.column_scroll_x_anim.tick(dt);
+            if m {
+                self.column_scroll_x = v;
+                moved = true;
+            }
+            active |= a;
+
+            for col in &mut self.columns {
+                let (v, m, a) = col.scroll_anim.tick(dt);
+                if m {
+                    col.scroll_y = v;
+                    moved = true;
+                }
+                active |= a;
+            }
+
+            if !active {
+                self.last_anim_tick = None;
+            }
+        } else if self.has_smooth_axes_active() {
+            self.last_anim_tick = Some(now);
+            active = true;
         }
 
-        if !active {
-            self.last_anim_tick = None;
-        }
+        let (sb_moved, sb_fading) = self.tick_overlay_scrollbar(now);
+        moved |= sb_moved;
+        active |= sb_fading;
+
         if moved {
             self.dirty = true;
         }
         active
     }
 
-    #[must_use]
-    pub(crate) fn has_active_animations(&self) -> bool {
+    fn tick_overlay_scrollbar(&mut self, now: Instant) -> (bool, bool) {
+        let Some(at) = self.last_scroll_activity else {
+            return (false, false);
+        };
+        let elapsed = now.saturating_duration_since(at).as_secs_f32();
+        let next_alpha = if elapsed <= 0.75 {
+            1.0
+        } else if elapsed >= 1.15 {
+            0.0
+        } else {
+            1.0 - (elapsed - 0.75) / 0.40
+        };
+        let mut moved = (next_alpha - self.overlay_scrollbar_alpha).abs() > 0.005;
+        if moved {
+            self.overlay_scrollbar_alpha = next_alpha;
+        }
+        if elapsed >= 1.15 {
+            self.overlay_scrollbar_alpha = 0.0;
+            self.last_scroll_activity = None;
+            moved = true;
+            (moved, false)
+        } else {
+            (moved, elapsed >= 0.75)
+        }
+    }
+
+    fn has_smooth_axes_active(&self) -> bool {
         self.sidebar_scroll_anim.is_active()
             || self.list_scroll_anim.is_active()
             || self.icons_scroll_anim.is_active()
@@ -1787,8 +2005,38 @@ impl FilesAppState {
     }
 
     #[must_use]
+    pub(crate) fn has_active_animations(&self) -> bool {
+        self.has_smooth_axes_active()
+            || (self.overlay_scrollbar_alpha > 0.0 && self.overlay_scrollbar_alpha < 0.999)
+    }
+
+    /// True when the overlay scrollbar fade timer has crossed its hold window and needs redraws.
+    #[must_use]
+    pub(crate) fn scrollbar_needs_tick(&self, now: Instant) -> bool {
+        self.last_scroll_activity
+            .is_some_and(|at| now.saturating_duration_since(at) >= Duration::from_millis(750))
+    }
+
+    /// Remaining hold delay before overlay scrollbar starts fading out.
+    #[must_use]
+    pub(crate) fn time_until_scrollbar_tick(&self, now: Instant) -> Option<Duration> {
+        let at = self.last_scroll_activity?;
+        let elapsed = now.saturating_duration_since(at);
+        if elapsed < Duration::from_millis(750) {
+            Some(
+                Duration::from_millis(750)
+                    .saturating_sub(elapsed)
+                    .max(Duration::from_millis(10)),
+            )
+        } else {
+            Some(Duration::from_millis(16))
+        }
+    }
+
+    #[must_use]
     pub(crate) fn has_pending_jobs(&self) -> bool {
         self.columns.iter().any(|c| c.loading)
+            || self.pending_home_search
             || !self.pending_previews.is_empty()
             || self.pending_info_path.is_some()
             || self.active_transfer.is_some()
@@ -2804,7 +3052,9 @@ mod tests {
         let mut state = FilesAppState::new(guard.locations(), &StartupOptions::default());
         state.complete_pending_loads_sync();
         assert_eq!(state.theme, FilesThemeMode::LightGoldenGate);
-        assert_eq!(state.view_mode, FileViewMode::Columns);
+        assert_eq!(state.view_mode, FileViewMode::Icons);
+        assert!(!state.show_path_bar);
+        state.set_view_mode(FileViewMode::Columns);
 
         state.navigate_sidebar(SidebarLocation::Documents, true);
         state.complete_pending_loads_sync();
@@ -2835,6 +3085,25 @@ mod tests {
         assert_eq!(state.view_mode, FileViewMode::Gallery);
         state.set_view_mode(FileViewMode::Columns);
         assert_eq!(state.view_mode, FileViewMode::Columns);
+
+        // Path Bar toggle persists & Home SearchScope finds deep files across subdirectories
+        state.toggle_path_bar();
+        assert!(state.show_path_bar);
+        assert!(FilesAppState::new(guard.locations(), &StartupOptions::default()).show_path_bar);
+
+        state.search_active = true;
+        state.set_search_query(String::from("deep"));
+        state.set_search_scope(SearchScope::Home);
+        state.complete_pending_loads_sync();
+        assert_eq!(state.columns[0].visible_entries.len(), 1);
+        assert_eq!(state.columns[0].visible_entries[0].name, "deep.rs");
+        state.set_search_scope(SearchScope::ThisFolder);
+        state.set_search_query(String::new());
+
+        // Ctrl+Shift+N creates a new folder via keyboard shortcut
+        state.handle_key_input("N", Some("N"), true, true);
+        state.complete_pending_loads_sync();
+        assert!(guard.locations().documents.join("untitled folder").is_dir());
         Ok(())
     }
 
@@ -2988,6 +3257,7 @@ mod tests {
         }
         let mut state = FilesAppState::new(locs.clone(), &StartupOptions::default());
         state.complete_pending_loads_sync();
+        state.set_view_mode(FileViewMode::Columns);
 
         let col = state
             .columns
@@ -2999,6 +3269,7 @@ mod tests {
 
         state.scroll_axis(ScrollTargetArea::Column(1), 88.0, true, 160);
         assert!(state.has_active_animations());
+        assert!((state.overlay_scrollbar_alpha - 1.0).abs() < 0.01);
         let t0 = state.last_anim_tick.unwrap_or_else(Instant::now);
         let _ = state.tick_animations(t0 + Duration::from_millis(16));
         assert!(state.columns[1].scroll_y > 0);
@@ -3008,6 +3279,11 @@ mod tests {
         }
         assert_eq!(state.columns[1].scroll_y, 88);
         assert!(!state.has_active_animations());
+        let scroll_at = state.last_scroll_activity.unwrap_or(t0);
+        let _ = state.tick_animations(scroll_at + Duration::from_millis(950));
+        assert!(state.overlay_scrollbar_alpha > 0.0 && state.overlay_scrollbar_alpha < 1.0);
+        let _ = state.tick_animations(scroll_at + Duration::from_millis(1200));
+        assert_eq!(state.overlay_scrollbar_alpha, 0.0);
 
         state.search_active = true;
         state.set_search_query(String::from("item"));

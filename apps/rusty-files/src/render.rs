@@ -16,15 +16,14 @@ use rusty_services::file_manager::{
 
 use crate::dialogs::render_dialog_overlays;
 use crate::icons::{
-    draw_chevron_aa, draw_ellipsis_glyph, draw_entry_icon, draw_folder_plus_glyph,
-    draw_search_glyph, draw_sidebar_icon, draw_sort_pill_glyph, draw_tag_outline_glyph,
-    draw_view_mode_icon,
+    draw_chevron_aa, draw_ellipsis_glyph, draw_entry_icon, draw_search_glyph, draw_share_glyph,
+    draw_sidebar_icon, draw_sort_pill_glyph, draw_tag_outline_glyph, draw_view_mode_icon,
 };
 use crate::layout::{
-    ColumnLayout, FilesLayout, PopupLayout, PreviewLayout, Rect, SIDEBAR_CORNER_RADIUS,
+    ColumnLayout, FilesLayout, PopupLayout, PreviewLayout, Rect, SearchScopeBarLayout,
     WINDOW_CORNER_RADIUS,
 };
-use crate::state::{FilesAppState, LIST_ROW_HEIGHT, ROW_HEIGHT, sidebar_total_height};
+use crate::state::{FilesAppState, LIST_ROW_HEIGHT, ROW_HEIGHT, SearchScope, sidebar_total_height};
 use crate::views::{render_gallery_view, render_icons_grid, render_path_bar, render_tab_bar};
 
 const INTER_REGULAR_BYTES: &[u8] = include_bytes!("../../../assets/fonts/Inter-Regular.ttf");
@@ -155,13 +154,13 @@ pub(crate) const fn palette_for(theme: FilesThemeMode) -> Palette {
     match theme {
         FilesThemeMode::LightGoldenGate => Palette {
             window_bg: rgba(255, 255, 255, 255),
-            window_border: rgba(210, 213, 222, 255),
-            sidebar_bg: rgba(241, 243, 247, 252),
-            sidebar_border: rgba(224, 227, 234, 255),
-            sidebar_active: rgba(221, 226, 235, 255),
+            window_border: rgba(196, 200, 212, 165),
+            sidebar_bg: rgba(238, 239, 241, 255),
+            sidebar_border: rgba(218, 219, 223, 255),
+            sidebar_active: rgba(218, 219, 222, 255),
             pill_bg: rgba(249, 250, 252, 255),
-            pill_border: rgba(218, 222, 230, 255),
-            pill_active: rgba(229, 232, 239, 255),
+            pill_border: rgba(212, 217, 228, 195),
+            pill_active: rgba(232, 235, 242, 255),
             divider: rgba(232, 234, 240, 255),
             scrollbar: rgba(140, 148, 162, 115),
             accent: rgba(0, 122, 255, 255),
@@ -169,7 +168,7 @@ pub(crate) const fn palette_for(theme: FilesThemeMode) -> Palette {
             secondary_select: rgba(229, 232, 239, 255),
             text_primary: rgba(29, 31, 36, 255),
             text_secondary: rgba(102, 110, 124, 255),
-            text_muted: rgba(145, 152, 166, 255),
+            text_muted: rgba(134, 136, 142, 255),
             row_alt: rgba(247, 248, 251, 255),
             popup_bg: rgba(250, 251, 253, 255),
             popup_border: rgba(204, 209, 219, 255),
@@ -177,15 +176,15 @@ pub(crate) const fn palette_for(theme: FilesThemeMode) -> Palette {
         },
         FilesThemeMode::DarkPurpleGlass => Palette {
             window_bg: rgba(30, 30, 32, 255),
-            window_border: rgba(68, 68, 74, 255),
-            sidebar_bg: rgba(38, 38, 42, 252),
-            sidebar_border: rgba(58, 58, 64, 255),
-            sidebar_active: rgba(58, 58, 66, 255),
+            window_border: rgba(255, 255, 255, 34),
+            sidebar_bg: rgba(41, 41, 44, 255),
+            sidebar_border: rgba(58, 58, 62, 255),
+            sidebar_active: rgba(66, 66, 70, 255),
             pill_bg: rgba(44, 44, 49, 255),
-            pill_border: rgba(72, 72, 80, 255),
-            pill_active: rgba(64, 64, 72, 255),
+            pill_border: rgba(98, 98, 108, 105),
+            pill_active: rgba(76, 76, 86, 255),
             divider: rgba(52, 52, 58, 255),
-            scrollbar: rgba(160, 160, 170, 115),
+            scrollbar: rgba(175, 178, 188, 115),
             accent: rgba(10, 132, 255, 255),
             accent_text: rgba(255, 255, 255, 255),
             secondary_select: rgba(54, 54, 62, 255),
@@ -198,6 +197,18 @@ pub(crate) const fn palette_for(theme: FilesThemeMode) -> Palette {
             is_dark: true,
         },
     }
+}
+
+/// Scales overlay scrollbar alpha factor `[0.0..=1.0]` for transient post-scroll fading (`RUSTYOS-071`).
+#[must_use]
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+pub(crate) fn overlay_scrollbar_color(base: [u8; 4], factor: f32) -> [u8; 4] {
+    let clamped = factor.clamp(0.0, 1.0);
+    if clamped <= 0.005 {
+        return [base[0], base[1], base[2], 0];
+    }
+    let a = (f32::from(base[3]) * clamped).round().clamp(0.0, 255.0) as u8;
+    [base[0], base[1], base[2], a]
 }
 
 pub(crate) struct Canvas<'a> {
@@ -888,7 +899,7 @@ impl<'a> Canvas<'a> {
         total_h: i32,
         color: [u8; 4],
     ) {
-        if total_h <= rect.h || rect.h <= 16 {
+        if color[3] == 0 || total_h <= rect.h || rect.h <= 16 {
             return;
         }
         let track_h = rect.h - 8;
@@ -896,10 +907,10 @@ impl<'a> Canvas<'a> {
         let max_scroll = (total_h - rect.h).max(1);
         let offset = ((scroll_y.clamp(0, max_scroll) * (track_h - thumb_h)) / max_scroll)
             .clamp(0, track_h - thumb_h);
-        let tx = rect.right() - 5;
+        let tx = rect.right() - 6;
         let ty = rect.y + 4 + offset;
         #[allow(clippy::cast_precision_loss)]
-        self.fill_rounded_rect_f(tx as f32, ty as f32, 2.6, thumb_h as f32, 1.3, color);
+        self.fill_rounded_rect_f(tx as f32, ty as f32, 3.0, thumb_h as f32, 1.5, color);
     }
 
     #[allow(clippy::cast_sign_loss)]
@@ -1250,6 +1261,10 @@ pub(crate) fn render_window_pixels_with_popup(
         render_tab_bar(&mut c, tb, &pal);
     }
 
+    if let Some(sb) = &layout.search_scope_bar {
+        render_search_scope_bar(&mut c, state, sb, &pal);
+    }
+
     if let Some(banner) = layout.trash_banner_rect {
         render_trash_banner(&mut c, layout, banner, &pal);
     }
@@ -1289,17 +1304,22 @@ pub(crate) fn render_window_pixels_with_popup(
 }
 
 fn render_sidebar(c: &mut Canvas<'_>, state: &FilesAppState, layout: &FilesLayout, pal: &Palette) {
-    c.fill_rounded_rect(layout.sidebar_rect, SIDEBAR_CORNER_RADIUS, pal.sidebar_bg);
-    c.stroke_rounded_rect(
-        layout.sidebar_rect,
-        SIDEBAR_CORNER_RADIUS,
+    // Full-bleed edge-to-edge Finder sidebar (`x=0, y=0..height`, clipped to window corners).
+    c.fill_rect(layout.sidebar_rect, pal.sidebar_bg);
+    c.fill_rect(
+        Rect::new(
+            layout.sidebar_rect.right() - 1,
+            layout.sidebar_rect.y,
+            1,
+            layout.sidebar_rect.h,
+        ),
         pal.sidebar_border,
     );
 
-    // Golden Gate traffic lights inside floating sidebar header (strictly above sidebar_clip_rect)
-    c.fill_circle_f(29.0, 30.0, 6.0, rgba(255, 95, 87, 255));
-    c.fill_circle_f(49.0, 30.0, 6.0, rgba(254, 188, 46, 255));
-    c.fill_circle_f(69.0, 30.0, 6.0, rgba(40, 200, 64, 255));
+    // Golden Gate traffic lights concentric with top-left window corner radius (strictly above clip)
+    c.fill_circle_f(25.0, 25.0, 6.0, rgba(255, 95, 87, 255));
+    c.fill_circle_f(45.0, 25.0, 6.0, rgba(254, 188, 46, 255));
+    c.fill_circle_f(65.0, 25.0, 6.0, rgba(40, 200, 64, 255));
 
     let clip = layout.sidebar_clip_rect;
     c.with_clip(clip, |c| {
@@ -1335,7 +1355,7 @@ fn render_sidebar(c: &mut Canvas<'_>, state: &FilesAppState, layout: &FilesLayou
             c.draw_text(
                 &label,
                 row.rect.x + 29,
-                row.rect.y + 4,
+                row.rect.y + 3,
                 13.0,
                 selected,
                 pal.text_primary,
@@ -1343,13 +1363,33 @@ fn render_sidebar(c: &mut Canvas<'_>, state: &FilesAppState, layout: &FilesLayou
             );
         }
         let total_h = sidebar_total_height(&state.sidebar_items);
-        c.draw_scrollbar(clip, state.sidebar_scroll_y, total_h, pal.scrollbar);
+        c.draw_scrollbar(
+            clip,
+            state.sidebar_scroll_y,
+            total_h,
+            overlay_scrollbar_color(pal.scrollbar, state.overlay_scrollbar_alpha),
+        );
     });
 }
 
+fn draw_glass_pill(c: &mut Canvas<'_>, rect: Rect, radius: i32, pal: &Palette) {
+    c.fill_rounded_rect(rect, radius, pal.pill_bg);
+    if rect.w > radius * 2 && rect.h > 4 {
+        let sheen = if pal.is_dark {
+            rgba(255, 255, 255, 44)
+        } else {
+            rgba(255, 255, 255, 215)
+        };
+        c.fill_rect(
+            Rect::new(rect.x + radius - 3, rect.y + 1, rect.w - 2 * radius + 6, 1),
+            sheen,
+        );
+    }
+    c.stroke_rounded_rect(rect, radius, pal.pill_border);
+}
+
 fn render_toolbar(c: &mut Canvas<'_>, state: &FilesAppState, layout: &FilesLayout, pal: &Palette) {
-    c.fill_rounded_rect(layout.nav_pill_rect, 16, pal.pill_bg);
-    c.stroke_rounded_rect(layout.nav_pill_rect, 16, pal.pill_border);
+    draw_glass_pill(c, layout.nav_pill_rect, 16, pal);
     c.fill_rect(
         Rect::new(
             layout.nav_pill_rect.x + 34,
@@ -1417,8 +1457,7 @@ fn render_toolbar_right_cluster(
     pal: &Palette,
 ) {
     // 4-segment View Switcher pill (`Icons` | `List` | `Columns` | `Gallery`)
-    c.fill_rounded_rect(layout.view_pill_rect, 16, pal.pill_bg);
-    c.stroke_rounded_rect(layout.view_pill_rect, 16, pal.pill_border);
+    draw_glass_pill(c, layout.view_pill_rect, 16, pal);
     for (mode, seg_rect) in layout.view_segments {
         let active = state.view_mode == mode;
         if active {
@@ -1429,7 +1468,6 @@ fn render_toolbar_right_cluster(
                 seg_rect.h - 4,
             );
             c.fill_rounded_rect(pill, 14, pal.pill_active);
-            c.stroke_rounded_rect(pill, 14, pal.pill_border);
         }
         let col = if active {
             pal.text_primary
@@ -1445,9 +1483,8 @@ fn render_toolbar_right_cluster(
         );
     }
 
-    // Sort pill
-    c.fill_rounded_rect(layout.sort_pill_rect, 16, pal.pill_bg);
-    c.stroke_rounded_rect(layout.sort_pill_rect, 16, pal.pill_border);
+    // Group By / Sort pill (`2x3` glyph + chevron)
+    draw_glass_pill(c, layout.sort_pill_rect, 16, pal);
     draw_sort_pill_glyph(
         c,
         layout.sort_pill_rect.x as f32,
@@ -1455,10 +1492,9 @@ fn render_toolbar_right_cluster(
         pal.text_primary,
     );
 
-    // Actions pill (`New Folder` | `Tag` | `...`)
-    c.fill_rounded_rect(layout.action_pill_rect, 16, pal.pill_bg);
-    c.stroke_rounded_rect(layout.action_pill_rect, 16, pal.pill_border);
-    draw_folder_plus_glyph(
+    // Actions pill (`Share` | `Tag` | `...`)
+    draw_glass_pill(c, layout.action_pill_rect, 16, pal);
+    draw_share_glyph(
         c,
         layout.action_primary_rect.x as f32 + 17.5,
         layout.action_primary_rect.y as f32 + 16.0,
@@ -1488,6 +1524,7 @@ fn render_toolbar_search_pill(
     pal: &Palette,
 ) {
     let pill = layout.search_pill_rect;
+    let wide = pill.w >= 72;
     if state.search_active {
         c.fill_rounded_rect(
             Rect::new(pill.x - 1, pill.y - 1, pill.w + 2, pill.h + 2),
@@ -1497,62 +1534,145 @@ fn render_toolbar_search_pill(
         c.fill_rounded_rect(pill, 16, pal.window_bg);
         c.stroke_rounded_rect(pill, 16, pal.accent);
     } else {
-        c.fill_rounded_rect(pill, 16, pal.pill_bg);
-        c.stroke_rounded_rect(pill, 16, pal.pill_border);
+        draw_glass_pill(c, pill, 16, pal);
     }
-    let icon_cx = if state.search_active {
+    let show_text = state.search_active || !state.search_query.is_empty() || wide;
+    let icon_cx = if show_text {
         pill.x as f32 + 14.5
     } else {
         pill.x as f32 + (pill.w as f32) * 0.5 - 0.5
     };
     let icon_col = if state.search_active {
         pal.accent
+    } else if wide {
+        pal.text_secondary
     } else {
         pal.text_primary
     };
     draw_search_glyph(c, icon_cx, pill.y as f32 + 15.5, icon_col);
-    if state.search_active {
-        let input_clip = Rect::new(pill.x + 26, pill.y + 2, pill.w - 48, 28);
-        let (fitted, col, text_x, caret_x) = if state.search_query.is_empty() {
-            (
-                String::from("Search..."),
-                pal.text_muted,
-                input_clip.x + 3,
-                input_clip.x,
-            )
-        } else {
-            let fitted =
-                Canvas::fit_text_tail(&state.search_query, (input_clip.w - 4).max(10), 12.5, false);
-            let w = Canvas::measure_text(&fitted, 12.5, false);
-            let cx = (input_clip.x + w + 1).min(input_clip.right() - 2);
-            (fitted, pal.text_primary, input_clip.x, cx)
-        };
-        c.draw_text(&fitted, text_x, pill.y + 8, 12.5, false, col, input_clip);
-        if state.caret_visible {
-            c.fill_rect(Rect::new(caret_x, pill.y + 8, 2, 16), pal.accent);
-        }
-        if !state.search_query.is_empty() {
-            let cx = layout.search_clear_rect.x as f32 + 9.0;
-            let cy = layout.search_clear_rect.y as f32 + 10.0;
-            c.fill_circle_f(cx, cy, 6.2, pal.pill_active);
-            c.stroke_line_aa(
-                cx - 2.3,
-                cy - 2.3,
-                cx + 2.3,
-                cy + 2.3,
-                1.25,
-                pal.text_secondary,
-            );
-            c.stroke_line_aa(
-                cx + 2.3,
-                cy - 2.3,
-                cx - 2.3,
-                cy + 2.3,
-                1.25,
-                pal.text_secondary,
-            );
-        }
+    if !show_text {
+        return;
     }
+
+    let input_clip = Rect::new(pill.x + 26, pill.y + 2, (pill.w - 48).max(10), 28);
+    let (fitted, col, text_x, caret_x) = if state.search_query.is_empty() {
+        (
+            if state.search_active {
+                String::from("Search...")
+            } else {
+                String::from("Search")
+            },
+            pal.text_muted,
+            input_clip.x + 3,
+            input_clip.x,
+        )
+    } else {
+        let fitted =
+            Canvas::fit_text_tail(&state.search_query, (input_clip.w - 4).max(10), 12.5, false);
+        let w = Canvas::measure_text(&fitted, 12.5, false);
+        let cx = (input_clip.x + w + 1).min(input_clip.right() - 2);
+        (fitted, pal.text_primary, input_clip.x, cx)
+    };
+    c.draw_text(&fitted, text_x, pill.y + 8, 12.5, false, col, input_clip);
+    if state.search_active && state.caret_visible {
+        c.fill_rect(Rect::new(caret_x, pill.y + 8, 2, 16), pal.accent);
+    }
+    if !state.search_query.is_empty() {
+        let cx = layout.search_clear_rect.x as f32 + 9.0;
+        let cy = layout.search_clear_rect.y as f32 + 10.0;
+        c.fill_circle_f(cx, cy, 6.2, pal.pill_active);
+        c.stroke_line_aa(
+            cx - 2.3,
+            cy - 2.3,
+            cx + 2.3,
+            cy + 2.3,
+            1.25,
+            pal.text_secondary,
+        );
+        c.stroke_line_aa(
+            cx + 2.3,
+            cy - 2.3,
+            cx - 2.3,
+            cy + 2.3,
+            1.25,
+            pal.text_secondary,
+        );
+    }
+}
+
+fn render_search_scope_bar(
+    c: &mut Canvas<'_>,
+    state: &FilesAppState,
+    sb: &SearchScopeBarLayout,
+    pal: &Palette,
+) {
+    c.fill_rect(
+        Rect::new(
+            sb.bar_rect.x + 4,
+            sb.bar_rect.bottom() - 1,
+            sb.bar_rect.w - 8,
+            1,
+        ),
+        pal.divider,
+    );
+    c.draw_text(
+        "Search:",
+        sb.bar_rect.x + 8,
+        sb.bar_rect.y + 6,
+        12.0,
+        false,
+        pal.text_secondary,
+        sb.bar_rect,
+    );
+    draw_scope_chip(
+        c,
+        sb.this_folder_rect,
+        &sb.this_folder_label,
+        state.search_scope == SearchScope::ThisFolder,
+        pal,
+    );
+    draw_scope_chip(
+        c,
+        sb.home_rect,
+        "Home",
+        state.search_scope == SearchScope::Home,
+        pal,
+    );
+    if let Some(clear) = sb.clear_rect {
+        c.fill_rounded_rect(clear, 10, pal.pill_bg);
+        c.stroke_rounded_rect(clear, 10, pal.pill_border);
+        let tw = Canvas::measure_text("Clear", 11.5, false);
+        c.draw_text(
+            "Clear",
+            clear.x + (clear.w - tw) / 2,
+            clear.y + 4,
+            11.5,
+            false,
+            pal.text_secondary,
+            clear,
+        );
+    }
+}
+
+fn draw_scope_chip(c: &mut Canvas<'_>, rect: Rect, label: &str, selected: bool, pal: &Palette) {
+    if selected {
+        c.fill_rounded_rect(rect, 11, pal.pill_active);
+    }
+    let tw = Canvas::measure_text(label, 12.0, selected);
+    let col = if selected {
+        pal.text_primary
+    } else {
+        pal.text_secondary
+    };
+    c.draw_text(
+        label,
+        rect.x + (rect.w - tw) / 2,
+        rect.y + 4,
+        12.0,
+        selected,
+        col,
+        rect,
+    );
 }
 
 fn render_trash_banner(c: &mut Canvas<'_>, layout: &FilesLayout, banner: Rect, pal: &Palette) {
@@ -1683,7 +1803,12 @@ fn render_miller_column_pane(
         }
 
         let total_h = i32::try_from(col.visible_entries.len()).unwrap_or(0) * ROW_HEIGHT + 12;
-        c.draw_scrollbar(col_clip, col.scroll_y, total_h, pal.scrollbar);
+        c.draw_scrollbar(
+            col_clip,
+            col.scroll_y,
+            total_h,
+            overlay_scrollbar_color(pal.scrollbar, state.overlay_scrollbar_alpha),
+        );
     });
 }
 
@@ -1722,7 +1847,7 @@ fn render_miller_column_row(
 
     let tags = state.tags_for(&entry.path);
     let tags_w = i32::try_from(tags.len().min(3)).unwrap_or(0) * 9;
-    let chev_w = if entry.is_navigable_dir() { 14 } else { 4 };
+    let chev_w = if entry.is_navigable_dir() { 20 } else { 6 };
     let text_w = (row_rect.w - 30 - tags_w - chev_w).max(20);
     let label = Canvas::fit_text(&entry.name, text_w, 13.0, selected);
     c.draw_text(
@@ -1749,7 +1874,7 @@ fn render_miller_column_row(
         };
         draw_chevron_aa(
             c,
-            row_rect.right() as f32 - 8.5,
+            row_rect.right() as f32 - 13.5,
             row_rect.y as f32 + 13.0,
             false,
             1.9,
@@ -1949,7 +2074,12 @@ fn render_list_view(
             }
         }
         let total_h = i32::try_from(col.visible_entries.len()).unwrap_or(0) * LIST_ROW_HEIGHT + 8;
-        c.draw_scrollbar(clip, state.list_scroll_y, total_h, pal.scrollbar);
+        c.draw_scrollbar(
+            clip,
+            state.list_scroll_y,
+            total_h,
+            overlay_scrollbar_color(pal.scrollbar, state.overlay_scrollbar_alpha),
+        );
     });
 }
 
@@ -2039,30 +2169,37 @@ fn render_status_bar(
     layout: &FilesLayout,
     pal: &Palette,
 ) {
-    c.fill_rect(
-        Rect::new(
-            layout.status_bar_rect.x + 4,
-            layout.status_bar_rect.y,
-            layout.status_bar_rect.w - 8,
-            1,
-        ),
-        pal.divider,
-    );
     let summary = state.status_summary();
     let status_right = layout.status_bar_rect.right() - 8;
     if layout.path_crumbs.is_empty() {
         let max_text_w = (status_right - layout.status_bar_rect.x - 12).max(40);
         let fitted = Canvas::fit_text(&summary, max_text_w, 11.5, false);
+        let sum_w = Canvas::measure_text(&fitted, 11.5, false);
+        let text_x = layout.status_bar_rect.x + ((layout.status_bar_rect.w - sum_w) / 2).max(8);
+        let text_col = if state.status_message.is_some() {
+            pal.text_secondary
+        } else {
+            pal.text_muted
+        };
         c.draw_text(
             &fitted,
-            layout.status_bar_rect.x + 8,
+            text_x,
             layout.status_bar_rect.y + 6,
             11.5,
             false,
-            pal.text_secondary,
+            text_col,
             layout.status_bar_rect,
         );
     } else {
+        c.fill_rect(
+            Rect::new(
+                layout.status_bar_rect.x + 4,
+                layout.status_bar_rect.y,
+                layout.status_bar_rect.w - 8,
+                1,
+            ),
+            pal.divider,
+        );
         render_path_bar(c, &layout.path_crumbs, pal);
         let right_edge = layout
             .path_crumbs
@@ -2199,8 +2336,46 @@ mod tests {
 
         // Rounded top-left pixel outside 20px radius remains transparent
         assert_eq!(&buf[0..4], &[0, 0, 0, 0]);
-        // Traffic light close button inside floating sidebar is red (#FF5F57 -> BGRA [87, 95, 255, 255])
-        let red_idx = ((30 * w + 29) * 4) as usize;
+        // Full-bleed edge-to-edge sidebar reaches x=2 with no white outer gutter and ends with 1px divider
+        let pal_light = palette_for(FilesThemeMode::LightGoldenGate);
+        let side_edge_idx = ((220 * w + 2) * 4) as usize;
+        assert_eq!(
+            &buf[side_edge_idx..side_edge_idx + 4],
+            &[
+                pal_light.sidebar_bg[2],
+                pal_light.sidebar_bg[1],
+                pal_light.sidebar_bg[0],
+                pal_light.sidebar_bg[3],
+            ]
+        );
+        let div_idx = ((220 * w + 195) * 4) as usize;
+        assert_eq!(
+            &buf[div_idx..div_idx + 4],
+            &[
+                pal_light.sidebar_border[2],
+                pal_light.sidebar_border[1],
+                pal_light.sidebar_border[0],
+                pal_light.sidebar_border[3],
+            ]
+        );
+        // Network sidebar icon in Locations stays neutral (not accent blue)
+        if let Some(net_row) = layout_light
+            .sidebar_rows
+            .iter()
+            .find(|r| r.location == rusty_services::file_manager::SidebarLocation::Network)
+        {
+            let net_has_accent = (net_row.rect.y..net_row.rect.bottom()).any(|py| {
+                ((net_row.rect.x + 8)..(net_row.rect.x + 23)).any(|px| {
+                    let idx = ((py.cast_unsigned() * w + px.cast_unsigned()) * 4) as usize;
+                    buf[idx + 2] == pal_light.accent[0]
+                        && buf[idx + 1] == pal_light.accent[1]
+                        && buf[idx] == pal_light.accent[2]
+                })
+            });
+            assert!(!net_has_accent, "Locations Network icon must be neutral");
+        }
+        // Traffic light close button in edge-to-edge sidebar header is red (#FF5F57 -> BGRA [87, 95, 255, 255])
+        let red_idx = ((25 * w + 25) * 4) as usize;
         assert_eq!(&buf[red_idx..red_idx + 4], &[87, 95, 255, 255]);
         // Content background white (#FFFFFF)
         let bg_idx = ((120 * w + 650) * 4) as usize;
@@ -2344,6 +2519,35 @@ mod tests {
         assert_eq!(pbuf[mid_idx + 2], pal.accent[0]);
         assert_eq!(pbuf[mid_idx + 1], pal.accent[1]);
         assert_eq!(pbuf[mid_idx], pal.accent[2]);
+
+        // Overlay scrollbar helper + Share popover + Dark capsule specular sheen checks (`RUSTYOS-071`)
+        assert_eq!(overlay_scrollbar_color(pal.scrollbar, 0.0)[3], 0);
+        assert_eq!(overlay_scrollbar_color(pal.scrollbar, 1.0), pal.scrollbar);
+        let share_spec = crate::layout::compute_popup_surface_spec(
+            &state,
+            &search_layout,
+            &crate::state::OpenPopupMenu::ShareMenu,
+            8,
+        );
+        assert!(
+            share_spec
+                .layout
+                .items
+                .iter()
+                .any(|it| it.label == "Copy Path")
+        );
+        assert!(
+            share_spec
+                .layout
+                .items
+                .iter()
+                .any(|it| it.label == "New Folder")
+        );
+        state.toggle_theme();
+        state.overlay_scrollbar_alpha = 1.0;
+        let dark_layout = compute_layout(&state, w, h);
+        render_window_pixels_with_popup(&mut buf, w, h, &state, &dark_layout, false);
+        assert_eq!(&buf[0..4], &[0, 0, 0, 0]);
 
         let _ = fs::remove_dir_all(&root);
     }

@@ -548,16 +548,11 @@ pub(super) fn push_soft_shadow(
     }
 
     // Stepped non-overlapping perimeter gradient bands matching quadratic SDF falloff
-    let band_count = 5;
-    let step = (spread / band_count).max(1);
+    let band_count = (spread / 2).clamp(5, 18);
     let max_a = f32::from(max_alpha) / 255.0;
     for band in 0..band_count {
-        let d0 = band * step;
-        let d1 = if band + 1 == band_count {
-            spread
-        } else {
-            ((band + 1) * step).min(spread)
-        };
+        let d0 = (band * spread) / band_count;
+        let d1 = ((band + 1) * spread) / band_count;
         let thick = d1 - d0;
         if thick <= 0 {
             continue;

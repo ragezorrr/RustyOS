@@ -1021,6 +1021,52 @@ hardware/software context и низкие накладные расходы.
   - Живой `--winit` прогон на `PLATFORM_WAYLAND_KHR` и `PLATFORM_X11_KHR` в `Light` и `Dark` + визуальная приёмка скриншотов `Desktop`, `TopBar Menu`, `Settings`, `Control Center`, `Spotlight`, `WindowSwitcher` и `LockScreen`.
 - **Risks:** На X11 под управлением хостового KWin комбинация `Alt+Tab` перехватывается хостовым WM до XWayland, поэтому в автоматическом X11 скриншот-QA использовался `Ctrl+Alt+Tab`; визуальная приёмка на чистом DRM/KMS (`--drm`) остаётся отдельным этапом.
 
+### RUSTYOS-071 — Приведение `rusty-files` (Finder) и тени окон к macOS 27 Golden Gate (`Light & Dark`)
+
+- **Goal:** Довести хром, стартовые настройки, поиск и скроллбары `rusty-files` + оконную тень композитора до визуального и интерактивного паритета 1:1 с референсами Finder `macOS 27 Golden Gate`.
+- **Status:** Done (`RUSTYOS-071` Вариант 1 — утверждённый объём выполнен)
+- **Dependencies:** `RUSTYOS-068`, `RUSTYOS-070`, `ADR-0030`, `ADR-0032`
+- **Acceptance Criteria:**
+  - Левая кнопка правого блока действий заменена на Share (`OpenPopupMenu::ShareMenu`: `Copy Path`, `Copy Link (file://)`, `New Folder`) при сохранении `New Folder` в меню `...`, контекстном меню и шорткатах (`Ctrl+Shift+N` / `Ctrl+N`).
+  - Активная капсула View Switcher отрисовывается без внутренней рамки; глиф Sort/Group By переведён на сетку `2×3` + шеврон.
+  - Капсула Search адаптивно расширяется с плейсхолдером `"Search"` при ширине окна `>= 880` px даже без фокуса и сворачивается на узких окнах; при активном или непустом поиске открывается `Search Scope Bar` (`ThisFolder` / `Home` + `Clear`) с неблокирующим рекурсивным поиском по Home.
+  - Стартовый режим изменён на `FileViewMode::Icons`; добавлена настройка `show_path_bar: bool` (`default = false`) с командой `TogglePathBar` (`"Show Path Bar"`), Path Bar скрыт по умолчанию, Status Bar центрирован и не дублирует заголовок.
+  - Скроллбары работают как затухающие overlay-пилюли (`overlay_scrollbar_alpha`) и не перекрывают шевроны `>` в Columns; пилюли toolbar получили 1 px верхний блик, а композиторная тень окна — углублённый градиент без ступенчатого бандинга.
+- **Scope:**
+  - `crates/rusty-services/src/file_manager.rs`: `FileViewMode` `#[default]` переключён на `Icons`, добавлено поле `show_path_bar` (`default = false`) в `FileTagsConfig` и функция `search_directory_recursive`.
+  - `apps/rusty-files/src/icons.rs`: обновлена `draw_sort_pill_glyph` (`2×3` + шеврон), добавлена `draw_share_glyph`, удалена неиспользуемая `draw_folder_plus_glyph`.
+  - `apps/rusty-files/src/state.rs`: добавлены `SearchScope` (`ThisFolder`, `Home`), `OpenPopupMenu::ShareMenu`, `HomeSearchResult`, неблокирующий `spawn_home_search_job` / `poll_home_search_jobs`, `toggle_path_bar`, `set_search_scope`, состояние затухания `overlay_scrollbar_alpha` (`note_scroll_activity`, `tick_overlay_scrollbar`).
+  - `apps/rusty-files/src/{layout,wayland,views,render}.rs`: адаптивная ширина Search (`width >= 880`), `SearchScopeBarLayout` и hit-test (`SearchScope`, `SearchScopeClear`), `share_menu_rows` + `TogglePathBar`, `overlay_scrollbar_color`, `draw_glass_pill`, безрамочная активная капсула View Switcher, сдвинутые левее шевроны Miller Columns и центрированный Status Bar.
+  - `crates/rusty-compositor/src/shell_render/{ssd,tokens}.rs`: усилены многослойные параметры `generate_window_shadow_elements` и адаптивное число полос в `push_soft_shadow` (`(spread / 2).clamp(5, 18)`).
+- **Tests:**
+  - `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`
+  - `cargo test --workspace -- --test-threads=1` (`211 passed; 0 failed`: `rusty_animation` 4, `rusty_compositor` 142, `rusty_files` 13, `rusty_ipc` 3, `rusty_services` 37, `rusty_shell` 5, `rusty_wm` 7)
+  - Включая `layout::tests::search_scope_clear_and_share_button_hit_test`, `file_manager::tests::stage_b_view_modes_roundtrip_in_tags_config`, обновлённые тесты `state::tests` и `render::tests`
+  - Живые прогоны `rusty-compositor --winit --max-frames 35` на `PLATFORM_WAYLAND_KHR` и `PLATFORM_X11_KHR` без ошибок EGL/шейдеров + визуальная проверка скриншотов `Light` & `Dark` (`Icons`, `Columns`, `Search`, `ShareMenu`, максимизированный wide `Search`).
+- **Risks:** При быстрой автоматической X11 XTest-съёмке одиночный кадр без микросдвига курсора иногда считывает предыдущий буфер обмена Mesa/Winit до завершения асинхронного commit клиента; ручное интерактивное взаимодействие и живой Wayland/X11 стек отрабатывают без потерь.
+
+### RUSTYOS-072 — Full-bleed левая панель `rusty-files` 1:1 к Finder `macOS 27 Golden Gate`
+
+- **Goal:** Перевести левую панель (sidebar) `rusty-files` к точному 1:1 виду с Finder-референсами (`27-Golden-Gate-Finder-Home-Folder.png`, `Applications.png`, `Finder-Network.png`), устранить конфликт формулировки в `DESIGN.md §12.3` и довести ритм, палитру, светофоры и векторные глифы сайдбара.
+- **Status:** Done (`RUSTYOS-072` Вариант 1 — утверждённый объём выполнен)
+- **Dependencies:** `RUSTYOS-071`, `ADR-0030`, `ADR-0032`
+- **Acceptance Criteria:**
+  - Левая панель переведена в full-bleed edge-to-edge режим (`x=0, y=0..height`, ширина `SIDEBAR_WIDTH = 196`, скругление по внешним левым углам окна `WINDOW_CORNER_RADIUS = 20`) с тонким `1 px` правым разделителем без внешней `10 px` окантовки и рамки.
+  - Светофоры выровнены концентрично левому верхнему углу (`(25, 25)`, `(45, 25)`, `(65, 25)`, кликабельная зона `14×14`), увеличены отступ до списка (`y = 50`) и межсекционные интервалы (`SIDEBAR_SECTION_HEIGHT = 24`, `hdr_y = y + 8`, `SIDEBAR_ROW_HEIGHT = 22`) с нейтральной пилюлей и `SemiBold` на активном пункте.
+  - Иконка `SidebarIconKind::Network` в секции `Locations` перекрашена из `accent` в нейтрально-графитовый `neutral`, утончены глифы сайдбара (`Applications`, `Desktop`, `Documents`, `Downloads`, `Home`, `Volume`, `Network`, `Trash`, `Tag`).
+  - В `DESIGN.md §12.3` зафиксировано различие между full-bleed сайдбаром Finder (`rusty-files`) и плавающей `inset`-карточкой `System Settings` / `Notes`.
+- **Scope:**
+  - `DESIGN.md` (§12.3): уточнена спецификация full-bleed Finder sidebar по референсам `INDEX.md`.
+  - `apps/rusty-files/src/state.rs`: обновлены `SIDEBAR_ROW_HEIGHT = 22` и `SIDEBAR_SECTION_HEIGHT = 24`.
+  - `apps/rusty-files/src/layout.rs`: убран `SIDEBAR_CORNER_RADIUS`, обновлены `SIDEBAR_WIDTH = 196`, `sidebar_rect`, `sidebar_clip_rect`, `traffic_close`/`traffic_min`/`traffic_max`, `layout_sidebar_rows`, `hit_test_chrome` и `golden_gate_layout_and_hit_testing_work`.
+  - `apps/rusty-files/src/icons.rs`: `SidebarIconKind::Network` переведён на `neutral`, утончены контуры `draw_sidebar_icon` и хелперов (вкл. слим-корпус `draw_drive_volume_icon`).
+  - `apps/rusty-files/src/render.rs`: обновлены `palette_for` (`sidebar_bg`, `sidebar_border`, `sidebar_active`, `text_muted` без синего отлива в Light/Dark), `render_sidebar` (edge-to-edge заливка + 1 px правый разделитель + светофоры `(25, 45, 65; 25)`), и добавлены assertions в `renders_golden_gate_light_and_dark_themes_cleanly` на full-bleed край, разделитель и нейтральность `Network`.
+- **Tests:**
+  - `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo build --workspace --bins`
+  - `cargo test --workspace -- --test-threads=1` (`211 passed; 0 failed`: `rusty_animation` 4, `rusty_compositor` 142, `rusty_files` 13, `rusty_ipc` 3, `rusty_services` 37, `rusty_shell` 5, `rusty_wm` 7)
+  - Живые `--winit --max-frames 35` smoke-прогоны на `PLATFORM_WAYLAND_KHR` и `PLATFORM_X11_KHR` (`late=0 missed=0`, без ошибок EGL/шейдеров) и визуальная проверка скриншотов `Light` & `Dark` (`qa-072-light-icons.png`, `qa-072-light-wide.png`, `qa-072-dark-icons.png`).
+- **Risks:** На стартовой высоте `768×461` при наличии примонтированного дополнительного тома (`RustyOS HD`) в `Locations` самый нижний тег `Purple` уходит на прокрутку и полностью виден при растяжении/максимизации окна (штатное поведение скролла сайдбара).
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

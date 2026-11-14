@@ -11,7 +11,7 @@ use crate::icons::{
     draw_close_x_glyph, draw_entry_icon, draw_large_entry_artwork, draw_plus_glyph,
 };
 use crate::layout::{FilesHit, Rect};
-use crate::render::{Canvas, Palette, rgba};
+use crate::render::{Canvas, Palette, overlay_scrollbar_color, rgba};
 use crate::state::{
     CachedPreview, FilesAppState, GALLERY_BOTTOM_H, GALLERY_INFO_WIDTH, ICON_CELL_H, ICON_CELL_W,
     TAB_BAR_HEIGHT,
@@ -572,7 +572,7 @@ pub(crate) fn render_icons_grid(
             clip,
             state.icons_scroll_y,
             rows * ICON_CELL_H + 16,
-            pal.scrollbar,
+            overlay_scrollbar_color(pal.scrollbar, state.overlay_scrollbar_alpha),
         );
     });
 }

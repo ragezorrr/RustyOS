@@ -52,7 +52,7 @@ use crate::layout::{
 };
 use crate::render::{render_popup_surface_pixels, render_window_pixels_with_popup};
 use crate::state::OpenPopupMenu;
-use crate::state::{FilesAppState, ScrollTargetArea, StartupOptions};
+use crate::state::{FilesAppState, ScrollTargetArea, SearchScope, StartupOptions};
 use rusty_services::file_manager::UserFileLocations;
 
 const DEFAULT_WIDTH: u32 = 1060;
@@ -384,15 +384,7 @@ impl WaylandClientData {
             FilesHit::ViewMode(mode) => self.app.set_view_mode(mode),
             FilesHit::SortButton => self.toggle_popup(OpenPopupMenu::SortMenu, prev_popup),
             FilesHit::ActionMoreMenu => self.toggle_popup(OpenPopupMenu::ActionsMenu, prev_popup),
-            FilesHit::ActionPrimary => {
-                if self.app.is_trash_view() {
-                    if let Some(entry) = self.app.selected_entry().cloned() {
-                        self.app.restore_entry(&entry);
-                    }
-                } else {
-                    self.app.action_new_folder();
-                }
-            }
+            FilesHit::ActionPrimary => self.toggle_popup(OpenPopupMenu::ShareMenu, prev_popup),
             FilesHit::ActionTagPicker => {
                 let target_path = self
                     .app
@@ -407,6 +399,7 @@ impl WaylandClientData {
                 let clicked_icon = px <= f64::from(layout.search_pill_rect.x + 26);
                 if self.app.search_active && self.app.search_query.is_empty() && clicked_icon {
                     self.app.search_active = false;
+                    self.app.set_search_scope(SearchScope::ThisFolder);
                 } else {
                     self.app.search_active = true;
                     self.app.reset_caret_blink();
@@ -414,6 +407,12 @@ impl WaylandClientData {
                 self.app.dirty = true;
             }
             FilesHit::SearchClear => self.app.set_search_query(String::new()),
+            FilesHit::SearchScope(scope) => self.app.set_search_scope(scope),
+            FilesHit::SearchScopeClear => {
+                self.app.search_active = false;
+                self.app.set_search_scope(SearchScope::ThisFolder);
+                self.app.set_search_query(String::new());
+            }
             FilesHit::EmptyTrashBanner => self.app.action_empty_trash(),
             FilesHit::SidebarItem(loc) => self.app.navigate_sidebar(loc, true),
             FilesHit::ColumnRow { col_idx, row_idx } => {
@@ -596,6 +595,15 @@ impl WaylandClientData {
             PopupCommand::NewTab => self.app.new_tab(None),
             PopupCommand::NewTabIn(path) => self.app.new_tab(Some(ListingTarget::Directory(path))),
             PopupCommand::ToggleTabBar => self.app.toggle_tab_bar(),
+            PopupCommand::TogglePathBar => self.app.toggle_path_bar(),
+            PopupCommand::ShareCopyPath(path) => {
+                let text = path.display().to_string();
+                self.app.share_copy_text(text, "Copied path");
+            }
+            PopupCommand::ShareCopyUri(path) => {
+                let text = format!("file://{}", path.display());
+                self.app.share_copy_text(text, "Copied link");
+            }
             PopupCommand::QuickLook => self.app.toggle_quick_look_selected(),
             PopupCommand::GetInfoSelected => self.app.open_get_info_selected(),
             PopupCommand::GetInfoPath(path) => self.app.open_get_info_for_path(&path),
@@ -792,7 +800,9 @@ pub(crate) fn run(options: &StartupOptions) -> Result<(), WaylandAppError> {
 
         if data.configured
             && data.frame_sent_at.is_none()
-            && (data.app.dirty || data.app.has_active_animations())
+            && (data.app.dirty
+                || data.app.has_active_animations()
+                || data.app.scrollbar_needs_tick(now))
         {
             let _ = data.app.tick_animations(now);
             draw_main_frame(&mut data)?;
@@ -804,10 +814,16 @@ pub(crate) fn run(options: &StartupOptions) -> Result<(), WaylandAppError> {
             Some(Duration::from_millis(8))
         } else if data.frame_sent_at.is_some() {
             Some(Duration::from_millis(24))
-        } else if data.app.has_focused_text_input() {
-            Some(data.app.time_until_caret_blink(now))
         } else {
-            None
+            let caret = data
+                .app
+                .has_focused_text_input()
+                .then(|| data.app.time_until_caret_blink(now));
+            let scroll = data.app.time_until_scrollbar_tick(now);
+            match (caret, scroll) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            }
         };
 
         event_loop

@@ -13,7 +13,7 @@ use crate::dialogs::{
 };
 use crate::state::{
     FilesAppState, LIST_ROW_HEIGHT, MILLER_COLUMN_WIDTH, OpenPopupMenu, ROW_HEIGHT,
-    SIDEBAR_ROW_HEIGHT, SIDEBAR_SECTION_HEIGHT, ScrollTargetArea,
+    SIDEBAR_ROW_HEIGHT, SIDEBAR_SECTION_HEIGHT, ScrollTargetArea, SearchScope,
 };
 use crate::views::{
     GalleryLayout, IconsGridLayout, PathCrumbLayout, TabBarLayout, compute_gallery_layout,
@@ -23,10 +23,8 @@ use crate::views::{
 
 /// Window corner radius matching macOS 27 Golden Gate (`20 px`).
 pub(crate) const WINDOW_CORNER_RADIUS: i32 = 20;
-/// Floating sidebar corner radius (`14 px`).
-pub(crate) const SIDEBAR_CORNER_RADIUS: i32 = 14;
-/// Floating sidebar width (`186 px`).
-pub(crate) const SIDEBAR_WIDTH: i32 = 186;
+/// Edge-to-edge Finder sidebar width (`196 px`).
+pub(crate) const SIDEBAR_WIDTH: i32 = 196;
 /// Resize border hotspot thickness around CSD window edges.
 const RESIZE_BORDER_PX: i32 = 5;
 
@@ -119,6 +117,9 @@ pub(crate) enum PopupCommand {
     NewTab,
     NewTabIn(PathBuf),
     ToggleTabBar,
+    TogglePathBar,
+    ShareCopyPath(PathBuf),
+    ShareCopyUri(PathBuf),
     QuickLook,
     GetInfoSelected,
     GetInfoPath(PathBuf),
@@ -135,6 +136,16 @@ pub(crate) enum PopupCommand {
     RestoreEntry(FileEntry),
     EmptyTrash,
     ToggleTag { path: PathBuf, color: FileTagColor },
+}
+
+/// Geometry of the secondary Search Scope strip below the toolbar (`RUSTYOS-071`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SearchScopeBarLayout {
+    pub bar_rect: Rect,
+    pub this_folder_rect: Rect,
+    pub this_folder_label: String,
+    pub home_rect: Rect,
+    pub clear_rect: Option<Rect>,
 }
 
 /// Visual separator or actionable row inside an open popover menu.
@@ -182,6 +193,8 @@ pub(crate) enum FilesHit {
     ActionMoreMenu,
     SearchToggle,
     SearchClear,
+    SearchScope(SearchScope),
+    SearchScopeClear,
     EmptyTrashBanner,
     SidebarItem(SidebarLocation),
     ColumnRow { col_idx: usize, row_idx: usize },
@@ -253,6 +266,7 @@ pub(crate) struct FilesLayout {
     pub search_clear_rect: Rect,
     pub trash_banner_rect: Option<Rect>,
     pub empty_trash_btn_rect: Option<Rect>,
+    pub search_scope_bar: Option<SearchScopeBarLayout>,
     pub content_rect: Rect,
     pub columns: Vec<ColumnLayout>,
     pub preview: Option<PreviewLayout>,
@@ -305,35 +319,45 @@ pub(crate) fn compute_layout(state: &FilesAppState, surface_w: u32, surface_h: u
     let width = i32::try_from(surface_w).unwrap_or(1060).max(480);
     let height = i32::try_from(surface_h).unwrap_or(660).max(360);
 
-    let sidebar_rect = Rect::new(10, 10, SIDEBAR_WIDTH, (height - 20).max(120));
+    let sidebar_rect = Rect::new(0, 0, SIDEBAR_WIDTH, height);
     let sidebar_clip_rect = Rect::new(
-        sidebar_rect.x + 2,
-        46,
-        sidebar_rect.w - 4,
-        (sidebar_rect.bottom() - 8 - 46).max(40),
+        0,
+        50,
+        SIDEBAR_WIDTH - 1,
+        (sidebar_rect.bottom() - 6 - 50).max(40),
     );
-    let traffic_close = Rect::new(22, 23, 14, 14);
-    let traffic_min = Rect::new(42, 23, 14, 14);
-    let traffic_max = Rect::new(62, 23, 14, 14);
+    let traffic_close = Rect::new(18, 18, 14, 14);
+    let traffic_min = Rect::new(38, 18, 14, 14);
+    let traffic_max = Rect::new(58, 18, 14, 14);
 
     let sidebar_rows = layout_sidebar_rows(state, sidebar_rect, sidebar_clip_rect);
     let toolbar_x = sidebar_rect.right() + 12;
     let tb = layout_toolbar(state, width, toolbar_x);
     let tab_bar = compute_tab_bar_layout(state, toolbar_x, width);
     let base_top = if tab_bar.is_some() { 88 } else { 58 };
+    let search_scope_bar = compute_search_scope_layout(state, toolbar_x, width, base_top);
+    let after_search_top = if search_scope_bar.is_some() {
+        base_top + 32
+    } else {
+        base_top
+    };
 
     let (trash_banner_rect, empty_trash_btn_rect, content_top) = if state.is_trash_view() {
-        let banner = Rect::new(toolbar_x, base_top, width - toolbar_x - 12, 32);
-        let btn = Rect::new(banner.right() - 78, base_top + 4, 72, 24);
-        (Some(banner), Some(btn), base_top + 34)
+        let banner = Rect::new(toolbar_x, after_search_top, width - toolbar_x - 12, 32);
+        let btn = Rect::new(banner.right() - 78, after_search_top + 4, 72, 24);
+        (Some(banner), Some(btn), after_search_top + 34)
     } else {
-        (None, None, base_top)
+        (None, None, after_search_top)
     };
 
     let status_bar_rect = Rect::new(toolbar_x, height - 28, width - toolbar_x - 10, 24);
     let status_w = crate::render::Canvas::measure_text(&state.status_summary(), 11.5, false);
     let crumbs_limit_x = (status_bar_rect.right() - status_w - 22).max(status_bar_rect.x + 12);
-    let path_crumbs = compute_path_breadcrumbs_layout(state, status_bar_rect, crumbs_limit_x);
+    let path_crumbs = if state.show_path_bar {
+        compute_path_breadcrumbs_layout(state, status_bar_rect, crumbs_limit_x)
+    } else {
+        Vec::new()
+    };
     let content_rect = Rect::new(
         toolbar_x,
         content_top,
@@ -371,6 +395,7 @@ pub(crate) fn compute_layout(state: &FilesAppState, surface_w: u32, surface_h: u
         search_clear_rect: tb.search_clear_rect,
         trash_banner_rect,
         empty_trash_btn_rect,
+        search_scope_bar,
         content_rect,
         columns: content.columns,
         preview: content.preview,
@@ -439,6 +464,43 @@ fn compute_inline_rename_anchor(
     None
 }
 
+fn compute_search_scope_layout(
+    state: &FilesAppState,
+    toolbar_x: i32,
+    width: i32,
+    top_y: i32,
+) -> Option<SearchScopeBarLayout> {
+    if !state.search_active && state.search_query.is_empty() {
+        return None;
+    }
+    let bar_rect = Rect::new(toolbar_x, top_y, (width - toolbar_x - 10).max(220), 28);
+    let label_w = crate::render::Canvas::measure_text("Search:", 12.0, false);
+    let mut cur_x = bar_rect.x + 8 + label_w + 8;
+
+    let raw_folder = state.search_this_folder_label();
+    let folder_label = crate::render::Canvas::fit_text(&raw_folder, 150, 12.0, true);
+    let folder_w = (crate::render::Canvas::measure_text(&folder_label, 12.0, true) + 20).max(60);
+    let this_folder_rect = Rect::new(cur_x, bar_rect.y + 3, folder_w, 22);
+    cur_x += folder_w + 6;
+
+    let home_w = (crate::render::Canvas::measure_text("Home", 12.0, true) + 20).max(56);
+    let home_rect = Rect::new(cur_x, bar_rect.y + 3, home_w, 22);
+
+    let clear_rect = if state.search_query.is_empty() {
+        None
+    } else {
+        Some(Rect::new(bar_rect.right() - 60, bar_rect.y + 3, 52, 22))
+    };
+
+    Some(SearchScopeBarLayout {
+        bar_rect,
+        this_folder_rect,
+        this_folder_label: folder_label,
+        home_rect,
+        clear_rect,
+    })
+}
+
 fn layout_toolbar(state: &FilesAppState, width: i32, toolbar_x: i32) -> ToolbarRects {
     let toolbar_rect = Rect::new(toolbar_x, 10, (width - toolbar_x - 10).max(200), 46);
     let nav_pill_rect = Rect::new(toolbar_x + 4, 15, 68, 32);
@@ -450,13 +512,19 @@ fn layout_toolbar(state: &FilesAppState, width: i32, toolbar_x: i32) -> ToolbarR
     let fixed_cluster_w = 136 + 8 + 54 + 8 + 102 + 8;
     let min_cluster_x = nav_pill_rect.right() + 8;
     let max_search_w = (right_margin - min_cluster_x - fixed_cluster_w).max(32);
-    let search_w = if state.search_active {
+    let wide_unfocused_cap = (right_margin - (title_x + 96) - fixed_cluster_w).clamp(32, 164);
+    let search_w = if state.search_active || !state.search_query.is_empty() {
         172.min(max_search_w)
+    } else if width >= 880 && wide_unfocused_cap >= 120 {
+        wide_unfocused_cap
     } else {
         32
     };
     let search_pill_rect = Rect::new(right_margin - search_w, 15, search_w, 32);
-    let search_clear_rect = if state.search_active && !state.search_query.is_empty() {
+    let search_clear_rect = if (state.search_active || !state.search_query.is_empty())
+        && !state.search_query.is_empty()
+        && search_w >= 72
+    {
         Rect::new(search_pill_rect.right() - 24, 21, 18, 20)
     } else {
         Rect::default()
@@ -511,20 +579,20 @@ fn layout_sidebar_rows(
     clip: Rect,
 ) -> Vec<SidebarRowLayout> {
     let mut rows = Vec::with_capacity(state.sidebar_items.len());
-    let mut y = 48 - state.sidebar_scroll_y;
+    let mut y = 50 - state.sidebar_scroll_y;
     for (index, item) in state.sidebar_items.iter().enumerate() {
         let top_y = y;
         let section_header_y = if item.section.is_some() {
-            let hdr_y = y + 3;
+            let hdr_y = y + 8;
             y += SIDEBAR_SECTION_HEIGHT;
             Some(hdr_y)
         } else {
             None
         };
         let rect = Rect::new(
-            sidebar_rect.x + 8,
+            sidebar_rect.x + 10,
             y,
-            sidebar_rect.w - 16,
+            sidebar_rect.w - 20,
             SIDEBAR_ROW_HEIGHT,
         );
         if rect.bottom() > clip.y && top_y < clip.bottom() {
@@ -787,6 +855,12 @@ fn build_popup_entries(
             176,
             sort_menu_rows(state),
         ),
+        OpenPopupMenu::ShareMenu => (
+            layout.action_primary_rect.x - 16,
+            layout.action_primary_rect.bottom() + 6,
+            196,
+            share_menu_rows(state),
+        ),
         OpenPopupMenu::ActionsMenu => (
             layout.action_pill_rect.right() - 210,
             layout.action_pill_rect.bottom() + 6,
@@ -803,6 +877,51 @@ fn build_popup_entries(
             x, y, target_entry, ..
         } => (*x, *y, 200, context_menu_rows(state, target_entry.as_ref())),
     }
+}
+
+fn share_menu_rows(state: &FilesAppState) -> Vec<PopupRowSpec> {
+    let mut rows = Vec::new();
+    if state.is_trash_view()
+        && let Some(entry) = state.selected_entry()
+    {
+        rows.push((
+            String::from("Put Back"),
+            false,
+            None,
+            Some(PopupCommand::RestoreEntry(entry.clone())),
+        ));
+        rows.push((String::new(), false, None, None));
+    }
+    if let Some(path) = state.share_target_path() {
+        rows.push((
+            String::from("Copy Path"),
+            false,
+            None,
+            Some(PopupCommand::ShareCopyPath(path.clone())),
+        ));
+        rows.push((
+            String::from("Copy Link (file://)"),
+            false,
+            None,
+            Some(PopupCommand::ShareCopyUri(path)),
+        ));
+        if state.selected_entry().is_some() {
+            rows.push((
+                String::from("Copy Item"),
+                false,
+                None,
+                Some(PopupCommand::CopySelected),
+            ));
+        }
+        rows.push((String::new(), false, None, None));
+    }
+    rows.push((
+        String::from("New Folder"),
+        false,
+        None,
+        Some(PopupCommand::NewFolder),
+    ));
+    rows
 }
 
 fn sort_menu_rows(state: &FilesAppState) -> Vec<PopupRowSpec> {
@@ -864,6 +983,12 @@ fn actions_menu_rows(state: &FilesAppState) -> Vec<PopupRowSpec> {
             state.tab_bar_visible(),
             None,
             Some(PopupCommand::ToggleTabBar),
+        ),
+        (
+            String::from("Show Path Bar"),
+            state.show_path_bar,
+            None,
+            Some(PopupCommand::TogglePathBar),
         ),
     ];
     append_selection_action_rows(state, &mut rows);
@@ -1007,6 +1132,12 @@ fn context_menu_rows(state: &FilesAppState, entry: Option<&FileEntry>) -> Vec<Po
             false,
             None,
             Some(PopupCommand::GetInfoSelected),
+        ));
+        rows.push((
+            String::from("Show Path Bar"),
+            state.show_path_bar,
+            None,
+            Some(PopupCommand::TogglePathBar),
         ));
         rows.push((
             String::from("Show Hidden Files"),
@@ -1189,6 +1320,17 @@ fn hit_test_chrome(layout: &FilesLayout, px: f64, py: f64) -> Option<FilesHit> {
     if layout.search_pill_rect.contains_f64(px, py) {
         return Some(FilesHit::SearchToggle);
     }
+    if let Some(sb) = &layout.search_scope_bar {
+        if sb.clear_rect.is_some_and(|r| r.contains_f64(px, py)) {
+            return Some(FilesHit::SearchScopeClear);
+        }
+        if sb.this_folder_rect.contains_f64(px, py) {
+            return Some(FilesHit::SearchScope(SearchScope::ThisFolder));
+        }
+        if sb.home_rect.contains_f64(px, py) {
+            return Some(FilesHit::SearchScope(SearchScope::Home));
+        }
+    }
     if let Some(tb) = &layout.tab_bar
         && let Some(hit) = hit_test_tab_bar(tb, px, py)
     {
@@ -1203,7 +1345,7 @@ fn hit_test_chrome(layout: &FilesLayout, px: f64, py: f64) -> Option<FilesHit> {
         return Some(hit);
     }
     if layout.toolbar_rect.contains_f64(px, py)
-        || (layout.sidebar_rect.contains_f64(px, py) && py < 48.0)
+        || (layout.sidebar_rect.contains_f64(px, py) && py < 50.0)
     {
         return Some(FilesHit::WindowDrag);
     }
@@ -1335,14 +1477,14 @@ mod tests {
         let (mut state, root) = test_state();
         let layout = compute_layout(&state, 1060, 660);
 
-        assert_eq!(layout.sidebar_rect, Rect::new(10, 10, 186, 640));
-        assert_eq!(hit_test(&layout, 28.0, 29.0), Some(FilesHit::TrafficClose));
+        assert_eq!(layout.sidebar_rect, Rect::new(0, 0, SIDEBAR_WIDTH, 660));
+        assert_eq!(hit_test(&layout, 25.0, 25.0), Some(FilesHit::TrafficClose));
         assert_eq!(
-            hit_test(&layout, 48.0, 29.0),
+            hit_test(&layout, 45.0, 25.0),
             Some(FilesHit::TrafficMinimize)
         );
         assert_eq!(
-            hit_test(&layout, 68.0, 29.0),
+            hit_test(&layout, 65.0, 25.0),
             Some(FilesHit::TrafficMaximize)
         );
         assert_eq!(hit_test(&layout, 224.0, 30.0), Some(FilesHit::NavBack));
@@ -1395,8 +1537,15 @@ mod tests {
         state.complete_pending_loads_sync();
 
         state.set_view_mode(FileViewMode::Icons);
+        let default_layout = compute_layout(&state, 1060, 660);
+        assert!(default_layout.icons_grid.is_some());
+        assert_eq!(default_layout.path_crumbs.len(), 0);
+        assert!(default_layout.search_pill_rect.w >= 120);
+        let narrow_unfocused = compute_layout(&state, 768, 461);
+        assert_eq!(narrow_unfocused.search_pill_rect.w, 32);
+
+        state.toggle_path_bar();
         let icons_layout = compute_layout(&state, 1060, 660);
-        assert!(icons_layout.icons_grid.is_some());
         if let Some(crumb) = icons_layout.path_crumbs.last() {
             assert_eq!(
                 hit_test(
@@ -1407,6 +1556,22 @@ mod tests {
                 Some(FilesHit::PathCrumb(crumb.path.clone()))
             );
         }
+
+        state.search_active = true;
+        state.set_search_query(String::from("doc"));
+        let search_layout = compute_layout(&state, 1060, 660);
+        if let Some(sb) = &search_layout.search_scope_bar {
+            assert_eq!(
+                hit_test(
+                    &search_layout,
+                    f64::from(sb.home_rect.x + 8),
+                    f64::from(sb.home_rect.y + 8)
+                ),
+                Some(FilesHit::SearchScope(SearchScope::Home))
+            );
+        }
+        state.search_active = false;
+        state.set_search_query(String::new());
 
         state.new_tab(None);
         state.set_view_mode(FileViewMode::Gallery);
@@ -1480,6 +1645,44 @@ mod tests {
         assert!(spec.anchor_y + spec.layout.rect.h > layout.height);
         assert_eq!(spec.surface_width, spec.layout.rect.w + 16);
         assert_eq!(spec.surface_height, spec.layout.rect.h + 16);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn search_scope_clear_and_share_button_hit_test() {
+        let (mut state, root) = test_state();
+        let idle = compute_layout(&state, 768, 461);
+        assert_eq!(
+            hit_test(
+                &idle,
+                f64::from(idle.action_primary_rect.x + 12),
+                f64::from(idle.action_primary_rect.y + 16),
+            ),
+            Some(FilesHit::ActionPrimary)
+        );
+
+        state.search_active = true;
+        state.set_search_query(String::from("doc"));
+        let search_1060 = compute_layout(&state, 1060, 660);
+        assert!(search_1060.search_scope_bar.is_some());
+        if let Some(sb) = &search_1060.search_scope_bar {
+            assert!(sb.clear_rect.is_some());
+            if let Some(clear) = sb.clear_rect {
+                assert_eq!(
+                    hit_test(
+                        &search_1060,
+                        f64::from(clear.x + 10),
+                        f64::from(clear.y + 8)
+                    ),
+                    Some(FilesHit::SearchScopeClear)
+                );
+            }
+        }
+        let search_768 = compute_layout(&state, 768, 461);
+        assert_eq!(
+            hit_test(&search_768, 768.0 - 36.0, 72.0),
+            Some(FilesHit::SearchScopeClear)
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 }
