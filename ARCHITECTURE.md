@@ -151,3 +151,24 @@ RustyOS/
 
 Существенные архитектурные изменения фиксируются в `docs/adr/NNNN-title.md`
 и `DECISIONS.md` до реализации только после явного `APPROVE:` пользователя.
+
+## 7. Точки расширения и внутренние контракты (Fast Code Map)
+
+Краткая карта типовых врезок для экономии контекста и поиска:
+
+- **Новый shell-оверлей / модал:**
+  1. Рендер и hit-test: `shell_render/modals.rs` -> реэкспорт и `ShellOverlayView` + `notifications_hidden_by_overlay` / `dock_tooltip_hidden_by_overlay` в `shell_render/mod.rs`.
+  2. Композиция (Z-order `foreground_overlay`): `frame_composer.rs`.
+  3. Состояние и fullscreen-bypass: `state/mod.rs` (`has_blocking_shell_overlay`, `should_hide_shell_chrome_for_fullscreen_on`, `active_unoccluded_fullscreen_window_on`) + взаимное закрытие в `state/shell_actions.rs` и `state/system_bridges.rs`.
+  4. Pointer-перехват: `input/pointer.rs` (`space.output_geometry(&self.output)...to_physical(1)`) + `input/shell_pointer.rs`.
+- **Новый хоткей / пункт меню / IPC-команда:**
+  1. IPC: `crates/rusty-ipc/src/lib.rs` (`ShellRequest`, `encode_line`, `decode_line`) -> обработка в `state/wm_windows.rs`.
+  2. Меню: `shell_render/top_bar.rs` (`TopBarMenuAction`, `MENU_*`, `top_bar_menu_items`) -> `state/shell_actions.rs` (`dispatch_top_bar_menu_action`).
+  3. Клавиатура: `input/mod.rs` (`KeyIntercept`) -> `input/keyboard.rs` (`dispatch_key_intercept`, `classify_keyboard_input`, `match_shortcut`).
+- **Настройки `UserConfig` и live save/reload:**
+  - `config.rs` (`UserConfig`, `parse_toml`, `to_toml_string`, `save_to_path`); `state/shell_actions.rs` (`sync_and_save_user_config`, `apply_user_config`, `reload_user_config`); `config_path` = `None` в тестах и `default_user_config_path()` в `winit_backend.rs`/`drm_backend.rs`.
+- **Нетривиальные сигнатуры и lint-правила:**
+  - `KeyboardHandle::change_repeat_info(&self, rate: i32, delay: i32)` (порядок `(rate, delay)`, обратный к `seat.add_keyboard(xkb, delay, rate)`).
+  - `set_output_rotation(id, rot, use_winit_fbo_flip)`: `use_winit_fbo_flip = name.eq_ignore_ascii_case("winit-0")` (`true` для Winit FBO, `false` для DRM/KMS).
+  - `TextCache::render_label_weighted(renderer, text, FontWeight, size_px, rgba, loc)` и `render_label_centered_weighted(renderer, text, FontWeight, size_px, rgba, logical_rect)`.
+  - Использовать `.map_or_default(...)` вместо `.map(...).unwrap_or_default()` (Clippy `1.100+` в CI) и не допускать `expect_used` / `items_after_statements` / `too_many_lines` (`>100`) даже в `#[cfg(test)]`.
