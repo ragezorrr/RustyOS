@@ -879,7 +879,12 @@ impl RustyCompositorState {
     /// Builds a snapshot of live settings & config state for [`crate::shell_render::ShellOverlayView::Settings`].
     #[must_use]
     pub fn settings_render_state(&self) -> crate::shell_render::SettingsRenderState<'_> {
-        let primary = self.output_map.primary();
+        let entries = self.output_map.entries();
+        let target = self.selected_settings_output();
+        let target_idx = entries
+            .iter()
+            .position(|entry| entry.id == target.id)
+            .unwrap_or(0);
         crate::shell_render::SettingsRenderState {
             active_tab: self.settings_tab,
             glass_opacity: self.glass_opacity,
@@ -891,9 +896,14 @@ impl RustyCompositorState {
             menubar_show_input_source: self.menubar_show_input_source,
             menubar_show_volume: self.menubar_show_volume,
             clock_24h: self.clock_24h,
-            primary_connector: &primary.name,
-            display_scale: primary.scale,
-            display_rotation: primary.rotation,
+            target_connector: &target.name,
+            target_output_index: target_idx,
+            output_count: entries.len().max(1),
+            display_width_px: target.physical_size.w,
+            display_height_px: target.physical_size.h,
+            display_refresh_hz: target.refresh_hz(),
+            display_scale: target.scale,
+            display_rotation: target.rotation,
             vrr_mode: self.user_config.vrr_mode,
             prefer_max_refresh: self.user_config.prefer_max_refresh,
             keyboard_layout: &self.user_config.keyboard_layout,
@@ -1089,10 +1099,11 @@ impl RustyCompositorState {
                 self.clock_24h = !self.clock_24h;
                 self.sync_and_save_user_config();
             }
+            SettingsHit::CycleTargetOutput => self.cycle_target_settings_output(),
             SettingsHit::ScaleDown | SettingsHit::ScaleUp => {
-                self.step_primary_display_scale(matches!(hit, SettingsHit::ScaleUp));
+                self.step_target_display_scale(matches!(hit, SettingsHit::ScaleUp));
             }
-            SettingsHit::CycleRotation => self.cycle_primary_display_rotation(),
+            SettingsHit::CycleRotation => self.cycle_target_display_rotation(),
             SettingsHit::CycleVrrMode => {
                 self.user_config.vrr_mode = match self.user_config.vrr_mode {
                     VrrMode::Off => VrrMode::Fullscreen,
@@ -1153,13 +1164,31 @@ impl RustyCompositorState {
         }
     }
 
-    fn cycle_primary_display_rotation(&mut self) {
+    fn cycle_target_settings_output(&mut self) {
+        let entries = self.output_map.entries();
+        if entries.len() <= 1 {
+            return;
+        }
+        let cur_id = self.selected_settings_output().id;
+        let cur_idx = entries
+            .iter()
+            .position(|entry| entry.id == cur_id)
+            .unwrap_or(0);
+        let next = &entries[(cur_idx + 1) % entries.len()];
+        let next_id = next.id;
+        let next_name = next.name.clone();
+        self.settings_target_output = Some(next_id);
+        self.shell_redraw_needed = true;
+        self.show_osd(format!("Display: {next_name}"), None, false);
+    }
+
+    fn cycle_target_display_rotation(&mut self) {
         use crate::config::DisplayRotation;
 
-        let primary = self.output_map.primary();
-        let id = primary.id;
-        let name = primary.name.clone();
-        let next_rot = match primary.rotation {
+        let target = self.selected_settings_output();
+        let id = target.id;
+        let name = target.name.clone();
+        let next_rot = match target.rotation {
             DisplayRotation::Rotate0 => DisplayRotation::Rotate90,
             DisplayRotation::Rotate90 => DisplayRotation::Rotate180,
             DisplayRotation::Rotate180 => DisplayRotation::Rotate270,
@@ -1223,14 +1252,14 @@ impl RustyCompositorState {
         self.sync_and_save_user_config();
     }
 
-    fn step_primary_display_scale(&mut self, increase: bool) {
+    fn step_target_display_scale(&mut self, increase: bool) {
         const SCALE_PRESETS: [f64; 4] = [1.0, 1.25, 1.5, 2.0];
-        let primary = self.output_map.primary();
-        let id = primary.id;
-        let name = primary.name.clone();
-        let phys = primary.physical_size;
-        let refresh = primary.refresh_milli_hz;
-        let cur = primary.scale;
+        let target = self.selected_settings_output();
+        let id = target.id;
+        let name = target.name.clone();
+        let phys = target.physical_size;
+        let refresh = target.refresh_milli_hz;
+        let cur = target.scale;
 
         let nearest = SCALE_PRESETS
             .iter()

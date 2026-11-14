@@ -884,6 +884,22 @@ hardware/software context и низкие накладные расходы.
 - **Verification:** `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --offline -- -D warnings` (0 предупреждений), `cargo test --workspace --offline` (165 passed, 0 failed, 0 ignored: `rusty_animation` 4, `rusty_compositor` 120, `rusty_ipc` 3, `rusty_services` 26, `rusty_shell` 5, `rusty_wm` 7), `cargo run -p rusty-compositor --offline -- --check` и `cargo run -p rusty-compositor --offline -- --winit --max-frames 3` (`rendered_frames=3`, `wayland-2`) завершены с кодом 0.
 - **Risks:** Новые зависимости и `unsafe` не добавлялись (`unsafe_code = "deny"` сохранён); при замене внешнего PNG-файла без изменения пути перерисовка выполняется по `ReloadConfig` / переключению обоев, без фонового polling/inotify.
 
+### RUSTYOS-063 — Выбор активного монитора и per-output scale/rotation в System Settings -> Displays (Multi-Monitor Displays UX)
+
+- **Status:** Done (`RUSTYOS-063` Вариант 1 — утверждённый объём выполнен)
+- **Scope:**
+  - В `crates/rusty-compositor/src/shell_render/modals.rs` расширен `SettingsRenderState` (`target_connector`, `target_output_index`, `output_count`, `display_width_px`, `display_height_px`, `display_refresh_hz`), добавлен вариант `SettingsHit::CycleTargetOutput`, а в `settings_display_rows` добавлена строка выбора выхода `Output {idx+1}/{count} · {w}x{h}@{hz}Hz` (`Output · {w}x{h}@{hz}Hz` при одном выходе) с pill `target_connector` и подписью `HiDPI Scale ({conn})`.
+  - В `crates/rusty-compositor/src/state/mod.rs` добавлено поле `settings_target_output: Option<OutputId>` и метод `RustyCompositorState::selected_settings_output()` с автоматическим fallback на `output_map.primary()`, если цель не выбрана или монитор отключён.
+  - В `crates/rusty-compositor/src/state/shell_actions.rs` обновлены `settings_render_state`, `apply_settings_hit`, `cycle_target_settings_output`, `step_target_display_scale` и `cycle_target_display_rotation`: scale и rotation применяются к выбранному выходу, сохраняются в `[display.outputs."<name>"]` (и в top-level `[display]` только при единственном подключённом выходе), а переключение выхода показывает OSD `Display: <name>`.
+  - Обновлены и добавлены модульные тесты в `crates/rusty-compositor/src/shell_render/tests.rs` и `crates/rusty-compositor/src/state/tests.rs` (`multi_output_settings_targets_each_display_independently_with_unplug_fallback`).
+- **Verification:**
+  - `cargo fmt --all -- --check` — pass;
+  - `cargo clippy --workspace --all-targets --offline -- -D warnings` — pass (0 warnings);
+  - `cargo test --workspace --offline` — pass (166 passed: `rusty_animation` 4, `rusty_compositor` 121, `rusty_ipc` 3, `rusty_services` 26, `rusty_shell` 5, `rusty_wm` 7);
+  - `cargo run -p rusty-compositor --offline -- --check` — pass (`finished cleanly (mode: check-only)`);
+  - `cargo run -p rusty-compositor --offline -- --winit --max-frames 3` — pass (`rendered_frames=3`, `finished cleanly (mode: nested-winit)`).
+- **Risks:** Новые зависимости и `unsafe` не добавлялись (`unsafe_code = "deny"` сохранён); переименование уже утверждённого scope отсутствует, а `Winit` и `DRM/KMS` используют единый `OutputMap` / `UserConfig` pipeline.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

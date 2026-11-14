@@ -981,11 +981,21 @@ pub struct SettingsRenderState<'a> {
     pub menubar_show_volume: bool,
     /// Use 24-hour Menu Bar clock format.
     pub clock_24h: bool,
-    /// Primary connected display name (e.g. `"Winit-1"` or `"eDP-1"`).
-    pub primary_connector: &'a str,
-    /// Active `HiDPI` scale for the primary output.
+    /// Active target display connector name (e.g. `"Winit-1"`, `"eDP-1"`, `"DP-1"`).
+    pub target_connector: &'a str,
+    /// Zero-based index of the selected display inside [`OutputMap::entries`].
+    pub target_output_index: usize,
+    /// Total number of currently connected displays (`>= 1`).
+    pub output_count: usize,
+    /// Physical pixel width of the selected display.
+    pub display_width_px: i32,
+    /// Physical pixel height of the selected display.
+    pub display_height_px: i32,
+    /// Rounded refresh rate of the selected display in Hertz (`60`, `144`, ...).
+    pub display_refresh_hz: u32,
+    /// Active `HiDPI` scale for the selected display.
     pub display_scale: f64,
-    /// Active orientation for the primary output.
+    /// Active orientation for the selected display.
     pub display_rotation: crate::config::DisplayRotation,
     /// Global Adaptive Sync / VRR policy.
     pub vrr_mode: crate::config::VrrMode,
@@ -1036,6 +1046,8 @@ pub enum SettingsHit {
     ToggleMenuVolume,
     /// Toggle `clock_24h`.
     ToggleClock24h,
+    /// Cycle which connected output is being configured in `Displays` (`RUSTYOS-063`).
+    CycleTargetOutput,
     /// Step display `HiDPI` scale down.
     ScaleDown,
     /// Step display `HiDPI` scale up.
@@ -1279,7 +1291,22 @@ fn settings_appearance_rows(st: &SettingsRenderState<'_>) -> Vec<SettingsRowEntr
 }
 
 fn settings_display_rows(st: &SettingsRenderState<'_>) -> Vec<SettingsRowEntry> {
-    let conn = truncate_ascii(st.primary_connector, 12);
+    let conn = truncate_ascii(st.target_connector, 11);
+    let output_label = if st.output_count > 1 {
+        format!(
+            "Output {}/{} · {}x{}@{}Hz",
+            st.target_output_index + 1,
+            st.output_count,
+            st.display_width_px,
+            st.display_height_px,
+            st.display_refresh_hz,
+        )
+    } else {
+        format!(
+            "Output · {}x{}@{}Hz",
+            st.display_width_px, st.display_height_px, st.display_refresh_hz,
+        )
+    };
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let scale_pct = (crate::config::clamp_display_scale(st.display_scale) * 100.0).round() as u32;
     let vrr_label = match st.vrr_mode {
@@ -1294,6 +1321,14 @@ fn settings_display_rows(st: &SettingsRenderState<'_>) -> Vec<SettingsRowEntry> 
         crate::config::DisplayRotation::Rotate270 => "270°",
     };
     vec![
+        SettingsRowEntry {
+            label: output_label,
+            kind: SettingsRowKind::Toggle {
+                hit: SettingsHit::CycleTargetOutput,
+                value: std::borrow::Cow::Owned(conn.clone()),
+                active: st.output_count > 1,
+            },
+        },
         SettingsRowEntry {
             label: format!("HiDPI Scale ({conn})"),
             kind: SettingsRowKind::Stepper {

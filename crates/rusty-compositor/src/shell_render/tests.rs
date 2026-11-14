@@ -1223,7 +1223,12 @@ fn sample_settings_render_state() -> SettingsRenderState<'static> {
         menubar_show_input_source: false,
         menubar_show_volume: false,
         clock_24h: false,
-        primary_connector: "Winit-1",
+        target_connector: "Winit-1",
+        target_output_index: 0,
+        output_count: 1,
+        display_width_px: 1280,
+        display_height_px: 800,
+        display_refresh_hz: 60,
         display_scale: 1.0,
         display_rotation: crate::config::DisplayRotation::Rotate0,
         vrr_mode: crate::config::VrrMode::Fullscreen,
@@ -1299,11 +1304,15 @@ fn settings_modal_hit_testing_covers_tabs_controls_and_buttons() {
 
     state.active_tab = SettingsTab::Displays;
     assert_eq!(
-        hit_test_settings_modal(size, &state, f64::from(content_right - 20), 302.0),
+        hit_test_settings_modal(size, &state, f64::from(content_right - 40), 302.0),
+        SettingsHit::CycleTargetOutput
+    );
+    assert_eq!(
+        hit_test_settings_modal(size, &state, f64::from(content_right - 20), 354.0),
         SettingsHit::ScaleUp
     );
     assert_eq!(
-        hit_test_settings_modal(size, &state, f64::from(content_right - 40), 354.0),
+        hit_test_settings_modal(size, &state, f64::from(content_right - 40), 406.0),
         SettingsHit::CycleRotation
     );
 

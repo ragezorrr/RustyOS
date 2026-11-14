@@ -473,6 +473,8 @@ pub struct RustyCompositorState {
     pub settings_active: bool,
     /// Active left-sidebar category in System Settings (`RUSTYOS-061`).
     pub settings_tab: crate::shell_render::SettingsTab,
+    /// Optional target display ID selected in `System Settings -> Displays` (`RUSTYOS-063`).
+    pub settings_target_output: Option<OutputId>,
     /// Footer persistence badge (`""`, `"Saved"`, `"Reloaded"`, or `"Error"`) (`RUSTYOS-061`).
     pub config_status_label: &'static str,
     /// Monotonic counter incremented when custom wallpaper configuration/files reload (`RUSTYOS-062`).
@@ -805,6 +807,7 @@ impl RustyCompositorState {
             quick_settings_anim: AnimatedValue::new_settled(0.0),
             settings_active: false,
             settings_tab: crate::shell_render::SettingsTab::Appearance,
+            settings_target_output: None,
             config_status_label: "",
             wallpaper_revision: 0,
             last_custom_wallpaper: initial_last_custom_wallpaper,
@@ -1024,6 +1027,14 @@ impl RustyCompositorState {
 
         self.relayout_wm_for_all_outputs();
         true
+    }
+
+    /// Returns the output currently targeted by System Settings -> Displays, falling back to primary (`RUSTYOS-063`).
+    #[must_use]
+    pub fn selected_settings_output(&self) -> &crate::outputs::OutputEntry {
+        self.settings_target_output
+            .and_then(|id| self.output_map.get(id))
+            .unwrap_or_else(|| self.output_map.primary())
     }
 
     pub(in crate::state) fn relayout_wm_for_all_outputs(&mut self) {

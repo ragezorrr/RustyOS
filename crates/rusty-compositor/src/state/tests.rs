@@ -429,3 +429,94 @@ fn keyboard_settings_wallpaper_reload_and_menubar_click_roundtrip() -> Result<()
     let _ = std::fs::remove_dir_all(&temp_dir);
     Ok(())
 }
+
+#[test]
+fn multi_output_settings_targets_each_display_independently_with_unplug_fallback()
+-> Result<(), Box<dyn Error>> {
+    use crate::config::{DisplayRotation, UserConfig};
+    use crate::shell_render::SettingsHit;
+    use smithay::output::{Mode, PhysicalProperties, Scale, Subpixel};
+
+    let mut display: Display<RustyCompositorState> = Display::new()?;
+    let mut event_loop: EventLoop<RustyCompositorState> = EventLoop::try_new()?;
+    let mut compositor = RustyCompositorState::new(
+        &display,
+        "wayland-rustyos-multi-output-test".to_owned(),
+        event_loop.get_signal(),
+        event_loop.handle(),
+        (1280, 800).into(),
+    )?;
+    let _ = (&mut display, &mut event_loop);
+
+    let temp_dir = std::env::temp_dir().join(format!("rustyos-multi-out-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    std::fs::create_dir_all(&temp_dir)?;
+    let cfg_path = temp_dir.join("config.toml");
+    compositor.config_path = Some(cfg_path.clone());
+
+    let primary_id = compositor.output_map.primary().id;
+    let primary_name = compositor.output_map.primary().name.clone();
+    let dp1_id = compositor.add_output(
+        "DP-1",
+        PhysicalProperties {
+            size: (600, 340).into(),
+            subpixel: Subpixel::Unknown,
+            make: "RustyOS".to_owned(),
+            model: "DP-1".to_owned(),
+        },
+        Mode {
+            size: (2560, 1440).into(),
+            refresh: 144_000,
+        },
+        Scale::Integer(1),
+        (1280, 0).into(),
+    );
+
+    assert_eq!(compositor.selected_settings_output().id, primary_id);
+    assert_eq!(compositor.settings_render_state().output_count, 2);
+    assert_eq!(
+        compositor.settings_render_state().target_connector,
+        primary_name.as_str()
+    );
+
+    compositor.apply_settings_hit(SettingsHit::CycleTargetOutput);
+    assert_eq!(compositor.selected_settings_output().id, dp1_id);
+    let targeted = compositor.settings_render_state();
+    assert_eq!(targeted.target_connector, "DP-1");
+    assert_eq!(targeted.target_output_index, 1);
+    assert_eq!(targeted.display_width_px, 2560);
+    assert_eq!(targeted.display_height_px, 1440);
+    assert_eq!(targeted.display_refresh_hz, 144);
+
+    compositor.apply_settings_hit(SettingsHit::ScaleUp);
+    compositor.apply_settings_hit(SettingsHit::CycleRotation);
+    let dp1_entry = compositor.output_map.get(dp1_id).ok_or("missing DP-1")?;
+    assert!((dp1_entry.scale - 1.25).abs() < f64::EPSILON);
+    assert_eq!(dp1_entry.rotation, DisplayRotation::Rotate90);
+    let primary_entry = compositor.output_map.primary();
+    assert!((primary_entry.scale - 1.0).abs() < f64::EPSILON);
+    assert_eq!(primary_entry.rotation, DisplayRotation::Rotate0);
+    assert!((compositor.user_config.display_scale - 1.0).abs() < f64::EPSILON);
+    assert_eq!(
+        compositor.user_config.display_rotation,
+        DisplayRotation::Rotate0
+    );
+
+    let reloaded = UserConfig::load_from_path(&cfg_path);
+    assert!((reloaded.scale_for_output("DP-1") - 1.25).abs() < f64::EPSILON);
+    assert_eq!(
+        reloaded.rotation_for_output("DP-1", None),
+        DisplayRotation::Rotate90
+    );
+
+    compositor.apply_settings_hit(SettingsHit::CycleTargetOutput);
+    assert_eq!(compositor.selected_settings_output().id, primary_id);
+    compositor.apply_settings_hit(SettingsHit::CycleTargetOutput);
+    assert_eq!(compositor.selected_settings_output().id, dp1_id);
+    compositor.output_map.remove(dp1_id);
+    assert_eq!(compositor.selected_settings_output().id, primary_id);
+    assert_eq!(compositor.settings_render_state().output_count, 1);
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    Ok(())
+}
