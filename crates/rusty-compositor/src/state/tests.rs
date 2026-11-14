@@ -342,3 +342,90 @@ fn persistent_config_save_reload_and_settings_toggles_roundtrip() -> Result<(), 
     let _ = std::fs::remove_dir_all(&temp_dir);
     Ok(())
 }
+
+#[test]
+fn keyboard_settings_wallpaper_reload_and_menubar_click_roundtrip() -> Result<(), Box<dyn Error>> {
+    use crate::shell_render::{
+        SettingsHit, SettingsTab, TopBarLayoutOptions, compute_top_bar_right_layout_with_options,
+    };
+
+    let mut display: Display<RustyCompositorState> = Display::new()?;
+    let mut event_loop: EventLoop<RustyCompositorState> = EventLoop::try_new()?;
+    let mut compositor = RustyCompositorState::new(
+        &display,
+        "wayland-rustyos-kbd-settings-test".to_owned(),
+        event_loop.get_signal(),
+        event_loop.handle(),
+        smithay::utils::Size::from((1280, 800)),
+    )?;
+    let _ = (&mut display, &mut event_loop);
+
+    let temp_dir =
+        std::env::temp_dir().join(format!("rustyos-state-kbd-wp-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    std::fs::create_dir_all(&temp_dir)?;
+    let cfg_path = temp_dir.join("config.toml");
+    let wp_path = temp_dir.join("custom.png");
+    std::fs::write(&wp_path, b"stub-png")?;
+    compositor.config_path = Some(cfg_path.clone());
+
+    for hit in [
+        SettingsHit::SelectTab(SettingsTab::Keyboard),
+        SettingsHit::CycleKeyboardLayout,
+        SettingsHit::CycleKeyboardOptions,
+        SettingsHit::RepeatRateUp,
+        SettingsHit::RepeatDelayDown,
+        SettingsHit::CycleActiveInputSource,
+        SettingsHit::ToggleMenuInputSource,
+    ] {
+        compositor.apply_settings_hit(hit);
+    }
+
+    let disk_cfg = crate::config::UserConfig::load_from_path(&cfg_path);
+    assert_eq!(disk_cfg.keyboard_layout, "us,ua");
+    assert_eq!(disk_cfg.keyboard_options, "grp:caps_toggle");
+    assert_eq!(disk_cfg.repeat_rate, 30);
+    assert_eq!(disk_cfg.repeat_delay, 150);
+    assert!(disk_cfg.menubar_show_input_source);
+    assert_eq!(compositor.active_kbd_layout, "UA");
+
+    let tel = compositor.telemetry.snapshot();
+    let clock_text = tel.clock_date_hhmm.as_str();
+    let opts = TopBarLayoutOptions {
+        has_battery: tel.power.has_battery,
+        notification_count: compositor.notification_count,
+        show_volume: compositor.menubar_show_volume,
+        show_input_source: true,
+        show_workspaces: compositor.menubar_show_workspaces,
+        show_tray: compositor.menubar_show_tray,
+    };
+    let right = compute_top_bar_right_layout_with_options(1280, clock_text, opts);
+    let kbd_x = f64::from(right.kbd_x.ok_or("missing TopBar kbd rect")? + 10);
+    let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+    compositor.pointer_location = (kbd_x, 12.0).into();
+    compositor.shell_redraw_needed = false;
+    assert!(compositor.handle_top_bar_pointer_click(1280, serial, 272));
+    assert_eq!(compositor.active_kbd_layout, "EN");
+    assert!(compositor.shell_redraw_needed);
+
+    assert!(compositor.handle_top_bar_pointer_click(1280, serial, 273));
+    assert!(compositor.settings_active);
+    assert_eq!(compositor.settings_tab, SettingsTab::Keyboard);
+
+    std::fs::write(
+        &cfg_path,
+        format!("[ui]\nwallpaper = \"{}\"\n", wp_path.display()),
+    )?;
+    let rev_before = compositor.wallpaper_revision;
+    compositor.handle_ipc_request(rusty_ipc::ShellRequest::ReloadConfig);
+    assert_eq!(compositor.user_config.wallpaper.as_ref(), Some(&wp_path));
+    assert!(compositor.wallpaper_revision > rev_before);
+
+    compositor.apply_settings_hit(SettingsHit::ToggleWallpaper);
+    assert_eq!(compositor.user_config.wallpaper, None);
+    compositor.apply_settings_hit(SettingsHit::ToggleWallpaper);
+    assert_eq!(compositor.user_config.wallpaper.as_ref(), Some(&wp_path));
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    Ok(())
+}

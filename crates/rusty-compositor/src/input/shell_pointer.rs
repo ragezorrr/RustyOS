@@ -131,7 +131,7 @@ impl RustyCompositorState {
         };
     }
 
-    pub(super) fn handle_top_bar_pointer_click(
+    pub(crate) fn handle_top_bar_pointer_click(
         &mut self,
         output_width: i32,
         serial: smithay::utils::Serial,
@@ -262,7 +262,12 @@ impl RustyCompositorState {
             x,
             y,
         ) {
-            self.cycle_keyboard_layout();
+            if button == 273 {
+                self.settings_tab = crate::shell_render::SettingsTab::Keyboard;
+                self.open_settings();
+            } else {
+                self.cycle_keyboard_layout();
+            }
             return true;
         }
         if let Some(tray_idx) = crate::shell_render::check_top_bar_tray_click_for_options(

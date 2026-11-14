@@ -1202,27 +1202,7 @@ fn overlay_and_chrome_visibility_predicates_isolate_modals() {
     assert!(dock_tooltip_hidden_by_overlay(ShellOverlayView::Portal(
         &portal
     )));
-
-    let settings_state = SettingsRenderState {
-        active_tab: SettingsTab::Appearance,
-        glass_opacity: crate::config::DEFAULT_GLASS_OPACITY,
-        reduce_transparency: false,
-        reduced_motion: false,
-        menubar_show_workspaces: false,
-        menubar_show_tray: false,
-        menubar_show_input_source: false,
-        menubar_show_volume: false,
-        clock_24h: false,
-        primary_connector: "eDP-1",
-        display_scale: 1.5,
-        display_rotation: crate::config::DisplayRotation::Rotate0,
-        vrr_mode: crate::config::VrrMode::Fullscreen,
-        prefer_max_refresh: true,
-        require_password_on_lock: true,
-        lock_on_sleep: true,
-        enable_polkit_agent: true,
-        config_status_label: "Saved",
-    };
+    let settings_state = sample_settings_render_state();
     assert!(notifications_hidden_by_overlay(ShellOverlayView::Settings(
         &settings_state
     )));
@@ -1231,14 +1211,13 @@ fn overlay_and_chrome_visibility_predicates_isolate_modals() {
     )));
 }
 
-#[test]
-fn settings_modal_hit_testing_covers_tabs_controls_and_buttons() {
-    let size = Size::from((1280, 800));
-    let mut state = SettingsRenderState {
+fn sample_settings_render_state() -> SettingsRenderState<'static> {
+    SettingsRenderState {
         active_tab: SettingsTab::Appearance,
-        glass_opacity: 0.78,
+        glass_opacity: crate::config::DEFAULT_GLASS_OPACITY,
         reduce_transparency: false,
         reduced_motion: false,
+        has_custom_wallpaper: false,
         menubar_show_workspaces: false,
         menubar_show_tray: false,
         menubar_show_input_source: false,
@@ -1249,11 +1228,22 @@ fn settings_modal_hit_testing_covers_tabs_controls_and_buttons() {
         display_rotation: crate::config::DisplayRotation::Rotate0,
         vrr_mode: crate::config::VrrMode::Fullscreen,
         prefer_max_refresh: true,
+        keyboard_layout: "us,ru",
+        keyboard_options: "grp:alt_shift_toggle",
+        repeat_rate: 25,
+        repeat_delay: 200,
+        active_kbd_layout: "EN",
         require_password_on_lock: true,
         lock_on_sleep: true,
         enable_polkit_agent: true,
         config_status_label: "",
-    };
+    }
+}
+
+#[test]
+fn settings_modal_hit_testing_covers_tabs_controls_and_buttons() {
+    let size = Size::from((1280, 800));
+    let mut state = sample_settings_render_state();
 
     // Centered modal box (580x432) -> (350, 184) .. (930, 616)
     assert_eq!(
@@ -1261,11 +1251,15 @@ fn settings_modal_hit_testing_covers_tabs_controls_and_buttons() {
         SettingsHit::Outside
     );
     assert_eq!(
-        hit_test_settings_modal(size, &state, f64::from(350 + 24), f64::from(184 + 122)),
+        hit_test_settings_modal(size, &state, f64::from(350 + 24), f64::from(184 + 125)),
         SettingsHit::SelectTab(SettingsTab::MenuBar)
     );
     assert_eq!(
-        hit_test_settings_modal(size, &state, f64::from(350 + 24), f64::from(184 + 210)),
+        hit_test_settings_modal(size, &state, f64::from(350 + 24), f64::from(184 + 205)),
+        SettingsHit::SelectTab(SettingsTab::Keyboard)
+    );
+    assert_eq!(
+        hit_test_settings_modal(size, &state, f64::from(350 + 24), f64::from(184 + 245)),
         SettingsHit::SelectTab(SettingsTab::Security)
     );
     assert_eq!(
@@ -1282,7 +1276,7 @@ fn settings_modal_hit_testing_covers_tabs_controls_and_buttons() {
         SettingsHit::ReloadConfig
     );
 
-    // Row 0 glass opacity stepper '+' is near right edge of row 0 (y ~ 184 + 98 + 20 = 302)
+    // Appearance row 0 stepper '+' / '-' and row 3 custom wallpaper toggle
     let content_right = 350 + 198 + (580 - 218);
     assert_eq!(
         hit_test_settings_modal(size, &state, f64::from(content_right - 20), 302.0),
@@ -1291,6 +1285,10 @@ fn settings_modal_hit_testing_covers_tabs_controls_and_buttons() {
     assert_eq!(
         hit_test_settings_modal(size, &state, f64::from(content_right - 115), 302.0),
         SettingsHit::GlassOpacityDown
+    );
+    assert_eq!(
+        hit_test_settings_modal(size, &state, f64::from(content_right - 40), 458.0),
+        SettingsHit::ToggleWallpaper
     );
 
     state.active_tab = SettingsTab::MenuBar;
@@ -1307,6 +1305,28 @@ fn settings_modal_hit_testing_covers_tabs_controls_and_buttons() {
     assert_eq!(
         hit_test_settings_modal(size, &state, f64::from(content_right - 40), 354.0),
         SettingsHit::CycleRotation
+    );
+
+    state.active_tab = SettingsTab::Keyboard;
+    assert_eq!(
+        hit_test_settings_modal(size, &state, f64::from(content_right - 40), 302.0),
+        SettingsHit::CycleKeyboardLayout
+    );
+    assert_eq!(
+        hit_test_settings_modal(size, &state, f64::from(content_right - 40), 354.0),
+        SettingsHit::CycleKeyboardOptions
+    );
+    assert_eq!(
+        hit_test_settings_modal(size, &state, f64::from(content_right - 20), 406.0),
+        SettingsHit::RepeatRateUp
+    );
+    assert_eq!(
+        hit_test_settings_modal(size, &state, f64::from(content_right - 115), 458.0),
+        SettingsHit::RepeatDelayDown
+    );
+    assert_eq!(
+        hit_test_settings_modal(size, &state, f64::from(content_right - 40), 510.0),
+        SettingsHit::CycleActiveInputSource
     );
 
     state.active_tab = SettingsTab::Security;

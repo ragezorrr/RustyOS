@@ -475,6 +475,10 @@ pub struct RustyCompositorState {
     pub settings_tab: crate::shell_render::SettingsTab,
     /// Footer persistence badge (`""`, `"Saved"`, `"Reloaded"`, or `"Error"`) (`RUSTYOS-061`).
     pub config_status_label: &'static str,
+    /// Monotonic counter incremented when custom wallpaper configuration/files reload (`RUSTYOS-062`).
+    pub wallpaper_revision: u64,
+    /// Last configured custom `.png` wallpaper path recalled when toggling back from built-in Tahoe (`RUSTYOS-062`).
+    pub last_custom_wallpaper: Option<std::path::PathBuf>,
     /// Whether Focus (Do Not Disturb) notification popup suppression is active (`RUSTYOS-053`).
     pub focus_mode: bool,
     /// Non-blocking system telemetry & quick audio controls (`RUSTYOS-021`).
@@ -714,6 +718,7 @@ impl RustyCompositorState {
         let initial_menubar_show_input_source = user_config.menubar_show_input_source;
         let initial_menubar_show_volume = user_config.menubar_show_volume;
         let initial_clock_24h = user_config.clock_24h;
+        let initial_last_custom_wallpaper = user_config.wallpaper.clone();
 
         let mut state = Self {
             start_time: Instant::now(),
@@ -801,6 +806,8 @@ impl RustyCompositorState {
             settings_active: false,
             settings_tab: crate::shell_render::SettingsTab::Appearance,
             config_status_label: "",
+            wallpaper_revision: 0,
+            last_custom_wallpaper: initial_last_custom_wallpaper,
             focus_mode: false,
             telemetry: crate::telemetry::SystemMetricsHandle::static_default(),
             screen_locked: false,
@@ -1813,7 +1820,10 @@ impl RustyCompositorState {
             drop(xkb);
             crate::config::layout_short_code(&name, layout_idx, &configured)
         });
-        self.active_kbd_layout = label;
+        if self.active_kbd_layout != label {
+            self.active_kbd_layout = label;
+            self.shell_redraw_needed = true;
+        }
     }
 
     /// Cycles forward to the next configured XKB layout (`us` ↔ `ru`, etc.) and updates `TopBar`.
@@ -1823,6 +1833,7 @@ impl RustyCompositorState {
             ctx.cycle_next_layout();
         });
         self.refresh_keyboard_layout_label();
+        self.shell_redraw_needed = true;
         info!(layout = %self.active_kbd_layout, "Switched active keyboard layout");
     }
 

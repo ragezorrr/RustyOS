@@ -527,6 +527,8 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
         );
     }
 
+    shape_cache.sync_wallpaper_revision(state.wallpaper_revision);
+
     let tel = state.telemetry.snapshot();
     let timing = state.frame_timing.summary();
     let lock_progress = state.lock_screen_anim.current();

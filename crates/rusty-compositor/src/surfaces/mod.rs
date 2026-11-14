@@ -203,6 +203,7 @@ struct GlyphKey {
 
 #[derive(Debug, Default)]
 struct CachedWallpaper {
+    revision: u64,
     custom_key: Option<(PathBuf, Size<i32, Logical>)>,
     custom_buffer: Option<MemoryRenderBuffer>,
     fallback_buffer: Option<MemoryRenderBuffer>,
@@ -514,6 +515,15 @@ impl UiShapeCache {
         .ok()
     }
 
+    /// Invalidates cached custom wallpaper GPU textures when compositor `wallpaper_revision` changes (`RUSTYOS-062`).
+    pub fn sync_wallpaper_revision(&mut self, revision: u64) {
+        if self.wallpaper.revision != revision {
+            self.wallpaper.custom_key = None;
+            self.wallpaper.custom_buffer = None;
+            self.wallpaper.revision = revision;
+        }
+    }
+
     /// Returns a GPU-cached wallpaper scaled cleanly to `screen_size`, preferring `custom_path` (`.png`)
     /// from `[ui] wallpaper` and falling back to the ambient Purple Glass gradient (`RUSTYOS-034`).
     pub fn wallpaper_element(
@@ -573,6 +583,9 @@ impl UiShapeCache {
                 )
                 .ok();
             }
+        } else if self.wallpaper.custom_key.is_some() || self.wallpaper.custom_buffer.is_some() {
+            self.wallpaper.custom_key = None;
+            self.wallpaper.custom_buffer = None;
         }
 
         let buf = self

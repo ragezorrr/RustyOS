@@ -884,26 +884,29 @@ pub(super) fn render_pick_color_composite(
     );
 }
 
-/// Active sidebar category inside the built-in System Settings modal (`RUSTYOS-061`).
+/// Active sidebar category inside the built-in System Settings modal (`RUSTYOS-061`/`062`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SettingsTab {
-    /// Frosted glass opacity, reduce transparency, and reduced motion.
+    /// Frosted glass opacity, reduce transparency, reduced motion, and wallpaper.
     #[default]
     Appearance,
     /// Menu Bar indicators and clock format.
     MenuBar,
     /// `HiDPI` scale presets, output rotation, VRR policy, and max refresh rate.
     Displays,
+    /// `XKB` keyboard layouts, switch shortcut, repeat rate, and repeat delay.
+    Keyboard,
     /// Lock screen authentication, lock-on-sleep, and `PolicyKit` agent.
     Security,
 }
 
 impl SettingsTab {
     /// Ordered sidebar tabs displayed in System Settings.
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
         Self::Appearance,
         Self::MenuBar,
         Self::Displays,
+        Self::Keyboard,
         Self::Security,
     ];
 
@@ -914,6 +917,7 @@ impl SettingsTab {
             Self::Appearance => "Appearance",
             Self::MenuBar => "Menu Bar",
             Self::Displays => "Displays",
+            Self::Keyboard => "Keyboard",
             Self::Security => "Security",
         }
     }
@@ -923,6 +927,7 @@ impl SettingsTab {
             Self::Appearance => crate::surfaces::UiGlyphKind::Transparency,
             Self::MenuBar => crate::surfaces::UiGlyphKind::ControlCenter,
             Self::Displays => crate::surfaces::UiGlyphKind::WindowMax,
+            Self::Keyboard => crate::surfaces::UiGlyphKind::Keyboard,
             Self::Security => crate::surfaces::UiGlyphKind::Lock,
         }
     }
@@ -933,7 +938,8 @@ impl SettingsTab {
         match self {
             Self::Appearance => Self::MenuBar,
             Self::MenuBar => Self::Displays,
-            Self::Displays => Self::Security,
+            Self::Displays => Self::Keyboard,
+            Self::Keyboard => Self::Security,
             Self::Security => Self::Appearance,
         }
     }
@@ -945,12 +951,13 @@ impl SettingsTab {
             Self::Appearance => Self::Security,
             Self::MenuBar => Self::Appearance,
             Self::Displays => Self::MenuBar,
-            Self::Security => Self::Displays,
+            Self::Keyboard => Self::Displays,
+            Self::Security => Self::Keyboard,
         }
     }
 }
 
-/// Snapshot passed to the System Settings renderer (`RUSTYOS-061`).
+/// Snapshot passed to the System Settings renderer (`RUSTYOS-061`/`062`).
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct SettingsRenderState<'a> {
@@ -962,6 +969,8 @@ pub struct SettingsRenderState<'a> {
     pub reduce_transparency: bool,
     /// Reduced motion / instant animations toggle.
     pub reduced_motion: bool,
+    /// Whether `[ui] wallpaper` currently uses a custom `.png` file instead of built-in Tahoe.
+    pub has_custom_wallpaper: bool,
     /// Show Menu Bar workspace strip.
     pub menubar_show_workspaces: bool,
     /// Show Menu Bar `StatusNotifier` tray icons.
@@ -982,6 +991,16 @@ pub struct SettingsRenderState<'a> {
     pub vrr_mode: crate::config::VrrMode,
     /// Prefer max supported mode refresh rate on DRM/KMS.
     pub prefer_max_refresh: bool,
+    /// Comma-separated `XKB` layout list (e.g. `"us,ru"`).
+    pub keyboard_layout: &'a str,
+    /// `XKB` options string (e.g. `"grp:alt_shift_toggle"`).
+    pub keyboard_options: &'a str,
+    /// Key repeat rate in keys/second (`1..=120`).
+    pub repeat_rate: i32,
+    /// Key repeat delay in milliseconds (`50..=2000`).
+    pub repeat_delay: i32,
+    /// Currently active short input layout badge (e.g. `"EN"`, `"RU"`).
+    pub active_kbd_layout: &'a str,
     /// Require PAM password when unlocking the Lock Screen.
     pub require_password_on_lock: bool,
     /// Automatically lock session on logind sleep.
@@ -992,7 +1011,7 @@ pub struct SettingsRenderState<'a> {
     pub config_status_label: &'a str,
 }
 
-/// Interactive click targets inside the System Settings modal (`RUSTYOS-061`).
+/// Interactive click targets inside the System Settings modal (`RUSTYOS-061`/`062`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsHit {
     /// Switch active sidebar category.
@@ -1005,6 +1024,8 @@ pub enum SettingsHit {
     ToggleReduceTransparency,
     /// Toggle `reduced_motion`.
     ToggleReducedMotion,
+    /// Toggle between custom `.png` wallpaper and built-in Tahoe gradient.
+    ToggleWallpaper,
     /// Toggle `menubar_show_workspaces`.
     ToggleMenuWorkspaces,
     /// Toggle `menubar_show_tray`.
@@ -1025,6 +1046,20 @@ pub enum SettingsHit {
     CycleVrrMode,
     /// Toggle `prefer_max_refresh`.
     TogglePreferMaxRefresh,
+    /// Cycle curated `[keyboard] layout` presets (`us`, `us,ru`, `us,ua`, ...).
+    CycleKeyboardLayout,
+    /// Cycle curated `[keyboard] options` layout-switch shortcuts.
+    CycleKeyboardOptions,
+    /// Decrease key repeat rate (`keys/s`).
+    RepeatRateDown,
+    /// Increase key repeat rate (`keys/s`).
+    RepeatRateUp,
+    /// Decrease key repeat delay (`ms`).
+    RepeatDelayDown,
+    /// Increase key repeat delay (`ms`).
+    RepeatDelayUp,
+    /// Cycle active `XKB` keyboard layout group (`EN` <-> `RU`, etc.).
+    CycleActiveInputSource,
     /// Toggle `require_password_on_lock`.
     ToggleRequirePassword,
     /// Toggle `lock_on_sleep`.
@@ -1046,7 +1081,7 @@ struct SettingsModalLayout {
     modal: Rectangle<i32, smithay::utils::Physical>,
     badge: Rectangle<i32, smithay::utils::Physical>,
     close_btn: Rectangle<i32, smithay::utils::Physical>,
-    tabs: [Rectangle<i32, smithay::utils::Physical>; 4],
+    tabs: [Rectangle<i32, smithay::utils::Physical>; 5],
     divider_x: i32,
     content_x: i32,
     rows: [Rectangle<i32, smithay::utils::Physical>; 5],
@@ -1066,8 +1101,8 @@ fn settings_modal_layout(screen_size: Size<i32, smithay::utils::Physical>) -> Se
 
     let tabs = std::array::from_fn(|idx| {
         #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-        let ry = y + 70 + (idx as i32) * 44;
-        Rectangle::new(Point::from((x + 18, ry)), Size::from((152, 36)))
+        let ry = y + 68 + (idx as i32) * 40;
+        Rectangle::new(Point::from((x + 18, ry)), Size::from((152, 34)))
     });
 
     let divider_x = x + 184;
@@ -1102,8 +1137,8 @@ fn settings_row_pill_rect(
     row: Rectangle<i32, smithay::utils::Physical>,
 ) -> Rectangle<i32, smithay::utils::Physical> {
     Rectangle::new(
-        Point::from((row.loc.x + row.size.w - 110, row.loc.y + 8)),
-        Size::from((100, 28)),
+        Point::from((row.loc.x + row.size.w - 120, row.loc.y + 8)),
+        Size::from((110, 28)),
     )
 }
 
@@ -1137,7 +1172,7 @@ enum SettingsRowKind {
     },
     Toggle {
         hit: SettingsHit,
-        value: &'static str,
+        value: std::borrow::Cow<'static, str>,
         active: bool,
     },
 }
@@ -1152,7 +1187,7 @@ fn toggle_row(label: impl Into<String>, hit: SettingsHit, active: bool) -> Setti
         label: label.into(),
         kind: SettingsRowKind::Toggle {
             hit,
-            value: if active { "On" } else { "Off" },
+            value: std::borrow::Cow::Borrowed(if active { "On" } else { "Off" }),
             active,
         },
     }
@@ -1185,6 +1220,7 @@ fn settings_tab_rows(st: &SettingsRenderState<'_>) -> Vec<SettingsRowEntry> {
             toggle_row("24-Hour Clock", SettingsHit::ToggleClock24h, st.clock_24h),
         ],
         SettingsTab::Displays => settings_display_rows(st),
+        SettingsTab::Keyboard => settings_keyboard_rows(st),
         SettingsTab::Security => vec![
             toggle_row(
                 "Require Password on Lock",
@@ -1227,6 +1263,18 @@ fn settings_appearance_rows(st: &SettingsRenderState<'_>) -> Vec<SettingsRowEntr
             SettingsHit::ToggleReducedMotion,
             st.reduced_motion,
         ),
+        SettingsRowEntry {
+            label: "Desktop Wallpaper".to_owned(),
+            kind: SettingsRowKind::Toggle {
+                hit: SettingsHit::ToggleWallpaper,
+                value: std::borrow::Cow::Borrowed(if st.has_custom_wallpaper {
+                    "Custom PNG"
+                } else {
+                    "Tahoe"
+                }),
+                active: st.has_custom_wallpaper,
+            },
+        },
     ]
 }
 
@@ -1258,7 +1306,7 @@ fn settings_display_rows(st: &SettingsRenderState<'_>) -> Vec<SettingsRowEntry> 
             label: "Rotation".to_owned(),
             kind: SettingsRowKind::Toggle {
                 hit: SettingsHit::CycleRotation,
-                value: rot_label,
+                value: std::borrow::Cow::Borrowed(rot_label),
                 active: st.display_rotation != crate::config::DisplayRotation::Rotate0,
             },
         },
@@ -1266,7 +1314,7 @@ fn settings_display_rows(st: &SettingsRenderState<'_>) -> Vec<SettingsRowEntry> 
             label: "Adaptive Sync (VRR)".to_owned(),
             kind: SettingsRowKind::Toggle {
                 hit: SettingsHit::CycleVrrMode,
-                value: vrr_label,
+                value: std::borrow::Cow::Borrowed(vrr_label),
                 active: st.vrr_mode != crate::config::VrrMode::Off,
             },
         },
@@ -1275,6 +1323,55 @@ fn settings_display_rows(st: &SettingsRenderState<'_>) -> Vec<SettingsRowEntry> 
             SettingsHit::TogglePreferMaxRefresh,
             st.prefer_max_refresh,
         ),
+    ]
+}
+
+fn settings_keyboard_rows(st: &SettingsRenderState<'_>) -> Vec<SettingsRowEntry> {
+    let layouts_value = truncate_ascii(st.keyboard_layout, 11);
+    let options_label = crate::config::keyboard_option_label(st.keyboard_options);
+    let rate = st.repeat_rate.clamp(1, 120);
+    let delay = st.repeat_delay.clamp(50, 2000);
+    vec![
+        SettingsRowEntry {
+            label: "Input Layouts".to_owned(),
+            kind: SettingsRowKind::Toggle {
+                hit: SettingsHit::CycleKeyboardLayout,
+                value: std::borrow::Cow::Owned(layouts_value),
+                active: st.keyboard_layout.contains(','),
+            },
+        },
+        SettingsRowEntry {
+            label: "Switch Shortcut".to_owned(),
+            kind: SettingsRowKind::Toggle {
+                hit: SettingsHit::CycleKeyboardOptions,
+                value: std::borrow::Cow::Borrowed(options_label),
+                active: !st.keyboard_options.trim().is_empty(),
+            },
+        },
+        SettingsRowEntry {
+            label: "Repeat Rate".to_owned(),
+            kind: SettingsRowKind::Stepper {
+                down: SettingsHit::RepeatRateDown,
+                up: SettingsHit::RepeatRateUp,
+                value: format!("{rate}/s"),
+            },
+        },
+        SettingsRowEntry {
+            label: "Repeat Delay".to_owned(),
+            kind: SettingsRowKind::Stepper {
+                down: SettingsHit::RepeatDelayDown,
+                up: SettingsHit::RepeatDelayUp,
+                value: format!("{delay}ms"),
+            },
+        },
+        SettingsRowEntry {
+            label: "Active Source".to_owned(),
+            kind: SettingsRowKind::Toggle {
+                hit: SettingsHit::CycleActiveInputSource,
+                value: std::borrow::Cow::Owned(truncate_ascii(st.active_kbd_layout, 4)),
+                active: true,
+            },
+        },
     ]
 }
 

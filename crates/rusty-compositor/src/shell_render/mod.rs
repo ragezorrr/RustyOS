@@ -1373,6 +1373,22 @@ fn build_chrome_shapes(
         }
     }
 
+    if top_telemetry.show_input_source
+        && let Some(kbd_x) = right_layout.kbd_x
+    {
+        push_rounded_glass_box(
+            &mut out,
+            shape_cache,
+            renderer,
+            Rectangle::new(
+                Point::from((kbd_x, TOP_BAR_ITEM_Y)),
+                Size::from((right_layout.kbd_w, TOP_BAR_ITEM_H)),
+            ),
+            6,
+            [255, 255, 255, 36],
+            Some([255, 255, 255, 42]),
+        );
+    }
     if top_telemetry.notification_count > 0 {
         push_rounded_glass_box(
             &mut out,

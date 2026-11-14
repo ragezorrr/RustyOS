@@ -726,6 +726,12 @@ pub fn default_user_config_path() -> Option<PathBuf> {
     })
 }
 
+/// Resolves the default user custom wallpaper `.png` path (`~/.config/rustyos/wallpaper.png`).
+#[must_use]
+pub fn default_user_wallpaper_path() -> Option<PathBuf> {
+    default_user_config_path().and_then(|cfg| cfg.parent().map(|dir| dir.join("wallpaper.png")))
+}
+
 fn expand_user_path(raw: &str) -> Option<PathBuf> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -794,6 +800,54 @@ pub fn layout_short_code(
     } else {
         fallback
     }
+}
+
+/// Curated multi-layout XKB presets exposed in `System Settings -> Keyboard` (`RUSTYOS-062`).
+pub const KEYBOARD_LAYOUT_PRESETS: [&str; 6] = ["us", "us,ru", "us,ua", "us,de", "us,fr", "us,es"];
+
+/// Curated XKB group-switch shortcuts `(xkb_option, human_label)` for `System Settings -> Keyboard` (`RUSTYOS-062`).
+pub const KEYBOARD_OPTION_PRESETS: [(&str, &str); 5] = [
+    ("grp:alt_shift_toggle", "Alt+Shift"),
+    ("grp:caps_toggle", "Caps Lock"),
+    ("grp:ctrl_shift_toggle", "Ctrl+Shift"),
+    ("grp:win_space_toggle", "Win+Space"),
+    ("", "Off"),
+];
+
+/// Returns the next curated `[keyboard] layout` preset after `current` (`RUSTYOS-062`).
+#[must_use]
+pub fn next_keyboard_layout_preset(current: &str) -> &'static str {
+    let normalized = current.trim();
+    match KEYBOARD_LAYOUT_PRESETS
+        .iter()
+        .position(|preset| preset.eq_ignore_ascii_case(normalized))
+    {
+        Some(idx) => KEYBOARD_LAYOUT_PRESETS[(idx + 1) % KEYBOARD_LAYOUT_PRESETS.len()],
+        None => KEYBOARD_LAYOUT_PRESETS[1],
+    }
+}
+
+/// Returns the next curated `[keyboard] options` group-switch preset after `current` (`RUSTYOS-062`).
+#[must_use]
+pub fn next_keyboard_option_preset(current: &str) -> &'static str {
+    let normalized = current.trim();
+    match KEYBOARD_OPTION_PRESETS
+        .iter()
+        .position(|(opt, _)| opt.eq_ignore_ascii_case(normalized))
+    {
+        Some(idx) => KEYBOARD_OPTION_PRESETS[(idx + 1) % KEYBOARD_OPTION_PRESETS.len()].0,
+        None => KEYBOARD_OPTION_PRESETS[0].0,
+    }
+}
+
+/// Maps an XKB `options` string to a concise button label for `System Settings` (`RUSTYOS-062`).
+#[must_use]
+pub fn keyboard_option_label(options: &str) -> &'static str {
+    let normalized = options.trim();
+    KEYBOARD_OPTION_PRESETS
+        .iter()
+        .find(|(opt, _)| opt.eq_ignore_ascii_case(normalized))
+        .map_or("Custom", |(_, label)| *label)
 }
 
 fn strip_toml_comment(line: &str) -> &str {
@@ -1200,5 +1254,22 @@ mod tests {
         assert_eq!(reloaded, cfg);
         let _ = fs::remove_dir_all(&temp_dir);
         Ok(())
+    }
+
+    #[test]
+    fn keyboard_preset_cycling_and_labels_cover_builtin_and_custom_values() {
+        assert_eq!(next_keyboard_layout_preset("us"), "us,ru");
+        assert_eq!(next_keyboard_layout_preset("us,es"), "us");
+        assert_eq!(next_keyboard_layout_preset("us,jp"), "us,ru");
+
+        assert_eq!(
+            next_keyboard_option_preset("grp:alt_shift_toggle"),
+            "grp:caps_toggle"
+        );
+        assert_eq!(next_keyboard_option_preset(""), "grp:alt_shift_toggle");
+        assert_eq!(keyboard_option_label("grp:ctrl_shift_toggle"), "Ctrl+Shift");
+        assert_eq!(keyboard_option_label(""), "Off");
+        assert_eq!(keyboard_option_label("lv3:ralt_switch"), "Custom");
+        assert!(default_user_wallpaper_path().is_none_or(|p| p.ends_with("rustyos/wallpaper.png")));
     }
 }

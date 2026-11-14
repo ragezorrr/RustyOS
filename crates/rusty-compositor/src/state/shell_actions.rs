@@ -885,6 +885,7 @@ impl RustyCompositorState {
             glass_opacity: self.glass_opacity,
             reduce_transparency: self.reduce_transparency,
             reduced_motion: self.animations.reduced_motion(),
+            has_custom_wallpaper: self.user_config.wallpaper.is_some(),
             menubar_show_workspaces: self.menubar_show_workspaces,
             menubar_show_tray: self.menubar_show_tray,
             menubar_show_input_source: self.menubar_show_input_source,
@@ -895,6 +896,11 @@ impl RustyCompositorState {
             display_rotation: primary.rotation,
             vrr_mode: self.user_config.vrr_mode,
             prefer_max_refresh: self.user_config.prefer_max_refresh,
+            keyboard_layout: &self.user_config.keyboard_layout,
+            keyboard_options: &self.user_config.keyboard_options,
+            repeat_rate: self.user_config.repeat_rate,
+            repeat_delay: self.user_config.repeat_delay,
+            active_kbd_layout: &self.active_kbd_layout,
             require_password_on_lock: self.user_config.require_password_on_lock,
             lock_on_sleep: self.user_config.lock_on_sleep,
             enable_polkit_agent: self.user_config.enable_polkit_agent,
@@ -935,13 +941,15 @@ impl RustyCompositorState {
         self.shell_redraw_needed = true;
     }
 
-    /// Applies an updated [`crate::config::UserConfig`] to live compositor subsystems without writing disk (`RUSTYOS-061`).
+    /// Applies an updated [`crate::config::UserConfig`] to live compositor subsystems without writing disk (`RUSTYOS-061`/`062`).
     pub fn apply_user_config(&mut self, cfg: crate::config::UserConfig) {
         let repeat_changed = cfg.repeat_delay != self.user_config.repeat_delay
             || cfg.repeat_rate != self.user_config.repeat_rate;
         let xkb_changed = cfg.keyboard_layout != self.user_config.keyboard_layout
             || cfg.keyboard_variant != self.user_config.keyboard_variant
             || cfg.keyboard_options != self.user_config.keyboard_options;
+        let wallpaper_changed =
+            cfg.wallpaper != self.user_config.wallpaper || cfg.wallpaper.is_some();
 
         self.animations.set_reduced_motion(cfg.reduced_motion);
         self.glass_opacity = crate::config::clamp_glass_opacity(cfg.glass_opacity);
@@ -983,6 +991,7 @@ impl RustyCompositorState {
         if repeat_changed {
             keyboard.change_repeat_info(cfg.repeat_rate, cfg.repeat_delay);
         }
+        let mut xkb_applied = false;
         if xkb_changed {
             if let Err(err) = keyboard.set_xkb_config(self, cfg.xkb_config()) {
                 tracing::warn!(
@@ -991,11 +1000,27 @@ impl RustyCompositorState {
                     "Failed to apply reloaded XKB config; keeping existing keymap"
                 );
             } else {
-                self.refresh_keyboard_layout_label();
+                xkb_applied = true;
             }
         }
 
+        if wallpaper_changed {
+            if let Some(ref wp) = cfg.wallpaper {
+                self.last_custom_wallpaper = Some(wp.clone());
+                if !wp.exists() {
+                    tracing::warn!(
+                        path = %wp.display(),
+                        "Configured wallpaper file does not exist; falling back to built-in gradient"
+                    );
+                }
+            }
+            self.wallpaper_revision = self.wallpaper_revision.wrapping_add(1);
+        }
+
         self.user_config = cfg;
+        if xkb_applied {
+            self.refresh_keyboard_layout_label();
+        }
         self.shell_redraw_needed = true;
     }
 
@@ -1026,9 +1051,9 @@ impl RustyCompositorState {
         }
     }
 
-    /// Executes an interactive control hit inside the System Settings modal (`RUSTYOS-061`).
+    /// Executes an interactive control hit inside the System Settings modal (`RUSTYOS-061`/`062`).
     pub fn apply_settings_hit(&mut self, hit: crate::shell_render::SettingsHit) {
-        use crate::config::{DisplayRotation, VrrMode};
+        use crate::config::{VrrMode, next_keyboard_layout_preset, next_keyboard_option_preset};
         use crate::shell_render::SettingsHit;
 
         match hit {
@@ -1036,17 +1061,14 @@ impl RustyCompositorState {
                 self.settings_tab = tab;
                 self.shell_redraw_needed = true;
             }
-            SettingsHit::GlassOpacityDown => {
-                self.set_glass_opacity(self.glass_opacity - 0.05);
-            }
-            SettingsHit::GlassOpacityUp => {
-                self.set_glass_opacity(self.glass_opacity + 0.05);
-            }
+            SettingsHit::GlassOpacityDown => self.set_glass_opacity(self.glass_opacity - 0.05),
+            SettingsHit::GlassOpacityUp => self.set_glass_opacity(self.glass_opacity + 0.05),
             SettingsHit::ToggleReduceTransparency => self.toggle_reduce_transparency(),
             SettingsHit::ToggleReducedMotion => {
                 let next = !self.animations.reduced_motion();
                 self.set_reduced_motion_pref(next);
             }
+            SettingsHit::ToggleWallpaper => self.toggle_wallpaper_setting(),
             SettingsHit::ToggleMenuWorkspaces => {
                 self.menubar_show_workspaces = !self.menubar_show_workspaces;
                 self.sync_and_save_user_config();
@@ -1070,25 +1092,7 @@ impl RustyCompositorState {
             SettingsHit::ScaleDown | SettingsHit::ScaleUp => {
                 self.step_primary_display_scale(matches!(hit, SettingsHit::ScaleUp));
             }
-            SettingsHit::CycleRotation => {
-                let primary = self.output_map.primary();
-                let id = primary.id;
-                let name = primary.name.clone();
-                let next_rot = match primary.rotation {
-                    DisplayRotation::Rotate0 => DisplayRotation::Rotate90,
-                    DisplayRotation::Rotate90 => DisplayRotation::Rotate180,
-                    DisplayRotation::Rotate180 => DisplayRotation::Rotate270,
-                    DisplayRotation::Rotate270 => DisplayRotation::Rotate0,
-                };
-                self.rotation_override = None;
-                let use_winit_flip = name.eq_ignore_ascii_case("winit-0");
-                self.user_config.output_rotations.insert(name, next_rot);
-                if self.output_map.entries().len() == 1 {
-                    self.user_config.display_rotation = next_rot;
-                }
-                self.set_output_rotation(id, next_rot, use_winit_flip);
-                self.sync_and_save_user_config();
-            }
+            SettingsHit::CycleRotation => self.cycle_primary_display_rotation(),
             SettingsHit::CycleVrrMode => {
                 self.user_config.vrr_mode = match self.user_config.vrr_mode {
                     VrrMode::Off => VrrMode::Fullscreen,
@@ -1101,6 +1105,33 @@ impl RustyCompositorState {
                 self.user_config.prefer_max_refresh = !self.user_config.prefer_max_refresh;
                 self.sync_and_save_user_config();
             }
+            SettingsHit::CycleKeyboardLayout => {
+                let next = next_keyboard_layout_preset(&self.user_config.keyboard_layout);
+                self.apply_keyboard_settings_and_save(Some(next.to_owned()), None, None, None);
+            }
+            SettingsHit::CycleKeyboardOptions => {
+                let next = next_keyboard_option_preset(&self.user_config.keyboard_options);
+                self.apply_keyboard_settings_and_save(None, Some(next.to_owned()), None, None);
+            }
+            SettingsHit::RepeatRateDown | SettingsHit::RepeatRateUp => {
+                let delta = if matches!(hit, SettingsHit::RepeatRateUp) {
+                    5
+                } else {
+                    -5
+                };
+                let next_rate = (self.user_config.repeat_rate + delta).clamp(5, 120);
+                self.apply_keyboard_settings_and_save(None, None, None, Some(next_rate));
+            }
+            SettingsHit::RepeatDelayDown | SettingsHit::RepeatDelayUp => {
+                let delta = if matches!(hit, SettingsHit::RepeatDelayUp) {
+                    50
+                } else {
+                    -50
+                };
+                let next_delay = (self.user_config.repeat_delay + delta).clamp(100, 1000);
+                self.apply_keyboard_settings_and_save(None, None, Some(next_delay), None);
+            }
+            SettingsHit::CycleActiveInputSource => self.cycle_keyboard_layout(),
             SettingsHit::ToggleRequirePassword => {
                 self.user_config.require_password_on_lock =
                     !self.user_config.require_password_on_lock;
@@ -1120,6 +1151,76 @@ impl RustyCompositorState {
             SettingsHit::Close | SettingsHit::Outside => self.close_settings(),
             SettingsHit::ModalBody => {}
         }
+    }
+
+    fn cycle_primary_display_rotation(&mut self) {
+        use crate::config::DisplayRotation;
+
+        let primary = self.output_map.primary();
+        let id = primary.id;
+        let name = primary.name.clone();
+        let next_rot = match primary.rotation {
+            DisplayRotation::Rotate0 => DisplayRotation::Rotate90,
+            DisplayRotation::Rotate90 => DisplayRotation::Rotate180,
+            DisplayRotation::Rotate180 => DisplayRotation::Rotate270,
+            DisplayRotation::Rotate270 => DisplayRotation::Rotate0,
+        };
+        self.rotation_override = None;
+        let use_winit_flip = name.eq_ignore_ascii_case("winit-0");
+        self.user_config.output_rotations.insert(name, next_rot);
+        if self.output_map.entries().len() == 1 {
+            self.user_config.display_rotation = next_rot;
+        }
+        self.set_output_rotation(id, next_rot, use_winit_flip);
+        self.sync_and_save_user_config();
+    }
+
+    fn toggle_wallpaper_setting(&mut self) {
+        if self.user_config.wallpaper.is_some() {
+            self.last_custom_wallpaper = self.user_config.wallpaper.take();
+            self.wallpaper_revision = self.wallpaper_revision.wrapping_add(1);
+            self.sync_and_save_user_config();
+            return;
+        }
+
+        let candidate = self
+            .last_custom_wallpaper
+            .clone()
+            .or_else(|| crate::config::default_user_wallpaper_path().filter(|p| p.is_file()));
+        if let Some(path) = candidate {
+            self.last_custom_wallpaper = Some(path.clone());
+            self.user_config.wallpaper = Some(path);
+            self.wallpaper_revision = self.wallpaper_revision.wrapping_add(1);
+            self.sync_and_save_user_config();
+        } else {
+            self.config_status_label = "No PNG";
+            self.show_osd("Set wallpaper in config.toml", None, false);
+            self.shell_redraw_needed = true;
+        }
+    }
+
+    fn apply_keyboard_settings_and_save(
+        &mut self,
+        layout: Option<String>,
+        options: Option<String>,
+        repeat_delay: Option<i32>,
+        repeat_rate: Option<i32>,
+    ) {
+        let mut next = self.user_config.clone();
+        if let Some(l) = layout {
+            next.keyboard_layout = l;
+        }
+        if let Some(o) = options {
+            next.keyboard_options = o;
+        }
+        if let Some(delay) = repeat_delay {
+            next.repeat_delay = delay.clamp(50, 2000);
+        }
+        if let Some(rate) = repeat_rate {
+            next.repeat_rate = rate.clamp(1, 120);
+        }
+        self.apply_user_config(next);
+        self.sync_and_save_user_config();
     }
 
     fn step_primary_display_scale(&mut self, increase: bool) {
