@@ -34,3 +34,29 @@ Approval относится только к описанному объёму. �
 
 Попроси выполнить RUSTYOS-002. Перед сменой graphics stack, IPC, process
 boundaries или крупными зависимостями требуй ADR proposal и approval.
+
+## 5. Установка и обкатка на чистом Arch Linux (`RUSTYOS-076`..`RUSTYOS-078`)
+
+1. **Предварительная проверка окружения (без прав root и без изменений `/usr`):**
+
+   ```bash
+   ./bin/rustyos-session --doctor
+   ```
+
+2. **Сборка и установка Arch-пакета (`rustyos-git`) или локальная установка:**
+
+   ```bash
+   # Вариант A (штатный пакет Arch через pacman, легко откатывается `sudo pacman -Rns rustyos-git`):
+   cd packaging/arch && makepkg -si
+
+   # Вариант B (ручная установка в /usr/local + /usr/lib/rustyos для pkexec):
+   ./scripts/install.sh --system
+   ```
+
+   Для тестовой сборки `.pkg.tar.zst` без установки в систему хоста задай изолированные `BUILDDIR`/`PKGDEST` и `--holdver`.
+
+3. **Проверка реального DRM/KMS (TTY) и `pkexec` после установки пакета:**
+   - Выйди в чистую TTY (`Ctrl + Alt + F3`), проверь готовность `rustyos-session --doctor` и запусти `rustyos-session --drm` (или выбери сессию **RustyOS** в `SDDM`/`greetd`).
+   - В `--drm` композитор сам публикует `WAYLAND_DISPLAY` и `DISPLAY` (`XWayland`) в `dbus-update-activation-environment --systemd` после старта; в nested `--winit` этот экспорт отключён.
+   - Для живой проверки `rusty-updater` открой меню `TopBar -> Check for Updates... -> Open Updater...` (либо запусти `rusty-updater --dry-run` для безопасной симуляции без записи в `/var/lib/pacman`).
+   - После живой проверки `--drm` на целевом GPU занеси фактический результат (модель GPU, ядро, драйвер, разрешение/Гц, курсор, suspend/resume) в `docs/HARDWARE_MATRIX.md`.

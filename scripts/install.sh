@@ -56,6 +56,7 @@ if [ "${ACTION}" = "uninstall" ]; then
         "${BIN_DIR}/rusty-pipewire-stream" \
         "${BIN_DIR}/rustyos-session" \
         "${LIB_DIR}/rustyos-update-helper" \
+        "${APPS_DIR}/org.rustyos.files.desktop" \
         "${APPS_DIR}/org.rustyos.updater.desktop" \
         "${SESSIONS_DIR}/rustyos.desktop" \
         "${PORTALS_DIR}/rustyos.portal" \
@@ -98,6 +99,7 @@ if [ -n "${PW_WORKER}" ] && [ -x "${PW_WORKER}" ]; then
 fi
 
 echo "Installing desktop applications and portal backend configuration..."
+install -m 644 "${ROOT_DIR}/packaging/applications/org.rustyos.files.desktop" "${APPS_DIR}/org.rustyos.files.desktop"
 install -m 644 "${ROOT_DIR}/packaging/applications/org.rustyos.updater.desktop" "${APPS_DIR}/org.rustyos.updater.desktop"
 install -m 644 "${ROOT_DIR}/packaging/portals/rustyos.portal" "${PORTALS_DIR}/rustyos.portal"
 install -m 644 "${ROOT_DIR}/packaging/portals/rustyos-portals.conf" "${PORTALS_CONF_DIR}/rustyos-portals.conf"
@@ -118,5 +120,6 @@ echo "Binaries: ${BIN_DIR}"
 echo "Wayland Session: ${SESSIONS_DIR}/rustyos.desktop"
 echo "Arch package alternative: cd ${ROOT_DIR}/packaging/arch && makepkg -si"
 echo "For menu-bar Arch update badge, ensure 'pacman-contrib' (checkupdates) is installed."
+echo "To run read-only Arch preflight check: ${BIN_DIR}/rustyos-session --doctor"
 echo "To test nested: ${BIN_DIR}/rustyos-session --winit"
 echo "For bare-metal TTY test: ${BIN_DIR}/rustyos-session --drm"

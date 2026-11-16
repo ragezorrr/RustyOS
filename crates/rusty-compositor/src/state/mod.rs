@@ -407,6 +407,8 @@ pub struct RustyCompositorState {
     pub x11_loop_handle: Option<LoopHandle<'static, Self>>,
     /// Active `XWayland` display number (`:N`) if attached (`RUSTYOS-026`).
     pub xwayland_display: Option<u32>,
+    /// Export `WAYLAND_DISPLAY`/`DISPLAY` to `dbus-update-activation-environment` (`RUSTYOS-078`, `--drm` only).
+    pub sync_systemd_activation_env: bool,
     /// Persistent user configuration loaded from `~/.config/rustyos/config.toml` (`RUSTYOS-029`).
     pub user_config: crate::config::UserConfig,
     /// Path used for atomic persistence and live reload (`None` in unit tests) (`RUSTYOS-061`).
@@ -851,6 +853,7 @@ impl RustyCompositorState {
             xwm: None,
             x11_loop_handle: None,
             xwayland_display: None,
+            sync_systemd_activation_env: false,
             user_config,
             config_path: None,
             active_kbd_layout: "EN".to_owned(),

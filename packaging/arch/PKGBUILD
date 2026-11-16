@@ -5,7 +5,7 @@
 #   Rollback / remove cleanly: sudo pacman -Rns rustyos-git
 
 pkgname=rustyos-git
-pkgver=0.1.0.r0.g0000000
+pkgver=0.1.0.r77.g4702baa
 pkgrel=1
 pkgdesc='Independent Linux desktop environment in Rust (Wayland compositor, dock, shell, and apps)'
 arch=('x86_64' 'aarch64')
@@ -19,6 +19,9 @@ depends=(
   'libinput'
   'systemd-libs'
   'seatd'
+  'dbus'
+  'fontconfig'
+  'adwaita-icon-theme'
   'xorg-xwayland'
   'pipewire'
   'xdg-desktop-portal'
@@ -29,6 +32,12 @@ makedepends=('rust' 'cargo' 'git' 'pkgconf')
 optdepends=(
   'sddm: graphical Wayland session login chooser'
   'greetd: minimal login manager alternative'
+  'networkmanager: Wi-Fi status and network toggles in Control Center'
+  'bluez: Bluetooth toggle and device status in Control Center'
+  'upower: battery and power supply status in TopBar'
+  'wireplumber: PipeWire session management for audio and ScreenCast'
+  'pipewire-pulse: PulseAudio compatibility for desktop applications'
+  'xdg-desktop-portal-gtk: file chooser and portal fallback backend'
 )
 provides=('rustyos')
 conflicts=('rustyos')
@@ -71,6 +80,7 @@ build() {
   root="$(_repo_root)"
   export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
   export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${srcdir}/target}"
+  export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=${srcdir}=/usr/src/debug/${pkgname} --remap-path-prefix=${root}=/usr/src/debug/${pkgname}"
   cargo build --release --locked --workspace --manifest-path "${root}/Cargo.toml"
 }
 
@@ -79,6 +89,7 @@ check() {
   root="$(_repo_root)"
   export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
   export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${srcdir}/target}"
+  export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=${srcdir}=/usr/src/debug/${pkgname} --remap-path-prefix=${root}=/usr/src/debug/${pkgname}"
   cargo test --workspace --locked --manifest-path "${root}/Cargo.toml" -- --test-threads=1
 }
 
@@ -109,6 +120,8 @@ package() {
     install -m755 "${pw_worker}" "${pkgdir}/usr/bin/rusty-pipewire-stream"
   fi
 
+  install -m644 "${root}/packaging/applications/org.rustyos.files.desktop" \
+    "${pkgdir}/usr/share/applications/org.rustyos.files.desktop"
   install -m644 "${root}/packaging/applications/org.rustyos.updater.desktop" \
     "${pkgdir}/usr/share/applications/org.rustyos.updater.desktop"
   install -m644 "${root}/packaging/polkit/org.rustyos.updater.policy" \

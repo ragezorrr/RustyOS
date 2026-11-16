@@ -428,6 +428,21 @@
                           policy XML и            
                           BuiltinAppIcon::Updater)
                           (ADR-0037)              
+
+  D-046                   Фаза 10/Arch Session &  accepted
+                          Readiness (`RUSTYOS-078`):
+                          асинхронный экспорт     
+                          `WAYLAND_DISPLAY` /     
+                          `DISPLAY` в             
+                          `dbus-update-activation-environment`
+                          строго только в         
+                          `--drm`, read-only      
+                          `rustyos-session --doctor`,
+                          `org.rustyos.files.desktop`,
+                          `depends`/`--remap-path-prefix`
+                          в `PKGBUILD` и Arch job 
+                          `makepkg` в CI          
+                          (ADR-0038)              
   -----------------------------------------------------------------------
 
 ## Открытые решения

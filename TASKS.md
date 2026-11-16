@@ -1178,6 +1178,30 @@ hardware/software context и низкие накладные расходы.
   - Живые `--winit --max-frames 35` smoke-прогоны (`Wayland` и `X11`: `late=0 missed=0`, без EGL/шейдерных ошибок) и визуальная QA в `Dark` & `Light` (`qa-077-dark-updater.png`, `qa-077-dark-dryrun-complete.png`, `qa-077-dark-logs.png`, `qa-077-dark-topbar-launch.png`, `qa-077-light-updater.png`, `qa-077-light-dryrun-complete.png`).
 - **Risks:** Реальный системный вызов `pkexec /usr/lib/rustyos/rustyos-update-helper` и установка файлов в `/usr` / `/etc/polkit-1` намеренно не выполнялись на хосте (проверено через `--dry-run`, unit-тесты валидации/парсинга и запуск из соседнего каталога `exe_dir`); полноценная runtime-проверка `pkexec` требует установки пакета на хосте или в VM по решению архитектора.
 
+### RUSTYOS-078 — Готовность к чистому Arch Linux: `--drm` activation env, `.desktop`, `rustyos-session --doctor` и проверка `makepkg`
+
+- **Status:** Done (`RUSTYOS-078 Вариант 1` — утверждённый объём выполнен)
+- **Goal:** Закрыть практические пробелы развёртывания на минимальном чистом Arch Linux: добавить `org.rustyos.files.desktop`, уточнить `depends`/`optdepends` и воспроизводимость в `PKGBUILD`, реализовать безопасный экспорт `WAYLAND_DISPLAY`/`DISPLAY` в `dbus-update-activation-environment --systemd` строго в `--drm` режиме, добавить read-only диагностику `rustyos-session --doctor`, проверить изолированную сборку `.pkg.tar.zst` через `makepkg` и добавить `arch-packaging` job в CI.
+- **Dependencies:** `RUSTYOS-014`, `RUSTYOS-076`, `RUSTYOS-077`, `ADR-0038`, `D-046`.
+- **Scope:**
+  - `packaging/applications/org.rustyos.files.desktop` (+ правка категории в `org.rustyos.updater.desktop`), `packaging/arch/PKGBUILD` (`depends` для чистого Arch: `dbus`, `fontconfig`, `adwaita-icon-theme`, расширенный `optdepends`, `--remap-path-prefix` в `RUSTFLAGS`), `scripts/install.sh` (установка и `--uninstall-*` для `org.rustyos.files.desktop`, подсказка `--doctor`).
+  - `crates/rusty-compositor/src/`: флаг `RustyCompositorState::sync_systemd_activation_env` (`false` в тестах и `--winit`, `true` только в `drm_backend.rs`), чистый конструктор аргументов `build_session_activation_env_args`, неблокирующий фоновый `sync_drm_activation_environment` (в том числе при готовности `XWayland` в `shell_actions::set_xwayland_display`).
+  - `bin/rustyos-session`: поддержка `--help` и read-only проверки `--doctor` (резолв бинарников с приоритетом свежего workspace `target/`, проверка утилит `Xwayland`, `dbus-update-activation-environment`, `pkexec`, `pacman`, `checkupdates`, `.desktop`, Polkit policy, порталов, системных/пользовательских служб, `/dev/dri/*` и `--drm-probe`).
+  - `.github/workflows/ci.yml`: добавлен job `arch-packaging` (`container: archlinux:base-devel`) с валидацией скриптов, `.desktop`, Polkit XML и изолированным запуском `makepkg`.
+  - Документация: `ADR-0038` (`docs/adr/0038-arch-session-activation-and-doctor.md`), `D-046` (`DECISIONS.md`), раздел 5 в `docs/GETTING_STARTED.md`.
+- **Acceptance Criteria:**
+  - `--winit` и unit-тесты не экспортируют переменные в хостовый `dbus`/`systemd`; `--drm` публикует `WAYLAND_DISPLAY` и `DISPLAY` (после старта `XWayland`) асинхронно без блокировки KMS event loop;
+  - `rustyos-session --doctor` выполняется read-only, корректно находит бинарники, проверяет `--drm-probe` и завершается с `exit 0` при готовности ядра;
+  - Изолированная сборка `makepkg` без установки на хост успешно создаёт `rustyos-git-*.pkg.tar.zst`, содержащий все 6 исполняемых/сервисных бинарников, `/usr/lib/rustyos/rustyos-update-helper`, оба `.desktop`, `.policy`, `.portal` и `wayland-sessions/rustyos.desktop` (`Exec=/usr/bin/rustyos-session`).
+- **Tests:**
+  - `python3` YAML-проверка `.github/workflows/ci.yml`, `sh -n bin/rustyos-session`, `bash -n packaging/arch/PKGBUILD scripts/install.sh`, `desktop-file-validate packaging/applications/org.rustyos.{files,updater}.desktop`, `xmllint --noout packaging/polkit/org.rustyos.updater.policy`
+  - `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo build --workspace --bins --locked`
+  - `cargo test --workspace --locked -- --test-threads=1` (`234 passed; 0 failed`: `rusty_animation` 4, `rusty_compositor` 156, `rusty_files` 13, `rusty_ipc` 3, `rusty_services` 42, `rusty_shell` 5, `rusty_updater` 4, `rusty_wm` 7)
+  - `./bin/rustyos-session --doctor` (`22 ok, 6 warn, 0 fail`, `exit 0`)
+  - Изолированный `makepkg -f --holdver --noconfirm --nocheck` -> `rustyos-git-0.1.0.r77.g4702baa-1-x86_64.pkg.tar.zst` (`10M`) + `pacman -Qlp` + `tar -xOf` (`Exec=/usr/bin/rustyos-session`)
+  - `./target/debug/rusty-compositor --winit --max-frames 35` (`late=0 missed=0`, без EGL/шейдерных ошибок) и `./target/debug/rusty-compositor --drm-probe`.
+- **Risks:** Реальный вход в `--drm` из TTY и интерактивный запрос пароля `pkexec` в установленном системном дереве `/usr` не запускались на рабочей сессии хоста и вынесены в пошаговую проверку пользователя (`docs/GETTING_STARTED.md §5`) перед занесением статуса `working` в `docs/HARDWARE_MATRIX.md`.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

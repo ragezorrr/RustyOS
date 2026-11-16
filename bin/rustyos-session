@@ -6,22 +6,187 @@ export XDG_CURRENT_DESKTOP=RustyOS
 export XDG_SESSION_DESKTOP=RustyOS
 export XDG_SESSION_TYPE=wayland
 
-# Find bin directory (relative, PATH, or local cargo build)
+# Find bin directory (sibling install -> PATH -> local cargo release/debug)
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-SHELL_BIN=""
-if [ -x "$SCRIPT_DIR/rusty-compositor" ]; then
-    COMPOSITOR_BIN="$SCRIPT_DIR/rusty-compositor"
-    SHELL_BIN="$SCRIPT_DIR/rusty-shell"
-elif command -v rusty-compositor >/dev/null 2>&1; then
-    COMPOSITOR_BIN="$(command -v rusty-compositor)"
-    SHELL_BIN="$(command -v rusty-shell 2>/dev/null || true)"
-elif [ -x "$SCRIPT_DIR/../target/release/rusty-compositor" ]; then
-    COMPOSITOR_BIN="$SCRIPT_DIR/../target/release/rusty-compositor"
-    SHELL_BIN="$SCRIPT_DIR/../target/release/rusty-shell"
-else
-    COMPOSITOR_BIN="$SCRIPT_DIR/../target/debug/rusty-compositor"
-    SHELL_BIN="$SCRIPT_DIR/../target/debug/rusty-shell"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+find_rusty_bin() {
+    name="$1"
+    if [ -x "$SCRIPT_DIR/$name" ]; then
+        printf '%s\n' "$SCRIPT_DIR/$name"
+        return 0
+    fi
+    if [ -f "$REPO_ROOT/Cargo.toml" ]; then
+        for cand in \
+            "$REPO_ROOT/target/release/$name" \
+            "$REPO_ROOT/target/debug/$name"; do
+            if [ -x "$cand" ]; then
+                printf '%s\n' "$cand"
+                return 0
+            fi
+        done
+    fi
+    if command -v "$name" >/dev/null 2>&1; then
+        command -v "$name"
+        return 0
+    fi
+    return 0
+}
+
+COMPOSITOR_BIN="$(find_rusty_bin rusty-compositor)"
+SHELL_BIN="$(find_rusty_bin rusty-shell)"
+FILES_BIN="$(find_rusty_bin rusty-files)"
+UPDATER_BIN="$(find_rusty_bin rusty-updater)"
+PW_WORKER_BIN="$(find_rusty_bin rusty-pipewire-stream)"
+if [ -z "$PW_WORKER_BIN" ]; then
+    for cand in \
+        "$REPO_ROOT"/target/release/build/rusty-services-*/out/rusty-pipewire-stream \
+        "$REPO_ROOT"/target/debug/build/rusty-services-*/out/rusty-pipewire-stream; do
+        if [ -x "$cand" ]; then
+            PW_WORKER_BIN="$cand"
+            break
+        fi
+    done
 fi
+
+HELPER_BIN=""
+for cand in \
+    "/usr/lib/rustyos/rustyos-update-helper" \
+    "${HOME:-/tmp}/.local/lib/rustyos/rustyos-update-helper" \
+    "$SCRIPT_DIR/../lib/rustyos/rustyos-update-helper" \
+    "$REPO_ROOT/target/release/rustyos-update-helper" \
+    "$REPO_ROOT/target/debug/rustyos-update-helper"; do
+    if [ -x "$cand" ]; then
+        HELPER_BIN="$cand"
+        break
+    fi
+done
+
+run_doctor() {
+    ok_count=0
+    warn_count=0
+    fail_count=0
+
+    doc_ok() {
+        ok_count=$((ok_count + 1))
+        printf '[OK]   %s\n' "$1"
+    }
+    doc_warn() {
+        warn_count=$((warn_count + 1))
+        printf '[WARN] %s\n' "$1"
+    }
+    doc_fail() {
+        fail_count=$((fail_count + 1))
+        printf '[FAIL] %s\n' "$1"
+    }
+
+    printf '=== RustyOS Session & Arch Readiness Doctor (--doctor) ===\n'
+    printf 'User: %s (uid=%s) | Desktop target: %s\n' "${USER:-unknown}" "$(id -u)" "${XDG_CURRENT_DESKTOP}"
+
+    for spec in \
+        "rusty-compositor:$COMPOSITOR_BIN:req:build workspace or install package" \
+        "rusty-shell:$SHELL_BIN:warn:only needed when RUSTYOS_EXTERNAL_SHELL=1" \
+        "rusty-files:$FILES_BIN:req:build workspace or install package" \
+        "rusty-updater:$UPDATER_BIN:req:build workspace or install package" \
+        "rusty-pipewire-stream:$PW_WORKER_BIN:warn:optional ScreenCast PipeWire worker" \
+        "rustyos-update-helper:$HELPER_BIN:warn:required at /usr/lib/rustyos/rustyos-update-helper for live pkexec upgrades"; do
+        name="${spec%%:*}"
+        rest="${spec#*:}"
+        bin_path="${rest%%:*}"
+        rest="${rest#*:}"
+        sev="${rest%%:*}"
+        hint="${rest#*:}"
+        if [ -n "$bin_path" ] && [ -x "$bin_path" ]; then
+            doc_ok "Binary $name: $bin_path"
+        elif [ "$sev" = "req" ]; then
+            doc_fail "Missing executable binary $name ($hint)"
+        else
+            doc_warn "Binary $name unavailable ($hint)"
+        fi
+    done
+
+    for cmd in Xwayland dbus-update-activation-environment pkexec pacman; do
+        if command -v "$cmd" >/dev/null 2>&1; then
+            doc_ok "System command $cmd: $(command -v "$cmd")"
+        else
+            doc_fail "Missing system command '$cmd'"
+        fi
+    done
+    if command -v checkupdates >/dev/null 2>&1; then
+        doc_ok "Arch update checker: $(command -v checkupdates)"
+    else
+        doc_warn "Missing 'checkupdates' (install 'pacman-contrib' for menu-bar updates indicator)"
+    fi
+
+    for sys_asset in \
+        "/usr/share/wayland-sessions/rustyos.desktop:${HOME:-/tmp}/.local/share/wayland-sessions/rustyos.desktop:wayland-session desktop" \
+        "/usr/share/applications/org.rustyos.files.desktop:${HOME:-/tmp}/.local/share/applications/org.rustyos.files.desktop:rusty-files .desktop" \
+        "/usr/share/applications/org.rustyos.updater.desktop:${HOME:-/tmp}/.local/share/applications/org.rustyos.updater.desktop:rusty-updater .desktop" \
+        "/usr/share/xdg-desktop-portal/portals/rustyos.portal:${XDG_DATA_HOME:-${HOME:-/tmp}/.local/share}/xdg-desktop-portal/portals/rustyos.portal:XDG portal registration"; do
+        p1="${sys_asset%%:*}"
+        r1="${sys_asset#*:}"
+        p2="${r1%%:*}"
+        lbl="${r1##*:}"
+        if [ -f "$p1" ]; then
+            doc_ok "$lbl: $p1"
+        elif [ -f "$p2" ]; then
+            doc_ok "$lbl (user install): $p2"
+        else
+            doc_warn "$lbl not installed yet (checked $p1 and $p2)"
+        fi
+    done
+
+    if [ -f /usr/share/polkit-1/actions/org.rustyos.updater.policy ]; then
+        doc_ok "Polkit policy: /usr/share/polkit-1/actions/org.rustyos.updater.policy"
+    else
+        doc_warn "Polkit policy missing at /usr/share/polkit-1/actions/org.rustyos.updater.policy (required for live updates)"
+    fi
+
+    if command -v systemctl >/dev/null 2>&1; then
+        for unit in dbus polkit NetworkManager bluetooth upower seatd systemd-logind; do
+            if systemctl is-active --quiet "$unit" 2>/dev/null; then
+                doc_ok "System service '$unit' is active"
+            else
+                doc_warn "System service '$unit' not active (optional unless needed on target hardware)"
+            fi
+        done
+        for uunit in pipewire wireplumber xdg-desktop-portal; do
+            if systemctl --user is-active --quiet "$uunit" 2>/dev/null; then
+                doc_ok "User service '$uunit' is active"
+            else
+                doc_warn "User service '$uunit' not active in current shell"
+            fi
+        done
+    fi
+
+    if [ -e /dev/dri/card0 ] || [ -e /dev/dri/card1 ] || ls /dev/dri/card* >/dev/null 2>&1; then
+        doc_ok "DRM devices present: $(ls -1 /dev/dri/card* /dev/dri/renderD* 2>/dev/null | tr '\n' ' ')"
+    else
+        doc_fail "No /dev/dri/card* devices found"
+    fi
+
+    if [ -n "$COMPOSITOR_BIN" ] && [ -x "$COMPOSITOR_BIN" ]; then
+        if "$COMPOSITOR_BIN" --drm-probe >/dev/null 2>&1; then
+            doc_ok "Compositor '--drm-probe' passed (KMS / GBM / EGL / DMA-BUF ready)"
+        else
+            doc_fail "Compositor '--drm-probe' failed (run '$COMPOSITOR_BIN --drm-probe' for details)"
+        fi
+    fi
+
+    printf '=== Doctor Summary: %s ok, %s warn, %s fail ===\n' "$ok_count" "$warn_count" "$fail_count"
+    [ "$fail_count" -eq 0 ]
+}
+
+case "${1:-}" in
+    --help|-h)
+        echo "Usage: $0 [--drm|--kms|--winit|--nested|--drm-probe|--check|--doctor] [-- <compositor-args>]"
+        exit 0
+        ;;
+    --doctor)
+        run_doctor
+        exit 0
+        ;;
+esac
 
 if [ ! -x "$COMPOSITOR_BIN" ]; then
     echo "Error: rusty-compositor binary not found at $COMPOSITOR_BIN" >&2

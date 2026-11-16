@@ -5,6 +5,6 @@ Exec=rusty-updater
 Icon=org.rustyos.Updater
 Terminal=false
 Type=Application
-Categories=System;Settings;
+Categories=System;PackageManager;
 StartupNotify=true
 Keywords=update;upgrade;pacman;arch;rustyos;

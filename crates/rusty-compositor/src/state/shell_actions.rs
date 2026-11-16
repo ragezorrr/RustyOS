@@ -646,6 +646,9 @@ impl RustyCompositorState {
     pub fn set_xwayland_display(&mut self, display_number: Option<u32>) {
         self.xwayland_display = display_number;
         self.launcher.x11_display = display_number.map(|num| format!(":{num}"));
+        if self.sync_systemd_activation_env && display_number.is_some() {
+            crate::drm_backend::sync_drm_activation_environment(&self.socket_name, display_number);
+        }
     }
 
     /// Inserts or replaces a notification received from the D-Bus session server (`RUSTYOS-026`).

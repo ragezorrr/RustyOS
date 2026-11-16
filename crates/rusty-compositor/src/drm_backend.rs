@@ -72,7 +72,7 @@ use smithay::{
         presentation::Refresh, socket::ListeningSocketSource,
     },
 };
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::{
     BackendMode, BootstrapReport, CompositorConfig, CompositorError,
@@ -1252,6 +1252,7 @@ fn try_run_native_drm_session(
         setup.pixel_size,
     )?;
     state.config_path = crate::config::default_user_config_path();
+    state.sync_systemd_activation_env = true;
 
     let refresh_milli_hz = i32::try_from(setup.vrefresh.saturating_mul(1000)).unwrap_or(60_000);
     let primary_scale = state.user_config.scale_for_output(&setup.connector_name);
@@ -1559,6 +1560,8 @@ fn try_run_native_drm_session(
         ipc_socket = %ipc_socket_path.display(),
         "RustyOS Native DRM/KMS compositor active"
     );
+
+    sync_drm_activation_environment(&socket_name, state.xwayland_display);
 
     let autostart = state.user_config.autostart.clone();
     for cmd in autostart.iter().chain(config.spawn_clients.iter()) {
@@ -2032,9 +2035,99 @@ fn log_hardware_report(report: &DrmHardwareReport) {
     }
 }
 
+/// Builds `dbus-update-activation-environment --systemd` arguments for native `--drm` sessions
+/// (`RUSTYOS-078`, ADR-0038).
+#[must_use]
+pub(crate) fn build_session_activation_env_args(
+    wayland_display: &str,
+    x11_display: Option<u32>,
+    portal_dir: Option<&str>,
+) -> Vec<String> {
+    let mut args = vec![
+        String::from("--systemd"),
+        format!("WAYLAND_DISPLAY={}", wayland_display.trim()),
+        String::from("XDG_CURRENT_DESKTOP=RustyOS"),
+        String::from("XDG_SESSION_DESKTOP=RustyOS"),
+        String::from("XDG_SESSION_TYPE=wayland"),
+    ];
+    if let Some(num) = x11_display {
+        args.push(format!("DISPLAY=:{num}"));
+    }
+    if let Some(dir) = portal_dir.map(str::trim).filter(|d| !d.is_empty()) {
+        args.push(format!("XDG_DESKTOP_PORTAL_DIR={dir}"));
+    }
+    args
+}
+
+/// Publishes native `--drm` session variables into `dbus-update-activation-environment` off the
+/// compositor event loop so XDG portals and `systemd --user` services resolve `WAYLAND_DISPLAY`
+/// and `DISPLAY` without stalling KMS presentation (`RUSTYOS-078`).
+pub(crate) fn sync_drm_activation_environment(wayland_display: &str, x11_display: Option<u32>) {
+    let clean_wl = wayland_display.trim();
+    if clean_wl.is_empty() {
+        return;
+    }
+    let portal_dir = std::env::var("XDG_DESKTOP_PORTAL_DIR").ok();
+    let args = build_session_activation_env_args(clean_wl, x11_display, portal_dir.as_deref());
+    let _ = std::thread::Builder::new()
+        .name(String::from("drm-env-sync"))
+        .spawn(move || {
+            match std::process::Command::new("dbus-update-activation-environment")
+                .args(&args)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+            {
+                Ok(status) if status.success() => {
+                    debug!("Synced RustyOS --drm session environment to D-Bus/systemd");
+                }
+                Ok(status) => {
+                    debug!(code = ?status.code(), "dbus-update-activation-environment exited non-zero");
+                }
+                Err(err) => {
+                    debug!(error = %err, "dbus-update-activation-environment unavailable");
+                }
+            }
+        });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_activation_env_args_include_wayland_and_optional_x11_display() {
+        let base = build_session_activation_env_args("wayland-1", None, None);
+        assert_eq!(
+            base,
+            vec![
+                "--systemd",
+                "WAYLAND_DISPLAY=wayland-1",
+                "XDG_CURRENT_DESKTOP=RustyOS",
+                "XDG_SESSION_DESKTOP=RustyOS",
+                "XDG_SESSION_TYPE=wayland",
+            ]
+        );
+
+        let with_x11 = build_session_activation_env_args(
+            "wayland-0",
+            Some(2),
+            Some("/usr/share/xdg-desktop-portal/portals"),
+        );
+        assert_eq!(
+            with_x11,
+            vec![
+                "--systemd",
+                "WAYLAND_DISPLAY=wayland-0",
+                "XDG_CURRENT_DESKTOP=RustyOS",
+                "XDG_SESSION_DESKTOP=RustyOS",
+                "XDG_SESSION_TYPE=wayland",
+                "DISPLAY=:2",
+                "XDG_DESKTOP_PORTAL_DIR=/usr/share/xdg-desktop-portal/portals",
+            ]
+        );
+    }
 
     #[test]
     fn hardware_report_serializes_valid_json() {

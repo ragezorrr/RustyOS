@@ -54,3 +54,48 @@ jobs:
 
       - name: Run compositor smoke check
         run: cargo run -p rusty-compositor -- --check
+
+  arch-packaging:
+    name: Arch Linux PKGBUILD & Asset Validation
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    steps:
+      - name: Install Arch build and validation dependencies
+        run: |
+          pacman -Syu --noconfirm \
+            git rust pkgconf \
+            wayland libxkbcommon mesa libglvnd libinput systemd-libs seatd \
+            dbus fontconfig adwaita-icon-theme xorg-xwayland pipewire \
+            xdg-desktop-portal polkit pacman-contrib desktop-file-utils libxml2
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate shell scripts, desktop entries, and Polkit policy
+        run: |
+          sh -n bin/rustyos-session
+          bash -n packaging/arch/PKGBUILD scripts/install.sh
+          desktop-file-validate packaging/applications/org.rustyos.files.desktop packaging/applications/org.rustyos.updater.desktop
+          xmllint --noout packaging/polkit/org.rustyos.updater.policy
+
+      - name: Build isolated Arch package with makepkg
+        run: |
+          useradd -m builder
+          mkdir -p /tmp/rustyos-pkg/{build,pkg,src,log}
+          chown -R builder:builder "${GITHUB_WORKSPACE}" /tmp/rustyos-pkg
+          su - builder -c "cd '${GITHUB_WORKSPACE}/packaging/arch' && \
+            BUILDDIR=/tmp/rustyos-pkg/build \
+            PKGDEST=/tmp/rustyos-pkg/pkg \
+            SRCDEST=/tmp/rustyos-pkg/src \
+            LOGDEST=/tmp/rustyos-pkg/log \
+            makepkg -f --holdver --noconfirm --nocheck --noprogressbar"
+          pacman -Qlp /tmp/rustyos-pkg/pkg/rustyos-git-*.pkg.tar.* | grep -F "/usr/bin/rusty-compositor"
+          pacman -Qlp /tmp/rustyos-pkg/pkg/rustyos-git-*.pkg.tar.* | grep -F "/usr/bin/rusty-files"
+          pacman -Qlp /tmp/rustyos-pkg/pkg/rustyos-git-*.pkg.tar.* | grep -F "/usr/bin/rusty-updater"
+          pacman -Qlp /tmp/rustyos-pkg/pkg/rustyos-git-*.pkg.tar.* | grep -F "/usr/lib/rustyos/rustyos-update-helper"
+          pacman -Qlp /tmp/rustyos-pkg/pkg/rustyos-git-*.pkg.tar.* | grep -F "/usr/share/wayland-sessions/rustyos.desktop"
+          pacman -Qlp /tmp/rustyos-pkg/pkg/rustyos-git-*.pkg.tar.* | grep -F "/usr/share/applications/org.rustyos.files.desktop"
+          pacman -Qlp /tmp/rustyos-pkg/pkg/rustyos-git-*.pkg.tar.* | grep -F "/usr/share/applications/org.rustyos.updater.desktop"
+          pacman -Qlp /tmp/rustyos-pkg/pkg/rustyos-git-*.pkg.tar.* | grep -F "/usr/share/polkit-1/actions/org.rustyos.updater.policy"
