@@ -391,8 +391,10 @@ palettes (section 5.1); geometry, Liquid Glass clarity, and interactions target 
   `menubar_show_input_source`, `menubar_show_volume`); workspaces and window layout remain directly
   accessible via `Go`/`Window` menus, Overview, Control Center, and keyboard shortcuts.
 - Right (`4x4` SSAA SDF monochrome glyphs, `10 px` icon gaps / `6 px` before Clock, macOS order):
-  `Battery` -> `Wi-Fi` -> `Search` -> `Control Center` (two horizontal toggle capsules) -> plain
-  Clock (`"Wed Apr 1  9:41 AM"` or 24h with `clock_24h = true`).
+  `Updates` badge with `#0A84FF` corner dot (`RUSTYOS-076`, shown only when updates are pending or
+  its popover is open; also accessible via `System -> Check for Updates...`) -> `Battery` ->
+  `Wi-Fi` -> `Search` -> `Control Center` (two horizontal toggle capsules) -> plain Clock
+  (`"Wed Apr 1  9:41 AM"` or 24h with `clock_24h = true`).
 
 ### 12.2 Dock & Wallpaper
 

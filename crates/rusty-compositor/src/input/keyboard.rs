@@ -178,6 +178,10 @@ impl RustyCompositorState {
                 self.close_quick_settings();
                 info!("Closed Quick Settings popover");
             }
+            KeyIntercept::UpdatesPopoverClose => {
+                self.close_updates_popover();
+                info!("Closed Software Updates popover");
+            }
             KeyIntercept::TopBarMenuClose => {
                 self.close_top_bar_menu();
                 info!("Closed TopBar menu popover");
@@ -435,6 +439,9 @@ pub(super) fn classify_keyboard_input(
     }
     if state.quick_settings_active && sym.raw() == Keysym::Escape.raw() {
         return FilterResult::Intercept(KeyIntercept::QuickSettingsClose);
+    }
+    if state.updates_popover_open && sym.raw() == Keysym::Escape.raw() {
+        return FilterResult::Intercept(KeyIntercept::UpdatesPopoverClose);
     }
     if state.settings_active
         && let Some(intercept) = classify_settings_key(modifiers, sym)

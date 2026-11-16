@@ -1132,6 +1132,29 @@ hardware/software context и низкие накладные расходы.
   - Живые `--winit --max-frames 35` (`Wayland` и `X11`) + Light/Dark `rusty-files` скриншоты (`qa-075-dark-window-shadow.png`, `qa-075-dark-overlap-shadow.png`, `qa-075-light-window-shadow.png`, `qa-075-light-overlap-shadow.png`) без EGL/шейдерных ошибок.
 - **Risks:** В безголовом окружении без GLES кастомных шейдеров активируется единый 9-slice fallback через `UiShapeCache` (без сдвига `y+5/+12`, полосатость отсутствует за счёт непрерывного 1 px текстурного градиента).
 
+### RUSTYOS-076 — Arch Linux PKGBUILD, актуализация `install.sh` и непривилегированный сервис + индикатор обновлений (Этап A)
+
+- **Status:** Done (`RUSTYOS-076 Вариант 1 (Этап A)` — утверждённый объём выполнен)
+- **Goal:** Подготовить штатную упаковку RustyOS для Arch Linux (`makepkg`/`pacman`), актуализировать `scripts/install.sh`, добавить непривилегированную фоновую проверку обновлений Arch/RustyOS и интегрировать индикатор доступных обновлений в `TopBar` + `Liquid Glass` поповер в эстетике `macOS 27 Golden Gate`.
+- **Dependencies:** `RUSTYOS-014`, `RUSTYOS-061`, `RUSTYOS-069`, `ADR-0036`, `D-044`.
+- **Scope:**
+  - `packaging/arch/PKGBUILD`: пакет `rustyos-git` (`provides=('rustyos')`, `conflicts=('rustyos')`, зависимости Wayland/Smithay и `pacman-contrib`) со сборкой `--release --locked --workspace` и установкой `rusty-compositor`, `rusty-shell`, `rusty-files`, `rustyos-session`, `rusty-pipewire-stream`, `rustyos.desktop`, порталов XDG и документации в `/usr`.
+  - `scripts/install.sh`: добавлена установка `rusty-files`, непривилегированная сборка через `sudo -u "$SUDO_USER"` при запуске с `sudo`, флаги `--uninstall-user` / `--uninstall-system` и подсказки по `pacman-contrib` / `PKGBUILD`.
+  - `crates/rusty-services/src/updates.rs` (`lib.rs`): `UpdateCheckerHandle`, `UpdateCheckState`, `PackageUpdateItem`, `UpdateStatusSnapshot`, `parse_checkupdates_output` (фоновый опрос `/usr/bin/checkupdates --nocolor` без root и без блокировки compositor loop, санитизация ANSI/CSI, классификация `rustyos*` и критичных для перезапуска системных пакетов).
+  - `crates/rusty-compositor/src/`: секция `[updates]` в `UserConfig` (`enabled`, `check_interval_minutes` `15..=10080`, `show_in_menu_bar`), значок `UiGlyphKind::Updates { available }` с `#0A84FF` угловой точкой в `surfaces/{mod,glyphs}.rs`, опциональный слот `updates_x` в `shell_render/top_bar.rs` и пункт `Check for Updates...` в `MENU_SYSTEM`, `Liquid Glass` поповер `ShellOverlayView::Updates` (`shell_render/updates_popover.rs`, список приоритетных обновлений, `Check Now`, `Open Updater...` / `Software Update...`), переключатели `Updates Indicator` (`SettingsTab::MenuBar`) и `Auto Update Checks` (`SettingsTab::Security`) в `modals.rs`, интеграция в `state/` (`system_bridges.rs`, `shell_actions.rs`), `input/` и `frame_composer.rs`.
+  - Документация: `ADR-0036` (`docs/adr/0036-arch-packaging-and-updates.md`), `D-044` (`DECISIONS.md`), `DESIGN.md §12.1`, `ARCHITECTURE.md`. (Этап B с отдельным GUI-приложением `apps/rusty-updater` и привилегированным установщиком вынесен в отдельную следующую задачу `RUSTYOS-077`.)
+- **Acceptance Criteria:**
+  - `PKGBUILD` и `scripts/install.sh` проходят `bash -n`, включают `rusty-files`, `pacman-contrib`, XDG portals и `/usr/share/wayland-sessions/rustyos.desktop` для SDDM;
+  - `UpdateCheckerHandle` не блокирует compositor loop, безопасно очищает CSI/управляющие символы и не запускает привилегированные `pacman`/`git fetch` процессы;
+  - Значок обновления в `TopBar` автоматически появляется при наличии обновлений (`menubar_show_updates && total_count > 0`) или открытом поповере и открывает Golden Gate `Liquid Glass` поповер с корректным остатком (`+N more packages`), кнопкой `Check Now`, запуском `rusty-updater` (либо информативным уведомлением до Этапа B) и сохранением `[updates]` в `config.toml`.
+- **Tests:**
+  - `bash -n packaging/arch/PKGBUILD scripts/install.sh` (`exit 0`)
+  - `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo build --workspace --bins`
+  - `cargo test --workspace -- --test-threads=1` (`227 passed; 0 failed`: `rusty_animation` 4, `rusty_compositor` 155, `rusty_files` 13, `rusty_ipc` 3, `rusty_services` 40, `rusty_shell` 5, `rusty_wm` 7)
+  - `./target/debug/rusty-compositor --drm-probe`
+  - Живые `--winit --max-frames 35` smoke-прогоны (`Wayland` и `X11`: `late=0 missed=0`, без EGL/шейдерных ошибок) и визуальная проверка `Dark` & `Light` (`qa-076-{dark,light}-system-menu.png`, `qa-076-{dark,light}-updates-popover.png`, `qa-076-{dark,light}-settings-menubar.png`, `qa-076-{dark,light}-settings-security.png`).
+- **Risks:** Установка самого пакета через `makepkg -si` и системные действия в `/usr` преднамеренно не выполнялись на хосте до явного решения пользователя; Stage B (`apps/rusty-updater` с интерактивным прогрессом `pacman` через Polkit) остаётся отдельной задачей.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

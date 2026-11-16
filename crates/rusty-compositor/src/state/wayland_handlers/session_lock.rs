@@ -54,6 +54,7 @@ impl SessionLockHandler for RustyCompositorState {
         self.dnd_icon = None;
         self.close_launcher();
         self.close_quick_settings();
+        self.close_updates_popover();
         self.close_overview();
         self.active_window_drag = None;
         self.active_window_resize = None;

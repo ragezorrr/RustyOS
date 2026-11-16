@@ -26,6 +26,7 @@ impl RustyCompositorState {
         let chrome_allowed = is_on_primary
             && !self.launcher_active
             && !self.quick_settings_active
+            && !self.updates_popover_open
             && !self.settings_active
             && !self.has_foreground_layer_surfaces()
             && !self.should_hide_shell_chrome_for_fullscreen();
@@ -298,24 +299,8 @@ impl RustyCompositorState {
         let (primary_size, is_on_primary, local_x, local_y) = self.primary_local_coords(pos);
         let chrome_hidden =
             self.has_foreground_layer_surfaces() || self.should_hide_shell_chrome_for_fullscreen();
-        if self.dock_stack.is_some() && is_on_primary && !chrome_hidden {
-            let logical_size = self.primary_output_logical_size();
-            let stack_hit = self.dock_stack_render_state().and_then(|st| {
-                crate::shell_render::hit_test_dock_stack(logical_size, &st, local_x, local_y)
-            });
-            let (new_item, new_footer) = match stack_hit {
-                Some(crate::shell_render::DockStackHit::Entry(idx)) => (Some(idx), false),
-                Some(crate::shell_render::DockStackHit::OpenInFiles) => (None, true),
-                _ => (None, false),
-            };
-            if let Some(ref mut stack) = self.dock_stack
-                && (stack.hovered_item != new_item || stack.hovered_open_in_files != new_footer)
-            {
-                stack.hovered_item = new_item;
-                stack.hovered_open_in_files = new_footer;
-                self.shell_redraw_needed = true;
-            }
-        }
+        self.update_dock_stack_hover(is_on_primary, chrome_hidden, local_x, local_y);
+        self.update_updates_popover_hover(is_on_primary, chrome_hidden, local_x, local_y);
         let fullscreen_active = self
             .topmost_fullscreen_window_on(self.output_map.primary().id)
             .is_some();
@@ -348,6 +333,7 @@ impl RustyCompositorState {
             && visible_toast_count > 0
             && !self.launcher_active
             && !self.quick_settings_active
+            && !self.updates_popover_open
             && self.window_switcher.is_none()
         {
             crate::shell_render::check_notification_click(
@@ -363,6 +349,7 @@ impl RustyCompositorState {
         self.hovered_traffic_light_window = if !fullscreen_active
             && !self.launcher_active
             && !self.quick_settings_active
+            && !self.updates_popover_open
             && !self.overview_active
             && self.active_top_bar_menu.is_none()
             && self.window_switcher.is_none()
@@ -374,6 +361,63 @@ impl RustyCompositorState {
         } else {
             None
         };
+    }
+
+    fn update_dock_stack_hover(
+        &mut self,
+        is_on_primary: bool,
+        chrome_hidden: bool,
+        local_x: f64,
+        local_y: f64,
+    ) {
+        if !(self.dock_stack.is_some() && is_on_primary && !chrome_hidden) {
+            return;
+        }
+        let logical_size = self.primary_output_logical_size();
+        let stack_hit = self.dock_stack_render_state().and_then(|st| {
+            crate::shell_render::hit_test_dock_stack(logical_size, &st, local_x, local_y)
+        });
+        let (new_item, new_footer) = match stack_hit {
+            Some(crate::shell_render::DockStackHit::Entry(idx)) => (Some(idx), false),
+            Some(crate::shell_render::DockStackHit::OpenInFiles) => (None, true),
+            _ => (None, false),
+        };
+        if let Some(ref mut stack) = self.dock_stack
+            && (stack.hovered_item != new_item || stack.hovered_open_in_files != new_footer)
+        {
+            stack.hovered_item = new_item;
+            stack.hovered_open_in_files = new_footer;
+            self.shell_redraw_needed = true;
+        }
+    }
+
+    fn update_updates_popover_hover(
+        &mut self,
+        is_on_primary: bool,
+        chrome_hidden: bool,
+        local_x: f64,
+        local_y: f64,
+    ) {
+        if !(self.updates_popover_open && is_on_primary && !chrome_hidden) {
+            return;
+        }
+        let logical_size = self.primary_output_logical_size();
+        let updates_view = self.updates_render_state(logical_size.w);
+        let next_hover = match crate::shell_render::hit_test_updates_popover(
+            logical_size,
+            &updates_view,
+            local_x,
+            local_y,
+        ) {
+            hit @ (crate::shell_render::UpdatesPopoverHit::CheckNow
+            | crate::shell_render::UpdatesPopoverHit::OpenUpdater) => Some(hit),
+            crate::shell_render::UpdatesPopoverHit::InsidePopover
+            | crate::shell_render::UpdatesPopoverHit::OutsidePopover => None,
+        };
+        if self.updates_popover_hover != next_hover {
+            self.updates_popover_hover = next_hover;
+            self.shell_redraw_needed = true;
+        }
     }
 
     pub(crate) fn handle_top_bar_pointer_click(
@@ -474,6 +518,7 @@ impl RustyCompositorState {
             show_input_source: self.menubar_show_input_source,
             show_workspaces: self.menubar_show_workspaces,
             show_tray: self.menubar_show_tray,
+            show_updates: self.should_show_top_bar_updates(),
         };
 
         if crate::shell_render::check_top_bar_search_click_for_options(
@@ -504,6 +549,16 @@ impl RustyCompositorState {
             y,
         ) {
             self.clear_notifications();
+            return true;
+        }
+        if crate::shell_render::check_top_bar_updates_click_for_options(
+            output_width,
+            clock_text,
+            opts,
+            x,
+            y,
+        ) {
+            self.toggle_updates_popover();
             return true;
         }
         if crate::shell_render::check_top_bar_kbd_click_for_options(
@@ -642,6 +697,28 @@ impl RustyCompositorState {
         } else {
             None
         };
+    }
+
+    pub(super) fn handle_updates_popover_pointer_click(&mut self, button: u32) {
+        let (output_size, _on_primary, local_x, local_y) =
+            self.primary_local_coords(self.pointer_location);
+        let view = self.updates_render_state(output_size.w);
+        let hit =
+            crate::shell_render::hit_test_updates_popover(output_size, &view, local_x, local_y);
+        match hit {
+            crate::shell_render::UpdatesPopoverHit::CheckNow if button == 272 => {
+                self.trigger_updates_check();
+            }
+            crate::shell_render::UpdatesPopoverHit::OpenUpdater if button == 272 => {
+                self.open_software_updater_action();
+            }
+            crate::shell_render::UpdatesPopoverHit::InsidePopover
+            | crate::shell_render::UpdatesPopoverHit::CheckNow
+            | crate::shell_render::UpdatesPopoverHit::OpenUpdater => {}
+            crate::shell_render::UpdatesPopoverHit::OutsidePopover => {
+                self.close_updates_popover();
+            }
+        }
     }
 
     pub(super) fn handle_overview_pointer_click(

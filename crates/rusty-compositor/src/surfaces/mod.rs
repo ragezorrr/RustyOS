@@ -163,6 +163,11 @@ pub enum UiGlyphKind {
     Transparency,
     /// Circular refresh arrow glyph.
     Refresh,
+    /// Software Update indicator icon (ring + downward arrow) (`RUSTYOS-076`).
+    Updates {
+        /// Whether updates are available (draws `#0A84FF` corner dot badge).
+        available: bool,
+    },
     /// Padlock glyph (`Lock Screen`).
     Lock,
     /// Looped command-key symbol for `Keyboard Shortcuts`.

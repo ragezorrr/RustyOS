@@ -248,6 +248,44 @@ fn dithered_wallpaper_eliminates_flat_banding_and_ui_glyphs_rasterize_cleanly() 
 }
 
 #[test]
+fn updates_glyph_rasterizes_cleanly_with_and_without_badge() {
+    let white = [245, 240, 255, 255];
+    for available in [false, true] {
+        let mut non_zero = 0_usize;
+        let mut blue_dot_pixels = 0_usize;
+        for py in 0..20 {
+            for px in 0..20 {
+                let p =
+                    sample_ui_glyph_pixel(px, py, 20, UiGlyphKind::Updates { available }, white);
+                if p[3] > 24 {
+                    non_zero += 1;
+                }
+                // Little-endian Argb8888 stores channels as [B, G, R, A].
+                if px >= 12 && py <= 7 && p[3] > 120 && p[0] > p[2].saturating_add(40) {
+                    blue_dot_pixels += 1;
+                }
+            }
+        }
+        assert!(
+            non_zero >= 20,
+            "Updates glyph (available={available}) too sparse: {non_zero}"
+        );
+        assert_eq!(
+            sample_ui_glyph_pixel(0, 0, 20, UiGlyphKind::Updates { available }, white)[3],
+            0
+        );
+        if available {
+            assert!(
+                blue_dot_pixels >= 2,
+                "Expected #0A84FF corner dot badge pixels, saw {blue_dot_pixels}"
+            );
+        } else {
+            assert_eq!(blue_dot_pixels, 0);
+        }
+    }
+}
+
+#[test]
 fn topbar_wifi_and_battery_glyphs_match_live_state() {
     let white = [245, 240, 255, 255];
 

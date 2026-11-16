@@ -45,6 +45,7 @@ mod ssd;
 mod tokens;
 mod top_bar;
 mod top_bar_menus;
+mod updates_popover;
 
 pub use context_menu::{
     ContextMenuAction, ContextMenuEntry, ContextMenuHit, ContextMenuKeyOutcome, ContextMenuLayout,
@@ -118,18 +119,23 @@ pub use top_bar::{
     check_top_bar_search_click_for_telemetry, check_top_bar_status_click,
     check_top_bar_status_click_for_options, check_top_bar_status_click_for_telemetry,
     check_top_bar_tray_click, check_top_bar_tray_click_for_options,
-    check_top_bar_tray_click_for_telemetry, check_top_bar_workspace_click,
-    check_top_bar_workspace_click_for_app, check_top_bar_workspace_click_for_profile,
-    check_top_bar_workspace_click_with_options, compute_top_bar_left_layout,
-    compute_top_bar_left_layout_for_profile, compute_top_bar_left_layout_with_options,
-    compute_top_bar_right_layout, compute_top_bar_right_layout_with_options, generate_osd_elements,
-    notification_toast_rects, osd_pill_rect, top_bar_menu_entries, top_bar_menu_items,
-    top_bar_menu_popover_rect, top_bar_menu_popover_rect_for_profile, tray_slot_rects,
-    tray_slot_rects_with_layout, tray_slot_rects_with_options,
+    check_top_bar_tray_click_for_telemetry, check_top_bar_updates_click_for_options,
+    check_top_bar_workspace_click, check_top_bar_workspace_click_for_app,
+    check_top_bar_workspace_click_for_profile, check_top_bar_workspace_click_with_options,
+    compute_top_bar_left_layout, compute_top_bar_left_layout_for_profile,
+    compute_top_bar_left_layout_with_options, compute_top_bar_right_layout,
+    compute_top_bar_right_layout_with_options, generate_osd_elements, notification_toast_rects,
+    osd_pill_rect, top_bar_menu_entries, top_bar_menu_items, top_bar_menu_popover_rect,
+    top_bar_menu_popover_rect_for_profile, tray_slot_rects, tray_slot_rects_with_layout,
+    tray_slot_rects_with_options,
 };
 pub use top_bar_menus::{
     AppShortcutAction, ResolvedTopBarMenuItem, TopBarAppProfile, classify_top_bar_app,
     resolve_top_bar_menu_entries,
+};
+pub use updates_popover::{
+    MAX_POPOVER_UPDATE_ITEMS, UpdatesPopoverHit, UpdatesPopoverLayout, UpdatesRenderState,
+    compute_updates_popover_layout, hit_test_updates_popover,
 };
 
 use context_menu::{render_context_menu_composite, render_context_menu_text};
@@ -159,6 +165,7 @@ use top_bar::{
     MENU_ITEM_HEIGHT, MENU_POPOVER_PAD_Y, MENU_SEPARATOR_HEIGHT, notification_app_icon,
     push_top_bar_right_glyphs, render_top_bar,
 };
+use updates_popover::{render_updates_composite, render_updates_text};
 
 /// Active modal/popover overlay rendered on top of the compositor shell.
 #[derive(Debug, Clone, Copy)]
@@ -185,6 +192,8 @@ pub enum ShellOverlayView<'a> {
     ContextMenu(&'a ContextMenuState),
     /// Graphical Downloads Stack popover (`RUSTYOS-073`).
     DockStack(&'a DockStackRenderState<'a>),
+    /// Software Updates popover anchored to `TopBar` (`RUSTYOS-076`).
+    Updates(&'a UpdatesRenderState<'a>),
 }
 
 /// Generates custom GLES render elements for `TopBar`, `Dock`, and active shell overlays.
@@ -229,7 +238,8 @@ pub fn generate_shell_render_elements(
         | ShellOverlayView::PickColor(_)
         | ShellOverlayView::Settings(_)
         | ShellOverlayView::ContextMenu(_)
-        | ShellOverlayView::DockStack(_) => {}
+        | ShellOverlayView::DockStack(_)
+        | ShellOverlayView::Updates(_) => {}
         ShellOverlayView::Spotlight(spot) => {
             render_spotlight_modal(&mut elements, width, height, spot, has_text);
         }
@@ -256,6 +266,7 @@ const fn notifications_hidden_by_overlay(overlay: ShellOverlayView<'_>) -> bool 
             | ShellOverlayView::Settings(_)
             | ShellOverlayView::ContextMenu(_)
             | ShellOverlayView::DockStack(_)
+            | ShellOverlayView::Updates(_)
     )
 }
 
@@ -270,6 +281,7 @@ const fn dock_tooltip_hidden_by_overlay(overlay: ShellOverlayView<'_>) -> bool {
             | ShellOverlayView::Settings(_)
             | ShellOverlayView::ContextMenu(_)
             | ShellOverlayView::DockStack(_)
+            | ShellOverlayView::Updates(_)
     )
 }
 
@@ -425,6 +437,9 @@ fn append_foreground_overlay_text(
         }
         ShellOverlayView::DockStack(ds) => {
             render_dock_stack_text(text_cache, renderer, screen_size, ds, elements);
+        }
+        ShellOverlayView::Updates(up) => {
+            render_updates_text(text_cache, renderer, screen_size, up, elements);
         }
     }
 
@@ -1264,6 +1279,9 @@ fn build_foreground_overlay_shapes(
                 ds,
             );
         }
+        ShellOverlayView::Updates(up) => {
+            render_updates_composite(&mut out, shape_cache, renderer, screen_size, up);
+        }
     }
 
     // 2b. Floating top-right Notification HUD toasts (`RUSTYOS-024`/`051`)
@@ -1534,6 +1552,22 @@ fn build_chrome_shapes(
             Rectangle::new(
                 Point::from((right_layout.control_center_x - 5, TOP_BAR_ITEM_Y)),
                 Size::from((right_layout.control_center_w + 10, TOP_BAR_ITEM_H)),
+            ),
+            6,
+            [255, 255, 255, 42],
+            None,
+        );
+    }
+    if top_telemetry.updates_open
+        && let Some(ux) = right_layout.updates_x
+    {
+        push_rounded_glass_box(
+            &mut out,
+            shape_cache,
+            renderer,
+            Rectangle::new(
+                Point::from((ux - 3, TOP_BAR_ITEM_Y)),
+                Size::from((right_layout.updates_w + 6, TOP_BAR_ITEM_H)),
             ),
             6,
             [255, 255, 255, 42],

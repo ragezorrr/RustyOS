@@ -1,0 +1,117 @@
+# Maintainer: RustyOS Contributors
+# Native Arch Linux / EndeavourOS package recipe (`RUSTYOS-076`, ADR-0036).
+# Usage:
+#   From local git checkout: cd packaging/arch && makepkg -si
+#   Rollback / remove cleanly: sudo pacman -Rns rustyos-git
+
+pkgname=rustyos-git
+pkgver=0.1.0.r0.g0000000
+pkgrel=1
+pkgdesc='Independent Linux desktop environment in Rust (Wayland compositor, dock, shell, and apps)'
+arch=('x86_64' 'aarch64')
+url='https://github.com/ragezorrr/RustyOS'
+license=('MIT' 'Apache-2.0')
+depends=(
+  'wayland'
+  'libxkbcommon'
+  'mesa'
+  'libglvnd'
+  'libinput'
+  'systemd-libs'
+  'seatd'
+  'xorg-xwayland'
+  'pipewire'
+  'xdg-desktop-portal'
+  'polkit'
+  'pacman-contrib'
+)
+makedepends=('rust' 'cargo' 'git' 'pkgconf')
+optdepends=(
+  'sddm: graphical Wayland session login chooser'
+  'greetd: minimal login manager alternative'
+)
+provides=('rustyos')
+conflicts=('rustyos')
+source=()
+sha256sums=()
+
+_repo_root() {
+  if [[ -d "${startdir}/../../.git" ]]; then
+    printf '%s\n' "$(cd "${startdir}/../.." && pwd)"
+  else
+    printf '%s\n' "${srcdir}"
+  fi
+}
+
+pkgver() {
+  local root
+  root="$(_repo_root)"
+  if [[ -d "${root}/.git" ]]; then
+    local rev
+    rev="$(git -C "${root}" rev-list --count HEAD 2>/dev/null || echo 0)"
+    local sha
+    sha="$(git -C "${root}" rev-parse --short HEAD 2>/dev/null || echo 0000000)"
+    printf '0.1.0.r%s.g%s\n' "${rev}" "${sha}"
+  else
+    printf '0.1.0\n'
+  fi
+}
+
+prepare() {
+  local root
+  root="$(_repo_root)"
+  export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
+  if [[ -f "${root}/Cargo.lock" ]]; then
+    cargo fetch --locked --manifest-path "${root}/Cargo.toml"
+  fi
+}
+
+build() {
+  local root
+  root="$(_repo_root)"
+  export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
+  export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${srcdir}/target}"
+  cargo build --release --locked --workspace --manifest-path "${root}/Cargo.toml"
+}
+
+check() {
+  local root
+  root="$(_repo_root)"
+  export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
+  export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${srcdir}/target}"
+  cargo test --workspace --locked --manifest-path "${root}/Cargo.toml" -- --test-threads=1
+}
+
+package() {
+  local root target_dir pw_worker
+  root="$(_repo_root)"
+  target_dir="${CARGO_TARGET_DIR:-${srcdir}/target}/release"
+
+  install -d \
+    "${pkgdir}/usr/bin" \
+    "${pkgdir}/usr/share/wayland-sessions" \
+    "${pkgdir}/usr/share/xdg-desktop-portal/portals" \
+    "${pkgdir}/usr/share/doc/${pkgname}"
+
+  install -m755 "${target_dir}/rusty-compositor" "${pkgdir}/usr/bin/rusty-compositor"
+  install -m755 "${target_dir}/rusty-shell" "${pkgdir}/usr/bin/rusty-shell"
+  install -m755 "${target_dir}/rusty-files" "${pkgdir}/usr/bin/rusty-files"
+  install -m755 "${root}/bin/rustyos-session" "${pkgdir}/usr/bin/rustyos-session"
+
+  pw_worker="$(ls -1t "${target_dir}"/build/rusty-services-*/out/rusty-pipewire-stream 2>/dev/null | head -n 1 || true)"
+  if [[ -n "${pw_worker}" && -x "${pw_worker}" ]]; then
+    install -m755 "${pw_worker}" "${pkgdir}/usr/bin/rusty-pipewire-stream"
+  fi
+
+  install -m644 "${root}/packaging/portals/rustyos.portal" \
+    "${pkgdir}/usr/share/xdg-desktop-portal/portals/rustyos.portal"
+  install -m644 "${root}/packaging/portals/rustyos-portals.conf" \
+    "${pkgdir}/usr/share/xdg-desktop-portal/rustyos-portals.conf"
+
+  sed 's|^Exec=.*|Exec=/usr/bin/rustyos-session|' \
+    "${root}/packaging/wayland-sessions/rustyos.desktop" \
+    > "${pkgdir}/usr/share/wayland-sessions/rustyos.desktop"
+  chmod 644 "${pkgdir}/usr/share/wayland-sessions/rustyos.desktop"
+
+  install -m644 "${root}/README.md" "${pkgdir}/usr/share/doc/${pkgname}/README.md"
+}

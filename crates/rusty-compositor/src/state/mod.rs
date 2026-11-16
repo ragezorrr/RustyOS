@@ -529,8 +529,22 @@ pub struct RustyCompositorState {
     pub menubar_show_input_source: bool,
     /// Show standalone speaker volume icon in Menu Bar (`RUSTYOS-049`).
     pub menubar_show_volume: bool,
+    /// Show Software Updates indicator in Menu Bar when updates are pending (`RUSTYOS-076`).
+    pub menubar_show_updates: bool,
     /// Display 24-hour clock format instead of 12-hour AM/PM (`RUSTYOS-049`).
     pub clock_24h: bool,
+    /// Enable automatic background Arch/RustyOS update checks (`RUSTYOS-076`).
+    pub updates_enabled: bool,
+    /// Non-blocking Arch/RustyOS update check worker handle (`RUSTYOS-076`).
+    pub updates_checker: rusty_services::UpdateCheckerHandle,
+    /// Latest update status snapshot received from [`Self::updates_checker`] (`RUSTYOS-076`).
+    pub updates_status: rusty_services::UpdateStatusSnapshot,
+    /// Whether the `TopBar` Software Updates Liquid Glass popover is open (`RUSTYOS-076`).
+    pub updates_popover_open: bool,
+    /// Currently hovered action button inside the open Software Updates popover (`RUSTYOS-076`).
+    pub updates_popover_hover: Option<crate::shell_render::UpdatesPopoverHit>,
+    /// Highest update count already announced with a HUD toast (`RUSTYOS-076`).
+    pub updates_notified_count: usize,
     /// Whether the Spotlight application launcher overlay is open (`RUSTYOS-018`).
     pub launcher_active: bool,
     /// Animated Spotlight transition progress (`0.0` closed -> `1.0` open) (`RUSTYOS-025`).
@@ -807,7 +821,9 @@ impl RustyCompositorState {
         let initial_menubar_show_tray = user_config.menubar_show_tray;
         let initial_menubar_show_input_source = user_config.menubar_show_input_source;
         let initial_menubar_show_volume = user_config.menubar_show_volume;
+        let initial_menubar_show_updates = user_config.updates_show_in_menu_bar;
         let initial_clock_24h = user_config.clock_24h;
+        let initial_updates_enabled = user_config.updates_enabled;
         let initial_last_custom_wallpaper = user_config.wallpaper.clone();
 
         let mut state = Self {
@@ -896,7 +912,14 @@ impl RustyCompositorState {
             menubar_show_tray: initial_menubar_show_tray,
             menubar_show_input_source: initial_menubar_show_input_source,
             menubar_show_volume: initial_menubar_show_volume,
+            menubar_show_updates: initial_menubar_show_updates,
             clock_24h: initial_clock_24h,
+            updates_enabled: initial_updates_enabled,
+            updates_checker: rusty_services::UpdateCheckerHandle::default(),
+            updates_status: rusty_services::UpdateStatusSnapshot::default(),
+            updates_popover_open: false,
+            updates_popover_hover: None,
+            updates_notified_count: 0,
             launcher_active: false,
             launcher_anim: AnimatedValue::new_settled(0.0),
             launcher: crate::launcher::LauncherState::new(),
@@ -1277,6 +1300,7 @@ impl RustyCompositorState {
             || self.launcher_active
             || self.overview_active
             || self.quick_settings_active
+            || self.updates_popover_open
             || self.settings_active
             || self.dock_stack.is_some()
             || self.context_menu.is_some()
@@ -1321,6 +1345,7 @@ impl RustyCompositorState {
         !self.is_session_locked()
             && !self.launcher_active
             && !self.quick_settings_active
+            && !self.updates_popover_open
             && self.window_switcher.is_none()
             && self.active_window_drag.is_none()
             && self.active_window_resize.is_none()
@@ -1853,6 +1878,7 @@ impl RustyCompositorState {
         if output_id == self.output_map.primary().id {
             let interactive_shell_open = self.launcher_active
                 || self.quick_settings_active
+                || self.updates_popover_open
                 || self.overview_active
                 || self.settings_active
                 || self
@@ -1892,6 +1918,7 @@ impl RustyCompositorState {
         if output_id == self.output_map.primary().id {
             let overlay_active = self.launcher_active
                 || self.quick_settings_active
+                || self.updates_popover_open
                 || self.overview_active
                 || self.settings_active
                 || self.window_switcher.is_some()

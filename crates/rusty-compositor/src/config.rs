@@ -586,6 +586,25 @@ pub struct UserConfig {
     pub dock_downloads_view: DownloadsViewMode,
     /// Sort order used in the Dock `Downloads` stack & context menu (`RUSTYOS-064` / `RUSTYOS-073`).
     pub downloads_sort: DownloadsSortMode,
+    /// Enable automatic background Arch/RustyOS update checks (`RUSTYOS-076`).
+    pub updates_enabled: bool,
+    /// Interval in minutes between automatic background update checks (`15..=10080`) (`RUSTYOS-076`).
+    pub updates_interval_minutes: u32,
+    /// Show the updates indicator in the `TopBar` Menu Bar when updates are available (`RUSTYOS-076`).
+    pub updates_show_in_menu_bar: bool,
+}
+
+/// Default interval between background update checks (`180` minutes / 3 hours) (`RUSTYOS-076`).
+pub const DEFAULT_UPDATES_INTERVAL_MINUTES: u32 = 180;
+/// Minimum allowed interval between background update checks (`15` minutes) (`RUSTYOS-076`).
+pub const MIN_UPDATES_INTERVAL_MINUTES: u32 = 15;
+/// Maximum allowed interval between background update checks (`7` days) (`RUSTYOS-076`).
+pub const MAX_UPDATES_INTERVAL_MINUTES: u32 = 10_080;
+
+/// Clamps `[updates] check_interval_minutes` to `15..=10080` (`RUSTYOS-076`).
+#[must_use]
+pub fn clamp_updates_interval_minutes(minutes: u32) -> u32 {
+    minutes.clamp(MIN_UPDATES_INTERVAL_MINUTES, MAX_UPDATES_INTERVAL_MINUTES)
 }
 
 impl Default for UserConfig {
@@ -629,6 +648,9 @@ impl Default for UserConfig {
             dock_downloads_display: DownloadsDisplayMode::Stack,
             dock_downloads_view: DownloadsViewMode::Automatic,
             downloads_sort: DownloadsSortMode::DateModified,
+            updates_enabled: true,
+            updates_interval_minutes: DEFAULT_UPDATES_INTERVAL_MINUTES,
+            updates_show_in_menu_bar: true,
         }
     }
 }
@@ -774,6 +796,7 @@ impl UserConfig {
             }
             ("security", _) => self.apply_security_kv(key, val),
             ("dock", _) => self.apply_dock_kv(key, val),
+            ("updates", _) => self.apply_updates_kv(key, val),
             _ => {
                 if let Some(raw_output) = section.strip_prefix("display.outputs.") {
                     self.apply_output_kv(strip_toml_quotes(raw_output), key, val);
@@ -927,6 +950,27 @@ impl UserConfig {
             "enable_polkit_agent" => {
                 if let Ok(b) = val.parse::<bool>() {
                     self.enable_polkit_agent = b;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn apply_updates_kv(&mut self, key: &str, val: &str) {
+        match key {
+            "enabled" => {
+                if let Ok(b) = val.parse::<bool>() {
+                    self.updates_enabled = b;
+                }
+            }
+            "check_interval_minutes" => {
+                if let Ok(mins) = val.parse::<u32>() {
+                    self.updates_interval_minutes = clamp_updates_interval_minutes(mins);
+                }
+            }
+            "show_in_menu_bar" => {
+                if let Ok(b) = val.parse::<bool>() {
+                    self.updates_show_in_menu_bar = b;
                 }
             }
             _ => {}
@@ -1112,6 +1156,7 @@ impl UserConfig {
 
         self.append_security_toml(&mut out);
         self.append_dock_toml(&mut out);
+        self.append_updates_toml(&mut out);
 
         let _ = writeln!(out, "\n[autostart]");
         let escaped_cmds: Vec<String> = self
@@ -1135,6 +1180,19 @@ impl UserConfig {
         );
         let _ = writeln!(out, "lock_on_sleep = {}", self.lock_on_sleep);
         let _ = writeln!(out, "enable_polkit_agent = {}", self.enable_polkit_agent);
+    }
+
+    fn append_updates_toml(&self, out: &mut String) {
+        use std::fmt::Write as _;
+
+        let _ = writeln!(out, "\n[updates]");
+        let _ = writeln!(out, "enabled = {}", self.updates_enabled);
+        let _ = writeln!(
+            out,
+            "check_interval_minutes = {}",
+            clamp_updates_interval_minutes(self.updates_interval_minutes)
+        );
+        let _ = writeln!(out, "show_in_menu_bar = {}", self.updates_show_in_menu_bar);
     }
 
     fn append_dock_toml(&self, out: &mut String) {
@@ -1766,6 +1824,9 @@ mod tests {
             dock_downloads_display: DownloadsDisplayMode::Folder,
             dock_downloads_view: DownloadsViewMode::Grid,
             downloads_sort: DownloadsSortMode::Kind,
+            updates_enabled: false,
+            updates_interval_minutes: 360,
+            updates_show_in_menu_bar: false,
             ..UserConfig::default()
         };
         cfg.output_scales.insert("eDP-1".to_owned(), 1.75);
@@ -1805,5 +1866,26 @@ mod tests {
         assert_eq!(keyboard_option_label(""), "Off");
         assert_eq!(keyboard_option_label("lv3:ralt_switch"), "Custom");
         assert!(default_user_wallpaper_path().is_none_or(|p| p.ends_with("rustyos/wallpaper.png")));
+    }
+
+    #[test]
+    fn parses_updates_section_and_clamps_interval() {
+        let defaults = UserConfig::default();
+        assert!(defaults.updates_enabled);
+        assert_eq!(
+            defaults.updates_interval_minutes,
+            DEFAULT_UPDATES_INTERVAL_MINUTES
+        );
+        assert!(defaults.updates_show_in_menu_bar);
+
+        let low = UserConfig::parse_toml(
+            "[updates]\nenabled = false\ncheck_interval_minutes = 2\nshow_in_menu_bar = false\n",
+        );
+        assert!(!low.updates_enabled);
+        assert_eq!(low.updates_interval_minutes, MIN_UPDATES_INTERVAL_MINUTES);
+        assert!(!low.updates_show_in_menu_bar);
+
+        let high = UserConfig::parse_toml("[updates]\ncheck_interval_minutes = 999999\n");
+        assert_eq!(high.updates_interval_minutes, MAX_UPDATES_INTERVAL_MINUTES);
     }
 }

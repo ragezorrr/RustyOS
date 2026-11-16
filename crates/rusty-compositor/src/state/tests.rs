@@ -398,6 +398,7 @@ fn keyboard_settings_wallpaper_reload_and_menubar_click_roundtrip() -> Result<()
         show_input_source: true,
         show_workspaces: compositor.menubar_show_workspaces,
         show_tray: compositor.menubar_show_tray,
+        show_updates: compositor.should_show_top_bar_updates(),
     };
     let right = compute_top_bar_right_layout_with_options(1280, clock_text, opts);
     let kbd_x = f64::from(right.kbd_x.ok_or("missing TopBar kbd rect")? + 10);
@@ -1107,5 +1108,96 @@ fn dock_pin_drag_reorder_remove_and_settings_config_work() -> Result<(), Box<dyn
         compositor.user_config.dock_downloads_display,
         DownloadsDisplayMode::Folder
     );
+    Ok(())
+}
+
+#[test]
+fn updates_popover_and_topbar_menu_workflow_persist_settings()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut display: Display<RustyCompositorState> = Display::new()?;
+    let mut event_loop: EventLoop<RustyCompositorState> = EventLoop::try_new()?;
+    let mut compositor = RustyCompositorState::new(
+        &display,
+        "wayland-rustyos-updates-test".to_owned(),
+        event_loop.get_signal(),
+        event_loop.handle(),
+        smithay::utils::Size::from((1280, 800)),
+    )?;
+    let _ = (&mut display, &mut event_loop);
+
+    let cfg_path = std::env::temp_dir().join(format!(
+        "rustyos-updates-state-test-{}.toml",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&cfg_path);
+    compositor.config_path = Some(cfg_path.clone());
+
+    assert!(compositor.menubar_show_updates);
+    assert!(compositor.updates_enabled);
+    assert!(!compositor.should_show_top_bar_updates());
+
+    compositor.updates_status = rusty_services::UpdateStatusSnapshot {
+        state: rusty_services::UpdateCheckState::Available,
+        total_count: 3,
+        arch_count: 2,
+        rustyos_available: true,
+        restart_recommended: true,
+        last_checked_label: "10:42".to_owned(),
+        error_hint: None,
+        items: vec![rusty_services::PackageUpdateItem {
+            name: "rustyos-git".to_owned(),
+            old_version: "0.1.0-1".to_owned(),
+            new_version: "0.1.1-1".to_owned(),
+            is_rustyos: true,
+            requires_restart: true,
+        }],
+    };
+    assert!(compositor.should_show_top_bar_updates());
+
+    let tel = compositor.telemetry.snapshot();
+    let clock_text = if compositor.clock_24h {
+        tel.clock_date_24h.as_str()
+    } else {
+        tel.clock_date_hhmm.as_str()
+    };
+    let right = crate::shell_render::compute_top_bar_right_layout_with_options(
+        1280,
+        clock_text,
+        crate::shell_render::TopBarLayoutOptions {
+            has_battery: tel.power.has_battery,
+            notification_count: compositor.notification_count,
+            show_volume: compositor.menubar_show_volume,
+            show_input_source: compositor.menubar_show_input_source,
+            show_workspaces: compositor.menubar_show_workspaces,
+            show_tray: compositor.menubar_show_tray,
+            show_updates: true,
+        },
+    );
+    let ux = right.updates_x.ok_or("missing updates_x")?;
+    let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+    compositor.pointer_location = (f64::from(ux + 10), 12.0).into();
+    assert!(compositor.handle_top_bar_pointer_click(1280, serial, 272));
+    assert!(compositor.updates_popover_open);
+
+    compositor.close_updates_popover();
+    assert!(!compositor.updates_popover_open);
+
+    compositor.dispatch_top_bar_menu_action(
+        crate::shell_render::TopBarMenuAction::CheckForUpdates,
+        serial,
+    );
+    assert!(compositor.updates_popover_open);
+
+    compositor.open_software_updater_action();
+    assert!(!compositor.updates_popover_open);
+
+    compositor.apply_settings_hit(crate::shell_render::SettingsHit::ToggleMenuUpdates);
+    compositor.apply_settings_hit(crate::shell_render::SettingsHit::ToggleUpdatesEnabled);
+    let saved = crate::config::UserConfig::load_from_path(&cfg_path);
+    assert!(!saved.updates_show_in_menu_bar);
+    assert!(!saved.updates_enabled);
+    assert!(!compositor.should_show_top_bar_updates());
+
+    let _ = std::fs::remove_file(&cfg_path);
     Ok(())
 }

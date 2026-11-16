@@ -28,6 +28,10 @@ impl RustyCompositorState {
         }
         self.portal = rusty_services::PortalHandle::start_background();
         self.sync_portal_snapshot();
+        self.updates_checker = rusty_services::UpdateCheckerHandle::start_background(
+            self.updates_enabled,
+            self.user_config.updates_interval_minutes,
+        );
     }
 
     /// Returns `true` and clears the pending shell redraw flag when async security events updated UI state.
@@ -112,17 +116,53 @@ impl RustyCompositorState {
         self.shell_redraw_needed = true;
     }
 
-    /// Non-blockingly drains PAM auth, `systemd-logind`, `PolicyKit`, and XDG Portal queues (`RUSTYOS-056`/`057`).
+    /// Non-blockingly drains PAM auth, `systemd-logind`, `PolicyKit`, XDG Portal, and Update queues (`RUSTYOS-056`/`057`/`076`).
     pub fn drain_system_integration_events(&mut self, serial: Serial) -> bool {
-        let a = self.drain_lock_auth_results(serial);
-        let l = self.drain_logind_events(serial);
-        let p = self.drain_polkit_events(serial);
-        let q = self.drain_portal_events(serial);
-        let changed = a || l || p || q;
+        let auth_changed = self.drain_lock_auth_results(serial);
+        let logind_changed = self.drain_logind_events(serial);
+        let polkit_changed = self.drain_polkit_events(serial);
+        let portal_changed = self.drain_portal_events(serial);
+        let updates_changed = self.drain_update_events();
+        let changed =
+            auth_changed || logind_changed || polkit_changed || portal_changed || updates_changed;
         if changed {
             self.shell_redraw_needed = true;
         }
         changed
+    }
+
+    fn drain_update_events(&mut self) -> bool {
+        if !self.updates_checker.take_dirty() {
+            return false;
+        }
+        let snapshot = self.updates_checker.snapshot();
+        let prev_total = self.updates_status.total_count;
+        let prev_state = self.updates_status.state;
+        let was_rustyos = self.updates_status.rustyos_available;
+        self.updates_status = snapshot.clone();
+        if snapshot.state == rusty_services::UpdateCheckState::Available
+            && snapshot.total_count > 0
+            && snapshot.total_count > self.updates_notified_count
+        {
+            self.updates_notified_count = snapshot.total_count;
+            let title = if snapshot.rustyos_available {
+                "RustyOS & System Updates Available".to_owned()
+            } else {
+                "Software Updates Available".to_owned()
+            };
+            let body = if snapshot.total_count == 1 {
+                "1 package update ready in Menu Bar".to_owned()
+            } else {
+                format!("{} package updates ready in Menu Bar", snapshot.total_count)
+            };
+            let _ = self.push_notification(rusty_ipc::Urgency::Low, title, body);
+        } else if snapshot.state == rusty_services::UpdateCheckState::UpToDate {
+            self.updates_notified_count = 0;
+        }
+        prev_total != snapshot.total_count
+            || prev_state != snapshot.state
+            || was_rustyos != snapshot.rustyos_available
+            || self.updates_popover_open
     }
 
     /// Synchronizes current outputs, visible windows, and lock status into [`rusty_services::PortalHandle`] (`RUSTYOS-057`).
@@ -776,6 +816,7 @@ impl RustyCompositorState {
         self.window_switcher = None;
         self.close_launcher();
         self.close_quick_settings();
+        self.close_updates_popover();
         self.close_top_bar_menu();
         self.close_overview();
         self.deactivate_focused_shortcut_inhibitor();
@@ -814,6 +855,7 @@ impl RustyCompositorState {
         };
         self.close_launcher();
         self.close_quick_settings();
+        self.close_updates_popover();
         self.close_overview();
         self.close_settings();
         self.close_top_bar_menu();
@@ -909,6 +951,7 @@ impl RustyCompositorState {
                     self.window_switcher = None;
                     self.close_launcher();
                     self.close_quick_settings();
+                    self.close_updates_popover();
                     self.close_overview();
                     self.close_settings();
                     self.close_top_bar_menu();

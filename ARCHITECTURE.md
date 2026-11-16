@@ -116,25 +116,26 @@ RustyOS/
 │   │   └── src/
 │   │       ├── frame_composer.rs  # Backend-независимая сборка render list кадра, Z-order overlay/chrome/layer-shell, HiDPI scale, readback
 │   │       ├── state/         # RustyCompositorState, wm_windows, shell_actions, context_menu_actions, system_bridges, wayland_handlers/
-│   │       ├── shell_render/  # tokens, top_bar, dock, context_menu, quick_settings, spotlight_overview, lock_screen, modals, ssd
+│   │       ├── shell_render/  # tokens, top_bar, dock, dock_stack, context_menu, quick_settings, updates_popover, spotlight_overview, lock_screen, modals, ssd
 │   │       ├── input/         # keyboard, pointer, shell_pointer, gestures
-│   │       └── surfaces/      # UiShapeCache, sdf, glyphs, xcursor
+│   │       └── surfaces/      # UiShapeCache, sdf, glyphs, xcursor, liquid_glass, window_shadow, window_minimize
 │   ├── rusty-wm/              # Детерминированная модель WM и workspace 1..9
 │   ├── rusty-animation/       # Refresh-rate independent animation engine
 │   ├── rusty-ipc/             # Версионируемый IPC-протокол compositor <-> shell
-│   └── rusty-services/        # Адаптеры NetworkManager, BlueZ, PipeWire, UPower, sysfs, logind, Polkit, Portal, file_manager, image_decode
-│       └── src/               # lib (ServiceRegistry), power, connectivity, media, display_session, auth, logind, polkit, portal, file_manager, image_decode
+│   └── rusty-services/        # Адаптеры NetworkManager, BlueZ, PipeWire, UPower, sysfs, logind, Polkit, Portal, file_manager, image_decode, updates
+│       └── src/               # lib (ServiceRegistry), power, connectivity, media, display_session, auth, logind, polkit, portal, file_manager, image_decode, updates
 ├── apps/
 │   ├── rusty-files/           # Самостоятельный Wayland-файловый менеджер (Golden Gate CSD, Этапы A и B)
 │   └── rusty-shell/           # Внешний процесс shell поверх Wayland layer-shell + IPC
 ├── bin/
 │   └── rustyos-session        # Лаунчер пользовательской сессии
 ├── packaging/
+│   ├── arch/PKGBUILD          # Arch Linux PKGBUILD (rustyos-git)
 │   └── wayland-sessions/      # rustyos.desktop
 ├── scripts/
 │   └── install.sh
 └── docs/
-    ├── adr/                   # ADR-0001 .. ADR-0031
+    ├── adr/                   # ADR-0001 .. ADR-0036
     ├── DEVELOPMENT_ENVIRONMENT.md
     ├── GETTING_STARTED.md
     └── HARDWARE_MATRIX.md

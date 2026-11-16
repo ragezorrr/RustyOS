@@ -39,6 +39,7 @@ impl RustyCompositorState {
             self.close_top_bar_menu();
             self.window_switcher = None;
             self.close_quick_settings();
+            self.close_updates_popover();
             self.close_overview();
             self.close_settings();
         }
@@ -61,6 +62,7 @@ impl RustyCompositorState {
             self.close_dock_stack();
             self.close_context_menu();
             self.close_top_bar_menu();
+            self.close_updates_popover();
             self.window_switcher = None;
             self.close_launcher();
             self.close_overview();
@@ -77,6 +79,129 @@ impl RustyCompositorState {
         self.retarget_quick_settings_anim();
     }
 
+    /// Returns whether the Software Updates indicator is currently shown in the Menu Bar (`RUSTYOS-076`).
+    #[must_use]
+    pub const fn should_show_top_bar_updates(&self) -> bool {
+        self.updates_popover_open
+            || (self.menubar_show_updates && self.updates_status.total_count > 0)
+    }
+
+    /// Toggles the `TopBar` Software Updates popover (`RUSTYOS-076`).
+    pub fn toggle_updates_popover(&mut self) {
+        if self.updates_popover_open {
+            self.close_updates_popover();
+        } else {
+            let trigger_refresh =
+                self.updates_status.state == rusty_services::UpdateCheckState::Idle;
+            self.open_updates_popover(trigger_refresh);
+        }
+    }
+
+    /// Opens the `TopBar` Software Updates popover and optionally starts a fresh check (`RUSTYOS-076`).
+    pub fn open_updates_popover(&mut self, trigger_refresh: bool) {
+        if self.is_session_locked() {
+            return;
+        }
+        self.updates_popover_open = true;
+        self.updates_popover_hover = None;
+        self.close_dock_stack();
+        self.close_context_menu();
+        self.close_top_bar_menu();
+        self.window_switcher = None;
+        self.close_quick_settings();
+        self.close_launcher();
+        self.close_overview();
+        self.close_settings();
+        if trigger_refresh {
+            self.trigger_updates_check();
+        }
+        self.shell_redraw_needed = true;
+    }
+
+    /// Closes the `TopBar` Software Updates popover (`RUSTYOS-076`).
+    pub fn close_updates_popover(&mut self) {
+        if self.updates_popover_open || self.updates_popover_hover.is_some() {
+            self.updates_popover_open = false;
+            self.updates_popover_hover = None;
+            self.shell_redraw_needed = true;
+        }
+    }
+
+    /// Requests an immediate asynchronous `checkupdates` refresh (`RUSTYOS-076`).
+    pub fn trigger_updates_check(&mut self) {
+        self.updates_status.state = rusty_services::UpdateCheckState::Checking;
+        self.updates_checker.trigger_check_now();
+        self.shell_redraw_needed = true;
+    }
+
+    /// Launches `rusty-updater` when installed, or shows a clean guidance notice until Stage B (`RUSTYOS-076`).
+    pub fn open_software_updater_action(&mut self) {
+        self.close_updates_popover();
+        if crate::launcher::resolve_program_path("rusty-updater").is_some() {
+            let ipc_path = rusty_ipc::default_ipc_socket_path(&self.socket_name);
+            if self
+                .launcher
+                .launch_program_with_args("rusty-updater", &[], &self.socket_name, &ipc_path)
+                .is_ok()
+            {
+                self.trigger_app_bounce("rusty-updater", false);
+                return;
+            }
+        }
+        let body = if self.updates_status.total_count > 0 {
+            format!(
+                "{} updates ready · run 'sudo pacman -Syu' or install rusty-updater (Stage B)",
+                self.updates_status.total_count
+            )
+        } else {
+            "rusty-updater UI arrives in Stage B (RUSTYOS-077); system is current".to_owned()
+        };
+        let _ = self.push_notification(
+            rusty_ipc::Urgency::Normal,
+            "Software Update".to_owned(),
+            body,
+        );
+        self.show_osd("Software Update", None, false);
+    }
+
+    /// Builds [`crate::shell_render::UpdatesRenderState`] anchored below `TopBar` (`RUSTYOS-076`).
+    #[must_use]
+    pub fn updates_render_state(
+        &self,
+        output_width: i32,
+    ) -> crate::shell_render::UpdatesRenderState<'_> {
+        let tel = self.telemetry.snapshot();
+        let clock_text = if self.clock_24h {
+            tel.clock_date_24h.as_str()
+        } else {
+            tel.clock_date_hhmm.as_str()
+        };
+        let right = crate::shell_render::compute_top_bar_right_layout_with_options(
+            output_width,
+            clock_text,
+            crate::shell_render::TopBarLayoutOptions {
+                has_battery: tel.power.has_battery,
+                notification_count: self.notification_count,
+                show_volume: self.menubar_show_volume,
+                show_input_source: self.menubar_show_input_source,
+                show_workspaces: self.menubar_show_workspaces,
+                show_tray: self.menubar_show_tray,
+                show_updates: self.should_show_top_bar_updates(),
+            },
+        );
+        let anchor_right_x = right
+            .updates_x
+            .map_or(output_width - 14, |ux| ux + right.updates_w);
+        crate::shell_render::UpdatesRenderState {
+            glass_opacity: self.glass_opacity,
+            reduce_transparency: self.reduce_transparency,
+            snapshot: &self.updates_status,
+            anchor_right_x,
+            hovered_hit: self.updates_popover_hover,
+            updater_installed: crate::launcher::resolve_program_path("rusty-updater").is_some(),
+        }
+    }
+
     /// Toggles a `TopBar` left menu dropdown popover (`RUSTYOS-048`, `RUSTYOS-068`).
     pub fn toggle_top_bar_menu(&mut self, menu: crate::shell_render::TopBarMenuHit) {
         if menu == crate::shell_render::TopBarMenuHit::Go
@@ -90,6 +215,7 @@ impl RustyCompositorState {
         } else {
             self.close_context_menu();
             self.close_quick_settings();
+            self.close_updates_popover();
             self.close_launcher();
             self.active_top_bar_menu = Some(menu);
             self.top_bar_menu_hover_row = None;
@@ -108,6 +234,7 @@ impl RustyCompositorState {
         self.set_dock_auto_hide_hovered(false);
         self.dock_drag = None;
         self.close_dock_stack();
+        self.updates_popover_hover = None;
         self.top_bar_menu_hover_row = None;
         self.qs_slider_drag = None;
         self.hovered_notification_idx = None;
@@ -172,6 +299,7 @@ impl RustyCompositorState {
             TopBarMenuAction::OpenOverview => self.toggle_overview(),
             TopBarMenuAction::OpenControlCenter => self.toggle_quick_settings(),
             TopBarMenuAction::OpenSettings => self.open_settings(),
+            TopBarMenuAction::CheckForUpdates => self.open_updates_popover(true),
             TopBarMenuAction::ReloadConfig => {
                 let _ = self.reload_user_config();
             }
@@ -339,6 +467,7 @@ impl RustyCompositorState {
             self.dnd_icon = None;
             self.close_launcher();
             self.close_quick_settings();
+            self.close_updates_popover();
             self.close_top_bar_menu();
             self.close_overview();
             self.active_window_drag = None;
@@ -724,6 +853,7 @@ impl RustyCompositorState {
             self.close_context_menu();
             self.close_launcher();
             self.close_quick_settings();
+            self.close_updates_popover();
             self.close_settings();
             self.active_window_drag = None;
             self.active_window_resize = None;
@@ -1321,6 +1451,7 @@ impl RustyCompositorState {
         self.close_context_menu();
         self.close_top_bar_menu();
         self.close_quick_settings();
+        self.close_updates_popover();
         self.close_settings();
         self.close_launcher();
         self.close_overview();
@@ -1535,6 +1666,7 @@ impl RustyCompositorState {
         self.close_context_menu();
         self.close_launcher();
         self.close_quick_settings();
+        self.close_updates_popover();
         self.close_overview();
         self.close_top_bar_menu();
         self.shell_redraw_needed = true;
@@ -1576,6 +1708,7 @@ impl RustyCompositorState {
             menubar_show_tray: self.menubar_show_tray,
             menubar_show_input_source: self.menubar_show_input_source,
             menubar_show_volume: self.menubar_show_volume,
+            menubar_show_updates: self.menubar_show_updates,
             clock_24h: self.clock_24h,
             target_connector: &target.name,
             target_output_index: target_idx,
@@ -1595,6 +1728,7 @@ impl RustyCompositorState {
             require_password_on_lock: self.user_config.require_password_on_lock,
             lock_on_sleep: self.user_config.lock_on_sleep,
             enable_polkit_agent: self.user_config.enable_polkit_agent,
+            updates_enabled: self.updates_enabled,
             dock_icon_size: self.user_config.dock_icon_size,
             dock_position: self.user_config.dock_position,
             dock_minimize_effect: self.user_config.dock_minimize_effect,
@@ -1617,7 +1751,13 @@ impl RustyCompositorState {
         self.user_config.menubar_show_tray = self.menubar_show_tray;
         self.user_config.menubar_show_input_source = self.menubar_show_input_source;
         self.user_config.menubar_show_volume = self.menubar_show_volume;
+        self.user_config.updates_show_in_menu_bar = self.menubar_show_updates;
+        self.user_config.updates_enabled = self.updates_enabled;
         self.user_config.clock_24h = self.clock_24h;
+        self.updates_checker.reconfigure(
+            self.updates_enabled,
+            self.user_config.updates_interval_minutes,
+        );
 
         if let Some(path) = self.config_path.as_deref() {
             match self.user_config.save_to_path(path) {
@@ -1652,6 +1792,8 @@ impl RustyCompositorState {
         let dock_layout_changed = cfg.dock_position != self.user_config.dock_position
             || cfg.dock_icon_size != self.user_config.dock_icon_size
             || cfg.dock_auto_hide != self.user_config.dock_auto_hide;
+        let updates_changed = cfg.updates_enabled != self.updates_enabled
+            || cfg.updates_interval_minutes != self.user_config.updates_interval_minutes;
 
         self.animations.set_reduced_motion(cfg.reduced_motion);
         self.glass_opacity = crate::config::clamp_glass_opacity(cfg.glass_opacity);
@@ -1660,6 +1802,8 @@ impl RustyCompositorState {
         self.menubar_show_tray = cfg.menubar_show_tray;
         self.menubar_show_input_source = cfg.menubar_show_input_source;
         self.menubar_show_volume = cfg.menubar_show_volume;
+        self.menubar_show_updates = cfg.updates_show_in_menu_bar;
+        self.updates_enabled = cfg.updates_enabled;
         self.clock_24h = cfg.clock_24h;
 
         let output_snapshots: Vec<_> = self
@@ -1721,6 +1865,12 @@ impl RustyCompositorState {
 
         self.user_config = cfg;
         crate::shell_render::set_active_appearance(self.user_config.appearance);
+        if updates_changed {
+            self.updates_checker.reconfigure(
+                self.updates_enabled,
+                self.user_config.updates_interval_minutes,
+            );
+        }
         if dock_layout_changed {
             self.close_dock_stack();
             self.sync_dock_auto_hide_target();
@@ -1791,6 +1941,10 @@ impl RustyCompositorState {
             }
             SettingsHit::ToggleMenuVolume => {
                 self.menubar_show_volume = !self.menubar_show_volume;
+                self.sync_and_save_user_config();
+            }
+            SettingsHit::ToggleMenuUpdates => {
+                self.menubar_show_updates = !self.menubar_show_updates;
                 self.sync_and_save_user_config();
             }
             SettingsHit::ToggleClock24h => {
@@ -1878,6 +2032,10 @@ impl RustyCompositorState {
             }
             SettingsHit::TogglePolkitAgent => {
                 self.user_config.enable_polkit_agent = !self.user_config.enable_polkit_agent;
+                self.sync_and_save_user_config();
+            }
+            SettingsHit::ToggleUpdatesEnabled => {
+                self.updates_enabled = !self.updates_enabled;
                 self.sync_and_save_user_config();
             }
             _ => {}

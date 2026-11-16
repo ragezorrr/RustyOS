@@ -46,6 +46,8 @@ pub struct TopBarLayoutOptions {
     pub show_workspaces: bool,
     /// Show `StatusNotifierItem` tray applets.
     pub show_tray: bool,
+    /// Show Software Updates indicator icon (`RUSTYOS-076`).
+    pub show_updates: bool,
 }
 
 /// Live hardware/session telemetry displayed inside `TopBar` (`RUSTYOS-021`, `RUSTYOS-048`, `RUSTYOS-049`).
@@ -72,6 +74,16 @@ pub struct TopBarTelemetry<'a> {
     pub audio_muted: bool,
     /// Whether the Quick Settings popover is currently open.
     pub quick_settings_open: bool,
+    /// Whether the Software Updates popover is currently open (`RUSTYOS-076`).
+    pub updates_open: bool,
+    /// Show Software Updates indicator in the Menu Bar right cluster (`RUSTYOS-076`).
+    pub show_updates: bool,
+    /// Number of pending Arch/RustyOS updates (`RUSTYOS-076`).
+    pub update_count: u32,
+    /// True while background `checkupdates` refresh is running (`RUSTYOS-076`).
+    pub update_checking: bool,
+    /// True when a `rustyos*` package update is pending (`RUSTYOS-076`).
+    pub rustyos_update_available: bool,
     /// Number of active/unread desktop notifications (`RUSTYOS-024`).
     pub notification_count: u32,
     /// Active keyboard layout badge code (`"EN"`, `"RU"`, etc.) (`RUSTYOS-029`).
@@ -111,6 +123,7 @@ impl TopBarTelemetry<'_> {
             show_input_source: self.show_input_source,
             show_workspaces: self.show_workspaces,
             show_tray: self.show_tray,
+            show_updates: self.show_updates,
         }
     }
 }
@@ -128,6 +141,11 @@ impl Default for TopBarTelemetry<'static> {
             volume_percent: 75,
             audio_muted: false,
             quick_settings_open: false,
+            updates_open: false,
+            show_updates: false,
+            update_count: 0,
+            update_checking: false,
+            rustyos_update_available: false,
             notification_count: 0,
             kbd_layout: "EN",
             tray_items: &[],
@@ -188,6 +206,8 @@ pub enum TopBarMenuAction {
     AboutRustyOs,
     /// Open built-in System Settings overlay (`Super+,`) (`RUSTYOS-061`).
     OpenSettings,
+    /// Open Software Updates popover and trigger an async check (`RUSTYOS-076`).
+    CheckForUpdates,
     /// Reload `~/.config/rustyos/config.toml` immediately (`Super+Shift+R`) (`RUSTYOS-061`).
     ReloadConfig,
     /// Show concise keyboard shortcuts reference card (`RUSTYOS-049`).
@@ -424,6 +444,8 @@ pub struct TopBarRightLayout {
     pub status_hit_w: i32,
     pub notif_x: i32,
     pub notif_w: i32,
+    pub updates_x: Option<i32>,
+    pub updates_w: i32,
     pub kbd_x: Option<i32>,
     pub kbd_w: i32,
     pub tray_anchor_x: i32,
@@ -506,6 +528,15 @@ pub fn compute_top_bar_right_layout_with_options(
         (left_cursor, 0)
     };
 
+    let updates_w = 22;
+    let updates_x = if opts.show_updates {
+        let ux = left_cursor - 8 - updates_w;
+        left_cursor = ux;
+        Some(ux)
+    } else {
+        None
+    };
+
     let kbd_w = 28;
     let kbd_x = if opts.show_input_source {
         let kx = left_cursor - 8 - kbd_w;
@@ -531,6 +562,8 @@ pub fn compute_top_bar_right_layout_with_options(
         status_hit_w,
         notif_x,
         notif_w,
+        updates_x,
+        updates_w,
         kbd_x,
         kbd_w,
         tray_anchor_x: left_cursor,
@@ -926,6 +959,12 @@ pub(super) const MENU_SYSTEM: &[TopBarMenuEntry] = &[
         action: TopBarMenuAction::OpenSettings,
     },
     TopBarMenuEntry::Item {
+        label: "Check for Updates...",
+        icon: crate::surfaces::UiGlyphKind::Updates { available: false },
+        shortcut: None,
+        action: TopBarMenuAction::CheckForUpdates,
+    },
+    TopBarMenuEntry::Item {
         label: "Reload Config",
         icon: crate::surfaces::UiGlyphKind::Refresh,
         shortcut: Some("Super+Shift+R"),
@@ -1206,6 +1245,7 @@ pub const fn top_bar_menu_items(
         TopBarMenuHit::SystemLogo => &[
             ("About RustyOS", TopBarMenuAction::AboutRustyOs),
             ("System Settings...", TopBarMenuAction::OpenSettings),
+            ("Check for Updates...", TopBarMenuAction::CheckForUpdates),
             ("Reload Config", TopBarMenuAction::ReloadConfig),
             ("Workspace Overview", TopBarMenuAction::OpenOverview),
             ("Control Center", TopBarMenuAction::OpenControlCenter),
@@ -1551,6 +1591,25 @@ pub fn check_top_bar_layout_click_for_profile(
     }
     let left = compute_top_bar_left_layout_for_profile(profile, active_app_name, show_workspaces);
     x >= f64::from(left.layout_x) && x < f64::from(left.layout_x + left.layout_w)
+}
+
+/// Option-aware hit-test for the right `TopBar` Software Updates indicator (`RUSTYOS-076`).
+#[must_use]
+pub fn check_top_bar_updates_click_for_options(
+    screen_width: i32,
+    clock_text: &str,
+    opts: TopBarLayoutOptions,
+    x: f64,
+    y: f64,
+) -> bool {
+    if !opts.show_updates || y < 0.0 || y > f64::from(TOP_BAR_HEIGHT) {
+        return false;
+    }
+    let right = compute_top_bar_right_layout_with_options(screen_width, clock_text, opts);
+    let Some(ux) = right.updates_x else {
+        return false;
+    };
+    x >= f64::from(ux - 3) && x < f64::from(ux + right.updates_w + 3)
 }
 
 /// Option-aware hit-test for the right `TopBar` Spotlight Search loupe (`RUSTYOS-049`).
@@ -2054,6 +2113,19 @@ pub(super) fn push_top_bar_right_glyphs(
 
     let white = [255, 255, 255, 255];
 
+    if let Some(ux) = right.updates_x
+        && let Some(el) = shape_cache.ui_glyph_element(
+            renderer,
+            UiGlyphKind::Updates {
+                available: t.update_count > 0 || t.rustyos_update_available,
+            },
+            18,
+            white,
+            Point::from((ux + 2, TOP_BAR_ITEM_Y + 1)),
+        )
+    {
+        out.push(CompositorRenderElement::Memory(el));
+    }
     if let Some(vx) = right.volume_x
         && let Some(el) = shape_cache.ui_glyph_element(
             renderer,

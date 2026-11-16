@@ -1026,6 +1026,12 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
             volume_percent: tel.audio.volume_percent,
             audio_muted: tel.audio.muted,
             quick_settings_open: state.quick_settings_active,
+            updates_open: state.updates_popover_open,
+            show_updates: state.should_show_top_bar_updates(),
+            update_count: u32::try_from(state.updates_status.total_count).unwrap_or(u32::MAX),
+            update_checking: state.updates_status.state
+                == rusty_services::UpdateCheckState::Checking,
+            rustyos_update_available: state.updates_status.rustyos_available,
             notification_count: state.notification_count,
             kbd_layout: &state.active_kbd_layout,
             tray_items: &tray_views,
@@ -1236,6 +1242,9 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
             .as_ref()
             .filter(|ctx| ctx.output_id == output_entry.id);
         let dock_stack_view = state.dock_stack_render_state();
+        let updates_view = state
+            .updates_popover_open
+            .then(|| state.updates_render_state(logical_size.w));
 
         let overlay = if let Some(pk) = polkit_view.as_ref() {
             ShellOverlayView::Polkit(pk)
@@ -1249,6 +1258,8 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
             ShellOverlayView::Settings(settings)
         } else if let Some(qs) = qs_view.as_ref() {
             ShellOverlayView::QuickSettings(qs)
+        } else if let Some(up) = updates_view.as_ref() {
+            ShellOverlayView::Updates(up)
         } else if let Some(ctx) = context_menu_view {
             ShellOverlayView::ContextMenu(ctx)
         } else if let Some(stack) = dock_stack_view.as_ref() {

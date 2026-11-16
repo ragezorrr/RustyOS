@@ -393,6 +393,25 @@
                           и System Settings ->    
                           Desktop & Dock          
                           (ADR-0035)              
+
+  D-044                   Фаза 10/Arch Packaging & accepted
+                          Updates (RUSTYOS-076    
+                          Этап A): Arch PKGBUILD  
+                          (`packaging/arch/PKGBUILD`),
+                          актуализированный       
+                          `scripts/install.sh` (с 
+                          `rusty-files` и         
+                          uninstall),             
+                          непривилегированный     
+                          `UpdateCheckerHandle`   
+                          (`checkupdates --nocolor`)
+                          в `rusty-services`,     
+                          секция `[updates]` в    
+                          `UserConfig`,           
+                          TopBar-индикатор и      
+                          `ShellOverlayView::Updates`
+                          Liquid Glass поповер    
+                          (ADR-0036)              
   -----------------------------------------------------------------------
 
 ## Открытые решения

@@ -786,11 +786,14 @@ fn macos27_top_bar_dynamic_left_right_and_menu_popover_hit_testing() {
             show_input_source: true,
             show_workspaces: true,
             show_tray: true,
+            show_updates: true,
         },
     );
     assert!(all_opts.volume_x.is_some());
     assert!(all_opts.kbd_x.is_some());
-    assert!(all_opts.kbd_x.unwrap_or(0) < all_opts.volume_x.unwrap_or(0));
+    assert!(all_opts.updates_x.is_some());
+    assert!(all_opts.kbd_x.unwrap_or(0) < all_opts.updates_x.unwrap_or(0));
+    assert!(all_opts.updates_x.unwrap_or(0) < all_opts.volume_x.unwrap_or(0));
     assert!(all_opts.volume_x.unwrap_or(0) < all_opts.battery_x.unwrap_or(0));
 
     assert!(check_top_bar_search_click_for_options(
@@ -1241,6 +1244,7 @@ fn sample_settings_render_state() -> SettingsRenderState<'static> {
         menubar_show_tray: false,
         menubar_show_input_source: false,
         menubar_show_volume: false,
+        menubar_show_updates: true,
         clock_24h: false,
         target_connector: "Winit-1",
         target_output_index: 0,
@@ -1260,6 +1264,7 @@ fn sample_settings_render_state() -> SettingsRenderState<'static> {
         require_password_on_lock: true,
         lock_on_sleep: true,
         enable_polkit_agent: true,
+        updates_enabled: true,
         dock_icon_size: crate::config::DEFAULT_DOCK_ICON_SIZE,
         dock_position: crate::config::DockPosition::default(),
         dock_minimize_effect: crate::config::DockMinimizeEffect::default(),
@@ -1914,5 +1919,100 @@ fn desktop_dock_settings_tab_hit_test_work() {
             f64::from(184 + 90 + 7 * 31 + 13)
         ),
         SettingsHit::DockToggleShowRecent
+    );
+}
+
+#[test]
+fn top_bar_updates_indicator_and_popover_hit_testing() {
+    let screen = Size::from((1280, 800));
+    let opts = TopBarLayoutOptions {
+        show_updates: true,
+        ..TopBarLayoutOptions::default()
+    };
+    let right = compute_top_bar_right_layout_with_options(1280, "Wed Apr 1  9:41 AM", opts);
+    let ux = right.updates_x.unwrap_or(0);
+    assert!(ux > 0);
+    assert!(check_top_bar_updates_click_for_options(
+        1280,
+        "Wed Apr 1  9:41 AM",
+        opts,
+        f64::from(ux + right.updates_w / 2),
+        12.0,
+    ));
+    assert!(!check_top_bar_status_click_for_options(
+        1280,
+        "Wed Apr 1  9:41 AM",
+        opts,
+        f64::from(ux + right.updates_w / 2),
+        12.0,
+    ));
+
+    let snapshot = rusty_services::UpdateStatusSnapshot {
+        state: rusty_services::UpdateCheckState::Available,
+        total_count: 2,
+        arch_count: 1,
+        rustyos_available: true,
+        restart_recommended: true,
+        last_checked_label: "11:30".to_owned(),
+        error_hint: None,
+        items: vec![
+            rusty_services::PackageUpdateItem {
+                name: "rustyos-git".to_owned(),
+                old_version: "0.1.0-1".to_owned(),
+                new_version: "0.1.1-1".to_owned(),
+                is_rustyos: true,
+                requires_restart: true,
+            },
+            rusty_services::PackageUpdateItem {
+                name: "mesa".to_owned(),
+                old_version: "25.0.1-1".to_owned(),
+                new_version: "25.0.2-1".to_owned(),
+                is_rustyos: false,
+                requires_restart: true,
+            },
+        ],
+    };
+    let state = UpdatesRenderState {
+        glass_opacity: crate::config::DEFAULT_GLASS_OPACITY,
+        reduce_transparency: false,
+        snapshot: &snapshot,
+        anchor_right_x: ux + right.updates_w,
+        hovered_hit: None,
+        updater_installed: false,
+    };
+    let layout = compute_updates_popover_layout(screen, &state);
+    assert_eq!(layout.item_rects.len(), 2);
+    assert!(layout.panel_rect.loc.x + layout.panel_rect.size.w <= screen.w - 12);
+
+    assert_eq!(
+        hit_test_updates_popover(
+            screen,
+            &state,
+            f64::from(layout.check_btn_rect.loc.x + 12),
+            f64::from(layout.check_btn_rect.loc.y + 10),
+        ),
+        UpdatesPopoverHit::CheckNow
+    );
+    assert_eq!(
+        hit_test_updates_popover(
+            screen,
+            &state,
+            f64::from(layout.refresh_btn_rect.loc.x + 8),
+            f64::from(layout.refresh_btn_rect.loc.y + 8),
+        ),
+        UpdatesPopoverHit::CheckNow
+    );
+    assert_eq!(
+        hit_test_updates_popover(
+            screen,
+            &state,
+            f64::from(layout.open_btn_rect.loc.x + 20),
+            f64::from(layout.open_btn_rect.loc.y + 10),
+        ),
+        UpdatesPopoverHit::OpenUpdater
+    );
+    assert_eq!(
+        hit_test_updates_popover(screen, &state, 20.0, 20.0),
+        UpdatesPopoverHit::OutsidePopover
     );
 }

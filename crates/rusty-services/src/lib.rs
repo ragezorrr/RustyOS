@@ -9,6 +9,7 @@ pub mod image_decode;
 pub mod logind;
 pub mod polkit;
 pub mod portal;
+pub mod updates;
 
 pub use auth::{
     AsyncAuthHandle, AuthCheckResult, AuthOutcome, SecretText, is_valid_unix_username,
@@ -54,6 +55,10 @@ pub use media::{
     parse_playerctl_status_line,
 };
 pub use power::{BatteryState, PowerService, PowerStatus};
+pub use updates::{
+    PackageUpdateItem, UpdateCheckState, UpdateCheckerHandle, UpdateStatusSnapshot,
+    is_rustyos_package, package_requires_restart, parse_checkupdates_output,
+};
 
 #[cfg(test)]
 use std::fs;

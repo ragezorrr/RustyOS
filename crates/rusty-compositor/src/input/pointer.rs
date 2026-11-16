@@ -414,6 +414,10 @@ impl RustyCompositorState {
                 self.handle_quick_settings_pointer_click(serial, button);
                 return;
             }
+            if self.updates_popover_open {
+                self.handle_updates_popover_pointer_click(button);
+                return;
+            }
 
             if self.dock_stack.is_some() && self.handle_dock_stack_pointer_press(button) {
                 return;

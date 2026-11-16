@@ -341,6 +341,32 @@ pub(super) fn sample_refresh_glyph_uv(u: f32, v: f32, edge: f32, tint: [f32; 4])
     premul_tint(tint, sd_cov(arc.min(head), edge))
 }
 
+pub(super) fn sample_updates_glyph_uv(
+    u: f32,
+    v: f32,
+    edge: f32,
+    tint: [f32; 4],
+    available: bool,
+) -> [f32; 4] {
+    let mut ring = sd_circle(u, v, 0.50, 0.50, 0.33).abs() - 0.045;
+    if available {
+        let halo = sd_circle(u, v, 0.78, 0.22, 0.155);
+        ring = ring.max(-halo);
+    }
+    let stem = sd_segment(u, v, 0.50, 0.29, 0.50, 0.63, 0.045);
+    let wing_l = sd_segment(u, v, 0.35, 0.50, 0.50, 0.65, 0.045);
+    let wing_r = sd_segment(u, v, 0.65, 0.50, 0.50, 0.65, 0.045);
+    let mut out = premul_tint(tint, sd_cov(ring.min(stem).min(wing_l).min(wing_r), edge));
+    if available {
+        let dot = sd_circle(u, v, 0.78, 0.22, 0.115);
+        let dot_cov = sd_cov(dot, edge);
+        if dot_cov > 0.0 {
+            out = blend_premul_over(out, [10.0, 132.0, 255.0], dot_cov);
+        }
+    }
+    out
+}
+
 pub(super) fn sample_lock_glyph_uv(u: f32, v: f32, edge: f32, tint: [f32; 4]) -> [f32; 4] {
     let shackle_arc = sd_arc_up(u, v, 0.50, 0.36, 0.15, core::f32::consts::FRAC_PI_2, 0.048);
     let shackle_l = sd_segment(u, v, 0.35, 0.36, 0.35, 0.48, 0.048);
@@ -607,6 +633,9 @@ pub(super) fn sample_ui_glyph_pixel_rect(
                 UiGlyphKind::Motion => sample_motion_glyph_uv(u, v, edge, tint),
                 UiGlyphKind::Transparency => sample_transparency_glyph_uv(u, v, edge, tint),
                 UiGlyphKind::Refresh => sample_refresh_glyph_uv(u, v, edge, tint),
+                UiGlyphKind::Updates { available } => {
+                    sample_updates_glyph_uv(u, v, edge, tint, available)
+                }
                 UiGlyphKind::Lock => sample_lock_glyph_uv(u, v, edge, tint),
                 UiGlyphKind::Shortcuts => sample_shortcuts_glyph_uv(u, v, edge, tint),
                 UiGlyphKind::WindowMax => sample_window_max_glyph_uv(u, v, edge, tint),

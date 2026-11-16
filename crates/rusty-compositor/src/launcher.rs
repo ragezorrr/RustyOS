@@ -610,7 +610,7 @@ fn command_exists_on_path(exec: &str) -> bool {
         .is_some_and(|program| resolve_program_path(&program).is_some())
 }
 
-fn resolve_program_path(program: &str) -> Option<PathBuf> {
+pub(crate) fn resolve_program_path(program: &str) -> Option<PathBuf> {
     let exe_dir = env::current_exe()
         .ok()
         .and_then(|exe| exe.parent().map(Path::to_path_buf));

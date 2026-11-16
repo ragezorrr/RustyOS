@@ -1006,6 +1006,8 @@ pub struct SettingsRenderState<'a> {
     pub menubar_show_input_source: bool,
     /// Show Menu Bar standalone volume glyph.
     pub menubar_show_volume: bool,
+    /// Show Menu Bar Software Updates indicator when updates are pending (`RUSTYOS-076`).
+    pub menubar_show_updates: bool,
     /// Use 24-hour Menu Bar clock format.
     pub clock_24h: bool,
     /// Active target display connector name (e.g. `"Winit-1"`, `"eDP-1"`, `"DP-1"`).
@@ -1044,6 +1046,8 @@ pub struct SettingsRenderState<'a> {
     pub lock_on_sleep: bool,
     /// Enable native `PolicyKit` authentication agent.
     pub enable_polkit_agent: bool,
+    /// Enable periodic background Arch/RustyOS update checks (`RUSTYOS-076`).
+    pub updates_enabled: bool,
     /// Dock icon base size in px (`36..=68`).
     pub dock_icon_size: i32,
     /// Dock edge placement (`Bottom`, `Left`, `Right`).
@@ -1089,6 +1093,8 @@ pub enum SettingsHit {
     ToggleMenuInputSource,
     /// Toggle `menubar_show_volume`.
     ToggleMenuVolume,
+    /// Toggle `updates_show_in_menu_bar` (`RUSTYOS-076`).
+    ToggleMenuUpdates,
     /// Toggle `clock_24h`.
     ToggleClock24h,
     /// Cycle which connected output is being configured in `Displays` (`RUSTYOS-063`).
@@ -1123,6 +1129,8 @@ pub enum SettingsHit {
     ToggleLockOnSleep,
     /// Toggle `enable_polkit_agent`.
     TogglePolkitAgent,
+    /// Toggle automatic background update checks (`[updates] enabled`) (`RUSTYOS-076`).
+    ToggleUpdatesEnabled,
     /// Decrease `[dock].icon_size`.
     DockSizeDown,
     /// Increase `[dock].icon_size`.
@@ -1191,6 +1199,13 @@ fn settings_modal_layout(
             .map(|idx| {
                 let ry = y + 90 + idx * 31;
                 Rectangle::new(Point::from((content_x, ry)), Size::from((content_w, 27)))
+            })
+            .collect()
+    } else if active_tab == SettingsTab::MenuBar {
+        (0_i32..6)
+            .map(|idx| {
+                let ry = y + 94 + idx * 45;
+                Rectangle::new(Point::from((content_x, ry)), Size::from((content_w, 38)))
             })
             .collect()
     } else {
@@ -1309,6 +1324,11 @@ fn settings_tab_rows(st: &SettingsRenderState<'_>) -> Vec<SettingsRowEntry> {
                 SettingsHit::ToggleMenuVolume,
                 st.menubar_show_volume,
             ),
+            toggle_row(
+                "Updates Indicator",
+                SettingsHit::ToggleMenuUpdates,
+                st.menubar_show_updates,
+            ),
             toggle_row("24-Hour Clock", SettingsHit::ToggleClock24h, st.clock_24h),
         ],
         SettingsTab::Displays => settings_display_rows(st),
@@ -1328,6 +1348,11 @@ fn settings_tab_rows(st: &SettingsRenderState<'_>) -> Vec<SettingsRowEntry> {
                 "Built-in Polkit Agent",
                 SettingsHit::TogglePolkitAgent,
                 st.enable_polkit_agent,
+            ),
+            toggle_row(
+                "Auto Update Checks",
+                SettingsHit::ToggleUpdatesEnabled,
+                st.updates_enabled,
             ),
         ],
         SettingsTab::DesktopDock => settings_dock_rows(st),
