@@ -1111,6 +1111,27 @@ hardware/software context и низкие накладные расходы.
   - Живые `--winit --max-frames 35` на `Wayland` и `X11` + визуальная сверка Light/Dark PNG (`qa-074-dark-cc-and-dock.png`, `qa-074-dark-dock-hover.png`, `qa-074-dark-spotlight.png`, `qa-074-light-cc-and-dock.png`, `qa-074-light-dock-hover.png`, `qa-074-light-spotlight.png`) без EGL/шейдерных ошибок.
 - **Risks:** На однотонно тёмных обоях в Dark-режиме соседние островки `Control Center` разделяются мягкой диффузной тенью и угловыми дугами без яркой обводки; визуальный контраст проверен на дефолтных обоях и в Spotlight.
 
+### RUSTYOS-075 — Бесшовная GLES SDF-тень окон и 9-slice текстурный fallback без ступенек и полос
+
+- **Status:** Done (`RUSTYOS-075 Вариант 1` — утверждённый объём выполнен)
+- **Goal:** Устранить видимые горизонтальные ступеньки (`+5/+12 px`), три неконцентрических угла и дискретные `Solid`-полосы под окнами, приведя тени активных и неактивных окон и шелл-оверлеев к единому непрерывному гауссову виду 1:1 с `macOS 27 Golden Gate`.
+- **Dependencies:** `RUSTYOS-074`, `ADR-0034`.
+- **Scope:**
+  - Новый безопасный модуль `crates/rusty-compositor/src/surfaces/window_shadow.rs` (`WindowShadowPipeline`, `WindowShadowSpec`, `WINDOW_SHADOW_FRAG`): единый аналитический GLES SDF-шейдер с непрерывной суммой contact + Y-сдвинутого ambient гауссова ореола (без обрыва под нижней гранью), `GL_FRAGMENT_PRECISION_HIGH`-совместимостью, экрано-пространственным 4×4 упорядоченным дизерингом и кэшированием стабильных `Id` по кадрам через `begin_shadow_frame` (`frame_composer.rs`).
+  - `surfaces/sdf.rs` и `surfaces/mod.rs`: единая кривая затухания `shadow_falloff_weight`, новый метод `shadow_edge_element` + `rasterize_shadow_edge_buffer` (растянутые попиксельные 1D `MemoryRenderBuffer`-полосы для 9-slice fallback без `band_count` `Solid`-ступенек), а также `window_shadow_render_element` и `soft_shadow_render_element`.
+  - `shell_render/ssd.rs` (`generate_window_shadow_elements`) и `shell_render/tokens.rs` (`push_soft_shadow`): переход с трёх сдвинутых вызовов `push_soft_shadow` (~78 элементов на окно) и дискретных `Solid`-полос на единый `WindowShadowPipeline` элемент (или один непрерывный текстурный 9-slice в CPU-fallback).
+  - Тесты (`window_shadow.rs`, `surfaces/tests.rs`) и обновление `DESIGN.md §12.3`.
+- **Acceptance Criteria:**
+  - Под нижним краем и нижними углами окон (`rusty-files` одиночное и перекрывающееся активное/неактивное) отсутствуют горизонтальные «слои», швы `+5/+12 px`, сдвинутые угловые дуги и полосы бандлинга;
+  - Все 8 `#define`-перестановок `WINDOW_SHADOW_FRAG` и 8 перестановок `LIQUID_GLASS_FRAG` проходят `glslangValidator`, пройдены тесты workspace, `--drm-probe` и живые `--winit` прогоны (`Wayland` + `X11`, `Light` & `Dark`).
+- **Tests:**
+  - `glslangValidator`: `16/16` (`WINDOW_SHADOW_FRAG` + `LIQUID_GLASS_FRAG` по 8 комбинациям `#define {NO_ALPHA, DEBUG_FLAGS, EXTERNAL}`)
+  - `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo build --workspace --bins`
+  - `cargo test --workspace -- --test-threads=1` (`220 passed; 0 failed`)
+  - `./target/debug/rusty-compositor --drm-probe`
+  - Живые `--winit --max-frames 35` (`Wayland` и `X11`) + Light/Dark `rusty-files` скриншоты (`qa-075-dark-window-shadow.png`, `qa-075-dark-overlap-shadow.png`, `qa-075-light-window-shadow.png`, `qa-075-light-overlap-shadow.png`) без EGL/шейдерных ошибок.
+- **Risks:** В безголовом окружении без GLES кастомных шейдеров активируется единый 9-slice fallback через `UiShapeCache` (без сдвига `y+5/+12`, полосатость отсутствует за счёт непрерывного 1 px текстурного градиента).
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

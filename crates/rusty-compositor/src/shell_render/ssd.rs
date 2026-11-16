@@ -455,7 +455,7 @@ pub fn generate_window_ssd_composite_elements_with_hover(
     out
 }
 
-/// Generates layered macOS ambient + contact drop shadows strictly outside a window frame (`RUSTYOS-022`/`051`).
+/// Generates a seamless Golden Gate drop shadow behind a window frame (`RUSTYOS-075`).
 pub fn generate_window_shadow_elements(
     shape_cache: &mut crate::surfaces::UiShapeCache,
     renderer: &mut GlesRenderer,
@@ -465,53 +465,23 @@ pub fn generate_window_shadow_elements(
     let mut out = Vec::new();
     let w = rect.width.max(64);
     let h = rect.height.max(TITLEBAR_HEIGHT + 32);
-    if is_focused {
-        push_soft_shadow(
-            &mut out,
-            shape_cache,
-            renderer,
-            Rectangle::new(Point::from((rect.x, rect.y + 1)), Size::from((w, h))),
-            WINDOW_RADIUS,
-            6,
-            26,
-        );
-        push_soft_shadow(
-            &mut out,
-            shape_cache,
-            renderer,
-            Rectangle::new(Point::from((rect.x, rect.y + 5)), Size::from((w, h))),
-            WINDOW_RADIUS,
-            18,
-            34,
-        );
-        push_soft_shadow(
-            &mut out,
-            shape_cache,
-            renderer,
-            Rectangle::new(Point::from((rect.x, rect.y + 12)), Size::from((w, h))),
-            WINDOW_RADIUS,
-            40,
-            46,
-        );
-    } else {
-        push_soft_shadow(
-            &mut out,
-            shape_cache,
-            renderer,
-            Rectangle::new(Point::from((rect.x, rect.y + 2)), Size::from((w, h))),
-            WINDOW_RADIUS,
-            10,
-            20,
-        );
-        push_soft_shadow(
-            &mut out,
-            shape_cache,
-            renderer,
-            Rectangle::new(Point::from((rect.x, rect.y + 6)), Size::from((w, h))),
-            WINDOW_RADIUS,
-            24,
-            22,
-        );
+    let win_logical = Rectangle::new(Point::from((rect.x, rect.y)), Size::from((w, h)));
+    if let Some(el) =
+        shape_cache.window_shadow_render_element(renderer, win_logical, WINDOW_RADIUS, is_focused)
+    {
+        out.push(el);
+        return out;
     }
+
+    let (spread, max_alpha, drop) = if is_focused { (36, 62, 4) } else { (22, 34, 2) };
+    push_soft_shadow(
+        &mut out,
+        shape_cache,
+        renderer,
+        Rectangle::new(Point::from((rect.x, rect.y + drop)), Size::from((w, h))),
+        WINDOW_RADIUS,
+        spread,
+        max_alpha,
+    );
     out
 }

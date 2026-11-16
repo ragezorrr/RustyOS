@@ -770,6 +770,7 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
         .unwrap_or_else(|| state.output_map.primary().clone());
     crate::shell_render::set_active_appearance(state.user_config.appearance);
     crate::shell_render::begin_solid_element_frame(output_entry.id.0);
+    shape_cache.begin_shadow_frame(output_entry.id.0);
     shape_cache.clear_active_liquid_glass_backdrop();
     let output_loc = output_entry.location;
     let output_geo = output_entry.logical_geometry();

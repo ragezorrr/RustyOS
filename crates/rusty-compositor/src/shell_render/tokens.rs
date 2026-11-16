@@ -543,18 +543,31 @@ pub(super) fn push_soft_shadow(
     spread: i32,
     max_alpha: u8,
 ) {
-    use crate::surfaces::CornerQuadrant;
+    use crate::surfaces::{CornerQuadrant, ShadowEdgeSide};
 
     let x = rect.loc.x;
     let y = rect.loc.y;
     let w = rect.size.w;
     let h = rect.size.h;
     let r = inner_radius.min(w / 2).min(h / 2).max(0);
-    if spread <= 0 {
+    if spread <= 0 || w <= 0 || h <= 0 {
         return;
     }
 
     let shadow_rgb = [6, 8, 14];
+    let logical_rect = Rectangle::new(Point::from((x, y)), Size::from((w, h)));
+    if let Some(el) = shape_cache.soft_shadow_render_element(
+        renderer,
+        logical_rect,
+        r,
+        spread,
+        shadow_rgb,
+        max_alpha,
+    ) {
+        out.push(el);
+        return;
+    }
+
     let corner_locs = [
         (
             CornerQuadrant::TopLeft,
@@ -581,47 +594,35 @@ pub(super) fn push_soft_shadow(
         }
     }
 
-    // Stepped non-overlapping perimeter gradient bands matching quadratic SDF falloff
-    let band_count = (spread / 2).clamp(5, 18);
-    let max_a = f32::from(max_alpha) / 255.0;
-    for band in 0..band_count {
-        let d0 = (band * spread) / band_count;
-        let d1 = ((band + 1) * spread) / band_count;
-        let thick = d1 - d0;
-        if thick <= 0 {
-            continue;
-        }
-        let d_mid = (d0 + d1) as f32 * 0.5;
-        let t = (d_mid / spread as f32).clamp(0.0, 1.0);
-        let inv_t = 1.0 - t;
-        let alpha = max_a * inv_t * inv_t * inv_t;
-        let col = premul(6.0 / 255.0, 8.0 / 255.0, 14.0 / 255.0, alpha);
-
-        if w > 2 * r {
-            out.push(CompositorRenderElement::Solid(make_solid_element(
-                Rectangle::new(Point::from((x + r, y - d1)), Size::from((w - 2 * r, thick))),
-                col,
-            )));
-            out.push(CompositorRenderElement::Solid(make_solid_element(
-                Rectangle::new(
-                    Point::from((x + r, y + h + d0)),
-                    Size::from((w - 2 * r, thick)),
-                ),
-                col,
-            )));
-        }
-        if h > 2 * r {
-            out.push(CompositorRenderElement::Solid(make_solid_element(
-                Rectangle::new(Point::from((x - d1, y + r)), Size::from((thick, h - 2 * r))),
-                col,
-            )));
-            out.push(CompositorRenderElement::Solid(make_solid_element(
-                Rectangle::new(
-                    Point::from((x + w + d0, y + r)),
-                    Size::from((thick, h - 2 * r)),
-                ),
-                col,
-            )));
+    let edge_strips = [
+        (
+            ShadowEdgeSide::Top,
+            Rectangle::new(
+                Point::from((x + r, y - spread)),
+                Size::from((w - 2 * r, spread)),
+            ),
+        ),
+        (
+            ShadowEdgeSide::Bottom,
+            Rectangle::new(Point::from((x + r, y + h)), Size::from((w - 2 * r, spread))),
+        ),
+        (
+            ShadowEdgeSide::Left,
+            Rectangle::new(
+                Point::from((x - spread, y + r)),
+                Size::from((spread, h - 2 * r)),
+            ),
+        ),
+        (
+            ShadowEdgeSide::Right,
+            Rectangle::new(Point::from((x + w, y + r)), Size::from((spread, h - 2 * r))),
+        ),
+    ];
+    for (side, dst) in edge_strips {
+        if let Some(el) =
+            shape_cache.shadow_edge_element(renderer, spread, side, shadow_rgb, max_alpha, dst)
+        {
+            out.push(CompositorRenderElement::Memory(el));
         }
     }
 }

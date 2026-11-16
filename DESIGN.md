@@ -427,7 +427,10 @@ palettes (section 5.1); geometry, Liquid Glass clarity, and interactions target 
 ### 12.3 Windows, Finder (`rusty-files`), menus, Spotlight, Notifications, and OSD
 
 - Window chrome (`SSD`): `WINDOW_RADIUS = 20` rounded corners at both top (`TITLEBAR_HEIGHT`) and
-  bottom, top 1 px specular rim, and deep soft multi-layer shadows (`generate_window_shadow_elements`).
+  bottom, top 1 px specular rim, and a single-pass seamless analytical GLES SDF Gaussian drop shadow
+  (`WindowShadowPipeline`: continuous contact + Y-shifted ambient glow with 4x4 ordered dithering
+  replacing multi-offset strips and discrete `Solid` bands; CPU 9-slice fallback via continuous
+  corner + stretched edge buffers in `UiShapeCache`) (`generate_window_shadow_elements`, `RUSTYOS-075`).
   Standard system windows (e.g., `System Settings`) should behave as movable desktop windows without a
   full-screen modal scrim that darkens `TopBar` and `Dock`.
 - Titlebar traffic lights: `12 px` gel-lit buttons (`TrafficLightKind::{Close, Minimize, Maximize}`)

@@ -211,6 +211,20 @@ pub(super) fn rasterize_corner_buffer(
     mem_buf
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ShadowEdgeSide {
+    Top,
+    Bottom,
+    Left,
+    Right,
+}
+
+fn shadow_falloff_weight(dist_outside: f32, spread: f32) -> f32 {
+    let t = (dist_outside / spread.max(1.0)).clamp(0.0, 1.0);
+    let smooth_end = smoothstep01(1.0, 0.72, t);
+    (-(t * t) * 4.0).exp() * smooth_end
+}
+
 #[allow(
     clippy::cast_precision_loss,
     clippy::cast_possible_truncation,
@@ -241,16 +255,77 @@ pub(super) fn sample_shadow_corner_pixel(
     if dist < r_f {
         return [0, 0, 0, 0];
     }
-    let t = ((dist - r_f) / s_f).clamp(0.0, 1.0);
-    let inv_t = 1.0 - t;
-    let falloff = inv_t * inv_t * inv_t;
-    let alpha = (f32::from(max_alpha) / 255.0) * falloff;
+    let alpha = (f32::from(max_alpha) / 255.0) * shadow_falloff_weight(dist - r_f, s_f);
     premul_pixel(
         f32::from(shadow_rgb[0]),
         f32::from(shadow_rgb[1]),
         f32::from(shadow_rgb[2]),
         alpha,
     )
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::cast_possible_truncation
+)]
+pub(super) fn sample_shadow_edge_alpha(
+    step: i32,
+    spread: i32,
+    side: ShadowEdgeSide,
+    max_alpha: u8,
+) -> u8 {
+    let s = spread.max(1);
+    let dist_out = match side {
+        ShadowEdgeSide::Top | ShadowEdgeSide::Left => (s - 1 - step) as f32 + 0.5,
+        ShadowEdgeSide::Bottom | ShadowEdgeSide::Right => step as f32 + 0.5,
+    };
+    ((f32::from(max_alpha) * shadow_falloff_weight(dist_out, s as f32)).round()).clamp(0.0, 255.0)
+        as u8
+}
+
+#[allow(clippy::cast_precision_loss)]
+pub(super) fn rasterize_shadow_edge_buffer(
+    spread: i32,
+    side: ShadowEdgeSide,
+    shadow_rgb: [u8; 3],
+    max_alpha: u8,
+) -> MemoryRenderBuffer {
+    let s = spread.max(1);
+    let (w, h) = match side {
+        ShadowEdgeSide::Top | ShadowEdgeSide::Bottom => (1, s),
+        ShadowEdgeSide::Left | ShadowEdgeSide::Right => (s, 1),
+    };
+    let mut mem_buf = MemoryRenderBuffer::new(Fourcc::Argb8888, (w, h), 1, Transform::Normal, None);
+    {
+        let mut ctx = mem_buf.render();
+        let _ = ctx.draw(|pixels| {
+            let max_a = f32::from(max_alpha) / 255.0;
+            let s_f = s as f32;
+            for step in 0..s {
+                let dist_out = match side {
+                    ShadowEdgeSide::Top | ShadowEdgeSide::Left => (s - 1 - step) as f32 + 0.5,
+                    ShadowEdgeSide::Bottom | ShadowEdgeSide::Right => step as f32 + 0.5,
+                };
+                let alpha = max_a * shadow_falloff_weight(dist_out, s_f);
+                let px_bytes = premul_pixel(
+                    f32::from(shadow_rgb[0]),
+                    f32::from(shadow_rgb[1]),
+                    f32::from(shadow_rgb[2]),
+                    alpha,
+                );
+                let idx = usize::try_from(step).unwrap_or(0) * 4;
+                if idx + 4 <= pixels.len() {
+                    pixels[idx..idx + 4].copy_from_slice(&px_bytes);
+                }
+            }
+            Ok::<_, std::convert::Infallible>(vec![smithay::utils::Rectangle::from_size(
+                Size::from((w, h)),
+            )])
+        });
+    }
+    mem_buf
 }
 
 pub(super) fn rasterize_shadow_corner_buffer(
@@ -295,7 +370,11 @@ pub(super) fn rasterize_shadow_corner_buffer(
 }
 
 #[cfg(test)]
-#[allow(clippy::cast_precision_loss, clippy::cast_sign_loss)]
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss,
+    clippy::cast_possible_truncation
+)]
 pub(super) fn sample_wallpaper_pixel(px: i32, py: i32, width: i32, height: i32) -> [u8; 4] {
     sample_wallpaper_pixel_themed(
         px,

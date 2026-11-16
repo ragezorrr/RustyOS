@@ -19,16 +19,19 @@ mod sdf;
 #[cfg(test)]
 mod tests;
 mod window_minimize;
+mod window_shadow;
 mod xcursor;
 
 pub use liquid_glass::LiquidGlassElement;
+pub use sdf::ShadowEdgeSide;
 
 use glyphs::rasterize_ui_glyph_buffer_rect;
 pub(crate) use sdf::signed_distance_polygon;
 use sdf::{
     rasterize_circle_buffer, rasterize_corner_buffer, rasterize_rgba_rect,
-    rasterize_shadow_corner_buffer, rasterize_wallpaper_buffer, sample_dock_icon_shadow_pixel,
-    sample_fallback_avatar_pixel, sample_glass_panel_pixel_themed, sample_traffic_light_pixel,
+    rasterize_shadow_corner_buffer, rasterize_shadow_edge_buffer, rasterize_wallpaper_buffer,
+    sample_dock_icon_shadow_pixel, sample_fallback_avatar_pixel, sample_glass_panel_pixel_themed,
+    sample_traffic_light_pixel,
 };
 use xcursor::{load_xcursor_for_icon, rasterize_cursor_arrow_buffer};
 pub(crate) use xcursor::{
@@ -68,6 +71,14 @@ struct ShadowCornerKey {
     inner_radius: u16,
     spread: u16,
     quadrant: CornerQuadrant,
+    shadow_rgb: [u8; 3],
+    max_alpha: u8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct ShadowEdgeKey {
+    spread: u16,
+    side: ShadowEdgeSide,
     shadow_rgb: [u8; 3],
     max_alpha: u8,
 }
@@ -229,6 +240,7 @@ pub struct UiShapeCache {
     circles: HashMap<CircleKey, (MemoryRenderBuffer, Size<i32, Logical>)>,
     corners: HashMap<CornerKey, (MemoryRenderBuffer, Size<i32, Logical>)>,
     shadow_corners: HashMap<ShadowCornerKey, (MemoryRenderBuffer, Size<i32, Logical>)>,
+    shadow_edges: HashMap<ShadowEdgeKey, MemoryRenderBuffer>,
     glyphs: HashMap<GlyphKey, MemoryRenderBuffer>,
     glass_panels: HashMap<GlassPanelKey, MemoryRenderBuffer>,
     traffic_lights: HashMap<TrafficLightKey, MemoryRenderBuffer>,
@@ -239,6 +251,7 @@ pub struct UiShapeCache {
     xcursors: HashMap<(Option<String>, &'static str, u32), Option<CachedCursor>>,
     liquid_glass: liquid_glass::LiquidGlassPipeline,
     window_minimize: window_minimize::WindowMinimizePipeline,
+    window_shadow: window_shadow::WindowShadowPipeline,
     /// Decoded & GPU-cached application and tray icon textures (`RUSTYOS-033`).
     pub icons: crate::icons::IconCache,
 }
@@ -368,6 +381,84 @@ impl UiShapeCache {
             Kind::Unspecified,
         )
         .ok()
+    }
+
+    /// Returns a stretched continuous `1 x spread` / `spread x 1` edge strip for CPU 9-slice shadows (`RUSTYOS-075`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn shadow_edge_element(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        spread: i32,
+        side: ShadowEdgeSide,
+        shadow_rgb: [u8; 3],
+        max_alpha: u8,
+        dst_rect: Rectangle<i32, Logical>,
+    ) -> Option<MemoryRenderBufferRenderElement<GlesRenderer>> {
+        if spread <= 0 || dst_rect.size.w <= 0 || dst_rect.size.h <= 0 {
+            return None;
+        }
+        let s_u16 = u16::try_from(spread).ok()?;
+        let key = ShadowEdgeKey {
+            spread: s_u16,
+            side,
+            shadow_rgb,
+            max_alpha,
+        };
+        let buf = self
+            .shadow_edges
+            .entry(key)
+            .or_insert_with(|| rasterize_shadow_edge_buffer(spread, side, shadow_rgb, max_alpha));
+        let src_size = match side {
+            ShadowEdgeSide::Top | ShadowEdgeSide::Bottom => Size::from((1.0, f64::from(spread))),
+            ShadowEdgeSide::Left | ShadowEdgeSide::Right => Size::from((f64::from(spread), 1.0)),
+        };
+        MemoryRenderBufferRenderElement::from_buffer(
+            renderer,
+            dst_rect.loc.to_f64().to_physical(1.0),
+            buf,
+            None,
+            Some(Rectangle::from_size(src_size)),
+            Some(dst_rect.size),
+            Kind::Unspecified,
+        )
+        .ok()
+    }
+
+    /// Advances the shadow slot generation at the start of each output frame (`RUSTYOS-075`).
+    pub(crate) fn begin_shadow_frame(&mut self, output_id: u32) {
+        self.window_shadow.begin_frame(output_id);
+    }
+
+    /// Builds a hardware-accelerated seamless Golden Gate drop shadow element for a mapped window (`RUSTYOS-075`).
+    pub(crate) fn window_shadow_render_element(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        win_rect: Rectangle<i32, Logical>,
+        radius: i32,
+        is_focused: bool,
+    ) -> Option<crate::shell_render::CompositorRenderElement> {
+        let spec = window_shadow::WindowShadowSpec::for_window(win_rect, radius, is_focused);
+        self.window_shadow
+            .make_shadow_element(renderer, spec)
+            .map(crate::shell_render::CompositorRenderElement::ShaderTexture)
+    }
+
+    /// Builds a hardware-accelerated seamless drop shadow element for shell panels and popovers (`RUSTYOS-075`).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn soft_shadow_render_element(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        rect: Rectangle<i32, Logical>,
+        radius: i32,
+        spread: i32,
+        shadow_rgb: [u8; 3],
+        max_alpha: u8,
+    ) -> Option<crate::shell_render::CompositorRenderElement> {
+        let spec =
+            window_shadow::WindowShadowSpec::for_panel(rect, radius, spread, shadow_rgb, max_alpha);
+        self.window_shadow
+            .make_shadow_element(renderer, spec)
+            .map(crate::shell_render::CompositorRenderElement::ShaderTexture)
     }
 
     /// Prepares offscreen Dual-Kawase backdrop blur for Liquid Glass panels on `output_id` (`RUSTYOS-069`).

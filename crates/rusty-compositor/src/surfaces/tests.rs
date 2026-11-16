@@ -38,6 +38,12 @@ fn circle_and_corner_sdf_preserve_clean_edges_and_opaque_interior() {
         sample_shadow_corner_pixel(12, 12, 10, 14, CornerQuadrant::TopLeft, [5, 2, 12], 96);
     assert_eq!(inside_glass[3], 0);
     assert!(outside_halo[3] > 0 && outside_halo[3] <= 96);
+    let top_inner = sample_shadow_edge_alpha(13, 14, ShadowEdgeSide::Top, 96);
+    let top_outer = sample_shadow_edge_alpha(0, 14, ShadowEdgeSide::Top, 96);
+    let bot_inner = sample_shadow_edge_alpha(0, 14, ShadowEdgeSide::Bottom, 96);
+    let bot_outer = sample_shadow_edge_alpha(13, 14, ShadowEdgeSide::Bottom, 96);
+    assert_eq!(top_inner, bot_inner);
+    assert!(top_inner > 60 && top_outer <= 2 && bot_outer <= 2);
 
     // Ambient Golden Gate silk wallpaper gradient is opaque and modulated smoothly
     let glow_px = sample_wallpaper_pixel(62, 110, 256, 160);
