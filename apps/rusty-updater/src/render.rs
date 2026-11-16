@@ -618,7 +618,17 @@ fn hero_subtitle(app: &UpdaterAppState) -> String {
         parts.push(format!("Kernel {}", app.summary.kernel_release));
     }
     if let Some(ver) = &app.summary.rustyos_installed_version {
-        parts.push(format!("RustyOS {ver}"));
+        if let Some(candidate) = app
+            .snapshot
+            .items
+            .iter()
+            .find(|it| it.is_rustyos)
+            .map(|it| &it.new_version)
+        {
+            parts.push(format!("RustyOS {ver} -> {candidate}"));
+        } else {
+            parts.push(format!("RustyOS {ver}"));
+        }
     }
     if app.dry_run {
         parts.push("Dry-run".to_owned());
@@ -845,7 +855,9 @@ fn render_list_and_footer(
 
     draw_overlay_scrollbar(canvas, app, layout, pal);
 
-    let footer_text = if !app.dry_run && app.summary.helper_path.is_none() {
+    let footer_text = if app.tx_restart_recommended {
+        "Restart or log out of your session to apply updated RustyOS components.".to_owned()
+    } else if !app.dry_run && app.summary.helper_path.is_none() {
         format!(
             "Checked {}  -  Run scripts/install.sh --system for pkexec",
             app.snapshot.last_checked_label
@@ -853,6 +865,11 @@ fn render_list_and_footer(
     } else if app.dry_run {
         format!(
             "Checked {}  -  Simulation mode (--dry-run)",
+            app.snapshot.last_checked_label
+        )
+    } else if !app.summary.pacman_repo_configured && app.summary.repo_pkgbuild_dir.is_none() {
+        format!(
+            "Checked {}  -  Add [rustyos] to /etc/pacman.conf for binary updates",
             app.snapshot.last_checked_label
         )
     } else {

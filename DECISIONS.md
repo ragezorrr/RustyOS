@@ -443,6 +443,21 @@
                           в `PKGBUILD` и Arch job 
                           `makepkg` в CI          
                           (ADR-0038)              
+
+  D-047                   Фаза 10/CI Arch Pacman  accepted
+                          Repository (`RUSTYOS-079`):
+                          конвейер сборки и       
+                          публикации pacman-      
+                          репозитория в           
+                          `publish-arch-repo` CI, 
+                          GPG/откреплённая        
+                          подпись и graceful      
+                          fallback, раздача через 
+                          `gh-pages` branch,      
+                          проверка `[rustyos]` в  
+                          `SystemReleaseSummary`  
+                          и статус сессии в UI    
+                          (ADR-0039)              
   -----------------------------------------------------------------------
 
 ## Открытые решения

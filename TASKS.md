@@ -1202,6 +1202,28 @@ hardware/software context и низкие накладные расходы.
   - `./target/debug/rusty-compositor --winit --max-frames 35` (`late=0 missed=0`, без EGL/шейдерных ошибок) и `./target/debug/rusty-compositor --drm-probe`.
 - **Risks:** Реальный вход в `--drm` из TTY и интерактивный запрос пароля `pkexec` в установленном системном дереве `/usr` не запускались на рабочей сессии хоста и вынесены в пошаговую проверку пользователя (`docs/GETTING_STARTED.md §5`) перед занесением статуса `working` в `docs/HARDWARE_MATRIX.md`.
 
+### RUSTYOS-079 — Непрерывная доставка: публикация pacman-репозитория в CI, автообновление и сессионный статус
+
+- **Status:** Done (`RUSTYOS-079 Вариант 1` — утверждённый объём выполнен)
+- **Goal:** Реализовать автоматическую сборку и публикацию штатного Arch Linux pacman-репозитория (`rustyos-git`, `rustyos.db.tar.zst`, `rustyos.files.tar.zst`) в GitHub Actions при каждом `git push` в `main` (строго после `check` и `arch-packaging`), поддержать опциональную GPG-подпись, отображать версию/перезапуск сессии в `rusty-services` и `rusty-updater`, и документировать подключение `[rustyos]` в `docs/GETTING_STARTED.md` без модификации системы хоста агентом.
+- **Dependencies:** `RUSTYOS-014`, `RUSTYOS-076`, `RUSTYOS-077`, `RUSTYOS-078`, `ADR-0039`, `D-047`.
+- **Scope:**
+  - `.github/workflows/ci.yml`: добавлен job `publish-arch-repo` (`needs: [check, arch-packaging]`, `if: push main`, `container: archlinux:base-devel`), собирающий `rustyos-git` с динамическим `pkgver()`, формирующий базу репозитория `repo-add rustyos.db.tar.zst *.pkg.tar.zst`, поддерживающий откреплённую GPG-подпись (`GPG_SIGNING_KEY` из secrets) с graceful unsigned fallback, публикующий артефакты `actions/upload-artifact@v4` и выгружающий репозиторий в ветку `gh-pages` для раздачи через GitHub Pages (`https://ragezorrr.github.io/RustyOS/repo/$arch`), а также создающий веб-страницу `index.html`.
+  - `crates/rusty-services/src/updates.rs`: в `SystemReleaseSummary` добавлен флаг `pacman_repo_configured`, методы `parse_pacman_conf_has_repo` и `is_pacman_repo_configured` для неблокирующей проверки `/etc/pacman.conf` без внешних команд, а также unit-тесты.
+  - `apps/rusty-updater/src/render.rs`: в `hero_subtitle` добавлено отображение обновления версии `RustyOS <old> -> <new>`, в подвале списка — подсказка о необходимости перезапуска сессии (`tx_restart_recommended`) либо напоминание о настройке `[rustyos]`, если репозиторий ещё не подключён.
+  - Документация: `ADR-0039` (`docs/adr/0039-arch-ci-pacman-repository.md`), `D-047` (`DECISIONS.md`), раздел 6 в `docs/GETTING_STARTED.md` с пошаговой инструкцией подключения репозитория и опциональной GPG-подписью.
+- **Acceptance Criteria:**
+  - `ci.yml` содержит валидный YAML, где `publish-arch-repo` запускается строго после успешных `check` и `arch-packaging` только при пуше в `main`;
+  - `updates.rs` корректно детектирует секцию `[rustyos]` в конфиге pacman без ложных срабатываний на комментарии;
+  - `rusty-updater` отображает статус готовности репозитория и рекомендацию выхода из сессии после применения обновления;
+  - Агент не трогает `/etc/pacman.conf` и `/usr` хоста; все системные настройки описаны для пользователя.
+- **Tests:**
+  - `python3 -c "import yaml; yaml.safe_load(open('.github/workflows/ci.yml'))"` (`exit 0`)
+  - `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo build --workspace --bins --locked`
+  - `cargo test --workspace --locked -- --test-threads=1` (`235 passed; 0 failed`: `rusty_animation` 4, `rusty_compositor` 157, `rusty_files` 13, `rusty_ipc` 3, `rusty_services` 43, `rusty_shell` 5, `rusty_updater` 4, `rusty_wm` 7)
+  - Живой `--winit --max-frames 35` smoke-прогон (`Wayland` и `X11`: `late=0 missed=0`, без EGL/шейдерных ошибок).
+- **Risks:** Непосредственная выгрузка в ветку `gh-pages` происходит на стороне GitHub Actions при наличии прав у токена (`contents: write`); включение раздачи в веб-интерфейсе GitHub Pages (`Settings -> Pages`) выполняется владельцем репозитория.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

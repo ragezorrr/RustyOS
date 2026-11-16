@@ -486,6 +486,8 @@ pub struct SystemReleaseSummary {
     pub helper_path: Option<PathBuf>,
     /// Local repository `packaging/arch` folder if launched from a git checkout.
     pub repo_pkgbuild_dir: Option<PathBuf>,
+    /// Whether `[rustyos]` is configured in `/etc/pacman.conf` (`RUSTYOS-079`).
+    pub pacman_repo_configured: bool,
 }
 
 /// Returns standard Polkit-authorized installation path for `rustyos-update-helper`.
@@ -557,7 +559,30 @@ pub fn read_system_release_summary() -> SystemReleaseSummary {
         rustyos_installed_version,
         helper_path: resolve_update_helper_path(),
         repo_pkgbuild_dir: detect_local_pkgbuild_dir(),
+        pacman_repo_configured: is_pacman_repo_configured(),
     }
+}
+
+/// Checks whether a pacman configuration string contains a given repository section (`RUSTYOS-079`).
+#[must_use]
+pub fn parse_pacman_conf_has_repo(contents: &str, repo_name: &str) -> bool {
+    contents.lines().any(|line| {
+        let trimmed = line.trim();
+        if trimmed.starts_with('#') {
+            return false;
+        }
+        trimmed
+            .strip_prefix('[')
+            .and_then(|s| s.strip_suffix(']'))
+            .is_some_and(|name| name.trim().eq_ignore_ascii_case(repo_name))
+    })
+}
+
+/// Reads host `/etc/pacman.conf` and checks if `[rustyos]` is present (`RUSTYOS-079`).
+#[must_use]
+pub fn is_pacman_repo_configured() -> bool {
+    std::fs::read_to_string("/etc/pacman.conf")
+        .is_ok_and(|conf| parse_pacman_conf_has_repo(&conf, "rustyos"))
 }
 
 fn parse_os_release_pretty_name(contents: &str) -> String {
@@ -1396,5 +1421,22 @@ mod tests {
         handle.reconfigure(false, 60);
         assert!(handle.take_dirty());
         assert!(!handle.take_dirty());
+    }
+
+    #[test]
+    fn parses_pacman_conf_repo_detection() {
+        let conf_without = "\
+            [options]\nHoldPkg = pacman glibc\n\
+            # [rustyos]\n# Server = https://example.com\n\
+            [core]\nInclude = /etc/pacman.d/mirrorlist\n";
+        assert!(!parse_pacman_conf_has_repo(conf_without, "rustyos"));
+
+        let conf_with = "\
+            [options]\nHoldPkg = pacman glibc\n\
+            [rustyos]\nSigLevel = Optional TrustAll\nServer = https://ragezorrr.github.io/RustyOS/repo/$arch\n\
+            [extra]\nInclude = /etc/pacman.d/mirrorlist\n";
+        assert!(parse_pacman_conf_has_repo(conf_with, "rustyos"));
+        assert!(parse_pacman_conf_has_repo(conf_with, "RUSTYOS"));
+        assert!(!parse_pacman_conf_has_repo(conf_with, "community"));
     }
 }

@@ -99,3 +99,118 @@ jobs:
           pacman -Qlp /tmp/rustyos-pkg/pkg/rustyos-git-*.pkg.tar.* | grep -F "/usr/share/applications/org.rustyos.files.desktop"
           pacman -Qlp /tmp/rustyos-pkg/pkg/rustyos-git-*.pkg.tar.* | grep -F "/usr/share/applications/org.rustyos.updater.desktop"
           pacman -Qlp /tmp/rustyos-pkg/pkg/rustyos-git-*.pkg.tar.* | grep -F "/usr/share/polkit-1/actions/org.rustyos.updater.policy"
+
+  publish-arch-repo:
+    name: Build & Publish Arch Pacman Repository
+    needs: [check, arch-packaging]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    permissions:
+      contents: write
+    steps:
+      - name: Install build and packaging dependencies
+        run: |
+          pacman -Syu --noconfirm \
+            git rust pkgconf gnupg \
+            wayland libxkbcommon mesa libglvnd libinput systemd-libs seatd \
+            dbus fontconfig adwaita-icon-theme xorg-xwayland pipewire \
+            xdg-desktop-portal polkit pacman-contrib
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build package and assemble pacman repository
+        env:
+          GPG_SIGNING_KEY: ${{ secrets.GPG_SIGNING_KEY }}
+        run: |
+          useradd -m builder
+          git config --global --add safe.directory "${GITHUB_WORKSPACE}"
+          REPO_DIR="${GITHUB_WORKSPACE}/deploy/repo"
+          mkdir -p "${REPO_DIR}/x86_64" /tmp/rustyos-pkg/{build,src,log}
+          chown -R builder:builder "${GITHUB_WORKSPACE}" /tmp/rustyos-pkg
+
+          su - builder -c "cd '${GITHUB_WORKSPACE}/packaging/arch' && \
+            BUILDDIR=/tmp/rustyos-pkg/build \
+            PKGDEST='${REPO_DIR}/x86_64' \
+            SRCDEST=/tmp/rustyos-pkg/src \
+            LOGDEST=/tmp/rustyos-pkg/log \
+            makepkg -f --noconfirm --nocheck --noprogressbar"
+
+          cd "${REPO_DIR}/x86_64"
+          ls -lh *.pkg.tar.*
+
+          if [ -n "${GPG_SIGNING_KEY:-}" ]; then
+            echo "Importing GPG signing key from secrets..."
+            echo "${GPG_SIGNING_KEY}" | gpg --batch --import || true
+            KEY_ID=$(gpg --list-secret-keys --with-colons 2>/dev/null | grep '^sec:' | cut -d: -f5 | head -n1 || true)
+            if [ -n "${KEY_ID}" ]; then
+              echo "Signing packages and repository with key: ${KEY_ID}"
+              for pkg in *.pkg.tar.*; do
+                gpg --batch --yes --detach-sign --no-armor --default-key "${KEY_ID}" "${pkg}"
+              done
+              repo-add --sign --key "${KEY_ID}" rustyos.db.tar.zst *.pkg.tar.zst
+              gpg --armor --export "${KEY_ID}" > rustyos.asc
+            else
+              echo "GPG key import produced no key ID; falling back to standard repository..."
+              repo-add rustyos.db.tar.zst *.pkg.tar.zst
+            fi
+          else
+            echo "GPG_SIGNING_KEY secret not configured; generating standard pacman repository..."
+            repo-add rustyos.db.tar.zst *.pkg.tar.zst
+          fi
+
+          cat << 'EOF' > "${REPO_DIR}/index.html"
+          <!DOCTYPE html>
+          <html>
+          <head><meta charset="utf-8"><title>RustyOS Arch Linux Repository</title></head>
+          <body style="font-family: -apple-system, BlinkMacSystemFont, sans-serif; max-width: 680px; margin: 40px auto; line-height: 1.6; color: #1d1d1f; padding: 0 16px;">
+            <h2>RustyOS Arch Linux Repository</h2>
+            <p>Official continuous integration repository for the RustyOS desktop environment.</p>
+            <h3>Add to /etc/pacman.conf</h3>
+            <pre style="background: #f5f5f7; padding: 14px; border-radius: 8px; overflow-x: auto;">[rustyos]
+          SigLevel = Optional TrustAll
+          Server = https://ragezorrr.github.io/RustyOS/repo/$arch</pre>
+            <p>Then synchronize and upgrade:</p>
+            <pre style="background: #f5f5f7; padding: 14px; border-radius: 8px; overflow-x: auto;">sudo pacman -Syu</pre>
+          </body>
+          </html>
+          EOF
+
+      - name: Upload repository artifacts for run inspection
+        uses: actions/upload-artifact@v4
+        with:
+          name: rustyos-pacman-repo
+          path: deploy/repo/
+          if-no-files-found: error
+
+      - name: Deploy repository to gh-pages branch
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global --add safe.directory /tmp/gh-pages-deploy
+          TMP_PAGES="/tmp/gh-pages-deploy"
+          rm -rf "${TMP_PAGES}"
+          mkdir -p "${TMP_PAGES}"
+          cd "${TMP_PAGES}"
+          git init
+          git remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          if git fetch --depth=1 origin gh-pages; then
+            git checkout -b gh-pages origin/gh-pages
+          else
+            git checkout -b gh-pages
+          fi
+          mkdir -p repo
+          cp -rf "${GITHUB_WORKSPACE}/deploy/repo/"* repo/
+          cp -f "${GITHUB_WORKSPACE}/deploy/repo/index.html" index.html
+          git add .
+          if git status --porcelain | grep -q .; then
+            git commit -m "deploy: update Arch pacman repository for ${GITHUB_SHA::8} [skip ci]"
+            git push origin gh-pages
+          else
+            echo "No repository changes to commit."
+          fi
