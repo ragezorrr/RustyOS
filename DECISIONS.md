@@ -458,6 +458,22 @@
                           `SystemReleaseSummary`  
                           и статус сессии в UI    
                           (ADR-0039)              
+
+  D-048                   Фаза 10/Сессия и        accepted
+                          Display Manager         
+                          (`RUSTYOS-084`):        
+                          нативное окружение      
+                          тулкитов (Qt, GTK,      
+                          Electron, Firefox, SDL) 
+                          в `bin/rustyos-session`, 
+                          цели `systemd --user`   
+                          `rustyos-session.target`
+                          и shutdown target с     
+                          graceful cleanup при    
+                          Log Out, установка      
+                          юнитов в PKGBUILD и     
+                          проверки в `--doctor`   
+                          (ADR-0040)              
   -----------------------------------------------------------------------
 
 ## Открытые решения

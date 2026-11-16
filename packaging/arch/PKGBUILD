@@ -101,6 +101,7 @@ package() {
   install -d \
     "${pkgdir}/usr/bin" \
     "${pkgdir}/usr/lib/rustyos" \
+    "${pkgdir}/usr/lib/systemd/user" \
     "${pkgdir}/usr/share/applications" \
     "${pkgdir}/usr/share/polkit-1/actions" \
     "${pkgdir}/usr/share/wayland-sessions" \
@@ -131,6 +132,11 @@ package() {
     "${pkgdir}/usr/share/xdg-desktop-portal/portals/rustyos.portal"
   install -m644 "${root}/packaging/portals/rustyos-portals.conf" \
     "${pkgdir}/usr/share/xdg-desktop-portal/rustyos-portals.conf"
+
+  install -m644 "${root}/packaging/systemd/user/rustyos-session.target" \
+    "${pkgdir}/usr/lib/systemd/user/rustyos-session.target"
+  install -m644 "${root}/packaging/systemd/user/rustyos-session-shutdown.target" \
+    "${pkgdir}/usr/lib/systemd/user/rustyos-session-shutdown.target"
 
   sed 's|^Exec=.*|Exec=/usr/bin/rustyos-session|' \
     "${root}/packaging/wayland-sessions/rustyos.desktop" \

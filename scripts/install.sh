@@ -34,6 +34,7 @@ if [ "${MODE}" = "user" ]; then
     SESSIONS_DIR="${PREFIX}/share/wayland-sessions"
     PORTALS_DIR="${XDG_DATA_HOME:-${HOME}/.local/share}/xdg-desktop-portal/portals"
     PORTALS_CONF_DIR="${XDG_CONFIG_HOME:-${HOME}/.config}/xdg-desktop-portal"
+    SYSTEMD_DIR="${XDG_DATA_HOME:-${HOME}/.local/share}/systemd/user"
     POLKIT_DIR=""
 else
     PREFIX="/usr/local"
@@ -43,6 +44,7 @@ else
     SESSIONS_DIR="/usr/share/wayland-sessions"
     PORTALS_DIR="/usr/share/xdg-desktop-portal/portals"
     PORTALS_CONF_DIR="/etc/xdg-desktop-portal"
+    SYSTEMD_DIR="/usr/lib/systemd/user"
     POLKIT_DIR="/usr/share/polkit-1/actions"
 fi
 
@@ -60,7 +62,9 @@ if [ "${ACTION}" = "uninstall" ]; then
         "${APPS_DIR}/org.rustyos.updater.desktop" \
         "${SESSIONS_DIR}/rustyos.desktop" \
         "${PORTALS_DIR}/rustyos.portal" \
-        "${PORTALS_CONF_DIR}/rustyos-portals.conf"
+        "${PORTALS_CONF_DIR}/rustyos-portals.conf" \
+        "${SYSTEMD_DIR}/rustyos-session.target" \
+        "${SYSTEMD_DIR}/rustyos-session-shutdown.target"
     if [ -n "${POLKIT_DIR}" ]; then
         rm -f "${POLKIT_DIR}/org.rustyos.updater.policy"
     fi
@@ -72,7 +76,7 @@ ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 TARGET_DIR="${ROOT_DIR}/target/release"
 
 echo "=== Installing RustyOS Desktop Environment (${BIN_DIR}, ${SESSIONS_DIR}) ==="
-mkdir -p "${BIN_DIR}" "${LIB_DIR}" "${APPS_DIR}" "${SESSIONS_DIR}" "${PORTALS_DIR}" "${PORTALS_CONF_DIR}"
+mkdir -p "${BIN_DIR}" "${LIB_DIR}" "${APPS_DIR}" "${SESSIONS_DIR}" "${PORTALS_DIR}" "${PORTALS_CONF_DIR}" "${SYSTEMD_DIR}"
 if [ -n "${POLKIT_DIR}" ]; then
     mkdir -p "${POLKIT_DIR}"
 fi
@@ -103,6 +107,8 @@ install -m 644 "${ROOT_DIR}/packaging/applications/org.rustyos.files.desktop" "$
 install -m 644 "${ROOT_DIR}/packaging/applications/org.rustyos.updater.desktop" "${APPS_DIR}/org.rustyos.updater.desktop"
 install -m 644 "${ROOT_DIR}/packaging/portals/rustyos.portal" "${PORTALS_DIR}/rustyos.portal"
 install -m 644 "${ROOT_DIR}/packaging/portals/rustyos-portals.conf" "${PORTALS_CONF_DIR}/rustyos-portals.conf"
+install -m 644 "${ROOT_DIR}/packaging/systemd/user/rustyos-session.target" "${SYSTEMD_DIR}/rustyos-session.target"
+install -m 644 "${ROOT_DIR}/packaging/systemd/user/rustyos-session-shutdown.target" "${SYSTEMD_DIR}/rustyos-session-shutdown.target"
 if [ -n "${POLKIT_DIR}" ]; then
     install -m 644 "${ROOT_DIR}/packaging/polkit/org.rustyos.updater.policy" "${POLKIT_DIR}/org.rustyos.updater.policy"
 fi

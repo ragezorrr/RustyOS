@@ -1,0 +1,6 @@
+[Unit]
+Description=RustyOS compositor session
+Documentation=https://github.com/ragezorrr/RustyOS
+BindsTo=graphical-session.target
+Wants=graphical-session-pre.target
+After=graphical-session-pre.target

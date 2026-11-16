@@ -1322,6 +1322,33 @@ hardware/software context и низкие накладные расходы.
   - `cargo test --workspace --locked -- --test-threads=1` (`225 passed; 0 failed`)
 - **Risks:** Нет.
 
+### RUSTYOS-084 — Нативная Wayland-сессия, системный запуск из Display Manager и окружение клиентов
+
+- **Status:** Done (`RUSTYOS-084 Вариант 1` — утверждённый объём выполнен)
+- **Goal:** Обеспечить полноценный запуск RustyOS как самостоятельной десктоп-сессии через системные дисплейные менеджеры (SDDM, GDM, LightDM, greetd): экспорт эталонных переменных окружения клиентских тулкитов (Qt, GTK, Electron, Firefox, SDL, Java), интеграция с `systemd --user` целями `graphical-session.target` / `rustyos-session.target`, гарантированный graceful shutdown сессии с остановкой служб при Log Out, расширение pre-flight самодиагностики `rustyos-session --doctor`, установка юнитов в `PKGBUILD` и `scripts/install.sh`, оформление ADR-0040 и записи D-048.
+- **Dependencies:** `RUSTYOS-078`, `ADR-0040`, `D-048`.
+- **Scope:**
+  - `bin/rustyos-session`: установлены эталонные переменные по умолчанию с сохранением пользовательских переопределений (`QT_QPA_PLATFORM="wayland;xcb"`, `QT_WAYLAND_DISABLE_WINDOWDECORATION="1"`, `GDK_BACKEND="wayland,x11,*"`, `MOZ_ENABLE_WAYLAND="1"`, `ELECTRON_OZONE_PLATFORM_HINT="auto"`, `SDL_VIDEODRIVER="wayland,x11"`, `CLUTTER_BACKEND="wayland"`, `_JAVA_AWT_WM_NONREPARENTING="1"`);
+  - `bin/rustyos-session`: в автономном `--drm`/`--kms` режиме добавлен импорт переменных в `systemctl --user import-environment` и старт `rustyos-session.target`; настроен перехват сигналов завершения (`trap cleanup_session EXIT INT TERM HUP`) с вызовом `systemctl --user stop rustyos-session.target graphical-session.target` и запуском `rustyos-session-shutdown.target`;
+  - `bin/rustyos-session`: расширена функция `--doctor` проверками доступности `rustyos-session.target`, `rustyos-session-shutdown.target` и ключевых переменных тулкитов;
+  - `packaging/systemd/user/rustyos-session.target`: Freedesktop/systemd юнит привязки к `graphical-session.target`;
+  - `packaging/systemd/user/rustyos-session-shutdown.target`: юнит бесконфликтной остановки сессионных служб при выходе;
+  - `packaging/arch/PKGBUILD`: добавлены каталоги и установка юнитов в `/usr/lib/systemd/user/`;
+  - `scripts/install.sh`: добавлена установка и очистка при удалении системных и пользовательских systemd-юнитов;
+  - `docs/adr/0040-standalone-wayland-session-and-systemd.md` и запись `D-048` в `DECISIONS.md`.
+- **Acceptance Criteria:**
+  - Все основные приложения (Chromium/Electron, Firefox, Qt, GTK) стартуют нативно через Wayland с четким HiDPI без размытия;
+  - `bin/rustyos-session --doctor` выводит статус 33 ok, 0 fail;
+  - Завершение сессии чисто останавливает `graphical-session.target` и связанные сессионные демоны;
+  - `sh -n bin/rustyos-session` и `bash -n scripts/install.sh` валидны;
+  - Пакет Arch Linux собирается с включением systemd user targets.
+- **Tests:**
+  - `sh -n bin/rustyos-session`, `bash -n scripts/install.sh`;
+  - `./bin/rustyos-session --doctor` (`33 ok, 2 warn, 0 fail`);
+  - `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`;
+  - `cargo test --workspace --locked -- --test-threads=1` (`225 passed; 0 failed`).
+- **Risks:** Нет.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

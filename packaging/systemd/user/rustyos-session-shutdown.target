@@ -1,0 +1,7 @@
+[Unit]
+Description=Shutdown RustyOS compositor session
+Documentation=https://github.com/ragezorrr/RustyOS
+DefaultDependencies=no
+StopWhenUnneeded=true
+Conflicts=graphical-session.target graphical-session-pre.target rustyos-session.target
+After=graphical-session.target graphical-session-pre.target rustyos-session.target

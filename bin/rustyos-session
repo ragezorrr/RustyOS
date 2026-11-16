@@ -6,6 +6,17 @@ export XDG_CURRENT_DESKTOP=RustyOS
 export XDG_SESSION_DESKTOP=RustyOS
 export XDG_SESSION_TYPE=wayland
 
+# Client toolkit defaults for native Wayland execution (RUSTYOS-084)
+: "${QT_QPA_PLATFORM:=wayland;xcb}"
+: "${QT_WAYLAND_DISABLE_WINDOWDECORATION:=1}"
+: "${GDK_BACKEND:=wayland,x11,*}"
+: "${MOZ_ENABLE_WAYLAND:=1}"
+: "${ELECTRON_OZONE_PLATFORM_HINT:=auto}"
+: "${SDL_VIDEODRIVER:=wayland,x11}"
+: "${CLUTTER_BACKEND:=wayland}"
+: "${_JAVA_AWT_WM_NONREPARENTING:=1}"
+export QT_QPA_PLATFORM QT_WAYLAND_DISABLE_WINDOWDECORATION GDK_BACKEND MOZ_ENABLE_WAYLAND ELECTRON_OZONE_PLATFORM_HINT SDL_VIDEODRIVER CLUTTER_BACKEND _JAVA_AWT_WM_NONREPARENTING
+
 # Find bin directory (sibling install -> PATH -> local cargo release/debug)
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -122,7 +133,9 @@ run_doctor() {
         "/usr/share/wayland-sessions/rustyos.desktop:${HOME:-/tmp}/.local/share/wayland-sessions/rustyos.desktop:wayland-session desktop" \
         "/usr/share/applications/org.rustyos.files.desktop:${HOME:-/tmp}/.local/share/applications/org.rustyos.files.desktop:rusty-files .desktop" \
         "/usr/share/applications/org.rustyos.updater.desktop:${HOME:-/tmp}/.local/share/applications/org.rustyos.updater.desktop:rusty-updater .desktop" \
-        "/usr/share/xdg-desktop-portal/portals/rustyos.portal:${XDG_DATA_HOME:-${HOME:-/tmp}/.local/share}/xdg-desktop-portal/portals/rustyos.portal:XDG portal registration"; do
+        "/usr/share/xdg-desktop-portal/portals/rustyos.portal:${XDG_DATA_HOME:-${HOME:-/tmp}/.local/share}/xdg-desktop-portal/portals/rustyos.portal:XDG portal registration" \
+        "/usr/lib/systemd/user/rustyos-session.target:${HOME:-/tmp}/.local/share/systemd/user/rustyos-session.target:systemd session target" \
+        "/usr/lib/systemd/user/rustyos-session-shutdown.target:${HOME:-/tmp}/.local/share/systemd/user/rustyos-session-shutdown.target:systemd shutdown target"; do
         p1="${sys_asset%%:*}"
         r1="${sys_asset#*:}"
         p2="${r1%%:*}"
@@ -133,6 +146,15 @@ run_doctor() {
             doc_ok "$lbl (user install): $p2"
         else
             doc_warn "$lbl not installed yet (checked $p1 and $p2)"
+        fi
+    done
+
+    for tk_var in QT_QPA_PLATFORM GDK_BACKEND MOZ_ENABLE_WAYLAND ELECTRON_OZONE_PLATFORM_HINT SDL_VIDEODRIVER; do
+        val="$(eval "printf '%s' \"\${$tk_var:-}\"")"
+        if [ -n "$val" ]; then
+            doc_ok "Toolkit default $tk_var: $val"
+        else
+            doc_warn "Toolkit variable $tk_var unset"
         fi
     done
 
@@ -220,17 +242,40 @@ if [ -z "${XDG_DESKTOP_PORTAL_DIR:-}" ]; then
     fi
 fi
 
-# Sync session desktop variables into systemd/D-Bus user environment only for standalone sessions.
+cleanup_session() {
+    exit_code=$?
+    trap - EXIT INT TERM HUP
+    echo "Shutting down RustyOS Desktop Session..."
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl --user stop rustyos-session.target >/dev/null 2>&1 || true
+        systemctl --user stop graphical-session.target >/dev/null 2>&1 || true
+        systemctl --user start --no-block rustyos-session-shutdown.target >/dev/null 2>&1 || true
+    fi
+    exit "$exit_code"
+}
+
+# Sync session desktop and toolkit variables into systemd/D-Bus user environment for standalone sessions.
 if [ "$BACKEND_FLAG" = "--drm" ] || [ "$BACKEND_FLAG" = "--kms" ]; then
     if command -v dbus-update-activation-environment >/dev/null 2>&1; then
         dbus-update-activation-environment --systemd \
             XDG_CURRENT_DESKTOP XDG_SESSION_DESKTOP XDG_SESSION_TYPE \
+            QT_QPA_PLATFORM QT_WAYLAND_DISABLE_WINDOWDECORATION \
+            GDK_BACKEND MOZ_ENABLE_WAYLAND ELECTRON_OZONE_PLATFORM_HINT \
+            SDL_VIDEODRIVER CLUTTER_BACKEND _JAVA_AWT_WM_NONREPARENTING \
             ${XDG_DESKTOP_PORTAL_DIR:+XDG_DESKTOP_PORTAL_DIR} \
             >/dev/null 2>&1 || true
     fi
     if command -v systemctl >/dev/null 2>&1; then
+        systemctl --user import-environment \
+            XDG_CURRENT_DESKTOP XDG_SESSION_DESKTOP XDG_SESSION_TYPE \
+            QT_QPA_PLATFORM QT_WAYLAND_DISABLE_WINDOWDECORATION \
+            GDK_BACKEND MOZ_ENABLE_WAYLAND ELECTRON_OZONE_PLATFORM_HINT \
+            SDL_VIDEODRIVER CLUTTER_BACKEND _JAVA_AWT_WM_NONREPARENTING \
+            >/dev/null 2>&1 || true
         systemctl --user try-restart xdg-desktop-portal.service >/dev/null 2>&1 || true
+        systemctl --user start rustyos-session.target >/dev/null 2>&1 || true
     fi
+    trap cleanup_session EXIT INT TERM HUP
 fi
 
 echo "Starting RustyOS Desktop Session (Backend: $BACKEND_FLAG)..."
@@ -238,8 +283,19 @@ if [ "${RUSTYOS_EXTERNAL_SHELL:-0}" = "1" ] \
     && [ "$BACKEND_FLAG" != "--check" ] \
     && [ "$BACKEND_FLAG" != "--drm-probe" ]; then
     if [ -n "$SHELL_BIN" ] && [ -x "$SHELL_BIN" ]; then
-        exec "$COMPOSITOR_BIN" "$BACKEND_FLAG" --spawn "$SHELL_BIN --wayland" "$@"
+        if [ "$BACKEND_FLAG" = "--drm" ] || [ "$BACKEND_FLAG" = "--kms" ]; then
+            "$COMPOSITOR_BIN" "$BACKEND_FLAG" --spawn "$SHELL_BIN --wayland" "$@"
+            exit $?
+        else
+            exec "$COMPOSITOR_BIN" "$BACKEND_FLAG" --spawn "$SHELL_BIN --wayland" "$@"
+        fi
     fi
     echo "Warning: RUSTYOS_EXTERNAL_SHELL=1 set, but rusty-shell binary not found; falling back to built-in compositor shell" >&2
 fi
-exec "$COMPOSITOR_BIN" "$BACKEND_FLAG" "$@"
+
+if [ "$BACKEND_FLAG" = "--drm" ] || [ "$BACKEND_FLAG" = "--kms" ]; then
+    "$COMPOSITOR_BIN" "$BACKEND_FLAG" "$@"
+    exit $?
+else
+    exec "$COMPOSITOR_BIN" "$BACKEND_FLAG" "$@"
+fi
