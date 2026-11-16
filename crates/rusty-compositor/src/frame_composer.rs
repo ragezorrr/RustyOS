@@ -742,13 +742,15 @@ fn build_backdrop_render_elements(
     );
 
     if fullscreen_win.is_none() {
-        if is_primary && !state.desktop_items.is_empty() {
+        if is_primary && (!state.desktop_items.is_empty() || state.desktop_rubber_band.is_some()) {
             crate::shell_render::render_desktop_canvas_elements(
                 renderer,
                 text_cache,
                 shape_cache,
                 &state.desktop_items,
-                state.selected_desktop_item.as_deref(),
+                &state.selected_desktop_items,
+                state.desktop_drag.as_ref(),
+                state.desktop_rubber_band.as_ref(),
                 Size::<i32, Logical>::from((output_geo.size.w.max(1), output_geo.size.h.max(1))),
                 crate::shell_render::DOCK_HEIGHT,
                 &mut backdrop_list,

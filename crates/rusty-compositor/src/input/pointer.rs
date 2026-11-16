@@ -164,6 +164,7 @@ impl RustyCompositorState {
         pointer.frame(self);
     }
 
+    #[allow(clippy::too_many_lines)]
     pub(super) fn apply_pointer_position(&mut self, pos: Point<f64, Logical>, time: u32) {
         self.pointer_location = pos;
 
@@ -242,6 +243,66 @@ impl RustyCompositorState {
             return;
         }
 
+        if let Some(ref mut drag) = self.desktop_drag {
+            drag.current_pointer = pos;
+            let dx = pos.x - drag.start_pointer.x;
+            let dy = pos.y - drag.start_pointer.y;
+            if (dx * dx + dy * dy) >= 25.0 {
+                drag.is_active = true;
+            }
+            if drag.is_active {
+                let primary_entry = self.output_map.primary();
+                let primary_geo = primary_entry.logical_geometry();
+                let local_pos = Point::from((
+                    pos.x - f64::from(primary_geo.loc.x),
+                    pos.y - f64::from(primary_geo.loc.y),
+                ));
+                let screen_size = primary_geo.size;
+                let hit_folder = crate::shell_render::hit_test_desktop_item(
+                    &self.desktop_items,
+                    screen_size,
+                    crate::shell_render::DOCK_HEIGHT,
+                    local_pos,
+                )
+                .and_then(|idx| self.desktop_items.get(idx))
+                .filter(|it| it.is_dir && it.path != drag.dragged_path)
+                .map(|it| it.path.clone());
+
+                drag.target_hover_dir = hit_folder;
+            }
+            self.shell_redraw_needed = true;
+            return;
+        }
+
+        if let Some(ref mut rb) = self.desktop_rubber_band {
+            rb.current = pos;
+            let rb_rect = rb.rect();
+            let primary_entry = self.output_map.primary();
+            let primary_geo = primary_entry.logical_geometry();
+            let screen_size = primary_geo.size;
+
+            self.selected_desktop_items.clear();
+            for item in &self.desktop_items {
+                let cell_rect = crate::shell_render::compute_desktop_cell_rect(
+                    item.slot.0,
+                    item.slot.1,
+                    screen_size,
+                );
+                let item_screen_rect = Rectangle::new(
+                    Point::from((
+                        cell_rect.loc.x + primary_geo.loc.x,
+                        cell_rect.loc.y + primary_geo.loc.y,
+                    )),
+                    cell_rect.size,
+                );
+                if rb_rect.overlaps(item_screen_rect) {
+                    self.selected_desktop_items.insert(item.path.clone());
+                }
+            }
+            self.shell_redraw_needed = true;
+            return;
+        }
+
         let under = self
             .target_surface_under(pos)
             .map(|(_win, surface, origin)| (surface, origin));
@@ -289,6 +350,59 @@ impl RustyCompositorState {
                     self.handle_dock_hit(drag.hit, serial);
                 }
                 self.sync_dock_auto_hide_target();
+                self.shell_redraw_needed = true;
+                return;
+            }
+
+            if button == 272
+                && let Some(drag) = self.desktop_drag.take()
+                && drag.is_active
+            {
+                if let Some(dest_dir) = drag.target_hover_dir {
+                    if let Some(file_name) = drag.dragged_path.file_name() {
+                        let dest_path = dest_dir.join(file_name);
+                        if let Err(err) = std::fs::rename(&drag.dragged_path, &dest_path) {
+                            tracing::warn!(?err, "Failed to move desktop item into folder");
+                        } else {
+                            self.resync_desktop_items();
+                            self.save_desktop_grid_layout();
+                        }
+                    }
+                } else {
+                    let primary_entry = self.output_map.primary();
+                    let primary_geo = primary_entry.logical_geometry();
+                    let local_pos = Point::from((
+                        drag.current_pointer.x - f64::from(primary_geo.loc.x),
+                        drag.current_pointer.y - f64::from(primary_geo.loc.y),
+                    ));
+                    let screen_size = primary_geo.size;
+                    let target_slot = crate::shell_render::cell_at_point(
+                        local_pos,
+                        screen_size,
+                        crate::shell_render::DOCK_HEIGHT,
+                    );
+                    if let Some(item_idx) = self
+                        .desktop_items
+                        .iter()
+                        .position(|it| it.path == drag.dragged_path)
+                    {
+                        let old_slot = self.desktop_items[item_idx].slot;
+                        if let Some(other_idx) = self
+                            .desktop_items
+                            .iter()
+                            .position(|it| it.slot == target_slot)
+                        {
+                            self.desktop_items[other_idx].slot = old_slot;
+                        }
+                        self.desktop_items[item_idx].slot = target_slot;
+                        self.save_desktop_grid_layout();
+                    }
+                }
+                self.shell_redraw_needed = true;
+                return;
+            }
+
+            if button == 272 && self.desktop_rubber_band.take().is_some() {
                 self.shell_redraw_needed = true;
                 return;
             }
@@ -612,22 +726,42 @@ impl RustyCompositorState {
                             };
                         if is_double_click {
                             self.last_desktop_click = None;
+                            self.desktop_drag = None;
                             self.open_desktop_canvas_item(&item);
                         } else {
-                            self.selected_desktop_item = Some(item.path.clone());
+                            if !self.selected_desktop_items.contains(&item.path) {
+                                self.selected_desktop_items.clear();
+                                self.selected_desktop_items.insert(item.path.clone());
+                            }
+                            self.desktop_drag = Some(crate::shell_render::DesktopDragState {
+                                start_pointer: self.pointer_location,
+                                current_pointer: self.pointer_location,
+                                dragged_path: item.path.clone(),
+                                is_active: false,
+                                target_hover_dir: None,
+                            });
                             self.last_desktop_click = Some((item.path, now));
                             self.shell_redraw_needed = true;
                         }
                         return;
                     } else if button == 273 {
-                        self.selected_desktop_item = Some(item.path.clone());
+                        self.selected_desktop_items.clear();
+                        self.selected_desktop_items.insert(item.path.clone());
                         self.open_desktop_item_context_menu(self.pointer_location, &item);
                         return;
                     }
                 } else {
-                    if self.selected_desktop_item.is_some() {
-                        self.selected_desktop_item = None;
+                    if !self.selected_desktop_items.is_empty() {
+                        self.selected_desktop_items.clear();
                         self.shell_redraw_needed = true;
+                    }
+                    if button == 272 && is_on_primary && !self.has_foreground_layer_surfaces() {
+                        self.desktop_rubber_band = Some(crate::shell_render::DesktopRubberBand {
+                            start: self.pointer_location,
+                            current: self.pointer_location,
+                        });
+                        self.shell_redraw_needed = true;
+                        return;
                     }
                     if button == 273
                         && !self.has_foreground_layer_surfaces()

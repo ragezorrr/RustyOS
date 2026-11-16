@@ -1274,6 +1274,29 @@ hardware/software context и низкие накладные расходы.
   - Интеграционный `--winit --max-frames 35` smoke-прогон (`rendered_frames=35, late=0 missed=0`, чистый выход).
 - **Risks:** Нет.
 
+### RUSTYOS-082 — Интерактивный рабочий стол: Drag-and-Drop, Rubber-band и сохранение расположения
+
+- **Status:** Done (`RUSTYOS-082 Вариант 1` — утверждённый объём выполнен)
+- **Goal:** Реализовать интерактивное управление иконками на холсте рабочего стола в стиле macOS Golden Gate: перетаскивание иконок мышью с визуальным следованием за курсором и привязкой к ячейкам сетки при отпускании (со сменой слотов при коллизиях), сброс файлов в папки рабочего стола (`fs::rename`), рамка множественного выделения Rubber-band на свободном пространстве холста с акцентной подсветкой macOS (`[0, 122, 255, 30]`), сохранение расположения иконок в `~/.config/rustyos/desktop_grid.toml` и типографика подписей в `Inter Bold/SemiBold` с рассеянной тенью ambient shadow.
+- **Dependencies:** `RUSTYOS-081`.
+- **Scope:**
+  - `crates/rusty-compositor/src/shell_render/desktop_canvas.rs`: структуры `DesktopRubberBand` (прямоугольник выделения с нормализацией координат) и `DesktopDragState` (отслеживание перетаскивания иконки, порог активации 5px, подсвечивание папки назначения `target_hover_dir`); вычисление координат ячейки `compute_desktop_cell_rect` и обратная проекция курсора в ячейку `cell_at_point`; сохранение и загрузка слотов `desktop_grid.toml` (`load_desktop_grid_positions`, `save_desktop_grid_positions`); отрисовка плавающей иконки при перетаскивании, подсветка целевой папки, отрисовка рамки Rubber-band, чёткие подписи `Inter Bold/SemiBold` с 4-точечным мягким ореолом ambient shadow.
+  - `crates/rusty-compositor/src/state/mod.rs`: добавлены поля `selected_desktop_items: HashSet<PathBuf>`, `desktop_drag: Option<DesktopDragState>`, `desktop_rubber_band: Option<DesktopRubberBand>`, хелперы `selected_desktop_item()` и `save_desktop_grid_layout()`.
+  - `crates/rusty-compositor/src/state/context_menu_actions.rs`: обновлена функция `scan_desktop_canvas_items` для автоматического назначения слотов с приоритетом сохранённых координат из `desktop_grid.toml` и непрерывного заполнения свободных ячеек для новых файлов; сохранение сетки при создании папки.
+  - `crates/rusty-compositor/src/frame_composer.rs`: передача активных состояний `selected_desktop_items`, `desktop_drag` и `desktop_rubber_band` в `render_desktop_canvas_elements`.
+  - `crates/rusty-compositor/src/input/pointer.rs`: в `apply_pointer_position` добавлено обновление координат перетаскивания (активация при смещении >=5px, поиск целевой папки) и динамический пересчет пересечений прямоугольника Rubber-band с ячейками иконок; в `handle_pointer_button` обработано отпускание (сброс в папку либо привязка к ячейке с обменом слотов и записью в TOML, завершение Rubber-band) и нажатие (старт drag при клике на иконку, старт Rubber-band при клике на обои).
+  - `crates/rusty-compositor/src/state/tests.rs`: unit-тесты для геометрии сетки, функции `cell_at_point`, персистентности `desktop_grid.toml`, пересечений `DesktopRubberBand` и переноса файлов в папку при drop.
+- **Acceptance Criteria:**
+  - Иконки на рабочем столе можно свободно перетаскивать мышью, при отпускании они привязываются к ближайшей ячейке сетки;
+  - Расположение иконок сохраняется между перезапусками в `~/.config/rustyos/desktop_grid.toml`;
+  - Перетаскивание файла на папку подсвечивает папку и при отпускании перемещает файл внутрь неё;
+  - Зажатие и протяжка ЛКМ на свободном месте рабочего стола рисует рамку Rubber-band и выделяет все охваченные иконки;
+  - Подписи иконок отображаются шрифтом Inter SemiBold с мягким рассеянным ореолом, исключающим резкие артефакты дублирования текста.
+- **Tests:**
+  - `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo build --workspace --bins --locked`
+  - `cargo test --workspace --locked -- --test-threads=1` (`225 passed; 0 failed`)
+- **Risks:** Нет.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

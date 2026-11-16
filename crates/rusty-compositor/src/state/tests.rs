@@ -691,7 +691,7 @@ fn desktop_canvas_folder_creation_and_item_interaction() -> Result<(), Box<dyn E
     )?;
     let _ = (&mut display, &mut event_loop);
 
-    compositor.desktop_items = items;
+    compositor.desktop_items = items.clone();
     let item0 = compositor.desktop_items[0].clone();
     compositor.open_desktop_item_context_menu((1850.0, 60.0).into(), &item0);
     let ctx = compositor
@@ -712,6 +712,93 @@ fn desktop_canvas_folder_creation_and_item_interaction() -> Result<(), Box<dyn E
             ..
         }
     )));
+
+    // Verify grid slots assigned
+    assert_eq!(items[0].slot, (0, 0));
+    assert_eq!(items[1].slot, (0, 1));
+    assert_eq!(items[2].slot, (0, 2));
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    Ok(())
+}
+
+#[test]
+fn desktop_grid_drag_drop_and_rubber_band() -> Result<(), Box<dyn Error>> {
+    use crate::shell_render::{
+        DOCK_HEIGHT, DesktopDragState, DesktopRubberBand, cell_at_point, compute_desktop_cell_rect,
+        load_desktop_grid_positions, save_desktop_grid_positions,
+    };
+    use smithay::utils::{Point, Size};
+    use std::collections::HashMap;
+
+    let screen_size = Size::from((1920, 1080));
+
+    // 1. Grid geometry and slot calculation
+    let cell_0_0 = compute_desktop_cell_rect(0, 0, screen_size);
+    assert_eq!(cell_0_0.loc.x, 1920 - 24 - 88);
+    assert_eq!(cell_0_0.loc.y, 46);
+
+    let cell_0_1 = compute_desktop_cell_rect(0, 1, screen_size);
+    assert_eq!(cell_0_1.loc.x, cell_0_0.loc.x);
+    assert_eq!(cell_0_1.loc.y, 46 + 92 + 12);
+
+    let cell_1_0 = compute_desktop_cell_rect(1, 0, screen_size);
+    assert_eq!(cell_1_0.loc.x, cell_0_0.loc.x - 88 - 16);
+    assert_eq!(cell_1_0.loc.y, 46);
+
+    // 2. Cell at point hit-testing
+    let pt_inside_0_0 = Point::from((
+        f64::from(cell_0_0.loc.x + 10),
+        f64::from(cell_0_0.loc.y + 10),
+    ));
+    assert_eq!(
+        cell_at_point(pt_inside_0_0, screen_size, DOCK_HEIGHT),
+        (0, 0)
+    );
+
+    // 3. Grid position persistence
+    let temp_dir = std::env::temp_dir().join(format!("rustyos-grid-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    std::fs::create_dir_all(&temp_dir)?;
+    let toml_path = temp_dir.join("desktop_grid.toml");
+
+    let mut saved = HashMap::new();
+    saved.insert("FolderA".to_owned(), (0, 0));
+    saved.insert("file.txt".to_owned(), (1, 2));
+    save_desktop_grid_positions(&toml_path, &saved);
+
+    let loaded = load_desktop_grid_positions(&toml_path);
+    assert_eq!(loaded.get("FolderA"), Some(&(0, 0)));
+    assert_eq!(loaded.get("file.txt"), Some(&(1, 2)));
+
+    // 4. Rubber band selection rectangle
+    let rb = DesktopRubberBand {
+        start: Point::from((1800.0, 40.0)),
+        current: Point::from((1900.0, 160.0)),
+    };
+    let rb_rect = rb.rect();
+    assert!(rb_rect.size.w > 0 && rb_rect.size.h > 0);
+    assert!(rb_rect.overlaps(cell_0_0));
+
+    // 5. Drag and drop file to folder
+    let folder_a = temp_dir.join("FolderA");
+    std::fs::create_dir_all(&folder_a)?;
+    let file_txt = temp_dir.join("file.txt");
+    std::fs::write(&file_txt, "content")?;
+
+    let drag = DesktopDragState {
+        start_pointer: Point::from((100.0, 100.0)),
+        current_pointer: Point::from((200.0, 200.0)),
+        dragged_path: file_txt.clone(),
+        is_active: true,
+        target_hover_dir: Some(folder_a.clone()),
+    };
+    if let Some(dest_dir) = drag.target_hover_dir {
+        let dest = dest_dir.join(drag.dragged_path.file_name().ok_or("file name")?);
+        std::fs::rename(&drag.dragged_path, &dest)?;
+        assert!(dest.exists());
+        assert!(!file_txt.exists());
+    }
 
     let _ = std::fs::remove_dir_all(&temp_dir);
     Ok(())

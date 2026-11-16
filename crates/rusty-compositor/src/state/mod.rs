@@ -513,8 +513,12 @@ pub struct RustyCompositorState {
     pub desktop_focused: bool,
     /// Native desktop canvas items loaded from Desktop directory (`RUSTYOS-081`).
     pub desktop_items: Vec<crate::shell_render::DesktopCanvasItem>,
-    /// Selected desktop canvas item path if any (`RUSTYOS-081`).
-    pub selected_desktop_item: Option<std::path::PathBuf>,
+    /// Selected desktop canvas item paths (`RUSTYOS-081`/`RUSTYOS-082`).
+    pub selected_desktop_items: std::collections::HashSet<std::path::PathBuf>,
+    /// Active desktop icon drag state (`RUSTYOS-082`).
+    pub desktop_drag: Option<crate::shell_render::DesktopDragState>,
+    /// Active rubber-band selection box (`RUSTYOS-082`).
+    pub desktop_rubber_band: Option<crate::shell_render::DesktopRubberBand>,
     /// Last clicked desktop canvas item and timestamp for double-click detection (`RUSTYOS-081`).
     pub last_desktop_click: Option<(std::path::PathBuf, std::time::Instant)>,
     /// Last time desktop directory was scanned for canvas items (`RUSTYOS-081`).
@@ -916,7 +920,9 @@ impl RustyCompositorState {
             desktop_items: crate::state::context_menu_actions::scan_desktop_canvas_items(
                 &crate::state::context_menu_actions::resolve_desktop_dir().unwrap_or_default(),
             ),
-            selected_desktop_item: None,
+            selected_desktop_items: std::collections::HashSet::new(),
+            desktop_drag: None,
+            desktop_rubber_band: None,
             last_desktop_click: None,
             desktop_last_scan: std::time::Instant::now(),
             top_bar_menu_hover_row: None,
@@ -1318,6 +1324,27 @@ impl RustyCompositorState {
             }
         }
         self.desktop_last_scan = std::time::Instant::now();
+    }
+
+    /// Returns the first selected desktop item path if any (`RUSTYOS-081`/`RUSTYOS-082`).
+    #[must_use]
+    pub fn selected_desktop_item(&self) -> Option<&std::path::PathBuf> {
+        self.selected_desktop_items.iter().next()
+    }
+
+    /// Persists current desktop item grid positions to configuration file (`RUSTYOS-082`).
+    pub fn save_desktop_grid_layout(&self) {
+        if let Some(grid_path) = crate::config::default_user_config_path()
+            .and_then(|cfg| cfg.parent().map(|dir| dir.join("desktop_grid.toml")))
+        {
+            let mut map = std::collections::HashMap::new();
+            for item in &self.desktop_items {
+                if let Some(name) = item.path.file_name() {
+                    map.insert(name.to_string_lossy().into_owned(), item.slot);
+                }
+            }
+            crate::shell_render::save_desktop_grid_positions(&grid_path, &map);
+        }
     }
 
     /// Returns `true` when an interactive compositor overlay or lock screen should bypass any

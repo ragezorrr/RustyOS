@@ -1,6 +1,6 @@
 //! Right-click Context Menu builders, actions, and safe background Trash cleanup (`RUSTYOS-064`).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -146,6 +146,7 @@ pub(crate) fn scan_desktop_canvas_items(
             path,
             is_dir,
             icon_name,
+            slot: (usize::MAX, usize::MAX),
         });
     }
 
@@ -154,6 +155,45 @@ pub(crate) fn scan_desktop_canvas_items(
         (false, true) => std::cmp::Ordering::Greater,
         _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
     });
+
+    let saved_slots = crate::config::default_user_config_path()
+        .and_then(|cfg| cfg.parent().map(|dir| dir.join("desktop_grid.toml")))
+        .map(|path| crate::shell_render::load_desktop_grid_positions(&path))
+        .unwrap_or_default();
+
+    let mut occupied: HashSet<(usize, usize)> = HashSet::new();
+
+    // 1. Assign saved positions first
+    for item in &mut items {
+        let key = item
+            .path
+            .file_name()
+            .map(|f| f.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        if let Some(&slot) = saved_slots.get(&key)
+            && !occupied.contains(&slot)
+        {
+            item.slot = slot;
+            occupied.insert(slot);
+        }
+    }
+
+    // 2. Allocate free grid cells for any new items flowing down columns
+    let mut next_col = 0;
+    let mut next_row = 0;
+    for item in &mut items {
+        if item.slot == (usize::MAX, usize::MAX) {
+            while occupied.contains(&(next_col, next_row)) {
+                next_row += 1;
+                if next_row >= 16 {
+                    next_row = 0;
+                    next_col += 1;
+                }
+            }
+            item.slot = (next_col, next_row);
+            occupied.insert((next_col, next_row));
+        }
+    }
 
     items
 }
@@ -1064,6 +1104,7 @@ impl RustyCompositorState {
                     path: path.clone(),
                     is_dir,
                     icon_name: None,
+                    slot: (0, 0),
                 };
                 self.open_desktop_canvas_item(&item);
             }
@@ -1249,7 +1290,9 @@ impl RustyCompositorState {
                     .unwrap_or("New Folder");
                 self.show_osd(format!("Created: {folder_name}"), None, false);
                 self.resync_desktop_items();
-                self.selected_desktop_item = Some(created);
+                self.selected_desktop_items.clear();
+                self.selected_desktop_items.insert(created);
+                self.save_desktop_grid_layout();
             }
             Err(err) => {
                 warn!(?err, "Failed to create Desktop folder");
