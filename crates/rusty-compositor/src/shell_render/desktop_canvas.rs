@@ -69,7 +69,7 @@ impl DesktopRubberBand {
     }
 }
 
-/// Active desktop icon drag state (`RUSTYOS-082`).
+/// Active desktop icon drag state (`RUSTYOS-082`/`RUSTYOS-083`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct DesktopDragState {
     /// Original pointer location when drag began.
@@ -82,6 +82,19 @@ pub struct DesktopDragState {
     pub is_active: bool,
     /// Destination directory path if currently hovering over another folder to drop into it.
     pub target_hover_dir: Option<PathBuf>,
+    /// True when hovering over the Trash icon in Dock to drop and delete (`RUSTYOS-083`).
+    pub drop_to_trash: bool,
+}
+
+/// In-place text renaming state for a desktop canvas file or folder (`RUSTYOS-083`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DesktopInlineRename {
+    /// Full filesystem path of the item being renamed.
+    pub target_path: PathBuf,
+    /// Editable text buffer.
+    pub buffer: String,
+    /// Text cursor position in characters.
+    pub cursor_pos: usize,
 }
 
 /// Computes the bounding rectangle for a specific desktop grid cell `(col, row)`.
@@ -248,6 +261,7 @@ pub fn render_desktop_canvas_elements(
     selected_paths: &HashSet<PathBuf>,
     drag_state: Option<&DesktopDragState>,
     rubber_band: Option<&DesktopRubberBand>,
+    inline_rename: Option<&DesktopInlineRename>,
     screen_size: Size<i32, Logical>,
     dock_height: i32,
     elements: &mut Vec<CompositorRenderElement>,
@@ -276,6 +290,7 @@ pub fn render_desktop_canvas_elements(
     if let Some(drag) = drag_state
         && drag.is_active
         && drag.target_hover_dir.is_none()
+        && !drag.drop_to_trash
     {
         let snap_slot = cell_at_point(drag.current_pointer, screen_size, dock_height);
         let snap_rect = compute_desktop_cell_rect(snap_slot.0, snap_slot.1, screen_size);
@@ -316,7 +331,13 @@ pub fn render_desktop_canvas_elements(
         let icon_y = rect.loc.y + 4;
         let icon_loc = Point::from((icon_x, icon_y));
 
-        let short_name = truncate_ascii(&item.name, 16);
+        let is_renaming = inline_rename.is_some_and(|r| r.target_path == item.path);
+        let display_text =
+            if let Some(rename) = inline_rename.filter(|r| r.target_path == item.path) {
+                truncate_ascii(&rename.buffer, 22)
+            } else {
+                truncate_ascii(&item.name, 16)
+            };
         let label_bounds = Rectangle::new(
             Point::from((rect.loc.x + 2, icon_y + DESKTOP_ICON_SIZE + 6)),
             Size::from((rect.size.w - 4, 24)),
@@ -325,7 +346,7 @@ pub fn render_desktop_canvas_elements(
         // FRONT: Crisp white text foreground (12px Inter Bold/SemiBold)
         if let Some(text_el) = text_cache.render_label_centered_weighted(
             renderer,
-            &short_name,
+            &display_text,
             crate::text::FontWeight::Bold,
             12.0,
             [255, 255, 255, 255],
@@ -334,8 +355,26 @@ pub fn render_desktop_canvas_elements(
             elements.push(CompositorRenderElement::Memory(text_el));
         }
 
-        // BEHIND TEXT: Soft diffused drop shadow for legibility over wallpapers (only when unselected)
-        if !is_selected {
+        // BEHIND TEXT: If renaming, show focused input box; else if unselected, soft ambient shadow
+        if is_renaming {
+            let input_rect = Rectangle::new(
+                Point::from((label_bounds.loc.x - 4, label_bounds.loc.y - 1)),
+                Size::from((label_bounds.size.w + 8, label_bounds.size.h + 2)),
+            );
+            let phys_input = Rectangle::new(
+                input_rect.loc.to_physical_precise_round(1),
+                input_rect.size.to_physical_precise_round(1),
+            );
+            super::tokens::push_rounded_glass_box(
+                elements,
+                shape_cache,
+                renderer,
+                phys_input,
+                6,
+                [20, 24, 34, 230],
+                Some([0, 122, 255, 220]),
+            );
+        } else if !is_selected {
             for (dx, dy, alpha) in [(0, 1, 90u8), (0, 2, 45u8), (-1, 0, 35u8), (1, 0, 35u8)] {
                 let shadow_bounds = Rectangle::new(
                     Point::from((label_bounds.loc.x + dx, label_bounds.loc.y + dy)),
@@ -343,7 +382,7 @@ pub fn render_desktop_canvas_elements(
                 );
                 if let Some(shadow_el) = text_cache.render_label_centered_weighted(
                     renderer,
-                    &short_name,
+                    &display_text,
                     crate::text::FontWeight::Bold,
                     12.0,
                     [0, 0, 0, alpha],
@@ -406,7 +445,7 @@ pub fn render_desktop_canvas_elements(
                 [0, 122, 255, 50],
                 Some([0, 122, 255, 200]),
             );
-        } else if is_selected {
+        } else if is_selected && !is_renaming {
             let phys_rect = Rectangle::new(
                 rect.loc.to_physical_precise_round(1),
                 rect.size.to_physical_precise_round(1),

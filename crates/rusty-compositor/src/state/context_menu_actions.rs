@@ -1301,6 +1301,65 @@ impl RustyCompositorState {
         }
     }
 
+    /// Commits the active desktop in-place rename if the new name is valid (`RUSTYOS-083`).
+    pub fn commit_desktop_inline_rename(&mut self) {
+        let Some(rename) = self.desktop_inline_rename.take() else {
+            return;
+        };
+        let new_name = rename.buffer.trim();
+        if new_name.is_empty() || new_name.contains('/') || new_name.contains('\0') {
+            self.show_osd("Invalid file name", None, false);
+            self.shell_redraw_needed = true;
+            return;
+        }
+        let Some(parent) = rename.target_path.parent() else {
+            return;
+        };
+        let new_path = parent.join(new_name);
+        if new_path == rename.target_path {
+            self.shell_redraw_needed = true;
+            return;
+        }
+        if new_path.exists() {
+            self.show_osd("File already exists", None, false);
+            self.shell_redraw_needed = true;
+            return;
+        }
+        if let Err(err) = fs::rename(&rename.target_path, &new_path) {
+            warn!(?err, "Failed to rename desktop file");
+            self.show_osd("Rename failed", None, false);
+        } else {
+            self.selected_desktop_items.remove(&rename.target_path);
+            self.selected_desktop_items.insert(new_path);
+            self.resync_desktop_items();
+            self.save_desktop_grid_layout();
+        }
+        self.shell_redraw_needed = true;
+    }
+
+    /// Moves all currently selected desktop items to Trash (`RUSTYOS-083`).
+    pub fn move_selected_desktop_items_to_trash(&mut self) {
+        let Some(trash_root) = resolve_trash_root() else {
+            self.show_osd("Trash unavailable", None, false);
+            return;
+        };
+        let mut count = 0;
+        let paths: Vec<PathBuf> = self.selected_desktop_items.iter().cloned().collect();
+        for path in paths {
+            if rusty_services::file_manager::move_to_trash(&path, &trash_root).is_ok() {
+                count += 1;
+                self.selected_desktop_items.remove(&path);
+            }
+        }
+        if count > 0 {
+            self.show_osd(format!("Moved to Trash: {count}"), None, false);
+            self.resync_desktop_items();
+            self.save_desktop_grid_layout();
+            self.update_trash_full_status();
+        }
+        self.shell_redraw_needed = true;
+    }
+
     fn toggle_dock_app_autostart(&mut self, hit: DockHit) {
         let Some(app_key) = self.dock_key_for_hit(hit) else {
             return;

@@ -243,32 +243,42 @@ impl RustyCompositorState {
             return;
         }
 
-        if let Some(ref mut drag) = self.desktop_drag {
-            drag.current_pointer = pos;
-            let dx = pos.x - drag.start_pointer.x;
-            let dy = pos.y - drag.start_pointer.y;
-            if (dx * dx + dy * dy) >= 25.0 {
-                drag.is_active = true;
-            }
-            if drag.is_active {
-                let primary_entry = self.output_map.primary();
-                let primary_geo = primary_entry.logical_geometry();
-                let local_pos = Point::from((
-                    pos.x - f64::from(primary_geo.loc.x),
-                    pos.y - f64::from(primary_geo.loc.y),
-                ));
-                let screen_size = primary_geo.size;
-                let hit_folder = crate::shell_render::hit_test_desktop_item(
-                    &self.desktop_items,
-                    screen_size,
-                    crate::shell_render::DOCK_HEIGHT,
-                    local_pos,
-                )
-                .and_then(|idx| self.desktop_items.get(idx))
-                .filter(|it| it.is_dir && it.path != drag.dragged_path)
-                .map(|it| it.path.clone());
+        if self.desktop_drag.is_some() {
+            let primary_entry = self.output_map.primary();
+            let primary_geo = primary_entry.logical_geometry();
+            let local_pos = Point::from((
+                pos.x - f64::from(primary_geo.loc.x),
+                pos.y - f64::from(primary_geo.loc.y),
+            ));
+            let screen_size = primary_geo.size;
+            let tiles = self.build_dock_tiles();
+            let layout = self.active_dock_layout(&tiles);
+            let drop_to_trash =
+                crate::shell_render::check_dock_layout_slot(&layout, local_pos.x, local_pos.y)
+                    .and_then(|idx| layout.slots.get(idx))
+                    .is_some_and(|slot| slot.tile.hit == crate::shell_render::DockHit::PinnedTrash);
 
-                drag.target_hover_dir = hit_folder;
+            if let Some(ref mut drag) = self.desktop_drag {
+                drag.current_pointer = pos;
+                let dx = pos.x - drag.start_pointer.x;
+                let dy = pos.y - drag.start_pointer.y;
+                if (dx * dx + dy * dy) >= 25.0 {
+                    drag.is_active = true;
+                }
+                if drag.is_active {
+                    let hit_folder = crate::shell_render::hit_test_desktop_item(
+                        &self.desktop_items,
+                        screen_size,
+                        crate::shell_render::DOCK_HEIGHT,
+                        local_pos,
+                    )
+                    .and_then(|idx| self.desktop_items.get(idx))
+                    .filter(|it| it.is_dir && it.path != drag.dragged_path)
+                    .map(|it| it.path.clone());
+
+                    drag.target_hover_dir = hit_folder;
+                    drag.drop_to_trash = drop_to_trash;
+                }
             }
             self.shell_redraw_needed = true;
             return;
@@ -358,6 +368,24 @@ impl RustyCompositorState {
                 && let Some(drag) = self.desktop_drag.take()
                 && drag.is_active
             {
+                if drag.drop_to_trash {
+                    if let Some(trash_root) =
+                        crate::state::context_menu_actions::resolve_trash_root()
+                        && rusty_services::file_manager::move_to_trash(
+                            &drag.dragged_path,
+                            &trash_root,
+                        )
+                        .is_ok()
+                    {
+                        self.show_osd("Moved to Trash", None, false);
+                        self.selected_desktop_items.remove(&drag.dragged_path);
+                        self.resync_desktop_items();
+                        self.save_desktop_grid_layout();
+                        self.update_trash_full_status();
+                    }
+                    self.shell_redraw_needed = true;
+                    return;
+                }
                 if let Some(dest_dir) = drag.target_hover_dir {
                     if let Some(file_name) = drag.dragged_path.file_name() {
                         let dest_path = dest_dir.join(file_name);
@@ -714,6 +742,10 @@ impl RustyCompositorState {
                     None
                 };
 
+                if self.desktop_inline_rename.is_some() {
+                    self.commit_desktop_inline_rename();
+                }
+
                 if let Some(item) = hit_item {
                     if button == 272 {
                         let now = std::time::Instant::now();
@@ -729,6 +761,29 @@ impl RustyCompositorState {
                             self.desktop_drag = None;
                             self.open_desktop_canvas_item(&item);
                         } else {
+                            let was_already_selected = self.selected_desktop_items.len() == 1
+                                && self.selected_desktop_items.contains(&item.path);
+                            let slow_click_rename = was_already_selected
+                                && self.last_desktop_click.as_ref().is_some_and(|(p, t)| {
+                                    p == &item.path
+                                        && (500..2500).contains(&now.duration_since(*t).as_millis())
+                                });
+
+                            if slow_click_rename
+                                && let Some(name) = item.path.file_name().and_then(|f| f.to_str())
+                            {
+                                let len = name.chars().count();
+                                self.desktop_inline_rename =
+                                    Some(crate::shell_render::DesktopInlineRename {
+                                        target_path: item.path.clone(),
+                                        buffer: name.to_owned(),
+                                        cursor_pos: len,
+                                    });
+                                self.last_desktop_click = None;
+                                self.shell_redraw_needed = true;
+                                return;
+                            }
+
                             if !self.selected_desktop_items.contains(&item.path) {
                                 self.selected_desktop_items.clear();
                                 self.selected_desktop_items.insert(item.path.clone());
@@ -739,6 +794,7 @@ impl RustyCompositorState {
                                 dragged_path: item.path.clone(),
                                 is_active: false,
                                 target_hover_dir: None,
+                                drop_to_trash: false,
                             });
                             self.last_desktop_click = Some((item.path, now));
                             self.shell_redraw_needed = true;

@@ -1334,7 +1334,7 @@ impl RustyCompositorState {
         }
 
         self.push_unpinned_and_minimized_tiles(&records, &pinned_keys, &mut tiles);
-        crate::shell_render::append_utility_dock_tiles(&mut tiles);
+        crate::shell_render::append_utility_dock_tiles(&mut tiles, self.trash_has_items);
         tiles
     }
 

@@ -96,6 +96,16 @@ pub(super) enum KeyIntercept {
     Media(MediaAction),
     TakeScreenshot(crate::screenshot::ScreenshotRequest),
     Wm(WmAction),
+    DesktopStartInlineRename,
+    DesktopInlineRenameCancel,
+    DesktopInlineRenameCommit,
+    DesktopInlineRenameBackspace,
+    DesktopInlineRenameDelete,
+    DesktopInlineRenameMoveLeft,
+    DesktopInlineRenameMoveRight,
+    DesktopInlineRenameInsert(String),
+    DesktopInlineRenameConsume,
+    DesktopMoveSelectedToTrash,
 }
 
 impl RustyCompositorState {

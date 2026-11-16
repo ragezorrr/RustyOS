@@ -121,6 +121,8 @@ pub enum BuiltinAppIcon {
     Downloads,
     /// Free-standing tapered frosted silver Trash wastebasket (`RUSTYOS-050`).
     Trash,
+    /// Free-standing frosted silver Trash wastebasket filled with crumpled paper (`RUSTYOS-083`).
+    TrashFull,
     /// Original amethyst-glass RustyOS crest squircle for system notifications (`RUSTYOS-051`).
     RustySystem,
     /// Golden Gate azure Software Update squircle (`RUSTYOS-077`).
@@ -702,7 +704,7 @@ fn sample_downloads_uv(u: f32, v: f32, edge: f32) -> [f32; 4] {
     col
 }
 
-fn sample_trash_uv(u: f32, v: f32, edge: f32) -> [f32; 4] {
+fn sample_trash_uv(u: f32, v: f32, edge: f32, is_full: bool) -> [f32; 4] {
     let mut col = [0.0_f32; 4];
     let body_top = 0.22_f32;
     let body_bot = 0.84_f32;
@@ -739,6 +741,25 @@ fn sample_trash_uv(u: f32, v: f32, edge: f32) -> [f32; 4] {
         let h_rgb = lerp_rgb([64.0, 68.0, 78.0], [116.0, 122.0, 134.0], (u - 0.22) * 1.4);
         col = blend_rgba(col, [h_rgb[0], h_rgb[1], h_rgb[2], hollow_cov * 0.88]);
     }
+    if is_full {
+        // Crumpled white paper sticking out of the hollow opening (RUSTYOS-083)
+        let p1 = sq_sd_ellipse(u, v, 0.43, 0.20, 0.052, 0.052);
+        let p2 = sq_sd_ellipse(u, v, 0.55, 0.19, 0.058, 0.058);
+        let p3 = sq_sd_ellipse(u, v, 0.49, 0.16, 0.046, 0.046);
+        let paper_sd = p1.min(p2).min(p3);
+        let paper_cov = sq_cov(paper_sd, edge);
+        if paper_cov > 0.0 {
+            let paper_rgb = lerp_rgb(
+                [246.0, 248.0, 252.0],
+                [210.0, 216.0, 226.0],
+                (v - 0.13) * 6.0,
+            );
+            col = blend_rgba(
+                col,
+                [paper_rgb[0], paper_rgb[1], paper_rgb[2], paper_cov * 0.96],
+            );
+        }
+    }
     let rim_ring = (top_rim.abs() - 0.010).max(0.0) - 0.002;
     let rim_cov = sq_cov(rim_ring, edge);
     if rim_cov > 0.0 {
@@ -751,7 +772,8 @@ fn sample_trash_uv(u: f32, v: f32, edge: f32) -> [f32; 4] {
 fn sample_squircle_uv(u: f32, v: f32, edge: f32, icon: BuiltinAppIcon) -> [f32; 4] {
     match icon {
         BuiltinAppIcon::Downloads => return sample_downloads_uv(u, v, edge),
-        BuiltinAppIcon::Trash => return sample_trash_uv(u, v, edge),
+        BuiltinAppIcon::Trash => return sample_trash_uv(u, v, edge, false),
+        BuiltinAppIcon::TrashFull => return sample_trash_uv(u, v, edge, true),
         _ => {}
     }
 
@@ -770,7 +792,9 @@ fn sample_squircle_uv(u: f32, v: f32, edge: f32, icon: BuiltinAppIcon) -> [f32; 
         BuiltinAppIcon::Settings => ([178.0, 182.0, 190.0], [114.0, 118.0, 128.0]),
         BuiltinAppIcon::RustySystem => ([152.0, 102.0, 252.0], [76.0, 34.0, 154.0]),
         BuiltinAppIcon::Updater => ([54.0, 172.0, 255.0], [0.0, 110.0, 245.0]),
-        BuiltinAppIcon::Downloads | BuiltinAppIcon::Trash => ([0.0; 3], [0.0; 3]),
+        BuiltinAppIcon::Downloads | BuiltinAppIcon::Trash | BuiltinAppIcon::TrashFull => {
+            ([0.0; 3], [0.0; 3])
+        }
         BuiltinAppIcon::WindowFallback { hue_seed, active } => {
             let palettes: [([f32; 3], [f32; 3]); 4] = [
                 ([139.0, 92.0, 246.0], [76.0, 29.0, 149.0]),
@@ -1033,7 +1057,7 @@ fn paint_squircle_glyph(
                 col = blend_rgba(col, [255.0, 255.0, 255.0, motif_cov * 0.96]);
             }
         }
-        BuiltinAppIcon::Downloads | BuiltinAppIcon::Trash => {}
+        BuiltinAppIcon::Downloads | BuiltinAppIcon::Trash | BuiltinAppIcon::TrashFull => {}
         BuiltinAppIcon::WindowFallback { .. } => {
             let win = sq_sd_rounded_box(u, v, 0.50, 0.51, 0.27, 0.22, 0.05);
             let win_cov = sq_cov(win, edge);

@@ -167,7 +167,8 @@ impl RustyCompositorState {
             }
             KeyIntercept::LockScreenConsume
             | KeyIntercept::LauncherConsume
-            | KeyIntercept::SwitcherConsume => {}
+            | KeyIntercept::SwitcherConsume
+            | KeyIntercept::DesktopInlineRenameConsume => {}
             KeyIntercept::Security(action) => {
                 self.dispatch_security_key_intercept(action, serial);
             }
@@ -290,6 +291,77 @@ impl RustyCompositorState {
             KeyIntercept::Wm(wm_action) => {
                 self.apply_wm_action(wm_action, serial);
             }
+            KeyIntercept::DesktopStartInlineRename => {
+                if self.selected_desktop_items.len() == 1
+                    && let Some(path) = self.selected_desktop_items.iter().next()
+                    && let Some(name) = path.file_name().and_then(|f| f.to_str())
+                {
+                    let len = name.chars().count();
+                    self.desktop_inline_rename = Some(crate::shell_render::DesktopInlineRename {
+                        target_path: path.clone(),
+                        buffer: name.to_owned(),
+                        cursor_pos: len,
+                    });
+                    self.shell_redraw_needed = true;
+                }
+            }
+            KeyIntercept::DesktopInlineRenameCancel => {
+                self.desktop_inline_rename = None;
+                self.shell_redraw_needed = true;
+            }
+            KeyIntercept::DesktopInlineRenameCommit => {
+                self.commit_desktop_inline_rename();
+            }
+            KeyIntercept::DesktopInlineRenameBackspace => {
+                if let Some(ref mut rename) = self.desktop_inline_rename
+                    && rename.cursor_pos > 0
+                {
+                    let mut chars: Vec<char> = rename.buffer.chars().collect();
+                    rename.cursor_pos -= 1;
+                    if rename.cursor_pos < chars.len() {
+                        chars.remove(rename.cursor_pos);
+                        rename.buffer = chars.into_iter().collect();
+                        self.shell_redraw_needed = true;
+                    }
+                }
+            }
+            KeyIntercept::DesktopInlineRenameDelete => {
+                if let Some(ref mut rename) = self.desktop_inline_rename {
+                    let mut chars: Vec<char> = rename.buffer.chars().collect();
+                    if rename.cursor_pos < chars.len() {
+                        chars.remove(rename.cursor_pos);
+                        rename.buffer = chars.into_iter().collect();
+                        self.shell_redraw_needed = true;
+                    }
+                }
+            }
+            KeyIntercept::DesktopInlineRenameMoveLeft => {
+                if let Some(ref mut rename) = self.desktop_inline_rename {
+                    rename.cursor_pos = rename.cursor_pos.saturating_sub(1);
+                    self.shell_redraw_needed = true;
+                }
+            }
+            KeyIntercept::DesktopInlineRenameMoveRight => {
+                if let Some(ref mut rename) = self.desktop_inline_rename {
+                    let max_pos = rename.buffer.chars().count();
+                    rename.cursor_pos = (rename.cursor_pos + 1).min(max_pos);
+                    self.shell_redraw_needed = true;
+                }
+            }
+            KeyIntercept::DesktopInlineRenameInsert(text) => {
+                if let Some(ref mut rename) = self.desktop_inline_rename {
+                    let mut chars: Vec<char> = rename.buffer.chars().collect();
+                    let ins_chars: Vec<char> = text.chars().collect();
+                    let ins_len = ins_chars.len();
+                    chars.splice(rename.cursor_pos..rename.cursor_pos, ins_chars);
+                    rename.cursor_pos += ins_len;
+                    rename.buffer = chars.into_iter().collect();
+                    self.shell_redraw_needed = true;
+                }
+            }
+            KeyIntercept::DesktopMoveSelectedToTrash => {
+                self.move_selected_desktop_items_to_trash();
+            }
         }
     }
 
@@ -359,6 +431,7 @@ impl RustyCompositorState {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 pub(super) fn classify_keyboard_input(
     state: &RustyCompositorState,
     shortcuts_inhibited: bool,
@@ -415,6 +488,39 @@ pub(super) fn classify_keyboard_input(
     {
         return FilterResult::Intercept(hw);
     }
+    if state.desktop_inline_rename.is_some() {
+        if key_state != KeyState::Pressed {
+            return FilterResult::Intercept(KeyIntercept::DesktopInlineRenameConsume);
+        }
+        if sym.raw() == Keysym::Escape.raw() {
+            return FilterResult::Intercept(KeyIntercept::DesktopInlineRenameCancel);
+        }
+        if sym.raw() == Keysym::Return.raw() || sym.raw() == Keysym::KP_Enter.raw() {
+            return FilterResult::Intercept(KeyIntercept::DesktopInlineRenameCommit);
+        }
+        if sym.raw() == Keysym::BackSpace.raw() {
+            return FilterResult::Intercept(KeyIntercept::DesktopInlineRenameBackspace);
+        }
+        if sym.raw() == Keysym::Delete.raw() {
+            return FilterResult::Intercept(KeyIntercept::DesktopInlineRenameDelete);
+        }
+        if sym.raw() == Keysym::Left.raw() {
+            return FilterResult::Intercept(KeyIntercept::DesktopInlineRenameMoveLeft);
+        }
+        if sym.raw() == Keysym::Right.raw() {
+            return FilterResult::Intercept(KeyIntercept::DesktopInlineRenameMoveRight);
+        }
+        if let Some(text) = utf8 {
+            let filtered: String = text
+                .chars()
+                .filter(|c| !c.is_control() && *c != '/' && *c != '\0')
+                .collect();
+            if !filtered.is_empty() {
+                return FilterResult::Intercept(KeyIntercept::DesktopInlineRenameInsert(filtered));
+            }
+        }
+        return FilterResult::Intercept(KeyIntercept::DesktopInlineRenameConsume);
+    }
     if state.context_menu.is_some() {
         return classify_context_menu_key(modifiers, sym, key_state);
     }
@@ -461,6 +567,25 @@ pub(super) fn classify_keyboard_input(
     }
     if !state.active_popup_grabs.is_empty() && sym.raw() == Keysym::Escape.raw() {
         return FilterResult::Intercept(KeyIntercept::DismissPopups);
+    }
+    if state.desktop_focused
+        || (state.keyboard.current_focus().is_none() && !state.has_blocking_shell_overlay())
+    {
+        if (sym.raw() == Keysym::Return.raw() || sym.raw() == Keysym::KP_Enter.raw())
+            && !modifiers.ctrl
+            && !modifiers.alt
+            && !modifiers.logo
+            && state.selected_desktop_items.len() == 1
+        {
+            return FilterResult::Intercept(KeyIntercept::DesktopStartInlineRename);
+        }
+        if (sym.raw() == Keysym::Delete.raw()
+            || (modifiers.logo
+                && (sym.raw() == Keysym::BackSpace.raw() || sym.raw() == Keysym::Delete.raw())))
+            && !state.selected_desktop_items.is_empty()
+        {
+            return FilterResult::Intercept(KeyIntercept::DesktopMoveSelectedToTrash);
+        }
     }
     if let Some(action) = match_shortcut(modifiers, sym) {
         FilterResult::Intercept(action)

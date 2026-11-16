@@ -486,12 +486,12 @@ pub(super) fn build_default_dock_tiles(
             fallback_title: w.title.clone(),
         });
     }
-    append_utility_dock_tiles(&mut tiles);
+    append_utility_dock_tiles(&mut tiles, false);
     tiles
 }
 
-/// Appends the right-side utility slots (`Downloads`, `Trash`) to `tiles` (`RUSTYOS-073`).
-pub fn append_utility_dock_tiles(tiles: &mut Vec<DockAppTile>) {
+/// Appends the right-side utility slots (`Downloads`, `Trash`) to `tiles` (`RUSTYOS-073`/`RUSTYOS-083`).
+pub fn append_utility_dock_tiles(tiles: &mut Vec<DockAppTile>, trash_has_items: bool) {
     tiles.push(DockAppTile {
         section: DockSection::Utility,
         app_key: "downloads".to_owned(),
@@ -507,12 +507,17 @@ pub fn append_utility_dock_tiles(tiles: &mut Vec<DockAppTile>) {
         toplevel_icon: None,
         fallback_title: "Downloads".to_owned(),
     });
+    let trash_icon = if trash_has_items {
+        crate::icons::BuiltinAppIcon::TrashFull
+    } else {
+        crate::icons::BuiltinAppIcon::Trash
+    };
     tiles.push(DockAppTile {
         section: DockSection::Utility,
         app_key: "trash".to_owned(),
         label: "Trash".to_owned(),
         hit: DockHit::PinnedTrash,
-        builtin_icon: Some(crate::icons::BuiltinAppIcon::Trash),
+        builtin_icon: Some(trash_icon),
         representative_win: None,
         window_count: 0,
         has_minimized: false,

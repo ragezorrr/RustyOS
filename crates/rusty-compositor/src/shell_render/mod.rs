@@ -55,7 +55,7 @@ pub use context_menu::{
     update_context_menu_hover,
 };
 pub use desktop_canvas::{
-    DesktopCanvasItem, DesktopDragState, DesktopRubberBand, cell_at_point,
+    DesktopCanvasItem, DesktopDragState, DesktopInlineRename, DesktopRubberBand, cell_at_point,
     compute_desktop_cell_rect, compute_desktop_item_rect, hit_test_desktop_item,
     load_desktop_grid_positions, render_desktop_canvas_elements, save_desktop_grid_positions,
 };

@@ -751,6 +751,7 @@ fn build_backdrop_render_elements(
                 &state.selected_desktop_items,
                 state.desktop_drag.as_ref(),
                 state.desktop_rubber_band.as_ref(),
+                state.desktop_inline_rename.as_ref(),
                 Size::<i32, Logical>::from((output_geo.size.w.max(1), output_geo.size.h.max(1))),
                 crate::shell_render::DOCK_HEIGHT,
                 &mut backdrop_list,

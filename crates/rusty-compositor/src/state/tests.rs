@@ -792,6 +792,7 @@ fn desktop_grid_drag_drop_and_rubber_band() -> Result<(), Box<dyn Error>> {
         dragged_path: file_txt.clone(),
         is_active: true,
         target_hover_dir: Some(folder_a.clone()),
+        drop_to_trash: false,
     };
     if let Some(dest_dir) = drag.target_hover_dir {
         let dest = dest_dir.join(drag.dragged_path.file_name().ok_or("file name")?);
@@ -799,6 +800,77 @@ fn desktop_grid_drag_drop_and_rubber_band() -> Result<(), Box<dyn Error>> {
         assert!(dest.exists());
         assert!(!file_txt.exists());
     }
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    Ok(())
+}
+
+#[test]
+fn desktop_inline_rename_and_trash_workflow() -> Result<(), Box<dyn Error>> {
+    use crate::icons::BuiltinAppIcon;
+    use crate::shell_render::{DesktopInlineRename, append_utility_dock_tiles};
+
+    let mut display: Display<RustyCompositorState> = Display::new()?;
+    let mut event_loop: EventLoop<RustyCompositorState> = EventLoop::try_new()?;
+    let mut compositor = RustyCompositorState::new(
+        &display,
+        "wayland-rustyos-desktop-rename-trash-test".to_owned(),
+        event_loop.get_signal(),
+        event_loop.handle(),
+        (1280, 800).into(),
+    )?;
+    let _ = (&mut display, &mut event_loop);
+
+    let temp_dir = std::env::temp_dir().join(format!("rustyos-rename-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    std::fs::create_dir_all(&temp_dir)?;
+
+    // 1. Inline rename
+    let old_file = temp_dir.join("OldName.txt");
+    std::fs::write(&old_file, "text data")?;
+    compositor.selected_desktop_items.insert(old_file.clone());
+
+    compositor.desktop_inline_rename = Some(DesktopInlineRename {
+        target_path: old_file.clone(),
+        buffer: "NewDocument.txt".to_owned(),
+        cursor_pos: 15,
+    });
+    compositor.commit_desktop_inline_rename();
+
+    let new_file = temp_dir.join("NewDocument.txt");
+    assert!(!old_file.exists());
+    assert!(new_file.exists());
+    assert!(compositor.selected_desktop_items.contains(&new_file));
+    assert!(compositor.desktop_inline_rename.is_none());
+
+    // 2. Reject invalid rename (slash or empty)
+    compositor.desktop_inline_rename = Some(DesktopInlineRename {
+        target_path: new_file.clone(),
+        buffer: "bad/name.txt".to_owned(),
+        cursor_pos: 12,
+    });
+    compositor.commit_desktop_inline_rename();
+    assert!(new_file.exists());
+
+    // 3. Dynamic Dock Trash icons based on trash_has_items
+    let mut tiles_empty = Vec::new();
+    append_utility_dock_tiles(&mut tiles_empty, false);
+    let trash_tile_empty = tiles_empty
+        .iter()
+        .find(|t| t.app_key == "trash")
+        .ok_or("trash tile")?;
+    assert_eq!(trash_tile_empty.builtin_icon, Some(BuiltinAppIcon::Trash));
+
+    let mut tiles_full = Vec::new();
+    append_utility_dock_tiles(&mut tiles_full, true);
+    let trash_tile_full = tiles_full
+        .iter()
+        .find(|t| t.app_key == "trash")
+        .ok_or("trash tile")?;
+    assert_eq!(
+        trash_tile_full.builtin_icon,
+        Some(BuiltinAppIcon::TrashFull)
+    );
 
     let _ = std::fs::remove_dir_all(&temp_dir);
     Ok(())

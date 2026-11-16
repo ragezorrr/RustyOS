@@ -1297,6 +1297,31 @@ hardware/software context и низкие накладные расходы.
   - `cargo test --workspace --locked -- --test-threads=1` (`225 passed; 0 failed`)
 - **Risks:** Нет.
 
+### RUSTYOS-083 — Полный жизненный цикл файлов рабочего стола: инлайн-переименование, удаление в корзину и Drag-and-Drop в Dock
+
+- **Status:** Done (`RUSTYOS-083 Вариант 1` — утверждённый объём выполнен)
+- **Goal:** Реализовать полноценный жизненный цикл файлов и папок рабочего стола в парадигме macOS Golden Gate: инлайн-переименование имени по клавише `Enter` или клику с фокусной плашкой и валидацией `fs::rename`, удаление выделенных файлов в Корзину по клавишам `Delete` или `Super+Backspace` с OSD-уведомлением, интерактивный Drag-and-Drop иконок рабочего стола в иконку Корзины Dock с динамической сменой иконки на `TrashFull` (скомканная бумага) и сохранением контекстной очистки Корзины.
+- **Dependencies:** `RUSTYOS-082`.
+- **Scope:**
+  - `crates/rusty-compositor/src/shell_render/desktop_canvas.rs`: структура `DesktopInlineRename` (целевой путь, текстовый буфер, позиция курсора); отрисовка фокусного поля ввода вокруг редактируемой подписи (`[20, 24, 34, 230]` с акцентной каймой `#007AFF`); скрытие рамки выделения при активном переименовании; поле `drop_to_trash` в `DesktopDragState` и подавление подсветки ячеек при наведении на Корзину.
+  - `crates/rusty-compositor/src/icons.rs`: поддержка динамической иконки `BuiltinAppIcon::TrashFull` (визуализация скомканной бумаги поверх металлической корзины) и выбор между пустой и заполненной корзиной в зависимости от содержимого `~/.local/share/Trash`.
+  - `crates/rusty-compositor/src/shell_render/dock.rs`: параметр `trash_has_items: bool` в `append_utility_dock_tiles` для автоматического переключения иконки корзины.
+  - `crates/rusty-compositor/src/state/mod.rs` и `state/shell_actions.rs`: поля `desktop_inline_rename: Option<DesktopInlineRename>` и `trash_has_items: bool` в `RustyCompositorState`, метод `update_trash_full_status()`.
+  - `crates/rusty-compositor/src/state/context_menu_actions.rs`: методы `commit_desktop_inline_rename()` (валидация спецсимволов `/`, `\0`, проверка коллизий, переименование `fs::rename` и перенос позиции сетки) и `move_selected_desktop_items_to_trash()` (перемещение всех выбранных объектов в `~/.local/share/Trash` с OSD «Moved to Trash»).
+  - `crates/rusty-compositor/src/input/keyboard.rs`: перехват клавиш при активном переименовании (`Enter` — коммит, `Escape` — отмена, стрелки `Left`/`Right`, `Backspace`, `Delete`, ввод символов) и горячие клавиши рабочего стола (`Enter` — начало переименования, `Delete` / `Super+Backspace` — перемещение в корзину).
+  - `crates/rusty-compositor/src/input/pointer.rs`: детекция наведения перетаскиваемой иконки на слот Корзины в Dock (`drop_to_trash = true`), при отпускании — вызов `move_to_trash`, обновление состояния корзины и удаление из сетки.
+  - `crates/rusty-compositor/src/state/tests.rs`: unit-тест `desktop_inline_rename_and_trash_workflow` для полного цикла переименования, горячих клавиш удаления и смены иконки корзины.
+- **Acceptance Criteria:**
+  - При выделенной иконке нажатие `Enter` активирует инлайн-редактирование имени в фокусной плашке;
+  - Повторный `Enter` или клик вне поля сохраняет новое имя с вызовом `fs::rename` и обновлением сетки; `Escape` отменяет ввод;
+  - Нажатие `Delete` или `Super+Backspace` перемещает выделенные элементы в `~/.local/share/Trash` с показом OSD;
+  - Перетаскивание файла рабочего стола на иконку Корзины в Dock и отпускание перемещает файл в Корзину;
+  - Иконка Корзины в Dock динамически переключается на заполненную (`TrashFull`) при наличии файлов.
+- **Tests:**
+  - `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo build --workspace --bins --locked`
+  - `cargo test --workspace --locked -- --test-threads=1` (`225 passed; 0 failed`)
+- **Risks:** Нет.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

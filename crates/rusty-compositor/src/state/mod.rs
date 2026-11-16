@@ -519,6 +519,10 @@ pub struct RustyCompositorState {
     pub desktop_drag: Option<crate::shell_render::DesktopDragState>,
     /// Active rubber-band selection box (`RUSTYOS-082`).
     pub desktop_rubber_band: Option<crate::shell_render::DesktopRubberBand>,
+    /// Active in-place text renaming state for desktop canvas item (`RUSTYOS-083`).
+    pub desktop_inline_rename: Option<crate::shell_render::DesktopInlineRename>,
+    /// Whether Trash wastebasket contains files (`RUSTYOS-083`).
+    pub trash_has_items: bool,
     /// Last clicked desktop canvas item and timestamp for double-click detection (`RUSTYOS-081`).
     pub last_desktop_click: Option<(std::path::PathBuf, std::time::Instant)>,
     /// Last time desktop directory was scanned for canvas items (`RUSTYOS-081`).
@@ -923,6 +927,9 @@ impl RustyCompositorState {
             selected_desktop_items: std::collections::HashSet::new(),
             desktop_drag: None,
             desktop_rubber_band: None,
+            desktop_inline_rename: None,
+            trash_has_items: crate::state::context_menu_actions::resolve_trash_root()
+                .is_some_and(|r| crate::state::context_menu_actions::trash_item_count(&r) > 0),
             last_desktop_click: None,
             desktop_last_scan: std::time::Instant::now(),
             top_bar_menu_hover_row: None,
@@ -1344,6 +1351,16 @@ impl RustyCompositorState {
                 }
             }
             crate::shell_render::save_desktop_grid_positions(&grid_path, &map);
+        }
+    }
+
+    /// Updates cached trash status and requests shell redraw if changed (`RUSTYOS-083`).
+    pub fn update_trash_full_status(&mut self) {
+        let has_items = crate::state::context_menu_actions::resolve_trash_root()
+            .is_some_and(|root| crate::state::context_menu_actions::trash_item_count(&root) > 0);
+        if self.trash_has_items != has_items {
+            self.trash_has_items = has_items;
+            self.shell_redraw_needed = true;
         }
     }
 
