@@ -89,21 +89,15 @@ Event loop не должен блокироваться тяжёлыми опе�
   `connectivity`, `media`, `display_session`, `auth`, `logind`, `polkit`,
   `portal`, `file_manager`, `image_decode`.
 
-### Системные приложения (`apps/rusty-files`)
+### Системные приложения (`apps/rusty-files`, `apps/rusty-updater`)
 
-- Самостоятельный Wayland-клиент на базе `smithay-client-toolkit` и
-  `fontdue` в эстетике macOS 27 (Golden Gate, светлая палитра по умолчанию
-  и переключатель `Light <-> Dark`);
-- Этапы A и B: плавающий sidebar (Favorites, Locations, Tags), все четыре
-  режима (**Icons**, **List**, **Columns** Miller + Preview, **Gallery** с
-  лентой миниатюр и инспектором *Information*), вкладки (`Tabs`),
-  кликабельный `Path Bar`, встроенный `Quick Look`, `Get Info`,
-  `Go to Folder...`, `Rename`, фоновые `Copy`/`Move` с разрешением
-  конфликтов, общий pure-Rust декодер изображений `image_decode`,
-  `New Folder`, `FreeDesktop` Trash и теги в
-  `~/.config/rustyos/file_tags.toml`;
-- композитор (`Dock`, `Desktop` ПКМ, `Launcher`, `Downloads`, `Trash`)
-  маршрутизирует работу с каталогами и корзиной напрямую в `rusty-files`.
+- Самостоятельные Wayland CSD-клиенты на базе `smithay-client-toolkit` и
+  `fontdue` в эстетике `macOS 27 Golden Gate` (`Light` / `Dark`);
+- `rusty-files`: плавающий/full-bleed sidebar, Icons/List/Columns/Gallery,
+  вкладки, clickable Path Bar, Quick Look, Get Info, Copy/Move, Trash, теги;
+- `rusty-updater`: окно *Software Update* со списком всех обновлений
+  Arch Linux и RustyOS (`checkupdates`), потоковым прогрессом/логом и
+  запуском `pacman` через валидируемый Polkit-хелпер `rustyos-update-helper`.
 
 ## 3. Текущая структура Cargo workspace и сессии
 
@@ -126,16 +120,19 @@ RustyOS/
 │       └── src/               # lib (ServiceRegistry), power, connectivity, media, display_session, auth, logind, polkit, portal, file_manager, image_decode, updates
 ├── apps/
 │   ├── rusty-files/           # Самостоятельный Wayland-файловый менеджер (Golden Gate CSD, Этапы A и B)
-│   └── rusty-shell/           # Внешний процесс shell поверх Wayland layer-shell + IPC
+│   ├── rusty-shell/           # Внешний процесс shell поверх Wayland layer-shell + IPC
+│   └── rusty-updater/         # Автономный GUI-клиент обновления Arch Linux и RustyOS (Golden Gate CSD, Этап B)
 ├── bin/
 │   └── rustyos-session        # Лаунчер пользовательской сессии
 ├── packaging/
+│   ├── applications/          # org.rustyos.updater.desktop
 │   ├── arch/PKGBUILD          # Arch Linux PKGBUILD (rustyos-git)
+│   ├── polkit/                # org.rustyos.updater.policy (rustyos-update-helper)
 │   └── wayland-sessions/      # rustyos.desktop
 ├── scripts/
 │   └── install.sh
 └── docs/
-    ├── adr/                   # ADR-0001 .. ADR-0036
+    ├── adr/                   # ADR-0001 .. ADR-0037
     ├── DEVELOPMENT_ENVIRONMENT.md
     ├── GETTING_STARTED.md
     └── HARDWARE_MATRIX.md

@@ -134,7 +134,7 @@ impl RustyCompositorState {
         self.shell_redraw_needed = true;
     }
 
-    /// Launches `rusty-updater` when installed, or shows a clean guidance notice until Stage B (`RUSTYOS-076`).
+    /// Launches `rusty-updater` when installed, or shows a clean guidance notice (`RUSTYOS-076`/`RUSTYOS-077`).
     pub fn open_software_updater_action(&mut self) {
         self.close_updates_popover();
         if crate::launcher::resolve_program_path("rusty-updater").is_some() {
@@ -144,17 +144,17 @@ impl RustyCompositorState {
                 .launch_program_with_args("rusty-updater", &[], &self.socket_name, &ipc_path)
                 .is_ok()
             {
-                self.trigger_app_bounce("rusty-updater", false);
+                self.trigger_app_bounce("updater", false);
                 return;
             }
         }
         let body = if self.updates_status.total_count > 0 {
             format!(
-                "{} updates ready · run 'sudo pacman -Syu' or install rusty-updater (Stage B)",
+                "{} updates ready · run 'sudo pacman -Syu' or install rusty-updater",
                 self.updates_status.total_count
             )
         } else {
-            "rusty-updater UI arrives in Stage B (RUSTYOS-077); system is current".to_owned()
+            "rusty-updater binary is not installed; system is current".to_owned()
         };
         let _ = self.push_notification(
             rusty_ipc::Urgency::Normal,

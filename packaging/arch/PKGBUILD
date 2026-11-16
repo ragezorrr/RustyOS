@@ -89,6 +89,9 @@ package() {
 
   install -d \
     "${pkgdir}/usr/bin" \
+    "${pkgdir}/usr/lib/rustyos" \
+    "${pkgdir}/usr/share/applications" \
+    "${pkgdir}/usr/share/polkit-1/actions" \
     "${pkgdir}/usr/share/wayland-sessions" \
     "${pkgdir}/usr/share/xdg-desktop-portal/portals" \
     "${pkgdir}/usr/share/doc/${pkgname}"
@@ -96,12 +99,20 @@ package() {
   install -m755 "${target_dir}/rusty-compositor" "${pkgdir}/usr/bin/rusty-compositor"
   install -m755 "${target_dir}/rusty-shell" "${pkgdir}/usr/bin/rusty-shell"
   install -m755 "${target_dir}/rusty-files" "${pkgdir}/usr/bin/rusty-files"
+  install -m755 "${target_dir}/rusty-updater" "${pkgdir}/usr/bin/rusty-updater"
+  install -m755 "${target_dir}/rustyos-update-helper" \
+    "${pkgdir}/usr/lib/rustyos/rustyos-update-helper"
   install -m755 "${root}/bin/rustyos-session" "${pkgdir}/usr/bin/rustyos-session"
 
   pw_worker="$(ls -1t "${target_dir}"/build/rusty-services-*/out/rusty-pipewire-stream 2>/dev/null | head -n 1 || true)"
   if [[ -n "${pw_worker}" && -x "${pw_worker}" ]]; then
     install -m755 "${pw_worker}" "${pkgdir}/usr/bin/rusty-pipewire-stream"
   fi
+
+  install -m644 "${root}/packaging/applications/org.rustyos.updater.desktop" \
+    "${pkgdir}/usr/share/applications/org.rustyos.updater.desktop"
+  install -m644 "${root}/packaging/polkit/org.rustyos.updater.policy" \
+    "${pkgdir}/usr/share/polkit-1/actions/org.rustyos.updater.policy"
 
   install -m644 "${root}/packaging/portals/rustyos.portal" \
     "${pkgdir}/usr/share/xdg-desktop-portal/portals/rustyos.portal"

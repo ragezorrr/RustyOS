@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "apps/rusty-files",
     "apps/rusty-shell",
+    "apps/rusty-updater",
     "crates/rusty-animation",
     "crates/rusty-compositor",
     "crates/rusty-ipc",

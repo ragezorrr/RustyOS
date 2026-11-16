@@ -29,15 +29,21 @@ esac
 if [ "${MODE}" = "user" ]; then
     PREFIX="${HOME}/.local"
     BIN_DIR="${PREFIX}/bin"
+    LIB_DIR="${PREFIX}/lib/rustyos"
+    APPS_DIR="${XDG_DATA_HOME:-${HOME}/.local/share}/applications"
     SESSIONS_DIR="${PREFIX}/share/wayland-sessions"
     PORTALS_DIR="${XDG_DATA_HOME:-${HOME}/.local/share}/xdg-desktop-portal/portals"
     PORTALS_CONF_DIR="${XDG_CONFIG_HOME:-${HOME}/.config}/xdg-desktop-portal"
+    POLKIT_DIR=""
 else
     PREFIX="/usr/local"
     BIN_DIR="${PREFIX}/bin"
+    LIB_DIR="/usr/lib/rustyos"
+    APPS_DIR="/usr/share/applications"
     SESSIONS_DIR="/usr/share/wayland-sessions"
     PORTALS_DIR="/usr/share/xdg-desktop-portal/portals"
     PORTALS_CONF_DIR="/etc/xdg-desktop-portal"
+    POLKIT_DIR="/usr/share/polkit-1/actions"
 fi
 
 if [ "${ACTION}" = "uninstall" ]; then
@@ -46,11 +52,17 @@ if [ "${ACTION}" = "uninstall" ]; then
         "${BIN_DIR}/rusty-compositor" \
         "${BIN_DIR}/rusty-shell" \
         "${BIN_DIR}/rusty-files" \
+        "${BIN_DIR}/rusty-updater" \
         "${BIN_DIR}/rusty-pipewire-stream" \
         "${BIN_DIR}/rustyos-session" \
+        "${LIB_DIR}/rustyos-update-helper" \
+        "${APPS_DIR}/org.rustyos.updater.desktop" \
         "${SESSIONS_DIR}/rustyos.desktop" \
         "${PORTALS_DIR}/rustyos.portal" \
         "${PORTALS_CONF_DIR}/rustyos-portals.conf"
+    if [ -n "${POLKIT_DIR}" ]; then
+        rm -f "${POLKIT_DIR}/org.rustyos.updater.policy"
+    fi
     echo "Uninstall completed cleanly."
     exit 0
 fi
@@ -59,7 +71,10 @@ ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 TARGET_DIR="${ROOT_DIR}/target/release"
 
 echo "=== Installing RustyOS Desktop Environment (${BIN_DIR}, ${SESSIONS_DIR}) ==="
-mkdir -p "${BIN_DIR}" "${SESSIONS_DIR}" "${PORTALS_DIR}" "${PORTALS_CONF_DIR}"
+mkdir -p "${BIN_DIR}" "${LIB_DIR}" "${APPS_DIR}" "${SESSIONS_DIR}" "${PORTALS_DIR}" "${PORTALS_CONF_DIR}"
+if [ -n "${POLKIT_DIR}" ]; then
+    mkdir -p "${POLKIT_DIR}"
+fi
 
 # Build release artifacts unprivileged when invoked via sudo so rustup/cargo caches remain intact.
 echo "Building release artifacts..."
@@ -70,19 +85,25 @@ else
     cargo build --release --workspace --locked --manifest-path "${ROOT_DIR}/Cargo.toml"
 fi
 
-echo "Installing binaries to ${BIN_DIR}..."
+echo "Installing binaries to ${BIN_DIR} and ${LIB_DIR}..."
 install -m 755 "${TARGET_DIR}/rusty-compositor" "${BIN_DIR}/rusty-compositor"
 install -m 755 "${TARGET_DIR}/rusty-shell" "${BIN_DIR}/rusty-shell"
 install -m 755 "${TARGET_DIR}/rusty-files" "${BIN_DIR}/rusty-files"
+install -m 755 "${TARGET_DIR}/rusty-updater" "${BIN_DIR}/rusty-updater"
+install -m 755 "${TARGET_DIR}/rustyos-update-helper" "${LIB_DIR}/rustyos-update-helper"
 install -m 755 "${ROOT_DIR}/bin/rustyos-session" "${BIN_DIR}/rustyos-session"
 PW_WORKER="$(ls -1t "${TARGET_DIR}"/build/rusty-services-*/out/rusty-pipewire-stream 2>/dev/null | head -n 1 || true)"
 if [ -n "${PW_WORKER}" ] && [ -x "${PW_WORKER}" ]; then
     install -m 755 "${PW_WORKER}" "${BIN_DIR}/rusty-pipewire-stream"
 fi
 
-echo "Installing portal backend configuration to ${PORTALS_DIR} and ${PORTALS_CONF_DIR}..."
+echo "Installing desktop applications and portal backend configuration..."
+install -m 644 "${ROOT_DIR}/packaging/applications/org.rustyos.updater.desktop" "${APPS_DIR}/org.rustyos.updater.desktop"
 install -m 644 "${ROOT_DIR}/packaging/portals/rustyos.portal" "${PORTALS_DIR}/rustyos.portal"
 install -m 644 "${ROOT_DIR}/packaging/portals/rustyos-portals.conf" "${PORTALS_CONF_DIR}/rustyos-portals.conf"
+if [ -n "${POLKIT_DIR}" ]; then
+    install -m 644 "${ROOT_DIR}/packaging/polkit/org.rustyos.updater.policy" "${POLKIT_DIR}/org.rustyos.updater.policy"
+fi
 
 echo "Installing session entry to ${SESSIONS_DIR}/rustyos.desktop..."
 TMP_DESKTOP="$(mktemp)"

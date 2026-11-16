@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=Software Update
+Comment=Check for and install Arch Linux and RustyOS updates
+Exec=rusty-updater
+Icon=org.rustyos.Updater
+Terminal=false
+Type=Application
+Categories=System;Settings;
+StartupNotify=true
+Keywords=update;upgrade;pacman;arch;rustyos;

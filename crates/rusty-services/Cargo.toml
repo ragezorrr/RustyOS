@@ -7,6 +7,10 @@ license.workspace = true
 authors.workspace = true
 description = "RustyOS Linux system service adapters (audio, battery, network, session lifecycle)"
 
+[[bin]]
+name = "rustyos-update-helper"
+path = "src/bin/rustyos_update_helper.rs"
+
 [dependencies]
 zbus.workspace = true
 

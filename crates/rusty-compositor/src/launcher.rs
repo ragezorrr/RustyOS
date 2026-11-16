@@ -339,6 +339,7 @@ impl LauncherState {
     #[must_use]
     pub(crate) fn canonical_preferred_bins(app_key: &str) -> Option<&'static [&'static str]> {
         const FILES: &[&str] = &["rusty-files"];
+        const UPDATER: &[&str] = &["rusty-updater"];
         const TERMINAL: &[&str] = &[
             "foot",
             "kitty",
@@ -368,6 +369,7 @@ impl LauncherState {
         ];
         match app_key.trim().to_ascii_lowercase().as_str() {
             "files" | "rusty-files" => Some(FILES),
+            "updater" | "rusty-updater" => Some(UPDATER),
             "terminal" => Some(TERMINAL),
             "browser" => Some(BROWSER),
             "notes" => Some(NOTES),
@@ -577,9 +579,10 @@ fn priority_rank(app: &LauncherApp) -> u8 {
         "foot" | "kitty" | "alacritty" | "wezterm" | "ghostty" | "weston-terminal" | "konsole"
         | "gnome-terminal" | "xfce4-terminal" => 0,
         "rusty-files" => 1,
-        "firefox" | "chromium" | "google-chrome" | "brave" => 2,
-        "es2gears_wayland" | "glmark2-wayland" => 3,
-        "rusty-settings" => 4,
+        "rusty-updater" => 2,
+        "firefox" | "chromium" | "google-chrome" | "brave" => 3,
+        "es2gears_wayland" | "glmark2-wayland" => 4,
+        "rusty-settings" => 5,
         _ => 10,
     }
 }
@@ -730,6 +733,20 @@ fn merge_builtin_fallbacks(catalog: &mut Vec<LauncherApp>) {
             keywords: vec!["folder".to_owned(), "manager".to_owned()],
             badge: "Fi".to_owned(),
             icon: Some("system-file-manager".to_owned()),
+        },
+        LauncherApp {
+            id: "org.rustyos.updater".to_owned(),
+            name: "Software Update".to_owned(),
+            subtitle: "Update Arch Linux & RustyOS packages".to_owned(),
+            exec: "rusty-updater".to_owned(),
+            keywords: vec![
+                "update".to_owned(),
+                "upgrade".to_owned(),
+                "pacman".to_owned(),
+                "arch".to_owned(),
+            ],
+            badge: "Up".to_owned(),
+            icon: Some("system-software-update".to_owned()),
         },
         LauncherApp {
             id: "org.rustyos.gears".to_owned(),

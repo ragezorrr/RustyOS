@@ -326,6 +326,9 @@ pub fn classify_top_bar_app(app_id: Option<&str>, title: &str) -> (String, TopBa
     if id_lower == "org.rustyos.settings" || id_lower == "rusty-settings" {
         return ("Settings".to_owned(), TopBarAppProfile::GenericApp);
     }
+    if id_lower == "org.rustyos.updater" || id_lower == "rusty-updater" {
+        return ("Software Update".to_owned(), TopBarAppProfile::GenericApp);
+    }
 
     let fallback = if !title_trimmed.is_empty() && !title_trimmed.starts_with("Window #") {
         extract_app_name(title_trimmed)

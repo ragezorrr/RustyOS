@@ -1932,6 +1932,8 @@ pub(super) fn notification_app_icon(title: &str) -> crate::icons::BuiltinAppIcon
         crate::icons::BuiltinAppIcon::Browser
     } else if lower.contains("setting") || lower.contains("config") || lower.contains("pref") {
         crate::icons::BuiltinAppIcon::Settings
+    } else if lower.contains("update") || lower.contains("upgrade") {
+        crate::icons::BuiltinAppIcon::Updater
     } else {
         crate::icons::BuiltinAppIcon::RustySystem
     }

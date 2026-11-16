@@ -437,12 +437,17 @@ palettes (section 5.1); geometry, Liquid Glass clarity, and interactions target 
   full-screen modal scrim that darkens `TopBar` and `Dock`.
 - Titlebar traffic lights: `12 px` gel-lit buttons (`TrafficLightKind::{Close, Minimize, Maximize}`)
   revealing `×`, `−`, `+` hover glyphs (`hovered_traffic_light_window`).
-- Finder / `rusty-files` 1:1 parity targets (`27-Golden-Gate-Finder-Home-Folder.png`, `Applications.png`,
+- System apps & Golden Gate parity (`27-Golden-Gate-Settings-General.png`, `27-Golden-Gate-Finder-Home-Folder.png`):
+  - `rusty-files` (`27-Golden-Gate-Finder-Home-Folder.png`, `Applications.png`,
   `Finder-Network.png`): Sky Blue folder icons in BOTH Light and Dark appearances (never purple/lavender),
   full-bleed edge-to-edge sidebar (`x=0, y=0..height`, matching the left window corners) containing the
   traffic lights and a subtle `1 px` right divider (distinct from the floating inset sidebar card used in
   `System Settings` / `Notes`), separated glass toolbar pills (`< | >`, view switcher, actions, search) above
   the tab bar, and clean status bar without debug theme-toggle buttons.
+  - `rusty-updater` (*Software Update*, `RUSTYOS-077`): Golden Gate `Light & Dark` CSD window (`740x560`,
+  `WINDOW_CORNER_RADIUS = 20`), centered header titlebar with traffic lights, hero summary card with
+  `#007AFF`/`#0A84FF` Software Update squircle, filter pills (`All`, `RustyOS`, `Restart`), live progress bar,
+  expandable `pacman` log view, and Polkit-backed upgrade actions without breaking Light/Dark tokens.
 - Menu bar dropdowns (`MENU_POPOVER_RADIUS = 16–20`): clear `Popover` liquid glass with leading
   `UiGlyphKind` icons, hairline dividers, right-aligned shortcut column (`⌘`/`⌥`/`⌃`/`⇧` or compositor
   equivalents), submenu chevrons (`>`), and a rounded accent pill highlight on hover.

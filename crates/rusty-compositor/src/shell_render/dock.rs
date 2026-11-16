@@ -162,6 +162,10 @@ pub fn canonical_dock_app_key(
             ][..],
         ),
         (
+            "updater",
+            &["rusty-updater", "org.rustyos.updater", "updater"][..],
+        ),
+        (
             "terminal",
             &[
                 "foot",
@@ -234,6 +238,7 @@ fn is_synthetic_wm_title(title: &str) -> bool {
 pub fn dock_builtin_for_key(app_key: &str) -> Option<crate::icons::BuiltinAppIcon> {
     match app_key.trim().to_ascii_lowercase().as_str() {
         "files" | "rusty-files" => Some(crate::icons::BuiltinAppIcon::Files),
+        "updater" | "rusty-updater" => Some(crate::icons::BuiltinAppIcon::Updater),
         "overview" | "apps" => Some(crate::icons::BuiltinAppIcon::Overview),
         "terminal" => Some(crate::icons::BuiltinAppIcon::Terminal),
         "browser" => Some(crate::icons::BuiltinAppIcon::Browser),
@@ -248,6 +253,7 @@ pub fn dock_builtin_for_key(app_key: &str) -> Option<crate::icons::BuiltinAppIco
 pub fn dock_label_for_key(app_key: &str) -> String {
     match app_key.trim().to_ascii_lowercase().as_str() {
         "files" | "rusty-files" => "Files".to_owned(),
+        "updater" | "rusty-updater" => "Software Update".to_owned(),
         "overview" | "apps" => "Overview".to_owned(),
         "terminal" => "Terminal".to_owned(),
         "browser" => "Browser".to_owned(),

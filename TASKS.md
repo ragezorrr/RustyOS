@@ -1155,6 +1155,29 @@ hardware/software context и низкие накладные расходы.
   - Живые `--winit --max-frames 35` smoke-прогоны (`Wayland` и `X11`: `late=0 missed=0`, без EGL/шейдерных ошибок) и визуальная проверка `Dark` & `Light` (`qa-076-{dark,light}-system-menu.png`, `qa-076-{dark,light}-updates-popover.png`, `qa-076-{dark,light}-settings-menubar.png`, `qa-076-{dark,light}-settings-security.png`).
 - **Risks:** Установка самого пакета через `makepkg -si` и системные действия в `/usr` преднамеренно не выполнялись на хосте до явного решения пользователя; Stage B (`apps/rusty-updater` с интерактивным прогрессом `pacman` через Polkit) остаётся отдельной задачей.
 
+### RUSTYOS-077 — Standalone Wayland апдейтер `rusty-updater` и привилегированный helper через Polkit (Этап B)
+
+- **Status:** Done (`RUSTYOS-077 Вариант 1 (Этап B)` — утверждённый объём выполнен)
+- **Goal:** Реализовать самостоятельное Wayland CSD-приложение `apps/rusty-updater` в эстетике `macOS 27 Golden Gate` (`Light & Dark`), потоковый раннер обновлений в `crates/rusty-services`, узкий root-helper `rustyos-update-helper` с политикой Polkit (`org.rustyos.updater.policy`), интеграцию с `PKGBUILD`/`scripts/install.sh` и оболочкой композитора без модификации `/usr` хоста.
+- **Dependencies:** `RUSTYOS-014`, `RUSTYOS-032`, `RUSTYOS-069`, `RUSTYOS-076`, `ADR-0037`, `D-045`.
+- **Scope:**
+  - `apps/rusty-updater/` (`Cargo.toml`, `main.rs`, `state.rs`, `layout.rs`, `render.rs`, `wayland.rs`): `xdg_toplevel` CSD-клиент (`org.rustyos.updater`, `title="Software Update"`) с фильтрами (`All`, `RustyOS`, `Restart`), карточкой статуса с эмблемой и кнопкой `Update Now` / `Check Again` / `Cancel`, полосой прогресса транзакции, просмотром live-лога helper'а (`View Log` / `Packages`), кнопкой локальной сборки RustyOS (`makepkg --noconfirm` непривилегированно + `install-local`), а также безопасным `--dry-run` режимом для визуальной/CLI-проверки.
+  - `crates/rusty-services/src/updates.rs` & `bin/rustyos_update_helper.rs`: полный список `check_all_pending_updates()`, `read_system_release_summary()`, неблокирующий `UpdateTransactionHandle` (парсинг прогресса `pacman` и санитизация управляющих последовательностей, локальная сборка `rustyos-git` непривилегированно с последующей установкой через `pkexec /usr/lib/rustyos/rustyos-update-helper`), узкий валидируемый CLI-интерфейс helper'а (`sysupgrade` / `install-local <abs-path-in-trusted-dir>.pkg.tar.{zst,xz,gz}`) без `sh -c` и без root-сборки `makepkg`.
+  - Упаковка и права (`packaging/polkit/org.rustyos.updater.policy`, `packaging/applications/org.rustyos.updater.desktop`, `packaging/arch/PKGBUILD`, `scripts/install.sh`): установка бинарника `rusty-updater`, helper'а `/usr/lib/rustyos/rustyos-update-helper`, Polkit policy (`auth_admin_keep`) и `.desktop` файла с чистым `--uninstall-system`.
+  - Интеграция с композитором (`crates/rusty-compositor/src/`: `icons.rs`, `launcher.rs`, `shell_render/{dock.rs,top_bar.rs,top_bar_menus.rs}`, `state/shell_actions.rs`): `BuiltinAppIcon::Updater`, элемент лаунчера `UPDATER` (`"Software Update"` / `org.rustyos.updater`), привязка иконки Dock/уведомлений/TopBar (`trigger_app_bounce("updater", false)` и запуск по кнопке `Open Updater...`).
+  - Документация: `ADR-0037` (`docs/adr/0037-rusty-updater-and-privileged-upgrade.md`), `D-045` (`DECISIONS.md`), `DESIGN.md §12.3`, `ARCHITECTURE.md` (§2, §3).
+- **Acceptance Criteria:**
+  - `rusty-updater` запускается на Wayland внутри `rusty-compositor` (в том числе через `TopBar -> Check for Updates... -> Open Updater...`), корректно отображает `Light` и `Dark` палитры `macOS 27 Golden Gate` без legacy purple-токенов, и корректно проводит транзакцию в безопасном `--dry-run` режиме;
+  - `rustyos-update-helper` принимает только фиксированные команды `sysupgrade` и `install-local <path>` с жёсткой валидацией пути (запрет `..`, неабсолютных путей и неподходящих суффиксов пакетов) и никогда не запускает `makepkg` от root;
+  - `PKGBUILD` и `scripts/install.sh` проходят `bash -n`, включают `rusty-updater`, `rustyos-update-helper`, Polkit policy и `.desktop`, а `--locked` сборка workspace с обновлённым `Cargo.lock` проходит без ошибок.
+- **Tests:**
+  - `bash -n packaging/arch/PKGBUILD scripts/install.sh` (`exit 0`)
+  - `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo build --workspace --bins --locked`
+  - `cargo test --workspace --locked -- --test-threads=1` (`233 passed; 0 failed`: `rusty_animation` 4, `rusty_compositor` 155, `rusty_files` 13, `rusty_ipc` 3, `rusty_services` 42, `rusty_shell` 5, `rusty_updater` 4, `rusty_wm` 7)
+  - `./target/debug/rusty-compositor --drm-probe`
+  - Живые `--winit --max-frames 35` smoke-прогоны (`Wayland` и `X11`: `late=0 missed=0`, без EGL/шейдерных ошибок) и визуальная QA в `Dark` & `Light` (`qa-077-dark-updater.png`, `qa-077-dark-dryrun-complete.png`, `qa-077-dark-logs.png`, `qa-077-dark-topbar-launch.png`, `qa-077-light-updater.png`, `qa-077-light-dryrun-complete.png`).
+- **Risks:** Реальный системный вызов `pkexec /usr/lib/rustyos/rustyos-update-helper` и установка файлов в `/usr` / `/etc/polkit-1` намеренно не выполнялись на хосте (проверено через `--dry-run`, unit-тесты валидации/парсинга и запуск из соседнего каталога `exe_dir`); полноценная runtime-проверка `pkexec` требует установки пакета на хосте или в VM по решению архитектора.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

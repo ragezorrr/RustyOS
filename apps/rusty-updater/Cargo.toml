@@ -1,0 +1,19 @@
+[package]
+name = "rusty-updater"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "RustyOS standalone Golden Gate Software Update utility (Wayland CSD)"
+
+[dependencies]
+fontdue.workspace = true
+rusty-services.workspace = true
+smithay-client-toolkit = { version = "0.19.2", default-features = false, features = ["calloop"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+wayland-client = "0.31.15"
+
+[lints]
+workspace = true

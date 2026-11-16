@@ -1013,6 +1013,10 @@ fn macos27_traffic_hover_notifications_and_osd_routing() {
     );
     assert_eq!(
         notification_app_icon("System Update"),
+        crate::icons::BuiltinAppIcon::Updater
+    );
+    assert_eq!(
+        notification_app_icon("Display Connected"),
         crate::icons::BuiltinAppIcon::RustySystem
     );
     assert_eq!(

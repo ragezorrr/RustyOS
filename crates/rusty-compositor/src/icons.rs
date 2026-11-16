@@ -123,6 +123,8 @@ pub enum BuiltinAppIcon {
     Trash,
     /// Original amethyst-glass RustyOS crest squircle for system notifications (`RUSTYOS-051`).
     RustySystem,
+    /// Golden Gate azure Software Update squircle (`RUSTYOS-077`).
+    Updater,
     /// Frosted jewel-tone window card squircle for windows lacking an XDG PNG or SHM icon.
     WindowFallback {
         /// Deterministic color bucket derived from the application ID.
@@ -767,6 +769,7 @@ fn sample_squircle_uv(u: f32, v: f32, edge: f32, icon: BuiltinAppIcon) -> [f32; 
         BuiltinAppIcon::Notes => ([252.0, 251.0, 246.0], [235.0, 233.0, 226.0]),
         BuiltinAppIcon::Settings => ([178.0, 182.0, 190.0], [114.0, 118.0, 128.0]),
         BuiltinAppIcon::RustySystem => ([152.0, 102.0, 252.0], [76.0, 34.0, 154.0]),
+        BuiltinAppIcon::Updater => ([54.0, 172.0, 255.0], [0.0, 110.0, 245.0]),
         BuiltinAppIcon::Downloads | BuiltinAppIcon::Trash => ([0.0; 3], [0.0; 3]),
         BuiltinAppIcon::WindowFallback { hue_seed, active } => {
             let palettes: [([f32; 3], [f32; 3]); 4] = [
@@ -1020,6 +1023,16 @@ fn paint_squircle_glyph(
         }
         BuiltinAppIcon::Settings => return paint_settings_glyph(u, v, edge, col),
         BuiltinAppIcon::RustySystem => return paint_rusty_system_glyph(u, v, edge, col),
+        BuiltinAppIcon::Updater => {
+            let ring_sd = ((u - 0.50).hypot(v - 0.50) - 0.245).abs() - 0.032;
+            let stem_sd = sq_sd_segment(u, v, 0.50, 0.34, 0.50, 0.61, 0.030);
+            let wing_l = sq_sd_segment(u, v, 0.39, 0.51, 0.50, 0.62, 0.030);
+            let wing_r = sq_sd_segment(u, v, 0.61, 0.51, 0.50, 0.62, 0.030);
+            let motif_cov = sq_cov(ring_sd.min(stem_sd).min(wing_l).min(wing_r), edge);
+            if motif_cov > 0.0 {
+                col = blend_rgba(col, [255.0, 255.0, 255.0, motif_cov * 0.96]);
+            }
+        }
         BuiltinAppIcon::Downloads | BuiltinAppIcon::Trash => {}
         BuiltinAppIcon::WindowFallback { .. } => {
             let win = sq_sd_rounded_box(u, v, 0.50, 0.51, 0.27, 0.22, 0.05);
@@ -1240,6 +1253,7 @@ mod tests {
         let notes_center = sample_builtin_squircle_pixel(24, 24, 48, BuiltinAppIcon::Notes);
         let settings_center = sample_builtin_squircle_pixel(24, 24, 48, BuiltinAppIcon::Settings);
         let rusty_center = sample_builtin_squircle_pixel(24, 24, 48, BuiltinAppIcon::RustySystem);
+        let updater_center = sample_builtin_squircle_pixel(24, 24, 48, BuiltinAppIcon::Updater);
         let downloads_center = sample_builtin_squircle_pixel(24, 30, 48, BuiltinAppIcon::Downloads);
         let trash_center = sample_builtin_squircle_pixel(24, 24, 48, BuiltinAppIcon::Trash);
         let fallback_center = sample_builtin_squircle_pixel(
@@ -1259,6 +1273,7 @@ mod tests {
             notes_center,
             settings_center,
             rusty_center,
+            updater_center,
             downloads_center,
             fallback_center,
         ] {
@@ -1270,12 +1285,14 @@ mod tests {
         assert_ne!(browser_center, notes_center);
         assert_ne!(settings_center, downloads_center);
         assert_ne!(rusty_center, overview_center);
+        assert_ne!(updater_center, notes_center);
         assert_ne!(downloads_center, trash_center);
 
         for kind in [
             BuiltinAppIcon::Files,
             BuiltinAppIcon::Browser,
             BuiltinAppIcon::RustySystem,
+            BuiltinAppIcon::Updater,
             BuiltinAppIcon::Downloads,
             BuiltinAppIcon::Trash,
         ] {

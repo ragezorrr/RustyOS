@@ -412,6 +412,22 @@
                           `ShellOverlayView::Updates`
                           Liquid Glass поповер    
                           (ADR-0036)              
+
+  D-045                   Фаза 10/Arch Updater    accepted
+                          (RUSTYOS-077 Этап B):   
+                          standalone Wayland CSD  
+                          `apps/rusty-updater`    
+                          (Golden Gate Light/Dark),
+                          потоковый               
+                          `UpdateTransactionHandle`
+                          и узкий Polkit-хелпер   
+                          `rustyos-update-helper` 
+                          (`pkexec` без `sh -c`,  
+                          непривилегированный     
+                          `makepkg` + `pacman`,   
+                          policy XML и            
+                          BuiltinAppIcon::Updater)
+                          (ADR-0037)              
   -----------------------------------------------------------------------
 
 ## Открытые решения
