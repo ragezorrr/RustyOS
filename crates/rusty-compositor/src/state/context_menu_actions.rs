@@ -15,8 +15,7 @@ use tracing::{info, warn};
 
 use crate::config::DownloadsSortMode;
 use crate::shell_render::{
-    ContextMenuAction, ContextMenuEntry, ContextMenuState, ContextMenuTarget, DOCK_PINNED_COUNT,
-    DockHit, dock_slot_rect,
+    ContextMenuAction, ContextMenuEntry, ContextMenuState, ContextMenuTarget, DockHit,
 };
 use crate::surfaces::UiGlyphKind;
 
@@ -30,8 +29,10 @@ pub(crate) struct DownloadsMenuEntry {
     pub(crate) name: String,
     pub(crate) path: PathBuf,
     pub(crate) is_dir: bool,
+    pub(crate) created_secs: u64,
     pub(crate) modified_secs: u64,
     pub(crate) size_bytes: u64,
+    pub(crate) extension: String,
 }
 
 pub(crate) fn resolve_desktop_dir() -> Option<PathBuf> {
@@ -109,15 +110,39 @@ pub(crate) fn read_downloads_entries(
             .ok()
             .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
             .map_or(0, |d| d.as_secs());
+        let created_secs = meta
+            .created()
+            .ok()
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map_or(modified_secs, |d| d.as_secs());
+        let extension = if is_dir {
+            "DIR".to_owned()
+        } else {
+            Path::new(&name)
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .map(|ext| ext.chars().take(4).collect::<String>().to_ascii_uppercase())
+                .filter(|ext| !ext.is_empty())
+                .unwrap_or_else(|| "FILE".to_owned())
+        };
         entries.push(DownloadsMenuEntry {
             name,
             path: entry.path(),
             is_dir,
+            created_secs,
             modified_secs,
             size_bytes,
+            extension,
         });
     }
     match sort_mode {
+        DownloadsSortMode::DateAdded => entries.sort_by(|a, b| {
+            b.created_secs.cmp(&a.created_secs).then_with(|| {
+                a.name
+                    .to_ascii_lowercase()
+                    .cmp(&b.name.to_ascii_lowercase())
+            })
+        }),
         DownloadsSortMode::DateModified => entries.sort_by(|a, b| {
             b.modified_secs.cmp(&a.modified_secs).then_with(|| {
                 a.name
@@ -137,9 +162,43 @@ pub(crate) fn read_downloads_entries(
                     .cmp(&b.name.to_ascii_lowercase())
             })
         }),
+        DownloadsSortMode::Kind => entries.sort_by(|a, b| {
+            b.is_dir
+                .cmp(&a.is_dir)
+                .then_with(|| a.extension.cmp(&b.extension))
+                .then_with(|| {
+                    a.name
+                        .to_ascii_lowercase()
+                        .cmp(&b.name.to_ascii_lowercase())
+                })
+        }),
     }
     entries.truncate(max_items);
     entries
+}
+
+pub(in crate::state) fn read_downloads_stack_entries(
+    downloads_dir: &Path,
+    sort_mode: DownloadsSortMode,
+    max_items: usize,
+) -> Vec<crate::shell_render::DockStackEntry> {
+    read_downloads_entries(downloads_dir, sort_mode, max_items)
+        .into_iter()
+        .map(|entry| {
+            let detail = if entry.is_dir {
+                "Folder".to_owned()
+            } else {
+                format_bytes_short(entry.size_bytes, false)
+            };
+            crate::shell_render::DockStackEntry {
+                name: entry.name,
+                path: entry.path,
+                is_dir: entry.is_dir,
+                detail,
+                extension: entry.extension,
+            }
+        })
+        .collect()
 }
 
 pub(crate) fn trash_item_count(trash_root: &Path) -> usize {
@@ -200,30 +259,20 @@ fn format_bytes_short(bytes: u64, is_dir: bool) -> String {
     }
 }
 
-fn dock_slot_index_for_hit(hit: DockHit, window_count: usize) -> Option<usize> {
-    let left_count = DOCK_PINNED_COUNT + window_count;
-    match hit {
-        DockHit::PinnedFiles => Some(0),
-        DockHit::ToggleOverview => Some(1),
-        DockHit::PinnedTerminal => Some(2),
-        DockHit::PinnedBrowser => Some(3),
-        DockHit::PinnedNotes => Some(4),
-        DockHit::PinnedSettings => Some(5),
-        DockHit::WindowSlot(idx) if idx < window_count => Some(DOCK_PINNED_COUNT + idx),
-        DockHit::PinnedDownloads => Some(left_count),
-        DockHit::PinnedTrash => Some(left_count + 1),
-        DockHit::WindowSlot(_) => None,
-    }
-}
-
-fn pinned_app_label_and_icon(hit: DockHit) -> (&'static str, UiGlyphKind) {
-    match hit {
-        DockHit::PinnedFiles => ("New Files Window", UiGlyphKind::Folder),
-        DockHit::PinnedTerminal => ("New Terminal Window", UiGlyphKind::TerminalPrompt),
-        DockHit::PinnedBrowser => ("New Browser Window", UiGlyphKind::Search),
-        DockHit::PinnedNotes => ("New Note", UiGlyphKind::Plus),
-        DockHit::PinnedSettings => ("Open System Settings", UiGlyphKind::ControlCenter),
-        _ => ("Open", UiGlyphKind::Info),
+fn app_new_window_label_and_icon(app_key: &str, label: &str) -> (String, UiGlyphKind) {
+    match app_key.trim().to_ascii_lowercase().as_str() {
+        "files" | "rusty-files" => ("New Files Window".to_owned(), UiGlyphKind::Folder),
+        "terminal" => (
+            "New Terminal Window".to_owned(),
+            UiGlyphKind::TerminalPrompt,
+        ),
+        "browser" => ("New Browser Window".to_owned(), UiGlyphKind::Search),
+        "notes" => ("New Note".to_owned(), UiGlyphKind::Plus),
+        "settings" => (
+            "Open System Settings".to_owned(),
+            UiGlyphKind::ControlCenter,
+        ),
+        _ => (format!("New {label} Window"), UiGlyphKind::Plus),
     }
 }
 
@@ -236,7 +285,7 @@ fn command_basename_lower(cmd: &str) -> String {
         .to_ascii_lowercase()
 }
 
-fn autostart_matches_candidates(entry: &str, candidates: &[&str]) -> bool {
+fn autostart_matches_candidates(entry: &str, candidates: &[String]) -> bool {
     let base = command_basename_lower(entry);
     !base.is_empty() && candidates.iter().any(|c| base.eq_ignore_ascii_case(c))
 }
@@ -304,6 +353,7 @@ impl RustyCompositorState {
     /// Closes any active right-click context menu (`RUSTYOS-064`).
     pub fn close_context_menu(&mut self) {
         if self.context_menu.take().is_some() {
+            self.sync_dock_auto_hide_target();
             self.shell_redraw_needed = true;
         }
     }
@@ -416,14 +466,19 @@ impl RustyCompositorState {
         if self.is_session_locked() {
             return;
         }
+        self.close_dock_stack();
+        let tiles = self.build_dock_tiles();
+        let bounces = self.dock_bounce_offsets();
+        let view = self.dock_view_state(&tiles, &[], &bounces, self.dock_hover_slot);
+        let layout = crate::shell_render::compute_dock_layout(dock_screen_size, &view);
+
         let primary = self.output_map.primary();
         let output_id = primary.id;
         let geo = primary.logical_geometry();
-        let win_count = self.ordered_visible_window_ids().len();
-        let anchor_local = dock_slot_index_for_hit(hit, win_count)
-            .and_then(|slot| {
-                dock_slot_rect(dock_screen_size.w, dock_screen_size.h, win_count, slot)
-            })
+        let anchor_local = layout
+            .slots
+            .iter()
+            .find(|slot| slot.tile.hit == hit)
             .map_or_else(
                 || {
                     #[allow(clippy::cast_possible_truncation)]
@@ -432,24 +487,35 @@ impl RustyCompositorState {
                         (global_pos.y - f64::from(geo.loc.y)).round() as i32,
                     ))
                 },
-                |rect| Point::from((rect.loc.x, rect.loc.y - 6)),
+                |slot| {
+                    let r = slot.icon_rect;
+                    match self.user_config.dock_position {
+                        crate::config::DockPosition::Bottom => Point::from((r.loc.x, r.loc.y - 6)),
+                        crate::config::DockPosition::Left => {
+                            Point::from((r.loc.x + r.size.w + 8, r.loc.y))
+                        }
+                        crate::config::DockPosition::Right => Point::from((r.loc.x - 8, r.loc.y)),
+                    }
+                },
             );
 
         let entries = match hit {
-            DockHit::PinnedFiles
-            | DockHit::PinnedTerminal
-            | DockHit::PinnedBrowser
-            | DockHit::PinnedNotes
-            | DockHit::PinnedSettings => self.build_pinned_app_context_entries(hit, alt_held),
             DockHit::ToggleOverview => self.build_overview_context_entries(),
-            DockHit::WindowSlot(idx) => {
-                let Some(items) = self.build_window_slot_context_entries(idx, alt_held) else {
+            DockHit::PinnedDownloads => self.build_downloads_context_entries(),
+            DockHit::PinnedTrash => Self::build_trash_context_entries(),
+            DockHit::MinimizedWindow(win_id) => {
+                let Some(items) = self.build_minimized_window_context_entries(win_id, alt_held)
+                else {
                     return;
                 };
                 items
             }
-            DockHit::PinnedDownloads => self.build_downloads_context_entries(),
-            DockHit::PinnedTrash => Self::build_trash_context_entries(),
+            _ => {
+                let Some(items) = self.build_dock_app_context_entries(hit, &tiles, alt_held) else {
+                    return;
+                };
+                items
+            }
         };
         self.install_context_menu(
             output_id,
@@ -457,54 +523,117 @@ impl RustyCompositorState {
             ContextMenuTarget::DockSlot(hit),
             entries,
         );
+        self.sync_dock_auto_hide_target();
     }
 
-    fn autostart_candidates_for_hit(hit: DockHit) -> Option<&'static [&'static str]> {
-        if hit == DockHit::PinnedSettings {
-            return Some(&["rusty-settings", "gnome-control-center", "systemsettings"]);
+    fn autostart_candidates_for_key(&self, app_key: &str) -> Vec<String> {
+        let key = app_key.trim().to_ascii_lowercase();
+        if key == "settings" {
+            return ["rusty-settings", "gnome-control-center", "systemsettings"]
+                .into_iter()
+                .map(ToOwned::to_owned)
+                .collect();
         }
-        Self::dock_preferred_candidates(hit)
+        if let Some(bins) = crate::launcher::LauncherState::canonical_preferred_bins(&key) {
+            return bins.iter().map(|s| (*s).to_owned()).collect();
+        }
+        self.launcher
+            .find_command_for_dock_key(&key)
+            .into_iter()
+            .collect()
     }
 
-    fn is_dock_app_in_autostart(&self, hit: DockHit) -> bool {
-        let Some(candidates) = Self::autostart_candidates_for_hit(hit) else {
+    fn is_dock_key_in_autostart(&self, app_key: &str) -> bool {
+        let candidates = self.autostart_candidates_for_key(app_key);
+        if candidates.is_empty() {
             return false;
-        };
+        }
         self.user_config
             .autostart
             .iter()
-            .any(|cmd| autostart_matches_candidates(cmd, candidates))
+            .any(|cmd| autostart_matches_candidates(cmd, &candidates))
     }
 
-    fn matching_windows_for_dock_app(&self, hit: DockHit) -> Vec<WindowId> {
-        let Some(candidates) = Self::autostart_candidates_for_hit(hit) else {
-            return Vec::new();
-        };
+    fn matching_windows_for_dock_key(&self, app_key: &str) -> Vec<WindowId> {
+        let key = app_key.trim().to_ascii_lowercase();
         self.ordered_visible_window_ids()
             .into_iter()
             .filter(|&win_id| {
-                let app_id = self
-                    .window_app_id(win_id)
-                    .unwrap_or_default()
-                    .to_ascii_lowercase();
-                let title = self.window_title(win_id).to_ascii_lowercase();
-                candidates
-                    .iter()
-                    .any(|cand| app_id.contains(cand) || title.contains(cand))
+                let title = self.window_title(win_id);
+                let app_id = self.window_app_id(win_id);
+                crate::shell_render::canonical_dock_app_key(app_id.as_deref(), &title, win_id)
+                    == key
             })
             .collect()
     }
 
-    fn build_pinned_app_context_entries(
+    fn build_dock_app_context_entries(
         &self,
         hit: DockHit,
+        tiles: &[crate::shell_render::DockAppTile],
         alt_held: bool,
-    ) -> Vec<ContextMenuEntry> {
-        let (launch_label, icon) = pinned_app_label_and_icon(hit);
-        let in_autostart = self.is_dock_app_in_autostart(hit);
-        let has_running = !self.matching_windows_for_dock_app(hit).is_empty()
-            || (hit == DockHit::PinnedSettings && self.settings_active);
+    ) -> Option<Vec<ContextMenuEntry>> {
+        let (app_key, label) = tiles
+            .iter()
+            .find(|t| t.hit == hit)
+            .map(|t| (t.app_key.clone(), t.label.clone()))
+            .or_else(|| {
+                self.dock_key_for_hit(hit)
+                    .map(|k| (k.clone(), crate::shell_render::dock_label_for_key(&k)))
+            })?;
+        let matching = self.matching_windows_for_dock_key(&app_key);
+        let focused = self.wm.focused_window();
+        let mut entries = Vec::new();
+
+        if !matching.is_empty() {
+            for &win_id in &matching {
+                let minimized = self.is_window_minimized(win_id);
+                let glyph = if minimized {
+                    UiGlyphKind::WindowMin
+                } else {
+                    UiGlyphKind::WindowMax
+                };
+                entries.push(
+                    ContextMenuEntry::item(
+                        self.window_title(win_id),
+                        glyph,
+                        ContextMenuAction::DockFocusWindow(win_id),
+                    )
+                    .with_checked(!minimized && focused == Some(win_id)),
+                );
+            }
+            entries.push(ContextMenuEntry::Separator);
+        }
+
+        let (launch_label, icon) = app_new_window_label_and_icon(&app_key, &label);
+        entries.push(ContextMenuEntry::item(
+            launch_label,
+            icon,
+            ContextMenuAction::DockLaunchApp(hit),
+        ));
+        entries.push(ContextMenuEntry::Separator);
+
+        let is_pinned = self
+            .user_config
+            .dock_pinned_apps
+            .iter()
+            .any(|p| p.eq_ignore_ascii_case(&app_key));
+        let keep_label = if is_pinned {
+            "Remove from Dock"
+        } else {
+            "Keep in Dock"
+        };
+        let removable = crate::shell_render::is_dock_pin_removable(&app_key);
+        let in_autostart = self.is_dock_key_in_autostart(&app_key);
+
         let options_sub = vec![
+            ContextMenuEntry::item(
+                keep_label,
+                UiGlyphKind::Plus,
+                ContextMenuAction::DockToggleKeepInDock(hit),
+            )
+            .with_checked(is_pinned)
+            .with_enabled(removable || !is_pinned),
             ContextMenuEntry::item(
                 "Open at Login",
                 UiGlyphKind::Refresh,
@@ -514,15 +643,16 @@ impl RustyCompositorState {
             ContextMenuEntry::item(
                 "Show All Windows",
                 UiGlyphKind::Grid,
-                ContextMenuAction::DockShowAllWindows,
+                ContextMenuAction::DockShowAppWindows(hit),
             ),
         ];
+        entries.push(ContextMenuEntry::submenu_item(
+            "Options",
+            UiGlyphKind::ControlCenter,
+            options_sub,
+        ));
 
-        let mut entries = vec![
-            ContextMenuEntry::item(launch_label, icon, ContextMenuAction::DockLaunchApp(hit)),
-            ContextMenuEntry::Separator,
-            ContextMenuEntry::submenu_item("Options", UiGlyphKind::ControlCenter, options_sub),
-        ];
+        let has_running = !matching.is_empty() || (app_key == "settings" && self.settings_active);
         if has_running {
             entries.push(ContextMenuEntry::Separator);
             let quit_entry = if alt_held {
@@ -541,7 +671,7 @@ impl RustyCompositorState {
             };
             entries.push(quit_entry);
         }
-        entries
+        Some(entries)
     }
 
     fn build_overview_context_entries(&self) -> Vec<ContextMenuEntry> {
@@ -572,13 +702,12 @@ impl RustyCompositorState {
         ]
     }
 
-    fn build_window_slot_context_entries(
+    fn build_minimized_window_context_entries(
         &self,
-        idx: usize,
+        win_id: WindowId,
         alt_held: bool,
     ) -> Option<Vec<ContextMenuEntry>> {
-        let ids = self.ordered_visible_window_ids();
-        let &win_id = ids.get(idx)?;
+        self.wm.window(win_id)?;
         let minimized = self.is_window_minimized(win_id);
         let focused = !minimized && self.wm.focused_window() == Some(win_id);
         let cur_ws = self.wm.window(win_id).map_or(1, |w| w.workspace.0);
@@ -645,12 +774,32 @@ impl RustyCompositorState {
         let files = resolve_downloads_dir().map_or_default(|dir| {
             read_downloads_entries(&dir, current_sort, MAX_DOWNLOADS_MENU_ITEMS)
         });
-        Self::build_downloads_entries_from_list(files, current_sort)
+        Self::build_downloads_entries_with_modes(
+            files,
+            current_sort,
+            self.user_config.dock_downloads_display,
+            self.user_config.dock_downloads_view,
+        )
     }
 
+    #[cfg(test)]
     pub(crate) fn build_downloads_entries_from_list(
         files: Vec<DownloadsMenuEntry>,
         current_sort: DownloadsSortMode,
+    ) -> Vec<ContextMenuEntry> {
+        Self::build_downloads_entries_with_modes(
+            files,
+            current_sort,
+            crate::config::DownloadsDisplayMode::default(),
+            crate::config::DownloadsViewMode::default(),
+        )
+    }
+
+    pub(crate) fn build_downloads_entries_with_modes(
+        files: Vec<DownloadsMenuEntry>,
+        current_sort: DownloadsSortMode,
+        display_mode: crate::config::DownloadsDisplayMode,
+        view_mode: crate::config::DownloadsViewMode,
     ) -> Vec<ContextMenuEntry> {
         let mut entries = Vec::new();
         if files.is_empty() {
@@ -679,10 +828,13 @@ impl RustyCompositorState {
                 );
             }
         }
+
         let sort_sub: Vec<ContextMenuEntry> = [
+            DownloadsSortMode::DateAdded,
             DownloadsSortMode::DateModified,
             DownloadsSortMode::Name,
             DownloadsSortMode::Size,
+            DownloadsSortMode::Kind,
         ]
         .into_iter()
         .map(|mode| {
@@ -695,11 +847,53 @@ impl RustyCompositorState {
         })
         .collect();
 
+        let display_sub: Vec<ContextMenuEntry> = [
+            crate::config::DownloadsDisplayMode::Stack,
+            crate::config::DownloadsDisplayMode::Folder,
+        ]
+        .into_iter()
+        .map(|mode| {
+            ContextMenuEntry::item(
+                mode.label(),
+                UiGlyphKind::Folder,
+                ContextMenuAction::DownloadsSetDisplay(mode),
+            )
+            .with_checked(display_mode == mode)
+        })
+        .collect();
+
+        let view_sub: Vec<ContextMenuEntry> = [
+            crate::config::DownloadsViewMode::Automatic,
+            crate::config::DownloadsViewMode::Fan,
+            crate::config::DownloadsViewMode::Grid,
+            crate::config::DownloadsViewMode::List,
+        ]
+        .into_iter()
+        .map(|mode| {
+            ContextMenuEntry::item(
+                mode.label(),
+                UiGlyphKind::Grid,
+                ContextMenuAction::DownloadsSetView(mode),
+            )
+            .with_checked(view_mode == mode)
+        })
+        .collect();
+
         entries.push(ContextMenuEntry::Separator);
         entries.push(ContextMenuEntry::submenu_item(
             "Sort By",
             UiGlyphKind::LayoutSplit,
             sort_sub,
+        ));
+        entries.push(ContextMenuEntry::submenu_item(
+            "Display as",
+            UiGlyphKind::Folder,
+            display_sub,
+        ));
+        entries.push(ContextMenuEntry::submenu_item(
+            "View content as",
+            UiGlyphKind::Grid,
+            view_sub,
         ));
         entries.push(ContextMenuEntry::Separator);
         entries.push(ContextMenuEntry::item(
@@ -735,8 +929,26 @@ impl RustyCompositorState {
     }
 
     /// Executes a selected action from the active [`ContextMenuState`] (`RUSTYOS-064`).
+    fn refresh_downloads_context_menu(&mut self) {
+        if self.context_menu.is_some() {
+            let entries = self.build_downloads_context_entries();
+            if let Some(ref mut ctx) = self.context_menu {
+                ctx.entries = entries;
+                ctx.open_submenu_parent = None;
+                ctx.submenu_selected_row = None;
+                ctx.selected_row = None;
+            }
+        }
+        self.shell_redraw_needed = true;
+    }
+
     pub fn execute_context_menu_action(&mut self, action: ContextMenuAction, serial: Serial) {
-        let keep_open = matches!(action, ContextMenuAction::DownloadsSetSort(_));
+        let keep_open = matches!(
+            action,
+            ContextMenuAction::DownloadsSetSort(_)
+                | ContextMenuAction::DownloadsSetDisplay(_)
+                | ContextMenuAction::DownloadsSetView(_)
+        );
         match action {
             ContextMenuAction::DesktopNewFolder => self.create_desktop_folder_action(),
             ContextMenuAction::DesktopOpenFiles => {
@@ -754,27 +966,16 @@ impl RustyCompositorState {
                 self.open_settings();
             }
             ContextMenuAction::DesktopOpenTerminal => {
-                self.handle_dock_hit(DockHit::PinnedTerminal, serial);
+                self.launch_dock_app_new_instance("terminal", false);
             }
             ContextMenuAction::DesktopMissionControl | ContextMenuAction::DockShowAllWindows => {
                 self.overview_active = false;
+                self.overview_filter_app = None;
                 self.toggle_overview();
             }
             ContextMenuAction::DesktopToggleLayoutMode => {
                 self.apply_wm_action(WmAction::ToggleLayoutMode, serial);
             }
-            ContextMenuAction::DockLaunchApp(hit) => {
-                if hit == DockHit::PinnedSettings {
-                    self.open_settings();
-                } else {
-                    self.handle_dock_hit(hit, serial);
-                }
-            }
-            ContextMenuAction::DockToggleOpenAtLogin(hit) => {
-                self.toggle_dock_app_autostart(hit);
-            }
-            ContextMenuAction::DockQuitApp(hit) => self.quit_dock_app(hit, false),
-            ContextMenuAction::DockForceQuitApp(hit) => self.quit_dock_app(hit, true),
             ContextMenuAction::OverviewToggle => self.toggle_overview(),
             ContextMenuAction::SwitchWorkspace(ws) => {
                 self.apply_wm_action(
@@ -782,7 +983,8 @@ impl RustyCompositorState {
                     serial,
                 );
             }
-            ContextMenuAction::WindowFocusOrRestore(win_id) => {
+            ContextMenuAction::DockFocusWindow(win_id)
+            | ContextMenuAction::WindowFocusOrRestore(win_id) => {
                 if self.is_window_minimized(win_id) {
                     self.restore_window(win_id, serial);
                 } else {
@@ -790,6 +992,36 @@ impl RustyCompositorState {
                     self.sync_space_with_wm(serial);
                 }
             }
+            ContextMenuAction::OpenSubmenu => return,
+            other => self.execute_dock_or_window_context_action(other, serial),
+        }
+        if !keep_open {
+            self.close_context_menu();
+        }
+    }
+
+    fn execute_dock_or_window_context_action(&mut self, action: ContextMenuAction, serial: Serial) {
+        match action {
+            ContextMenuAction::DockLaunchApp(hit) => {
+                if hit == DockHit::PinnedSettings {
+                    self.open_settings();
+                } else if let Some(app_key) = self.dock_key_for_hit(hit) {
+                    self.launch_dock_app_new_instance(&app_key, false);
+                }
+            }
+            ContextMenuAction::DockToggleKeepInDock(hit) => {
+                if let Some(app_key) = self.dock_key_for_hit(hit) {
+                    self.toggle_app_keep_in_dock(&app_key);
+                }
+            }
+            ContextMenuAction::DockShowAppWindows(hit) => {
+                if let Some(app_key) = self.dock_key_for_hit(hit) {
+                    self.toggle_overview_for_app(&app_key);
+                }
+            }
+            ContextMenuAction::DockToggleOpenAtLogin(hit) => self.toggle_dock_app_autostart(hit),
+            ContextMenuAction::DockQuitApp(hit) => self.quit_dock_app(hit, false),
+            ContextMenuAction::DockForceQuitApp(hit) => self.quit_dock_app(hit, true),
             ContextMenuAction::WindowMinimize(win_id) => self.minimize_window(win_id, serial),
             ContextMenuAction::WindowMoveToWorkspace(win_id, ws) => {
                 if self.is_window_minimized(win_id) {
@@ -804,36 +1036,34 @@ impl RustyCompositorState {
             ContextMenuAction::WindowQuit(win_id) => self.close_window_by_id(win_id),
             ContextMenuAction::WindowForceQuit(win_id) => self.force_quit_window_by_id(win_id),
             ContextMenuAction::DownloadsOpenFolder => {
-                self.handle_dock_hit(DockHit::PinnedDownloads, serial);
+                let downloads = resolve_downloads_dir();
+                if !self.launch_rusty_files_dir(downloads.as_deref()) {
+                    self.toggle_launcher();
+                }
             }
             ContextMenuAction::DownloadsOpenEntry(path) => self.open_downloads_entry(&path),
             ContextMenuAction::DownloadsSetSort(mode) => {
                 self.user_config.downloads_sort = mode;
                 self.sync_and_save_user_config();
-                if self.context_menu.is_some() {
-                    let refreshed = resolve_downloads_dir().map_or_default(|dir| {
-                        read_downloads_entries(&dir, mode, MAX_DOWNLOADS_MENU_ITEMS)
-                    });
-                    let entries = Self::build_downloads_entries_from_list(refreshed, mode);
-                    if let Some(ref mut ctx) = self.context_menu {
-                        ctx.entries = entries;
-                        ctx.open_submenu_parent = None;
-                        ctx.submenu_selected_row = None;
-                        ctx.selected_row = None;
-                    }
-                }
-                self.shell_redraw_needed = true;
+                self.refresh_downloads_context_menu();
+            }
+            ContextMenuAction::DownloadsSetDisplay(mode) => {
+                self.user_config.dock_downloads_display = mode;
+                self.sync_and_save_user_config();
+                self.refresh_downloads_context_menu();
+            }
+            ContextMenuAction::DownloadsSetView(mode) => {
+                self.user_config.dock_downloads_view = mode;
+                self.sync_and_save_user_config();
+                self.refresh_downloads_context_menu();
             }
             ContextMenuAction::TrashOpen => self.handle_dock_hit(DockHit::PinnedTrash, serial),
             ContextMenuAction::TrashEmpty => self.spawn_empty_trash_worker(),
-            ContextMenuAction::OpenSubmenu => return,
-        }
-        if !keep_open {
-            self.close_context_menu();
+            _ => {}
         }
     }
 
-    fn open_downloads_entry(&mut self, path: &Path) {
+    pub(crate) fn open_downloads_entry(&mut self, path: &Path) {
         if path.is_dir() {
             let _ = self.launch_rusty_files_dir(Some(path));
         } else {
@@ -873,24 +1103,29 @@ impl RustyCompositorState {
     }
 
     fn toggle_dock_app_autostart(&mut self, hit: DockHit) {
-        let Some(candidates) = Self::autostart_candidates_for_hit(hit) else {
+        let Some(app_key) = self.dock_key_for_hit(hit) else {
             return;
         };
+        let candidates = self.autostart_candidates_for_key(&app_key);
+        if candidates.is_empty() {
+            return;
+        }
         let had = self
             .user_config
             .autostart
             .iter()
-            .any(|cmd| autostart_matches_candidates(cmd, candidates));
+            .any(|cmd| autostart_matches_candidates(cmd, &candidates));
         if had {
             self.user_config
                 .autostart
-                .retain(|cmd| !autostart_matches_candidates(cmd, candidates));
+                .retain(|cmd| !autostart_matches_candidates(cmd, &candidates));
             self.show_osd("Removed Open at Login", None, false);
         } else {
+            let cand_refs: Vec<&str> = candidates.iter().map(String::as_str).collect();
             let cmd = self
                 .launcher
-                .find_available_command(candidates)
-                .unwrap_or_else(|| candidates[0].to_owned());
+                .find_available_command(&cand_refs)
+                .unwrap_or_else(|| candidates[0].clone());
             self.user_config.autostart.push(cmd);
             self.show_osd("Enabled Open at Login", None, false);
         }
@@ -944,10 +1179,13 @@ impl RustyCompositorState {
     }
 
     fn quit_dock_app(&mut self, hit: DockHit, force: bool) {
-        if hit == DockHit::PinnedSettings {
+        let Some(app_key) = self.dock_key_for_hit(hit) else {
+            return;
+        };
+        if app_key == "settings" {
             self.close_settings();
         }
-        let matching = self.matching_windows_for_dock_app(hit);
+        let matching = self.matching_windows_for_dock_key(&app_key);
         if force {
             let self_pid = std::process::id();
             let pids: BTreeSet<u32> = matching

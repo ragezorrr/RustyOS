@@ -374,6 +374,25 @@
                           fallback при lock /     
                           reduce_transparency     
                           (ADR-0034)              
+
+  D-043                   Фаза 8/Compositor &     accepted
+                          Dock (RUSTYOS-073):     
+                          app-centric Dock        
+                          (группировка без дублей,
+                          динамические пины,      
+                          Recent & свёрнутые      
+                          мини-слоты), локальный  
+                          hover наведённой иконки 
+                          (+8 px / +6 px lift без 
+                          волны), Launch bounce,  
+                          GLES Genie/Scale,       
+                          позиции Bottom/Left/    
+                          Right + Auto-hide,      
+                          Downloads Stack (Fan/   
+                          Grid/List), drag-реордер
+                          и System Settings ->    
+                          Desktop & Dock          
+                          (ADR-0035)              
   -----------------------------------------------------------------------
 
 ## Открытые решения

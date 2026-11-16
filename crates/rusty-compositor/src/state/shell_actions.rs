@@ -10,6 +10,16 @@ use tracing::{info, warn};
 
 use super::{CompositorNotification, OsdBanner, RustyCompositorState, TouchpadSwipeState};
 
+pub(in crate::state) struct DockWindowRecord {
+    pub(in crate::state) id: WindowId,
+    pub(in crate::state) title: String,
+    pub(in crate::state) app_key: String,
+    pub(in crate::state) minimized: bool,
+    pub(in crate::state) focused: bool,
+    pub(in crate::state) icon_name: Option<String>,
+    pub(in crate::state) toplevel_icon: Option<crate::icons::ShmToplevelIcon>,
+}
+
 impl RustyCompositorState {
     /// Requests a clean shutdown of the compositor event loop.
     pub fn request_shutdown(&mut self) {
@@ -24,6 +34,7 @@ impl RustyCompositorState {
     pub fn toggle_launcher(&mut self) {
         self.launcher_active = !self.launcher_active;
         if self.launcher_active {
+            self.close_dock_stack();
             self.close_context_menu();
             self.close_top_bar_menu();
             self.window_switcher = None;
@@ -47,6 +58,7 @@ impl RustyCompositorState {
         self.quick_settings_active = !self.quick_settings_active;
         self.qs_slider_drag = None;
         if self.quick_settings_active {
+            self.close_dock_stack();
             self.close_context_menu();
             self.close_top_bar_menu();
             self.window_switcher = None;
@@ -93,6 +105,9 @@ impl RustyCompositorState {
     /// Clears transient shell hover and active slider drag states (`RUSTYOS-051`).
     pub fn clear_shell_hover_states(&mut self) {
         self.set_dock_hover_slot(None);
+        self.set_dock_auto_hide_hovered(false);
+        self.dock_drag = None;
+        self.close_dock_stack();
         self.top_bar_menu_hover_row = None;
         self.qs_slider_drag = None;
         self.hovered_notification_idx = None;
@@ -111,6 +126,7 @@ impl RustyCompositorState {
                 Easing::EaseOutCubic,
                 self.animations.reduced_motion(),
             );
+            self.shell_redraw_needed = true;
         }
     }
 
@@ -161,10 +177,10 @@ impl RustyCompositorState {
             }
             TopBarMenuAction::OpenSpotlight => self.toggle_launcher(),
             TopBarMenuAction::NewTerminal => {
-                self.handle_dock_hit(crate::shell_render::DockHit::PinnedTerminal, serial);
+                self.launch_dock_app_new_instance("terminal", true);
             }
             TopBarMenuAction::OpenFiles => {
-                self.handle_dock_hit(crate::shell_render::DockHit::PinnedFiles, serial);
+                self.launch_dock_app_new_instance("files", true);
             }
             TopBarMenuAction::NewDesktopFolder => self.create_desktop_folder_action(),
             TopBarMenuAction::GoRecents
@@ -704,12 +720,15 @@ impl RustyCompositorState {
     pub fn toggle_overview(&mut self) {
         self.overview_active = !self.overview_active;
         if self.overview_active {
+            self.close_dock_stack();
             self.close_context_menu();
             self.close_launcher();
             self.close_quick_settings();
             self.close_settings();
             self.active_window_drag = None;
             self.active_window_resize = None;
+        } else {
+            self.overview_filter_app = None;
         }
         self.retarget_overview_anim();
     }
@@ -717,7 +736,66 @@ impl RustyCompositorState {
     /// Exits Workspace Overview mode (`RUSTYOS-023`).
     pub fn close_overview(&mut self) {
         self.overview_active = false;
+        self.overview_filter_app = None;
         self.retarget_overview_anim();
+    }
+
+    /// Toggles Workspace Overview filtered to windows of a single Dock app (App Exposé, `RUSTYOS-073`).
+    pub fn toggle_overview_for_app(&mut self, app_key: &str) {
+        let key = app_key.trim().to_ascii_lowercase();
+        if self.overview_active && self.overview_filter_app.as_deref() == Some(key.as_str()) {
+            self.close_overview();
+            return;
+        }
+        self.overview_filter_app = Some(key);
+        if self.overview_active {
+            self.shell_redraw_needed = true;
+        } else {
+            self.toggle_overview();
+        }
+    }
+
+    /// Ordered window IDs shown in Workspace Overview (filtered when App Exposé is active).
+    #[must_use]
+    pub fn overview_window_ids(&self) -> Vec<WindowId> {
+        let ids = self.ordered_visible_window_ids();
+        let Some(ref filter) = self.overview_filter_app else {
+            return ids;
+        };
+        ids.into_iter()
+            .filter(|&id| {
+                let title = self.window_title(id);
+                let app_id = self.window_app_id(id);
+                crate::shell_render::canonical_dock_app_key(app_id.as_deref(), &title, id)
+                    == *filter
+            })
+            .collect()
+    }
+
+    #[must_use]
+    pub fn dock_stack_render_state(&self) -> Option<crate::shell_render::DockStackRenderState<'_>> {
+        let stack = self.dock_stack.as_ref()?;
+        Some(crate::shell_render::DockStackRenderState {
+            entries: &stack.entries,
+            view_mode: self.user_config.dock_downloads_view,
+            dock_position: self.user_config.dock_position,
+            anchor_rect: stack.anchor_rect,
+            hovered_item: stack.hovered_item,
+            hovered_open_in_files: stack.hovered_open_in_files,
+            title: &stack.title,
+        })
+    }
+
+    #[must_use]
+    pub fn open_dock_stack_layout(
+        &self,
+        primary_size: smithay::utils::Size<i32, smithay::utils::Physical>,
+    ) -> Option<crate::shell_render::DockStackLayout> {
+        let state = self.dock_stack_render_state()?;
+        Some(crate::shell_render::compute_dock_stack_layout(
+            primary_size,
+            &state,
+        ))
     }
 
     /// Returns visible window IDs on the active workspace in stable ascending `WindowId` order (`RUSTYOS-023`).
@@ -813,96 +891,603 @@ impl RustyCompositorState {
         }
     }
 
+    #[cfg(test)]
     pub(in crate::state) fn dock_preferred_candidates(
         hit: crate::shell_render::DockHit,
     ) -> Option<&'static [&'static str]> {
-        const FILES: &[&str] = &["rusty-files"];
-        const TERMINAL: &[&str] = &[
-            "foot",
-            "kitty",
-            "alacritty",
-            "wezterm",
-            "ghostty",
-            "weston-terminal",
-            "gnome-terminal",
-            "konsole",
-            "xfce4-terminal",
-        ];
-        const BROWSER: &[&str] = &[
-            "firefox",
-            "chromium",
-            "google-chrome",
-            "brave-browser",
-            "epiphany",
-            "falkon",
-        ];
-        const NOTES: &[&str] = &[
-            "gnome-text-editor",
-            "gedit",
-            "kate",
-            "mousepad",
-            "featherpad",
-            "obsidian",
-        ];
         match hit {
-            crate::shell_render::DockHit::PinnedFiles => Some(FILES),
-            crate::shell_render::DockHit::PinnedTerminal => Some(TERMINAL),
-            crate::shell_render::DockHit::PinnedBrowser => Some(BROWSER),
-            crate::shell_render::DockHit::PinnedNotes => Some(NOTES),
+            crate::shell_render::DockHit::PinnedFiles => {
+                crate::launcher::LauncherState::canonical_preferred_bins("files")
+            }
+            crate::shell_render::DockHit::PinnedTerminal => {
+                crate::launcher::LauncherState::canonical_preferred_bins("terminal")
+            }
+            crate::shell_render::DockHit::PinnedBrowser => {
+                crate::launcher::LauncherState::canonical_preferred_bins("browser")
+            }
+            crate::shell_render::DockHit::PinnedNotes => {
+                crate::launcher::LauncherState::canonical_preferred_bins("notes")
+            }
             _ => None,
         }
     }
 
-    fn launch_dock_app_or_spotlight(&mut self, candidates: &[&str], ipc_path: &std::path::Path) {
+    pub(in crate::state) fn dock_key_for_hit(
+        &self,
+        hit: crate::shell_render::DockHit,
+    ) -> Option<String> {
+        match hit {
+            crate::shell_render::DockHit::PinnedFiles => Some("files".to_owned()),
+            crate::shell_render::DockHit::ToggleOverview => Some("overview".to_owned()),
+            crate::shell_render::DockHit::PinnedTerminal => Some("terminal".to_owned()),
+            crate::shell_render::DockHit::PinnedBrowser => Some("browser".to_owned()),
+            crate::shell_render::DockHit::PinnedNotes => Some("notes".to_owned()),
+            crate::shell_render::DockHit::PinnedSettings => Some("settings".to_owned()),
+            crate::shell_render::DockHit::PinnedApp(idx) => {
+                self.user_config.dock_pinned_apps.get(idx).cloned()
+            }
+            crate::shell_render::DockHit::PinnedDownloads => Some("downloads".to_owned()),
+            crate::shell_render::DockHit::PinnedTrash => Some("trash".to_owned()),
+            _ => self
+                .build_dock_tiles()
+                .into_iter()
+                .find(|tile| tile.hit == hit)
+                .map(|tile| tile.app_key),
+        }
+    }
+
+    /// Triggers a single or continuous launch bounce animation on `app_key` (`RUSTYOS-073`).
+    pub fn trigger_app_bounce(&mut self, app_key: &str, continuous: bool) {
+        if !self.user_config.dock_animate_opening || self.animations.reduced_motion() {
+            return;
+        }
+        let key = app_key.trim().to_ascii_lowercase();
+        if key.is_empty() {
+            return;
+        }
+        let now = self.elapsed();
+        if let Some(existing) = self.app_bounces.iter_mut().find(|b| b.app_key == key) {
+            existing.started_at = now;
+            existing.elapsed_ms = 0.0;
+            existing.continuous = existing.continuous || continuous;
+        } else {
+            self.app_bounces.push(super::DockBounceState {
+                app_key: key,
+                started_at: now,
+                elapsed_ms: 0.0,
+                continuous,
+            });
+        }
+        self.shell_redraw_needed = true;
+    }
+
+    /// Allows a continuous launch bounce to finish cleanly once the app maps its window (`RUSTYOS-073`).
+    pub fn settle_app_bounce(&mut self, app_key: &str) {
+        let key = app_key.trim().to_ascii_lowercase();
+        for b in &mut self.app_bounces {
+            if b.app_key == key {
+                b.continuous = false;
+            }
+        }
+    }
+
+    /// Computes vertical/inward bounce displacements in logical pixels (`0.0..=14.0`).
+    #[must_use]
+    pub fn dock_bounce_offsets(&self) -> Vec<(&str, f64)> {
+        const PERIOD_MS: f64 = 520.0;
+        const AMP_PX: f64 = 14.0;
+        self.app_bounces
+            .iter()
+            .map(|b| {
+                let phase = (b.elapsed_ms % PERIOD_MS) / PERIOD_MS;
+                let decay = if b.continuous {
+                    1.0
+                } else {
+                    (1.0 - b.elapsed_ms / (PERIOD_MS * 2.0)).clamp(0.25, 1.0)
+                };
+                let offset = (phase * std::f64::consts::PI).sin().abs() * AMP_PX * decay;
+                (b.app_key.as_str(), offset)
+            })
+            .collect()
+    }
+
+    /// Updates pointer edge/hover state for Dock Auto-hide reveal animations (`RUSTYOS-073`).
+    pub fn set_dock_auto_hide_hovered(&mut self, hovered: bool) {
+        if self.dock_auto_hide_hovered != hovered {
+            self.dock_auto_hide_hovered = hovered;
+            self.sync_dock_auto_hide_target();
+        }
+    }
+
+    pub(crate) fn sync_dock_auto_hide_target(&mut self) {
+        let keep_open = !self.user_config.dock_auto_hide
+            || self.dock_auto_hide_hovered
+            || self.dock_stack.is_some()
+            || self.dock_drag.is_some()
+            || matches!(
+                self.context_menu.as_ref().map(|c| c.target),
+                Some(crate::shell_render::ContextMenuTarget::DockSlot(_))
+            );
+        let target = if keep_open { 1.0 } else { 0.0 };
+        if (self.dock_auto_hide_anim.target() - target).abs() > 1e-4 {
+            let now = self.elapsed();
+            let easing = if keep_open {
+                Easing::EaseOutCubic
+            } else {
+                Easing::EaseInOutCubic
+            };
+            self.dock_auto_hide_anim.retarget(
+                target,
+                now,
+                Duration::from_millis(180),
+                easing,
+                self.animations.reduced_motion(),
+            );
+            self.shell_redraw_needed = true;
+        }
+    }
+
+    /// Closes an open Dock `Downloads` Stack popover if present (`RUSTYOS-073`).
+    pub fn close_dock_stack(&mut self) {
+        if self.dock_stack.take().is_some() {
+            self.sync_dock_auto_hide_target();
+            self.shell_redraw_needed = true;
+        }
+    }
+
+    #[must_use]
+    pub fn primary_output_logical_size(
+        &self,
+    ) -> smithay::utils::Size<i32, smithay::utils::Physical> {
+        let lsize = self.output_map.primary().logical_geometry().size;
+        smithay::utils::Size::from((lsize.w.max(320), lsize.h.max(240)))
+    }
+
+    #[must_use]
+    pub fn dock_drag_preview(&self) -> Option<crate::shell_render::DockDragPreview<'_>> {
+        let drag = self.dock_drag.as_ref()?;
+        if !drag.active_drag {
+            return None;
+        }
+        let source_pinned_idx = drag.source_pinned_idx?;
+        Some(crate::shell_render::DockDragPreview {
+            app_key: &drag.app_key,
+            source_pinned_idx,
+            target_pinned_idx: drag.target_pinned_idx,
+            pointer_xy: (drag.current_pointer.x, drag.current_pointer.y),
+            pulled_outside: drag.pulled_outside,
+        })
+    }
+
+    #[must_use]
+    pub fn dock_view_state<'a>(
+        &'a self,
+        tiles: &'a [crate::shell_render::DockAppTile],
+        windows: &'a [crate::shell_render::DockWindowEntry],
+        bounces: &'a [(&'a str, f64)],
+        hover_slot: Option<usize>,
+    ) -> crate::shell_render::DockViewState<'a> {
+        crate::shell_render::DockViewState {
+            pinned_icons: [None, None],
+            windows,
+            tiles,
+            hover_slot,
+            overview_active: self.overview_active,
+            hover_progress: self.dock_hover_anim.current(),
+            reduced_motion: self.animations.reduced_motion(),
+            icon_size: self.user_config.dock_icon_size,
+            position: self.user_config.dock_position,
+            auto_hide_reveal: if self.user_config.dock_auto_hide {
+                self.dock_auto_hide_anim.current()
+            } else {
+                1.0
+            },
+            show_indicators: self.user_config.dock_show_indicators,
+            bounces,
+            drag_preview: self.dock_drag_preview(),
+        }
+    }
+
+    #[must_use]
+    pub fn active_dock_layout(
+        &self,
+        tiles: &[crate::shell_render::DockAppTile],
+    ) -> crate::shell_render::ComputedDockLayout {
+        let screen_size = self.primary_output_logical_size();
+        let bounces = self.dock_bounce_offsets();
+        let view = self.dock_view_state(tiles, &[], &bounces, self.dock_hover_slot);
+        crate::shell_render::compute_dock_layout(screen_size, &view)
+    }
+
+    pub(in crate::state) fn collect_dock_window_records(&self) -> Vec<DockWindowRecord> {
+        let focused = self.wm.focused_window();
+        self.ordered_visible_window_ids()
+            .into_iter()
+            .map(|id| {
+                let title = self.window_title(id);
+                let app_id = self.window_app_id(id);
+                let minimized = self.is_window_minimized(id);
+                let app_key =
+                    crate::shell_render::canonical_dock_app_key(app_id.as_deref(), &title, id);
+                let icon_name = self.launcher.icon_for_app_hints(app_id.as_deref(), &title);
+                let toplevel_icon = self.window_toplevel_icons.get(&id).cloned();
+                DockWindowRecord {
+                    id,
+                    title,
+                    app_key,
+                    minimized,
+                    focused: !minimized && focused == Some(id),
+                    icon_name,
+                    toplevel_icon,
+                }
+            })
+            .collect()
+    }
+
+    fn label_for_dock_record(key: &str, fallback_title: &str) -> String {
+        if key.starts_with("win-") {
+            return crate::shell_render::extract_app_name(fallback_title);
+        }
+        crate::shell_render::dock_label_for_key(key)
+    }
+
+    /// Builds ordered macOS 27 Golden Gate Dock tiles with app grouping (`RUSTYOS-073`).
+    #[must_use]
+    pub fn build_dock_tiles(&self) -> Vec<crate::shell_render::DockAppTile> {
+        let records = self.collect_dock_window_records();
+        let mut tiles =
+            Vec::with_capacity(self.user_config.dock_pinned_apps.len() + records.len() + 4);
+        let mut pinned_keys = std::collections::HashSet::new();
+
+        for (pin_idx, raw_key) in self.user_config.dock_pinned_apps.iter().enumerate() {
+            let key = raw_key.trim().to_ascii_lowercase();
+            if key.is_empty() || !pinned_keys.insert(key.clone()) {
+                continue;
+            }
+            let matching: Vec<&DockWindowRecord> =
+                records.iter().filter(|rec| rec.app_key == key).collect();
+            let representative_win = matching
+                .iter()
+                .find(|r| r.focused)
+                .or_else(|| matching.iter().find(|r| !r.minimized))
+                .or_else(|| matching.first())
+                .map(|r| r.id);
+            let is_active = if key == "overview" {
+                self.overview_active
+            } else {
+                (key == "files" && self.desktop_focused) || matching.iter().any(|r| r.focused)
+            };
+            let has_indicator = if key == "overview" {
+                self.overview_active
+            } else {
+                !matching.is_empty() || (key == "files" && self.desktop_focused)
+            };
+            let icon_name = matching
+                .iter()
+                .find_map(|r| r.icon_name.clone())
+                .or_else(|| self.launcher.icon_for_dock_key(&key));
+            let toplevel_icon = matching.iter().find_map(|r| r.toplevel_icon.clone());
+            let label = crate::shell_render::dock_label_for_key(&key);
+            tiles.push(crate::shell_render::DockAppTile {
+                section: crate::shell_render::DockSection::Pinned,
+                hit: crate::shell_render::dock_hit_for_pinned_key(&key, pin_idx),
+                builtin_icon: crate::shell_render::dock_builtin_for_key(&key),
+                app_key: key,
+                label: label.clone(),
+                representative_win,
+                window_count: matching.len(),
+                has_minimized: matching.iter().any(|r| r.minimized),
+                is_active,
+                has_indicator,
+                icon_name,
+                toplevel_icon,
+                fallback_title: label,
+            });
+        }
+
+        self.push_unpinned_and_minimized_tiles(&records, &pinned_keys, &mut tiles);
+        crate::shell_render::append_utility_dock_tiles(&mut tiles);
+        tiles
+    }
+
+    fn push_unpinned_and_minimized_tiles(
+        &self,
+        records: &[DockWindowRecord],
+        pinned_keys: &std::collections::HashSet<String>,
+        tiles: &mut Vec<crate::shell_render::DockAppTile>,
+    ) {
+        let mut seen_unpinned = std::collections::HashSet::new();
+        let mut unpinned_ordinal = 0_usize;
+        for rec in records {
+            if pinned_keys.contains(&rec.app_key) || !seen_unpinned.insert(rec.app_key.clone()) {
+                continue;
+            }
+            let group: Vec<&DockWindowRecord> = records
+                .iter()
+                .filter(|other| other.app_key == rec.app_key)
+                .collect();
+            let rep = group
+                .iter()
+                .find(|r| r.focused)
+                .or_else(|| group.iter().find(|r| !r.minimized))
+                .or_else(|| group.first())
+                .map(|r| r.id);
+            let label = Self::label_for_dock_record(&rec.app_key, &rec.title);
+            tiles.push(crate::shell_render::DockAppTile {
+                section: crate::shell_render::DockSection::UnpinnedOrRecent,
+                app_key: rec.app_key.clone(),
+                label: label.clone(),
+                hit: crate::shell_render::DockHit::WindowSlot(unpinned_ordinal),
+                builtin_icon: crate::shell_render::dock_builtin_for_key(&rec.app_key),
+                representative_win: rep,
+                window_count: group.len(),
+                has_minimized: group.iter().any(|r| r.minimized),
+                is_active: group.iter().any(|r| r.focused),
+                has_indicator: true,
+                icon_name: group.iter().find_map(|r| r.icon_name.clone()),
+                toplevel_icon: group.iter().find_map(|r| r.toplevel_icon.clone()),
+                fallback_title: label,
+            });
+            unpinned_ordinal += 1;
+        }
+
+        if self.user_config.dock_show_recent {
+            for (idx, recent) in self.recent_unpinned_apps.iter().enumerate() {
+                if pinned_keys.contains(&recent.app_key) || seen_unpinned.contains(&recent.app_key)
+                {
+                    continue;
+                }
+                tiles.push(crate::shell_render::DockAppTile {
+                    section: crate::shell_render::DockSection::UnpinnedOrRecent,
+                    app_key: recent.app_key.clone(),
+                    label: recent.label.clone(),
+                    hit: crate::shell_render::DockHit::RecentApp(idx),
+                    builtin_icon: crate::shell_render::dock_builtin_for_key(&recent.app_key),
+                    representative_win: None,
+                    window_count: 0,
+                    has_minimized: false,
+                    is_active: false,
+                    has_indicator: false,
+                    icon_name: recent.icon_name.clone(),
+                    toplevel_icon: None,
+                    fallback_title: recent.label.clone(),
+                });
+            }
+        }
+
+        if !self.user_config.dock_minimize_into_app {
+            for rec in records.iter().filter(|r| r.minimized) {
+                let short = if rec.title.len() > 24 {
+                    crate::shell_render::extract_app_name(&rec.title)
+                } else {
+                    rec.title.clone()
+                };
+                tiles.push(crate::shell_render::DockAppTile {
+                    section: crate::shell_render::DockSection::MinimizedWindow,
+                    app_key: rec.app_key.clone(),
+                    label: short,
+                    hit: crate::shell_render::DockHit::MinimizedWindow(rec.id),
+                    builtin_icon: crate::shell_render::dock_builtin_for_key(&rec.app_key),
+                    representative_win: Some(rec.id),
+                    window_count: 1,
+                    has_minimized: true,
+                    is_active: false,
+                    has_indicator: false,
+                    icon_name: rec.icon_name.clone(),
+                    toplevel_icon: rec.toplevel_icon.clone(),
+                    fallback_title: rec.title.clone(),
+                });
+            }
+        }
+    }
+
+    /// Launches a fresh instance of a Dock app key with opening bounce (`RUSTYOS-073`).
+    pub fn launch_dock_app_new_instance(&mut self, app_key: &str, continuous_bounce: bool) {
+        self.close_dock_stack();
         self.close_overview();
-        if !self
+        let ipc_path = rusty_ipc::default_ipc_socket_path(&self.socket_name);
+        if self
             .launcher
-            .launch_preferred(candidates, &self.socket_name, ipc_path)
+            .launch_by_dock_key(app_key, &self.socket_name, &ipc_path)
         {
+            self.trigger_app_bounce(app_key, continuous_bounce);
+        } else {
             self.toggle_launcher();
         }
     }
 
     pub(in crate::state) fn launch_rusty_files(&mut self, args: &[&str]) -> bool {
+        self.close_dock_stack();
         self.close_overview();
         let ipc_path = rusty_ipc::default_ipc_socket_path(&self.socket_name);
-        self.launcher
+        let launched = self
+            .launcher
             .launch_program_with_args("rusty-files", args, &self.socket_name, &ipc_path)
-            .is_ok()
+            .is_ok();
+        if launched {
+            self.trigger_app_bounce("files", false);
+        }
+        launched
     }
 
-    pub(in crate::state) fn launch_rusty_files_dir(
-        &mut self,
-        dir: Option<&std::path::Path>,
-    ) -> bool {
+    pub(crate) fn launch_rusty_files_dir(&mut self, dir: Option<&std::path::Path>) -> bool {
         match dir.and_then(|p| p.to_str()) {
             Some(path_str) => self.launch_rusty_files(&["--path", path_str]),
             None => self.launch_rusty_files(&[]),
         }
     }
 
-    /// Executes an interactive Dock click action (`RUSTYOS-023` / `RUSTYOS-032` / `RUSTYOS-050`).
-    pub fn handle_dock_hit(&mut self, hit: crate::shell_render::DockHit, serial: Serial) {
-        let ipc_path = rusty_ipc::default_ipc_socket_path(&self.socket_name);
-        if let Some(candidates) = Self::dock_preferred_candidates(hit) {
-            self.launch_dock_app_or_spotlight(candidates, &ipc_path);
+    pub(in crate::state) fn open_downloads_stack(&mut self) {
+        self.close_context_menu();
+        self.close_top_bar_menu();
+        self.close_quick_settings();
+        self.close_settings();
+        self.close_launcher();
+        self.close_overview();
+        let tiles = self.build_dock_tiles();
+        let layout = self.active_dock_layout(&tiles);
+        let anchor_rect = layout
+            .slots
+            .iter()
+            .find(|slot| slot.tile.hit == crate::shell_render::DockHit::PinnedDownloads)
+            .map_or_else(
+                || smithay::utils::Rectangle::new((0, 0).into(), (50, 50).into()),
+                |slot| slot.icon_rect,
+            );
+        let entries = super::context_menu_actions::resolve_downloads_dir().map_or_default(|dir| {
+            super::context_menu_actions::read_downloads_stack_entries(
+                &dir,
+                self.user_config.downloads_sort,
+                24,
+            )
+        });
+        self.dock_stack = Some(super::DockStackState {
+            title: "Downloads".to_owned(),
+            anchor_rect,
+            entries,
+            hovered_item: None,
+            hovered_open_in_files: false,
+            selected_idx: None,
+        });
+        self.sync_dock_auto_hide_target();
+        self.shell_redraw_needed = true;
+    }
+
+    /// Commits a finished internal Dock drag to reorder or unpin `[dock].pinned_apps` (`RUSTYOS-073`).
+    pub fn commit_dock_pin_reorder_or_remove(
+        &mut self,
+        source_idx: usize,
+        target_idx: usize,
+        pulled_outside: bool,
+    ) {
+        let len = self.user_config.dock_pinned_apps.len();
+        if source_idx >= len {
             return;
         }
+        let key = self.user_config.dock_pinned_apps[source_idx].clone();
+        if pulled_outside && crate::shell_render::is_dock_pin_removable(&key) {
+            self.user_config.dock_pinned_apps.remove(source_idx);
+            self.set_dock_hover_slot(None);
+            self.sync_and_save_user_config();
+            self.shell_redraw_needed = true;
+            return;
+        }
+        let clamped_target = target_idx.min(len.saturating_sub(1));
+        if clamped_target != source_idx {
+            let removed = self.user_config.dock_pinned_apps.remove(source_idx);
+            self.user_config
+                .dock_pinned_apps
+                .insert(clamped_target, removed);
+            self.sync_and_save_user_config();
+            self.shell_redraw_needed = true;
+        }
+    }
+
+    /// Pins or unpins an application key inside `[dock].pinned_apps` (`RUSTYOS-073`).
+    pub fn toggle_app_keep_in_dock(&mut self, app_key: &str) {
+        let key = app_key.trim().to_ascii_lowercase();
+        if key.is_empty() {
+            return;
+        }
+        if let Some(pos) = self
+            .user_config
+            .dock_pinned_apps
+            .iter()
+            .position(|item| item.eq_ignore_ascii_case(&key))
+        {
+            if crate::shell_render::is_dock_pin_removable(&key) {
+                self.user_config.dock_pinned_apps.remove(pos);
+                self.sync_and_save_user_config();
+                self.shell_redraw_needed = true;
+            }
+        } else {
+            self.user_config.dock_pinned_apps.push(key);
+            self.recent_unpinned_apps
+                .retain(|rec| !rec.app_key.eq_ignore_ascii_case(app_key));
+            self.sync_and_save_user_config();
+            self.shell_redraw_needed = true;
+        }
+    }
+
+    fn focus_or_launch_dock_app(&mut self, app_key: &str, serial: Serial) {
+        let records = self.collect_dock_window_records();
+        let matching: Vec<&DockWindowRecord> =
+            records.iter().filter(|r| r.app_key == app_key).collect();
+        if matching.is_empty() {
+            self.launch_dock_app_new_instance(app_key, true);
+            return;
+        }
+        let unmin: Vec<WindowId> = matching
+            .iter()
+            .filter(|r| !r.minimized)
+            .map(|r| r.id)
+            .collect();
+        if unmin.is_empty() {
+            let first_min = matching[0].id;
+            self.restore_window(first_min, serial);
+            self.close_overview();
+            return;
+        }
+        let focused = self.wm.focused_window();
+        if let Some(pos) = focused.and_then(|f| unmin.iter().position(|id| *id == f)) {
+            if unmin.len() > 1 {
+                let next = unmin[(pos + 1) % unmin.len()];
+                self.wm.focus_and_raise(next);
+                self.sync_space_with_wm(serial);
+            }
+        } else {
+            for &id in &unmin {
+                self.wm.focus_and_raise(id);
+            }
+            self.sync_space_with_wm(serial);
+        }
+        self.close_overview();
+    }
+
+    /// Executes an interactive Dock click action (`RUSTYOS-023` / `RUSTYOS-032` / `RUSTYOS-073`).
+    pub fn handle_dock_hit(&mut self, hit: crate::shell_render::DockHit, serial: Serial) {
+        if hit == crate::shell_render::DockHit::ToggleOverview {
+            self.close_dock_stack();
+            self.toggle_overview();
+            return;
+        }
+        if hit == crate::shell_render::DockHit::PinnedDownloads {
+            self.close_overview();
+            match self.user_config.dock_downloads_display {
+                crate::config::DownloadsDisplayMode::Stack => {
+                    if self.dock_stack.is_some() {
+                        self.close_dock_stack();
+                    } else {
+                        self.open_downloads_stack();
+                    }
+                }
+                crate::config::DownloadsDisplayMode::Folder => {
+                    let downloads = super::context_menu_actions::resolve_downloads_dir();
+                    if !self.launch_rusty_files_dir(downloads.as_deref()) {
+                        self.toggle_launcher();
+                    }
+                }
+            }
+            return;
+        }
+        self.close_dock_stack();
         match hit {
             crate::shell_render::DockHit::PinnedSettings => {
                 self.close_overview();
-                if !self.launcher.launch_preferred(
-                    &["rusty-settings", "gnome-control-center", "systemsettings"],
-                    &self.socket_name,
-                    &ipc_path,
-                ) {
-                    self.toggle_quick_settings();
-                }
-            }
-            crate::shell_render::DockHit::PinnedDownloads => {
-                let downloads = super::context_menu_actions::resolve_downloads_dir();
-                if !self.launch_rusty_files_dir(downloads.as_deref()) {
-                    self.toggle_launcher();
+                let open_settings_win = self
+                    .collect_dock_window_records()
+                    .into_iter()
+                    .find(|r| r.app_key == "settings")
+                    .map(|r| r.id);
+                if let Some(win_id) = open_settings_win {
+                    if self.is_window_minimized(win_id) {
+                        self.restore_window(win_id, serial);
+                    } else {
+                        self.wm.focus_and_raise(win_id);
+                        self.sync_space_with_wm(serial);
+                    }
+                } else {
+                    self.toggle_settings();
                 }
             }
             crate::shell_render::DockHit::PinnedTrash => {
@@ -910,25 +1495,15 @@ impl RustyCompositorState {
                     self.toggle_launcher();
                 }
             }
-            crate::shell_render::DockHit::ToggleOverview => {
-                self.toggle_overview();
+            crate::shell_render::DockHit::MinimizedWindow(win_id) => {
+                self.restore_window(win_id, serial);
+                self.close_overview();
             }
-            crate::shell_render::DockHit::WindowSlot(idx) => {
-                let ids = self.ordered_visible_window_ids();
-                if let Some(&win_id) = ids.get(idx) {
-                    if self.is_window_minimized(win_id) {
-                        self.restore_window(win_id, serial);
-                        self.close_overview();
-                    } else if !self.overview_active && self.wm.focused_window() == Some(win_id) {
-                        self.minimize_window(win_id, serial);
-                    } else {
-                        self.wm.focus_and_raise(win_id);
-                        self.sync_space_with_wm(serial);
-                        self.close_overview();
-                    }
+            other => {
+                if let Some(app_key) = self.dock_key_for_hit(other) {
+                    self.focus_or_launch_dock_app(&app_key, serial);
                 }
             }
-            _ => {}
         }
     }
 
@@ -956,6 +1531,7 @@ impl RustyCompositorState {
             return;
         }
         self.settings_active = true;
+        self.close_dock_stack();
         self.close_context_menu();
         self.close_launcher();
         self.close_quick_settings();
@@ -1019,6 +1595,14 @@ impl RustyCompositorState {
             require_password_on_lock: self.user_config.require_password_on_lock,
             lock_on_sleep: self.user_config.lock_on_sleep,
             enable_polkit_agent: self.user_config.enable_polkit_agent,
+            dock_icon_size: self.user_config.dock_icon_size,
+            dock_position: self.user_config.dock_position,
+            dock_minimize_effect: self.user_config.dock_minimize_effect,
+            dock_minimize_into_app: self.user_config.dock_minimize_into_app,
+            dock_auto_hide: self.user_config.dock_auto_hide,
+            dock_animate_opening: self.user_config.dock_animate_opening,
+            dock_show_indicators: self.user_config.dock_show_indicators,
+            dock_show_recent: self.user_config.dock_show_recent,
             config_status_label: self.config_status_label,
         }
     }
@@ -1065,6 +1649,9 @@ impl RustyCompositorState {
             || cfg.keyboard_options != self.user_config.keyboard_options;
         let wallpaper_changed =
             cfg.wallpaper != self.user_config.wallpaper || cfg.wallpaper.is_some();
+        let dock_layout_changed = cfg.dock_position != self.user_config.dock_position
+            || cfg.dock_icon_size != self.user_config.dock_icon_size
+            || cfg.dock_auto_hide != self.user_config.dock_auto_hide;
 
         self.animations.set_reduced_motion(cfg.reduced_motion);
         self.glass_opacity = crate::config::clamp_glass_opacity(cfg.glass_opacity);
@@ -1134,6 +1721,11 @@ impl RustyCompositorState {
 
         self.user_config = cfg;
         crate::shell_render::set_active_appearance(self.user_config.appearance);
+        if dock_layout_changed {
+            self.close_dock_stack();
+            self.sync_dock_auto_hide_target();
+            self.relayout_wm_for_all_outputs();
+        }
         if xkb_applied {
             self.refresh_keyboard_layout_label();
         }
@@ -1169,7 +1761,6 @@ impl RustyCompositorState {
 
     /// Executes an interactive control hit inside the System Settings modal (`RUSTYOS-061`/`062`).
     pub fn apply_settings_hit(&mut self, hit: crate::shell_render::SettingsHit) {
-        use crate::config::{VrrMode, next_keyboard_layout_preset, next_keyboard_option_preset};
         use crate::shell_render::SettingsHit;
 
         match hit {
@@ -1206,6 +1797,32 @@ impl RustyCompositorState {
                 self.clock_24h = !self.clock_24h;
                 self.sync_and_save_user_config();
             }
+            dock_hit @ (SettingsHit::DockSizeDown
+            | SettingsHit::DockSizeUp
+            | SettingsHit::DockCyclePosition
+            | SettingsHit::DockToggleMinimizeEffect
+            | SettingsHit::DockToggleMinimizeIntoApp
+            | SettingsHit::DockToggleAutoHide
+            | SettingsHit::DockToggleAnimateOpening
+            | SettingsHit::DockToggleShowIndicators
+            | SettingsHit::DockToggleShowRecent) => self.apply_dock_settings_hit(dock_hit),
+            SettingsHit::ReloadConfig => {
+                let _ = self.reload_user_config();
+            }
+            SettingsHit::Close | SettingsHit::Outside => self.close_settings(),
+            SettingsHit::ModalBody => {}
+            other => self.apply_display_keyboard_security_settings_hit(other),
+        }
+    }
+
+    fn apply_display_keyboard_security_settings_hit(
+        &mut self,
+        hit: crate::shell_render::SettingsHit,
+    ) {
+        use crate::config::{VrrMode, next_keyboard_layout_preset, next_keyboard_option_preset};
+        use crate::shell_render::SettingsHit;
+
+        match hit {
             SettingsHit::CycleTargetOutput => self.cycle_target_settings_output(),
             SettingsHit::ScaleDown | SettingsHit::ScaleUp => {
                 self.step_target_display_scale(matches!(hit, SettingsHit::ScaleUp));
@@ -1263,12 +1880,58 @@ impl RustyCompositorState {
                 self.user_config.enable_polkit_agent = !self.user_config.enable_polkit_agent;
                 self.sync_and_save_user_config();
             }
-            SettingsHit::ReloadConfig => {
-                let _ = self.reload_user_config();
-            }
-            SettingsHit::Close | SettingsHit::Outside => self.close_settings(),
-            SettingsHit::ModalBody => {}
+            _ => {}
         }
+    }
+
+    fn apply_dock_settings_hit(&mut self, hit: crate::shell_render::SettingsHit) {
+        use crate::shell_render::SettingsHit;
+
+        let mut layout_changed = false;
+        match hit {
+            SettingsHit::DockSizeDown => {
+                self.user_config.dock_icon_size =
+                    crate::config::clamp_dock_icon_size(self.user_config.dock_icon_size - 4);
+                layout_changed = true;
+            }
+            SettingsHit::DockSizeUp => {
+                self.user_config.dock_icon_size =
+                    crate::config::clamp_dock_icon_size(self.user_config.dock_icon_size + 4);
+                layout_changed = true;
+            }
+            SettingsHit::DockCyclePosition => {
+                self.user_config.dock_position = self.user_config.dock_position.next();
+                layout_changed = true;
+            }
+            SettingsHit::DockToggleMinimizeEffect => {
+                self.user_config.dock_minimize_effect =
+                    self.user_config.dock_minimize_effect.toggle();
+            }
+            SettingsHit::DockToggleMinimizeIntoApp => {
+                self.user_config.dock_minimize_into_app = !self.user_config.dock_minimize_into_app;
+            }
+            SettingsHit::DockToggleAutoHide => {
+                self.user_config.dock_auto_hide = !self.user_config.dock_auto_hide;
+                self.sync_dock_auto_hide_target();
+                layout_changed = true;
+            }
+            SettingsHit::DockToggleAnimateOpening => {
+                self.user_config.dock_animate_opening = !self.user_config.dock_animate_opening;
+            }
+            SettingsHit::DockToggleShowIndicators => {
+                self.user_config.dock_show_indicators = !self.user_config.dock_show_indicators;
+            }
+            SettingsHit::DockToggleShowRecent => {
+                self.user_config.dock_show_recent = !self.user_config.dock_show_recent;
+            }
+            _ => return,
+        }
+        if layout_changed {
+            self.close_dock_stack();
+            self.relayout_wm_for_all_outputs();
+        }
+        self.sync_and_save_user_config();
+        self.shell_redraw_needed = true;
     }
 
     fn toggle_appearance_setting(&mut self) {

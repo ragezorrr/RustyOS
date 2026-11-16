@@ -399,19 +399,30 @@ palettes (section 5.1); geometry, Liquid Glass clarity, and interactions target 
 - Built-in Golden Gate procedural wallpaper targets layered 3D S-curve silk folds with crisp luminous
   crest highlights (matching `27-Golden-Gate-Desktop.png` Light/Dark contrast) so Liquid Glass edge
   refraction reads clearly behind Dock and popovers.
-- Concentric rounded floating glass container (`DOCK_HEIGHT = 68 px`, `DOCK_RADIUS = 22 px`,
-  `DOCK_MARGIN_BOTTOM = 8 px`), width dynamically fits `6` pinned apps + running windows + `2`
-  utility slots; clear top-lit `LiquidGlassElement` frosted fill (light, high background clarity with
-  directional corner caustics rather than heavy grey/milky tint), tapering specular rim, and an opaque
-  fallback when `reduce_transparency = true`.
-- Resting slots have zero grey box outlines or dark backing smudges: crisp `50 px` `4x4` SSAA
-  superellipse app icons sit cleanly on the translucent glass tray over `6 px` gaps (`52 px` hit slots),
-  followed by a centered `1 px` hairline divider and glass-styled `Downloads` folder + translucent `Trash` icon.
-- Running indicator target: neutral circular `5x5` dot (dark/charcoal in Light mode, luminous white in
-  Dark mode; amber when minimized) anchored `7 px` above the Dock bottom edge.
-- Hover: quantized icon magnification (`50..=58 px`) and smooth upward lift (`+6 px`, `120 ms`
-  interruptible animation; `2 px` static lift when `reduced_motion = true`) with a floating frosted
-  glass tooltip pill naming the hovered application above the Dock.
+- App-centric concentric rounded floating glass container (`DOCK_RADIUS = 22 px`, clear top-lit
+  `LiquidGlassElement` frosted fill, tapering specular rim, opaque fallback on `reduce_transparency = true`),
+  supporting `Bottom`, `Left`, and `Right` screen edges (`usable_work_area_with_dock`) and `Auto-hide`
+  edge reveal. Slots follow three sections separated by `1 px` hairline dividers:
+  1. `Pinned` apps (`[dock].pinned_apps`, reorderable and pull-out removable via `>= 52 px` `"Remove"` pill);
+  2. `Unpinned` running apps + up to `4` recent apps (`show_recent`);
+  3. Minimized window mini-slots (when `minimize_into_app = false`) + utility slots (`Downloads` Stack + `Trash`).
+- Resting slots have zero grey box outlines or dark backing smudges: crisp `4x4` SSAA superellipse app icons
+  (configurable `dock_icon_size` `36..=68 px`) sit cleanly on the translucent glass tray.
+- Running indicator (`dock_show_indicators`): neutral circular `5x5` dot (dark/charcoal in Light mode,
+  luminous white in Dark mode; amber when an app has minimized windows). Clicking an app icon focuses,
+  raises, restores, or cycles its windows without re-minimizing active windows; launching triggers upward
+  `Launch bounce` when `dock_animate_opening = true`. Right-click opens an app-centric menu (open windows,
+  `Keep in Dock` / `Remove from Dock`, `Open at Login`, `Show All Windows` -> filtered App Exposé,
+  `Quit` / `Alt+Force Quit`).
+- Hover & Minimize: single-icon local hover without wave rippling or capsule stretching (hovered icon
+  scales `+8 px` centered in its slot and lifts `+6 px`, or `+2 px` static lift with `0 px` scaling
+  when `reduced_motion = true`) with a floating frosted glass tooltip pill; window minimize uses safe
+  GLES `WindowMinimizePipeline` (`Genie` or `Scale` deformation into the target Dock slot).
+- `Downloads` utility supports `Display as` (`Folder` / `Stack`), interactive `Liquid Glass` popover in
+  `Fan`, `Grid`, or `List` (`Automatic` adapts to Dock edge), `Sort By` (`Date Added`, `Date Modified`,
+  `Name`, `Size`, `Kind`), and `"Open in Files"`.
+- Runtime Dock configuration lives in `[dock]` of `config.toml` and `System Settings -> Desktop & Dock`
+  (`SettingsTab::DesktopDock`).
 
 ### 12.3 Windows, Finder (`rusty-files`), menus, Spotlight, Notifications, and OSD
 
@@ -451,15 +462,18 @@ palettes (section 5.1); geometry, Liquid Glass clarity, and interactions target 
 
 ### 12.5 Material and depth
 
-- Glass containers (`Dock`, `Popover`, `ControlModule`, `Switcher`, `LockScreen` input pill) render
-  through the 5-pass GLES Dual-Kawase backdrop blur FBO pipeline (`LiquidGlassPipeline`:
+- Glass containers (`Dock`, `Popover`, `ControlModule`, `Switcher`, `LockScreen` input pill, `Dock` tooltip)
+  render through the 5-pass GLES Dual-Kawase backdrop blur FBO pipeline (`LiquidGlassPipeline`:
   `1 -> 1/2 -> 1/4 -> 1/8 -> 1/4 -> 1/2`) using `OutputDamageTracker` on the backdrop scene so idle
   frames incur zero extra GPU passes, composited via `LIQUID_GLASS_FRAG` (`TextureShaderElement`) with
-  analytical rounded-box SDF, edge optical lensing/dispersion, vibrance boost, directional specular
-  bevel rim, and restrained Light/Dark tinting (`ADR-0034`) so Light glass stays clear and luminous.
-- Automatic runtime CPU fallback (`UiShapeCache::glass_panel_element` with `4x4` Bayer dithering)
-  activates cleanly whenever `reduce_transparency = true`, the session/screen is locked, no glass UI
-  is visible, or GLES shader/FBO init fails.
+  continuous analytical rounded-box SDF normals, pronounced edge optical lensing/dispersion (`6.5..8.5 px`),
+  vibrance boost, opposing diagonal (`top-left` / `bottom-right`) `d^7` corner-arc specular bevel without
+  a 360° wireframe contour, cubic-decay ambient drop shadows, and restrained translucent Light/Dark
+  tinting (`ADR-0034`, `RUSTYOS-074`).
+- Automatic runtime CPU fallback (`UiShapeCache::glass_panel_element` with `4x4` Bayer dithering and
+  matching diagonal corner-arc specular math in `sdf.rs`) activates cleanly whenever
+  `reduce_transparency = true`, the session/screen is locked, no glass UI is visible, or GLES
+  shader/FBO init fails.
 - User controls for `glass_opacity` (`0.35..=1.0`, default `0.78`) and `reduce_transparency`
   (`true` switches shell panels to opaque high-contrast surfaces) are configurable via `[ui]` in
   `config.toml` and live-adjustable in Control Center.

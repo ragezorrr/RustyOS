@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use rusty_animation::LogicalRect;
+use rusty_animation::{AnimatedValue, Easing, LogicalRect};
 use rusty_ipc::{
     CompositorEvent, DesktopStateSnapshot, NotificationSummary, ShellRequest, WindowSummary,
 };
@@ -47,11 +47,45 @@ impl RustyCompositorState {
         self.minimized_window_ids.contains(&win_id)
     }
 
-    /// Minimizes `win_id` to the Dock, shifting focus to the next topmost visible window (`RUSTYOS-032`).
-    pub fn minimize_window(&mut self, win_id: WindowId, serial: Serial) {
-        if self.wm.window(win_id).is_none() {
-            return;
+    fn compute_minimize_target_rect(&self, win_id: WindowId) -> Rect {
+        let title = self.window_title(win_id);
+        let app_id = self.window_app_id(win_id);
+        let app_key =
+            crate::shell_render::canonical_dock_app_key(app_id.as_deref(), &title, win_id);
+        let tiles = self.build_dock_tiles();
+        let layout = self.active_dock_layout(&tiles);
+        let target_slot = layout
+            .slots
+            .iter()
+            .find(|slot| {
+                !self.user_config.dock_minimize_into_app
+                    && slot.tile.hit == crate::shell_render::DockHit::MinimizedWindow(win_id)
+            })
+            .or_else(|| {
+                layout
+                    .slots
+                    .iter()
+                    .find(|slot| slot.tile.app_key == app_key)
+            });
+        if let Some(slot) = target_slot {
+            let r = slot.icon_rect;
+            return Rect::new(r.loc.x, r.loc.y, r.size.w.max(16), r.size.h.max(16));
         }
+        let c = layout.capsule_rect;
+        Rect::new(
+            c.loc.x + (c.size.w / 2 - 24).max(0),
+            c.loc.y + (c.size.h / 2 - 24).max(0),
+            48,
+            48,
+        )
+    }
+
+    /// Minimizes `win_id` to the Dock with Genie/Scale animation, shifting focus cleanly (`RUSTYOS-032`/`073`).
+    pub fn minimize_window(&mut self, win_id: WindowId, serial: Serial) {
+        let Some(wm_win) = self.wm.window(win_id) else {
+            return;
+        };
+        let window_rect = wm_win.geometry;
         if self
             .active_window_drag
             .is_some_and(|drag| drag.window_id == win_id)
@@ -78,16 +112,61 @@ impl RustyCompositorState {
             }
         }
         self.sync_space_with_wm(serial);
+
+        self.minimize_anims.retain(|anim| anim.win_id != win_id);
+        if !self.animations.reduced_motion() {
+            let dock_rect = self.compute_minimize_target_rect(win_id);
+            let mut progress = AnimatedValue::new_settled(0.0);
+            progress.retarget(
+                1.0,
+                self.elapsed(),
+                Duration::from_millis(280),
+                Easing::EaseInOutCubic,
+                false,
+            );
+            self.minimize_anims.push(super::WindowMinimizeAnimState {
+                win_id,
+                restoring: false,
+                progress,
+                window_rect,
+                dock_rect,
+                snapshot_pending: true,
+            });
+        }
+        self.shell_redraw_needed = true;
     }
 
-    /// Restores a minimized window from the Dock, focusing and raising it (`RUSTYOS-032`).
+    /// Restores a minimized window from the Dock with Genie/Scale animation (`RUSTYOS-032`/`073`).
     pub fn restore_window(&mut self, win_id: WindowId, serial: Serial) {
-        if self.wm.window(win_id).is_none() {
+        let Some(wm_win) = self.wm.window(win_id) else {
             return;
-        }
+        };
+        let window_rect = wm_win.geometry;
+        let dock_rect = self.compute_minimize_target_rect(win_id);
         self.minimized_window_ids.remove(&win_id);
         self.wm.focus_and_raise(win_id);
         self.sync_space_with_wm(serial);
+
+        self.minimize_anims.retain(|anim| anim.win_id != win_id);
+        if !self.animations.reduced_motion() {
+            let mut progress = AnimatedValue::new_settled(1.0);
+            progress.retarget(
+                0.0,
+                self.elapsed(),
+                Duration::from_millis(250),
+                Easing::EaseOutCubic,
+                false,
+            );
+            self.minimize_anims.push(super::WindowMinimizeAnimState {
+                win_id,
+                restoring: true,
+                progress,
+                window_rect,
+                dock_rect,
+                snapshot_pending: false,
+            });
+        }
+        self.shell_redraw_needed = true;
     }
 
     /// Returns the Wayland `app_id` or `XWayland` `WM_CLASS` identifier for `win_id`, if set (`RUSTYOS-033`).
@@ -428,6 +507,89 @@ impl RustyCompositorState {
         self.window_toplevel_icons.remove(&win_id);
     }
 
+    fn record_closed_app_if_last(&mut self, win_id: WindowId) {
+        let title = self.window_title(win_id);
+        let app_id = self.window_app_id(win_id);
+        let app_key =
+            crate::shell_render::canonical_dock_app_key(app_id.as_deref(), &title, win_id);
+        let has_other = self.window_bindings.iter().any(|(other_id, _)| {
+            *other_id != win_id
+                && crate::shell_render::canonical_dock_app_key(
+                    self.window_app_id(*other_id).as_deref(),
+                    &self.window_title(*other_id),
+                    *other_id,
+                ) == app_key
+        });
+        if has_other {
+            return;
+        }
+        self.app_bounces.retain(|b| b.app_key != app_key);
+        let is_pinned = self
+            .user_config
+            .dock_pinned_apps
+            .iter()
+            .any(|pin| pin.eq_ignore_ascii_case(&app_key));
+        if is_pinned || app_key.starts_with("win-") {
+            return;
+        }
+        let label = crate::shell_render::dock_label_for_key(&app_key);
+        let icon_name = self
+            .launcher
+            .icon_for_app_hints(app_id.as_deref(), &title)
+            .or_else(|| self.launcher.icon_for_dock_key(&app_key));
+        self.recent_unpinned_apps.retain(|r| r.app_key != app_key);
+        self.recent_unpinned_apps.insert(
+            0,
+            super::RecentDockApp {
+                app_key,
+                label,
+                icon_name,
+            },
+        );
+        self.recent_unpinned_apps.truncate(4);
+    }
+
+    /// Settles continuous launch bounces and drops closed-app recents once a matching window opens.
+    pub fn refresh_dock_window_presence(&mut self, win_id: WindowId) {
+        if self.app_bounces.is_empty() && self.recent_unpinned_apps.is_empty() {
+            return;
+        }
+        let title = self.window_title(win_id);
+        let app_id = self.window_app_id(win_id);
+        let app_key =
+            crate::shell_render::canonical_dock_app_key(app_id.as_deref(), &title, win_id);
+        self.settle_app_bounce(&app_key);
+        self.recent_unpinned_apps.retain(|r| r.app_key != app_key);
+    }
+
+    /// Shared teardown executed when a Wayland or XWayland window closes (`RUSTYOS-073`).
+    pub fn finish_window_teardown(&mut self, win_id: WindowId) {
+        if self
+            .active_window_drag
+            .is_some_and(|drag| drag.window_id == win_id)
+        {
+            self.active_window_drag = None;
+        }
+        if self
+            .active_window_resize
+            .is_some_and(|resize| resize.window_id == win_id)
+        {
+            self.active_window_resize = None;
+        }
+        if let Some((_, sw)) = self.window_bindings.iter().find(|(id, _)| *id == win_id) {
+            let sw_clone = sw.clone();
+            self.space.unmap_elem(&sw_clone);
+        }
+        self.record_closed_app_if_last(win_id);
+        self.window_bindings.retain(|(wid, _)| *wid != win_id);
+        self.unregister_window_metadata(win_id);
+        self.minimize_anims.retain(|anim| anim.win_id != win_id);
+        self.minimized_window_ids.remove(&win_id);
+        self.remove_from_switcher(win_id);
+        self.wm.unmap_window(win_id);
+        self.animations.remove_window(win_id.0);
+    }
+
     /// Resolves the live UI title for `win_id` (falling back to `app_id`, then `Window #N`) (`RUSTYOS-047`).
     #[must_use]
     pub fn window_title(&self, win_id: WindowId) -> String {
@@ -695,7 +857,14 @@ impl RustyCompositorState {
         let titlebar_h = self.window_titlebar_height(win_id);
         let work_area = self.space.output_geometry(&self.output).map_or_else(
             || Rect::new(0, crate::shell_render::TOP_BAR_HEIGHT, 1280, 744),
-            |geo| crate::shell_render::usable_work_area(geo.size.to_physical(1)),
+            |geo| {
+                crate::shell_render::usable_work_area_with_dock(
+                    geo.size.to_physical(1),
+                    self.user_config.dock_position,
+                    self.user_config.dock_icon_size,
+                    self.user_config.dock_auto_hide,
+                )
+            },
         );
         let desired_w = min_w.min(work_area.width);
         let desired_h = min_h.saturating_add(titlebar_h).min(work_area.height);
@@ -837,24 +1006,7 @@ impl RustyCompositorState {
         }
 
         for id in dead_ids {
-            if self
-                .active_window_drag
-                .is_some_and(|drag| drag.window_id == id)
-            {
-                self.active_window_drag = None;
-            }
-            if self
-                .active_window_resize
-                .is_some_and(|resize| resize.window_id == id)
-            {
-                self.active_window_resize = None;
-            }
-            self.window_bindings.retain(|(wid, _)| *wid != id);
-            self.unregister_window_metadata(id);
-            self.minimized_window_ids.remove(&id);
-            self.remove_from_switcher(id);
-            self.wm.unmap_window(id);
-            self.animations.remove_window(id.0);
+            self.finish_window_teardown(id);
             info!(window_id = id.0, "Pruned closed Wayland window from WM");
         }
         let serial = smithay::utils::SERIAL_COUNTER.next_serial();
@@ -1067,6 +1219,12 @@ impl RustyCompositorState {
             || self.quick_settings_anim.is_active()
             || self.lock_screen_anim.is_active()
             || self.dock_hover_anim.is_active()
+            || self.dock_auto_hide_anim.is_active()
+            || !self.app_bounces.is_empty()
+            || self
+                .minimize_anims
+                .iter()
+                .any(|anim| anim.progress.is_active() || anim.snapshot_pending)
             || self.animations.has_active_animations()
     }
 
@@ -1079,6 +1237,36 @@ impl RustyCompositorState {
         let _ = self.quick_settings_anim.tick(now);
         let _ = self.lock_screen_anim.tick(now);
         let _ = self.dock_hover_anim.tick(now);
+        let _ = self.dock_auto_hide_anim.tick(now);
+
+        if !self.app_bounces.is_empty() {
+            for bounce in &mut self.app_bounces {
+                bounce.elapsed_ms = now.saturating_sub(bounce.started_at).as_secs_f64() * 1000.0;
+            }
+            let before = self.app_bounces.len();
+            self.app_bounces.retain(|b| {
+                let limit_ms = if b.continuous { 2600.0 } else { 980.0 };
+                b.elapsed_ms < limit_ms
+            });
+            if self.app_bounces.len() != before {
+                self.shell_redraw_needed = true;
+            }
+        }
+
+        if !self.minimize_anims.is_empty() {
+            let mut finished_any = false;
+            for anim in &mut self.minimize_anims {
+                let _ = anim.progress.tick(now);
+                if !anim.progress.is_active() && !anim.snapshot_pending {
+                    finished_any = true;
+                }
+            }
+            self.minimize_anims
+                .retain(|anim| anim.progress.is_active() || anim.snapshot_pending);
+            if finished_any {
+                self.shell_redraw_needed = true;
+            }
+        }
 
         if !self.animations.has_active_animations() {
             return;

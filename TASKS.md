@@ -1067,6 +1067,50 @@ hardware/software context и низкие накладные расходы.
   - Живые `--winit --max-frames 35` smoke-прогоны на `PLATFORM_WAYLAND_KHR` и `PLATFORM_X11_KHR` (`late=0 missed=0`, без ошибок EGL/шейдеров) и визуальная проверка скриншотов `Light` & `Dark` (`qa-072-light-icons.png`, `qa-072-light-wide.png`, `qa-072-dark-icons.png`).
 - **Risks:** На стартовой высоте `768×461` при наличии примонтированного дополнительного тома (`RustyOS HD`) в `Locations` самый нижний тег `Purple` уходит на прокрутку и полностью виден при растяжении/максимизации окна (штатное поведение скролла сайдбара).
 
+### RUSTYOS-073 — App-centric Dock, локальный hover, Stacks и Desktop & Dock в стиле macOS 27 Golden Gate
+
+- **Status:** Done (`RUSTYOS-073 Вариант 1` — утверждённый объём выполнен, волна заменена на локальный hover)
+- **Goal:** Привести поведение, физику, визуал и настройки Dock к стандарту `macOS 27 Golden Gate`: единая модель «одно приложение — один слот», спокойный локальный hover только для наведённой иконки, анимации запуска и сворачивания, края экрана + Auto-hide, графический `Downloads Stack`, внутренний drag-реордер/открепление и вкладка `System Settings -> Desktop & Dock`.
+- **Dependencies:** `RUSTYOS-069` (`Liquid Glass`), `RUSTYOS-072`, `ADR-0035`, `D-043`.
+- **Scope:**
+  - App-centric группировка по `canonical_dock_app_key`, динамические `[dock].pinned_apps`, секция открытых + до `4` недавних (`dock_show_recent`), отдельные мини-слоты свёрнутых окон или сворачивание в иконку приложения (`dock_minimize_into_app`), ЛКМ-фокус/восстановление/циклирование без автосворачивания активного окна, ПКМ-меню приложения (список окон `DockFocusWindow`, `Keep in Dock` / `Remove from Dock`, `Open at Login`, `Show All Windows` -> фильтрованный App Exposé, `Quit` / `Alt+Force Quit`).
+  - Локальный hover только для наведённой иконки (`+8 px` масштаб по центру своего слота, подъём `+6 px`, или `0 px` масштаб и `+2 px` статический подъём при `reduced_motion`, без волны по соседям и растяжения капсулы Dock) со стеклянной tooltip-пилюлей, настраиваемый размер иконок (`36..=68 px`), `Launch bounce` (`dock_animate_opening`), позиции `Bottom`/`Left`/`Right` (`usable_work_area_with_dock`), `Auto-hide`, безопасный (`unsafe_code = "deny"`) GLES-пайплайн `WindowMinimizePipeline` (`Genie`/`Scale` в целевой слот Dock с инкрементальным `DamageBag`, выносом из `backdrop_elements` без покадрового Dual-Kawase blur и бесшовной S-кривой без рывка при `t = 0`), графический поповер `Downloads Stack` (`Automatic`/`Fan`/`Grid`/`List`, `Display as`, `Sort By`: `Date Added`/`Date Modified`/`Name`/`Size`/`Kind`) и внутренний pointer drag-реордер / открепление при вытягивании (`>= 52 px`, пилюля `"Remove"`).
+  - Вкладка `System Settings -> Desktop & Dock` (`8` контролов без `Magnification`, синхронизированных с `UserConfig`; старый `[dock].magnification_size` безопасно игнорируется при парсинге `config.toml`), `ADR-0035`, `D-043`, `DESIGN.md §12.2`.
+- **Acceptance Criteria:**
+  - Закреплённые, недавние и свёрнутые слоты не создают дублей открытых окон; клик по приложению поднимает/фокусирует окно или запускает с bounce-анимацией;
+  - Локальный hover (`+8 px` / `+6 px`), `Position`, `Auto-hide`, `Genie`/`Scale` сворачивание/разворачивание без пропусков кадров, `Downloads Stack` (`Fan`/`Grid`/`List`) и drag-реордер/открепление работают на `Bottom`, `Left` и `Right` при фиксированных слотах и ширине капсулы;
+  - `UserConfig` и `System Settings -> Desktop & Dock` сохраняют параметры `[dock]` и безопасно загружают legacy-конфиги с `magnification_size`;
+  - Workspace-проверки, живые `--winit` (`Wayland` и `X11`), `--drm-probe` и визуальная проверка `Light` & `Dark` (включая mid-flight сворачивание и разворачивание `Genie`) пройдены без EGL/шейдерных ошибок.
+- **Tests:**
+  - `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo build --workspace --bins`
+  - `cargo test --workspace -- --test-threads=1` (`218 passed; 0 failed`: `rusty_animation` 4, `rusty_compositor` 149 + 0 bin, `rusty_files` 13, `rusty_ipc` 3, `rusty_services` 37, `rusty_shell` 5 + 0 bin, `rusty_wm` 7)
+  - Живые `--winit --max-frames 35` smoke-прогоны на `PLATFORM_WAYLAND_KHR` (`late=0 missed=0`) и `PLATFORM_X11_KHR` (`late=1 missed=0`) + `./target/debug/rusty-compositor --drm-probe` без ошибок шейдеров/FBO/паник
+  - Интерактивный `--winit` X11 Light/Dark прогон (`qa_073.py`) и живой 220-кадровый прогон `Genie` minimize & restore (`render_duration_us` p50 `4875 us`, `missed_frames=1`, `dispatch_stalls=0`, скриншоты `qa-073-min-mid.png` и `qa-073-restore-mid.png`, плюс `qa-073-hover-*`).
+- **Risks:** На Winit X11-бэкенде в `Xwayland` при полностью статичных простоях `backend.submit(None)` продолжает циклировать swapchain-буферы без нового композитинга (на реальный рендер DRM и интерактивную реакцию при изменении damage не влияет).
+
+### RUSTYOS-074 — Переработка Liquid Glass: удаление 360° белой рамки, диагональный угловой specular и паритет Light/Dark
+
+- **Status:** Done (`RUSTYOS-074 Вариант 1` — утверждённый объём выполнен)
+- **Goal:** Устранить замкнутый 360° проволочный контур («белую рамку») и плотный матово-серый оттенок Dark-стекла на капсулах `Dock`, `Control Center`, `Spotlight` и поповеров, приведя физику края (`edge lensing`, угловой диагональный блик, мягкие тени и CPU-fallback) к 1:1 паритету с `macOS 27 Golden Gate`.
+- **Dependencies:** `RUSTYOS-069` (`Liquid Glass`, `ADR-0034`), `RUSTYOS-073`.
+- **Scope:**
+  - `LIQUID_GLASS_FRAG` и `compute_glass_material` (`crates/rusty-compositor/src/surfaces/liquid_glass.rs`): гладкая аналитическая SDF-нормаль без скачков на внутренней диагонали, усиленная краевая рефракция (`6.5..8.5 px` `edge lensing` + дисперсия `0.55 px`), замена замкнутого `0.30 + top/side/bottom` ободка на встречный диагональный `d^7` specular по дугам `top-left` и `bottom-right` (`0.62x`) с затуханием по прямым и `TR`/`BL`-граням, мягкий гауссовский профиль фаски без `shadow_lip`, чистая Light/Dark палитра (прозрачное дымчатое Dark-стекло `0.14..0.24` вместо плотного матового серого).
+  - `surfaces/sdf.rs` (`sample_glass_panel_pixel_themed`, `base_glass_layer`, `diagonal_glass_rim`, `sample_shadow_corner_pixel`): CPU-паритет диагонального углового блика и более мягкий кубический спад угловых теней (`(1 - t)^3`).
+  - `shell_render/{tokens.rs, mod.rs, quick_settings.rs}`: перевод Dock hover tooltip на `push_liquid_glass_panel` (`GlassPanelStyle::Popover`), смягчение `border_rgba`/`border_highlight_rgba` (`tokens.rs`) и диффузных теней в `Control Center` (`(18, 18)`) и `Spotlight` (`(24, 30)` / `(26, 32)`), кубический спад теневых полос в `push_soft_shadow`.
+  - Модульные тесты (`liquid_glass.rs`, `surfaces/tests.rs`) и обновление `DESIGN.md §12.5`.
+- **Acceptance Criteria:**
+  - На `Dock`, `Control Center`, `Spotlight` и поповерах отсутствует замкнутая 360° белая или тёмная контурная рамка: блик сосредоточен на встречных диагональных дугах `TL`/`BR` и плавно гаснет к `TR`/`BL` и прямым граням;
+  - Краевая рефракция физически преломляет фон по кромке без артефактов, Light-капсулы светлые и прозрачные без тёмного ободка тени, Dark-капсулы дымчато-прозрачные;
+  - CPU-fallback (`sdf.rs`) воспроизводит ту же диагональную асимметрию без замкнутого контура;
+  - GLSL ES 1.00 проверяется во всех препроцессорных комбинациях, пройдены workspace-тесты, `--drm-probe` и живые `--winit` прогоны (`Wayland` + `X11`, `Light` & `Dark`).
+- **Tests:**
+  - `glslangValidator` по всем 8 комбинациям `#define {NO_ALPHA, DEBUG_FLAGS, EXTERNAL}`
+  - `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo build --workspace --bins`
+  - `cargo test --workspace -- --test-threads=1` (`218 passed; 0 failed`)
+  - `./target/debug/rusty-compositor --drm-probe`
+  - Живые `--winit --max-frames 35` на `Wayland` и `X11` + визуальная сверка Light/Dark PNG (`qa-074-dark-cc-and-dock.png`, `qa-074-dark-dock-hover.png`, `qa-074-dark-spotlight.png`, `qa-074-light-cc-and-dock.png`, `qa-074-light-dock-hover.png`, `qa-074-light-spotlight.png`) без EGL/шейдерных ошибок.
+- **Risks:** На однотонно тёмных обоях в Dark-режиме соседние островки `Control Center` разделяются мягкой диффузной тенью и угловыми дугами без яркой обводки; визуальный контраст проверен на дефолтных обоях и в Spotlight.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

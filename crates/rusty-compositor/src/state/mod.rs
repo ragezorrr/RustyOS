@@ -104,7 +104,7 @@ impl ClientData for ClientState {
     }
 }
 
-mod context_menu_actions;
+pub(crate) mod context_menu_actions;
 mod shell_actions;
 mod system_bridges;
 mod wayland_handlers;
@@ -126,6 +126,59 @@ pub struct WindowResizeState {
     pub edges: crate::shell_render::ResizeEdges,
     pub start_pointer: Point<f64, Logical>,
     pub start_rect: Rect,
+}
+
+/// Recently closed unpinned application entry retained for the Dock Recent section (`RUSTYOS-073`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecentDockApp {
+    pub app_key: String,
+    pub label: String,
+    pub icon_name: Option<String>,
+}
+
+/// Active launch bounce animation tracked per canonical Dock app key (`RUSTYOS-073`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct DockBounceState {
+    pub app_key: String,
+    pub started_at: std::time::Duration,
+    pub elapsed_ms: f64,
+    pub continuous: bool,
+}
+
+/// Active pointer drag state inside the Dock for reordering/unpinning (`RUSTYOS-073`).
+#[derive(Debug, Clone)]
+pub struct DockDragState {
+    pub slot_idx: usize,
+    pub app_key: String,
+    pub source_pinned_idx: Option<usize>,
+    pub start_pointer: Point<f64, Logical>,
+    pub current_pointer: Point<f64, Logical>,
+    pub active_drag: bool,
+    pub target_pinned_idx: usize,
+    pub pulled_outside: bool,
+    pub hit: crate::shell_render::DockHit,
+}
+
+/// Interactive open `Downloads` Stack popover state (`RUSTYOS-073`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DockStackState {
+    pub title: String,
+    pub anchor_rect: smithay::utils::Rectangle<i32, smithay::utils::Physical>,
+    pub entries: Vec<crate::shell_render::DockStackEntry>,
+    pub hovered_item: Option<usize>,
+    pub hovered_open_in_files: bool,
+    pub selected_idx: Option<usize>,
+}
+
+/// Active per-window GLES Genie / Scale minimize or restore animation (`RUSTYOS-073`).
+#[derive(Debug, Clone)]
+pub struct WindowMinimizeAnimState {
+    pub win_id: WindowId,
+    pub restoring: bool,
+    pub progress: AnimatedValue,
+    pub window_rect: Rect,
+    pub dock_rect: Rect,
+    pub snapshot_pending: bool,
 }
 
 /// Active `Alt+Tab` window switcher HUD state (`RUSTYOS-033`).
@@ -432,10 +485,26 @@ pub struct RustyCompositorState {
     pub overview_active: bool,
     /// Animated Overview transition progress (`0.0` closed -> `1.0` open) (`RUSTYOS-025`).
     pub overview_anim: AnimatedValue,
-    /// Currently hovered Dock slot index (`0..3 + windows.len()`) (`RUSTYOS-023`).
+    /// Currently hovered Dock slot index (`RUSTYOS-023` / `RUSTYOS-073`).
     pub dock_hover_slot: Option<usize>,
     /// Animated Dock hover lift progress (`0.0` rest -> `1.0` lifted, 120 ms) (`RUSTYOS-048`).
     pub dock_hover_anim: AnimatedValue,
+    /// Up to 4 recently closed unpinned Dock applications (`RUSTYOS-073`).
+    pub recent_unpinned_apps: Vec<RecentDockApp>,
+    /// Active launch/notification Dock icon bounce timers (`RUSTYOS-073`).
+    pub app_bounces: Vec<DockBounceState>,
+    /// Animated auto-hide reveal progress (`0.0` hidden offscreen -> `1.0` revealed) (`RUSTYOS-073`).
+    pub dock_auto_hide_anim: AnimatedValue,
+    /// True when the pointer is within the edge reveal strip or hovering an open Dock/Stack (`RUSTYOS-073`).
+    pub dock_auto_hide_hovered: bool,
+    /// Active internal Dock drag-reorder/pull-out state (`RUSTYOS-073`).
+    pub dock_drag: Option<DockDragState>,
+    /// Open interactive `Downloads` Stack popover state (`RUSTYOS-073`).
+    pub dock_stack: Option<DockStackState>,
+    /// Optional App Exposé filter (`Show All Windows`) inside Workspace Overview (`RUSTYOS-073`).
+    pub overview_filter_app: Option<String>,
+    /// Active per-window GLES Genie / Scale minimize & restore animations (`RUSTYOS-073`).
+    pub minimize_anims: Vec<WindowMinimizeAnimState>,
     /// Open `TopBar` left dropdown menu popover if any (`RUSTYOS-048`).
     pub active_top_bar_menu: Option<crate::shell_render::TopBarMenuHit>,
     /// True when the user clicked the empty desktop background so `Files` is the active Menu Bar app (`RUSTYOS-067`).
@@ -707,7 +776,13 @@ impl RustyCompositorState {
         );
         let logical_phys_typed =
             Size::<i32, smithay::utils::Physical>::from((logical_size.w, logical_size.h));
-        let work_area = crate::shell_render::usable_work_area(logical_phys_typed);
+        let initial_dock_reveal = if user_config.dock_auto_hide { 0.0 } else { 1.0 };
+        let work_area = crate::shell_render::usable_work_area_with_dock(
+            logical_phys_typed,
+            user_config.dock_position,
+            user_config.dock_icon_size,
+            user_config.dock_auto_hide,
+        );
         let full_area = Rect::new(0, 0, logical_size.w.max(100), logical_size.h.max(100));
         let mut wm = WindowManager::new(work_area);
         wm.upsert_output_with_full_area(PRIMARY_OUTPUT_ID, work_area, full_area);
@@ -801,6 +876,14 @@ impl RustyCompositorState {
             overview_anim: AnimatedValue::new_settled(0.0),
             dock_hover_slot: None,
             dock_hover_anim: AnimatedValue::new_settled(0.0),
+            recent_unpinned_apps: Vec::new(),
+            app_bounces: Vec::new(),
+            dock_auto_hide_anim: AnimatedValue::new_settled(initial_dock_reveal),
+            dock_auto_hide_hovered: false,
+            dock_drag: None,
+            dock_stack: None,
+            overview_filter_app: None,
+            minimize_anims: Vec::new(),
             active_top_bar_menu: None,
             desktop_focused: false,
             top_bar_menu_hover_row: None,
@@ -1071,7 +1154,12 @@ impl RustyCompositorState {
                 geo.size.h.max(100),
             );
             let work_area = if entry.is_primary {
-                let mut wa = crate::shell_render::usable_work_area(logical_phys);
+                let mut wa = crate::shell_render::usable_work_area_with_dock(
+                    logical_phys,
+                    self.user_config.dock_position,
+                    self.user_config.dock_icon_size,
+                    self.user_config.dock_auto_hide,
+                );
                 wa.x += geo.loc.x;
                 wa.y += geo.loc.y;
                 wa
@@ -1190,6 +1278,7 @@ impl RustyCompositorState {
             || self.overview_active
             || self.quick_settings_active
             || self.settings_active
+            || self.dock_stack.is_some()
             || self.context_menu.is_some()
             || self.window_switcher.is_some()
             || self.active_window_drag.is_some()

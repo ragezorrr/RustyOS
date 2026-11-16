@@ -1145,7 +1145,7 @@ pub(super) fn render_quick_settings_composite(
             crate::surfaces::GlassPanelStyle::ControlModule,
             qs.glass_opacity,
             qs.reduce_transparency,
-            Some((10, 26)),
+            Some((18, 18)),
         );
     }
 }

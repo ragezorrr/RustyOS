@@ -36,6 +36,7 @@ smithay::backend::renderer::element::render_elements! {
 
 mod context_menu;
 mod dock;
+mod dock_stack;
 mod lock_screen;
 mod modals;
 mod quick_settings;
@@ -52,8 +53,15 @@ pub use context_menu::{
     update_context_menu_hover,
 };
 pub use dock::{
-    DockHit, DockViewState, DockWindowEntry, check_dock_click, check_dock_slot, dock_slot_rect,
-    extract_app_name, make_window_badge,
+    ComputedDockLayout, ComputedDockSlot, DockAppTile, DockDragPreview, DockHit, DockSection,
+    DockViewState, DockWindowEntry, append_utility_dock_tiles, canonical_dock_app_key,
+    check_dock_click, check_dock_layout_slot, check_dock_slot, compute_dock_layout,
+    dock_builtin_for_key, dock_hit_for_pinned_key, dock_label_for_key, dock_slot_rect,
+    extract_app_name, is_dock_pin_removable, is_pointer_in_dock_auto_hide_zone, make_window_badge,
+};
+pub use dock_stack::{
+    DockStackEntry, DockStackHit, DockStackItemSlot, DockStackLayout, DockStackRenderState,
+    compute_dock_stack_layout, hit_test_dock_stack,
 };
 #[cfg(test)]
 pub(crate) use lock_screen::lock_screen_primary_row_center;
@@ -82,6 +90,7 @@ pub use ssd::{
     generate_window_ssd_composite_elements, generate_window_ssd_composite_elements_with_hover,
     generate_window_ssd_elements,
 };
+#[cfg(test)]
 pub(crate) use tokens::scale_glass_rgba;
 pub use tokens::{
     COLOR_ACCENT, COLOR_ACCENT_HOVER, COLOR_ACCENT_MUTED, COLOR_BACKGROUND, COLOR_BORDER,
@@ -91,7 +100,7 @@ pub use tokens::{
     DOCK_PINNED_COUNT, DOCK_RADIUS, DOCK_UTILITY_COUNT, RESIZE_GRAB_BORDER, TITLEBAR_HEIGHT,
     TOP_BAR_APP_X, TOP_BAR_FONT_SIZE, TOP_BAR_HEIGHT, TOP_BAR_ITEM_H, TOP_BAR_ITEM_Y,
     TOP_BAR_LOGO_W, TOP_BAR_LOGO_X, WINDOW_RADIUS, WS_BTN_GAP, WS_BTN_STRIDE, WS_BTN_WIDTH,
-    usable_work_area,
+    usable_work_area, usable_work_area_with_dock,
 };
 pub use top_bar::{
     MAX_TOP_BAR_TRAY_ITEMS, MAX_VISIBLE_NOTIFICATIONS, MENU_POPOVER_RADIUS, NotificationToastView,
@@ -124,7 +133,8 @@ pub use top_bar_menus::{
 };
 
 use context_menu::{render_context_menu_composite, render_context_menu_text};
-use dock::{dock_layout_bounds, dock_tooltip_rect_and_label, render_dock};
+use dock::{dock_tooltip_rect_and_label, render_dock};
+use dock_stack::{render_dock_stack_composite, render_dock_stack_text};
 use modals::{
     render_pick_color_composite, render_pick_color_text, render_polkit_composite,
     render_polkit_text, render_portal_composite, render_portal_text, render_settings_composite,
@@ -173,6 +183,8 @@ pub enum ShellOverlayView<'a> {
     Settings(&'a SettingsRenderState<'a>),
     /// macOS-aligned Liquid Glass right-click context menu (`RUSTYOS-064`).
     ContextMenu(&'a ContextMenuState),
+    /// Graphical Downloads Stack popover (`RUSTYOS-073`).
+    DockStack(&'a DockStackRenderState<'a>),
 }
 
 /// Generates custom GLES render elements for `TopBar`, `Dock`, and active shell overlays.
@@ -216,7 +228,8 @@ pub fn generate_shell_render_elements(
         | ShellOverlayView::Portal(_)
         | ShellOverlayView::PickColor(_)
         | ShellOverlayView::Settings(_)
-        | ShellOverlayView::ContextMenu(_) => {}
+        | ShellOverlayView::ContextMenu(_)
+        | ShellOverlayView::DockStack(_) => {}
         ShellOverlayView::Spotlight(spot) => {
             render_spotlight_modal(&mut elements, width, height, spot, has_text);
         }
@@ -242,6 +255,7 @@ const fn notifications_hidden_by_overlay(overlay: ShellOverlayView<'_>) -> bool 
             | ShellOverlayView::Portal(_)
             | ShellOverlayView::Settings(_)
             | ShellOverlayView::ContextMenu(_)
+            | ShellOverlayView::DockStack(_)
     )
 }
 
@@ -255,6 +269,7 @@ const fn dock_tooltip_hidden_by_overlay(overlay: ShellOverlayView<'_>) -> bool {
             | ShellOverlayView::Portal(_)
             | ShellOverlayView::Settings(_)
             | ShellOverlayView::ContextMenu(_)
+            | ShellOverlayView::DockStack(_)
     )
 }
 
@@ -407,6 +422,9 @@ fn append_foreground_overlay_text(
         }
         ShellOverlayView::ContextMenu(ctx) => {
             render_context_menu_text(text_cache, renderer, screen_size, ctx, true, elements);
+        }
+        ShellOverlayView::DockStack(ds) => {
+            render_dock_stack_text(text_cache, renderer, screen_size, ds, elements);
         }
     }
 
@@ -780,23 +798,41 @@ fn append_chrome_text(
         }
     }
 
-    // 5. Dock hover tooltip label (`RUSTYOS-050`)
-    if !dock_tooltip_hidden_by_overlay(overlay)
-        && let Some((tooltip_rect, tooltip_label)) =
+    // 5. Dock hover tooltip & drag Remove pill label (`RUSTYOS-050` / `RUSTYOS-073`)
+    if !dock_tooltip_hidden_by_overlay(overlay) {
+        if dock_view.drag_preview.is_some_and(|d| d.pulled_outside) {
+            let layout = compute_dock_layout(screen_size, dock_view);
+            if let Some(badge_rect) = layout.drag_remove_badge
+                && let Some(el) = text_cache.render_label_centered_weighted(
+                    renderer,
+                    "Remove",
+                    crate::text::FontWeight::Bold,
+                    11.5,
+                    [255, 255, 255, 255],
+                    Rectangle::new(
+                        Point::from((badge_rect.loc.x, badge_rect.loc.y)),
+                        Size::from((badge_rect.size.w, badge_rect.size.h)),
+                    ),
+                )
+            {
+                elements.push(el);
+            }
+        } else if let Some((tooltip_rect, tooltip_label)) =
             dock_tooltip_rect_and_label(width, height, dock_view)
-        && let Some(el) = text_cache.render_label_centered_weighted(
-            renderer,
-            &tooltip_label,
-            crate::text::FontWeight::Bold,
-            12.0,
-            pal.popover_text_primary,
-            Rectangle::new(
-                Point::from((tooltip_rect.loc.x, tooltip_rect.loc.y)),
-                Size::from((tooltip_rect.size.w, tooltip_rect.size.h)),
-            ),
-        )
-    {
-        elements.push(el);
+            && let Some(el) = text_cache.render_label_centered_weighted(
+                renderer,
+                &tooltip_label,
+                crate::text::FontWeight::Bold,
+                12.0,
+                pal.popover_text_primary,
+                Rectangle::new(
+                    Point::from((tooltip_rect.loc.x, tooltip_rect.loc.y)),
+                    Size::from((tooltip_rect.size.w, tooltip_rect.size.h)),
+                ),
+            )
+        {
+            elements.push(el);
+        }
     }
     let _ = shape_cache;
 }
@@ -1021,7 +1057,7 @@ fn build_foreground_overlay_shapes(
                 crate::surfaces::GlassPanelStyle::Popover,
                 glass_op,
                 reduce_tr,
-                Some((18, 52)),
+                Some((24, 30)),
             );
 
             // Detached results capsule with 10 px breathing space below search pill
@@ -1081,7 +1117,7 @@ fn build_foreground_overlay_shapes(
                 crate::surfaces::GlassPanelStyle::Popover,
                 glass_op,
                 reduce_tr,
-                Some((20, 56)),
+                Some((26, 32)),
             );
         }
         ShellOverlayView::QuickSettings(qs) => {
@@ -1217,6 +1253,17 @@ fn build_foreground_overlay_shapes(
                 true,
             );
         }
+        ShellOverlayView::DockStack(ds) => {
+            render_dock_stack_composite(
+                &mut out,
+                shape_cache,
+                renderer,
+                screen_size,
+                top_telemetry.glass_opacity,
+                top_telemetry.reduce_transparency,
+                ds,
+            );
+        }
     }
 
     // 2b. Floating top-right Notification HUD toasts (`RUSTYOS-024`/`051`)
@@ -1288,7 +1335,6 @@ fn build_chrome_shapes(
 ) -> Vec<CompositorRenderElement> {
     let mut out = Vec::new();
     let width = screen_size.w;
-    let height = screen_size.h;
     let pal = ThemePalette::active();
 
     // 3. TopBar macOS Menu Bar SDF glyphs, optional tray/workspaces, menu popover & transparent default (`RUSTYOS-048`, `RUSTYOS-049`, `RUSTYOS-068`)
@@ -1554,186 +1600,254 @@ fn build_chrome_shapes(
         )));
     }
 
-    // 4. Dock macOS glass container, 4x4 SSAA icons, soft drop shadows, hover magnification, tooltip & divider (`RUSTYOS-050`)
+    // 4. Dock macOS glass container, 4x4 SSAA/XDG icons, local hover, drag overlay & indicators (`RUSTYOS-050`/`073`)
+    push_dock_chrome_shapes(
+        &mut out,
+        shape_cache,
+        renderer,
+        screen_size,
+        dock_view,
+        top_telemetry,
+        overlay,
+        &pal,
+    );
+
+    out
+}
+
+fn render_dock_tile_icon(
+    shape_cache: &mut crate::surfaces::UiShapeCache,
+    renderer: &mut GlesRenderer,
+    tile: &DockAppTile,
+    draw_size: i32,
+    icon_loc: Point<i32, smithay::utils::Logical>,
+) -> Option<CompositorRenderElement> {
+    if let Some(kind) = tile.builtin_icon {
+        return shape_cache
+            .icons
+            .builtin_squircle_icon_element(renderer, kind, draw_size, icon_loc)
+            .map(CompositorRenderElement::Memory);
+    }
+    shape_cache
+        .icons
+        .window_icon_element(
+            renderer,
+            &tile.app_key,
+            tile.toplevel_icon.as_ref(),
+            tile.icon_name.as_deref(),
+            draw_size,
+            icon_loc,
+        )
+        .or_else(|| {
+            let win_id = tile.representative_win.map_or(0, |w| w.0);
+            let hue_seed = title_hue_seed(&tile.fallback_title, win_id);
+            shape_cache
+                .icons
+                .builtin_squircle_icon_element(
+                    renderer,
+                    crate::icons::BuiltinAppIcon::WindowFallback {
+                        hue_seed,
+                        active: tile.is_active,
+                    },
+                    draw_size,
+                    icon_loc,
+                )
+                .map(|el| crate::icons::ResolvedIconElement::Memory(Box::new(el)))
+        })
+        .map(resolved_icon_to_element)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_dock_tooltip_and_drag(
+    out: &mut Vec<CompositorRenderElement>,
+    shape_cache: &mut crate::surfaces::UiShapeCache,
+    renderer: &mut GlesRenderer,
+    screen_size: Size<i32, smithay::utils::Physical>,
+    dock_view: &DockViewState<'_>,
+    top_telemetry: &TopBarTelemetry<'_>,
+    overlay: ShellOverlayView<'_>,
+    layout: &ComputedDockLayout,
+) {
     if !dock_tooltip_hidden_by_overlay(overlay)
-        && let Some((tooltip_rect, _)) = dock_tooltip_rect_and_label(width, height, dock_view)
+        && let Some((tooltip_rect, _)) =
+            dock_tooltip_rect_and_label(screen_size.w, screen_size.h, dock_view)
     {
-        push_rounded_glass_box(
-            &mut out,
+        push_liquid_glass_panel(
+            out,
             shape_cache,
             renderer,
             tooltip_rect,
             9,
-            scale_glass_rgba(
-                pal.surface_elevated_rgba,
-                top_telemetry.glass_opacity,
-                top_telemetry.reduce_transparency,
-            ),
-            Some(pal.border_highlight_rgba),
+            crate::surfaces::GlassPanelStyle::Popover,
+            top_telemetry.glass_opacity,
+            top_telemetry.reduce_transparency,
+            Some((8, 28)),
         );
-        push_soft_shadow(&mut out, shape_cache, renderer, tooltip_rect, 9, 8, 34);
+    }
+    if let Some(badge_rect) = layout.drag_remove_badge {
+        push_rounded_glass_box(
+            out,
+            shape_cache,
+            renderer,
+            badge_rect,
+            10,
+            [218, 56, 66, 232],
+            Some([255, 146, 150, 185]),
+        );
+        push_soft_shadow(out, shape_cache, renderer, badge_rect, 10, 8, 42);
+    }
+    if let Some((ref dragged_tile, drag_rect)) = layout.dragged_icon {
+        if let Some(el) = render_dock_tile_icon(
+            shape_cache,
+            renderer,
+            dragged_tile,
+            drag_rect.size.w,
+            Point::from((drag_rect.loc.x, drag_rect.loc.y)),
+        ) {
+            out.push(el);
+        }
+        push_soft_shadow(out, shape_cache, renderer, drag_rect, 12, 10, 48);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_dock_chrome_shapes(
+    out: &mut Vec<CompositorRenderElement>,
+    shape_cache: &mut crate::surfaces::UiShapeCache,
+    renderer: &mut GlesRenderer,
+    screen_size: Size<i32, smithay::utils::Physical>,
+    dock_view: &DockViewState<'_>,
+    top_telemetry: &TopBarTelemetry<'_>,
+    overlay: ShellOverlayView<'_>,
+    pal: &ThemePalette,
+) {
+    let layout = compute_dock_layout(screen_size, dock_view);
+    push_dock_tooltip_and_drag(
+        out,
+        shape_cache,
+        renderer,
+        screen_size,
+        dock_view,
+        top_telemetry,
+        overlay,
+        &layout,
+    );
+
+    if dock_view.auto_hide_reveal <= 0.01 {
+        return;
     }
 
-    let (dock_x, dock_y, dock_width, dock_items_count) =
-        dock_layout_bounds(width, height, dock_view.windows.len());
-    let left_count = DOCK_PINNED_COUNT + dock_view.windows.len();
-    let _ = dock_view.pinned_icons;
-
-    let mut dock_icons = Vec::with_capacity(dock_items_count);
+    let mut dock_icons = Vec::with_capacity(layout.slots.len());
     let mut dock_dots_and_divider = Vec::new();
-
-    if let Some(last_app_slot) =
-        dock_slot_rect(width, height, dock_view.windows.len(), left_count - 1)
-    {
-        let sep_x = last_app_slot.loc.x
-            + last_app_slot.size.w
-            + i32::midpoint(DOCK_ITEM_GAP, DOCK_DIVIDER_GAP);
+    let sep_col = if pal.is_dark {
+        rgba_to_premul_color32f([255, 255, 255, 64])
+    } else {
+        rgba_to_premul_color32f([0, 0, 0, 52])
+    };
+    for &div_rect in &layout.dividers {
         dock_dots_and_divider.push(CompositorRenderElement::Solid(make_solid_element(
-            Rectangle::new(Point::from((sep_x, dock_y + 15)), Size::from((1, 38))),
-            rgba_to_premul_color32f([255, 255, 255, 64]),
+            div_rect, sep_col,
         )));
     }
 
-    for i in 0..dock_items_count {
-        let Some(slot_rect) = dock_slot_rect(width, height, dock_view.windows.len(), i) else {
-            continue;
-        };
-        let item_x = slot_rect.loc.x;
-        let item_size = slot_rect.size.w;
-        let hovered = dock_view.hover_slot == Some(i);
-        let hover_factor = if hovered {
-            if dock_view.reduced_motion {
-                0.25
-            } else {
-                dock_view.hover_progress.clamp(0.35, 1.0)
-            }
-        } else {
-            0.0
-        };
-        #[allow(clippy::cast_possible_truncation)]
-        let lift = if hovered {
-            if dock_view.reduced_motion {
-                2
-            } else {
-                (6.0 * hover_factor).round() as i32
-            }
-        } else {
-            0
-        };
-        #[allow(clippy::cast_possible_truncation)]
-        let extra_half = if hovered {
-            ((4.0 * hover_factor).round() as i32).clamp(0, 4)
-        } else {
-            0
-        };
-        let draw_size = DOCK_ICON_SIZE + extra_half * 2;
-        let icon_x = item_x + (item_size - draw_size) / 2;
-        let icon_y = (dock_y + 7) - extra_half - lift;
-        let icon_loc = Point::from((icon_x, icon_y));
-
-        let win_entry = (i >= DOCK_PINNED_COUNT && i < left_count)
-            .then(|| dock_view.windows.get(i - DOCK_PINNED_COUNT))
-            .flatten();
-        let is_minimized = win_entry.is_some_and(|w| w.minimized);
-        let is_active = match i {
-            0 => true,
-            1 => dock_view.overview_active,
-            _ => win_entry.is_some_and(|w| w.focused && !w.minimized),
-        };
-        let has_running_dot =
-            win_entry.is_some() || i == 0 || (i == 1 && dock_view.overview_active);
-        if has_running_dot {
-            let pip_color = if is_minimized {
-                [232, 196, 119, 235]
-            } else if pal.is_dark {
-                if is_active {
-                    [246, 247, 250, 242]
-                } else {
-                    [220, 224, 232, 165]
-                }
-            } else if is_active {
-                [28, 30, 36, 228]
-            } else {
-                [44, 48, 56, 155]
-            };
-            if let Some(dot) = shape_cache.circle_element(
-                renderer,
-                5,
-                pip_color,
-                None,
-                Point::from((item_x + (item_size - 5) / 2, dock_y + DOCK_HEIGHT - 8)),
-            ) {
-                dock_dots_and_divider.push(CompositorRenderElement::Memory(dot));
-            }
-        }
-
-        let builtin_for_slot = match i {
-            0 => Some(crate::icons::BuiltinAppIcon::Files),
-            1 => Some(crate::icons::BuiltinAppIcon::Overview),
-            2 => Some(crate::icons::BuiltinAppIcon::Terminal),
-            3 => Some(crate::icons::BuiltinAppIcon::Browser),
-            4 => Some(crate::icons::BuiltinAppIcon::Notes),
-            5 => Some(crate::icons::BuiltinAppIcon::Settings),
-            n if n == left_count => Some(crate::icons::BuiltinAppIcon::Downloads),
-            n if n == left_count + 1 => Some(crate::icons::BuiltinAppIcon::Trash),
-            _ => None,
-        };
-        let slot_icon_el = if let Some(kind) = builtin_for_slot {
-            shape_cache
-                .icons
-                .builtin_squircle_icon_element(renderer, kind, draw_size, icon_loc)
-                .map(|el| crate::icons::ResolvedIconElement::Memory(Box::new(el)))
-        } else {
-            win_entry.and_then(|w| {
-                let key = format!("win-{}", w.id.0);
-                shape_cache
-                    .icons
-                    .window_icon_element(
-                        renderer,
-                        &key,
-                        w.toplevel_icon.as_ref(),
-                        w.icon_name.as_deref(),
-                        draw_size,
-                        icon_loc,
-                    )
-                    .or_else(|| {
-                        let hue_seed = title_hue_seed(&w.title, w.id.0);
-                        shape_cache
-                            .icons
-                            .builtin_squircle_icon_element(
-                                renderer,
-                                crate::icons::BuiltinAppIcon::WindowFallback {
-                                    hue_seed,
-                                    active: is_active,
-                                },
-                                draw_size,
-                                icon_loc,
-                            )
-                            .map(|el| crate::icons::ResolvedIconElement::Memory(Box::new(el)))
-                    })
-            })
-        };
-        if let Some(el) = slot_icon_el {
-            dock_icons.push(resolved_icon_to_element(el));
-        }
+    for slot in &layout.slots {
+        push_dock_slot_shape(
+            &mut dock_icons,
+            &mut dock_dots_and_divider,
+            shape_cache,
+            renderer,
+            dock_view,
+            pal,
+            slot,
+        );
     }
 
     out.extend(dock_icons);
     out.extend(dock_dots_and_divider);
 
+    let capsule = layout.capsule_rect;
     if let Some(dock_glass) = shape_cache.dock_glass_render_element(
         renderer,
-        dock_width,
-        DOCK_HEIGHT,
+        capsule.size.w,
+        capsule.size.h,
         DOCK_RADIUS,
         top_telemetry.glass_opacity,
         top_telemetry.reduce_transparency,
-        Point::from((dock_x, dock_y)),
+        Point::from((capsule.loc.x, capsule.loc.y)),
     ) {
         out.push(dock_glass);
     }
+}
 
-    out
+fn push_dock_slot_shape(
+    dock_icons: &mut Vec<CompositorRenderElement>,
+    dock_dots: &mut Vec<CompositorRenderElement>,
+    shape_cache: &mut crate::surfaces::UiShapeCache,
+    renderer: &mut GlesRenderer,
+    dock_view: &DockViewState<'_>,
+    pal: &ThemePalette,
+    slot: &dock::ComputedDockSlot,
+) {
+    let tile = &slot.tile;
+    if dock_view.show_indicators && tile.has_indicator {
+        let pip_color = if tile.has_minimized && tile.window_count == 1 {
+            [232, 196, 119, 235]
+        } else if pal.is_dark {
+            if tile.is_active {
+                [246, 247, 250, 242]
+            } else {
+                [220, 224, 232, 165]
+            }
+        } else if tile.is_active {
+            [28, 30, 36, 228]
+        } else {
+            [44, 48, 56, 155]
+        };
+        if let Some(dot) = shape_cache.circle_element(
+            renderer,
+            slot.dot_rect.size.w,
+            pip_color,
+            None,
+            Point::from((slot.dot_rect.loc.x, slot.dot_rect.loc.y)),
+        ) {
+            dock_dots.push(CompositorRenderElement::Memory(dot));
+        }
+    }
+
+    if tile.section == DockSection::MinimizedWindow {
+        let inset = (slot.icon_rect.size.w / 8).clamp(3, 6);
+        let inner_sz = (slot.icon_rect.size.w - inset * 2).max(16);
+        if let Some(el) = render_dock_tile_icon(
+            shape_cache,
+            renderer,
+            tile,
+            inner_sz,
+            Point::from((slot.icon_rect.loc.x + inset, slot.icon_rect.loc.y + inset)),
+        ) {
+            dock_icons.push(el);
+        }
+        push_rounded_glass_box(
+            dock_icons,
+            shape_cache,
+            renderer,
+            slot.icon_rect,
+            10,
+            if pal.is_dark {
+                [255, 255, 255, 26]
+            } else {
+                [255, 255, 255, 168]
+            },
+            Some(pal.border_highlight_rgba),
+        );
+    } else if let Some(el) = render_dock_tile_icon(
+        shape_cache,
+        renderer,
+        tile,
+        slot.icon_rect.size.w,
+        Point::from((slot.icon_rect.loc.x, slot.icon_rect.loc.y)),
+    ) {
+        dock_icons.push(el);
+    }
 }
 
 #[allow(clippy::too_many_lines)]

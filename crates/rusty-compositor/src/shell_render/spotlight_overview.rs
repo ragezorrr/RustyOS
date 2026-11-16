@@ -38,6 +38,8 @@ pub struct OverviewRenderState<'a> {
     pub spaces: &'a [OverviewWorkspaceSpace],
     /// Animated reveal progress (`0.0` closed -> `1.0` open) (`RUSTYOS-025`).
     pub progress: f64,
+    /// Optional App Exposé filter banner (e.g. `"App Expose · Files"`) (`RUSTYOS-073`).
+    pub filter_label: Option<&'a str>,
 }
 
 /// Interactive click target while Workspace Overview is open (`RUSTYOS-023` / `RUSTYOS-051`).
@@ -548,8 +550,30 @@ pub(super) fn render_overview_text(
         }
     }
 
+    if let Some(filter) = ov.filter_label
+        && !filter.is_empty()
+    {
+        let pill_bounds = Rectangle::new(
+            Point::from((32, super::tokens::TOP_BAR_HEIGHT + 86 + heading_dy)),
+            Size::from((width - 64, 24)),
+        );
+        if let Some(el) = text_cache.render_label_centered_weighted(
+            renderer,
+            filter,
+            crate::text::FontWeight::Bold,
+            13.0,
+            text_bright,
+            pill_bounds,
+        ) {
+            elements.push(el);
+        }
+    }
+
     if ov.windows.is_empty() {
-        let empty_msg = format!("Desktop {} is empty", ov.active_workspace);
+        let empty_msg = ov.filter_label.map_or_else(
+            || format!("Desktop {} is empty", ov.active_workspace),
+            |label| format!("No open windows for {label}"),
+        );
         if let Some(el) = text_cache.render_label_centered(
             renderer,
             &empty_msg,

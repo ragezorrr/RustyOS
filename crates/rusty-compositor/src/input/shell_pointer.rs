@@ -21,24 +21,246 @@ impl RustyCompositorState {
     }
 
     pub(super) fn update_dock_hover_slot(&mut self, pos: Point<f64, Logical>) {
-        let (primary_size, is_on_primary, local_x, local_y) = self.primary_local_coords(pos);
-
-        let next_slot = if is_on_primary
+        let (_primary_size, is_on_primary, local_x, local_y) = self.primary_local_coords(pos);
+        let logical_size = self.primary_output_logical_size();
+        let chrome_allowed = is_on_primary
             && !self.launcher_active
             && !self.quick_settings_active
+            && !self.settings_active
             && !self.has_foreground_layer_surfaces()
-            && !self.should_hide_shell_chrome_for_fullscreen()
-        {
-            crate::shell_render::check_dock_slot(
-                primary_size,
-                self.wm.visible_windows().len(),
+            && !self.should_hide_shell_chrome_for_fullscreen();
+
+        if chrome_allowed && self.dock_drag.is_some() {
+            self.update_dock_drag_motion(logical_size, local_x, local_y);
+            self.set_dock_auto_hide_hovered(true);
+            return;
+        }
+        if !chrome_allowed {
+            self.set_dock_auto_hide_hovered(false);
+            self.set_dock_hover_slot(None);
+            return;
+        }
+
+        let tiles = self.build_dock_tiles();
+        let bounces = self.dock_bounce_offsets();
+        let dock_view = self.dock_view_state(&tiles, &[], &bounces, self.dock_hover_slot);
+        let layout = crate::shell_render::compute_dock_layout(logical_size, &dock_view);
+        let next_slot = crate::shell_render::check_dock_layout_slot(&layout, local_x, local_y);
+
+        if self.user_config.dock_auto_hide {
+            let reveal = self.dock_auto_hide_anim.current();
+            let in_edge = crate::shell_render::is_pointer_in_dock_auto_hide_zone(
+                logical_size,
+                &dock_view,
+                reveal > 0.25,
                 local_x,
                 local_y,
-            )
-        } else {
-            None
-        };
+            );
+            let c = layout.capsule_rect;
+            let pad = 14;
+            let near_capsule = reveal > 0.05
+                && local_x >= f64::from(c.loc.x - pad)
+                && local_x < f64::from(c.loc.x + c.size.w + pad)
+                && local_y >= f64::from(c.loc.y - pad)
+                && local_y < f64::from(c.loc.y + c.size.h + pad);
+            let in_stack = self
+                .dock_stack_render_state()
+                .and_then(|st| {
+                    crate::shell_render::hit_test_dock_stack(logical_size, &st, local_x, local_y)
+                })
+                .is_some();
+            self.set_dock_auto_hide_hovered(in_edge || near_capsule || in_stack);
+        }
+
         self.set_dock_hover_slot(next_slot);
+    }
+
+    fn update_dock_drag_motion(
+        &mut self,
+        primary_size: Size<i32, smithay::utils::Physical>,
+        local_x: f64,
+        local_y: f64,
+    ) {
+        let Some(ref drag_snapshot) = self.dock_drag else {
+            return;
+        };
+        let dist = (local_x - drag_snapshot.start_pointer.x)
+            .hypot(local_y - drag_snapshot.start_pointer.y);
+        let active_drag =
+            drag_snapshot.source_pinned_idx.is_some() && (drag_snapshot.active_drag || dist > 6.0);
+        let app_key = drag_snapshot.app_key.clone();
+        let source_pinned = drag_snapshot.source_pinned_idx;
+        let mut target_pinned_idx = drag_snapshot.target_pinned_idx;
+        let mut pulled_outside = false;
+
+        if active_drag && source_pinned.is_some() {
+            let tiles = self.build_dock_tiles();
+            let rest_view = crate::shell_render::DockViewState {
+                tiles: &tiles,
+                icon_size: self.user_config.dock_icon_size,
+                position: self.user_config.dock_position,
+                show_indicators: self.user_config.dock_show_indicators,
+                ..crate::shell_render::DockViewState::default()
+            };
+            let rest_layout = crate::shell_render::compute_dock_layout(primary_size, &rest_view);
+            let cap = rest_layout.capsule_rect;
+            let outside_dist = match self.user_config.dock_position {
+                crate::config::DockPosition::Bottom => f64::from(cap.loc.y) - local_y,
+                crate::config::DockPosition::Left => local_x - f64::from(cap.loc.x + cap.size.w),
+                crate::config::DockPosition::Right => f64::from(cap.loc.x) - local_x,
+            };
+            pulled_outside =
+                outside_dist > 52.0 && crate::shell_render::is_dock_pin_removable(&app_key);
+
+            if !pulled_outside {
+                let mut best_pin = target_pinned_idx;
+                let mut best_dist = f64::MAX;
+                let mut pin_ord = 0_usize;
+                for slot in &rest_layout.slots {
+                    if slot.tile.section != crate::shell_render::DockSection::Pinned {
+                        continue;
+                    }
+                    let center = match self.user_config.dock_position {
+                        crate::config::DockPosition::Bottom => {
+                            f64::from(slot.hit_rect.loc.x) + f64::from(slot.hit_rect.size.w) * 0.5
+                        }
+                        crate::config::DockPosition::Left | crate::config::DockPosition::Right => {
+                            f64::from(slot.hit_rect.loc.y) + f64::from(slot.hit_rect.size.h) * 0.5
+                        }
+                    };
+                    let cur = match self.user_config.dock_position {
+                        crate::config::DockPosition::Bottom => local_x,
+                        crate::config::DockPosition::Left | crate::config::DockPosition::Right => {
+                            local_y
+                        }
+                    };
+                    let d = (cur - center).abs();
+                    if d < best_dist {
+                        best_dist = d;
+                        best_pin = pin_ord;
+                    }
+                    pin_ord += 1;
+                }
+                target_pinned_idx = best_pin;
+            }
+        }
+
+        if let Some(ref mut drag) = self.dock_drag {
+            drag.current_pointer = Point::from((local_x, local_y));
+            drag.active_drag = active_drag;
+            drag.target_pinned_idx = target_pinned_idx;
+            drag.pulled_outside = pulled_outside;
+        }
+        if active_drag {
+            self.set_dock_hover_slot(None);
+            self.shell_redraw_needed = true;
+        }
+    }
+
+    pub(super) fn handle_dock_stack_pointer_press(&mut self, button: u32) -> bool {
+        if self.dock_stack.is_none() {
+            return false;
+        }
+        let (_, is_on_primary, local_x, local_y) = self.primary_local_coords(self.pointer_location);
+        let logical_size = self.primary_output_logical_size();
+        if is_on_primary
+            && let Some(hit) = self.dock_stack_render_state().and_then(|st| {
+                crate::shell_render::hit_test_dock_stack(logical_size, &st, local_x, local_y)
+            })
+        {
+            match hit {
+                crate::shell_render::DockStackHit::Entry(idx) => {
+                    let path = self
+                        .dock_stack
+                        .as_ref()
+                        .and_then(|s| s.entries.get(idx).map(|e| e.path.clone()));
+                    self.close_dock_stack();
+                    if let Some(target_path) = path {
+                        self.open_downloads_entry(&target_path);
+                    }
+                    return true;
+                }
+                crate::shell_render::DockStackHit::OpenInFiles => {
+                    self.close_dock_stack();
+                    let downloads = crate::state::context_menu_actions::resolve_downloads_dir();
+                    if !self.launch_rusty_files_dir(downloads.as_deref()) {
+                        self.toggle_launcher();
+                    }
+                    return true;
+                }
+                crate::shell_render::DockStackHit::InsideBackground => {
+                    return true;
+                }
+            }
+        }
+        let clicked_downloads_toggle = is_on_primary && button == 272 && {
+            let tiles = self.build_dock_tiles();
+            let layout = self.active_dock_layout(&tiles);
+            crate::shell_render::check_dock_layout_slot(&layout, local_x, local_y).is_some_and(
+                |idx| {
+                    layout.slots.get(idx).is_some_and(|s| {
+                        s.tile.hit == crate::shell_render::DockHit::PinnedDownloads
+                    })
+                },
+            )
+        };
+        self.close_dock_stack();
+        clicked_downloads_toggle
+    }
+
+    pub(super) fn handle_dock_pointer_press(
+        &mut self,
+        local_x: f64,
+        local_y: f64,
+        button: u32,
+    ) -> bool {
+        if self.user_config.dock_auto_hide && self.dock_auto_hide_anim.current() <= 0.25 {
+            return false;
+        }
+        let logical_size = self.primary_output_logical_size();
+        let tiles = self.build_dock_tiles();
+        let layout = self.active_dock_layout(&tiles);
+        let Some(slot_idx) = crate::shell_render::check_dock_layout_slot(&layout, local_x, local_y)
+        else {
+            return false;
+        };
+        let Some(slot) = layout.slots.get(slot_idx) else {
+            return false;
+        };
+        if button == 273 {
+            let alt_held = self.keyboard.modifier_state().alt;
+            self.open_dock_context_menu(
+                slot.tile.hit,
+                logical_size,
+                self.pointer_location,
+                alt_held,
+            );
+            return true;
+        }
+        if button == 272 {
+            let source_pinned_idx = (slot.tile.section == crate::shell_render::DockSection::Pinned)
+                .then(|| {
+                    self.user_config
+                        .dock_pinned_apps
+                        .iter()
+                        .position(|k| k.eq_ignore_ascii_case(&slot.tile.app_key))
+                })
+                .flatten();
+            self.dock_drag = Some(crate::state::DockDragState {
+                slot_idx,
+                app_key: slot.tile.app_key.clone(),
+                source_pinned_idx,
+                start_pointer: Point::from((local_x, local_y)),
+                current_pointer: Point::from((local_x, local_y)),
+                active_drag: false,
+                target_pinned_idx: source_pinned_idx.unwrap_or(0),
+                pulled_outside: false,
+                hit: slot.tile.hit,
+            });
+            self.sync_dock_auto_hide_target();
+            return true;
+        }
+        false
     }
 
     pub(super) fn apply_display_slider_percent(&mut self, track_pct: u8) {
@@ -76,6 +298,24 @@ impl RustyCompositorState {
         let (primary_size, is_on_primary, local_x, local_y) = self.primary_local_coords(pos);
         let chrome_hidden =
             self.has_foreground_layer_surfaces() || self.should_hide_shell_chrome_for_fullscreen();
+        if self.dock_stack.is_some() && is_on_primary && !chrome_hidden {
+            let logical_size = self.primary_output_logical_size();
+            let stack_hit = self.dock_stack_render_state().and_then(|st| {
+                crate::shell_render::hit_test_dock_stack(logical_size, &st, local_x, local_y)
+            });
+            let (new_item, new_footer) = match stack_hit {
+                Some(crate::shell_render::DockStackHit::Entry(idx)) => (Some(idx), false),
+                Some(crate::shell_render::DockStackHit::OpenInFiles) => (None, true),
+                _ => (None, false),
+            };
+            if let Some(ref mut stack) = self.dock_stack
+                && (stack.hovered_item != new_item || stack.hovered_open_in_files != new_footer)
+            {
+                stack.hovered_item = new_item;
+                stack.hovered_open_in_files = new_footer;
+                self.shell_redraw_needed = true;
+            }
+        }
         let fullscreen_active = self
             .topmost_fullscreen_window_on(self.output_map.primary().id)
             .is_some();
@@ -410,16 +650,27 @@ impl RustyCompositorState {
         window_count: usize,
         serial: smithay::utils::Serial,
     ) {
+        let overview_ids = self.overview_window_ids();
+        let card_count = if self.overview_filter_app.is_some() {
+            overview_ids.len()
+        } else {
+            window_count
+        };
         let spaces = self.overview_workspace_spaces();
         match crate::shell_render::check_overview_click_with_spaces(
             output_phys,
             &spaces,
-            window_count,
+            card_count,
             self.pointer_location.x,
             self.pointer_location.y,
         ) {
             crate::shell_render::OverviewHit::Card(idx) => {
-                self.focus_ordered_window(idx, serial);
+                if let Some(&win_id) = overview_ids.get(idx) {
+                    self.restore_window(win_id, serial);
+                    self.close_overview();
+                } else {
+                    self.focus_ordered_window(idx, serial);
+                }
             }
             crate::shell_render::OverviewHit::SwitchWorkspace(ws) => {
                 let target_ws = WorkspaceId::new_clamped(ws);

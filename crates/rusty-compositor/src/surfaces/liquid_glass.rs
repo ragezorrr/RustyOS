@@ -198,21 +198,22 @@ void main() {
         return;
     }
 
-    vec2 grad = vec2(0.0);
+    vec2 sgn = vec2(p.x >= 0.0 ? 1.0 : -1.0, p.y >= 0.0 ? 1.0 : -1.0);
+    vec2 grad = vec2(0.0, -1.0);
     if (q.x > 0.0 && q.y > 0.0) {
-        vec2 rq = max(q, vec2(0.0001));
-        grad = sign(p) * normalize(rq);
-    } else if (q.x > q.y) {
-        grad = vec2(sign(p.x), 0.0);
+        grad = sgn * normalize(max(q, vec2(0.0001)));
     } else {
-        grad = vec2(0.0, sign(p.y));
+        float blend = smoothstep(-2.0, 2.0, q.x - q.y);
+        vec2 straight = mix(vec2(0.0, sgn.y), vec2(sgn.x, 0.0), blend);
+        float len = length(straight);
+        grad = len > 0.0001 ? straight / len : vec2(0.0, -1.0);
     }
 
     float edge_depth = clamp(-dist, 0.0, 32.0);
-    float lens_band = exp(-edge_depth / 9.0) * smoothstep(22.0, 0.0, edge_depth);
+    float lens_band = exp(-edge_depth / 7.5) * smoothstep(22.0, 0.0, edge_depth);
     vec2 uv_per_px = uv_size / panel_size;
     vec2 lens_uv = grad * (u_sat_refract.y * lens_band) * uv_per_px;
-    vec2 disp_uv = grad * (0.42 * lens_band) * uv_per_px;
+    vec2 disp_uv = grad * (0.55 * lens_band) * uv_per_px;
 
     vec2 uv_g = clamp(v_coords - lens_uv, u_uv_bounds.xy, u_uv_bounds.zw);
     vec2 uv_r = clamp(v_coords - lens_uv - disp_uv, u_uv_bounds.xy, u_uv_bounds.zw);
@@ -233,19 +234,29 @@ void main() {
 
     vec3 glass = mix(bg, u_tint_rgba.rgb, u_tint_rgba.a);
 
-    float sheen = pow(clamp(1.0 - panel_uv.y, 0.0, 1.0), 2.8) * u_sat_refract.w;
+    float top_t = clamp(1.0 - panel_uv.y, 0.0, 1.0);
+    float sheen = top_t * top_t * top_t * u_sat_refract.w;
     glass += vec3(sheen);
 
-    float rim_mask = 1.0 - smoothstep(0.0, 1.35, abs(dist + 0.35));
-    float caustic_band = 1.0 - smoothstep(0.0, 3.0, abs(dist + 2.0));
-    float top_dir = clamp(-grad.y, 0.0, 1.0);
-    float side_dir = abs(grad.x) * 0.52;
-    float bottom_dir = clamp(grad.y, 0.0, 1.0) * 0.36;
-    float spec_weight = u_sat_refract.z * (0.30 + 0.70 * top_dir + side_dir + bottom_dir);
-    glass += vec3(rim_mask * spec_weight + caustic_band * u_sat_refract.z * 0.06);
+    vec2 light_tl = normalize(vec2(-1.0, -1.0));
+    float d_tl = max(dot(grad, light_tl), 0.0);
+    float d_br = max(dot(grad, -light_tl), 0.0);
+    float d_tl2 = d_tl * d_tl;
+    float d_br2 = d_br * d_br;
+    float arc_tl = d_tl2 * d_tl2 * d_tl2 * d_tl;
+    float arc_br = d_br2 * d_br2 * d_br2 * d_br;
+    float spec_dir = arc_tl + arc_br * 0.62;
 
-    float inner_lip = (1.0 - smoothstep(0.0, 1.5, abs(dist + 1.4))) * (1.0 - top_dir) * 0.03;
-    glass = clamp(glass - vec3(inner_lip), 0.0, 1.0);
+    float rim_t = (dist + 0.6) / 1.4;
+    float outer_bevel = exp(-(rim_t * rim_t));
+    float inner_caustic = (1.0 - smoothstep(0.0, 6.0, edge_depth)) * smoothstep(0.0, 1.5, edge_depth);
+    float is_light = smoothstep(0.35, 0.75, u_tint_rgba.r);
+    float light_fresnel = outer_bevel * is_light * 0.04;
+    glass = clamp(
+        glass + vec3(light_fresnel + (outer_bevel + inner_caustic * 0.28) * u_sat_refract.z * spec_dir),
+        0.0,
+        1.0
+    );
 
     float out_alpha = coverage * alpha;
 #if defined(DEBUG_FLAGS)
@@ -278,28 +289,28 @@ pub(crate) fn compute_glass_material(
     let g = crate::config::clamp_glass_opacity(glass_opacity);
     match (style, is_dark) {
         (GlassPanelStyle::Dock, false) => GlassMaterialUniforms {
-            tint_rgba: [0.97, 0.98, 1.0, 0.08 + 0.14 * g],
-            sat_refract_rim_sheen: [1.28, 6.2, 0.82, 0.14],
+            tint_rgba: [0.98, 0.985, 1.0, 0.06 + 0.12 * g],
+            sat_refract_rim_sheen: [1.30, 8.5, 0.34, 0.08],
         },
         (GlassPanelStyle::Dock, true) => GlassMaterialUniforms {
-            tint_rgba: [0.08, 0.085, 0.10, 0.22 + 0.20 * g],
-            sat_refract_rim_sheen: [1.24, 5.8, 0.42, 0.09],
+            tint_rgba: [0.06, 0.065, 0.08, 0.14 + 0.16 * g],
+            sat_refract_rim_sheen: [1.26, 8.0, 0.24, 0.045],
         },
         (GlassPanelStyle::Popover, false) => GlassMaterialUniforms {
-            tint_rgba: [0.97, 0.98, 1.0, 0.14 + 0.18 * g],
-            sat_refract_rim_sheen: [1.24, 4.8, 0.78, 0.12],
+            tint_rgba: [0.975, 0.98, 1.0, 0.14 + 0.18 * g],
+            sat_refract_rim_sheen: [1.24, 6.8, 0.30, 0.065],
         },
         (GlassPanelStyle::Popover, true) => GlassMaterialUniforms {
-            tint_rgba: [0.10, 0.105, 0.125, 0.34 + 0.22 * g],
-            sat_refract_rim_sheen: [1.20, 4.8, 0.40, 0.08],
+            tint_rgba: [0.09, 0.095, 0.115, 0.24 + 0.22 * g],
+            sat_refract_rim_sheen: [1.22, 6.5, 0.21, 0.04],
         },
         (GlassPanelStyle::ControlModule, false) => GlassMaterialUniforms {
-            tint_rgba: [0.985, 0.99, 1.0, 0.20 + 0.20 * g],
-            sat_refract_rim_sheen: [1.18, 3.4, 0.66, 0.10],
+            tint_rgba: [0.98, 0.985, 1.0, 0.09 + 0.13 * g],
+            sat_refract_rim_sheen: [1.24, 7.8, 0.32, 0.065],
         },
         (GlassPanelStyle::ControlModule, true) => GlassMaterialUniforms {
-            tint_rgba: [0.16, 0.17, 0.20, 0.30 + 0.22 * g],
-            sat_refract_rim_sheen: [1.18, 3.6, 0.32, 0.06],
+            tint_rgba: [0.10, 0.105, 0.125, 0.16 + 0.16 * g],
+            sat_refract_rim_sheen: [1.22, 7.5, 0.23, 0.04],
         },
     }
 }
@@ -426,6 +437,14 @@ pub(crate) fn expand_and_scale_damage_to_half(
 pub struct LiquidGlassElement {
     id: Id,
     shader: TextureShaderElement,
+}
+
+impl LiquidGlassElement {
+    /// Wraps a custom [`TextureShaderElement`] with a stable caller-managed [`Id`].
+    #[must_use]
+    pub(crate) fn from_parts(id: Id, shader: TextureShaderElement) -> Self {
+        Self { id, shader }
+    }
 }
 
 impl Element for LiquidGlassElement {
@@ -1157,7 +1176,14 @@ mod tests {
 
         let light = compute_glass_material(GlassPanelStyle::Dock, 0.85, false);
         let dark = compute_glass_material(GlassPanelStyle::Dock, 0.85, true);
+        let dark_mod = compute_glass_material(GlassPanelStyle::ControlModule, 0.78, true);
         assert!(light.tint_rgba[0] > 0.8 && dark.tint_rgba[0] < 0.2);
         assert!(light.sat_refract_rim_sheen[2] > dark.sat_refract_rim_sheen[2]);
+        assert!(dark_mod.tint_rgba[3] < 0.35 && dark_mod.sat_refract_rim_sheen[1] >= 7.0);
+        assert!(
+            LIQUID_GLASS_FRAG.contains("spec_dir")
+                && !LIQUID_GLASS_FRAG.contains("top_dir")
+                && !LIQUID_GLASS_FRAG.contains("caustic_band")
+        );
     }
 }

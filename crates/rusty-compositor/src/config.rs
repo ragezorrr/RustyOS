@@ -162,9 +162,242 @@ pub fn clamp_display_scale(scale: f64) -> f64 {
     }
 }
 
-/// Sort order for the Dock `Downloads` stack context menu (`RUSTYOS-064`).
+/// Default resting Dock app icon size in logical pixels (`36..=68`).
+pub const DEFAULT_DOCK_ICON_SIZE: i32 = 50;
+
+/// Clamps Dock resting icon size into `36..=68` logical pixels.
+#[must_use]
+pub fn clamp_dock_icon_size(px: i32) -> i32 {
+    px.clamp(36, 68)
+}
+
+/// Default pinned Dock application keys (`RUSTYOS-073`).
+#[must_use]
+pub fn default_dock_pinned_apps() -> Vec<String> {
+    vec![
+        "files".to_owned(),
+        "overview".to_owned(),
+        "terminal".to_owned(),
+        "browser".to_owned(),
+        "notes".to_owned(),
+        "settings".to_owned(),
+    ]
+}
+
+/// Screen edge where the floating Dock is anchored (`RUSTYOS-073`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DockPosition {
+    /// Centered along bottom screen edge (macOS default).
+    #[default]
+    Bottom,
+    /// Vertically centered along left screen edge.
+    Left,
+    /// Vertically centered along right screen edge.
+    Right,
+}
+
+impl DockPosition {
+    /// Canonical TOML key string.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Bottom => "bottom",
+            Self::Left => "left",
+            Self::Right => "right",
+        }
+    }
+
+    /// Human-readable UI label shown in `System Settings -> Desktop & Dock`.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Bottom => "Bottom",
+            Self::Left => "Left",
+            Self::Right => "Right",
+        }
+    }
+
+    /// Cycles `Bottom -> Left -> Right -> Bottom`.
+    #[must_use]
+    pub const fn next(self) -> Self {
+        match self {
+            Self::Bottom => Self::Left,
+            Self::Left => Self::Right,
+            Self::Right => Self::Bottom,
+        }
+    }
+
+    /// Parses a persisted string from `[dock].position`.
+    #[must_use]
+    pub fn parse(raw: &str) -> Option<Self> {
+        match strip_toml_quotes(raw).trim().to_ascii_lowercase().as_str() {
+            "bottom" => Some(Self::Bottom),
+            "left" => Some(Self::Left),
+            "right" => Some(Self::Right),
+            _ => None,
+        }
+    }
+}
+
+/// Window minimize/restore animation effect into the Dock (`RUSTYOS-073`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DockMinimizeEffect {
+    /// Curvilinear liquid funnel pulled into the target Dock icon (`macOS` default).
+    #[default]
+    Genie,
+    /// Uniform smooth geometric scaling toward/from the target Dock icon.
+    Scale,
+}
+
+impl DockMinimizeEffect {
+    /// Canonical TOML key string.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Genie => "genie",
+            Self::Scale => "scale",
+        }
+    }
+
+    /// Human-readable UI label shown in `System Settings -> Desktop & Dock`.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Genie => "Genie",
+            Self::Scale => "Scale",
+        }
+    }
+
+    /// Toggles `Genie <-> Scale`.
+    #[must_use]
+    pub const fn toggle(self) -> Self {
+        match self {
+            Self::Genie => Self::Scale,
+            Self::Scale => Self::Genie,
+        }
+    }
+
+    /// Parses a persisted string from `[dock].minimize_effect`.
+    #[must_use]
+    pub fn parse(raw: &str) -> Option<Self> {
+        match strip_toml_quotes(raw).trim().to_ascii_lowercase().as_str() {
+            "genie" => Some(Self::Genie),
+            "scale" => Some(Self::Scale),
+            _ => None,
+        }
+    }
+}
+
+/// Left-click presentation style for the `Downloads` Dock utility (`RUSTYOS-073`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DownloadsDisplayMode {
+    /// Opens an interactive Liquid Glass Stack popover (`macOS` default).
+    #[default]
+    Stack,
+    /// Launches `rusty-files --path ~/Downloads` directly.
+    Folder,
+}
+
+impl DownloadsDisplayMode {
+    /// Canonical TOML key string.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Stack => "stack",
+            Self::Folder => "folder",
+        }
+    }
+
+    /// Human-readable menu label.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Stack => "Stack",
+            Self::Folder => "Folder",
+        }
+    }
+
+    /// Parses a persisted string from `[dock].downloads_display`.
+    #[must_use]
+    pub fn parse(raw: &str) -> Option<Self> {
+        match strip_toml_quotes(raw).trim().to_ascii_lowercase().as_str() {
+            "stack" => Some(Self::Stack),
+            "folder" => Some(Self::Folder),
+            _ => None,
+        }
+    }
+}
+
+/// Popover geometry style when viewing `Downloads` as a Stack (`RUSTYOS-073`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DownloadsViewMode {
+    /// Chooses `Fan` for compact lists (`<= 8` items) and `Grid` for larger directories.
+    #[default]
+    Automatic,
+    /// Arc-stacked floating pills radiating from the `Downloads` Dock slot.
+    Fan,
+    /// Multi-column translucent Liquid Glass popover grid.
+    Grid,
+    /// Compact scrollable/dense vertical Liquid Glass file list.
+    List,
+}
+
+impl DownloadsViewMode {
+    /// Canonical TOML key string.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Automatic => "automatic",
+            Self::Fan => "fan",
+            Self::Grid => "grid",
+            Self::List => "list",
+        }
+    }
+
+    /// Human-readable menu label.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Automatic => "Automatic",
+            Self::Fan => "Fan",
+            Self::Grid => "Grid",
+            Self::List => "List",
+        }
+    }
+
+    /// Resolves `Automatic` into concrete `Fan` / `Grid` given `item_count`.
+    #[must_use]
+    pub const fn resolve_for_count(self, item_count: usize) -> Self {
+        match self {
+            Self::Automatic => {
+                if item_count <= 8 {
+                    Self::Fan
+                } else {
+                    Self::Grid
+                }
+            }
+            other => other,
+        }
+    }
+
+    /// Parses a persisted string from `[dock].downloads_view`.
+    #[must_use]
+    pub fn parse(raw: &str) -> Option<Self> {
+        match strip_toml_quotes(raw).trim().to_ascii_lowercase().as_str() {
+            "auto" | "automatic" => Some(Self::Automatic),
+            "fan" => Some(Self::Fan),
+            "grid" => Some(Self::Grid),
+            "list" => Some(Self::List),
+            _ => None,
+        }
+    }
+}
+
+/// Sort order for the Dock `Downloads` stack & context menu (`RUSTYOS-064` / `RUSTYOS-073`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DownloadsSortMode {
+    /// Sort newest added/created items first.
+    DateAdded,
     /// Sort newest modified items first.
     #[default]
     DateModified,
@@ -172,6 +405,8 @@ pub enum DownloadsSortMode {
     Name,
     /// Sort largest files first.
     Size,
+    /// Group directories first, then sort by extension/kind and name.
+    Kind,
 }
 
 impl DownloadsSortMode {
@@ -179,9 +414,11 @@ impl DownloadsSortMode {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::DateAdded => "date_added",
             Self::DateModified => "date_modified",
             Self::Name => "name",
             Self::Size => "size",
+            Self::Kind => "kind",
         }
     }
 
@@ -189,9 +426,11 @@ impl DownloadsSortMode {
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
+            Self::DateAdded => "Date Added",
             Self::DateModified => "Date Modified",
             Self::Name => "Name",
             Self::Size => "Size",
+            Self::Kind => "Kind",
         }
     }
 
@@ -200,9 +439,11 @@ impl DownloadsSortMode {
     pub fn parse(raw: &str) -> Option<Self> {
         let norm = strip_toml_quotes(raw).trim().to_ascii_lowercase();
         match norm.as_str() {
+            "added" | "date_added" => Some(Self::DateAdded),
             "date" | "date_modified" | "modified" => Some(Self::DateModified),
             "name" | "alpha" => Some(Self::Name),
             "size" => Some(Self::Size),
+            "kind" | "type" => Some(Self::Kind),
             _ => None,
         }
     }
@@ -321,7 +562,29 @@ pub struct UserConfig {
     pub lock_on_sleep: bool,
     /// Enable the native compositor `org.freedesktop.PolicyKit1.AuthenticationAgent` (`RUSTYOS-056`).
     pub enable_polkit_agent: bool,
-    /// Sort order used in the Dock `Downloads` context menu (`RUSTYOS-064`).
+    /// Resting Dock app icon edge size in logical pixels (`36..=68`, default `50`) (`RUSTYOS-073`).
+    pub dock_icon_size: i32,
+    /// Screen edge anchoring the Dock (`Bottom`, `Left`, `Right`) (`RUSTYOS-073`).
+    pub dock_position: DockPosition,
+    /// Animation used when minimizing/restoring windows (`Genie` or `Scale`) (`RUSTYOS-073`).
+    pub dock_minimize_effect: DockMinimizeEffect,
+    /// Minimize windows directly into their owning application's Dock icon (`RUSTYOS-073`).
+    pub dock_minimize_into_app: bool,
+    /// Automatically hide Dock when idle and expand `usable_work_area` (`RUSTYOS-073`).
+    pub dock_auto_hide: bool,
+    /// Bounce app icon while launching (`RUSTYOS-073`).
+    pub dock_animate_opening: bool,
+    /// Render running-application dot indicators beneath active Dock apps (`RUSTYOS-073`).
+    pub dock_show_indicators: bool,
+    /// Show recently closed unpinned apps section before the right divider (`RUSTYOS-073`).
+    pub dock_show_recent: bool,
+    /// Ordered list of pinned Dock application keys (`RUSTYOS-073`).
+    pub dock_pinned_apps: Vec<String>,
+    /// Left-click presentation mode (`Stack` or `Folder`) for `Downloads` (`RUSTYOS-073`).
+    pub dock_downloads_display: DownloadsDisplayMode,
+    /// Visual layout mode (`Automatic`, `Fan`, `Grid`, `List`) for `Downloads` stack (`RUSTYOS-073`).
+    pub dock_downloads_view: DownloadsViewMode,
+    /// Sort order used in the Dock `Downloads` stack & context menu (`RUSTYOS-064` / `RUSTYOS-073`).
     pub downloads_sort: DownloadsSortMode,
 }
 
@@ -354,6 +617,17 @@ impl Default for UserConfig {
             require_password_on_lock: true,
             lock_on_sleep: true,
             enable_polkit_agent: true,
+            dock_icon_size: DEFAULT_DOCK_ICON_SIZE,
+            dock_position: DockPosition::Bottom,
+            dock_minimize_effect: DockMinimizeEffect::Genie,
+            dock_minimize_into_app: false,
+            dock_auto_hide: false,
+            dock_animate_opening: true,
+            dock_show_indicators: true,
+            dock_show_recent: true,
+            dock_pinned_apps: default_dock_pinned_apps(),
+            dock_downloads_display: DownloadsDisplayMode::Stack,
+            dock_downloads_view: DownloadsViewMode::Automatic,
             downloads_sort: DownloadsSortMode::DateModified,
         }
     }
@@ -499,16 +773,84 @@ impl UserConfig {
                 self.autostart = parse_toml_string_array(val);
             }
             ("security", _) => self.apply_security_kv(key, val),
-            ("dock", "downloads_sort") => {
-                if let Some(mode) = DownloadsSortMode::parse(val) {
-                    self.downloads_sort = mode;
-                }
-            }
+            ("dock", _) => self.apply_dock_kv(key, val),
             _ => {
                 if let Some(raw_output) = section.strip_prefix("display.outputs.") {
                     self.apply_output_kv(strip_toml_quotes(raw_output), key, val);
                 }
             }
+        }
+    }
+
+    fn apply_dock_kv(&mut self, key: &str, val: &str) {
+        match key {
+            "icon_size" => {
+                if let Ok(px) = val.parse::<i32>() {
+                    self.dock_icon_size = clamp_dock_icon_size(px);
+                }
+            }
+            "position" => {
+                if let Some(pos) = DockPosition::parse(val) {
+                    self.dock_position = pos;
+                }
+            }
+            "minimize_effect" => {
+                if let Some(effect) = DockMinimizeEffect::parse(val) {
+                    self.dock_minimize_effect = effect;
+                }
+            }
+            "minimize_into_app" => {
+                if let Ok(b) = val.parse::<bool>() {
+                    self.dock_minimize_into_app = b;
+                }
+            }
+            "auto_hide" => {
+                if let Ok(b) = val.parse::<bool>() {
+                    self.dock_auto_hide = b;
+                }
+            }
+            "animate_opening" => {
+                if let Ok(b) = val.parse::<bool>() {
+                    self.dock_animate_opening = b;
+                }
+            }
+            "show_indicators" => {
+                if let Ok(b) = val.parse::<bool>() {
+                    self.dock_show_indicators = b;
+                }
+            }
+            "show_recent" => {
+                if let Ok(b) = val.parse::<bool>() {
+                    self.dock_show_recent = b;
+                }
+            }
+            "pinned_apps" => {
+                let parsed: Vec<String> = parse_toml_string_array(val)
+                    .into_iter()
+                    .map(|s| s.trim().to_ascii_lowercase())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                if !parsed.is_empty() {
+                    self.dock_pinned_apps = parsed;
+                }
+            }
+            "downloads_display" => {
+                if let Some(mode) = DownloadsDisplayMode::parse(val) {
+                    self.dock_downloads_display = mode;
+                }
+            }
+            "downloads_view" => {
+                if let Some(mode) = DownloadsViewMode::parse(val) {
+                    self.dock_downloads_view = mode;
+                }
+            }
+            "downloads_sort" => {
+                if let Some(mode) = DownloadsSortMode::parse(val) {
+                    self.downloads_sort = mode;
+                }
+            }
+            // Also accepts deprecated `[dock].magnification_size` silently for backwards compatibility.
+            _ => {}
         }
     }
 
@@ -768,17 +1110,8 @@ impl UserConfig {
             }
         }
 
-        let _ = writeln!(out, "\n[security]");
-        let _ = writeln!(
-            out,
-            "require_password_on_lock = {}",
-            self.require_password_on_lock
-        );
-        let _ = writeln!(out, "lock_on_sleep = {}", self.lock_on_sleep);
-        let _ = writeln!(out, "enable_polkit_agent = {}", self.enable_polkit_agent);
-
-        let _ = writeln!(out, "\n[dock]");
-        let _ = writeln!(out, "downloads_sort = \"{}\"", self.downloads_sort.as_str());
+        self.append_security_toml(&mut out);
+        self.append_dock_toml(&mut out);
 
         let _ = writeln!(out, "\n[autostart]");
         let escaped_cmds: Vec<String> = self
@@ -789,6 +1122,58 @@ impl UserConfig {
         let _ = writeln!(out, "commands = [{}]", escaped_cmds.join(", "));
 
         out
+    }
+
+    fn append_security_toml(&self, out: &mut String) {
+        use std::fmt::Write as _;
+
+        let _ = writeln!(out, "\n[security]");
+        let _ = writeln!(
+            out,
+            "require_password_on_lock = {}",
+            self.require_password_on_lock
+        );
+        let _ = writeln!(out, "lock_on_sleep = {}", self.lock_on_sleep);
+        let _ = writeln!(out, "enable_polkit_agent = {}", self.enable_polkit_agent);
+    }
+
+    fn append_dock_toml(&self, out: &mut String) {
+        use std::fmt::Write as _;
+
+        let _ = writeln!(out, "\n[dock]");
+        let _ = writeln!(
+            out,
+            "icon_size = {}",
+            clamp_dock_icon_size(self.dock_icon_size)
+        );
+        let _ = writeln!(out, "position = \"{}\"", self.dock_position.as_str());
+        let _ = writeln!(
+            out,
+            "minimize_effect = \"{}\"",
+            self.dock_minimize_effect.as_str()
+        );
+        let _ = writeln!(out, "minimize_into_app = {}", self.dock_minimize_into_app);
+        let _ = writeln!(out, "auto_hide = {}", self.dock_auto_hide);
+        let _ = writeln!(out, "animate_opening = {}", self.dock_animate_opening);
+        let _ = writeln!(out, "show_indicators = {}", self.dock_show_indicators);
+        let _ = writeln!(out, "show_recent = {}", self.dock_show_recent);
+        let escaped_pins: Vec<String> = self
+            .dock_pinned_apps
+            .iter()
+            .map(|pin| format!("\"{}\"", escape_toml_string(pin)))
+            .collect();
+        let _ = writeln!(out, "pinned_apps = [{}]", escaped_pins.join(", "));
+        let _ = writeln!(
+            out,
+            "downloads_display = \"{}\"",
+            self.dock_downloads_display.as_str()
+        );
+        let _ = writeln!(
+            out,
+            "downloads_view = \"{}\"",
+            self.dock_downloads_view.as_str()
+        );
+        let _ = writeln!(out, "downloads_sort = \"{}\"", self.downloads_sort.as_str());
     }
 
     /// Atomically persists [`UserConfig`] to `path` via a sibling temp file + rename (`RUSTYOS-061`).
@@ -1137,6 +1522,15 @@ mod tests {
         assert_eq!(cfg.wallpaper, None);
         assert_eq!(cfg.cursor_theme, None);
         assert_eq!(cfg.autostart, Vec::<String>::new());
+
+        let legacy_dock = UserConfig::parse_toml(
+            r"
+            [dock]
+            icon_size = 56
+            magnification_size = 76
+            ",
+        );
+        assert_eq!(legacy_dock.dock_icon_size, 56);
     }
 
     #[test]
@@ -1355,7 +1749,23 @@ mod tests {
             require_password_on_lock: false,
             lock_on_sleep: false,
             enable_polkit_agent: false,
-            downloads_sort: DownloadsSortMode::Name,
+            dock_icon_size: 56,
+            dock_position: DockPosition::Left,
+            dock_minimize_effect: DockMinimizeEffect::Scale,
+            dock_minimize_into_app: true,
+            dock_auto_hide: true,
+            dock_animate_opening: false,
+            dock_show_indicators: false,
+            dock_show_recent: false,
+            dock_pinned_apps: vec![
+                "files".to_owned(),
+                "overview".to_owned(),
+                "firefox".to_owned(),
+                "terminal".to_owned(),
+            ],
+            dock_downloads_display: DownloadsDisplayMode::Folder,
+            dock_downloads_view: DownloadsViewMode::Grid,
+            downloads_sort: DownloadsSortMode::Kind,
             ..UserConfig::default()
         };
         cfg.output_scales.insert("eDP-1".to_owned(), 1.75);

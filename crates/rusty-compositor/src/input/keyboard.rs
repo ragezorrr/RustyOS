@@ -182,6 +182,39 @@ impl RustyCompositorState {
                 self.close_top_bar_menu();
                 info!("Closed TopBar menu popover");
             }
+            KeyIntercept::DockStackClose => self.close_dock_stack(),
+            KeyIntercept::DockStackStep(delta) => {
+                if let Some(ref mut stack) = self.dock_stack {
+                    let count = stack.entries.len();
+                    if count > 0 {
+                        let cur = stack
+                            .selected_idx
+                            .or(stack.hovered_item)
+                            .unwrap_or(if delta > 0 { count - 1 } else { 0 });
+                        let next = (isize::try_from(cur).unwrap_or(0) + delta)
+                            .rem_euclid(isize::try_from(count).unwrap_or(1));
+                        let next_idx = usize::try_from(next).unwrap_or(0);
+                        stack.selected_idx = Some(next_idx);
+                        stack.hovered_item = Some(next_idx);
+                        self.shell_redraw_needed = true;
+                    }
+                }
+            }
+            KeyIntercept::DockStackActivate => {
+                let target_path = self.dock_stack.as_ref().and_then(|stack| {
+                    let idx = stack.selected_idx.or(stack.hovered_item).unwrap_or(0);
+                    stack.entries.get(idx).map(|e| e.path.clone())
+                });
+                self.close_dock_stack();
+                if let Some(path) = target_path {
+                    self.open_downloads_entry(&path);
+                } else {
+                    let downloads = crate::state::context_menu_actions::resolve_downloads_dir();
+                    if !self.launch_rusty_files_dir(downloads.as_deref()) {
+                        self.toggle_launcher();
+                    }
+                }
+            }
             KeyIntercept::LauncherClose => {
                 self.close_launcher();
                 info!("Closed Spotlight application launcher");
@@ -408,6 +441,11 @@ pub(super) fn classify_keyboard_input(
     {
         return FilterResult::Intercept(intercept);
     }
+    if state.dock_stack.is_some()
+        && let Some(intercept) = classify_dock_stack_key(modifiers, sym)
+    {
+        return FilterResult::Intercept(intercept);
+    }
     if state.active_top_bar_menu.is_some() && sym.raw() == Keysym::Escape.raw() {
         return FilterResult::Intercept(KeyIntercept::TopBarMenuClose);
     }
@@ -421,6 +459,25 @@ pub(super) fn classify_keyboard_input(
         FilterResult::Intercept(action)
     } else {
         FilterResult::Forward
+    }
+}
+
+fn classify_dock_stack_key(modifiers: ModifiersState, sym: Keysym) -> Option<KeyIntercept> {
+    if sym.raw() == Keysym::Escape.raw() {
+        return Some(KeyIntercept::DockStackClose);
+    }
+    if modifiers.ctrl || modifiers.alt || modifiers.logo {
+        return None;
+    }
+    match sym {
+        Keysym::Up | Keysym::KP_Up | Keysym::Left | Keysym::KP_Left => {
+            Some(KeyIntercept::DockStackStep(-1))
+        }
+        Keysym::Down | Keysym::KP_Down | Keysym::Right | Keysym::KP_Right | Keysym::Tab => {
+            Some(KeyIntercept::DockStackStep(1))
+        }
+        Keysym::Return | Keysym::KP_Enter => Some(KeyIntercept::DockStackActivate),
+        _ => None,
     }
 }
 

@@ -98,6 +98,7 @@ impl CompositorHandler for RustyCompositorState {
             if let Some(win_id) = self.window_id_for_smithay(&window) {
                 self.sync_toplevel_icon_from_surface(win_id, surface);
                 self.sync_foreign_toplevel_metadata(win_id);
+                self.refresh_dock_window_presence(win_id);
                 if self.ensure_floating_min_size(win_id) {
                     let serial = smithay::utils::SERIAL_COUNTER.next_serial();
                     self.sync_space_with_wm(serial);
@@ -398,28 +399,7 @@ impl XdgShellHandler for RustyCompositorState {
 
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
         if let Some(win_id) = self.window_id_for_toplevel(&surface) {
-            if self
-                .active_window_drag
-                .is_some_and(|drag| drag.window_id == win_id)
-            {
-                self.active_window_drag = None;
-            }
-            if self
-                .active_window_resize
-                .is_some_and(|resize| resize.window_id == win_id)
-            {
-                self.active_window_resize = None;
-            }
-            if let Some((_, sw)) = self.window_bindings.iter().find(|(id, _)| *id == win_id) {
-                let sw_clone = sw.clone();
-                self.space.unmap_elem(&sw_clone);
-            }
-            self.window_bindings.retain(|(wid, _)| *wid != win_id);
-            self.unregister_window_metadata(win_id);
-            self.minimized_window_ids.remove(&win_id);
-            self.remove_from_switcher(win_id);
-            self.wm.unmap_window(win_id);
-            self.animations.remove_window(win_id.0);
+            self.finish_window_teardown(win_id);
             let serial = smithay::utils::SERIAL_COUNTER.next_serial();
             self.sync_space_with_wm(serial);
             info!(

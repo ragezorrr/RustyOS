@@ -506,14 +506,48 @@ fn dock_glass_and_icon_shadow_rasterize_cleanly() {
     let height = 68;
     let radius = 22;
 
-    // Translucent frosted Dock glass: corners transparent, top rim brighter than center,
-    // and center remains light/translucent rather than an opaque dark slab.
+    // Opposing diagonal Golden Gate corner-arc specular (no 360° wireframe contour).
     let corner = sample_dock_glass_pixel(0, 0, width, height, radius, 0.78, false);
-    let top_rim = sample_dock_glass_pixel(width / 2, 0, width, height, radius, 0.78, false);
+    let top_center = sample_dock_glass_pixel(width / 2, 0, width, height, radius, 0.78, false);
+    let bottom_straight =
+        sample_dock_glass_pixel(width / 2, height - 2, width, height, radius, 0.78, false);
+    let top_left_arc = sample_dock_glass_pixel(7, 7, width, height, radius, 0.78, false);
+    let top_right_arc = sample_dock_glass_pixel(width - 8, 7, width, height, radius, 0.78, false);
+    let bottom_right_arc =
+        sample_dock_glass_pixel(width - 8, height - 8, width, height, radius, 0.78, false);
+    let bottom_left_arc =
+        sample_dock_glass_pixel(7, height - 8, width, height, radius, 0.78, false);
     let center = sample_dock_glass_pixel(width / 2, height / 2, width, height, radius, 0.78, false);
     assert_eq!(corner[3], 0);
-    assert!(top_rim[3] > center[3]);
+    assert!(top_center[3] > 0);
+    assert!(top_left_arc[3] > top_right_arc[3] && top_left_arc[0] > top_right_arc[0]);
+    assert!(bottom_right_arc[3] > bottom_left_arc[3] && bottom_right_arc[0] > bottom_left_arc[0]);
+    assert!(bottom_straight[3] <= center[3] + 6);
     assert!(center[3] > 20 && center[3] <= 120);
+
+    let dark_top_left = sample_glass_panel_pixel_themed(
+        7,
+        7,
+        width,
+        height,
+        radius,
+        0.78,
+        false,
+        GlassPanelStyle::ControlModule,
+        true,
+    );
+    let dark_top_right = sample_glass_panel_pixel_themed(
+        width - 8,
+        7,
+        width,
+        height,
+        radius,
+        0.78,
+        false,
+        GlassPanelStyle::ControlModule,
+        true,
+    );
+    assert!(dark_top_left[0] > dark_top_right[0] && dark_top_left[3] > dark_top_right[3]);
 
     // Reduce-transparency mode falls back to opaque high-contrast obsidian-slate container.
     let opaque_center =

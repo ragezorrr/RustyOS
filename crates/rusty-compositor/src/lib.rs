@@ -668,10 +668,18 @@ mod tests {
         assert!(!compositor.is_window_minimized(w2));
         assert_eq!(compositor.wm.focused_window(), Some(w2));
 
-        // Clicking Dock slot for already-focused w2 minimizes it again.
+        // macOS Dock LKM on an already-focused single-window app keeps it focused without minimizing.
         compositor.handle_dock_hit(shell_render::DockHit::WindowSlot(1), serial);
+        assert!(!compositor.is_window_minimized(w2));
+        assert_eq!(compositor.wm.focused_window(), Some(w2));
+
+        // Minimize w2 via WM action and verify explicit MinimizedWindow Dock tile restores it.
+        compositor.minimize_window(w2, serial);
         assert!(compositor.is_window_minimized(w2));
         assert_eq!(compositor.wm.focused_window(), Some(w1));
+        compositor.handle_dock_hit(shell_render::DockHit::MinimizedWindow(w2), serial);
+        assert!(!compositor.is_window_minimized(w2));
+        assert_eq!(compositor.wm.focused_window(), Some(w2));
 
         Ok(())
     }

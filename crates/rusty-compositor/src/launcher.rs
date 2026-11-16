@@ -335,6 +335,107 @@ impl LauncherState {
             .map(|bin| (*bin).to_owned())
     }
 
+    /// Preferred executable candidates for canonical built-in Dock keys (`RUSTYOS-073`).
+    #[must_use]
+    pub(crate) fn canonical_preferred_bins(app_key: &str) -> Option<&'static [&'static str]> {
+        const FILES: &[&str] = &["rusty-files"];
+        const TERMINAL: &[&str] = &[
+            "foot",
+            "kitty",
+            "alacritty",
+            "wezterm",
+            "ghostty",
+            "weston-terminal",
+            "gnome-terminal",
+            "konsole",
+            "xfce4-terminal",
+        ];
+        const BROWSER: &[&str] = &[
+            "firefox",
+            "chromium",
+            "google-chrome",
+            "brave-browser",
+            "epiphany",
+            "falkon",
+        ];
+        const NOTES: &[&str] = &[
+            "gnome-text-editor",
+            "gedit",
+            "kate",
+            "mousepad",
+            "featherpad",
+            "obsidian",
+        ];
+        match app_key.trim().to_ascii_lowercase().as_str() {
+            "files" | "rusty-files" => Some(FILES),
+            "terminal" => Some(TERMINAL),
+            "browser" => Some(BROWSER),
+            "notes" => Some(NOTES),
+            _ => None,
+        }
+    }
+
+    /// Resolves a launch command for either a canonical Dock key or a custom `.desktop`/binary key.
+    #[must_use]
+    pub(crate) fn find_command_for_dock_key(&self, app_key: &str) -> Option<String> {
+        let key = app_key.trim().to_ascii_lowercase();
+        if key.is_empty() {
+            return None;
+        }
+        if let Some(bins) = Self::canonical_preferred_bins(&key) {
+            return self.find_available_command(bins);
+        }
+        let dot_suffix = format!(".{key}");
+        for app in &self.catalog {
+            let id_lower = app.id.trim_end_matches(".desktop").to_ascii_lowercase();
+            let bin = exec_basename(&app.exec);
+            let matched = app.id.eq_ignore_ascii_case(&key)
+                || id_lower == key
+                || id_lower.ends_with(&dot_suffix)
+                || bin.eq_ignore_ascii_case(&key)
+                || app.name.eq_ignore_ascii_case(&key);
+            if matched && command_exists_on_path(&app.exec) {
+                return Some(app.exec.clone());
+            }
+        }
+        if command_exists_on_path(&key) {
+            return Some(key);
+        }
+        key.rsplit('.')
+            .next()
+            .filter(|short| *short != key && command_exists_on_path(short))
+            .map(ToOwned::to_owned)
+    }
+
+    /// Launches a canonical or custom Dock application key.
+    pub(crate) fn launch_by_dock_key(
+        &mut self,
+        app_key: &str,
+        wayland_display: &str,
+        ipc_socket: &Path,
+    ) -> bool {
+        self.find_command_for_dock_key(app_key).is_some_and(|cmd| {
+            self.launch_command(&cmd, wayland_display, ipc_socket)
+                .is_ok()
+        })
+    }
+
+    /// Resolves an XDG icon name/path for a canonical or custom Dock key.
+    #[must_use]
+    pub(crate) fn icon_for_dock_key(&self, app_key: &str) -> Option<String> {
+        let key = app_key.trim().to_ascii_lowercase();
+        if key.is_empty() {
+            return None;
+        }
+        if let Some(bins) = Self::canonical_preferred_bins(&key) {
+            let icon = self.preferred_icon(bins, "");
+            if !icon.is_empty() {
+                return Some(icon.to_owned());
+            }
+        }
+        self.icon_for_app_hints(Some(&key), &key)
+    }
+
     /// Non-blockingly reaps any exited child processes spawned from Spotlight.
     pub fn reap_children(&mut self) {
         self.children

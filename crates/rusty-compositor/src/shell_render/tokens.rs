@@ -69,7 +69,6 @@ pub(crate) struct ThemePalette {
     pub accent_rgba: [u8; 4],
     pub accent_hover_fill: [u8; 4],
     pub accent_hover_border: [u8; 4],
-    pub surface_elevated_rgba: [u8; 4],
     pub control_pill_off_rgba: [u8; 4],
     pub border_rgba: [u8; 4],
     pub border_highlight_rgba: [u8; 4],
@@ -92,10 +91,9 @@ impl ThemePalette {
                 accent_rgba: [0, 122, 255, 255],
                 accent_hover_fill: [0, 122, 255, 238],
                 accent_hover_border: [56, 152, 255, 160],
-                surface_elevated_rgba: [246, 247, 250, 246],
                 control_pill_off_rgba: [220, 224, 232, 224],
-                border_rgba: [0, 0, 0, 28],
-                border_highlight_rgba: [255, 255, 255, 185],
+                border_rgba: [0, 0, 0, 20],
+                border_highlight_rgba: [255, 255, 255, 96],
             },
             crate::config::AppearanceMode::Dark => Self {
                 is_dark: true,
@@ -109,10 +107,9 @@ impl ThemePalette {
                 accent_rgba: [10, 132, 255, 255],
                 accent_hover_fill: [10, 132, 255, 234],
                 accent_hover_border: [74, 164, 255, 145],
-                surface_elevated_rgba: [38, 38, 42, 246],
                 control_pill_off_rgba: [56, 56, 62, 220],
-                border_rgba: [255, 255, 255, 31],
-                border_highlight_rgba: [255, 255, 255, 62],
+                border_rgba: [255, 255, 255, 18],
+                border_highlight_rgba: [255, 255, 255, 26],
             },
         }
     }
@@ -240,13 +237,50 @@ pub const COLOR_WARNING: Color32F = Color32F::new(1.0, 0.839, 0.039, 1.0); // #F
 pub const COLOR_BORDER: Color32F = premul(1.0, 1.0, 1.0, 0.12); // #FFFFFF12 border
 pub const COLOR_BORDER_HIGHLIGHT: Color32F = premul(1.0, 1.0, 1.0, 0.22); // outer glass rim
 
-/// Computes the usable work area rectangle for client windows, reserving space for `TopBar` and `Dock`.
+/// Computes the usable work area rectangle reserving `TopBar` and the active floating `Dock`
+/// (`Bottom`, `Left`, or `Right`, or zero Dock reservation when `auto_hide` is enabled) (`RUSTYOS-073`).
+#[must_use]
+pub fn usable_work_area_with_dock(
+    screen_size: Size<i32, smithay::utils::Physical>,
+    position: crate::config::DockPosition,
+    icon_size: i32,
+    auto_hide: bool,
+) -> rusty_wm::Rect {
+    let top_margin = TOP_BAR_HEIGHT;
+    if auto_hide {
+        let h = (screen_size.h - top_margin).max(100);
+        return rusty_wm::Rect::new(0, top_margin, screen_size.w.max(100), h);
+    }
+    let clamped_icon = crate::config::clamp_dock_icon_size(icon_size);
+    let dock_thickness = clamped_icon + DOCK_PADDING * 2 + 2;
+    let dock_reserve = dock_thickness + DOCK_MARGIN_BOTTOM * 2;
+    match position {
+        crate::config::DockPosition::Bottom => {
+            let h = (screen_size.h - top_margin - dock_reserve).max(100);
+            rusty_wm::Rect::new(0, top_margin, screen_size.w.max(100), h)
+        }
+        crate::config::DockPosition::Left => {
+            let w = (screen_size.w - dock_reserve).max(100);
+            let h = (screen_size.h - top_margin).max(100);
+            rusty_wm::Rect::new(dock_reserve, top_margin, w, h)
+        }
+        crate::config::DockPosition::Right => {
+            let w = (screen_size.w - dock_reserve).max(100);
+            let h = (screen_size.h - top_margin).max(100);
+            rusty_wm::Rect::new(0, top_margin, w, h)
+        }
+    }
+}
+
+/// Computes the usable work area rectangle for client windows using default bottom Dock metrics.
 #[must_use]
 pub fn usable_work_area(screen_size: Size<i32, smithay::utils::Physical>) -> rusty_wm::Rect {
-    let top_margin = TOP_BAR_HEIGHT;
-    let bottom_margin = DOCK_HEIGHT + DOCK_MARGIN_BOTTOM * 2;
-    let h = (screen_size.h - top_margin - bottom_margin).max(100);
-    rusty_wm::Rect::new(0, top_margin, screen_size.w, h)
+    usable_work_area_with_dock(
+        screen_size,
+        crate::config::DockPosition::Bottom,
+        crate::config::DEFAULT_DOCK_ICON_SIZE,
+        false,
+    )
 }
 
 pub(crate) fn make_solid_element(
@@ -559,7 +593,8 @@ pub(super) fn push_soft_shadow(
         }
         let d_mid = (d0 + d1) as f32 * 0.5;
         let t = (d_mid / spread as f32).clamp(0.0, 1.0);
-        let alpha = max_a * (1.0 - t) * (1.0 - t);
+        let inv_t = 1.0 - t;
+        let alpha = max_a * inv_t * inv_t * inv_t;
         let col = premul(6.0 / 255.0, 8.0 / 255.0, 14.0 / 255.0, alpha);
 
         if w > 2 * r {

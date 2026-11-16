@@ -40,6 +40,12 @@ pub enum ContextMenuAction {
 
     /// Launches a pinned Dock application slot.
     DockLaunchApp(DockHit),
+    /// Focuses or unminimizes a specific managed window from an app's Dock menu (`RUSTYOS-073`).
+    DockFocusWindow(rusty_wm::WindowId),
+    /// Toggles whether a Dock application remains pinned in `[dock].pinned_apps` (`Keep/Remove in Dock`).
+    DockToggleKeepInDock(DockHit),
+    /// Filters Mission Control / Overview to windows belonging to this Dock application (`Show All Windows`).
+    DockShowAppWindows(DockHit),
     /// Toggles the pinned application's entry in `UserConfig::autostart`.
     DockToggleOpenAtLogin(DockHit),
     /// Opens Mission Control / Workspace Overview to inspect all windows.
@@ -69,6 +75,10 @@ pub enum ContextMenuAction {
     DownloadsOpenFolder,
     /// Opens an individual file or directory listed in the `Downloads` menu.
     DownloadsOpenEntry(std::path::PathBuf),
+    /// Changes `[dock].downloads_display` (`Stack` / `Folder`).
+    DownloadsSetDisplay(crate::config::DownloadsDisplayMode),
+    /// Changes `[dock].downloads_view` (`Automatic` / `Fan` / `Grid` / `List`).
+    DownloadsSetView(crate::config::DownloadsViewMode),
     /// Changes `[dock].downloads_sort` and persists `UserConfig`.
     DownloadsSetSort(DownloadsSortMode),
 

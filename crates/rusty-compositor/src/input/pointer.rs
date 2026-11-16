@@ -274,6 +274,24 @@ impl RustyCompositorState {
             self.active_window_drag = None;
             self.active_window_resize = None;
             self.qs_slider_drag = None;
+            if button == 272
+                && let Some(drag) = self.dock_drag.take()
+            {
+                if drag.active_drag {
+                    if let Some(src_idx) = drag.source_pinned_idx {
+                        self.commit_dock_pin_reorder_or_remove(
+                            src_idx,
+                            drag.target_pinned_idx,
+                            drag.pulled_outside,
+                        );
+                    }
+                } else {
+                    self.handle_dock_hit(drag.hit, serial);
+                }
+                self.sync_dock_auto_hide_target();
+                self.shell_redraw_needed = true;
+                return;
+            }
         }
 
         if self.ext_session_locked {
@@ -397,6 +415,10 @@ impl RustyCompositorState {
                 return;
             }
 
+            if self.dock_stack.is_some() && self.handle_dock_stack_pointer_press(button) {
+                return;
+            }
+
             // Handle floating Notification HUD toast clicks to dismiss (`RUSTYOS-024`)
             let output_phys = self
                 .space
@@ -422,30 +444,14 @@ impl RustyCompositorState {
                 return;
             }
 
-            // Handle bottom Dock clicks (`RUSTYOS-023` / `RUSTYOS-064`) before Overview/windows when visible
+            // Handle Dock clicks & internal drag-reorder (`RUSTYOS-023` / `RUSTYOS-064` / `RUSTYOS-073`) before Overview/windows when visible
             let (_, is_on_primary, primary_local_x, primary_local_y) =
                 self.primary_local_coords(self.pointer_location);
             let ordered_ids = self.ordered_visible_window_ids();
             if is_on_primary
                 && shell_chrome_visible
-                && let Some(dock_hit) = crate::shell_render::check_dock_click(
-                    output_phys,
-                    ordered_ids.len(),
-                    primary_local_x,
-                    primary_local_y,
-                )
+                && self.handle_dock_pointer_press(primary_local_x, primary_local_y, button)
             {
-                if button == 273 {
-                    let alt_held = self.keyboard.modifier_state().alt;
-                    self.open_dock_context_menu(
-                        dock_hit,
-                        output_phys,
-                        self.pointer_location,
-                        alt_held,
-                    );
-                } else {
-                    self.handle_dock_hit(dock_hit, serial);
-                }
                 return;
             }
 

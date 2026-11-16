@@ -892,6 +892,7 @@ fn macos_dock_divider_gap_tooltip_and_radii_constants() {
         overview_active: false,
         hover_progress: 1.0,
         reduced_motion: false,
+        ..DockViewState::default()
     };
     let tooltip_opt = dock_tooltip_rect_and_label(1280, 800, &dock_view);
     assert!(tooltip_opt.is_some());
@@ -1190,6 +1191,7 @@ fn overlay_and_chrome_visibility_predicates_isolate_modals() {
         windows: &[],
         spaces: &[],
         progress: 1.0,
+        filter_label: None,
     };
 
     assert!(!notifications_hidden_by_overlay(ShellOverlayView::None));
@@ -1258,6 +1260,14 @@ fn sample_settings_render_state() -> SettingsRenderState<'static> {
         require_password_on_lock: true,
         lock_on_sleep: true,
         enable_polkit_agent: true,
+        dock_icon_size: crate::config::DEFAULT_DOCK_ICON_SIZE,
+        dock_position: crate::config::DockPosition::default(),
+        dock_minimize_effect: crate::config::DockMinimizeEffect::default(),
+        dock_minimize_into_app: false,
+        dock_auto_hide: false,
+        dock_animate_opening: true,
+        dock_show_indicators: true,
+        dock_show_recent: true,
         config_status_label: "",
     }
 }
@@ -1713,5 +1723,196 @@ fn app_aware_topbar_dropdowns_and_popover_hit_testing_match_profile() {
             f64::from(my + MENU_POPOVER_PAD_Y + 8),
         ),
         TopBarMenuPopoverClick::Action(TopBarMenuAction::AppShortcut(AppShortcutAction::NewTab))
+    );
+}
+
+#[test]
+fn dock_hover_edge_positions_and_auto_hide_work() {
+    use crate::config::DockPosition;
+
+    let screen = Size::from((1280, 800));
+    let tiles = build_default_dock_tiles(&[], false);
+    let rest_view = DockViewState {
+        tiles: &tiles,
+        icon_size: 50,
+        position: DockPosition::Bottom,
+        auto_hide_reveal: 1.0,
+        show_indicators: true,
+        ..DockViewState::default()
+    };
+    let rest = compute_dock_layout(screen, &rest_view);
+    let view = DockViewState {
+        hover_slot: Some(1),
+        hover_progress: 1.0,
+        ..rest_view
+    };
+    let bottom = compute_dock_layout(screen, &view);
+    assert_eq!(bottom.capsule_rect, rest.capsule_rect);
+    assert_eq!(bottom.slots[1].icon_rect.size.w, 58);
+    assert!(bottom.slots[1].icon_rect.loc.y < rest.slots[1].icon_rect.loc.y);
+    assert_eq!(bottom.slots[0].icon_rect, rest.slots[0].icon_rect);
+    assert_eq!(bottom.slots[2].icon_rect, rest.slots[2].icon_rect);
+
+    let reduced = compute_dock_layout(
+        screen,
+        &DockViewState {
+            reduced_motion: true,
+            ..view
+        },
+    );
+    assert_eq!(reduced.slots[1].icon_rect.size.w, 50);
+    assert_eq!(
+        reduced.slots[1].icon_rect.loc.y,
+        rest.slots[1].icon_rect.loc.y - 2
+    );
+
+    let left_view = DockViewState {
+        position: DockPosition::Left,
+        ..view
+    };
+    let left = compute_dock_layout(screen, &left_view);
+    assert!(left.capsule_rect.size.h > left.capsule_rect.size.w);
+    assert!(left.capsule_rect.loc.x <= 12);
+
+    let right_view = DockViewState {
+        position: DockPosition::Right,
+        ..view
+    };
+    let right = compute_dock_layout(screen, &right_view);
+    assert!(right.capsule_rect.loc.x + right.capsule_rect.size.w >= 1260);
+    assert!(is_pointer_in_dock_auto_hide_zone(
+        screen,
+        &right_view,
+        false,
+        1278.0,
+        400.0
+    ));
+    assert!(!is_pointer_in_dock_auto_hide_zone(
+        screen,
+        &right_view,
+        false,
+        640.0,
+        400.0
+    ));
+
+    let wa_auto = usable_work_area_with_dock(screen, DockPosition::Bottom, 50, true);
+    assert_eq!(wa_auto.height, 800 - TOP_BAR_HEIGHT);
+    let wa_left = usable_work_area_with_dock(screen, DockPosition::Left, 50, false);
+    assert!(wa_left.x > 50 && wa_left.width < 1230);
+    assert_eq!(
+        canonical_dock_app_key(Some("foot"), "zsh", rusty_wm::WindowId(1)),
+        canonical_dock_app_key(Some("foot"), "vim", rusty_wm::WindowId(2))
+    );
+}
+
+#[test]
+fn dock_stack_layouts_and_hit_testing_work() {
+    use crate::config::{DockPosition, DownloadsViewMode};
+
+    let entries: Vec<DockStackEntry> = (0..5)
+        .map(|idx| DockStackEntry {
+            name: format!("file_{idx}.pdf"),
+            path: std::path::PathBuf::from(format!("/tmp/file_{idx}.pdf")),
+            is_dir: false,
+            detail: "12 KB".to_owned(),
+            extension: "PDF".to_owned(),
+        })
+        .collect();
+    let anchor = Rectangle::new(Point::from((840, 730)), Size::from((52, 52)));
+    let fan_state = DockStackRenderState {
+        entries: &entries,
+        view_mode: DownloadsViewMode::Automatic,
+        dock_position: DockPosition::Bottom,
+        anchor_rect: anchor,
+        hovered_item: None,
+        hovered_open_in_files: false,
+        title: "Downloads",
+    };
+    let screen = Size::from((1280, 800));
+    let fan_layout = compute_dock_stack_layout(screen, &fan_state);
+    assert_eq!(fan_layout.resolved_mode, DownloadsViewMode::Fan);
+    assert_eq!(fan_layout.items.len(), 5);
+    let first = &fan_layout.items[0].hit_rect;
+    assert_eq!(
+        hit_test_dock_stack(
+            screen,
+            &fan_state,
+            f64::from(first.loc.x + 8),
+            f64::from(first.loc.y + 8)
+        ),
+        Some(DockStackHit::Entry(0))
+    );
+    let foot = fan_layout.footer_rect;
+    assert_eq!(
+        hit_test_dock_stack(
+            screen,
+            &fan_state,
+            f64::from(foot.loc.x + 12),
+            f64::from(foot.loc.y + 8)
+        ),
+        Some(DockStackHit::OpenInFiles)
+    );
+    assert_eq!(hit_test_dock_stack(screen, &fan_state, 40.0, 40.0), None);
+
+    let left_grid = DockStackRenderState {
+        dock_position: DockPosition::Left,
+        ..fan_state
+    };
+    assert_eq!(
+        compute_dock_stack_layout(screen, &left_grid).resolved_mode,
+        DownloadsViewMode::Grid
+    );
+}
+
+#[test]
+fn desktop_dock_settings_tab_hit_test_work() {
+    let screen = Size::from((1280, 800));
+    let mut st = sample_settings_render_state();
+    assert_eq!(
+        hit_test_settings_modal(
+            screen,
+            &st,
+            f64::from(350 + 24),
+            f64::from(184 + 68 + 5 * 40 + 16)
+        ),
+        SettingsHit::SelectTab(SettingsTab::DesktopDock)
+    );
+    st.active_tab = SettingsTab::DesktopDock;
+    let content_right = 350 + 198 + (580 - 218);
+    assert_eq!(
+        hit_test_settings_modal(
+            screen,
+            &st,
+            f64::from(content_right - 20),
+            f64::from(184 + 90 + 13)
+        ),
+        SettingsHit::DockSizeUp
+    );
+    assert_eq!(
+        hit_test_settings_modal(
+            screen,
+            &st,
+            f64::from(content_right - 40),
+            f64::from(184 + 90 + 31 + 13)
+        ),
+        SettingsHit::DockCyclePosition
+    );
+    assert_eq!(
+        hit_test_settings_modal(
+            screen,
+            &st,
+            f64::from(content_right - 40),
+            f64::from(184 + 90 + 4 * 31 + 13)
+        ),
+        SettingsHit::DockToggleAutoHide
+    );
+    assert_eq!(
+        hit_test_settings_modal(
+            screen,
+            &st,
+            f64::from(content_right - 40),
+            f64::from(184 + 90 + 7 * 31 + 13)
+        ),
+        SettingsHit::DockToggleShowRecent
     );
 }

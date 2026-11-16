@@ -904,7 +904,7 @@ pub(super) fn render_pick_color_composite(
     );
 }
 
-/// Active sidebar category inside the built-in System Settings modal (`RUSTYOS-061`/`062`).
+/// Active sidebar category inside the built-in System Settings modal (`RUSTYOS-061`/`062`/`073`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SettingsTab {
     /// Frosted glass opacity, reduce transparency, reduced motion, and wallpaper.
@@ -918,16 +918,19 @@ pub enum SettingsTab {
     Keyboard,
     /// Lock screen authentication, lock-on-sleep, and `PolicyKit` agent.
     Security,
+    /// Dock size, screen edge position, minimize effect, auto-hide, indicators & recent apps.
+    DesktopDock,
 }
 
 impl SettingsTab {
     /// Ordered sidebar tabs displayed in System Settings.
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Appearance,
         Self::MenuBar,
         Self::Displays,
         Self::Keyboard,
         Self::Security,
+        Self::DesktopDock,
     ];
 
     /// Human-readable sidebar & header title.
@@ -939,6 +942,7 @@ impl SettingsTab {
             Self::Displays => "Displays",
             Self::Keyboard => "Keyboard",
             Self::Security => "Security",
+            Self::DesktopDock => "Desktop & Dock",
         }
     }
 
@@ -949,6 +953,7 @@ impl SettingsTab {
             Self::Displays => crate::surfaces::UiGlyphKind::WindowMax,
             Self::Keyboard => crate::surfaces::UiGlyphKind::Keyboard,
             Self::Security => crate::surfaces::UiGlyphKind::Lock,
+            Self::DesktopDock => crate::surfaces::UiGlyphKind::OverviewSpaces,
         }
     }
 
@@ -960,7 +965,8 @@ impl SettingsTab {
             Self::MenuBar => Self::Displays,
             Self::Displays => Self::Keyboard,
             Self::Keyboard => Self::Security,
-            Self::Security => Self::Appearance,
+            Self::Security => Self::DesktopDock,
+            Self::DesktopDock => Self::Appearance,
         }
     }
 
@@ -968,11 +974,12 @@ impl SettingsTab {
     #[must_use]
     pub const fn prev(self) -> Self {
         match self {
-            Self::Appearance => Self::Security,
+            Self::Appearance => Self::DesktopDock,
             Self::MenuBar => Self::Appearance,
             Self::Displays => Self::MenuBar,
             Self::Keyboard => Self::Displays,
             Self::Security => Self::Keyboard,
+            Self::DesktopDock => Self::Security,
         }
     }
 }
@@ -1037,6 +1044,22 @@ pub struct SettingsRenderState<'a> {
     pub lock_on_sleep: bool,
     /// Enable native `PolicyKit` authentication agent.
     pub enable_polkit_agent: bool,
+    /// Dock icon base size in px (`36..=68`).
+    pub dock_icon_size: i32,
+    /// Dock edge placement (`Bottom`, `Left`, `Right`).
+    pub dock_position: crate::config::DockPosition,
+    /// Window minimize transition (`Genie` or `Scale`).
+    pub dock_minimize_effect: crate::config::DockMinimizeEffect,
+    /// Minimize windows directly into their owning app icon instead of trailing slots.
+    pub dock_minimize_into_app: bool,
+    /// Automatically hide and show the Dock when pointer is away from the screen edge.
+    pub dock_auto_hide: bool,
+    /// Animate opening applications with a launch bounce.
+    pub dock_animate_opening: bool,
+    /// Show open application indicator dots under running Dock items.
+    pub dock_show_indicators: bool,
+    /// Show suggested/recent unpinned applications in the Dock middle section.
+    pub dock_show_recent: bool,
     /// Footer persistence badge (e.g. `"Saved"`, `"Reloaded"`, or `""`).
     pub config_status_label: &'a str,
 }
@@ -1100,6 +1123,24 @@ pub enum SettingsHit {
     ToggleLockOnSleep,
     /// Toggle `enable_polkit_agent`.
     TogglePolkitAgent,
+    /// Decrease `[dock].icon_size`.
+    DockSizeDown,
+    /// Increase `[dock].icon_size`.
+    DockSizeUp,
+    /// Cycle `[dock].position` (`Bottom` -> `Left` -> `Right`).
+    DockCyclePosition,
+    /// Toggle `[dock].minimize_effect` (`Genie` <-> `Scale`).
+    DockToggleMinimizeEffect,
+    /// Toggle `[dock].minimize_into_app`.
+    DockToggleMinimizeIntoApp,
+    /// Toggle `[dock].auto_hide`.
+    DockToggleAutoHide,
+    /// Toggle `[dock].animate_opening`.
+    DockToggleAnimateOpening,
+    /// Toggle `[dock].show_indicators`.
+    DockToggleShowIndicators,
+    /// Toggle `[dock].show_recent`.
+    DockToggleShowRecent,
     /// Reload `~/.config/rustyos/config.toml` from disk.
     ReloadConfig,
     /// Close System Settings overlay (`×` or `Done`).
@@ -1110,20 +1151,23 @@ pub enum SettingsHit {
     Outside,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct SettingsModalLayout {
     modal: Rectangle<i32, smithay::utils::Physical>,
     badge: Rectangle<i32, smithay::utils::Physical>,
     close_btn: Rectangle<i32, smithay::utils::Physical>,
-    tabs: [Rectangle<i32, smithay::utils::Physical>; 5],
+    tabs: [Rectangle<i32, smithay::utils::Physical>; 6],
     divider_x: i32,
     content_x: i32,
-    rows: [Rectangle<i32, smithay::utils::Physical>; 5],
+    rows: Vec<Rectangle<i32, smithay::utils::Physical>>,
     reload_btn: Rectangle<i32, smithay::utils::Physical>,
     done_btn: Rectangle<i32, smithay::utils::Physical>,
 }
 
-fn settings_modal_layout(screen_size: Size<i32, smithay::utils::Physical>) -> SettingsModalLayout {
+fn settings_modal_layout(
+    screen_size: Size<i32, smithay::utils::Physical>,
+    active_tab: SettingsTab,
+) -> SettingsModalLayout {
     let w = 580.min((screen_size.w - 32).max(380));
     let h = 432.min((screen_size.h - TOP_BAR_HEIGHT - 24).max(320));
     let x = (screen_size.w - w) / 2;
@@ -1142,11 +1186,21 @@ fn settings_modal_layout(screen_size: Size<i32, smithay::utils::Physical>) -> Se
     let divider_x = x + 184;
     let content_x = x + 198;
     let content_w = (w - 218).max(160);
-    let rows = std::array::from_fn(|idx| {
-        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-        let ry = y + 98 + (idx as i32) * 52;
-        Rectangle::new(Point::from((content_x, ry)), Size::from((content_w, 44)))
-    });
+    let rows = if active_tab == SettingsTab::DesktopDock {
+        (0_i32..8)
+            .map(|idx| {
+                let ry = y + 90 + idx * 31;
+                Rectangle::new(Point::from((content_x, ry)), Size::from((content_w, 27)))
+            })
+            .collect()
+    } else {
+        (0_i32..5)
+            .map(|idx| {
+                let ry = y + 98 + idx * 52;
+                Rectangle::new(Point::from((content_x, ry)), Size::from((content_w, 44)))
+            })
+            .collect()
+    };
 
     let done_btn = Rectangle::new(Point::from((x + w - 98, y + h - 50)), Size::from((78, 32)));
     let reload_btn = Rectangle::new(
@@ -1170,9 +1224,11 @@ fn settings_modal_layout(screen_size: Size<i32, smithay::utils::Physical>) -> Se
 fn settings_row_pill_rect(
     row: Rectangle<i32, smithay::utils::Physical>,
 ) -> Rectangle<i32, smithay::utils::Physical> {
+    let pill_h = if row.size.h < 34 { 21 } else { 28 };
+    let offset_y = (row.size.h - pill_h) / 2;
     Rectangle::new(
-        Point::from((row.loc.x + row.size.w - 120, row.loc.y + 8)),
-        Size::from((110, 28)),
+        Point::from((row.loc.x + row.size.w - 120, row.loc.y + offset_y)),
+        Size::from((110, pill_h)),
     )
 }
 
@@ -1183,17 +1239,19 @@ fn settings_row_stepper_rects(
     Rectangle<i32, smithay::utils::Physical>,
     Rectangle<i32, smithay::utils::Physical>,
 ) {
+    let ctrl_h = if row.size.h < 34 { 21 } else { 28 };
+    let offset_y = (row.size.h - ctrl_h) / 2;
     let plus = Rectangle::new(
-        Point::from((row.loc.x + row.size.w - 38, row.loc.y + 8)),
-        Size::from((28, 28)),
+        Point::from((row.loc.x + row.size.w - 38, row.loc.y + offset_y)),
+        Size::from((28, ctrl_h)),
     );
     let value_box = Rectangle::new(
-        Point::from((plus.loc.x - 62, row.loc.y + 8)),
-        Size::from((56, 28)),
+        Point::from((plus.loc.x - 62, row.loc.y + offset_y)),
+        Size::from((56, ctrl_h)),
     );
     let minus = Rectangle::new(
-        Point::from((value_box.loc.x - 34, row.loc.y + 8)),
-        Size::from((28, 28)),
+        Point::from((value_box.loc.x - 34, row.loc.y + offset_y)),
+        Size::from((28, ctrl_h)),
     );
     (minus, value_box, plus)
 }
@@ -1272,7 +1330,63 @@ fn settings_tab_rows(st: &SettingsRenderState<'_>) -> Vec<SettingsRowEntry> {
                 st.enable_polkit_agent,
             ),
         ],
+        SettingsTab::DesktopDock => settings_dock_rows(st),
     }
+}
+
+fn settings_dock_rows(st: &SettingsRenderState<'_>) -> Vec<SettingsRowEntry> {
+    let icon_sz = crate::config::clamp_dock_icon_size(st.dock_icon_size);
+    vec![
+        SettingsRowEntry {
+            label: "Dock Size".to_owned(),
+            kind: SettingsRowKind::Stepper {
+                down: SettingsHit::DockSizeDown,
+                up: SettingsHit::DockSizeUp,
+                value: format!("{icon_sz} px"),
+            },
+        },
+        SettingsRowEntry {
+            label: "Position on screen".to_owned(),
+            kind: SettingsRowKind::Toggle {
+                hit: SettingsHit::DockCyclePosition,
+                value: std::borrow::Cow::Borrowed(st.dock_position.label()),
+                active: true,
+            },
+        },
+        SettingsRowEntry {
+            label: "Minimize using".to_owned(),
+            kind: SettingsRowKind::Toggle {
+                hit: SettingsHit::DockToggleMinimizeEffect,
+                value: std::borrow::Cow::Borrowed(st.dock_minimize_effect.label()),
+                active: true,
+            },
+        },
+        toggle_row(
+            "Minimize into app icon",
+            SettingsHit::DockToggleMinimizeIntoApp,
+            st.dock_minimize_into_app,
+        ),
+        toggle_row(
+            "Auto-hide the Dock",
+            SettingsHit::DockToggleAutoHide,
+            st.dock_auto_hide,
+        ),
+        toggle_row(
+            "Animate opening apps",
+            SettingsHit::DockToggleAnimateOpening,
+            st.dock_animate_opening,
+        ),
+        toggle_row(
+            "Show open indicators",
+            SettingsHit::DockToggleShowIndicators,
+            st.dock_show_indicators,
+        ),
+        toggle_row(
+            "Show recent apps",
+            SettingsHit::DockToggleShowRecent,
+            st.dock_show_recent,
+        ),
+    ]
 }
 
 fn settings_appearance_rows(st: &SettingsRenderState<'_>) -> Vec<SettingsRowEntry> {
@@ -1449,7 +1563,7 @@ pub fn hit_test_settings_modal(
     x: f64,
     y: f64,
 ) -> SettingsHit {
-    let layout = settings_modal_layout(screen_size);
+    let layout = settings_modal_layout(screen_size, state.active_tab);
     if !rect_contains(layout.modal, x, y) {
         return SettingsHit::Outside;
     }
@@ -1464,7 +1578,7 @@ pub fn hit_test_settings_modal(
             return SettingsHit::SelectTab(*tab);
         }
     }
-    for (entry, row_rect) in settings_tab_rows(state).iter().zip(layout.rows) {
+    for (entry, &row_rect) in settings_tab_rows(state).iter().zip(&layout.rows) {
         match &entry.kind {
             SettingsRowKind::Stepper { down, up, .. } => {
                 let (minus, _, plus) = settings_row_stepper_rects(row_rect);
@@ -1493,7 +1607,7 @@ pub(super) fn render_settings_text(
     elements: &mut Vec<MemoryRenderBufferRenderElement<GlesRenderer>>,
 ) {
     let pal = ThemePalette::active();
-    let layout = settings_modal_layout(screen_size);
+    let layout = settings_modal_layout(screen_size, st.active_tab);
     let modal = layout.modal;
 
     if let Some(el) = text_cache.render_label_weighted(
@@ -1553,13 +1667,20 @@ fn render_settings_rows_text(
     elements: &mut Vec<MemoryRenderBufferRenderElement<GlesRenderer>>,
 ) {
     let pal = ThemePalette::active();
-    for (entry, row) in settings_tab_rows(st).iter().zip(layout.rows) {
+    for (entry, &row) in settings_tab_rows(st).iter().zip(&layout.rows) {
+        let compact = row.size.h < 34;
+        let label_size = if compact { 11.5 } else { 12.5 };
+        let label_y = if compact {
+            row.loc.y + 7
+        } else {
+            row.loc.y + 14
+        };
         if let Some(el) = text_cache.render_label(
             renderer,
             &entry.label,
-            12.5,
+            label_size,
             pal.popover_text_primary,
-            Point::from((row.loc.x + 14, row.loc.y + 14)),
+            Point::from((row.loc.x + 14, label_y)),
         ) {
             elements.push(el);
         }
@@ -1653,7 +1774,7 @@ pub(super) fn render_settings_composite(
     st: &SettingsRenderState<'_>,
 ) {
     let pal = ThemePalette::active();
-    let layout = settings_modal_layout(screen_size);
+    let layout = settings_modal_layout(screen_size, st.active_tab);
     let modal = layout.modal;
 
     // Icons pushed before panel boxes so glyphs composite above backgrounds.
@@ -1782,7 +1903,7 @@ fn render_settings_controls_composite(
     } else {
         [228, 232, 240, 145]
     };
-    for (entry, row) in settings_tab_rows(st).iter().zip(layout.rows) {
+    for (entry, &row) in settings_tab_rows(st).iter().zip(&layout.rows) {
         match &entry.kind {
             SettingsRowKind::Stepper { .. } => {
                 let (minus, value_box, plus) = settings_row_stepper_rects(row);

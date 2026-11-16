@@ -650,26 +650,54 @@ fn context_menu_dock_window_alt_force_quit_and_open_at_login() -> Result<(), Box
             )
         })
     };
-    let ctx = compositor
-        .context_menu
-        .as_ref()
-        .ok_or("missing window menu")?;
-    assert!(has_action(ctx, &ContextMenuAction::WindowQuit(w1)));
-    assert!(!has_action(ctx, &ContextMenuAction::WindowForceQuit(w1)));
+    let ctx = compositor.context_menu.as_ref().ok_or("missing app menu")?;
+    assert!(has_action(ctx, &ContextMenuAction::DockFocusWindow(w1)));
+    assert!(has_action(
+        ctx,
+        &ContextMenuAction::DockQuitApp(DockHit::WindowSlot(0))
+    ));
+    assert!(!has_action(
+        ctx,
+        &ContextMenuAction::DockForceQuitApp(DockHit::WindowSlot(0))
+    ));
 
     compositor.sync_context_menu_alt_modifier(true);
     let ctx_alt = compositor.context_menu.as_ref().ok_or("missing alt menu")?;
-    assert!(has_action(ctx_alt, &ContextMenuAction::WindowForceQuit(w1)));
+    assert!(has_action(
+        ctx_alt,
+        &ContextMenuAction::DockForceQuitApp(DockHit::WindowSlot(0))
+    ));
 
     compositor.sync_context_menu_alt_modifier(false);
     let ctx_rel = compositor
         .context_menu
         .as_ref()
         .ok_or("missing norm menu")?;
-    assert!(has_action(ctx_rel, &ContextMenuAction::WindowQuit(w1)));
+    assert!(has_action(
+        ctx_rel,
+        &ContextMenuAction::DockQuitApp(DockHit::WindowSlot(0))
+    ));
 
-    compositor.execute_context_menu_action(ContextMenuAction::WindowMinimize(w1), serial);
+    compositor.minimize_window(w1, serial);
     assert!(compositor.is_window_minimized(w1));
+    compositor.open_dock_context_menu(
+        DockHit::MinimizedWindow(w1),
+        (1280, 800).into(),
+        (900.0, 760.0).into(),
+        false,
+    );
+    let min_ctx = compositor
+        .context_menu
+        .as_ref()
+        .ok_or("missing minimized window menu")?;
+    assert!(has_action(min_ctx, &ContextMenuAction::WindowQuit(w1)));
+    compositor.sync_context_menu_alt_modifier(true);
+    let min_alt = compositor
+        .context_menu
+        .as_ref()
+        .ok_or("missing min alt menu")?;
+    assert!(has_action(min_alt, &ContextMenuAction::WindowForceQuit(w1)));
+
     compositor.execute_context_menu_action(ContextMenuAction::WindowMoveToWorkspace(w1, 2), serial);
     assert!(!compositor.is_window_minimized(w1));
     assert_eq!(compositor.wm.window(w1).map(|w| w.workspace.0), Some(2));
@@ -914,6 +942,170 @@ fn top_bar_active_app_context_and_about_action_default_to_files() -> Result<(), 
             .notifications
             .iter()
             .any(|n| n.title == "About Files")
+    );
+    Ok(())
+}
+
+#[test]
+fn dock_keep_in_dock_recent_apps_and_minimize_modes_work() -> Result<(), Box<dyn Error>> {
+    use crate::shell_render::DockSection;
+
+    let mut display: Display<RustyCompositorState> = Display::new()?;
+    let mut event_loop: EventLoop<RustyCompositorState> = EventLoop::try_new()?;
+    let mut compositor = RustyCompositorState::new(
+        &display,
+        "wayland-rustyos-dock-073-test".to_owned(),
+        event_loop.get_signal(),
+        event_loop.handle(),
+        (1280, 800).into(),
+    )?;
+    let _ = (&mut display, &mut event_loop);
+
+    compositor.toggle_app_keep_in_dock("notes");
+    assert!(
+        !compositor
+            .user_config
+            .dock_pinned_apps
+            .iter()
+            .any(|p| p == "notes")
+    );
+    compositor.toggle_app_keep_in_dock("notes");
+    assert!(
+        compositor
+            .user_config
+            .dock_pinned_apps
+            .iter()
+            .any(|p| p == "notes")
+    );
+
+    let w1 = compositor.wm.next_window_id();
+    let _ = compositor.wm.map_window(w1, Some((640, 480)));
+    let w1_key = compositor
+        .collect_dock_window_records()
+        .into_iter()
+        .find(|r| r.id == w1)
+        .map(|r| r.app_key)
+        .ok_or("missing w1 dock record")?;
+    let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+    compositor.minimize_window(w1, serial);
+    assert!(compositor.is_window_minimized(w1));
+    assert_eq!(compositor.minimize_anims.len(), 1);
+    assert!(!compositor.minimize_anims[0].restoring);
+
+    let tiles_sep = compositor.build_dock_tiles();
+    assert!(
+        tiles_sep
+            .iter()
+            .any(|t| t.section == DockSection::MinimizedWindow && t.representative_win == Some(w1))
+    );
+    compositor.user_config.dock_minimize_into_app = true;
+    let tiles_into = compositor.build_dock_tiles();
+    assert!(
+        !tiles_into
+            .iter()
+            .any(|t| t.section == DockSection::MinimizedWindow)
+    );
+    assert!(
+        tiles_into
+            .iter()
+            .any(|t| t.app_key == w1_key && t.has_minimized)
+    );
+
+    compositor.restore_window(w1, serial);
+    assert!(!compositor.is_window_minimized(w1));
+    assert_eq!(compositor.minimize_anims.len(), 1);
+    assert!(compositor.minimize_anims[0].restoring);
+    compositor.finish_window_teardown(w1);
+    assert!(
+        compositor
+            .recent_unpinned_apps
+            .iter()
+            .any(|r| r.app_key == w1_key)
+    );
+    assert!(
+        compositor
+            .build_dock_tiles()
+            .iter()
+            .any(|t| t.section == DockSection::UnpinnedOrRecent && t.app_key == w1_key)
+    );
+    compositor.user_config.dock_show_recent = false;
+    assert!(
+        !compositor
+            .build_dock_tiles()
+            .iter()
+            .any(|t| t.section == DockSection::UnpinnedOrRecent && t.app_key == w1_key)
+    );
+    Ok(())
+}
+
+#[test]
+fn dock_pin_drag_reorder_remove_and_settings_config_work() -> Result<(), Box<dyn Error>> {
+    use crate::config::{
+        DockMinimizeEffect, DockPosition, DownloadsDisplayMode, DownloadsSortMode,
+    };
+    use crate::shell_render::{ContextMenuAction, SettingsHit, SettingsTab};
+
+    let mut display: Display<RustyCompositorState> = Display::new()?;
+    let mut event_loop: EventLoop<RustyCompositorState> = EventLoop::try_new()?;
+    let mut compositor = RustyCompositorState::new(
+        &display,
+        "wayland-rustyos-dock-drag-test".to_owned(),
+        event_loop.get_signal(),
+        event_loop.handle(),
+        (1280, 800).into(),
+    )?;
+    let _ = (&mut display, &mut event_loop);
+
+    let initial_len = compositor.user_config.dock_pinned_apps.len();
+    assert!(initial_len >= 4);
+    let last_pin = compositor.user_config.dock_pinned_apps[initial_len - 1].clone();
+    compositor.commit_dock_pin_reorder_or_remove(initial_len - 1, 2, false);
+    assert_eq!(compositor.user_config.dock_pinned_apps[2], last_pin);
+
+    compositor.commit_dock_pin_reorder_or_remove(0, 0, true);
+    assert_eq!(compositor.user_config.dock_pinned_apps.len(), initial_len);
+    let notes_idx = compositor
+        .user_config
+        .dock_pinned_apps
+        .iter()
+        .position(|p| p == "notes")
+        .ok_or("missing notes pin")?;
+    compositor.commit_dock_pin_reorder_or_remove(notes_idx, notes_idx, true);
+    assert!(
+        !compositor
+            .user_config
+            .dock_pinned_apps
+            .iter()
+            .any(|p| p == "notes")
+    );
+
+    compositor.apply_settings_hit(SettingsHit::SelectTab(SettingsTab::DesktopDock));
+    compositor.apply_settings_hit(SettingsHit::DockCyclePosition);
+    assert_eq!(compositor.user_config.dock_position, DockPosition::Left);
+    compositor.apply_settings_hit(SettingsHit::DockToggleMinimizeEffect);
+    assert_eq!(
+        compositor.user_config.dock_minimize_effect,
+        DockMinimizeEffect::Scale
+    );
+    compositor.apply_settings_hit(SettingsHit::DockToggleAutoHide);
+    assert!(compositor.user_config.dock_auto_hide);
+
+    let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+    compositor.execute_context_menu_action(
+        ContextMenuAction::DownloadsSetSort(DownloadsSortMode::Kind),
+        serial,
+    );
+    compositor.execute_context_menu_action(
+        ContextMenuAction::DownloadsSetDisplay(DownloadsDisplayMode::Folder),
+        serial,
+    );
+    assert_eq!(
+        compositor.user_config.downloads_sort,
+        DownloadsSortMode::Kind
+    );
+    assert_eq!(
+        compositor.user_config.dock_downloads_display,
+        DownloadsDisplayMode::Folder
     );
     Ok(())
 }

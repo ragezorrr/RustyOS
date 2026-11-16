@@ -18,6 +18,7 @@ mod liquid_glass;
 mod sdf;
 #[cfg(test)]
 mod tests;
+mod window_minimize;
 mod xcursor;
 
 pub use liquid_glass::LiquidGlassElement;
@@ -237,6 +238,7 @@ pub struct UiShapeCache {
     cursor_arrow: Option<MemoryRenderBuffer>,
     xcursors: HashMap<(Option<String>, &'static str, u32), Option<CachedCursor>>,
     liquid_glass: liquid_glass::LiquidGlassPipeline,
+    window_minimize: window_minimize::WindowMinimizePipeline,
     /// Decoded & GPU-cached application and tray icon textures (`RUSTYOS-033`).
     pub icons: crate::icons::IconCache,
 }
@@ -377,6 +379,7 @@ impl UiShapeCache {
         output_scale: f64,
         backdrop_elements: &[crate::shell_render::CompositorRenderElement],
     ) -> bool {
+        let _ = self.window_minimize.ensure_program(renderer);
         self.liquid_glass.prepare_backdrop(
             renderer,
             output_id,
@@ -389,6 +392,54 @@ impl UiShapeCache {
     /// Clears the active blurred backdrop reference after an output's shell elements are built (`RUSTYOS-069`).
     pub(crate) fn clear_active_liquid_glass_backdrop(&mut self) {
         self.liquid_glass.clear_active();
+    }
+
+    /// Captures window-local render elements into an offscreen GLES snapshot for minimize/restore warp (`RUSTYOS-073`).
+    pub(crate) fn capture_minimize_snapshot(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        window_id: u64,
+        win_size: Size<i32, Logical>,
+        output_scale: f64,
+        local_elements: &[crate::shell_render::CompositorRenderElement],
+    ) -> bool {
+        self.window_minimize.capture_snapshot(
+            renderer,
+            window_id,
+            win_size,
+            output_scale,
+            local_elements,
+        )
+    }
+
+    /// Returns `true` if a cached GLES minimize/restore snapshot exists for `window_id`.
+    #[must_use]
+    pub(crate) fn has_minimize_snapshot(&self, window_id: u64) -> bool {
+        self.window_minimize.has_snapshot(window_id)
+    }
+
+    /// Retains only minimize/restore snapshot textures matching `keep`.
+    pub(crate) fn retain_minimize_snapshots(&mut self, keep: impl FnMut(u64) -> bool) {
+        self.window_minimize.retain_snapshots(keep);
+    }
+
+    /// Emits a `Genie`/`Scale` warp element interpolating between `win_rect` and `dock_rect` (`RUSTYOS-073`).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn minimize_warp_element(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        window_id: u64,
+        win_rect: Rectangle<i32, Logical>,
+        dock_rect: Rectangle<i32, Logical>,
+        progress: f64,
+        effect: crate::config::DockMinimizeEffect,
+        position: crate::config::DockPosition,
+    ) -> Option<crate::shell_render::CompositorRenderElement> {
+        self.window_minimize
+            .make_warp_element(
+                renderer, window_id, win_rect, dock_rect, progress, effect, position,
+            )
+            .map(crate::shell_render::CompositorRenderElement::ShaderTexture)
     }
 
     /// Returns a Liquid Glass Dock container element, preferring the GLES multi-pass backdrop blur

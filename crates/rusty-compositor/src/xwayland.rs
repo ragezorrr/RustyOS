@@ -282,6 +282,7 @@ impl XwmHandler for RustyCompositorState {
             }
             WmWindowProperty::Title | WmWindowProperty::Class => {
                 self.sync_foreign_toplevel_metadata(win_id);
+                self.refresh_dock_window_presence(win_id);
             }
             _ => {}
         }
@@ -449,28 +450,7 @@ fn find_bound_window_id(state: &RustyCompositorState, x11_id: X11Window) -> Opti
 
 fn remove_x11_window(state: &mut RustyCompositorState, x11_id: X11Window, reason: &str) {
     if let Some(win_id) = find_bound_window_id(state, x11_id) {
-        if state
-            .active_window_drag
-            .is_some_and(|drag| drag.window_id == win_id)
-        {
-            state.active_window_drag = None;
-        }
-        if state
-            .active_window_resize
-            .is_some_and(|resize| resize.window_id == win_id)
-        {
-            state.active_window_resize = None;
-        }
-        if let Some((_, sw)) = state.window_bindings.iter().find(|(id, _)| *id == win_id) {
-            let sw_clone = sw.clone();
-            state.space.unmap_elem(&sw_clone);
-        }
-        state.window_bindings.retain(|(id, _)| *id != win_id);
-        state.unregister_window_metadata(win_id);
-        state.minimized_window_ids.remove(&win_id);
-        state.remove_from_switcher(win_id);
-        state.wm.unmap_window(win_id);
-        state.animations.remove_window(win_id.0);
+        state.finish_window_teardown(win_id);
         let serial = SERIAL_COUNTER.next_serial();
         state.sync_space_with_wm(serial);
         info!(

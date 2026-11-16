@@ -242,7 +242,8 @@ pub(super) fn sample_shadow_corner_pixel(
         return [0, 0, 0, 0];
     }
     let t = ((dist - r_f) / s_f).clamp(0.0, 1.0);
-    let falloff = (1.0 - t) * (1.0 - t);
+    let inv_t = 1.0 - t;
+    let falloff = inv_t * inv_t * inv_t;
     let alpha = (f32::from(max_alpha) / 255.0) * falloff;
     premul_pixel(
         f32::from(shadow_rgb[0]),
@@ -751,28 +752,28 @@ fn base_glass_layer(
 ) -> [f32; 4] {
     let (base_a, rgb) = match (is_dark, style) {
         (true, GlassPanelStyle::Dock) => (
-            (0.34 - 0.08 * t_v) * (0.42 + 0.58 * glass_scale),
-            [96.0 - 24.0 * t_v, 98.0 - 24.0 * t_v, 108.0 - 24.0 * t_v],
+            (0.26 - 0.05 * t_v) * (0.45 + 0.55 * glass_scale),
+            [58.0 - 12.0 * t_v, 60.0 - 12.0 * t_v, 68.0 - 12.0 * t_v],
         ),
         (true, GlassPanelStyle::Popover) => (
-            (0.82 - 0.06 * t_v) * (0.50 + 0.50 * glass_scale),
-            [40.0 - 8.0 * t_v, 40.0 - 8.0 * t_v, 44.0 - 8.0 * t_v],
+            (0.80 - 0.06 * t_v) * (0.50 + 0.50 * glass_scale),
+            [36.0 - 6.0 * t_v, 36.0 - 6.0 * t_v, 40.0 - 6.0 * t_v],
         ),
         (true, GlassPanelStyle::ControlModule) => (
             (0.24 - 0.04 * t_v) * (0.48 + 0.52 * glass_scale),
-            [144.0 - 18.0 * t_v, 146.0 - 18.0 * t_v, 156.0 - 18.0 * t_v],
+            [68.0 - 10.0 * t_v, 70.0 - 10.0 * t_v, 78.0 - 10.0 * t_v],
         ),
         (false, GlassPanelStyle::Dock) => (
-            (0.24 - 0.05 * t_v) * (0.44 + 0.56 * glass_scale),
-            [244.0 - 12.0 * t_v, 246.0 - 10.0 * t_v, 250.0 - 8.0 * t_v],
+            (0.20 - 0.04 * t_v) * (0.44 + 0.56 * glass_scale),
+            [244.0 - 10.0 * t_v, 246.0 - 8.0 * t_v, 250.0 - 6.0 * t_v],
         ),
         (false, GlassPanelStyle::Popover) => (
-            (0.68 - 0.05 * t_v) * (0.52 + 0.48 * glass_scale),
+            (0.66 - 0.05 * t_v) * (0.52 + 0.48 * glass_scale),
             [246.0 - 5.0 * t_v, 247.0 - 5.0 * t_v, 250.0 - 4.0 * t_v],
         ),
         (false, GlassPanelStyle::ControlModule) => (
-            (0.26 - 0.04 * t_v) * (0.48 + 0.52 * glass_scale),
-            [242.0 - 10.0 * t_v, 244.0 - 10.0 * t_v, 248.0 - 8.0 * t_v],
+            (0.22 - 0.04 * t_v) * (0.48 + 0.52 * glass_scale),
+            [242.0 - 8.0 * t_v, 244.0 - 8.0 * t_v, 248.0 - 6.0 * t_v],
         ),
     };
     [
@@ -781,6 +782,36 @@ fn base_glass_layer(
         (rgb[2] + dither) * base_a,
         base_a,
     ]
+}
+
+fn diagonal_glass_rim(u: f32, v: f32, hw: f32, hh: f32, r: f32, sd: f32) -> (f32, f32) {
+    let px = u - hw;
+    let py = v - hh;
+    let hx = (hw - r).max(0.0);
+    let hy = (hh - r).max(0.0);
+    let qx = px.abs() - hx;
+    let qy = py.abs() - hy;
+    let sx = if px >= 0.0 { 1.0 } else { -1.0 };
+    let sy = if py >= 0.0 { 1.0 } else { -1.0 };
+    let (nx, ny) = if qx > 0.0 && qy > 0.0 {
+        let rx = qx.max(1e-4);
+        let ry = qy.max(1e-4);
+        let len = rx.hypot(ry);
+        (sx * rx / len, sy * ry / len)
+    } else {
+        let blend = smoothstep01(-2.0, 2.0, qx - qy);
+        let gx = blend * sx;
+        let gy = (1.0 - blend) * sy;
+        let glen = gx.hypot(gy).max(1e-4);
+        (gx / glen, gy / glen)
+    };
+    let diag = std::f32::consts::FRAC_1_SQRT_2;
+    let d_tl = (-nx * diag - ny * diag).max(0.0);
+    let d_br = (nx * diag + ny * diag).max(0.0);
+    let spec_dir = d_tl.powi(7) + d_br.powi(7) * 0.62;
+    let rim_t = (sd + 0.6) / 1.4;
+    let outer_bevel = (-(rim_t * rim_t)).exp();
+    (outer_bevel, spec_dir)
 }
 
 #[allow(clippy::cast_precision_loss, clippy::too_many_arguments)]
@@ -816,9 +847,8 @@ pub(super) fn sample_glass_panel_pixel_themed(
     let bx = usize::try_from(px.rem_euclid(4)).unwrap_or(0);
     let dither = (f32::from(BAYER4[by][bx]) / 16.0 - 0.5) * 0.9;
 
-    // 1 px perimeter highlight weighted cleanly toward the top curved edge like macOS liquid glass.
-    let rim_band = (1.0 - ((-sd - 0.15).max(0.0) / 1.35)).clamp(0.0, 1.0);
-    let dir_light = (1.0 - t_v * 0.72).clamp(0.26, 1.0);
+    // Opposing diagonal corner-arc specular bevel matching GPU LIQUID_GLASS_FRAG (no 360° wire rim).
+    let (outer_bevel, spec_dir) = diagonal_glass_rim(u, v, hw, hh, r, sd);
 
     if reduce_transparency {
         let (base_rgb, rim_scale, alpha) = match (is_dark, style) {
@@ -829,7 +859,7 @@ pub(super) fn sample_glass_panel_pixel_themed(
             (false, GlassPanelStyle::Popover) => ([246.0, 247.0, 250.0], 1.15, 248.0 / 255.0),
             (false, GlassPanelStyle::ControlModule) => ([226.0, 230.0, 238.0], 0.90, 236.0 / 255.0),
         };
-        let rim_mix = rim_band * (0.08 + 0.12 * dir_light) * rim_scale;
+        let rim_mix = (outer_bevel * spec_dir * 0.14 * rim_scale).clamp(0.0, 0.30);
         let r_col = (base_rgb[0] - 4.0 * t_v + dither) * (1.0 - rim_mix) + 255.0 * rim_mix;
         let g_col = (base_rgb[1] - 4.0 * t_v + dither) * (1.0 - rim_mix) + 255.0 * rim_mix;
         let b_col = (base_rgb[2] - 4.0 * t_v + dither) * (1.0 - rim_mix) + 255.0 * rim_mix;
@@ -845,20 +875,26 @@ pub(super) fn sample_glass_panel_pixel_themed(
         GlassPanelStyle::ControlModule => 0.20,
     };
     if t_v < sheen_limit && sd < -0.5 {
-        let sheen_peak = match style {
-            GlassPanelStyle::Dock | GlassPanelStyle::Popover => 0.055,
-            GlassPanelStyle::ControlModule => 0.065,
+        let sheen_peak = match (is_dark, style) {
+            (false, GlassPanelStyle::Dock | GlassPanelStyle::Popover) => 0.048,
+            (false, GlassPanelStyle::ControlModule) => 0.055,
+            (true, GlassPanelStyle::Dock | GlassPanelStyle::Popover) => 0.028,
+            (true, GlassPanelStyle::ControlModule) => 0.032,
         };
         let sheen_a = (1.0 - t_v / sheen_limit) * sheen_peak * glass_scale;
         layer = blend_premul_over(layer, [255.0, 255.0, 255.0], sheen_a);
     }
 
-    let mod_rim_light = dir_light.max(((t_v - 0.78) * 1.8).clamp(0.0, 0.55));
-    let rim_alpha = match style {
-        GlassPanelStyle::Dock => rim_band * (0.10 + 0.30 * dir_light),
-        GlassPanelStyle::Popover => rim_band * (0.16 + 0.28 * dir_light),
-        GlassPanelStyle::ControlModule => rim_band * (0.12 + 0.28 * mod_rim_light),
+    let rim_peak = match (is_dark, style) {
+        (false, GlassPanelStyle::Dock) => 0.34,
+        (false, GlassPanelStyle::Popover) => 0.30,
+        (false, GlassPanelStyle::ControlModule) => 0.32,
+        (true, GlassPanelStyle::Dock) => 0.24,
+        (true, GlassPanelStyle::ControlModule) => 0.23,
+        (true, GlassPanelStyle::Popover) => 0.21,
     };
+    let light_fresnel = if is_dark { 0.0 } else { 0.04 };
+    let rim_alpha = (outer_bevel * (spec_dir * rim_peak + light_fresnel)).clamp(0.0, 0.55);
     if rim_alpha > 0.001 {
         layer = blend_premul_over(layer, [255.0, 255.0, 255.0], rim_alpha);
     }

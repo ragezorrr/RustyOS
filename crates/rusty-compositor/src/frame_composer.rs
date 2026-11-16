@@ -25,7 +25,7 @@ use tracing::{error, info, warn};
 use crate::{
     BackendMode, CompositorError,
     shell_render::{
-        CompositorRenderElement, DockViewState, DockWindowEntry, MAX_TOP_BAR_TRAY_ITEMS,
+        CompositorRenderElement, DockWindowEntry, MAX_TOP_BAR_TRAY_ITEMS,
         MAX_VISIBLE_NOTIFICATIONS, NotificationToastView, OverviewRenderState,
         PolkitPromptRenderState, PortalPromptRenderState, PortalSourceRow,
         QuickSettingsRenderState, ShellOverlayView, SpotlightRenderState, TopBarTelemetry,
@@ -539,6 +539,152 @@ fn push_window_backdrop_elements(
     }
 }
 
+fn prune_inactive_minimize_snapshots(
+    state: &RustyCompositorState,
+    visible_windows: &[(rusty_wm::WindowId, rusty_wm::Rect)],
+    shape_cache: &mut crate::surfaces::UiShapeCache,
+) {
+    let _ = visible_windows;
+    shape_cache.retain_minimize_snapshots(|win_id_u64| {
+        let win_id = rusty_wm::WindowId(win_id_u64);
+        state.is_window_minimized(win_id)
+            || state
+                .minimize_anims
+                .iter()
+                .any(|anim| anim.win_id == win_id)
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_minimize_snapshots_for_output(
+    renderer: &mut GlesRenderer,
+    text_cache: &mut crate::text::TextCache,
+    shape_cache: &mut crate::surfaces::UiShapeCache,
+    state: &mut RustyCompositorState,
+    output_windows: &[(rusty_wm::WindowId, rusty_wm::Rect)],
+    output_scale: f64,
+) {
+    for idx in 0..state.minimize_anims.len() {
+        let anim = &state.minimize_anims[idx];
+        if !output_windows.iter().any(|(id, _)| *id == anim.win_id) {
+            continue;
+        }
+        if !anim.snapshot_pending && shape_cache.has_minimize_snapshot(anim.win_id.0) {
+            continue;
+        }
+        let win_id = anim.win_id;
+        let rect = anim.window_rect;
+        let win_origin = state
+            .animations
+            .animated_window_origin(win_id.0)
+            .unwrap_or((rect.x, rect.y));
+        let mut local_elements = Vec::new();
+        push_window_backdrop_elements(
+            &mut local_elements,
+            renderer,
+            text_cache,
+            shape_cache,
+            state,
+            win_id,
+            rect,
+            Point::from((win_origin.0, win_origin.1)),
+            output_scale,
+            true,
+            state.is_window_fullscreen(win_id),
+        );
+        let scaled = scale_render_elements_for_output(local_elements, output_scale);
+        let captured = shape_cache.capture_minimize_snapshot(
+            renderer,
+            win_id.0,
+            Size::from((rect.width.max(1), rect.height.max(1))),
+            output_scale,
+            &scaled,
+        );
+        state.minimize_anims[idx].snapshot_pending = false;
+        if captured && !state.minimize_anims[idx].restoring {
+            let now = state.elapsed();
+            let mut progress = rusty_animation::AnimatedValue::new_settled(0.0);
+            progress.retarget(
+                1.0,
+                now,
+                std::time::Duration::from_millis(280),
+                rusty_animation::Easing::EaseInOutCubic,
+                false,
+            );
+            state.minimize_anims[idx].progress = progress;
+        }
+    }
+}
+
+#[allow(clippy::cast_possible_truncation)]
+fn push_minimize_warp_elements(
+    backdrop_list: &mut Vec<CompositorRenderElement>,
+    renderer: &mut GlesRenderer,
+    shape_cache: &mut crate::surfaces::UiShapeCache,
+    state: &RustyCompositorState,
+    output_loc: Point<i32, Logical>,
+    output_windows: &[(rusty_wm::WindowId, rusty_wm::Rect)],
+) {
+    for anim in &state.minimize_anims {
+        if !output_windows.iter().any(|(id, _)| *id == anim.win_id) {
+            continue;
+        }
+        let t = anim.progress.current().clamp(0.0, 1.0);
+        let win_rect = Rectangle::new(
+            Point::from((
+                anim.window_rect.x - output_loc.x,
+                anim.window_rect.y - output_loc.y,
+            )),
+            Size::from((
+                anim.window_rect.width.max(1),
+                anim.window_rect.height.max(1),
+            )),
+        );
+        let dock_rect = Rectangle::new(
+            Point::from((
+                anim.dock_rect.x - output_loc.x,
+                anim.dock_rect.y - output_loc.y,
+            )),
+            Size::from((anim.dock_rect.width.max(1), anim.dock_rect.height.max(1))),
+        );
+        if let Some(el) = shape_cache.minimize_warp_element(
+            renderer,
+            anim.win_id.0,
+            win_rect,
+            dock_rect,
+            t,
+            state.user_config.dock_minimize_effect,
+            state.user_config.dock_position,
+        ) {
+            backdrop_list.push(el);
+        } else {
+            let lx = (f64::from(win_rect.loc.x) + (f64::from(dock_rect.loc.x - win_rect.loc.x) * t))
+                .round() as i32;
+            let ly = (f64::from(win_rect.loc.y) + (f64::from(dock_rect.loc.y - win_rect.loc.y) * t))
+                .round() as i32;
+            let lw = (f64::from(win_rect.size.w)
+                + (f64::from(dock_rect.size.w - win_rect.size.w) * t))
+                .round()
+                .max(8.0) as i32;
+            let lh = (f64::from(win_rect.size.h)
+                + (f64::from(dock_rect.size.h - win_rect.size.h) * t))
+                .round()
+                .max(8.0) as i32;
+            if let Some(card) = shape_cache.dock_glass_render_element(
+                renderer,
+                lw,
+                lh,
+                10,
+                state.glass_opacity,
+                state.reduce_transparency,
+                Point::from((lx, ly)),
+            ) {
+                backdrop_list.push(card);
+            }
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_backdrop_render_elements(
     renderer: &mut GlesRenderer,
@@ -555,7 +701,12 @@ fn build_backdrop_render_elements(
 ) -> Vec<CompositorRenderElement> {
     let mut backdrop_list: Vec<CompositorRenderElement> = Vec::new();
     for &(win_id, rect) in output_windows.iter().rev() {
-        if state.is_window_minimized(win_id) {
+        if state.is_window_minimized(win_id)
+            || state
+                .minimize_anims
+                .iter()
+                .any(|anim| anim.win_id == win_id)
+        {
             continue;
         }
         if let Some(fs_id) = fullscreen_win
@@ -770,6 +921,15 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
     } else {
         state.active_unoccluded_fullscreen_window_on(output_entry.id)
     };
+    prune_inactive_minimize_snapshots(state, &visible_windows, shape_cache);
+    prepare_minimize_snapshots_for_output(
+        renderer,
+        text_cache,
+        shape_cache,
+        state,
+        &output_windows,
+        output_scale,
+    );
     let backdrop_elements = build_backdrop_render_elements(
         renderer,
         text_cache,
@@ -900,31 +1060,14 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
         };
 
         let dock_windows = collect_dock_windows(state, &visible_windows, focused_win);
-        let terminal_icon = state.launcher.preferred_icon(
-            &[
-                "foot",
-                "kitty",
-                "alacritty",
-                "wezterm",
-                "ghostty",
-                "weston-terminal",
-                "gnome-terminal",
-                "konsole",
-                "xfce4-terminal",
-            ],
-            "utilities-terminal",
+        let dock_tiles = state.build_dock_tiles();
+        let dock_bounces = state.dock_bounce_offsets();
+        let dock_view = state.dock_view_state(
+            &dock_tiles,
+            &dock_windows,
+            &dock_bounces,
+            state.dock_hover_slot,
         );
-        let files_icon = state
-            .launcher
-            .preferred_icon(&["rusty-files"], "system-file-manager");
-        let dock_view = DockViewState {
-            pinned_icons: [Some(terminal_icon), Some(files_icon)],
-            windows: &dock_windows,
-            hover_slot: state.dock_hover_slot,
-            hover_progress: state.dock_hover_anim.current(),
-            reduced_motion: state.animations.reduced_motion(),
-            overview_active: state.overview_active,
-        };
 
         let switcher_cards: Vec<WindowSwitcherCard<'_>> =
             state.window_switcher.as_ref().map_or_default(|sw| {
@@ -1010,12 +1153,38 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
         } else {
             Vec::new()
         };
+        let overview_filtered_windows: Option<Vec<DockWindowEntry>> =
+            if show_ov && state.overview_filter_app.is_some() {
+                let allowed: std::collections::HashSet<_> =
+                    state.overview_window_ids().into_iter().collect();
+                Some(
+                    dock_windows
+                        .iter()
+                        .filter(|w| allowed.contains(&w.id))
+                        .cloned()
+                        .collect(),
+                )
+            } else {
+                None
+            };
+        let overview_filter_label = show_ov
+            .then_some(state.overview_filter_app.as_deref())
+            .flatten()
+            .map(|key| {
+                format!(
+                    "App Expose: {}",
+                    crate::shell_render::dock_label_for_key(key)
+                )
+            });
         let ov_view = show_ov.then_some(OverviewRenderState {
             active_workspace: active_ws,
             layout_mode: layout_str,
-            windows: &dock_windows,
+            windows: overview_filtered_windows
+                .as_deref()
+                .unwrap_or(&dock_windows),
             spaces: &overview_spaces,
             progress: ov_progress,
+            filter_label: overview_filter_label.as_deref(),
         });
 
         let polkit_display = state
@@ -1065,6 +1234,7 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
             .context_menu
             .as_ref()
             .filter(|ctx| ctx.output_id == output_entry.id);
+        let dock_stack_view = state.dock_stack_render_state();
 
         let overlay = if let Some(pk) = polkit_view.as_ref() {
             ShellOverlayView::Polkit(pk)
@@ -1080,6 +1250,8 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
             ShellOverlayView::QuickSettings(qs)
         } else if let Some(ctx) = context_menu_view {
             ShellOverlayView::ContextMenu(ctx)
+        } else if let Some(stack) = dock_stack_view.as_ref() {
+            ShellOverlayView::DockStack(stack)
         } else if let Some(ov) = ov_view.as_ref() {
             ShellOverlayView::Overview(ov)
         } else if let Some(pick) = state.portal_pick_color.as_ref() {
@@ -1167,6 +1339,21 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
 
     shape_cache.clear_active_liquid_glass_backdrop();
     let mut final_list = scale_render_elements_for_output(render_list, output_scale);
+    if fullscreen_win.is_none() && !state.minimize_anims.is_empty() {
+        let mut warp_elements = Vec::new();
+        push_minimize_warp_elements(
+            &mut warp_elements,
+            renderer,
+            shape_cache,
+            state,
+            output_loc,
+            &output_windows,
+        );
+        final_list.extend(scale_render_elements_for_output(
+            warp_elements,
+            output_scale,
+        ));
+    }
     final_list.extend(backdrop_elements);
     final_list
 }
