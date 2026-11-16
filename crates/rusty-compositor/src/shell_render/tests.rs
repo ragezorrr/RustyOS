@@ -1812,6 +1812,24 @@ fn dock_hover_edge_positions_and_auto_hide_work() {
         canonical_dock_app_key(Some("foot"), "zsh", rusty_wm::WindowId(1)),
         canonical_dock_app_key(Some("foot"), "vim", rusty_wm::WindowId(2))
     );
+    assert_eq!(
+        canonical_dock_app_key(
+            Some("Google-chrome"),
+            "New Tab - Google Chrome",
+            rusty_wm::WindowId(3)
+        ),
+        "google-chrome"
+    );
+    assert_eq!(
+        canonical_dock_app_key(
+            Some("org.mozilla.firefox"),
+            "Download Google Chrome - Mozilla Firefox",
+            rusty_wm::WindowId(4),
+        ),
+        "firefox"
+    );
+    assert_eq!(dock_label_for_key("google-chrome"), "Google Chrome");
+    assert_eq!(dock_label_for_key("firefox"), "Firefox");
 }
 
 #[test]

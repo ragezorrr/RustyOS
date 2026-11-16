@@ -112,10 +112,9 @@ impl CompositorHandler for RustyCompositorState {
                         .animated_window_origin(win_id.0)
                         .unwrap_or((wm_win.geometry.x, wm_win.geometry.y));
                     let titlebar_h = self.window_titlebar_height(win_id);
-                    let geo_loc = window.geometry().loc;
-                    let client_origin = (origin.0 - geo_loc.x, origin.1 + titlebar_h - geo_loc.y);
+                    let content_origin = (origin.0, origin.1 + titlebar_h);
                     let is_focused = self.wm.focused_window() == Some(win_id);
-                    self.space.map_element(window, client_origin, is_focused);
+                    self.space.map_element(window, content_origin, is_focused);
                     if is_focused && !self.screen_locked {
                         let keyboard = self.keyboard.clone();
                         if keyboard.current_focus().as_ref() != Some(surface) {
@@ -388,12 +387,16 @@ impl XdgShellHandler for RustyCompositorState {
     fn title_changed(&mut self, surface: ToplevelSurface) {
         if let Some(win_id) = self.window_id_for_toplevel(&surface) {
             self.sync_foreign_toplevel_metadata(win_id);
+            self.refresh_dock_window_presence(win_id);
+            self.shell_redraw_needed = true;
         }
     }
 
     fn app_id_changed(&mut self, surface: ToplevelSurface) {
         if let Some(win_id) = self.window_id_for_toplevel(&surface) {
             self.sync_foreign_toplevel_metadata(win_id);
+            self.refresh_dock_window_presence(win_id);
+            self.shell_redraw_needed = true;
         }
     }
 

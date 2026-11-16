@@ -283,6 +283,7 @@ impl XwmHandler for RustyCompositorState {
             WmWindowProperty::Title | WmWindowProperty::Class => {
                 self.sync_foreign_toplevel_metadata(win_id);
                 self.refresh_dock_window_presence(win_id);
+                self.shell_redraw_needed = true;
             }
             _ => {}
         }

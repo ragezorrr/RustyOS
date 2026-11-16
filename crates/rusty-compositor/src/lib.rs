@@ -1419,4 +1419,54 @@ mod tests {
 
         Ok(())
     }
+
+    #[test]
+    fn space_render_location_subtracts_csd_geometry_loc_once() -> Result<(), Box<dyn Error>> {
+        use smithay::desktop::{Space, space::SpaceElement};
+        use smithay::utils::{IsAlive, Logical, Point, Rectangle};
+
+        #[derive(Clone, PartialEq)]
+        struct CsdGeomMock {
+            geo: Rectangle<i32, Logical>,
+            bbox: Rectangle<i32, Logical>,
+        }
+        impl IsAlive for CsdGeomMock {
+            fn alive(&self) -> bool {
+                true
+            }
+        }
+        impl SpaceElement for CsdGeomMock {
+            fn geometry(&self) -> Rectangle<i32, Logical> {
+                self.geo
+            }
+            fn bbox(&self) -> Rectangle<i32, Logical> {
+                self.bbox
+            }
+            fn is_in_input_region(&self, point: &Point<f64, Logical>) -> bool {
+                // Local buffer coords of `geo` start at `(26, 23)`.
+                self.geo.to_f64().contains(*point)
+            }
+            fn z_index(&self) -> u8 {
+                0
+            }
+            fn set_activate(&self, _: bool) {}
+            fn output_enter(&self, _: &smithay::output::Output, _: Rectangle<i32, Logical>) {}
+            fn output_leave(&self, _: &smithay::output::Output) {}
+        }
+
+        let elem = CsdGeomMock {
+            geo: Rectangle::new((26, 23).into(), (500, 360).into()),
+            bbox: Rectangle::new((0, 0).into(), (552, 406).into()),
+        };
+        let mut space: Space<CsdGeomMock> = Space::default();
+        // Compositor maps `SpaceElement` at visible content origin `(32, 56)`, NOT `(32-26, 56-23)`.
+        space.map_element(elem, (32, 56), true);
+
+        let (_, render_loc) = space
+            .element_under((32.0 + 488.0, 56.0 + 12.0))
+            .ok_or("visible CSD top-right button must hit")?;
+        assert_eq!(render_loc, (6, 33).into());
+        assert!(space.element_under((32.0 + 488.0, 56.0 - 15.0)).is_none());
+        Ok(())
+    }
 }

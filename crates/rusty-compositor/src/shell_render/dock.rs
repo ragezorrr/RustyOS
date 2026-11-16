@@ -140,6 +140,79 @@ pub fn extract_app_name(title: &str) -> String {
     truncate_ascii(trimmed, 14)
 }
 
+const CANONICAL_DOCK_ALIASES: &[(&str, &[&str])] = &[
+    (
+        "files",
+        &[
+            "rusty-files",
+            "org.rustyos.files",
+            "org.gnome.nautilus",
+            "nautilus",
+            "dolphin",
+            "thunar",
+        ],
+    ),
+    (
+        "updater",
+        &["rusty-updater", "org.rustyos.updater", "updater"],
+    ),
+    (
+        "terminal",
+        &[
+            "foot",
+            "kitty",
+            "alacritty",
+            "wezterm",
+            "ghostty",
+            "weston-terminal",
+            "gnome-terminal",
+            "konsole",
+            "xfce4-terminal",
+        ],
+    ),
+    (
+        "google-chrome",
+        &[
+            "google-chrome",
+            "google-chrome-stable",
+            "com.google.chrome",
+            "google chrome",
+        ],
+    ),
+    (
+        "chromium",
+        &["chromium", "chromium-browser", "org.chromium.chromium"],
+    ),
+    (
+        "firefox",
+        &[
+            "firefox",
+            "org.mozilla.firefox",
+            "firefox-esr",
+            "firefox-nightly",
+            "firefox-developer-edition",
+            "mozilla firefox",
+        ],
+    ),
+    ("brave-browser", &["brave-browser", "com.brave.browser"]),
+    ("browser", &["browser", "safari", "org.rustyos.browser"]),
+    (
+        "notes",
+        &[
+            "gnome-text-editor",
+            "gedit",
+            "kate",
+            "mousepad",
+            "featherpad",
+            "obsidian",
+        ],
+    ),
+    (
+        "settings",
+        &["rusty-settings", "gnome-control-center", "systemsettings"],
+    ),
+];
+
 /// Normalizes a Wayland `app_id` / `WM_CLASS` + window title into a canonical Dock grouping key (`RUSTYOS-073`).
 #[must_use]
 pub fn canonical_dock_app_key(
@@ -149,73 +222,22 @@ pub fn canonical_dock_app_key(
 ) -> String {
     let id_lower = app_id.unwrap_or_default().trim().to_ascii_lowercase();
     let title_lower = title.trim().to_ascii_lowercase();
-    for (canonical, aliases) in [
-        (
-            "files",
-            &[
-                "rusty-files",
-                "org.rustyos.files",
-                "org.gnome.nautilus",
-                "nautilus",
-                "dolphin",
-                "thunar",
-            ][..],
-        ),
-        (
-            "updater",
-            &["rusty-updater", "org.rustyos.updater", "updater"][..],
-        ),
-        (
-            "terminal",
-            &[
-                "foot",
-                "kitty",
-                "alacritty",
-                "wezterm",
-                "ghostty",
-                "weston-terminal",
-                "gnome-terminal",
-                "konsole",
-                "xfce4-terminal",
-            ][..],
-        ),
-        (
-            "browser",
-            &[
-                "firefox",
-                "chromium",
-                "google-chrome",
-                "brave-browser",
-                "epiphany",
-                "falkon",
-            ][..],
-        ),
-        (
-            "notes",
-            &[
-                "gnome-text-editor",
-                "gedit",
-                "kate",
-                "mousepad",
-                "featherpad",
-                "obsidian",
-            ][..],
-        ),
-        (
-            "settings",
-            &["rusty-settings", "gnome-control-center", "systemsettings"][..],
-        ),
-    ] {
-        if aliases
-            .iter()
-            .any(|a| id_lower == *a || id_lower.contains(a) || title_lower.contains(a))
-        {
-            return canonical.to_owned();
+    if !id_lower.is_empty() {
+        for &(canonical, aliases) in CANONICAL_DOCK_ALIASES {
+            if aliases
+                .iter()
+                .any(|a| id_lower == *a || id_lower.contains(a))
+            {
+                return canonical.to_owned();
+            }
         }
+        return id_lower.trim_end_matches(".desktop").to_owned();
     }
 
-    if !id_lower.is_empty() {
-        return id_lower.trim_end_matches(".desktop").to_owned();
+    for &(canonical, aliases) in CANONICAL_DOCK_ALIASES {
+        if aliases.iter().any(|a| title_lower.contains(a)) {
+            return canonical.to_owned();
+        }
     }
     let clean_title = title.trim();
     if !clean_title.is_empty() && !is_synthetic_wm_title(clean_title) {
@@ -257,6 +279,10 @@ pub fn dock_label_for_key(app_key: &str) -> String {
         "overview" | "apps" => "Overview".to_owned(),
         "terminal" => "Terminal".to_owned(),
         "browser" => "Browser".to_owned(),
+        "google-chrome" => "Google Chrome".to_owned(),
+        "chromium" => "Chromium".to_owned(),
+        "firefox" => "Firefox".to_owned(),
+        "brave-browser" => "Brave".to_owned(),
         "notes" => "Notes".to_owned(),
         "settings" => "Settings".to_owned(),
         other => {

@@ -152,7 +152,7 @@ impl InputMethodHandler for RustyCompositorState {
                 .is_some_and(|root| Self::surface_in_tree(&root, parent))
                 && let Some(loc) = self.space.element_location(win)
             {
-                return Rectangle::new(loc + win.geometry().loc, win.geometry().size);
+                return Rectangle::new(loc, win.geometry().size);
             }
         }
         for entry in self.output_map.entries() {

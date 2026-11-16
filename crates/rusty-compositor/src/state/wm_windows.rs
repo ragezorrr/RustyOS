@@ -404,9 +404,7 @@ impl RustyCompositorState {
             .find_map(|(_, win)| {
                 let matches = win.toplevel().is_some_and(|tl| tl.wl_surface() == &root);
                 if matches {
-                    self.space
-                        .element_location(win)
-                        .map(|loc| loc + win.geometry().loc)
+                    self.space.element_location(win)
                 } else {
                     None
                 }
@@ -1152,8 +1150,9 @@ impl RustyCompositorState {
                 let has_ssd = !fullscreen && !self.window_uses_csd(win_id);
                 let titlebar_h = self.window_titlebar_height(win_id);
                 let (client_width, client_height) = self.effective_client_size(win_id, rect);
-                let geo_loc = window.geometry().loc;
-                let client_origin = (origin.0 - geo_loc.x, origin.1 + titlebar_h - geo_loc.y);
+                // Smithay's `Space::render_location` already subtracts `window.geometry().loc`,
+                // so `map_element` receives the target geometry origin (never `origin - geo_loc`).
+                let content_origin = (origin.0, origin.1 + titlebar_h);
                 if let Some(toplevel) = window.toplevel() {
                     toplevel.with_pending_state(|state| {
                         state.size = Some((client_width, client_height).into());
@@ -1188,7 +1187,7 @@ impl RustyCompositorState {
                 if let Some(root_ws) = WaylandFocus::wl_surface(&window) {
                     Self::apply_surface_scale(&root_ws, output_scale);
                 }
-                self.space.map_element(window, client_origin, is_focused);
+                self.space.map_element(window, content_origin, is_focused);
             }
         }
 
@@ -1291,9 +1290,8 @@ impl RustyCompositorState {
             {
                 let is_focused = focused_id == Some(win_id);
                 let titlebar_h = self.window_titlebar_height(win_id);
-                let geo_loc = window.geometry().loc;
-                let client_origin = (origin.0 - geo_loc.x, origin.1 + titlebar_h - geo_loc.y);
-                self.space.map_element(window, client_origin, is_focused);
+                let content_origin = (origin.0, origin.1 + titlebar_h);
+                self.space.map_element(window, content_origin, is_focused);
             }
         }
     }

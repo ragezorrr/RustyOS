@@ -326,7 +326,7 @@ impl LauncherState {
             if preferred_bins.iter().any(|p| p.eq_ignore_ascii_case(&bin))
                 && command_exists_on_path(&app.exec)
             {
-                return Some(app.exec.clone());
+                return Some(clean_desktop_exec(&app.exec));
             }
         }
         preferred_bins
@@ -355,6 +355,7 @@ impl LauncherState {
             "firefox",
             "chromium",
             "google-chrome",
+            "google-chrome-stable",
             "brave-browser",
             "epiphany",
             "falkon",
@@ -397,7 +398,7 @@ impl LauncherState {
                 || bin.eq_ignore_ascii_case(&key)
                 || app.name.eq_ignore_ascii_case(&key);
             if matched && command_exists_on_path(&app.exec) {
-                return Some(app.exec.clone());
+                return Some(clean_desktop_exec(&app.exec));
             }
         }
         if command_exists_on_path(&key) {
@@ -580,7 +581,7 @@ fn priority_rank(app: &LauncherApp) -> u8 {
         | "gnome-terminal" | "xfce4-terminal" => 0,
         "rusty-files" => 1,
         "rusty-updater" => 2,
-        "firefox" | "chromium" | "google-chrome" | "brave" => 3,
+        "firefox" | "chromium" | "google-chrome" | "google-chrome-stable" | "brave" => 3,
         "es2gears_wayland" | "glmark2-wayland" => 4,
         "rusty-settings" => 5,
         _ => 10,
@@ -604,6 +605,20 @@ fn exec_basename(exec: &str) -> String {
         .and_then(|s| s.to_str())
         .unwrap_or(&first)
         .to_ascii_lowercase()
+}
+
+fn clean_desktop_exec(exec: &str) -> String {
+    parse_exec_argv(exec)
+        .into_iter()
+        .map(|arg| {
+            if arg.chars().any(char::is_whitespace) || arg.contains(['"', '\'', '\\']) {
+                format!("'{}'", arg.replace('\'', "'\\''"))
+            } else {
+                arg
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn command_exists_on_path(exec: &str) -> bool {
