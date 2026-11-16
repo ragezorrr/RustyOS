@@ -262,31 +262,53 @@ impl LauncherState {
         false
     }
 
-    /// Resolves the best XDG icon name/path for a window using its `app_id`/`WM_CLASS` and title (`RUSTYOS-033`).
+    /// Resolves the best XDG icon name/path for a window using its `app_id`/`WM_CLASS` and title (`RUSTYOS-033`, `RUSTYOS-080`).
     #[must_use]
     pub fn icon_for_app_hints(&self, app_id: Option<&str>, title: &str) -> Option<String> {
         let hint = app_id.map(str::trim).filter(|s| !s.is_empty());
         if let Some(raw_hint) = hint {
             let lower = raw_hint.to_ascii_lowercase();
             let short = lower.rsplit('.').next().unwrap_or(&lower);
+
+            // Pass 1: exact app ID / desktop file stem match takes strict precedence (e.g. google-chrome.desktop -> google-chrome).
             for app in &self.catalog {
                 let id_stem = app
                     .id
                     .strip_suffix(".desktop")
                     .unwrap_or(&app.id)
                     .to_ascii_lowercase();
-                let bin = exec_basename(&app.exec);
-                let name_lower = app.name.to_ascii_lowercase();
-                if (id_stem == lower
-                    || id_stem == short
-                    || bin == lower
-                    || bin == short
-                    || name_lower == lower)
+                if (id_stem == lower || id_stem == short)
                     && let Some(ref icon) = app.icon
                 {
                     return Some(icon.clone());
                 }
             }
+
+            // Pass 2: match executable or app name, but ignore Chrome/Chromium PWA web apps (--app-id=) when searching for generic binaries.
+            for app in &self.catalog {
+                if app.exec.contains("--app-id=") {
+                    continue;
+                }
+                let bin = exec_basename(&app.exec);
+                let name_lower = app.name.to_ascii_lowercase();
+                if (bin == lower || bin == short || name_lower == lower)
+                    && let Some(ref icon) = app.icon
+                {
+                    return Some(icon.clone());
+                }
+            }
+
+            // Pass 3: any match including PWAs if nothing else matched.
+            for app in &self.catalog {
+                let bin = exec_basename(&app.exec);
+                let name_lower = app.name.to_ascii_lowercase();
+                if (bin == lower || bin == short || name_lower == lower)
+                    && let Some(ref icon) = app.icon
+                {
+                    return Some(icon.clone());
+                }
+            }
+
             return Some(raw_hint.to_owned());
         }
 
@@ -308,7 +330,24 @@ impl LauncherState {
     pub fn preferred_icon<'a>(&'a self, preferred_bins: &[&str], fallback: &'a str) -> &'a str {
         for bin in preferred_bins {
             let needle = bin.to_ascii_lowercase();
+            // Pass 1: exact desktop ID stem match
             for app in &self.catalog {
+                let id_stem = app
+                    .id
+                    .strip_suffix(".desktop")
+                    .unwrap_or(&app.id)
+                    .to_ascii_lowercase();
+                if id_stem == needle
+                    && let Some(ref icon) = app.icon
+                {
+                    return icon.as_str();
+                }
+            }
+            // Pass 2: executable basename match, skipping PWA web apps
+            for app in &self.catalog {
+                if app.exec.contains("--app-id=") {
+                    continue;
+                }
                 if exec_basename(&app.exec) == needle
                     && let Some(ref icon) = app.icon
                 {
@@ -322,6 +361,9 @@ impl LauncherState {
     #[must_use]
     pub(crate) fn find_available_command(&self, preferred_bins: &[&str]) -> Option<String> {
         for app in &self.catalog {
+            if app.exec.contains("--app-id=") {
+                continue;
+            }
             let bin = exec_basename(&app.exec);
             if preferred_bins.iter().any(|p| p.eq_ignore_ascii_case(&bin))
                 && command_exists_on_path(&app.exec)
@@ -368,12 +410,14 @@ impl LauncherState {
             "featherpad",
             "obsidian",
         ];
+        const CHROME: &[&str] = &["google-chrome", "google-chrome-stable", "chromium"];
         match app_key.trim().to_ascii_lowercase().as_str() {
             "files" | "rusty-files" => Some(FILES),
             "updater" | "rusty-updater" => Some(UPDATER),
             "terminal" => Some(TERMINAL),
             "browser" => Some(BROWSER),
             "notes" => Some(NOTES),
+            "google-chrome" | "google-chrome-stable" | "chrome" => Some(CHROME),
             _ => None,
         }
     }
@@ -1087,5 +1131,36 @@ Exec=firefox --private-window
 
         let _ = fs::remove_dir_all(&base);
         Ok(())
+    }
+
+    #[test]
+    fn prioritizes_native_app_id_and_ignores_pwa_when_resolving_browser_icons() {
+        let mut launcher = LauncherState::new();
+        launcher.catalog = vec![
+            LauncherApp {
+                id: "chrome-pommaclcbfghclhalboakcipcmmndhcj-Default.desktop".to_owned(),
+                name: "Google Chat".to_owned(),
+                subtitle: String::new(),
+                exec: "/opt/google/chrome/google-chrome --profile-directory=Default --app-id=pommaclcbfghclhalboakcipcmmndhcj".to_owned(),
+                keywords: Vec::new(),
+                badge: "GC".to_owned(),
+                icon: Some("chrome-pommaclcbfghclhalboakcipcmmndhcj-Default".to_owned()),
+            },
+            LauncherApp {
+                id: "google-chrome.desktop".to_owned(),
+                name: "Google Chrome".to_owned(),
+                subtitle: "Web Browser".to_owned(),
+                exec: "/usr/bin/google-chrome-stable %U".to_owned(),
+                keywords: Vec::new(),
+                badge: "GC".to_owned(),
+                icon: Some("google-chrome".to_owned()),
+            },
+        ];
+
+        let icon = launcher.icon_for_app_hints(Some("google-chrome"), "Google Chrome");
+        assert_eq!(icon.as_deref(), Some("google-chrome"));
+
+        let dock_icon = launcher.icon_for_dock_key("google-chrome");
+        assert_eq!(dock_icon.as_deref(), Some("google-chrome"));
     }
 }

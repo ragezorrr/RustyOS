@@ -137,6 +137,41 @@ impl VrrMode {
     }
 }
 
+/// Window drop shadow style (`Subtle` [default], `Normal`, `None`) (`RUSTYOS-080`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WindowShadowMode {
+    /// Crisp, compact macOS Golden Gate elevation (default).
+    #[default]
+    Subtle,
+    /// Traditional deeper elevation blur.
+    Normal,
+    /// Disabled (no drop shadows around windows).
+    None,
+}
+
+impl WindowShadowMode {
+    pub(crate) fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "subtle" | "compact" | "small" | "low" | "true" | "on" | "enabled" => {
+                Some(Self::Subtle)
+            }
+            "normal" | "default" | "large" | "high" => Some(Self::Normal),
+            "none" | "off" | "false" | "disabled" => Some(Self::None),
+            _ => None,
+        }
+    }
+
+    /// Canonical string representation (`"subtle"`, `"normal"`, `"none"`).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Subtle => "subtle",
+            Self::Normal => "normal",
+            Self::None => "none",
+        }
+    }
+}
+
 /// Default frosted glass opacity factor across macOS 27 shell surfaces (`RUSTYOS-048`).
 pub const DEFAULT_GLASS_OPACITY: f32 = 0.78;
 /// Minimum allowed glass opacity factor (`0.35..=1.0`).
@@ -537,6 +572,8 @@ pub struct UserConfig {
     pub menubar_show_volume: bool,
     /// Format Menu Bar clock using 24-hour time (`RUSTYOS-049`, default `false` = macOS 12h AM/PM).
     pub clock_24h: bool,
+    /// Window drop shadow profile (`Subtle` [default], `Normal`, `None`) (`RUSTYOS-080`).
+    pub window_shadow: WindowShadowMode,
     /// Prefer the highest supported refresh rate (60/120/144/240 Hz) at the display's native
     /// resolution on DRM/KMS outputs (`RUSTYOS-042`).
     pub prefer_max_refresh: bool,
@@ -624,6 +661,7 @@ impl Default for UserConfig {
             menubar_show_input_source: false,
             menubar_show_volume: false,
             clock_24h: false,
+            window_shadow: WindowShadowMode::Subtle,
             prefer_max_refresh: true,
             vrr_mode: VrrMode::Fullscreen,
             display_scale: 1.0,
@@ -1023,6 +1061,15 @@ impl UserConfig {
                     *target = b;
                 }
             }
+            "window_shadow" | "shadow" => {
+                if let Some(mode) = WindowShadowMode::parse(val) {
+                    self.window_shadow = mode;
+                } else if let Some(s) = parse_toml_string(val)
+                    && let Some(mode) = WindowShadowMode::parse(&s)
+                {
+                    self.window_shadow = mode;
+                }
+            }
             _ => {}
         }
     }
@@ -1114,6 +1161,7 @@ impl UserConfig {
         );
         let _ = writeln!(out, "menubar_show_volume = {}", self.menubar_show_volume);
         let _ = writeln!(out, "clock_24h = {}", self.clock_24h);
+        let _ = writeln!(out, "window_shadow = \"{}\"", self.window_shadow.as_str());
         if let Some(wallpaper) = self.wallpaper.as_ref() {
             let _ = writeln!(
                 out,
@@ -1656,9 +1704,10 @@ mod tests {
         assert!(!defaults.menubar_show_input_source);
         assert!(!defaults.menubar_show_volume);
         assert!(!defaults.clock_24h);
+        assert_eq!(defaults.window_shadow, WindowShadowMode::Subtle);
 
         let cfg = UserConfig::parse_toml(
-            r"
+            r#"
             [ui]
             glass_opacity = 0.62
             reduce_transparency = true
@@ -1667,7 +1716,8 @@ mod tests {
             menubar_show_input_source = true
             menubar_show_volume = true
             clock_24h = true
-            ",
+            window_shadow = "none"
+            "#,
         );
         assert!((cfg.glass_opacity - 0.62).abs() < 1e-6);
         assert!(cfg.reduce_transparency);
@@ -1676,6 +1726,14 @@ mod tests {
         assert!(cfg.menubar_show_input_source);
         assert!(cfg.menubar_show_volume);
         assert!(cfg.clock_24h);
+        assert_eq!(cfg.window_shadow, WindowShadowMode::None);
+
+        let normal_cfg = UserConfig::parse_toml("[ui]\nwindow_shadow = \"normal\"\n");
+        assert_eq!(normal_cfg.window_shadow, WindowShadowMode::Normal);
+        let bool_off = UserConfig::parse_toml("[ui]\nwindow_shadow = false\n");
+        assert_eq!(bool_off.window_shadow, WindowShadowMode::None);
+        let bool_on = UserConfig::parse_toml("[ui]\nwindow_shadow = true\n");
+        assert_eq!(bool_on.window_shadow, WindowShadowMode::Subtle);
 
         let clamped_low = UserConfig::parse_toml("[ui]\nglass_opacity = 0.05\n");
         assert!((clamped_low.glass_opacity - MIN_GLASS_OPACITY).abs() < 1e-6);

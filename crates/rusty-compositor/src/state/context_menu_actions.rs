@@ -35,22 +35,48 @@ pub(crate) struct DownloadsMenuEntry {
     pub(crate) extension: String,
 }
 
+#[allow(clippy::unnecessary_wraps)]
 pub(crate) fn resolve_desktop_dir() -> Option<PathBuf> {
     if let Some(dir) = std::env::var_os("XDG_DESKTOP_DIR")
         && !dir.is_empty()
     {
         return Some(PathBuf::from(dir));
     }
-    std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Desktop"))
+    let detected = rusty_services::file_manager::UserFileLocations::detect().desktop;
+    if detected.is_dir() {
+        return Some(detected);
+    }
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        let localized_ru = home.join("Рабочий стол");
+        if localized_ru.is_dir() {
+            return Some(localized_ru);
+        }
+        let en = home.join("Desktop");
+        return Some(en);
+    }
+    Some(detected)
 }
 
+#[allow(clippy::unnecessary_wraps)]
 pub(crate) fn resolve_downloads_dir() -> Option<PathBuf> {
     if let Some(dir) = std::env::var_os("XDG_DOWNLOAD_DIR")
         && !dir.is_empty()
     {
         return Some(PathBuf::from(dir));
     }
-    std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Downloads"))
+    let detected = rusty_services::file_manager::UserFileLocations::detect().downloads;
+    if detected.is_dir() {
+        return Some(detected);
+    }
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        let localized_ru = home.join("Загрузки");
+        if localized_ru.is_dir() {
+            return Some(localized_ru);
+        }
+        let en = home.join("Downloads");
+        return Some(en);
+    }
+    Some(detected)
 }
 
 pub(crate) fn resolve_trash_root() -> Option<PathBuf> {
@@ -64,11 +90,17 @@ pub(crate) fn resolve_trash_root() -> Option<PathBuf> {
 
 pub(crate) fn create_unique_desktop_folder(desktop_dir: &Path) -> std::io::Result<PathBuf> {
     fs::create_dir_all(desktop_dir)?;
+    let is_ru = desktop_dir.to_string_lossy().contains("Рабочий стол");
+    let base_name = if is_ru {
+        "Новая папка"
+    } else {
+        "New Folder"
+    };
     for idx in 1..=999_u32 {
         let name = if idx == 1 {
-            "New Folder".to_owned()
+            base_name.to_owned()
         } else {
-            format!("New Folder {idx}")
+            format!("{base_name} {idx}")
         };
         let candidate = desktop_dir.join(name);
         match fs::create_dir(&candidate) {

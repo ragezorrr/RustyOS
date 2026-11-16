@@ -1224,6 +1224,30 @@ hardware/software context и низкие накладные расходы.
   - Живой `--winit --max-frames 35` smoke-прогон (`Wayland` и `X11`: `late=0 missed=0`, без EGL/шейдерных ошибок).
 - **Risks:** Непосредственная выгрузка в ветку `gh-pages` происходит на стороне GitHub Actions при наличии прав у токена (`contents: write`); включение раздачи в веб-интерфейсе GitHub Pages (`Settings -> Pages`) выполняется владельцем репозитория.
 
+### RUSTYOS-080 — Исправление UX композитора: питание сессии, Chrome PWA, тени окон, папки рабочего стола и автозапуск
+
+- **Status:** Done (`RUSTYOS-080 Вариант 1` — утверждённый объём выполнен)
+- **Goal:** Устранить 5 выявленных на живой системе замечаний UX: очистить автозапуск `rusty-updater`, добавить системные действия питания (`Sleep`, `Restart...`, `Shut Down...`, `Log Out...`) в меню Apple/System Logo по спецификации macOS 27 Golden Gate, обеспечить строгий приоритет desktop ID над Chrome PWA ярлыками при поиске иконок, уменьшить радиус/ореол тени окон с возможностью отключения через `[ui].window_shadow` в `config.toml`, и поддержать создание папок в локализованном каталоге рабочего стола пользователя (`user-dirs.dirs`, `~/Рабочий стол`).
+- **Dependencies:** `RUSTYOS-033`, `RUSTYOS-048`, `RUSTYOS-054`, `RUSTYOS-073`, `RUSTYOS-075`, `RUSTYOS-079`.
+- **Scope:**
+  - `~/.config/rustyos/config.toml`: очищен массив `commands = []` в секции `[autostart]`.
+  - `crates/rusty-compositor/src/config.rs`: добавлен enum `WindowShadowMode` (`Subtle`, `Normal`, `None`), поле `window_shadow` в `UserConfig`, парсинг строковых и булевых значений из `[ui]` и сериализация.
+  - `crates/rusty-compositor/src/surfaces/window_shadow.rs`, `surfaces/mod.rs`, `shell_render/ssd.rs`, `frame_composer.rs`: уменьшен радиус и плотность тени окна до компактного Golden Gate профиля (`amb_spread: 16.0`, `drop_y: 5.0`, `amb_alpha: 0.09` для активного; `amb_spread: 10.0`, `drop_y: 3.0` для неактивного); при `WindowShadowMode::None` тени полностью отключаются.
+  - `crates/rusty-compositor/src/shell_render/top_bar.rs` и `state/shell_actions.rs`: в `TopBarMenuAction` и системное меню добавлены `Sleep` (`Moon`), `Restart...` (`Refresh`), `Shut Down...` (`PowerSymbol`), разделитель и `Log Out...` (`Close`, `Super+Shift+Q`), привязанные к `self.telemetry.dispatch_session(...)` и `self.loop_signal.stop()`.
+  - `crates/rusty-compositor/src/launcher.rs`: реализован 3-фазный поиск иконок (фаза 1 — точное совпадение ID desktop-файла, фаза 2 — поиск бинарника с исключением веб-приложений PWA `--app-id=`, фаза 3 — fallback); добавлены `google-chrome` и псевдонимы в `canonical_preferred_bins`.
+  - `crates/rusty-compositor/src/state/context_menu_actions.rs`: функции `resolve_desktop_dir()` и `resolve_downloads_dir()` интегрированы с `UserFileLocations::detect()` для чтения `~/.config/user-dirs.dirs` и локализованных путей (`Рабочий стол`, `Загрузки`); генерация уникальных имён папок адаптирована для русскоязычной локали («Новая папка»).
+- **Acceptance Criteria:**
+  - `rusty-updater` не запускается автоматически при старте композитора;
+  - Системное меню верхнего бара отображает пункты `Sleep`, `Restart...`, `Shut Down...`, `Log Out...`;
+  - Закреплённый и запущенный ярлык `google-chrome` разрешается в официальную иконку Chrome вместо PWA Google Chat;
+  - Окна отрисовываются с аккуратной компактной тенью, либо без неё при `window_shadow = "none"` / `false`;
+  - Пункт «Новая папка» на рабочем столе создаёт папку в фактическом каталоге пользователя (`~/Рабочий стол`).
+- **Tests:**
+  - `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo build --workspace --bins --locked`
+  - `cargo test --workspace --locked -- --test-threads=1` (`236 passed; 0 failed`: `rusty_animation` 4, `rusty_compositor` 158, `rusty_files` 13, `rusty_ipc` 3, `rusty_services` 43, `rusty_shell` 5, `rusty_updater` 4, `rusty_wm` 7)
+  - Живой `--winit --max-frames 35` smoke-прогон (`autostart_count=0`, `rendered_frames=35`, без EGL/шейдерных ошибок).
+- **Risks:** Нет.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

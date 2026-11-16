@@ -762,6 +762,7 @@ fn macos27_quick_settings_glass_and_volume_slider_hit_testing() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn macos27_top_bar_dynamic_left_right_and_menu_popover_hit_testing() {
     let without_bat = compute_top_bar_right_layout(1280, false, 0, "Wed Apr 1  9:41 AM");
     let with_bat = compute_top_bar_right_layout(1280, true, 0, "Wed Apr 1  9:41 AM");
@@ -865,6 +866,28 @@ fn macos27_top_bar_dynamic_left_right_and_menu_popover_hit_testing() {
     assert_eq!(
         check_top_bar_menu_popover_click("Files", TopBarMenuHit::File, 800.0, 400.0),
         TopBarMenuPopoverClick::Outside
+    );
+
+    let sys_items = top_bar_menu_items(TopBarMenuHit::SystemLogo);
+    assert!(
+        sys_items
+            .iter()
+            .any(|(l, a)| *l == "Sleep" && *a == TopBarMenuAction::Sleep)
+    );
+    assert!(
+        sys_items
+            .iter()
+            .any(|(l, a)| *l == "Restart..." && *a == TopBarMenuAction::Restart)
+    );
+    assert!(
+        sys_items
+            .iter()
+            .any(|(l, a)| *l == "Shut Down..." && *a == TopBarMenuAction::ShutDown)
+    );
+    assert!(
+        sys_items
+            .iter()
+            .any(|(l, a)| *l == "Log Out..." && *a == TopBarMenuAction::LogOut)
     );
 }
 

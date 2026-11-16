@@ -550,6 +550,18 @@ fn context_menu_desktop_folder_multi_monitor_dismiss_and_actions() -> Result<(),
         Some("New Folder 2")
     );
 
+    let ru_dir = temp_dir.join("Рабочий стол");
+    let ru_f1 = create_unique_desktop_folder(&ru_dir)?;
+    let ru_f2 = create_unique_desktop_folder(&ru_dir)?;
+    assert_eq!(
+        ru_f1.file_name().and_then(|n| n.to_str()),
+        Some("Новая папка")
+    );
+    assert_eq!(
+        ru_f2.file_name().and_then(|n| n.to_str()),
+        Some("Новая папка 2")
+    );
+
     let dp1_id = compositor.add_output(
         "DP-1",
         PhysicalProperties {

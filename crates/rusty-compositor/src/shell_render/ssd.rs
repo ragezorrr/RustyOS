@@ -455,25 +455,39 @@ pub fn generate_window_ssd_composite_elements_with_hover(
     out
 }
 
-/// Generates a seamless Golden Gate drop shadow behind a window frame (`RUSTYOS-075`).
+/// Generates a seamless Golden Gate drop shadow behind a window frame (`RUSTYOS-075`, `RUSTYOS-080`).
 pub fn generate_window_shadow_elements(
     shape_cache: &mut crate::surfaces::UiShapeCache,
     renderer: &mut GlesRenderer,
     rect: rusty_wm::Rect,
     is_focused: bool,
+    shadow_mode: crate::config::WindowShadowMode,
 ) -> Vec<CompositorRenderElement> {
     let mut out = Vec::new();
+    if shadow_mode == crate::config::WindowShadowMode::None {
+        return out;
+    }
     let w = rect.width.max(64);
     let h = rect.height.max(TITLEBAR_HEIGHT + 32);
     let win_logical = Rectangle::new(Point::from((rect.x, rect.y)), Size::from((w, h)));
-    if let Some(el) =
-        shape_cache.window_shadow_render_element(renderer, win_logical, WINDOW_RADIUS, is_focused)
-    {
+    if let Some(el) = shape_cache.window_shadow_render_element(
+        renderer,
+        win_logical,
+        WINDOW_RADIUS,
+        is_focused,
+        shadow_mode,
+    ) {
         out.push(el);
         return out;
     }
 
-    let (spread, max_alpha, drop) = if is_focused { (36, 62, 4) } else { (22, 34, 2) };
+    let (spread, max_alpha, drop) = if shadow_mode == crate::config::WindowShadowMode::Normal {
+        if is_focused { (28, 48, 4) } else { (18, 28, 2) }
+    } else if is_focused {
+        (16, 28, 3)
+    } else {
+        (10, 16, 2)
+    };
     push_soft_shadow(
         &mut out,
         shape_cache,

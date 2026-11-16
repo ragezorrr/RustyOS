@@ -325,6 +325,21 @@ impl RustyCompositorState {
             TopBarMenuAction::ToggleReduceTransparency => self.toggle_reduce_transparency(),
             TopBarMenuAction::RefreshMetrics => self.telemetry.request_refresh(),
             TopBarMenuAction::LockSession => self.set_screen_locked(true, serial),
+            TopBarMenuAction::Sleep => {
+                self.telemetry
+                    .dispatch_session(rusty_services::SessionAction::Suspend);
+            }
+            TopBarMenuAction::Restart => {
+                self.telemetry
+                    .dispatch_session(rusty_services::SessionAction::Reboot);
+            }
+            TopBarMenuAction::ShutDown => {
+                self.telemetry
+                    .dispatch_session(rusty_services::SessionAction::PowerOff);
+            }
+            TopBarMenuAction::LogOut => {
+                self.loop_signal.stop();
+            }
             TopBarMenuAction::ShowShortcuts => {
                 let _ = self.push_notification(
                     Urgency::Low,

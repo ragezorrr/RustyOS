@@ -529,12 +529,13 @@ fn push_window_backdrop_elements(
         );
     }
 
-    if !is_fullscreen {
+    if !is_fullscreen && state.user_config.window_shadow != crate::config::WindowShadowMode::None {
         backdrop_list.extend(crate::shell_render::generate_window_shadow_elements(
             shape_cache,
             renderer,
             frame_rect,
             is_focused,
+            state.user_config.window_shadow,
         ));
     }
 }

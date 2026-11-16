@@ -434,15 +434,20 @@ impl UiShapeCache {
         self.window_shadow.begin_frame(output_id);
     }
 
-    /// Builds a hardware-accelerated seamless Golden Gate drop shadow element for a mapped window (`RUSTYOS-075`).
+    /// Builds a hardware-accelerated seamless Golden Gate drop shadow element for a mapped window (`RUSTYOS-075`, `RUSTYOS-080`).
     pub(crate) fn window_shadow_render_element(
         &mut self,
         renderer: &mut GlesRenderer,
         win_rect: Rectangle<i32, Logical>,
         radius: i32,
         is_focused: bool,
+        mode: crate::config::WindowShadowMode,
     ) -> Option<crate::shell_render::CompositorRenderElement> {
-        let spec = window_shadow::WindowShadowSpec::for_window(win_rect, radius, is_focused);
+        if mode == crate::config::WindowShadowMode::None {
+            return None;
+        }
+        let spec =
+            window_shadow::WindowShadowSpec::for_window_mode(win_rect, radius, is_focused, mode);
         self.window_shadow
             .make_shadow_element(renderer, spec)
             .map(crate::shell_render::CompositorRenderElement::ShaderTexture)

@@ -252,6 +252,14 @@ pub enum TopBarMenuAction {
     RefreshMetrics,
     /// Engage session Lock Screen.
     LockSession,
+    /// Suspend system to RAM via systemd-logind (`RUSTYOS-080`).
+    Sleep,
+    /// Reboot the system via systemd-logind (`RUSTYOS-080`).
+    Restart,
+    /// Shut down the system via systemd-logind (`RUSTYOS-080`).
+    ShutDown,
+    /// Terminate compositor session loop and log out (`RUSTYOS-080`).
+    LogOut,
     /// Cycle focus to next window.
     FocusNextWindow,
     /// Maximize / restore focused window.
@@ -990,6 +998,31 @@ pub(super) const MENU_SYSTEM: &[TopBarMenuEntry] = &[
         shortcut: Some("Super+L"),
         action: TopBarMenuAction::LockSession,
     },
+    TopBarMenuEntry::Item {
+        label: "Sleep",
+        icon: crate::surfaces::UiGlyphKind::Moon,
+        shortcut: None,
+        action: TopBarMenuAction::Sleep,
+    },
+    TopBarMenuEntry::Item {
+        label: "Restart...",
+        icon: crate::surfaces::UiGlyphKind::Refresh,
+        shortcut: None,
+        action: TopBarMenuAction::Restart,
+    },
+    TopBarMenuEntry::Item {
+        label: "Shut Down...",
+        icon: crate::surfaces::UiGlyphKind::PowerSymbol,
+        shortcut: None,
+        action: TopBarMenuAction::ShutDown,
+    },
+    TopBarMenuEntry::Separator,
+    TopBarMenuEntry::Item {
+        label: "Log Out...",
+        icon: crate::surfaces::UiGlyphKind::Close,
+        shortcut: Some("Super+Shift+Q"),
+        action: TopBarMenuAction::LogOut,
+    },
 ];
 
 pub(super) const MENU_ACTIVE_APP: &[TopBarMenuEntry] = &[
@@ -1250,6 +1283,10 @@ pub const fn top_bar_menu_items(
             ("Workspace Overview", TopBarMenuAction::OpenOverview),
             ("Control Center", TopBarMenuAction::OpenControlCenter),
             ("Lock Screen", TopBarMenuAction::LockSession),
+            ("Sleep", TopBarMenuAction::Sleep),
+            ("Restart...", TopBarMenuAction::Restart),
+            ("Shut Down...", TopBarMenuAction::ShutDown),
+            ("Log Out...", TopBarMenuAction::LogOut),
         ],
         TopBarMenuHit::ActiveApp => &[
             ("About Files", TopBarMenuAction::AboutRustyOs),

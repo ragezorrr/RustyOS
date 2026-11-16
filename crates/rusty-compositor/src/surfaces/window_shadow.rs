@@ -132,34 +132,80 @@ pub(crate) struct WindowShadowSpec {
 }
 
 impl WindowShadowSpec {
-    /// Golden Gate active/inactive window shadow preset (`RUSTYOS-075`).
+    /// Golden Gate active/inactive window shadow preset (`RUSTYOS-075`, `RUSTYOS-080`).
     #[must_use]
+    #[allow(dead_code)]
     pub(crate) const fn for_window(
         win_rect: Rectangle<i32, Logical>,
         radius: i32,
         is_focused: bool,
     ) -> Self {
-        if is_focused {
-            Self {
-                win_rect,
-                radius,
-                drop_y: 13.0,
-                contact_alpha: 0.12,
-                contact_spread: 9.0,
-                amb_alpha: 0.24,
-                amb_spread: 46.0,
-                shadow_rgb: [6, 8, 14],
+        Self::for_window_mode(
+            win_rect,
+            radius,
+            is_focused,
+            crate::config::WindowShadowMode::Subtle,
+        )
+    }
+
+    /// Golden Gate active/inactive window shadow preset for a specific mode (`RUSTYOS-080`).
+    #[must_use]
+    pub(crate) const fn for_window_mode(
+        win_rect: Rectangle<i32, Logical>,
+        radius: i32,
+        is_focused: bool,
+        mode: crate::config::WindowShadowMode,
+    ) -> Self {
+        match mode {
+            crate::config::WindowShadowMode::Subtle | crate::config::WindowShadowMode::None => {
+                if is_focused {
+                    Self {
+                        win_rect,
+                        radius,
+                        drop_y: 5.0,
+                        contact_alpha: 0.08,
+                        contact_spread: 6.0,
+                        amb_alpha: 0.09,
+                        amb_spread: 16.0,
+                        shadow_rgb: [6, 8, 14],
+                    }
+                } else {
+                    Self {
+                        win_rect,
+                        radius,
+                        drop_y: 3.0,
+                        contact_alpha: 0.05,
+                        contact_spread: 4.0,
+                        amb_alpha: 0.05,
+                        amb_spread: 10.0,
+                        shadow_rgb: [6, 8, 14],
+                    }
+                }
             }
-        } else {
-            Self {
-                win_rect,
-                radius,
-                drop_y: 6.0,
-                contact_alpha: 0.08,
-                contact_spread: 7.0,
-                amb_alpha: 0.13,
-                amb_spread: 28.0,
-                shadow_rgb: [6, 8, 14],
+            crate::config::WindowShadowMode::Normal => {
+                if is_focused {
+                    Self {
+                        win_rect,
+                        radius,
+                        drop_y: 8.0,
+                        contact_alpha: 0.10,
+                        contact_spread: 8.0,
+                        amb_alpha: 0.16,
+                        amb_spread: 28.0,
+                        shadow_rgb: [6, 8, 14],
+                    }
+                } else {
+                    Self {
+                        win_rect,
+                        radius,
+                        drop_y: 4.0,
+                        contact_alpha: 0.06,
+                        contact_spread: 5.0,
+                        amb_alpha: 0.08,
+                        amb_spread: 16.0,
+                        shadow_rgb: [6, 8, 14],
+                    }
+                }
             }
         }
     }
@@ -477,10 +523,10 @@ mod tests {
         let unfocused = WindowShadowSpec::for_window(win, 20, false);
         let (fb, fpx, fpt) = focused.bounds_and_offsets();
         let (ub, _, _) = unfocused.bounds_and_offsets();
-        assert_eq!(fpx, 46);
-        assert_eq!(fpt, 33);
-        assert_eq!(fb.loc, Point::from((54, 87)));
-        assert_eq!(fb.size, Size::from((892, 592)));
+        assert_eq!(fpx, 16);
+        assert_eq!(fpt, 11);
+        assert_eq!(fb.loc, Point::from((84, 109)));
+        assert_eq!(fb.size, Size::from((832, 532)));
         assert!(fb.size.w > ub.size.w && fb.size.h > ub.size.h);
         assert!(focused.amb_alpha > unfocused.amb_alpha);
     }
