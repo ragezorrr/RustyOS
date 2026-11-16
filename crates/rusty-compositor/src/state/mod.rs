@@ -511,6 +511,14 @@ pub struct RustyCompositorState {
     pub active_top_bar_menu: Option<crate::shell_render::TopBarMenuHit>,
     /// True when the user clicked the empty desktop background so `Files` is the active Menu Bar app (`RUSTYOS-067`).
     pub desktop_focused: bool,
+    /// Native desktop canvas items loaded from Desktop directory (`RUSTYOS-081`).
+    pub desktop_items: Vec<crate::shell_render::DesktopCanvasItem>,
+    /// Selected desktop canvas item path if any (`RUSTYOS-081`).
+    pub selected_desktop_item: Option<std::path::PathBuf>,
+    /// Last clicked desktop canvas item and timestamp for double-click detection (`RUSTYOS-081`).
+    pub last_desktop_click: Option<(std::path::PathBuf, std::time::Instant)>,
+    /// Last time desktop directory was scanned for canvas items (`RUSTYOS-081`).
+    pub desktop_last_scan: std::time::Instant,
     /// Currently hovered row index inside an open `TopBar` dropdown menu (`RUSTYOS-051`).
     pub top_bar_menu_hover_row: Option<usize>,
     /// Active Control Center slider drag state (`RUSTYOS-051`).
@@ -905,6 +913,12 @@ impl RustyCompositorState {
             minimize_anims: Vec::new(),
             active_top_bar_menu: None,
             desktop_focused: false,
+            desktop_items: crate::state::context_menu_actions::scan_desktop_canvas_items(
+                &crate::state::context_menu_actions::resolve_desktop_dir().unwrap_or_default(),
+            ),
+            selected_desktop_item: None,
+            last_desktop_click: None,
+            desktop_last_scan: std::time::Instant::now(),
             top_bar_menu_hover_row: None,
             qs_slider_drag: None,
             hovered_notification_idx: None,
@@ -1291,6 +1305,19 @@ impl RustyCompositorState {
     #[must_use]
     pub fn is_session_locked(&self) -> bool {
         self.screen_locked || self.ext_session_locked
+    }
+
+    /// Scans the desktop directory and updates canvas items if changed (`RUSTYOS-081`).
+    pub fn resync_desktop_items(&mut self) {
+        if let Some(desktop_dir) = crate::state::context_menu_actions::resolve_desktop_dir() {
+            let scanned =
+                crate::state::context_menu_actions::scan_desktop_canvas_items(&desktop_dir);
+            if scanned != self.desktop_items {
+                self.desktop_items = scanned;
+                self.shell_redraw_needed = true;
+            }
+        }
+        self.desktop_last_scan = std::time::Instant::now();
     }
 
     /// Returns `true` when an interactive compositor overlay or lock screen should bypass any

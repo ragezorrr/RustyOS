@@ -1248,6 +1248,32 @@ hardware/software context и низкие накладные расходы.
   - Живой `--winit --max-frames 35` smoke-прогон (`autostart_count=0`, `rendered_frames=35`, без EGL/шейдерных ошибок).
 - **Risks:** Нет.
 
+### RUSTYOS-081 — Нативные иконки и сетка рабочего стола (Desktop Canvas)
+
+- **Status:** Done (`RUSTYOS-081 Вариант 1` — утверждённый объём выполнен)
+- **Goal:** Реализовать отображение файлов и папок из `~/Рабочий стол` на холсте обоев композитора в стиле macOS Golden Gate: вертикальная сетка в правом верхнем углу, squircle-иконки 48x48, контрастные двухслойные подписи с тенью, выделение кликом, запуск двойным кликом (папки в `rusty-files`, приложения `.desktop` через `launcher`, файлы через `xdg-open`), контекстное меню элемента («Open», «Move to Trash») и автосинхронизация при изменениях.
+- **Dependencies:** `RUSTYOS-033`, `RUSTYOS-048`, `RUSTYOS-050`, `RUSTYOS-064`, `RUSTYOS-080`.
+- **Scope:**
+  - `crates/rusty-compositor/src/shell_render/desktop_canvas.rs`: модуль нативной отрисовки холста рабочего стола с параметрами macOS 27 Golden Gate (`DESKTOP_ITEM_W: 88`, `DESKTOP_ITEM_H: 92`, `DESKTOP_ICON_SIZE: 48`, отступы `margin_right: 24`, `margin_top: 46`, вертикальный поток с переносом колонок влево); расчет геометрии `compute_desktop_item_rect`, хит-тестирование `hit_test_desktop_item`, плашка выделения `push_rounded_glass_box`, 48x48 squircle-иконки и двухслойная тень шрифта (`[0, 0, 0, 220]` и `[255, 255, 255, 255]`); unit-тесты сетки и хит-тестирования.
+  - `crates/rusty-compositor/src/shell_render/mod.rs` & `context_menu.rs`: регистрация модуля `desktop_canvas` и добавление действий контекстного меню `ContextMenuAction::DesktopItemOpen` и `ContextMenuAction::DesktopItemTrash`.
+  - `crates/rusty-compositor/src/state/mod.rs`: добавлены поля `desktop_items`, `selected_desktop_item`, `last_desktop_click`, `desktop_last_scan` и метод `resync_desktop_items(&mut self)` для опроса директории рабочего стола.
+  - `crates/rusty-compositor/src/state/context_menu_actions.rs`: функции `scan_desktop_canvas_items(&Path)` (парсинг .desktop файлов, сортировка папок и файлов), `open_desktop_canvas_item(&item)` (открытие в `rusty-files` / запуск exec / `xdg-open`), `open_desktop_item_context_menu(point, &item)` и обновление `create_desktop_folder_action` с немедленным вызовом `resync_desktop_items` и фокусом на созданной папке.
+  - `crates/rusty-compositor/src/frame_composer.rs`: вызов `render_desktop_canvas_elements` в `build_backdrop_render_elements` перед добавлением обоев на основном мониторе (иконки отображаются поверх обоев и под всеми плавающими окнами и панелями).
+  - `crates/rusty-compositor/src/input/pointer.rs`: хит-тестирование иконок рабочего стола при клике на свободное пространство (одиночный клик — выделение, двойной клик <450ms — открытие, правый клик — выбор и контекстное меню элемента; клик в пустое место — сброс выделения и общее меню рабочего стола).
+  - `crates/rusty-compositor/src/state/system_bridges.rs`: периодическая автосинхронизация состояния рабочего стола каждые 3 секунды в фоновом цикле системных мостов.
+- **Acceptance Criteria:**
+  - Файлы и папки из каталога рабочего стола (`~/Рабочий стол` / `~/Desktop`) отображаются прямо на обоях рабочего стола;
+  - Сетка иконок выравнивается в правом верхнем углу (macOS Golden Gate);
+  - Создание «Новая папка» сразу же отображает новую папку на рабочем столе с автоматическим выделением;
+  - Двойной клик по папке открывает её в файловом менеджере `rusty-files`;
+  - Правый клик по иконке открывает контекстное меню для данного объекта («Open», «Move to Trash»);
+  - Клики по пустому рабочему столу снимают выделение и вызывают общее контекстное меню стола.
+- **Tests:**
+  - `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo build --workspace --bins --locked`
+  - `cargo test --workspace --locked -- --test-threads=1` (`223 passed; 0 failed`)
+  - Интеграционный `--winit --max-frames 35` smoke-прогон (`rendered_frames=35, late=0 missed=0`, чистый выход).
+- **Risks:** Нет.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

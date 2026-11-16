@@ -37,6 +37,10 @@ pub enum ContextMenuAction {
     DesktopMissionControl,
     /// Toggles `Tile` / `Float` layout mode for the active workspace.
     DesktopToggleLayoutMode,
+    /// Opens a specific desktop canvas file/directory (`RUSTYOS-081`).
+    DesktopItemOpen(std::path::PathBuf),
+    /// Moves a desktop canvas file/directory to trash (`RUSTYOS-081`).
+    DesktopItemTrash(std::path::PathBuf),
 
     /// Launches a pinned Dock application slot.
     DockLaunchApp(DockHit),

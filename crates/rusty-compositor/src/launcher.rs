@@ -651,7 +651,7 @@ fn exec_basename(exec: &str) -> String {
         .to_ascii_lowercase()
 }
 
-fn clean_desktop_exec(exec: &str) -> String {
+pub(crate) fn clean_desktop_exec(exec: &str) -> String {
     parse_exec_argv(exec)
         .into_iter()
         .map(|arg| {

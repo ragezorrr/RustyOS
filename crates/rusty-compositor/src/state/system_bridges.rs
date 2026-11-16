@@ -123,6 +123,9 @@ impl RustyCompositorState {
         let polkit_changed = self.drain_polkit_events(serial);
         let portal_changed = self.drain_portal_events(serial);
         let updates_changed = self.drain_update_events();
+        if self.desktop_last_scan.elapsed() >= std::time::Duration::from_secs(3) {
+            self.resync_desktop_items();
+        }
         let changed =
             auth_changed || logind_changed || polkit_changed || portal_changed || updates_changed;
         if changed {

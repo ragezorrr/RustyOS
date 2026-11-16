@@ -699,6 +699,7 @@ fn build_backdrop_render_elements(
     output_windows: &[(rusty_wm::WindowId, rusty_wm::Rect)],
     focused_win: Option<rusty_wm::WindowId>,
     fullscreen_win: Option<rusty_wm::WindowId>,
+    is_primary: bool,
 ) -> Vec<CompositorRenderElement> {
     let mut backdrop_list: Vec<CompositorRenderElement> = Vec::new();
     for &(win_id, rect) in output_windows.iter().rev() {
@@ -740,14 +741,26 @@ fn build_backdrop_render_elements(
         output_scale,
     );
 
-    if fullscreen_win.is_none()
-        && let Some(wallpaper) = shape_cache.wallpaper_element(
+    if fullscreen_win.is_none() {
+        if is_primary && !state.desktop_items.is_empty() {
+            crate::shell_render::render_desktop_canvas_elements(
+                renderer,
+                text_cache,
+                shape_cache,
+                &state.desktop_items,
+                state.selected_desktop_item.as_deref(),
+                Size::<i32, Logical>::from((output_geo.size.w.max(1), output_geo.size.h.max(1))),
+                crate::shell_render::DOCK_HEIGHT,
+                &mut backdrop_list,
+            );
+        }
+        if let Some(wallpaper) = shape_cache.wallpaper_element(
             renderer,
             Size::<i32, Logical>::from((output_geo.size.w.max(1), output_geo.size.h.max(1))),
             state.user_config.wallpaper.as_deref(),
-        )
-    {
-        backdrop_list.push(CompositorRenderElement::Memory(wallpaper));
+        ) {
+            backdrop_list.push(CompositorRenderElement::Memory(wallpaper));
+        }
     }
 
     scale_render_elements_for_output(backdrop_list, output_scale)
@@ -944,6 +957,7 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
         &output_windows,
         focused_win,
         fullscreen_win,
+        is_primary,
     );
     let hide_chrome_for_fullscreen = fullscreen_win.is_some()
         || state.should_hide_shell_chrome_for_fullscreen_on(output_entry.id);

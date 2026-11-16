@@ -35,6 +35,7 @@ smithay::backend::renderer::element::render_elements! {
 }
 
 mod context_menu;
+mod desktop_canvas;
 mod dock;
 mod dock_stack;
 mod lock_screen;
@@ -52,6 +53,10 @@ pub use context_menu::{
     ContextMenuState, ContextMenuSubmenuLayout, ContextMenuTarget, compute_context_menu_layout,
     generate_context_menu_elements, handle_context_menu_key, hit_test_context_menu,
     update_context_menu_hover,
+};
+pub use desktop_canvas::{
+    DesktopCanvasItem, compute_desktop_item_rect, hit_test_desktop_item,
+    render_desktop_canvas_elements,
 };
 pub use dock::{
     ComputedDockLayout, ComputedDockSlot, DockAppTile, DockDragPreview, DockHit, DockSection,

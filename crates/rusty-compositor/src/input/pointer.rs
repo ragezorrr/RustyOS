@@ -584,18 +584,66 @@ impl RustyCompositorState {
                 keyboard.set_focus(self, None, serial);
                 self.desktop_focused = true;
                 self.shell_redraw_needed = true;
-                if button == 273
-                    && !self.has_foreground_layer_surfaces()
-                    && (!is_on_primary
-                        || primary_local_y >= f64::from(crate::shell_render::TOP_BAR_HEIGHT))
-                {
-                    let hide_chrome = self
-                        .output_map
-                        .output_under(self.pointer_location)
-                        .is_some_and(|oid| self.should_hide_shell_chrome_for_fullscreen_on(oid));
-                    if !hide_chrome {
-                        self.open_desktop_context_menu(self.pointer_location);
+
+                // Desktop canvas icon interaction (RUSTYOS-081)
+                let hit_item = if is_on_primary && !self.has_foreground_layer_surfaces() {
+                    let screen_size = self.output_map.primary().logical_geometry().size;
+                    let local_pos = Point::from((primary_local_x, primary_local_y));
+                    crate::shell_render::hit_test_desktop_item(
+                        &self.desktop_items,
+                        screen_size,
+                        crate::shell_render::DOCK_HEIGHT,
+                        local_pos,
+                    )
+                    .and_then(|idx| self.desktop_items.get(idx).cloned())
+                } else {
+                    None
+                };
+
+                if let Some(item) = hit_item {
+                    if button == 272 {
+                        let now = std::time::Instant::now();
+                        let is_double_click =
+                            if let Some((ref last_path, last_time)) = self.last_desktop_click {
+                                last_path == &item.path
+                                    && now.duration_since(last_time).as_millis() <= 450
+                            } else {
+                                false
+                            };
+                        if is_double_click {
+                            self.last_desktop_click = None;
+                            self.open_desktop_canvas_item(&item);
+                        } else {
+                            self.selected_desktop_item = Some(item.path.clone());
+                            self.last_desktop_click = Some((item.path, now));
+                            self.shell_redraw_needed = true;
+                        }
                         return;
+                    } else if button == 273 {
+                        self.selected_desktop_item = Some(item.path.clone());
+                        self.open_desktop_item_context_menu(self.pointer_location, &item);
+                        return;
+                    }
+                } else {
+                    if self.selected_desktop_item.is_some() {
+                        self.selected_desktop_item = None;
+                        self.shell_redraw_needed = true;
+                    }
+                    if button == 273
+                        && !self.has_foreground_layer_surfaces()
+                        && (!is_on_primary
+                            || primary_local_y >= f64::from(crate::shell_render::TOP_BAR_HEIGHT))
+                    {
+                        let hide_chrome = self
+                            .output_map
+                            .output_under(self.pointer_location)
+                            .is_some_and(|oid| {
+                                self.should_hide_shell_chrome_for_fullscreen_on(oid)
+                            });
+                        if !hide_chrome {
+                            self.open_desktop_context_menu(self.pointer_location);
+                            return;
+                        }
                     }
                 }
             }

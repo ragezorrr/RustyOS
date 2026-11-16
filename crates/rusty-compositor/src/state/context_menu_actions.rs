@@ -115,6 +115,49 @@ pub(crate) fn create_unique_desktop_folder(desktop_dir: &Path) -> std::io::Resul
     ))
 }
 
+pub(crate) fn scan_desktop_canvas_items(
+    desktop_dir: &Path,
+) -> Vec<crate::shell_render::DesktopCanvasItem> {
+    let mut items = Vec::new();
+    let Ok(read_dir) = fs::read_dir(desktop_dir) else {
+        return items;
+    };
+    for entry in read_dir.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with('.') {
+            continue;
+        }
+        let path = entry.path();
+        let is_dir = entry.file_type().is_ok_and(|ft| ft.is_dir());
+        let mut display_name = name.clone();
+        let mut icon_name = None;
+
+        if !is_dir
+            && name.ends_with(".desktop")
+            && let Ok(content) = fs::read_to_string(&path)
+            && let Some(app) = crate::launcher::parse_desktop_entry(&content, &name)
+        {
+            display_name = app.name;
+            icon_name = app.icon;
+        }
+
+        items.push(crate::shell_render::DesktopCanvasItem {
+            name: display_name,
+            path,
+            is_dir,
+            icon_name,
+        });
+    }
+
+    items.sort_by(|a, b| match (a.is_dir, b.is_dir) {
+        (true, false) => std::cmp::Ordering::Less,
+        (false, true) => std::cmp::Ordering::Greater,
+        _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+    });
+
+    items
+}
+
 pub(crate) fn read_downloads_entries(
     downloads_dir: &Path,
     sort_mode: DownloadsSortMode,
@@ -1009,6 +1052,28 @@ impl RustyCompositorState {
             ContextMenuAction::DesktopToggleLayoutMode => {
                 self.apply_wm_action(WmAction::ToggleLayoutMode, serial);
             }
+            ContextMenuAction::DesktopItemOpen(path) => {
+                let is_dir = path.is_dir();
+                let name = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("")
+                    .to_owned();
+                let item = crate::shell_render::DesktopCanvasItem {
+                    name,
+                    path: path.clone(),
+                    is_dir,
+                    icon_name: None,
+                };
+                self.open_desktop_canvas_item(&item);
+            }
+            ContextMenuAction::DesktopItemTrash(path) => {
+                if let Some(trash_dir) = resolve_trash_root() {
+                    let _ = rusty_services::file_manager::move_to_trash(&path, &trash_dir);
+                    self.resync_desktop_items();
+                    self.show_osd("Moved to Trash", None, false);
+                }
+            }
             ContextMenuAction::OverviewToggle => self.toggle_overview(),
             ContextMenuAction::SwitchWorkspace(ws) => {
                 self.apply_wm_action(
@@ -1115,6 +1180,62 @@ impl RustyCompositorState {
             .launch_command(&cmd, &self.socket_name, &ipc_path);
     }
 
+    pub(crate) fn open_desktop_canvas_item(
+        &mut self,
+        item: &crate::shell_render::DesktopCanvasItem,
+    ) {
+        if item.is_dir {
+            let _ = self.launch_rusty_files_dir(Some(&item.path));
+        } else if item.path.extension().is_some_and(|e| e == "desktop")
+            && let Ok(content) = fs::read_to_string(&item.path)
+            && let Some(app) = crate::launcher::parse_desktop_entry(&content, &item.name)
+        {
+            let ipc_path = rusty_ipc::default_ipc_socket_path(&self.socket_name);
+            let cmd = crate::launcher::clean_desktop_exec(&app.exec);
+            let _ = self
+                .launcher
+                .launch_command(&cmd, &self.socket_name, &ipc_path);
+        } else {
+            self.launch_path_with_xdg_open(&item.path);
+        }
+    }
+
+    #[allow(clippy::cast_possible_truncation)]
+    pub(crate) fn open_desktop_item_context_menu(
+        &mut self,
+        point: Point<f64, Logical>,
+        item: &crate::shell_render::DesktopCanvasItem,
+    ) {
+        let Some(output_id) = self.output_map.output_under(point) else {
+            return;
+        };
+        let Some(entry) = self.output_map.get(output_id) else {
+            return;
+        };
+        let anchor_diff = point - entry.location.to_f64();
+        let anchor_local =
+            Point::from((anchor_diff.x.round() as i32, anchor_diff.y.round() as i32));
+        let entries = vec![
+            crate::shell_render::ContextMenuEntry::item(
+                "Open",
+                crate::surfaces::UiGlyphKind::Folder,
+                crate::shell_render::ContextMenuAction::DesktopItemOpen(item.path.clone()),
+            ),
+            crate::shell_render::ContextMenuEntry::Separator,
+            crate::shell_render::ContextMenuEntry::item(
+                "Move to Trash",
+                crate::surfaces::UiGlyphKind::Close,
+                crate::shell_render::ContextMenuAction::DesktopItemTrash(item.path.clone()),
+            ),
+        ];
+        self.install_context_menu(
+            output_id,
+            anchor_local,
+            crate::shell_render::ContextMenuTarget::Desktop,
+            entries,
+        );
+    }
+
     pub(in crate::state) fn create_desktop_folder_action(&mut self) {
         let Some(desktop_dir) = resolve_desktop_dir() else {
             self.show_osd("Desktop path unavailable", None, false);
@@ -1127,6 +1248,8 @@ impl RustyCompositorState {
                     .and_then(|n| n.to_str())
                     .unwrap_or("New Folder");
                 self.show_osd(format!("Created: {folder_name}"), None, false);
+                self.resync_desktop_items();
+                self.selected_desktop_item = Some(created);
             }
             Err(err) => {
                 warn!(?err, "Failed to create Desktop folder");

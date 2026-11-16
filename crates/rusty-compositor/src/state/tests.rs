@@ -624,6 +624,100 @@ fn context_menu_desktop_folder_multi_monitor_dismiss_and_actions() -> Result<(),
 }
 
 #[test]
+fn desktop_canvas_folder_creation_and_item_interaction() -> Result<(), Box<dyn Error>> {
+    use crate::shell_render::{
+        ContextMenuAction, DOCK_HEIGHT, compute_desktop_item_rect, hit_test_desktop_item,
+    };
+    use crate::state::context_menu_actions::scan_desktop_canvas_items;
+    use smithay::utils::{Point, Size};
+
+    let temp_dir = std::env::temp_dir().join(format!(
+        "rustyos-desktop-canvas-test-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    std::fs::create_dir_all(&temp_dir)?;
+
+    // 1. Create a folder, desktop entry and regular file
+    let folder_path = temp_dir.join("Новая папка");
+    std::fs::create_dir(&folder_path)?;
+
+    let desktop_file_path = temp_dir.join("steam.desktop");
+    std::fs::write(
+        &desktop_file_path,
+        "[Desktop Entry]\nType=Application\nName=Steam\nExec=/usr/bin/steam\nIcon=steam\n",
+    )?;
+
+    let txt_path = temp_dir.join("notes.txt");
+    std::fs::write(&txt_path, "Hello RustyOS")?;
+
+    // 2. Scan desktop canvas items
+    let items = scan_desktop_canvas_items(&temp_dir);
+    assert_eq!(items.len(), 3);
+
+    // Folders come first
+    assert!(items[0].is_dir);
+    assert_eq!(items[0].name, "Новая папка");
+
+    // Desktop entry is parsed
+    let steam_item = items
+        .iter()
+        .find(|i| i.name == "Steam")
+        .ok_or("missing steam item")?;
+    assert!(!steam_item.is_dir);
+    assert_eq!(steam_item.icon_name.as_deref(), Some("steam"));
+
+    // 3. Layout and hit testing
+    let screen_size = Size::from((1920, 1080));
+    let rect0 = compute_desktop_item_rect(0, screen_size, DOCK_HEIGHT);
+    assert!(rect0.loc.x > 1800);
+    assert_eq!(rect0.loc.y, 46);
+
+    let inside_pos = Point::from((f64::from(rect0.loc.x + 10), f64::from(rect0.loc.y + 10)));
+    assert_eq!(
+        hit_test_desktop_item(&items, screen_size, DOCK_HEIGHT, inside_pos),
+        Some(0)
+    );
+
+    // 4. Test compositor context menu on desktop item
+    let mut display: Display<RustyCompositorState> = Display::new()?;
+    let mut event_loop: EventLoop<RustyCompositorState> = EventLoop::try_new()?;
+    let mut compositor = RustyCompositorState::new(
+        &display,
+        "wayland-rustyos-desktop-canvas-test".to_owned(),
+        event_loop.get_signal(),
+        event_loop.handle(),
+        (1920, 1080).into(),
+    )?;
+    let _ = (&mut display, &mut event_loop);
+
+    compositor.desktop_items = items;
+    let item0 = compositor.desktop_items[0].clone();
+    compositor.open_desktop_item_context_menu((1850.0, 60.0).into(), &item0);
+    let ctx = compositor
+        .context_menu
+        .as_ref()
+        .ok_or("desktop item context menu")?;
+    assert!(ctx.entries.iter().any(|e| matches!(
+        e,
+        crate::shell_render::ContextMenuEntry::Item {
+            action: ContextMenuAction::DesktopItemOpen(_),
+            ..
+        }
+    )));
+    assert!(ctx.entries.iter().any(|e| matches!(
+        e,
+        crate::shell_render::ContextMenuEntry::Item {
+            action: ContextMenuAction::DesktopItemTrash(_),
+            ..
+        }
+    )));
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    Ok(())
+}
+
+#[test]
 fn context_menu_dock_window_alt_force_quit_and_open_at_login() -> Result<(), Box<dyn Error>> {
     use crate::config::UserConfig;
     use crate::shell_render::{ContextMenuAction, ContextMenuEntry, DockHit};
