@@ -4,6 +4,7 @@
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
+use std::time::SystemTime;
 
 use rusty_services::file_manager::{FilesThemeMode, detect_system_theme_from_toml};
 use rusty_services::updates::{
@@ -51,6 +52,8 @@ pub(crate) struct UpdaterAppState {
     pub running: bool,
     pub dirty: bool,
     pub theme: FilesThemeMode,
+    theme_locked: bool,
+    last_config_mtime: Option<SystemTime>,
     pub dry_run: bool,
     pub summary: SystemReleaseSummary,
     pub snapshot: UpdateStatusSnapshot,
@@ -81,6 +84,8 @@ impl UpdaterAppState {
             running: true,
             dirty: true,
             theme,
+            theme_locked: opts.theme_override.is_some(),
+            last_config_mtime: updater_config_mtime(),
             dry_run: opts.dry_run,
             summary,
             snapshot: UpdateStatusSnapshot::default(),
@@ -125,6 +130,23 @@ impl UpdaterAppState {
             tx.cancel();
         }
         self.running = false;
+    }
+
+    pub(crate) fn poll_system_theme(&mut self) -> bool {
+        if self.theme_locked {
+            return false;
+        }
+        let mtime = updater_config_mtime();
+        if mtime.is_some() && mtime != self.last_config_mtime {
+            self.last_config_mtime = mtime;
+            let next = detect_config_theme();
+            if next != self.theme {
+                self.theme = next;
+                self.dirty = true;
+                return true;
+            }
+        }
+        false
     }
 
     pub(crate) fn start_check_now(&mut self) {
@@ -369,12 +391,23 @@ impl UpdaterAppState {
     }
 }
 
-fn detect_config_theme() -> FilesThemeMode {
-    let config_path = std::env::var_os("XDG_CONFIG_HOME")
+fn updater_config_path() -> Option<PathBuf> {
+    std::env::var_os("XDG_CONFIG_HOME")
+        .filter(|v| !v.is_empty())
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
-        .map(|base| base.join("rustyos/config.toml"));
-    if let Some(path) = config_path
+        .map(|base| base.join("rustyos/config.toml"))
+}
+
+fn updater_config_mtime() -> Option<SystemTime> {
+    std::fs::metadata(updater_config_path()?)
+        .ok()?
+        .modified()
+        .ok()
+}
+
+fn detect_config_theme() -> FilesThemeMode {
+    if let Some(path) = updater_config_path()
         && let Ok(raw) = std::fs::read_to_string(path)
         && let Some(mode) = detect_system_theme_from_toml(&raw)
     {

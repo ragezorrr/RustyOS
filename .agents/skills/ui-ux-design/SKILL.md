@@ -19,14 +19,17 @@ name: ui-ux-design
 - Before designing or editing UI: open the matching Light and Dark PNGs from
   `docs/design/references/macos-27-golden-gate/INDEX.md` (`read_file`).
 - Liquid Glass 1:1 parity rules:
-  - Light glass must look clear and luminous (`tint` alpha restrained so blurred folds read through)
-    with directional corner caustics/rim highlights, not milky-white or muddy grey.
+  - Use the unified superellipse lens + directional 3-layer `uRim` shader (`LIQUID_GLASS_FRAG`:
+    top `1.0`, bottom `0.35`, vertical sides `0.0`, zero diagonal corner flares or milky `sheen`)
+    so Light and Dark glass stay clear and balanced against underlying wallpaper folds.
   - All primary glass overlays (`Dock`, `Popover`, `ControlModule`, `Spotlight` search pill +
-    separate results card, `App Switcher`, `LockScreen` password pill) must use GPU
-    `LiquidGlassElement` with CPU `UiShapeCache::glass_panel_element` fallback.
+    separate results card, `App Switcher`, `LockScreen` password pill, `rustyos_liquid_glass_v1`
+    client surfaces) use GPU `LiquidGlassElement` (`compute_glass_material`) with matching CPU
+    `UiShapeCache::glass_panel_element` fallback (`cutefish_rim_alpha`).
   - Transparent `TopBar` with no opaque backing box under right status icons or placeholder block
-    behind the logo; non-blocking windows like `Settings` must not dim `TopBar`/`Dock`.
-  - Floating macOS 27 window style target: inset rounded glass sidebar (traffic lights inside)
-    and separated glass toolbar pills without debug controls in production status bars.
+    behind the logo; standalone `System Settings` (`apps/rusty-settings`) uses a flat cool-grey
+    sidebar (`#ECEDF1` Light / `#262628` Dark) without Liquid Glass blur and never dims `TopBar`/`Dock`.
+  - Floating window chrome uses rounded top/bottom corners (`WINDOW_RADIUS = 20`) and Light/Dark
+    adaptive SSD frames (`ssd_frame_colors`), with clean toolbars and zero debug controls in status bars.
 - After UI changes, capture a live `--winit` screenshot in `scratch/` and inspect the PNG with
   `read_file` across Light and Dark modes (without mutating persistent `~/.config/rustyos/config.toml`).

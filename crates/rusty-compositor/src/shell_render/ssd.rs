@@ -1,5 +1,6 @@
 //! Server-Side Decoration (SSD) titlebars, traffic lights, borders, and drop shadows.
 
+use smithay::backend::renderer::Color32F;
 use smithay::backend::renderer::element::memory::MemoryRenderBufferRenderElement;
 use smithay::backend::renderer::element::solid::SolidColorRenderElement;
 use smithay::backend::renderer::gles::GlesRenderer;
@@ -7,11 +8,10 @@ use smithay::utils::{Point, Rectangle, Size};
 
 use super::CompositorRenderElement;
 use super::tokens::{
-    COLOR_BORDER, COLOR_BORDER_HIGHLIGHT, COLOR_DANGER, COLOR_MUTED, COLOR_SUBTLE, COLOR_SUCCESS,
-    COLOR_SURFACE_ELEVATED, COLOR_SURFACE_OVERLAY, COLOR_WARNING, RESIZE_GRAB_BORDER, RGBA_BORDER,
-    RGBA_BORDER_HIGHLIGHT, RGBA_SURFACE_ELEVATED, RGBA_SURFACE_OVERLAY, TITLEBAR_HEIGHT,
-    WINDOW_RADIUS, blend_border_over_fill_color, make_solid_element, push_soft_shadow,
-    rgba_to_premul_color32f,
+    COLOR_BORDER, COLOR_DANGER, COLOR_MUTED, COLOR_SUBTLE, COLOR_SUCCESS, COLOR_WARNING,
+    RESIZE_GRAB_BORDER, RGBA_BORDER, RGBA_BORDER_HIGHLIGHT, RGBA_SURFACE_ELEVATED,
+    RGBA_SURFACE_OVERLAY, TITLEBAR_HEIGHT, WINDOW_RADIUS, blend_border_over_fill_color,
+    make_solid_element, push_soft_shadow, rgba_to_premul_color32f,
 };
 
 /// Active edges targeted by an interactive window resize (`RUSTYOS-022`).
@@ -169,15 +169,14 @@ pub fn generate_window_ssd_elements(
     let w = rect.width.max(64);
     let h = rect.height.max(TITLEBAR_HEIGHT + 32);
 
-    let border_color = if is_focused {
-        COLOR_BORDER_HIGHLIGHT
-    } else {
+    let pal = super::tokens::ThemePalette::active();
+    let (titlebar_rgba, border_rgba) = ssd_frame_colors(pal.is_dark, is_focused);
+    let border_color = rgba_to_premul_color32f(border_rgba);
+    let titlebar_bg = rgba_to_premul_color32f(titlebar_rgba);
+    let divider_color = if pal.is_dark {
         COLOR_BORDER
-    };
-    let titlebar_bg = if is_focused {
-        COLOR_SURFACE_OVERLAY
     } else {
-        COLOR_SURFACE_ELEVATED
+        pal.popover_separator
     };
 
     // 1. Outer 1px glass rim around the whole window frame (4 edge strips)
@@ -208,7 +207,7 @@ pub fn generate_window_ssd_elements(
             Point::from((x, y + TITLEBAR_HEIGHT - 1)),
             Size::from((w, 1)),
         ),
-        COLOR_BORDER,
+        divider_color,
     ));
 
     // 3. macOS-style traffic light buttons (Close, Minimize, Maximize)
@@ -256,20 +255,59 @@ pub fn generate_window_ssd_elements(
     let title_w = (w / 4).clamp(48, 160);
     if !has_text && w > 140 {
         let title_x = x + (w - title_w) / 2;
-        let title_color = if is_focused {
-            COLOR_MUTED
-        } else {
-            COLOR_SUBTLE
-        };
         elements.push(make_solid_element(
             Rectangle::new(Point::from((title_x, y + 11)), Size::from((title_w, 6))),
-            title_color,
+            ssd_title_pill_color(&pal, is_focused),
         ));
     }
 
     // Smithay render_output expects front-to-back order.
     elements.reverse();
     elements
+}
+
+fn ssd_title_pill_color(pal: &super::tokens::ThemePalette, is_focused: bool) -> Color32F {
+    if pal.is_dark {
+        if is_focused {
+            COLOR_MUTED
+        } else {
+            COLOR_SUBTLE
+        }
+    } else {
+        rgba_to_premul_color32f(if is_focused {
+            pal.popover_text_secondary
+        } else {
+            pal.popover_text_muted
+        })
+    }
+}
+
+const fn ssd_frame_colors(is_dark: bool, is_focused: bool) -> ([u8; 4], [u8; 4]) {
+    if is_dark {
+        let titlebar = if is_focused {
+            RGBA_SURFACE_OVERLAY
+        } else {
+            RGBA_SURFACE_ELEVATED
+        };
+        let border = if is_focused {
+            RGBA_BORDER_HIGHLIGHT
+        } else {
+            RGBA_BORDER
+        };
+        (titlebar, border)
+    } else {
+        let titlebar = if is_focused {
+            [245, 246, 250, 248]
+        } else {
+            [236, 237, 241, 244]
+        };
+        let border = if is_focused {
+            [0, 0, 0, 28]
+        } else {
+            [0, 0, 0, 18]
+        };
+        (titlebar, border)
+    }
 }
 
 /// Generates centered title text element for a window's SSD titlebar (`RUSTYOS-020`).
@@ -283,10 +321,11 @@ pub fn generate_ssd_title_element(
     if !text_cache.has_font() || rect.width < 120 {
         return None;
     }
+    let pal = super::tokens::ThemePalette::active();
     let color = if is_focused {
-        [242, 242, 247, 255] // #F2F2F7
+        pal.popover_text_primary
     } else {
-        [148, 148, 156, 255] // #94949C
+        pal.popover_text_muted
     };
     let bounds = Rectangle::new(
         Point::from((rect.x + 70, rect.y)),
@@ -365,15 +404,19 @@ pub fn generate_window_ssd_composite_elements_with_hover(
 
     // Rounded top & bottom corners (`WINDOW_RADIUS = 20`) + crisp 1px glass rim
     let r = WINDOW_RADIUS.min(w / 2).min(h / 2).max(4);
-    let titlebar_rgba = if is_focused {
-        RGBA_SURFACE_OVERLAY
+    let pal = super::tokens::ThemePalette::active();
+    let (titlebar_rgba, border_rgba) = ssd_frame_colors(pal.is_dark, is_focused);
+    let spec_alpha = if pal.is_dark {
+        if is_focused { 30 } else { 14 }
+    } else if is_focused {
+        160
     } else {
-        RGBA_SURFACE_ELEVATED
+        90
     };
-    let border_rgba = if is_focused {
-        RGBA_BORDER_HIGHLIGHT
+    let divider_col = if pal.is_dark {
+        COLOR_BORDER
     } else {
-        RGBA_BORDER
+        pal.popover_separator
     };
     let titlebar_fill = rgba_to_premul_color32f(titlebar_rgba);
     let top_rim_col = blend_border_over_fill_color(border_rgba, titlebar_rgba);
@@ -412,7 +455,7 @@ pub fn generate_window_ssd_composite_elements_with_hover(
         )));
         out.push(CompositorRenderElement::Solid(make_solid_element(
             Rectangle::new(Point::from((x + r, y + 1)), Size::from((w - 2 * r, 1))),
-            rgba_to_premul_color32f([255, 255, 255, if is_focused { 30 } else { 14 }]),
+            rgba_to_premul_color32f([255, 255, 255, spec_alpha]),
         )));
         if r > 2 {
             out.push(CompositorRenderElement::Solid(make_solid_element(
@@ -439,7 +482,7 @@ pub fn generate_window_ssd_composite_elements_with_hover(
             Point::from((x + 1, y + TITLEBAR_HEIGHT - 1)),
             Size::from((w - 2, 1)),
         ),
-        COLOR_BORDER,
+        divider_col,
     )));
     if h > 2 * r {
         out.push(CompositorRenderElement::Solid(make_solid_element(

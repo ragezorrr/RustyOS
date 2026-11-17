@@ -837,7 +837,7 @@ fn base_glass_layer(
             (0.76 * (0.50 + 0.50 * glass_scale), [43.0, 43.0, 48.0])
         }
         (true, GlassPanelStyle::ControlModule) => {
-            (0.26 * (0.48 + 0.52 * glass_scale), [36.0, 36.0, 41.0])
+            (0.28 * (0.48 + 0.52 * glass_scale), [60.0, 60.0, 68.0])
         }
         (false, GlassPanelStyle::Dock) => {
             (0.25 * (0.44 + 0.56 * glass_scale), [153.0, 153.0, 153.0])
@@ -846,7 +846,7 @@ fn base_glass_layer(
             (0.62 * (0.52 + 0.48 * glass_scale), [250.0, 250.0, 252.0])
         }
         (false, GlassPanelStyle::ControlModule) => {
-            (0.22 * (0.48 + 0.52 * glass_scale), [248.0, 248.0, 250.0])
+            (0.22 * (0.48 + 0.52 * glass_scale), [184.0, 188.0, 198.0])
         }
     };
     [
@@ -932,7 +932,7 @@ pub(super) fn sample_glass_panel_pixel_themed(
             (true, GlassPanelStyle::ControlModule) => ([54.0, 54.0, 60.0], 232.0 / 255.0),
             (false, GlassPanelStyle::Dock) => ([236.0, 238.0, 243.0], 246.0 / 255.0),
             (false, GlassPanelStyle::Popover) => ([246.0, 247.0, 250.0], 248.0 / 255.0),
-            (false, GlassPanelStyle::ControlModule) => ([226.0, 230.0, 238.0], 236.0 / 255.0),
+            (false, GlassPanelStyle::ControlModule) => ([238.0, 240.0, 245.0], 238.0 / 255.0),
         };
         return premul_pixel(
             base_rgb[0] + dither,
@@ -949,11 +949,10 @@ pub(super) fn sample_glass_panel_pixel_themed(
     let (_nx, ny) = outward_normal_2d(u, v, hw, hh, r);
     let rim_peak = match (is_dark, style) {
         (false, GlassPanelStyle::Dock) => 0.43,
-        (true, GlassPanelStyle::Dock) => 0.35,
+        (true, GlassPanelStyle::Dock | GlassPanelStyle::ControlModule) => 0.35,
         (false, GlassPanelStyle::Popover) => 0.36,
         (true, GlassPanelStyle::Popover) => 0.30,
-        (false, GlassPanelStyle::ControlModule) => 0.38,
-        (true, GlassPanelStyle::ControlModule) => 0.32,
+        (false, GlassPanelStyle::ControlModule) => 0.42,
     };
     let rim_alpha = cutefish_rim_alpha(ny, sd, rim_peak);
     if rim_alpha > 0.001 {

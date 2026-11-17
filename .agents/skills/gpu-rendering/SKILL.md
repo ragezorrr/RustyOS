@@ -14,10 +14,14 @@ name: gpu-rendering
 - Add fallbacks for unsupported formats/features.
 - Benchmark on target hardware; do not assume zero-copy or direct
   scanout.
-- Liquid Glass backdrop blur (`surfaces/liquid_glass.rs`) runs a damage-gated Dual-Kawase FBO
-  ladder (`1 -> 1/2 -> 1/4 -> 1/8 -> 1/4 -> 1/2`) via safe Smithay `GlesTexProgram` / `Offscreen`,
-  skipping blur passes when backdrop damage is empty, suppressing desktop capture while locked,
-  and falling back cleanly to CPU `UiShapeCache::glass_panel_element`.
+- Liquid Glass (`surfaces/liquid_glass.rs`, ADR-0052/0053) runs a damage-gated Dual-Kawase FBO
+  ladder (`1 -> half_a -> quarter_a -> eighth_a -> quarter_b -> half_out`) via safe Smithay
+  `GlesTexProgram` / `Offscreen`, sampling `half_a` for `Dock` and `half_out` for
+  `Popover`/`ControlModule` through the single unified superellipse lens shader
+  (`LIQUID_GLASS_FRAG`, `14 px` edge lens `ior = 1.7`, directional top/bottom `uRim`, zero
+  corner flares/sheen). Call `LiquidGlassPipeline::invalidate_all()` (via
+  `UiShapeCache::sync_wallpaper_revision`) whenever `appearance` or wallpaper changes, suppress
+  backdrop capture while locked, and fall back cleanly to CPU `UiShapeCache::glass_panel_element`.
 - **Smithay/EGL Surface Invariant (critical):** any offscreen `renderer.bind(&mut texture)` pass
   (`LiquidGlassPipeline`, screenshot/portal capture) calls `egl.make_current()`, leaving the
   thread on `EGL_NO_SURFACE`. `WinitGraphicsBackend::bind()` does not restore the window surface;

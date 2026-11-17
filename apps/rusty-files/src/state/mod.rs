@@ -25,7 +25,7 @@ pub(crate) use types::*;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 
 use rusty_services::file_manager::{
     FileDetailedInfo, FileEntry, FileSortField, FileSortOrder, FileTagColor, FileTagsConfig,
@@ -42,6 +42,8 @@ pub(crate) struct FilesAppState {
     pub active_sidebar: Option<SidebarLocation>,
     pub view_mode: FileViewMode,
     pub theme: FilesThemeMode,
+    pub(crate) theme_locked: bool,
+    pub(crate) last_config_mtime: Option<SystemTime>,
     pub sort_field: FileSortField,
     pub sort_order: FileSortOrder,
     pub show_hidden: bool,
@@ -118,25 +120,24 @@ impl FilesAppState {
         let (transfer_tx, transfer_rx) = mpsc::channel();
         let (home_search_tx, home_search_rx) = mpsc::channel();
         let sidebar_items = build_sidebar_items(&locations, &volumes);
-
         let theme = opts
             .theme_override
             .or_else(|| locations.detect_system_theme())
             .unwrap_or(tags_config.theme);
-        let view_mode = tags_config.view_mode;
-
         let mut app = Self {
             sort_field: tags_config.sort_field,
             sort_order: tags_config.sort_order,
             show_hidden: tags_config.show_hidden,
             show_path_bar: tags_config.show_path_bar,
+            view_mode: tags_config.view_mode,
             locations,
             tags_config,
             volumes,
             sidebar_items,
             active_sidebar: None,
-            view_mode,
             theme,
+            theme_locked: opts.theme_override.is_some(),
+            last_config_mtime: rustyos_config_mtime(),
             search_active: false,
             search_query: String::new(),
             search_scope: SearchScope::ThisFolder,
@@ -225,6 +226,25 @@ impl FilesAppState {
         self.run_state = AppRunState::Exiting;
     }
 
+    /// Reloads system `Light` / `Dark` theme if `~/.config/rustyos/config.toml` changed on disk.
+    pub(crate) fn poll_system_theme(&mut self) -> bool {
+        if self.theme_locked {
+            return false;
+        }
+        let mtime = rustyos_config_mtime();
+        if mtime.is_some() && mtime != self.last_config_mtime {
+            self.last_config_mtime = mtime;
+            if let Some(next) = self.locations.detect_system_theme()
+                && next != self.theme
+            {
+                self.theme = next;
+                self.dirty = true;
+                return true;
+            }
+        }
+        false
+    }
+
     /// True if compositor or traffic-light toggle has the window maximized.
     #[must_use]
     pub(crate) const fn is_maximized(&self) -> bool {
@@ -239,6 +259,17 @@ impl FilesAppState {
             WindowSizeState::Normal
         };
     }
+}
+
+fn rustyos_config_mtime() -> Option<SystemTime> {
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
+    std::fs::metadata(base.join("rustyos/config.toml"))
+        .ok()?
+        .modified()
+        .ok()
 }
 
 pub(crate) fn build_sidebar_items(

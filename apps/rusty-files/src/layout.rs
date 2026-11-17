@@ -1020,8 +1020,8 @@ fn actions_menu_rows(state: &FilesAppState) -> Vec<PopupRowSpec> {
         Some(PopupCommand::ToggleShowHidden),
     ));
     let theme_label = match state.theme {
-        rusty_services::file_manager::FilesThemeMode::LightGoldenGate => "Dark Golden Gate Theme",
-        rusty_services::file_manager::FilesThemeMode::DarkPurpleGlass => "Light Golden Gate Theme",
+        rusty_services::file_manager::FilesThemeMode::LightGoldenGate => "Dark Theme",
+        rusty_services::file_manager::FilesThemeMode::DarkPurpleGlass => "Light Theme",
     };
     rows.push((
         String::from(theme_label),

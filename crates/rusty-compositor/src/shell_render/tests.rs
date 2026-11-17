@@ -1,9 +1,12 @@
+use smithay::utils::{Point, Rectangle};
+
 use super::dock::*;
 use super::lock_screen::*;
 use super::modals::*;
 use super::quick_settings::*;
 use super::spotlight_overview::*;
 use super::ssd::*;
+use super::tokens::anim_offset;
 use super::top_bar::*;
 use super::*;
 
@@ -759,6 +762,10 @@ fn macos27_quick_settings_glass_and_volume_slider_hit_testing() {
     assert!(tinted[3] < 200 && tinted[3] >= 40);
     let opaque = scale_glass_rgba([20, 14, 34, 180], 0.40, true);
     assert!(opaque[3] >= 246);
+    assert_eq!(layout.display_card.size.h, 58);
+    assert_eq!(layout.sound_card.size.h, 58);
+    assert_eq!(layout.wifi_pill.size.h, layout.bt_pill.size.h);
+    assert_eq!(layout.power_pill.size.h, layout.focus_pill.size.h);
 }
 
 #[test]
@@ -1305,105 +1312,131 @@ fn sample_settings_render_state() -> SettingsRenderState<'static> {
 }
 
 #[test]
-fn settings_modal_hit_testing_covers_tabs_controls_and_buttons() {
+fn settings_modal_cutefish_appearance_and_close_targets() {
     let size = Size::from((1280, 800));
-    let mut state = sample_settings_render_state();
+    let state = sample_settings_render_state();
 
-    // Centered modal box (580x432) -> (350, 184) .. (930, 616)
+    // Top-left traffic light Close and footer Done close target
     assert_eq!(
-        hit_test_settings_modal(size, &state, 20.0, 20.0),
-        SettingsHit::Outside
-    );
-    assert_eq!(
-        hit_test_settings_modal(size, &state, f64::from(350 + 24), f64::from(184 + 125)),
-        SettingsHit::SelectTab(SettingsTab::MenuBar)
-    );
-    assert_eq!(
-        hit_test_settings_modal(size, &state, f64::from(350 + 24), f64::from(184 + 205)),
-        SettingsHit::SelectTab(SettingsTab::Keyboard)
-    );
-    assert_eq!(
-        hit_test_settings_modal(size, &state, f64::from(350 + 24), f64::from(184 + 245)),
-        SettingsHit::SelectTab(SettingsTab::Security)
-    );
-    assert_eq!(
-        hit_test_settings_modal(size, &state, f64::from(350 + 580 - 30), f64::from(184 + 30)),
+        hit_test_settings_modal(size, &state, f64::from(260 + 20), f64::from(140 + 20)),
         SettingsHit::Close
     );
     assert_eq!(
         hit_test_settings_modal(
             size,
             &state,
-            f64::from(350 + 580 - 150),
-            f64::from(184 + 432 - 35)
+            f64::from(260 + 760 - 60),
+            f64::from(140 + 520 - 28)
+        ),
+        SettingsHit::Close
+    );
+    // Appearance Light/Dark visual preview card click
+    assert_eq!(
+        hit_test_settings_modal(size, &state, 550.0, 230.0),
+        SettingsHit::ToggleAppearance
+    );
+}
+
+#[test]
+fn settings_modal_hit_testing_covers_tabs_controls_and_buttons() {
+    let size = Size::from((1280, 800));
+    let mut state = sample_settings_render_state();
+
+    // Centered modal box (760x520) -> (260, 140) .. (1020, 660)
+    assert_eq!(
+        hit_test_settings_modal(size, &state, 20.0, 20.0),
+        SettingsHit::Outside
+    );
+    assert_eq!(
+        hit_test_settings_modal(size, &state, f64::from(260 + 48), f64::from(140 + 138 + 16)),
+        SettingsHit::SelectTab(SettingsTab::MenuBar)
+    );
+    assert_eq!(
+        hit_test_settings_modal(size, &state, f64::from(260 + 48), f64::from(140 + 236 + 16)),
+        SettingsHit::SelectTab(SettingsTab::Keyboard)
+    );
+    assert_eq!(
+        hit_test_settings_modal(size, &state, f64::from(260 + 48), f64::from(140 + 298 + 16)),
+        SettingsHit::SelectTab(SettingsTab::Security)
+    );
+    assert_eq!(
+        hit_test_settings_modal(size, &state, f64::from(260 + 760 - 29), f64::from(140 + 23)),
+        SettingsHit::Close
+    );
+    assert_eq!(
+        hit_test_settings_modal(
+            size,
+            &state,
+            f64::from(260 + 760 - 165),
+            f64::from(140 + 520 - 28)
         ),
         SettingsHit::ReloadConfig
     );
 
-    // Appearance row 0 stepper '+' / '-' and row 3 custom wallpaper toggle
-    let content_right = 350 + 198 + (580 - 218);
+    // Appearance list_card starts at y=318 with row_h=46; content_right = 260 + 220 + 24 + 492 = 996
+    let content_right = 260 + 220 + 24 + 492;
     assert_eq!(
-        hit_test_settings_modal(size, &state, f64::from(content_right - 20), 302.0),
+        hit_test_settings_modal(size, &state, f64::from(content_right - 30), 341.0),
         SettingsHit::GlassOpacityUp
     );
     assert_eq!(
-        hit_test_settings_modal(size, &state, f64::from(content_right - 115), 302.0),
+        hit_test_settings_modal(size, &state, f64::from(content_right - 126), 341.0),
         SettingsHit::GlassOpacityDown
     );
     assert_eq!(
-        hit_test_settings_modal(size, &state, f64::from(content_right - 40), 458.0),
+        hit_test_settings_modal(size, &state, f64::from(content_right - 40), 479.0),
         SettingsHit::ToggleWallpaper
     );
     assert_eq!(
-        hit_test_settings_modal(size, &state, f64::from(content_right - 40), 510.0),
+        hit_test_settings_modal(size, &state, f64::from(content_right - 40), 525.0),
         SettingsHit::ToggleAppearance
     );
 
     state.active_tab = SettingsTab::MenuBar;
     assert_eq!(
-        hit_test_settings_modal(size, &state, f64::from(content_right - 40), 302.0),
+        hit_test_settings_modal(size, &state, f64::from(content_right - 40), 240.0),
         SettingsHit::ToggleMenuWorkspaces
     );
 
     state.active_tab = SettingsTab::Displays;
     assert_eq!(
-        hit_test_settings_modal(size, &state, f64::from(content_right - 40), 302.0),
+        hit_test_settings_modal(size, &state, f64::from(content_right - 40), 242.0),
         SettingsHit::CycleTargetOutput
     );
     assert_eq!(
-        hit_test_settings_modal(size, &state, f64::from(content_right - 20), 354.0),
+        hit_test_settings_modal(size, &state, f64::from(content_right - 30), 298.0),
         SettingsHit::ScaleUp
     );
     assert_eq!(
-        hit_test_settings_modal(size, &state, f64::from(content_right - 40), 406.0),
+        hit_test_settings_modal(size, &state, f64::from(content_right - 40), 354.0),
         SettingsHit::CycleRotation
     );
 
     state.active_tab = SettingsTab::Keyboard;
     assert_eq!(
-        hit_test_settings_modal(size, &state, f64::from(content_right - 40), 302.0),
+        hit_test_settings_modal(size, &state, f64::from(content_right - 40), 242.0),
         SettingsHit::CycleKeyboardLayout
     );
     assert_eq!(
-        hit_test_settings_modal(size, &state, f64::from(content_right - 40), 354.0),
+        hit_test_settings_modal(size, &state, f64::from(content_right - 40), 298.0),
         SettingsHit::CycleKeyboardOptions
     );
     assert_eq!(
-        hit_test_settings_modal(size, &state, f64::from(content_right - 20), 406.0),
+        hit_test_settings_modal(size, &state, f64::from(content_right - 30), 354.0),
         SettingsHit::RepeatRateUp
     );
     assert_eq!(
-        hit_test_settings_modal(size, &state, f64::from(content_right - 115), 458.0),
+        hit_test_settings_modal(size, &state, f64::from(content_right - 126), 410.0),
         SettingsHit::RepeatDelayDown
     );
     assert_eq!(
-        hit_test_settings_modal(size, &state, f64::from(content_right - 40), 510.0),
+        hit_test_settings_modal(size, &state, f64::from(content_right - 40), 466.0),
         SettingsHit::CycleActiveInputSource
     );
 
     state.active_tab = SettingsTab::Security;
     assert_eq!(
-        hit_test_settings_modal(size, &state, f64::from(content_right - 40), 302.0),
+        hit_test_settings_modal(size, &state, f64::from(content_right - 40), 242.0),
         SettingsHit::ToggleRequirePassword
     );
 }
@@ -1919,22 +1952,17 @@ fn desktop_dock_settings_tab_hit_test_work() {
     let screen = Size::from((1280, 800));
     let mut st = sample_settings_render_state();
     assert_eq!(
-        hit_test_settings_modal(
-            screen,
-            &st,
-            f64::from(350 + 24),
-            f64::from(184 + 68 + 5 * 40 + 16)
-        ),
+        hit_test_settings_modal(screen, &st, f64::from(260 + 48), f64::from(140 + 334 + 16)),
         SettingsHit::SelectTab(SettingsTab::DesktopDock)
     );
     st.active_tab = SettingsTab::DesktopDock;
-    let content_right = 350 + 198 + (580 - 218);
+    let content_right = 260 + 220 + 24 + 492;
     assert_eq!(
         hit_test_settings_modal(
             screen,
             &st,
-            f64::from(content_right - 20),
-            f64::from(184 + 90 + 13)
+            f64::from(content_right - 30),
+            f64::from(140 + 74 + 23)
         ),
         SettingsHit::DockSizeUp
     );
@@ -1943,7 +1971,7 @@ fn desktop_dock_settings_tab_hit_test_work() {
             screen,
             &st,
             f64::from(content_right - 40),
-            f64::from(184 + 90 + 31 + 13)
+            f64::from(140 + 74 + 46 + 23)
         ),
         SettingsHit::DockCyclePosition
     );
@@ -1952,7 +1980,7 @@ fn desktop_dock_settings_tab_hit_test_work() {
             screen,
             &st,
             f64::from(content_right - 40),
-            f64::from(184 + 90 + 4 * 31 + 13)
+            f64::from(140 + 74 + 4 * 46 + 23)
         ),
         SettingsHit::DockToggleAutoHide
     );
@@ -1961,7 +1989,7 @@ fn desktop_dock_settings_tab_hit_test_work() {
             screen,
             &st,
             f64::from(content_right - 40),
-            f64::from(184 + 90 + 7 * 31 + 13)
+            f64::from(140 + 74 + 7 * 46 + 23)
         ),
         SettingsHit::DockToggleShowRecent
     );

@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "RustyOS standalone Golden Gate file manager client (Wayland CSD)"
+description = "RustyOS standalone file manager client (Wayland CSD)"
 
 [dependencies]
 fontdue.workspace = true

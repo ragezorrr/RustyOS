@@ -209,7 +209,12 @@ const CANONICAL_DOCK_ALIASES: &[(&str, &[&str])] = &[
     ),
     (
         "settings",
-        &["rusty-settings", "gnome-control-center", "systemsettings"],
+        &[
+            "org.rustyos.settings",
+            "rusty-settings",
+            "gnome-control-center",
+            "systemsettings",
+        ],
     ),
 ];
 

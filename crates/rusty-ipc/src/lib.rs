@@ -768,10 +768,12 @@ impl IpcServer {
                             message: err.to_string(),
                         },
                     };
-                    let encoded = response.encode_line();
-                    if stream.write_all(encoded.as_bytes()).is_err() || stream.flush().is_err() {
-                        write_ok = false;
-                        break;
+                    if write_ok {
+                        let encoded = response.encode_line();
+                        if stream.write_all(encoded.as_bytes()).is_err() || stream.flush().is_err()
+                        {
+                            write_ok = false;
+                        }
                     }
                 }
                 if still_connected && write_ok {

@@ -854,17 +854,7 @@ impl RustyCompositorState {
             return false;
         };
         let titlebar_h = self.window_titlebar_height(win_id);
-        let work_area = self.space.output_geometry(&self.output).map_or_else(
-            || Rect::new(0, crate::shell_render::TOP_BAR_HEIGHT, 1280, 744),
-            |geo| {
-                crate::shell_render::usable_work_area_with_dock(
-                    geo.size.to_physical(1),
-                    self.user_config.dock_position,
-                    self.user_config.dock_icon_size,
-                    self.user_config.dock_auto_hide,
-                )
-            },
-        );
+        let work_area = self.floating_work_area();
         let desired_w = min_w.min(work_area.width);
         let desired_h = min_h.saturating_add(titlebar_h).min(work_area.height);
         if desired_w <= current.width && desired_h <= current.height {
@@ -890,6 +880,52 @@ impl RustyCompositorState {
         false
     }
 
+    fn floating_work_area(&self) -> Rect {
+        self.space.output_geometry(&self.output).map_or_else(
+            || Rect::new(0, crate::shell_render::TOP_BAR_HEIGHT, 1280, 744),
+            |geo| {
+                crate::shell_render::usable_work_area_with_dock(
+                    geo.size.to_physical(1),
+                    self.user_config.dock_position,
+                    self.user_config.dock_icon_size,
+                    self.user_config.dock_auto_hide,
+                )
+            },
+        )
+    }
+
+    fn apply_preferred_initial_size(&mut self, win_id: WindowId) {
+        if self.wm.active_layout_mode() != LayoutMode::Floating {
+            return;
+        }
+        let Some(wm_win) = self.wm.window(win_id) else {
+            return;
+        };
+        if wm_win.maximized {
+            return;
+        }
+        let Some(app_id) = self.window_app_id(win_id) else {
+            return;
+        };
+        if !(app_id.eq_ignore_ascii_case("org.rustyos.settings")
+            || app_id.eq_ignore_ascii_case("rusty-settings"))
+        {
+            return;
+        }
+        let work_area = self.floating_work_area();
+        let w = 882.min(work_area.width);
+        let h = 600.min(work_area.height);
+        let x = work_area.x + (work_area.width - w).max(0) / 2;
+        let y = work_area.y + (work_area.height - h).max(0) / 2;
+        let target = Rect::new(x, y, w, h);
+        if self.wm.resize_window(win_id, target) {
+            self.animations.snap_window_immediate(
+                win_id.0,
+                LogicalRect::new(target.x, target.y, target.width, target.height),
+            );
+        }
+    }
+
     /// Flushes initial `xdg_toplevel` configure events once per dispatch turn after
     /// `zxdg_toplevel_decoration_v1` requests in the same batch have been processed (`RUSTYOS-030`).
     pub fn flush_pending_toplevel_configures(&mut self) {
@@ -911,6 +947,7 @@ impl RustyCompositorState {
             if !self.xdg_decoration_requested.contains(&win_id) {
                 self.csd_window_ids.insert(win_id);
             }
+            self.apply_preferred_initial_size(win_id);
             if let Some(wm_win) = self.wm.window(win_id) {
                 let rect = wm_win.geometry;
                 let maximized = wm_win.maximized;
@@ -1401,11 +1438,7 @@ impl RustyCompositorState {
                 );
             }
             ShellRequest::LaunchCommand { command } => {
-                let ipc_path = rusty_ipc::default_ipc_socket_path(&self.socket_name);
-                let _ = self
-                    .launcher
-                    .launch_command(&command, &self.socket_name, &ipc_path);
-                self.close_launcher();
+                self.handle_launch_command_ipc(&command);
             }
             ShellRequest::SetReducedMotion { enabled } => {
                 self.set_reduced_motion_pref(enabled);
@@ -1452,5 +1485,25 @@ impl RustyCompositorState {
             }
         }
         CompositorEvent::StateSnapshot(self.build_ipc_snapshot())
+    }
+
+    fn handle_launch_command_ipc(&mut self, command: &str) {
+        match command.trim() {
+            "settings" | "rusty-settings" | "system-settings" => {
+                self.close_launcher();
+                self.open_settings();
+            }
+            "control-center" | "quick-settings" => {
+                self.close_launcher();
+                self.toggle_quick_settings();
+            }
+            other => {
+                let ipc_path = rusty_ipc::default_ipc_socket_path(&self.socket_name);
+                let _ = self
+                    .launcher
+                    .launch_command(other, &self.socket_name, &ipc_path);
+                self.close_launcher();
+            }
+        }
     }
 }

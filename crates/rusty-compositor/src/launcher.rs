@@ -381,6 +381,7 @@ impl LauncherState {
     #[must_use]
     pub(crate) fn canonical_preferred_bins(app_key: &str) -> Option<&'static [&'static str]> {
         const FILES: &[&str] = &["rusty-files"];
+        const SETTINGS: &[&str] = &["rusty-settings"];
         const UPDATER: &[&str] = &["rusty-updater"];
         const TERMINAL: &[&str] = &[
             "foot",
@@ -413,6 +414,7 @@ impl LauncherState {
         const CHROME: &[&str] = &["google-chrome", "google-chrome-stable", "chromium"];
         match app_key.trim().to_ascii_lowercase().as_str() {
             "files" | "rusty-files" => Some(FILES),
+            "settings" | "rusty-settings" | "system-settings" => Some(SETTINGS),
             "updater" | "rusty-updater" => Some(UPDATER),
             "terminal" => Some(TERMINAL),
             "browser" => Some(BROWSER),
@@ -806,6 +808,21 @@ fn merge_builtin_fallbacks(catalog: &mut Vec<LauncherApp>) {
             ],
             badge: "Up".to_owned(),
             icon: Some("system-software-update".to_owned()),
+        },
+        LauncherApp {
+            id: "org.rustyos.settings".to_owned(),
+            name: "System Settings".to_owned(),
+            subtitle: "Appearance, displays, network & sound (RustyOS)".to_owned(),
+            exec: "rusty-settings".to_owned(),
+            keywords: vec![
+                "settings".to_owned(),
+                "preferences".to_owned(),
+                "appearance".to_owned(),
+                "theme".to_owned(),
+                "display".to_owned(),
+            ],
+            badge: "Se".to_owned(),
+            icon: Some("preferences-system".to_owned()),
         },
         LauncherApp {
             id: "org.rustyos.gears".to_owned(),

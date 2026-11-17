@@ -773,12 +773,13 @@ impl UiShapeCache {
         .ok()
     }
 
-    /// Invalidates cached custom wallpaper GPU textures when compositor `wallpaper_revision` changes (`RUSTYOS-062`).
+    /// Invalidates cached custom wallpaper and Liquid Glass GPU textures when compositor `wallpaper_revision` changes (`RUSTYOS-062`).
     pub fn sync_wallpaper_revision(&mut self, revision: u64) {
         if self.wallpaper.revision != revision {
             self.wallpaper.custom_key = None;
             self.wallpaper.custom_buffer = None;
             self.wallpaper.revision = revision;
+            self.liquid_glass.invalidate_all();
         }
     }
 

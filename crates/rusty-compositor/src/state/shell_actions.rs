@@ -292,7 +292,7 @@ impl RustyCompositorState {
                 let _ = self.push_notification(
                     Urgency::Low,
                     "RustyOS Desktop".to_owned(),
-                    "Wayland compositor • Golden Gate UI".to_owned(),
+                    "Wayland compositor • RustyOS UI".to_owned(),
                 );
             }
             TopBarMenuAction::AboutActiveApp => self.dispatch_about_active_app(),
@@ -1455,6 +1455,25 @@ impl RustyCompositorState {
         launched
     }
 
+    pub(in crate::state) fn launch_rusty_settings(&mut self) -> bool {
+        let ipc_path = rusty_ipc::default_ipc_socket_path(&self.socket_name);
+        let launched = self
+            .launcher
+            .launch_program_with_args("rusty-settings", &[], &self.socket_name, &ipc_path)
+            .is_ok();
+        if launched {
+            self.trigger_app_bounce("settings", false);
+        }
+        launched
+    }
+
+    fn wayland_socket_exists(&self) -> bool {
+        !self.socket_name.is_empty()
+            && std::env::var_os("XDG_RUNTIME_DIR")
+                .map(|dir| std::path::PathBuf::from(dir).join(&self.socket_name))
+                .is_some_and(|path| path.exists())
+    }
+
     pub(crate) fn launch_rusty_files_dir(&mut self, dir: Option<&std::path::Path>) -> bool {
         match dir.and_then(|p| p.to_str()) {
             Some(path_str) => self.launch_rusty_files(&["--path", path_str]),
@@ -1671,12 +1690,11 @@ impl RustyCompositorState {
         self.close_launcher();
     }
 
-    /// Opens the built-in System Settings modal overlay (`RUSTYOS-061`).
+    /// Opens the standalone `rusty-settings` Wayland window in live sessions or falls back to the built-in modal (`RUSTYOS-103`).
     pub fn open_settings(&mut self) {
         if self.is_session_locked() {
             return;
         }
-        self.settings_active = true;
         self.close_dock_stack();
         self.close_context_menu();
         self.close_launcher();
@@ -1684,6 +1702,30 @@ impl RustyCompositorState {
         self.close_updates_popover();
         self.close_overview();
         self.close_top_bar_menu();
+
+        let existing = self
+            .collect_dock_window_records()
+            .into_iter()
+            .find(|r| r.app_key == "settings")
+            .map(|r| r.id);
+        if let Some(win_id) = existing {
+            let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+            if self.is_window_minimized(win_id) {
+                self.restore_window(win_id, serial);
+            } else {
+                self.wm.focus_and_raise(win_id);
+                self.sync_space_with_wm(serial);
+            }
+            self.shell_redraw_needed = true;
+            return;
+        }
+
+        if self.wayland_socket_exists() && self.launch_rusty_settings() {
+            self.shell_redraw_needed = true;
+            return;
+        }
+
+        self.settings_active = true;
         self.shell_redraw_needed = true;
     }
 
@@ -1804,6 +1846,7 @@ impl RustyCompositorState {
             || cfg.keyboard_options != self.user_config.keyboard_options;
         let wallpaper_changed =
             cfg.wallpaper != self.user_config.wallpaper || cfg.wallpaper.is_some();
+        let appearance_changed = cfg.appearance != self.user_config.appearance;
         let dock_layout_changed = cfg.dock_position != self.user_config.dock_position
             || cfg.dock_icon_size != self.user_config.dock_icon_size
             || cfg.dock_auto_hide != self.user_config.dock_auto_hide;
@@ -1865,7 +1908,7 @@ impl RustyCompositorState {
             }
         }
 
-        if wallpaper_changed {
+        if wallpaper_changed || appearance_changed {
             if let Some(ref wp) = cfg.wallpaper {
                 self.last_custom_wallpaper = Some(wp.clone());
                 if !wp.exists() {
@@ -2110,6 +2153,7 @@ impl RustyCompositorState {
     fn toggle_appearance_setting(&mut self) {
         self.user_config.appearance = self.user_config.appearance.toggle();
         crate::shell_render::set_active_appearance(self.user_config.appearance);
+        self.wallpaper_revision = self.wallpaper_revision.wrapping_add(1);
         let label = self.user_config.appearance.label();
         self.sync_and_save_user_config();
         self.show_osd(format!("Appearance: {label}"), None, false);

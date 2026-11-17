@@ -54,8 +54,12 @@ Event loop не должен блокироваться тяжёлыми опе�
 - EGL + OpenGL ES (`GlesRenderer`) + GBM/DMA-BUF без Vulkan/wgpu;
 - tracking damage (`OutputDamageTracker`), Direct Scanout при полноэкранном
   DMA-BUF клиенте;
-- 2D shell/SSD рендеринг через `UiShapeCache` (`surfaces/`: `mod`, `sdf`,
-  `glyphs`, `xcursor`) и `TextCache` (`fontdue`).
+- единый Liquid Glass пайплайн (`surfaces/liquid_glass.rs`: damage-gated Dual-Kawase FBO-пирамида
+  `1 -> half_a -> quarter_a -> eighth_a -> quarter_b -> half_out`, кубический суперэллиптический
+  шейдер `LIQUID_GLASS_FRAG` с 14 px преломляющей линзой, 3-слойным направленным кантом `uRim` и
+  профилями `GlassPanelStyle::{Dock, Popover, ControlModule}` + `invalidate_all()` при смене темы/обоев);
+- 2D shell/SSD рендеринг и CPU-fallback стекла через `UiShapeCache` (`surfaces/`: `mod`, `sdf`,
+  `glyphs`, `xcursor`, `window_shadow`, `window_minimize`) и `TextCache` (`fontdue`).
 
 ### Animation Engine (`crates/rusty-animation`)
 
@@ -71,8 +75,9 @@ Event loop не должен блокироваться тяжёлыми опе�
 - `apps/rusty-shell`: опциональный внешний процесс shell-клиента
   (`--wayland`, opt-in через `RUSTYOS_EXTERNAL_SHELL=1` в `rustyos-session`),
   плюс канонические встроенные композиторные оверлеи
-  (`shell_render/`: `tokens`, `top_bar`, `dock`, `context_menu`, `quick_settings`,
-  `spotlight_overview`, `lock_screen`, `modals`, `ssd`) для low-latency
+  (`shell_render/`: `mod`, `text_pass`, `overlay_shapes`, `chrome_shapes`, `tokens`,
+  `top_bar`, `dock`, `context_menu`, `quick_settings`, `spotlight_overview`,
+  `lock_screen`, `modals`, `ssd`) для low-latency
   взаимодействия (TopBar, Dock, Context Menus, Spotlight Launcher, Overview, Quick Settings,
   Lock Screen, Notifications, Alt+Tab HUD, Polkit/Portal/PickColor/Settings modals).
 
@@ -90,12 +95,15 @@ Event loop не должен блокироваться тяжёлыми опе�
   `connectivity`, `media`, `display_session`, `auth`, `logind`, `polkit`,
   `portal`, `file_manager`, `image_decode`.
 
-### Системные приложения (`apps/rusty-files`, `apps/rusty-updater`)
+### Системные приложения (`apps/rusty-files`, `apps/rusty-settings`, `apps/rusty-updater`)
 
 - Самостоятельные Wayland CSD-клиенты на базе `smithay-client-toolkit` и
-  `fontdue` в эстетике `macOS 27 Golden Gate` (`Light` / `Dark`);
-- `rusty-files`: плавающий/full-bleed sidebar, Icons/List/Columns/Gallery,
-  вкладки, clickable Path Bar, Quick Look, Get Info, Copy/Move, Trash, теги;
+  `fontdue` со сквозной синхронизацией темы `Light` / `Dark`;
+- `rusty-files`: full-bleed/полупрозрачный sidebar, Icons/List/Columns/Gallery,
+  вкладки, clickable Path Bar, Quick Look, Get Info, Copy/Move, Trash, теги и Liquid Glass поповеры;
+- `rusty-settings`: отдельное окно настроек (`882×600`, `org.rustyos.Settings`) с
+  плоским непрозрачным сайдбаром (`#ECEDF1`/`#262628`), карточками без рамок, скроллингом,
+  выбором темы (`Light`/`Dark`/`Auto`) и живой отправкой `v1|RELOAD_CONFIG` в композитор;
 - `rusty-updater`: окно *Software Update* со списком всех обновлений
   Arch Linux и RustyOS (`checkupdates`), потоковым прогрессом/логом и
   запуском `pacman` через валидируемый Polkit-хелпер `rustyos-update-helper`.
@@ -111,7 +119,7 @@ RustyOS/
 │   │   └── src/
 │   │       ├── frame_composer.rs  # Backend-независимая сборка render list кадра, Z-order overlay/chrome/layer-shell, HiDPI scale, readback
 │   │       ├── state/         # RustyCompositorState, wm_windows, shell_actions, context_menu_actions, system_bridges, wayland_handlers/
-│   │       ├── shell_render/  # tokens, top_bar (panel, menus, status, notifications), dock, dock_stack, context_menu, quick_settings, updates_popover, spotlight_overview, lock_screen, modals (polkit, portal, magnifier, settings), ssd
+│   │       ├── shell_render/  # mod (фасад), text_pass, overlay_shapes, chrome_shapes, tokens, top_bar (panel, menus, status, notifications), dock, dock_stack, context_menu, quick_settings, updates_popover, spotlight_overview, lock_screen, modals (polkit, portal, magnifier, settings), ssd
 │   │       ├── input/         # keyboard, pointer, shell_pointer, gestures
 │   │       └── surfaces/      # UiShapeCache, sdf, glyphs, xcursor, liquid_glass, window_shadow, window_minimize
 │   ├── rusty-wm/              # Детерминированная модель WM и workspace 1..9
@@ -120,9 +128,10 @@ RustyOS/
 │   └── rusty-services/        # Адаптеры NetworkManager, BlueZ, PipeWire, UPower, sysfs, logind, Polkit, Portal, file_manager, image_decode, updates
 │       └── src/               # lib (ServiceRegistry), power, connectivity, media, display_session, auth, logind, polkit, portal, file_manager (types, listing, trash, operations, metadata), image_decode, updates
 ├── apps/
-│   ├── rusty-files/           # Самостоятельный Wayland-файловый менеджер (Golden Gate CSD, render: canvas, chrome, sidebar, views, dialogs, popup, mod; layout; state: types, tabs, dialogs, clipboard, search, input, navigation)
+│   ├── rusty-files/           # Самостоятельный Wayland-файловый менеджер (CSD, render: canvas, chrome, sidebar, views, dialogs, popup, mod; layout; state)
+│   ├── rusty-settings/        # Самостоятельное Wayland CSD-окно System Settings (`882×600`, flat sidebar, scroll, TOML + `RELOAD_CONFIG`)
 │   ├── rusty-shell/           # Внешний процесс shell поверх Wayland layer-shell + IPC
-│   └── rusty-updater/         # Автономный GUI-клиент обновления Arch Linux и RustyOS (Golden Gate CSD, Этап B)
+│   └── rusty-updater/         # Автономный GUI-клиент обновления Arch Linux и RustyOS (CSD, Этап B)
 ├── bin/
 │   └── rustyos-session        # Лаунчер пользовательской сессии
 ├── packaging/
@@ -133,7 +142,7 @@ RustyOS/
 ├── scripts/
 │   └── install.sh
 └── docs/
-    ├── adr/                   # ADR-0001 .. ADR-0047
+    ├── adr/                   # ADR-0001 .. ADR-0055
     ├── DEVELOPMENT_ENVIRONMENT.md
     ├── GETTING_STARTED.md
     └── HARDWARE_MATRIX.md
@@ -173,7 +182,7 @@ RustyOS/
 Краткая карта типовых врезок для экономии контекста и поиска:
 
 - **Новый shell-оверлей / модал:**
-  1. Рендер и hit-test: `shell_render/modals/` -> реэкспорт и `ShellOverlayView` + `notifications_hidden_by_overlay` / `dock_tooltip_hidden_by_overlay` в `shell_render/mod.rs`.
+  1. Рендер и hit-test: `shell_render/modals/` -> реэкспорт, `ShellOverlayView` и маски скрытия в `shell_render/mod.rs` + диспетчеризация текста/геометрии в `text_pass.rs` / `overlay_shapes.rs`.
   2. Композиция (Z-order `foreground_overlay`): `frame_composer.rs`.
   3. Состояние и fullscreen-bypass: `state/mod.rs` (`has_blocking_shell_overlay`, `should_hide_shell_chrome_for_fullscreen_on`, `active_unoccluded_fullscreen_window_on`) + взаимное закрытие в `state/shell_actions.rs` и `state/system_bridges.rs`.
   4. Pointer-перехват: `input/pointer.rs` (`space.output_geometry(&self.output)...to_physical(1)`) + `input/shell_pointer.rs`.
@@ -187,7 +196,8 @@ RustyOS/
   - Системные меню: `shell_render/context_menu.rs` (`ContextMenuState`, `ContextMenuEntry`, `ContextMenuAction`, `compute_context_menu_layout`, `generate_context_menu_elements`) + `ShellOverlayView::ContextMenu` в `shell_render/mod.rs`.
   - Модульная подсистема: `crates/rusty-compositor/src/context_menu/` (`window_menu.rs`, `desktop_menu.rs`, `dock_menu.rs`, `actions.rs`, `mod.rs`) с фасадом в `state/context_menu_actions.rs`.
   - Оконное управление: перехват правого клика на SSD-заголовках/кнопках (`input/pointer.rs`), глобальные хоткеи `Alt+Right` / `Super+Right` и Wayland CSD callback `show_window_menu` (`state/wayland_handlers/core.rs`).
-  - Клиентский стандарт 1:1 Liquid Glass Popover (`apps/rusty-files/src/render/popup.rs`): `MENU_POPOVER_RADIUS = 16`, инсетные плавающие пилюли ховера `HOVER_PILL_RADIUS = 8`, `HOVER_PILL_INSET_H = 6`, многостадийная SDF-тень, зеркальный верхний кант, колонка шорткатов (ADR-0043, D-051).
+  - Клиентский стандарт Liquid Glass Popover (`apps/rusty-files/src/render/popup.rs`): `MENU_POPOVER_RADIUS = 16`, инсетные плавающие пилюли ховера `HOVER_PILL_RADIUS = 8`, `HOVER_PILL_INSET_H = 6`, многостадийная SDF-тень, направленный внутренний `1 px` hairline (верх `100%`, низ `35%`), колонка шорткатов (ADR-0043, D-051, ADR-0053).
+  - Унифицированный GPU-шейдер Liquid Glass и CPU-fallback (`crates/rusty-compositor/src/surfaces/liquid_glass.rs`, `sdf.rs`): `LIQUID_GLASS_FRAG` с кубическим суперэллипсом (`cornerExtent = 1.5*r`), 14 px линзой (`ior = 1.7`) и 3-слойным направленным `uRim` для `GlassPanelStyle::{Dock, Popover, ControlModule}` + `LiquidGlassPipeline::invalidate_all()` при смене темы/обоев (ADR-0052, ADR-0053).
   - First-party Wayland-протокол Liquid Glass `rustyos_liquid_glass_v1`: серверный менеджер `crates/rusty-compositor/src/state/wayland_handlers/liquid_glass.rs`, композиторная отрисовка в `frame_composer.rs` (`push_window_liquid_glass_elements`), клиентская интеграция в `apps/rusty-files` (`liquid_glass.rs`, `wayland.rs`) (ADR-0048, D-056).
 - **Нетривиальные сигнатуры и lint-правила:**
   - `KeyboardHandle::change_repeat_info(&self, rate: i32, delay: i32)` (порядок `(rate, delay)`, обратный к `seat.add_keyboard(xkb, delay, rate)`).

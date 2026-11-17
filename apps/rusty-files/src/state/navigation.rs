@@ -518,14 +518,14 @@ impl FilesAppState {
         }
     }
 
-    /// Toggles Golden Gate Light <-> Dark theme and saves `file_tags.toml`.
+    /// Toggles Light <-> Dark theme and saves `file_tags.toml`.
     pub(crate) fn toggle_theme(&mut self) {
         self.theme = self.theme.toggle();
         self.tags_config.theme = self.theme;
         self.persist_preferences();
         self.status_message = Some(match self.theme {
-            FilesThemeMode::LightGoldenGate => String::from("Light Golden Gate appearance"),
-            FilesThemeMode::DarkPurpleGlass => String::from("Dark Golden Gate appearance"),
+            FilesThemeMode::LightGoldenGate => String::from("Light appearance"),
+            FilesThemeMode::DarkPurpleGlass => String::from("Dark appearance"),
         });
         self.dirty = true;
     }

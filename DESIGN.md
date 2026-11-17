@@ -109,14 +109,14 @@ Liquid Glass-inspired styling may be used for:
 
 Rules:
 
-- Use restrained background transparency.
-- Apply blur only where it improves visual hierarchy.
-- Maintain readable foreground contrast.
-- Avoid excessive blur and stacked transparency.
-- Provide opaque fallbacks when transparency is unavailable.
-- Consider GPU and compositor performance.
+- Use restrained background transparency backed by the unified superellipse lens + directional `uRim` Liquid Glass pipeline (`section 12.5`).
+- Apply blur and edge refraction only where it improves visual hierarchy.
+- Maintain readable foreground contrast in both Light and Dark themes.
+- Avoid excessive blur, diagonal corner glare, and stacked transparency.
+- Provide opaque fallbacks when transparency is unavailable or `reduce_transparency = true`.
+- Consider GPU and compositor performance (damage-gated Dual-Kawase FBO caching).
 
-Not every component needs glass effects.
+Not every component needs glass effects — utility applications such as standalone `System Settings` (`apps/rusty-settings`) intentionally pair a flat opaque grey sidebar (`#ECEDF1` Light / `#262628` Dark) with a clean content canvas (`#F5F6FA` Light / `#1C1C1D` Dark) without backdrop blur.
 
 ### 4.3 Geometry
 
@@ -401,10 +401,7 @@ palettes (section 5.1); geometry, Liquid Glass clarity, and interactions target 
 - Built-in Golden Gate procedural wallpaper targets layered 3D S-curve silk folds with crisp luminous
   crest highlights (matching `27-Golden-Gate-Desktop.png` Light/Dark contrast) so Liquid Glass edge
   refraction reads clearly behind Dock and popovers.
-- App-centric concentric rounded floating glass container (`DOCK_RADIUS = 22 px`, clear top-lit
-  `LiquidGlassElement` frosted fill, tapering specular rim, opaque fallback on `reduce_transparency = true`),
-  supporting `Bottom`, `Left`, and `Right` screen edges (`usable_work_area_with_dock`) and `Auto-hide`
-  edge reveal. Slots follow three sections separated by `1 px` hairline dividers:
+- App-centric concentric rounded floating glass container (dynamic corner radius `compute_dock_radius(thickness)` = `(thickness * 28 + 43) / 86`, clamped `>= 12 px`; `GlassPanelStyle::Dock` sampling crisp `half_a` backdrop with `14 px` superellipse edge refraction and 3-layer directional `uRim` — top `1.0`, bottom `0.35`, vertical sides `0.0`; opaque fallback on `reduce_transparency = true`), supporting `Bottom`, `Left`, and `Right` screen edges (`usable_work_area_with_dock`) and `Auto-hide` edge reveal. Slots follow three sections separated by `1 px` hairline dividers:
   1. `Pinned` apps (`[dock].pinned_apps`, reorderable and pull-out removable via `>= 52 px` `"Remove"` pill);
   2. `Unpinned` running apps + up to `4` recent apps (`show_recent`);
   3. Minimized window mini-slots (when `minimize_into_app = false`) + utility slots (`Downloads` Stack + `Trash`).
@@ -429,12 +426,16 @@ palettes (section 5.1); geometry, Liquid Glass clarity, and interactions target 
 ### 12.3 Windows, Finder (`rusty-files`), menus, Spotlight, Notifications, and OSD
 
 - Window chrome (`SSD`): `WINDOW_RADIUS = 20` rounded corners at both top (`TITLEBAR_HEIGHT`) and
-  bottom, top 1 px specular rim, and a single-pass seamless analytical GLES SDF Gaussian drop shadow
+  bottom, theme-adaptive Light (`[245, 246, 250, 248]`) / Dark (`[48, 48, 54, 250]`) titlebars and
+  titles (`ssd_frame_colors`), top 1 px specular rim, and a single-pass seamless analytical GLES SDF Gaussian drop shadow
   (`WindowShadowPipeline`: continuous contact + Y-shifted ambient glow with 4x4 ordered dithering
   replacing multi-offset strips and discrete `Solid` bands; CPU 9-slice fallback via continuous
   corner + stretched edge buffers in `UiShapeCache`) (`generate_window_shadow_elements`, `RUSTYOS-075`).
-  Standard system windows (e.g., `System Settings`) should behave as movable desktop windows without a
-  full-screen modal scrim that darkens `TopBar` and `Dock`.
+  System Settings runs as an independent movable, minimizable, maximizable, and resizable Wayland CSD window
+  (`apps/rusty-settings`, `882×600`, `min_size = 640×500`, `WINDOW_CORNER_RADIUS = 14`) with a flat
+  cool-grey sidebar (`#ECEDF1` Light / `#262628` Dark, zero Liquid Glass blur), borderless cards
+  (`#FFFFFF` / `#2C2C2D`) on `#F5F6FA` / `#1C1C1D`, `Light`/`Dark`/`Auto` preview tiles, and vertical
+  scrolling without dimming `TopBar` or `Dock`.
 - Titlebar traffic lights: `12 px` gel-lit buttons (`TrafficLightKind::{Close, Minimize, Maximize}`)
   revealing `×`, `−`, `+` hover glyphs (`hovered_traffic_light_window`).
 - System apps & Golden Gate parity (`27-Golden-Gate-Settings-General.png`, `27-Golden-Gate-Finder-Home-Folder.png`):
@@ -466,30 +467,34 @@ palettes (section 5.1); geometry, Liquid Glass clarity, and interactions target 
 ### 12.4 Control center and quick settings
 
 - Floating Liquid Glass islands anchored top-right (`TOP_BAR_HEIGHT + 10`) with no outer dark container box;
-  each island uses individual `GlassPanelStyle::ControlModule` glass and drop shadow (`RUSTYOS-053`).
+  each island uses individual `GlassPanelStyle::ControlModule` glass and soft drop shadow (`(18, 42)`, `RUSTYOS-053`, `RUSTYOS-104`).
 - Matches `27-Golden-Gate-Finder-Control-Center.png` hierarchy: three stacked connectivity/status capsules
-  on the left (`Wi-Fi`, `Bluetooth`, `Power` / `AirDrop` equivalent), square `Now Playing` card backed by
+  on the left (`Wi-Fi`, `Bluetooth`, `Power` with borderless `36 px` icon circles), square `Now Playing` card backed by
   `MPRIS2` / `playerctl` on top-right, circular quick toggles (`Layout`, `Overview`, `Reduced Motion`,
-  `Transparency`), right `Focus` capsule, full-width `Display` and `Sound` slider capsules (bright
-  active track over tinted glass), and bottom pill (`Lock Screen` / `Edit Controls` parity).
+  `Transparency`, active state inset by `7 px` to preserve the outer `uRim`), right `Focus` capsule, full-capsule (`r = h / 2`) `Display` and `Sound` slider islands (`5 px` bright white active track + `12 px` circular thumb knob + borderless mute button), legible `popover_text_secondary`/`muted` capsule subtitles, and centered bottom `Lock Screen` pill.
 
-### 12.5 Material and depth
+### 12.5 Material and depth (Unified Superellipse Liquid Glass)
 
-- Glass containers (`Dock`, `Popover`, `ControlModule`, `Switcher`, `LockScreen` input pill, `Dock` tooltip)
-  render through the 5-pass GLES Dual-Kawase backdrop blur FBO pipeline (`LiquidGlassPipeline`:
-  `1 -> 1/2 -> 1/4 -> 1/8 -> 1/4 -> 1/2`) using `OutputDamageTracker` on the backdrop scene so idle
-  frames incur zero extra GPU passes, composited via `LIQUID_GLASS_FRAG` (`TextureShaderElement`) with
-  continuous analytical rounded-box SDF normals, pronounced edge optical lensing/dispersion (`6.5..8.5 px`),
-  vibrance boost, opposing diagonal (`top-left` / `bottom-right`) `d^7` corner-arc specular bevel without
-  a 360° wireframe contour, cubic-decay ambient drop shadows, and restrained translucent Light/Dark
-  tinting (`ADR-0034`, `RUSTYOS-074`).
-- Automatic runtime CPU fallback (`UiShapeCache::glass_panel_element` with `4x4` Bayer dithering and
-  matching diagonal corner-arc specular math in `sdf.rs`) activates cleanly whenever
-  `reduce_transparency = true`, the session/screen is locked, no glass UI is visible, or GLES
-  shader/FBO init fails.
-- User controls for `glass_opacity` (`0.35..=1.0`, default `0.78`) and `reduce_transparency`
-  (`true` switches shell panels to opaque high-contrast surfaces) are configurable via `[ui]` in
-  `config.toml` and live-adjustable in Control Center.
+- **Backdrop Blur Pyramid (`LiquidGlassPipeline`, `surfaces/liquid_glass.rs`):**
+  - 5-pass GLES Dual-Kawase down/upsample ladder (`scene 1/1 -> half_a 1/2 -> quarter_a 1/4 -> eighth_a 1/8 -> quarter_b 1/4 -> half_out 1/2`), gated by `OutputDamageTracker` with `BLUR_DAMAGE_PAD_PHYS = 32 px` padding so idle frames perform zero extra GPU passes.
+  - On theme switch (`Light` <-> `Dark`) or wallpaper update (`wallpaper_revision`), `UiShapeCache::sync_wallpaper_revision` calls `LiquidGlassPipeline::invalidate_all()` so offscreen backdrops rebuild immediately without stale tinting.
+- **Single Unified Composite Shader (`LIQUID_GLASS_FRAG`):**
+  - All GPU glass surfaces — compositor overlays and Wayland clients via `rustyos_liquid_glass_v1` — share one branch-free GLSL ES 1.00 fragment shader (`ADR-0052`, `ADR-0053`):
+  - **Cubic superellipse SDF:** `cornerExtent = clamp(radius * 1.5, 0.0, halfSize)` with 4-point tangent-averaged anti-aliased edge coverage (`roundedCoverage`).
+  - **14 px superellipse edge lens:** `lensHeight` over `band = 14.0 px` (`ior = 1.7`), 4-sample `refractedAt` sampling clamped to `u_uv_bounds` with optional chromatic channel shift (`u_sat_refract.w = chroma`), vibrance saturation boost (`u_sat_refract.x`), and target Light/Dark frosted tint mix (`u_tint_rgba`).
+  - **3-layer directional `uRim` (`lit = abs(outward.y) * mix(1.0, 0.35, 0.5 + 0.5 * outward.y)`):** top edge weight `1.0`, bottom edge `0.35`, left/right vertical sides `0.0` (no side glare, no diagonal `d^7` corner flares, no vertical `sheen`):
+    1. Outer `1 px` edge shade darkening (`shade`);
+    2. Inner `1 px` sharp `hairline` (`1.0 - (1.0 - glass) * (1.0 - rim_x * lit * 0.43 * hairline)`);
+    3. Exponential inner `glow` (`exp(-d / 1.7)`) modulated by luminance `headroom` to avoid clipping bright backgrounds.
+- **Three Material Profiles (`compute_glass_material`):**
+  - `GlassPanelStyle::Dock` (compositor Dock & client `BasePanel`): samples crisper `half_a`, `sat = 1.30`, `displacement = 36.0`, `rim = 1.0`, `chroma = 0.0`, Light `[0.60, 0.60, 0.60, 0.13 + 0.12 * g]`, Dark `[0.38, 0.38, 0.38, 0.15 + 0.14 * g]`.
+  - `GlassPanelStyle::Popover` (menus, popovers, Spotlight, Notifications, App Switcher, Overview cards, `DockStack`, Dock tooltip, `Polkit`/`Portal`/`Magnifier` sheets, `LockScreen` card, client `Popover`/`Custom`): samples smooth `half_out`, `sat = 1.20`, `displacement = 20.0`, `rim = 0.85`, `chroma = 0.03`, Light `[1.0, 1.0, 1.0, 0.32 + 0.28 * g]`, Dark `[0.17, 0.17, 0.19, 0.34 + 0.26 * g]`.
+  - `GlassPanelStyle::ControlModule` (Control Center islands, Lock Screen password pill, client `Sidebar`/`ControlPill`): samples smooth `half_out` (`RUSTYOS-104`), `sat = 1.30`, `displacement = 34.0`, `rim = 1.0`, `chroma = 0.01`, Light `[0.72, 0.74, 0.78, 0.11 + 0.11 * g]`, Dark `[0.24, 0.24, 0.27, 0.15 + 0.15 * g]`.
+- **CPU Fallback & Client Surfaces:**
+  - `UiShapeCache::glass_panel_element` (`surfaces/sdf.rs`, `sample_glass_panel_pixel_themed`) uses flat themed `base_glass_layer` + `4×4` Bayer dithering + matching directional top/bottom rim (`cutefish_rim_alpha`, no side glare or diagonal flares), automatically taking over on `reduce_transparency = true` (high-contrast opaque surfaces), Lock Screen, or GLES unavailability.
+  - Client-rendered Chrome (`apps/rusty-files/src/render/{sidebar.rs, popup.rs}`: `draw_glass_pill`, `render_popup_chrome`) mirrors the directional `100%` top / `35%` bottom `1 px` inner hairline cleanly.
+- **Runtime Configuration:**
+  - `glass_opacity` (`0.35..=1.0`, `DEFAULT_GLASS_OPACITY = 0.78`) and `reduce_transparency` live under `[ui]` in `config.toml` and update compositor + Wayland apps (`rusty-settings`, `rusty-files`, `rusty-updater`) live via `RELOAD_CONFIG` / mtime sync.
 
 ### 12.6 Mission Control / Overview
 

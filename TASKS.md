@@ -1756,6 +1756,76 @@ hardware/software context и низкие накладные расходы.
 - **Tests:** Все 251 тестов workspace (`rusty-compositor`, `rusty-files`, `rusty-shell`, `rusty-ipc`, `rusty-services`, `rusty-settings`, `rusty-updater`).
 - **Risks:** Нет.
 
+### RUSTYOS-101 — Модульная декомпозиция `crates/rusty-compositor/src/shell_render/mod.rs` на проходы рендера
+
+- **Status:** Done
+- **Goal:** Разбить 2014-строчный `crates/rusty-compositor/src/shell_render/mod.rs` на специализированные подмодули проходов рендера (`text_pass.rs`, `overlay_shapes.rs`, `chrome_shapes.rs`) и компактный фасад `mod.rs` без изменения публичного API и с сохранением 100% тестов.
+- **Dependencies:** `RUSTYOS-091`, `RUSTYOS-100`.
+- **Scope:**
+  - `crates/rusty-compositor/src/shell_render/text_pass.rs` (595 строк): `append_foreground_overlay_text`, `generate_shell_text_elements`, `append_chrome_text`;
+  - `crates/rusty-compositor/src/shell_render/overlay_shapes.rs` (398 строк): `generate_shell_foreground_overlay_elements`, `build_foreground_overlay_shapes`;
+  - `crates/rusty-compositor/src/shell_render/chrome_shapes.rs` (759 строк): `generate_shell_chrome_composite_elements`, `generate_shell_overview_elements`, `build_chrome_shapes`, Док-функции (`push_dock_chrome_shapes`, `push_dock_slot_shape`, `push_dock_tooltip_and_drag`, `render_dock_tile_icon`) и `build_overview_shapes`;
+  - `crates/rusty-compositor/src/shell_render/mod.rs` (329 строк): реэкспорты и корневые точки входа; `tests.rs` (явные импорты `Point`/`Rectangle`/`anim_offset`);
+  - `docs/adr/0054-modular-decomposition-of-shell-render-passes.md`, `ARCHITECTURE.md`, `DECISIONS.md` (`D-065`).
+- **Acceptance Criteria:**
+  - `shell_render/mod.rs` сокращён с 2014 до 329 строк без изменения публичного API;
+  - `cargo fmt --all -- --check` и `cargo clippy --workspace --all-targets -- -D warnings` чисты;
+  - 100% тестов воркспейса проходят (251 passed, 0 failed).
+- **Tests:** Все 251 тестов workspace.
+- **Risks:** Нет.
+
+### RUSTYOS-102 — Редизайн окна System Settings по архитектуре и эталону `cutefishos/settings`
+
+- **Status:** Done
+- **Goal:** Перестроить встроенное окно `System Settings` (`crates/rusty-compositor/src/shell_render/modals/settings.rs`) по архитектуре `cutefishos/settings`: разделение `Liquid Glass` сайдбара и непрозрачного правого холста страницы, шапка с traffic lights, полем `Search` и `← → Title`, категоризированные `24×24` (`r=6`) `RowIcon` бейджи без purple/lavender, визуальная карточка превью `Light`/`Dark` + акцентных свотчей и групповые карточки `Card` с `Switch`-тумблерами.
+- **Dependencies:** `RUSTYOS-091`, `RUSTYOS-100`, `RUSTYOS-101`.
+- **Scope:**
+  - `crates/rusty-compositor/src/shell_render/modals/settings.rs`: геометрия `760×520`, разделение `sidebar_w = 220` (`Liquid Glass`) и непрозрачного правого холста `push_right_rounded_canvas` (`#F4F5F9` Light / `#1C1C1E` Dark, скругление `WINDOW_RADIUS - 1`), traffic lights + `Search` pill, категоризированные `Desktop`/`Devices`/`System` табы с цветными `RowIcon` и нейтральным выделением активного таба, карточка превью `Light`/`Dark` + 6 свотчей, групповые карточки `Card::Style::List` с `1px` разделителями и графические `40×22` `Switch`-тумблеры;
+  - `crates/rusty-compositor/src/state/wm_windows.rs`: вызов `self.open_settings()` из `handle_launch_command_ipc` для `"settings" | "rusty-settings" | "system-settings"`;
+  - `crates/rusty-compositor/src/shell_render/tests.rs`: обновление `settings_modal_hit_testing_covers_tabs_controls_and_buttons`, `desktop_dock_settings_tab_hit_test_work` и добавление `settings_modal_cutefish_appearance_and_close_targets`;
+  - `docs/adr/0055-cutefish-settings-window-architecture.md`, `DECISIONS.md` (`D-066`).
+- **Acceptance Criteria:**
+  - Живой `--winit` прогон подтверждён визуально в режимах `Dark` и `Light` без GLES-ошибок;
+  - `cargo fmt --all -- --check` и `cargo clippy --workspace --all-targets -- -D warnings` чисты;
+  - 100% тестов воркспейса проходят (252 passed, 0 failed).
+- **Tests:** Все 252 тестов workspace.
+- **Risks:** Нет.
+
+### RUSTYOS-103 — Вынос System Settings в отдельное Wayland-окно `apps/rusty-settings`, вертикальный скролл и сквозная смена темы
+
+- **Status:** Done
+- **Goal:** Вынести `System Settings` в самостоятельное перемещаемое и изменяемое по размеру Wayland CSD-окно `apps/rusty-settings` (`882×600`, `app_id = "org.rustyos.Settings"`), убрать все пользовательские упоминания сторонних систем (`CutefishOS` / `Golden Gate`), добавить вертикальный скроллинг контента/сайдбара и обеспечить полное сквозное переключение темы (`Light` / `Dark` / `Auto`) across композитор и приложения.
+- **Dependencies:** `RUSTYOS-102`.
+- **Scope:**
+  - `apps/rusty-settings` (`Cargo.toml`, `src/main.rs`, `src/state.rs`, `src/layout.rs`, `src/render.rs`, `src/wayland.rs`): самостоятельный Wayland CSD-клиент (`882×600`, минимум `640×500`), плоский сайдбар (`#ECEDF1`/`#262628`) без Liquid Glass, скроллбар и клиппинг контента (`Canvas::clip`), `PointerEventKind::Axis` и клавиатурная прокрутка, поддержка `ThemeChoice::Auto` (`theme_mode = "auto"`), mtime-синхронизация `config.toml` и надёжное уведомление `v1|RELOAD_CONFIG`.
+  - `crates/rusty-ipc/src/lib.rs`: выполнение всех принятых строк запроса в `IpcServer::poll` даже при закрытии сокета клиентом после отправки.
+  - `crates/rusty-compositor`: интеграция в `launcher.rs`, `dock.rs`, `wm_windows.rs` (центрированный `882×600` при старте) и `shell_actions.rs` (запуск/фокус `rusty-settings` при живом Wayland-сокете); инвалидация FBO `LiquidGlassPipeline::invalidate_all` (`liquid_glass.rs`, `surfaces/mod.rs`) и сброс `wallpaper_revision` при смене темы; адаптивная Light/Dark раскраска SSD-рамок и заголовков в `shell_render/ssd.rs`; плоский сайдбар и карточки без тёмных рамок в фолбэке `modals/settings.rs`.
+  - `apps/rusty-files` и `apps/rusty-updater`: live mtime-синхронизация системной темы из `config.toml` и очистка UI-текста.
+  - `docs/adr/0055-cutefish-settings-window-architecture.md`, `DECISIONS.md` (`D-067`).
+- **Acceptance Criteria:**
+  - `rusty-settings` запускается как независимое Wayland-окно (`882×600`) из Дока/меню/IPC, прокручивается колесом мыши и клавишами, не содержит UI-упоминаний `CutefishOS` и `Golden Gate`;
+  - Смена темы `Light`/`Dark` синхронно обновляет фон, `Liquid Glass`, `TopBar`, `Dock`, уведомления/OSD, SSD-заголовки, `rusty-settings`, `rusty-files` и `rusty-updater`;
+  - `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace` и живые `--winit` прогоны Light + Dark пройдены без ошибок.
+- **Tests:** Все unit-тесты workspace (`rusty-compositor`, `rusty-settings`, `rusty-files`, `rusty-updater`, `rusty-shell`, `rusty-ipc`, `rusty-services`, `rusty-animation`, `rusty-wm`).
+- **Risks:** Нет.
+
+### RUSTYOS-104 — Выравнивание `Control Center` под единый `Liquid Glass` (`ControlModule`)
+
+- **Status:** Done
+- **Goal:** Откалибровать `GlassPanelStyle::ControlModule` (GLES + CPU fallback) и обновить острова, капсулы, слайдеры, тени и контраст подписей `Control Center` под обновлённый `Liquid Glass` в `Light` и `Dark` темах.
+- **Dependencies:** `RUSTYOS-100`, `RUSTYOS-101`, `RUSTYOS-103`.
+- **Scope:**
+  - `crates/rusty-compositor/src/surfaces/liquid_glass.rs`: `compute_glass_material` и `make_glass_element` для `ControlModule` переведены на сглаженный `buffers.half_out`, `[1.30, 34.0, 1.0, 0.01]`, Light `[0.72, 0.74, 0.78, 0.11 + 0.11 * g]` и Dark `[0.24, 0.24, 0.27, 0.15 + 0.15 * g]`; расширен `liquid_glass_pipeline_defaults_to_cpu_fallback_when_inactive`;
+  - `crates/rusty-compositor/src/surfaces/sdf.rs`: синхронизация CPU/fallback-подложки (`base_glass_layer`, `reduce_transparency` Light `[238.0, 240.0, 245.0]` и `rim_peak`);
+  - `crates/rusty-compositor/src/shell_render/quick_settings.rs`: полные капсулы `Display`/`Sound` (`r = h / 2 = 29`), тень островов `Some((18, 42))`, тонкий `5 px` белый трек слайдера с `12 px` круглым белым thumb-бегунком, `7 px` inset активного круга тумблеров для сохранения `uRim`, очистка лишних рамок у иконок/mute/`Now Playing`, улучшение контраста заголовков и подписей (`popover_text_secondary`);
+  - `crates/rusty-compositor/src/state/wm_windows.rs` и `crates/rusty-compositor/src/shell_render/tests.rs`: IPC `"control-center" | "quick-settings"` и проверки геометрии капсул в `macos27_quick_settings_glass_and_volume_slider_hit_testing`;
+  - `DESIGN.md` (`§12.4`, `§12.5`), `docs/adr/0056-control-center-liquid-glass-alignment.md`, `DECISIONS.md` (`D-068`).
+- **Acceptance Criteria:**
+  - Живой `--winit` прогон в `Light` и `Dark` режимах подтверждён визуально без EGL/shader-ошибок и без резкого просвечивания фоновых иконок;
+  - `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings` и 256 тестов workspace проходят без ошибок и регрессий.
+- **Tests:** Все 256 unit-тестов workspace (`4` `rusty-animation`, `171` `rusty-compositor`, `15` `rusty-files`, `3` `rusty-ipc`, `43` `rusty-services`, `4` `rusty-settings`, `5` `rusty-shell`, `4` `rusty-updater`, `7` `rusty-wm`).
+- **Risks:** Нет.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

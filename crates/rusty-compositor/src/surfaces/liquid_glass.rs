@@ -402,14 +402,15 @@ pub(crate) fn compute_glass_material(
             tint_rgba: [0.17, 0.17, 0.19, 0.34 + 0.26 * g],
             sat_refract_rim_sheen: [1.20, 20.0, 0.85, 0.03],
         },
-        // ControlModule (`fishuiGlass` / Sidebar / ControlPill): Light [1,1,1,0.24], Dark [0.14,0.14,0.16,0.30], saturation=1.22, displacement=24, rim=0.90, chroma=0.03 (`RUSTYOS-100`).
+        // ControlModule (Control Center islands, Lock Screen pill, client Sidebar/ControlPill): frosted `half_out`
+        // backdrop preventing sharp icon/label bleed-through (`RUSTYOS-104`) with crisp crystal rim refraction and Light/Dark polarity.
         (GlassPanelStyle::ControlModule, false) => GlassMaterialUniforms {
-            tint_rgba: [1.0, 1.0, 1.0, 0.10 + 0.14 * g],
-            sat_refract_rim_sheen: [1.22, 24.0, 0.90, 0.03],
+            tint_rgba: [0.72, 0.74, 0.78, 0.11 + 0.11 * g],
+            sat_refract_rim_sheen: [1.30, 34.0, 1.0, 0.01],
         },
         (GlassPanelStyle::ControlModule, true) => GlassMaterialUniforms {
-            tint_rgba: [0.14, 0.14, 0.16, 0.14 + 0.16 * g],
-            sat_refract_rim_sheen: [1.22, 24.0, 0.90, 0.03],
+            tint_rgba: [0.24, 0.24, 0.27, 0.15 + 0.15 * g],
+            sat_refract_rim_sheen: [1.30, 34.0, 1.0, 0.01],
         },
     }
 }
@@ -685,6 +686,17 @@ impl LiquidGlassPipeline {
         self.frame_slot_counts.clear();
     }
 
+    /// Invalidates cached offscreen backdrop & blur FBOs across all outputs so theme/wallpaper
+    /// changes re-render the Liquid Glass backdrop immediately.
+    pub(crate) fn invalidate_all(&mut self) {
+        for buf in self.outputs.values_mut() {
+            buf.has_valid_scene = false;
+            buf.has_valid_blur = false;
+            buf.blur_damage.reset();
+        }
+        self.slots.clear();
+    }
+
     #[cfg(test)]
     #[must_use]
     pub(crate) fn has_active_backdrop(&self) -> bool {
@@ -788,10 +800,9 @@ impl LiquidGlassPipeline {
         let glass_pct = (crate::config::clamp_glass_opacity(glass_opacity) * 100.0).round() as u8;
         let is_dark = crate::shell_render::active_appearance().is_dark();
 
-        let half_tex = if style == GlassPanelStyle::Dock {
-            buffers.half_a.clone()
-        } else {
-            buffers.half_out.clone()
+        let half_tex = match style {
+            GlassPanelStyle::Dock => buffers.half_a.clone(),
+            GlassPanelStyle::ControlModule | GlassPanelStyle::Popover => buffers.half_out.clone(),
         };
         let half_size = half_tex.size();
         let blur_snapshot = buffers.blur_damage.snapshot();
@@ -1279,20 +1290,23 @@ mod tests {
 
         let light = compute_glass_material(GlassPanelStyle::Dock, 0.85, false);
         let dark = compute_glass_material(GlassPanelStyle::Dock, 0.85, true);
+        let light_mod = compute_glass_material(GlassPanelStyle::ControlModule, 0.78, false);
         let dark_mod = compute_glass_material(GlassPanelStyle::ControlModule, 0.78, true);
         assert!(light.tint_rgba[0] > 0.5 && dark.tint_rgba[0] < 0.45);
-        // RUSTYOS-099: CutefishOS exact Dock parameters — displacement=36.0, uRim.x=1.0, sheen=0.0
         assert_eq!(
             light.sat_refract_rim_sheen,
             [1.30, 36.0, 1.0, 0.0],
-            "Dock light material must match CutefishOS"
+            "Dock light material must match calibrated Liquid Glass"
         );
         assert_eq!(
             dark.sat_refract_rim_sheen,
             [1.30, 36.0, 1.0, 0.0],
-            "Dock dark material must match CutefishOS"
+            "Dock dark material must match calibrated Liquid Glass"
         );
-        assert!(dark_mod.tint_rgba[3] < 0.35 && dark_mod.sat_refract_rim_sheen[1] >= 20.0);
+        assert_eq!(light_mod.sat_refract_rim_sheen, [1.30, 34.0, 1.0, 0.01]);
+        assert_eq!(dark_mod.sat_refract_rim_sheen, [1.30, 34.0, 1.0, 0.01]);
+        assert!(light_mod.tint_rgba[0] >= 0.70 && light_mod.tint_rgba[3] < 0.28);
+        assert!(dark_mod.tint_rgba[0] < 0.30 && dark_mod.tint_rgba[3] < 0.35);
         assert!(
             LIQUID_GLASS_FRAG.contains("refractedAt")
                 && !LIQUID_GLASS_FRAG.contains("corner_flares")

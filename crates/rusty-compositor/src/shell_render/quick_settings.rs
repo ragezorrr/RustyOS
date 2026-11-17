@@ -498,7 +498,7 @@ pub(super) fn render_control_center_capsule_text(
         if bright {
             pal.popover_text_primary
         } else {
-            pal.popover_text_muted
+            pal.popover_text_secondary
         },
         Point::from((pill.loc.x + 54, top_y)),
     ) {
@@ -508,7 +508,11 @@ pub(super) fn render_control_center_capsule_text(
         renderer,
         sub,
         10.5,
-        pal.popover_text_muted,
+        if bright {
+            pal.popover_text_secondary
+        } else {
+            pal.popover_text_muted
+        },
         Point::from((pill.loc.x + 54, top_y + 16)),
     ) {
         elements.push(el);
@@ -664,6 +668,7 @@ pub(super) fn push_cc_capsule_icon(
     active_glyph_rgba: [u8; 4],
     inactive_glyph_rgba: [u8; 4],
 ) {
+    let pal = ThemePalette::active();
     let circle_d = 36;
     let circle_x = pill.loc.x + 10;
     let circle_y = pill.loc.y + (pill.size.h - circle_d) / 2;
@@ -685,20 +690,17 @@ pub(super) fn push_cc_capsule_icon(
         out.push(CompositorRenderElement::Memory(el));
     }
     let circle_fill = if active {
-        [252, 252, 255, 252]
+        [255, 255, 255, 248]
+    } else if pal.is_dark {
+        [255, 255, 255, 36]
     } else {
-        [255, 255, 255, 42]
-    };
-    let circle_border = if active {
-        [255, 255, 255, 255]
-    } else {
-        [255, 255, 255, 62]
+        [0, 0, 0, 22]
     };
     if let Some(el) = shape_cache.circle_element(
         renderer,
         circle_d,
         circle_fill,
-        Some(circle_border),
+        None,
         Point::from((circle_x, circle_y)),
     ) {
         out.push(CompositorRenderElement::Memory(el));
@@ -735,19 +737,11 @@ pub(super) fn push_cc_now_playing_contents(
     let art_bg = if qs.media_active {
         pal.accent_hover_fill
     } else if pal.is_dark {
-        [255, 255, 255, 38]
+        [255, 255, 255, 34]
     } else {
-        [0, 0, 0, 22]
+        [0, 0, 0, 20]
     };
-    push_rounded_glass_box(
-        out,
-        shape_cache,
-        renderer,
-        art_rect,
-        9,
-        art_bg,
-        Some(pal.border_rgba),
-    );
+    push_rounded_glass_box(out, shape_cache, renderer, art_rect, 10, art_bg, None);
 
     let play_kind = if qs.media_playing {
         crate::surfaces::UiGlyphKind::MediaPause
@@ -796,29 +790,40 @@ pub(super) fn push_cc_thin_slider(
     active_fill: bool,
 ) {
     let pal = ThemePalette::active();
-    let bar_h = 6;
+    let bar_h = 5;
     let bar_y = track.loc.y + (track.size.h - bar_h) / 2;
+    let clamped_norm = norm.clamp(0.0, 1.0);
     #[allow(
         clippy::cast_precision_loss,
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss
     )]
-    let fill_w = ((track.size.w as f32) * norm.clamp(0.0, 1.0))
+    let fill_w = ((track.size.w as f32) * clamped_norm)
         .round()
         .clamp(6.0, track.size.w as f32) as i32;
+    let knob_d = 12;
+    let knob_x = (track.loc.x + fill_w - knob_d / 2)
+        .clamp(track.loc.x, track.loc.x + (track.size.w - knob_d).max(0));
+    let knob_y = track.loc.y + (track.size.h - knob_d) / 2;
+    if let Some(el) = shape_cache.circle_element(
+        renderer,
+        knob_d,
+        [255, 255, 255, 252],
+        Some([0, 0, 0, 34]),
+        Point::from((knob_x, knob_y)),
+    ) {
+        out.push(CompositorRenderElement::Memory(el));
+    }
+
     let fill_rgba = if active_fill {
-        if pal.is_dark {
-            [255, 255, 255, 245]
-        } else {
-            pal.accent_rgba
-        }
+        [255, 255, 255, 245]
     } else {
         pal.popover_text_muted
     };
     let track_rgba = if pal.is_dark {
-        [255, 255, 255, 58]
+        [255, 255, 255, 52]
     } else {
-        [0, 0, 0, 26]
+        [0, 0, 0, 34]
     };
     push_rounded_glass_box(
         out,
@@ -950,17 +955,17 @@ pub(super) fn push_cc_sound_slider(
         out.push(CompositorRenderElement::Memory(el));
     }
     let mute_circle_bg = if qs.audio_muted {
-        [252, 252, 255, 245]
+        [255, 255, 255, 248]
     } else if pal.is_dark {
-        [255, 255, 255, 42]
+        [255, 255, 255, 34]
     } else {
-        [0, 0, 0, 18]
+        [0, 0, 0, 20]
     };
     if let Some(el) = shape_cache.circle_element(
         renderer,
         layout.sound_mute_zone.size.w,
         mute_circle_bg,
-        Some(pal.border_rgba),
+        None,
         Point::from((layout.sound_mute_zone.loc.x, layout.sound_mute_zone.loc.y)),
     ) {
         out.push(CompositorRenderElement::Memory(el));
@@ -1009,7 +1014,11 @@ pub(super) fn push_cc_round_toggle_buttons(
     ] {
         let g_size = 21;
         let glyph_col = if active {
-            [255, 255, 255, 255]
+            if pal.is_dark {
+                [255, 255, 255, 255]
+            } else {
+                pal.accent_rgba
+            }
         } else {
             pal.popover_icon
         };
@@ -1025,16 +1034,23 @@ pub(super) fn push_cc_round_toggle_buttons(
         ) {
             out.push(CompositorRenderElement::Memory(el));
         }
-        if active
-            && let Some(el) = shape_cache.circle_element(
+        if active {
+            let inset = 7;
+            let active_d = (btn_rect.size.w - inset * 2).max(20);
+            let active_fill = if pal.is_dark {
+                pal.accent_hover_fill
+            } else {
+                [255, 255, 255, 242]
+            };
+            if let Some(el) = shape_cache.circle_element(
                 renderer,
-                btn_rect.size.w,
-                pal.accent_hover_fill,
-                Some(pal.accent_hover_border),
-                Point::from((btn_rect.loc.x, btn_rect.loc.y)),
-            )
-        {
-            out.push(CompositorRenderElement::Memory(el));
+                active_d,
+                active_fill,
+                None,
+                Point::from((btn_rect.loc.x + inset, btn_rect.loc.y + inset)),
+            ) {
+                out.push(CompositorRenderElement::Memory(el));
+            }
         }
     }
 }
@@ -1132,8 +1148,8 @@ pub(super) fn render_quick_settings_composite(
         (layout.motion_btn, layout.motion_btn.size.h / 2),
         (layout.transparency_btn, layout.transparency_btn.size.h / 2),
         (layout.focus_pill, layout.focus_pill.size.h / 2),
-        (layout.display_card, 22),
-        (layout.sound_card, 22),
+        (layout.display_card, layout.display_card.size.h / 2),
+        (layout.sound_card, layout.sound_card.size.h / 2),
         (layout.lock_btn, layout.lock_btn.size.h / 2),
     ] {
         push_liquid_glass_panel(
@@ -1145,7 +1161,7 @@ pub(super) fn render_quick_settings_composite(
             crate::surfaces::GlassPanelStyle::ControlModule,
             qs.glass_opacity,
             qs.reduce_transparency,
-            Some((18, 18)),
+            Some((18, 42)),
         );
     }
 }

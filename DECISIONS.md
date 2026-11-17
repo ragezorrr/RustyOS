@@ -696,6 +696,60 @@
                            и направленный uRim
                            (ADR-0053, 251 тест ok)
   -----------------------------------------------------------------------
+   D-065                   Фаза 8/10 Модульная       accepted
+                           декомпозиция (RUSTYOS-101):
+                           разделение монолита
+                           shell_render/mod.rs
+                           (2014 строк) на text_pass.rs
+                           (595), overlay_shapes.rs
+                           (398), chrome_shapes.rs
+                           (759) и фасад mod.rs (329)
+                           с сохранением 100% API и
+                           251 тестов (ADR-0054)
+  -----------------------------------------------------------------------
+   D-066                   Фаза 8/10 UI & System     accepted
+                           Settings (RUSTYOS-102):
+                           редизайн System Settings
+                           (760x520) по архитектуре
+                           cutefishos/settings —
+                           Liquid Glass сайдбар
+                           слева (traffic lights,
+                           Search, RowIcon сквирклы,
+                           нейтральный выбор таба),
+                           непрозрачный холст справа,
+                           превью Light/Dark,
+                           групповые Card и тумблеры
+                           Switch (ADR-0055, 252
+                           теста ok)
+  -----------------------------------------------------------------------
+   D-067                   Фаза 8/10 UI & System     accepted
+                           Settings (RUSTYOS-103):
+                           вынос System Settings в
+                           отдельное Wayland CSD-
+                           окно apps/rusty-settings
+                           (882x600), удаление
+                           UI-упоминаний CutefishOS/
+                           Golden Gate, скролл и
+                           сквозная синхронизация
+                           темы Light/Dark/Auto
+                           через rusty-ipc,
+                           LiquidGlassPipeline и
+                           SSD (ADR-0055)
+  -----------------------------------------------------------------------
+   D-068                   Фаза 8/10 UI & Control    accepted
+                           Center (RUSTYOS-104):
+                           калибровка ControlModule
+                           (half_out, [1.30, 34.0,
+                           1.0, 0.01], Light [0.72,
+                           0.74, 0.78, 0.11+0.11g],
+                           Dark [0.24, 0.24, 0.27,
+                           0.15+0.15g]) и CPU fallback
+                           в sdf.rs; капсулы r=h/2,
+                           слайдеры с 12px thumb,
+                           inset-тумблеры и контраст
+                           подписей в quick_settings.rs
+                           (ADR-0056)
+  -----------------------------------------------------------------------
 
 ## Открытые решения
 

@@ -241,6 +241,7 @@ pub(crate) fn run(opts: &StartupOptions) -> Result<(), WaylandAppError> {
     while client.app.running {
         let now = Instant::now();
         let _ = client.app.poll_background_jobs();
+        let _ = client.app.poll_system_theme();
         if let Some(sent_at) = client.frame_sent_at
             && now.saturating_duration_since(sent_at) >= Duration::from_millis(120)
         {
@@ -255,7 +256,7 @@ pub(crate) fn run(opts: &StartupOptions) -> Result<(), WaylandAppError> {
         let timeout = if client.app.has_pending_jobs() {
             Some(Duration::from_millis(24))
         } else {
-            None
+            Some(Duration::from_millis(500))
         };
         event_loop
             .dispatch(timeout, &mut client)

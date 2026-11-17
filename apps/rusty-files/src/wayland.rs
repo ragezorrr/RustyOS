@@ -831,6 +831,7 @@ pub(crate) fn run(options: &StartupOptions) -> Result<(), WaylandAppError> {
     while data.app.is_running() {
         let now = Instant::now();
         let _ = data.app.poll_background_loads();
+        let _ = data.app.poll_system_theme();
         let _ = data.app.update_caret_blink(now);
 
         if data.app.window_title != data.last_title
@@ -871,10 +872,12 @@ pub(crate) fn run(options: &StartupOptions) -> Result<(), WaylandAppError> {
                 .has_focused_text_input()
                 .then(|| data.app.time_until_caret_blink(now));
             let scroll = data.app.time_until_scrollbar_tick(now);
-            match (caret, scroll) {
+            let next = match (caret, scroll) {
                 (Some(a), Some(b)) => Some(a.min(b)),
                 (a, b) => a.or(b),
-            }
+            };
+            let refresh_interval = Duration::from_millis(500);
+            Some(next.map_or(refresh_interval, |d| d.min(refresh_interval)))
         };
 
         event_loop
