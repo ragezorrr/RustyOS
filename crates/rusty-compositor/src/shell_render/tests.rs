@@ -894,7 +894,7 @@ fn macos27_top_bar_dynamic_left_right_and_menu_popover_hit_testing() {
 #[test]
 fn macos_dock_divider_gap_tooltip_and_radii_constants() {
     assert_eq!(DOCK_HEIGHT, 68);
-    assert_eq!(DOCK_RADIUS, 22);
+    assert_eq!(DOCK_RADIUS, 18);
     assert_eq!(DOCK_ICON_SIZE, 50);
     assert_eq!(DOCK_ITEM_GAP, 6);
     assert_eq!(WINDOW_RADIUS, 20);

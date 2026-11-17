@@ -1,293 +1,18 @@
-//! Stage B Golden Gate modal sheets & inline dialogs (`Quick Look`, `Get Info`,
-//! `Go to Folder`, `Transfer Progress`, conflict `Replace / Keep Both / Stop`,
-//! and inline `Rename`) (`RUSTYOS-066`).
+//! Modal dialogs and overlay sheets rendering (Quick Look, Get Info, Go to Folder, Rename, Conflict).
 
-use std::path::PathBuf;
-
-use rusty_services::file_manager::{
-    FileTagColor, TransferConflictDecision, TransferKind, format_byte_size, format_unix_timestamp,
-};
+use rusty_services::file_manager::{TransferKind, format_byte_size, format_unix_timestamp};
 
 use crate::icons::{draw_chevron_aa, draw_close_x_glyph, draw_large_entry_artwork};
-use crate::layout::{FilesHit, FilesLayout, Rect};
-use crate::render::{Canvas, Palette, rgba};
+use crate::layout::{
+    ConflictDialogLayout, FilesLayout, GetInfoLayout, GoToFolderLayout, QuickLookLayout, Rect,
+    TransferDialogLayout,
+};
+use crate::render::canvas::Canvas;
+use crate::render::views::{
+    draw_aspect_fitted_preview, draw_framed_thumbnail, render_text_preview_card,
+};
+use crate::render::{Palette, rgba};
 use crate::state::{CachedPreview, FilesAppState, InlineRenameState};
-use crate::views::{draw_aspect_fitted_preview, draw_framed_thumbnail, render_text_preview_card};
-
-/// Layout for `Quick Look` preview modal (`Space`).
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(clippy::struct_field_names)]
-pub(crate) struct QuickLookLayout {
-    pub modal_rect: Rect,
-    pub close_rect: Rect,
-    pub prev_rect: Rect,
-    pub next_rect: Rect,
-    pub open_rect: Rect,
-    pub stage_rect: Rect,
-}
-
-/// Layout for `Get Info` sheet (`Ctrl+I`).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct GetInfoLayout {
-    pub modal_rect: Rect,
-    pub close_rect: Rect,
-    pub more_toggle_rect: Rect,
-    pub tags: Vec<(FileTagColor, Rect)>,
-    pub preview_rect: Rect,
-}
-
-/// Layout for `Go to Folder...` sheet (`Ctrl+Shift+G`).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct GoToFolderLayout {
-    pub modal_rect: Rect,
-    pub input_rect: Rect,
-    pub clear_rect: Rect,
-    pub suggestions: Vec<(usize, Rect)>,
-}
-
-/// Layout for background Copy/Move progress pill card.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(clippy::struct_field_names)]
-pub(crate) struct TransferDialogLayout {
-    pub card_rect: Rect,
-    pub bar_rect: Rect,
-    pub stop_rect: Rect,
-}
-
-/// Layout for conflict resolution prompt (`Keep Both`, `Skip`, `Stop`, `Replace`).
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(clippy::struct_field_names)]
-pub(crate) struct ConflictDialogLayout {
-    pub modal_rect: Rect,
-    pub keep_both_rect: Rect,
-    pub skip_rect: Rect,
-    pub stop_rect: Rect,
-    pub replace_rect: Rect,
-}
-
-/// Combined active overlay layouts for a frame.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub(crate) struct DialogOverlaysLayout {
-    pub quick_look: Option<QuickLookLayout>,
-    pub get_info: Option<GetInfoLayout>,
-    pub go_to_folder: Option<GoToFolderLayout>,
-    pub transfer: Option<TransferDialogLayout>,
-    pub conflict: Option<ConflictDialogLayout>,
-    pub inline_rename_rect: Option<Rect>,
-}
-
-/// Computes active dialog overlay geometries within a `width x height` window.
-#[must_use]
-pub(crate) fn compute_dialog_overlays_layout(
-    state: &FilesAppState,
-    width: i32,
-    height: i32,
-    inline_anchor: Option<Rect>,
-) -> DialogOverlaysLayout {
-    let mut out = DialogOverlaysLayout {
-        inline_rename_rect: inline_anchor,
-        ..Default::default()
-    };
-
-    if state.quick_look.is_some() {
-        let mw = (width - 80).clamp(320, 760);
-        let mh = (height - 68).clamp(240, 520);
-        let mx = (width - mw) / 2;
-        let my = (height - mh) / 2;
-        let modal_rect = Rect::new(mx, my, mw, mh);
-        out.quick_look = Some(QuickLookLayout {
-            close_rect: Rect::new(mx + 12, my + 10, 20, 20),
-            prev_rect: Rect::new(mx + 42, my + 10, 22, 20),
-            next_rect: Rect::new(mx + 66, my + 10, 22, 20),
-            open_rect: Rect::new(modal_rect.right() - 78, my + 8, 66, 24),
-            stage_rect: Rect::new(mx + 14, my + 44, mw - 28, mh - 58),
-            modal_rect,
-        });
-    }
-
-    if state.get_info.is_some() {
-        let mw = 304.min(width - 40);
-        let mh = 436.min(height - 36);
-        let mx = (width - mw - 28).max(20);
-        let my = ((height - mh) / 2).max(18);
-        let modal_rect = Rect::new(mx, my, mw, mh);
-        let tags_y = my + 98;
-        let mut tags = Vec::with_capacity(FileTagColor::ALL.len());
-        for (i, color) in FileTagColor::ALL.iter().enumerate() {
-            let tx = mx + 58 + i32::try_from(i).unwrap_or(0) * 30;
-            tags.push((*color, Rect::new(tx, tags_y, 22, 22)));
-        }
-        out.get_info = Some(GetInfoLayout {
-            close_rect: Rect::new(mx + 12, my + 10, 18, 18),
-            more_toggle_rect: Rect::new(mx + mw - 72, my + 242, 58, 18),
-            tags,
-            preview_rect: Rect::new(mx + 18, my + mh - 98, mw - 36, 84),
-            modal_rect,
-        });
-    }
-
-    if let Some(gt) = &state.go_to_folder {
-        let mw = (width - 96).clamp(280, 440);
-        let sugg_count = i32::try_from(gt.suggestions.len()).unwrap_or(0);
-        let err_h = if gt.error.is_some() { 22 } else { 0 };
-        let mh = 80 + err_h + sugg_count * 28;
-        let mx = ((width - mw) / 2).max(16);
-        let my = 62;
-        let modal_rect = Rect::new(mx, my, mw, mh);
-        let input_rect = Rect::new(mx + 12, my + 10, mw - 24, 30);
-        let clear_rect = Rect::new(input_rect.right() - 24, input_rect.y + 5, 20, 20);
-        let mut suggestions = Vec::with_capacity(gt.suggestions.len());
-        let mut sy = my + 68 + err_h;
-        for idx in 0..gt.suggestions.len() {
-            suggestions.push((idx, Rect::new(mx + 10, sy, mw - 20, 26)));
-            sy += 28;
-        }
-        out.go_to_folder = Some(GoToFolderLayout {
-            modal_rect,
-            input_rect,
-            clear_rect,
-            suggestions,
-        });
-    }
-
-    if let Some(tr) = &state.active_transfer {
-        let cw = 360.min(width - 40);
-        let cx = (width - cw) / 2;
-        let cy = 62;
-        let card_rect = Rect::new(cx, cy, cw, 74);
-        let bar_rect = Rect::new(cx + 16, cy + 36, cw - 62, 6);
-        let stop_rect = Rect::new(bar_rect.right() + 14, cy + 29, 20, 20);
-        out.transfer = Some(TransferDialogLayout {
-            card_rect,
-            bar_rect,
-            stop_rect,
-        });
-        if tr.conflict.is_some() {
-            let mw = 420.min(width - 40);
-            let mh = 152;
-            let mx = (width - mw) / 2;
-            let my = ((height - mh) / 2).max(60);
-            let modal_rect = Rect::new(mx, my, mw, mh);
-            let btn_y = modal_rect.bottom() - 38;
-            let replace_rect = Rect::new(modal_rect.right() - 88, btn_y, 74, 26);
-            let stop_btn = Rect::new(replace_rect.x - 68, btn_y, 60, 26);
-            let skip_rect = Rect::new(stop_btn.x - 66, btn_y, 58, 26);
-            let keep_both_rect = Rect::new(skip_rect.x - 96, btn_y, 88, 26);
-            out.conflict = Some(ConflictDialogLayout {
-                modal_rect,
-                keep_both_rect,
-                skip_rect,
-                stop_rect: stop_btn,
-                replace_rect,
-            });
-        }
-    }
-
-    out
-}
-
-/// Hit-tests active modal overlays in strict front-to-back stacking order.
-#[must_use]
-pub(crate) fn hit_test_dialog_overlays(
-    ov: &DialogOverlaysLayout,
-    px: f64,
-    py: f64,
-) -> Option<FilesHit> {
-    if let Some(cf) = &ov.conflict {
-        if cf.replace_rect.contains_f64(px, py) {
-            return Some(FilesHit::ConflictDecision(
-                TransferConflictDecision::Replace,
-            ));
-        }
-        if cf.keep_both_rect.contains_f64(px, py) {
-            return Some(FilesHit::ConflictDecision(
-                TransferConflictDecision::KeepBoth,
-            ));
-        }
-        if cf.skip_rect.contains_f64(px, py) {
-            return Some(FilesHit::ConflictDecision(TransferConflictDecision::Skip));
-        }
-        if cf.stop_rect.contains_f64(px, py) {
-            return Some(FilesHit::ConflictDecision(TransferConflictDecision::Stop));
-        }
-        return Some(
-            FilesHit::ConflictDecision(TransferConflictDecision::Stop)
-                .take_or_block(cf.modal_rect.contains_f64(px, py)),
-        );
-    }
-    if let Some(gt) = &ov.go_to_folder {
-        if !gt.modal_rect.contains_f64(px, py) {
-            return Some(FilesHit::GoToClose);
-        }
-        if gt.clear_rect.contains_f64(px, py) {
-            return Some(FilesHit::GoToClear);
-        }
-        for (idx, rect) in &gt.suggestions {
-            if rect.contains_f64(px, py) {
-                return Some(FilesHit::GoToSuggestion(*idx));
-            }
-        }
-        return Some(FilesHit::GoToModalBody);
-    }
-    if let Some(gi) = &ov.get_info {
-        if gi.close_rect.contains_f64(px, py) {
-            return Some(FilesHit::GetInfoClose);
-        }
-        if gi.modal_rect.contains_f64(px, py) {
-            if gi.more_toggle_rect.contains_f64(px, py) {
-                return Some(FilesHit::GetInfoMoreToggle);
-            }
-            for (color, rect) in &gi.tags {
-                if rect.contains_f64(px, py) {
-                    return Some(FilesHit::GetInfoTag {
-                        path: PathBuf::new(),
-                        color: *color,
-                    });
-                }
-            }
-            return Some(FilesHit::GetInfoModalBody);
-        }
-    }
-    if let Some(ql) = &ov.quick_look {
-        if !ql.modal_rect.contains_f64(px, py) || ql.close_rect.contains_f64(px, py) {
-            return Some(FilesHit::QuickLookClose);
-        }
-        if ql.prev_rect.contains_f64(px, py) {
-            return Some(FilesHit::QuickLookPrev);
-        }
-        if ql.next_rect.contains_f64(px, py) {
-            return Some(FilesHit::QuickLookNext);
-        }
-        if ql.open_rect.contains_f64(px, py) {
-            return Some(FilesHit::QuickLookOpen);
-        }
-        return Some(FilesHit::QuickLookModalBody);
-    }
-    if let Some(tr) = &ov.transfer
-        && tr.stop_rect.contains_f64(px, py)
-    {
-        return Some(FilesHit::TransferStop);
-    }
-    if let Some(rn_rect) = ov.inline_rename_rect
-        && rn_rect.contains_f64(px, py)
-    {
-        return Some(FilesHit::InlineRenameBox);
-    }
-    None
-}
-
-trait ConflictHitExt {
-    fn take_or_block(self, inside: bool) -> FilesHit;
-}
-impl ConflictHitExt for FilesHit {
-    fn take_or_block(self, inside: bool) -> FilesHit {
-        if inside {
-            FilesHit::GetInfoModalBody
-        } else {
-            self
-        }
-    }
-}
 
 /// Renders active Stage B overlays cleanly in back-to-front order.
 pub(crate) fn render_dialog_overlays(
@@ -316,7 +41,7 @@ pub(crate) fn render_dialog_overlays(
     }
 }
 
-fn render_inline_rename_editor(
+pub(crate) fn render_inline_rename_editor(
     c: &mut Canvas<'_>,
     state: &FilesAppState,
     rn: &InlineRenameState,
@@ -359,7 +84,7 @@ fn render_inline_rename_editor(
     }
 }
 
-fn render_quick_look_overlay(
+pub(crate) fn render_quick_look_overlay(
     c: &mut Canvas<'_>,
     state: &FilesAppState,
     ql: &QuickLookLayout,
@@ -446,7 +171,7 @@ fn render_quick_look_overlay(
     render_quick_look_stage(c, state, ql, &qs.entry, pal);
 }
 
-fn render_quick_look_stage(
+pub(crate) fn render_quick_look_stage(
     c: &mut Canvas<'_>,
     state: &FilesAppState,
     ql: &QuickLookLayout,
@@ -493,7 +218,7 @@ fn render_quick_look_stage(
     });
 }
 
-fn render_get_info_sheet(
+pub(crate) fn render_get_info_sheet(
     c: &mut Canvas<'_>,
     state: &FilesAppState,
     gi: &GetInfoLayout,
@@ -571,7 +296,7 @@ fn render_get_info_sheet(
     });
 }
 
-fn render_get_info_tags_and_general(
+pub(crate) fn render_get_info_tags_and_general(
     c: &mut Canvas<'_>,
     state: &FilesAppState,
     gi: &GetInfoLayout,
@@ -657,7 +382,7 @@ fn render_get_info_tags_and_general(
     }
 }
 
-fn render_get_info_more_and_preview(
+pub(crate) fn render_get_info_more_and_preview(
     c: &mut Canvas<'_>,
     state: &FilesAppState,
     gi: &GetInfoLayout,
@@ -762,7 +487,7 @@ fn render_get_info_more_and_preview(
     }
 }
 
-fn render_go_to_folder_sheet(
+pub(crate) fn render_go_to_folder_sheet(
     c: &mut Canvas<'_>,
     state: &FilesAppState,
     gt_layout: &GoToFolderLayout,
@@ -863,7 +588,7 @@ fn render_go_to_folder_sheet(
     });
 }
 
-fn render_transfer_progress_card(
+pub(crate) fn render_transfer_progress_card(
     c: &mut Canvas<'_>,
     state: &FilesAppState,
     tr_layout: &TransferDialogLayout,
@@ -956,7 +681,7 @@ fn render_transfer_progress_card(
     });
 }
 
-fn render_conflict_dialog(
+pub(crate) fn render_conflict_dialog(
     c: &mut Canvas<'_>,
     state: &FilesAppState,
     cf_layout: &ConflictDialogLayout,
@@ -1041,7 +766,12 @@ fn render_conflict_dialog(
     });
 }
 
-fn draw_modal_shadow_and_frame(c: &mut Canvas<'_>, rect: Rect, radius: i32, pal: &Palette) {
+pub(crate) fn draw_modal_shadow_and_frame(
+    c: &mut Canvas<'_>,
+    rect: Rect,
+    radius: i32,
+    pal: &Palette,
+) {
     let shadow = Rect::new(rect.x - 2, rect.y + 2, rect.w + 4, rect.h + 5);
     c.fill_rounded_rect(
         shadow,

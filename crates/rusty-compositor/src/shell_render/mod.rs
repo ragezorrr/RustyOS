@@ -107,7 +107,7 @@ pub use tokens::{
     DOCK_PINNED_COUNT, DOCK_RADIUS, DOCK_UTILITY_COUNT, RESIZE_GRAB_BORDER, TITLEBAR_HEIGHT,
     TOP_BAR_APP_X, TOP_BAR_FONT_SIZE, TOP_BAR_HEIGHT, TOP_BAR_ITEM_H, TOP_BAR_ITEM_Y,
     TOP_BAR_LOGO_W, TOP_BAR_LOGO_X, WINDOW_RADIUS, WS_BTN_GAP, WS_BTN_STRIDE, WS_BTN_WIDTH,
-    usable_work_area, usable_work_area_with_dock,
+    compute_dock_radius, usable_work_area, usable_work_area_with_dock,
 };
 pub use top_bar::{
     MAX_TOP_BAR_TRAY_ITEMS, MAX_VISIBLE_NOTIFICATIONS, MENU_POPOVER_RADIUS, NotificationToastView,
@@ -1806,11 +1806,12 @@ fn push_dock_chrome_shapes(
     out.extend(dock_dots_and_divider);
 
     let capsule = layout.capsule_rect;
+    let radius = compute_dock_radius(capsule.size.h.min(capsule.size.w));
     if let Some(dock_glass) = shape_cache.dock_glass_render_element(
         renderer,
         capsule.size.w,
         capsule.size.h,
-        DOCK_RADIUS,
+        radius,
         top_telemetry.glass_opacity,
         top_telemetry.reduce_transparency,
         Point::from((capsule.loc.x, capsule.loc.y)),

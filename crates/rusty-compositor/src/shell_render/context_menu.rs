@@ -70,6 +70,14 @@ pub enum ContextMenuAction {
     WindowMinimize(rusty_wm::WindowId),
     /// Moves the selected Dock window to workspace `1..=9`.
     WindowMoveToWorkspace(rusty_wm::WindowId, u8),
+    /// Snaps the selected window to the left half (`Alt+Left`).
+    WindowTileLeft(rusty_wm::WindowId),
+    /// Snaps the selected window to the right half (`Alt+Right`).
+    WindowTileRight(rusty_wm::WindowId),
+    /// Toggles maximize / restore size for the selected window (`Alt+F`).
+    WindowToggleMaximize(rusty_wm::WindowId),
+    /// Moves the selected window to the next display output (`Alt+O`).
+    WindowMoveToNextOutput(rusty_wm::WindowId),
     /// Requests graceful close (`xdg_toplevel::close` / `WM_DELETE_WINDOW`).
     WindowQuit(rusty_wm::WindowId),
     /// Force-terminates the selected window's owning client process (`Alt` modifier).
@@ -197,13 +205,15 @@ impl ContextMenuEntry {
     }
 }
 
-/// Target surface/slot that spawned the open context menu (`RUSTYOS-064`).
+/// Target surface/slot that spawned the open context menu (`RUSTYOS-064`, `RUSTYOS-086`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContextMenuTarget {
     /// Empty Desktop area on an output.
     Desktop,
     /// Specific slot inside the bottom Dock.
     DockSlot(DockHit),
+    /// Title bar, frame, or client surface of an application window (`RUSTYOS-086`).
+    Window(rusty_wm::WindowId),
 }
 
 /// Complete live compositor context menu overlay state (`RUSTYOS-064`).

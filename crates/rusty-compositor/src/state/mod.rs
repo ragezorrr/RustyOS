@@ -110,6 +110,7 @@ mod system_bridges;
 mod wayland_handlers;
 mod wm_windows;
 pub(in crate::state) use wayland_handlers::desktop_protocols::ToplevelIconEntry;
+pub(crate) use wayland_handlers::liquid_glass;
 
 /// Active mouse-driven window drag state via SSD titlebar (`RUSTYOS-019`).
 #[derive(Debug, Clone, Copy)]
@@ -563,6 +564,11 @@ pub struct RustyCompositorState {
     pub updates_popover_hover: Option<crate::shell_render::UpdatesPopoverHit>,
     /// Highest update count already announced with a HUD toast (`RUSTYOS-076`).
     pub updates_notified_count: usize,
+    /// First-party Wayland Liquid Glass protocol state (`RUSTYOS-092`).
+    pub liquid_glass_state: wayland_handlers::liquid_glass::LiquidGlassManagerState,
+    /// Active client surfaces requesting compositor Liquid Glass effects (`RUSTYOS-092`).
+    pub active_liquid_glass_surfaces:
+        std::collections::HashSet<smithay::reexports::wayland_server::backend::ObjectId>,
     /// Whether the Spotlight application launcher overlay is open (`RUSTYOS-018`).
     pub launcher_active: bool,
     /// Animated Spotlight transition progress (`0.0` closed -> `1.0` open) (`RUSTYOS-025`).
@@ -777,6 +783,8 @@ impl RustyCompositorState {
             Some(&primary_selection_state),
             |_| true,
         );
+        let liquid_glass_state =
+            wayland_handlers::liquid_glass::LiquidGlassManagerState::new(&display_handle);
 
         let user_config = if cfg!(test) {
             crate::config::UserConfig::default()
@@ -1013,12 +1021,19 @@ impl RustyCompositorState {
             toplevel_icons: HashMap::new(),
             next_toplevel_icon_rev: 0,
             next_notification_id: 0,
+            liquid_glass_state,
+            active_liquid_glass_surfaces: std::collections::HashSet::new(),
         };
         state
             .animations
             .set_reduced_motion(state.user_config.reduced_motion);
         state.refresh_keyboard_layout_label();
         Ok(state)
+    }
+
+    /// Returns true if any client Wayland surface has registered active Liquid Glass effects (`RUSTYOS-092`).
+    pub fn has_active_client_liquid_glass(&self) -> bool {
+        !self.active_liquid_glass_surfaces.is_empty()
     }
 
     pub(in crate::state) fn create_initial_output(

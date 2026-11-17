@@ -50,6 +50,7 @@ use crate::layout::{
     FilesHit, FilesLayout, PopupCommand, PopupSurfaceSpec, ResizeEdgeZone, compute_layout,
     compute_popup_surface_spec, hit_test, scroll_area_at,
 };
+use crate::liquid_glass::{GlassStyle, RustyosLiquidGlassManagerV1, RustyosSurfaceGlassV1};
 use crate::render::{render_popup_surface_pixels, render_window_pixels_with_popup};
 use crate::state::OpenPopupMenu;
 use crate::state::{FilesAppState, ScrollTargetArea, SearchScope, StartupOptions};
@@ -117,6 +118,7 @@ impl From<WaylandError> for WaylandAppError {
 
 struct ActiveWaylandPopup {
     popup: Popup,
+    glass: Option<RustyosSurfaceGlassV1>,
     menu_key: OpenPopupMenu,
     spec: PopupSurfaceSpec,
     hover_idx: Option<usize>,
@@ -124,6 +126,14 @@ struct ActiveWaylandPopup {
     configured: bool,
     configured_size: (u32, u32),
     buffers: Vec<Buffer>,
+}
+
+impl Drop for ActiveWaylandPopup {
+    fn drop(&mut self) {
+        if let Some(ref glass) = self.glass {
+            glass.destroy();
+        }
+    }
 }
 
 struct WaylandClientData {
@@ -134,6 +144,8 @@ struct WaylandClientData {
     compositor_state: CompositorState,
     shm: Shm,
     xdg_shell: XdgShell,
+    glass_manager: Option<RustyosLiquidGlassManagerV1>,
+    _window_glass: Option<RustyosSurfaceGlassV1>,
     pool: SlotPool,
     window: Option<Window>,
     main_buffers: Vec<Buffer>,
@@ -229,6 +241,14 @@ impl WaylandClientData {
         )
         .map_err(|e| WaylandAppError::XdgProtocol(format!("{e:?}")))?;
 
+        let glass = self.glass_manager.as_ref().map(|mgr| {
+            let g = mgr.get_surface_glass(popup.wl_surface(), &self.qh, ());
+            g.set_corner_radius(16);
+            g.set_style(GlassStyle::Popover);
+            g.commit();
+            g
+        });
+
         if let (Some(seat), Some(serial)) = (&self.seat, self.popup_trigger_serial) {
             popup.xdg_popup().grab(seat, serial);
         }
@@ -238,6 +258,7 @@ impl WaylandClientData {
         let req_h = u32::try_from(spec.surface_height.max(1)).unwrap_or(1);
         self.active_popup = Some(ActiveWaylandPopup {
             popup,
+            glass,
             menu_key: menu,
             spec,
             hover_idx: None,
@@ -559,6 +580,10 @@ impl WaylandClientData {
                 (None, self.app.active_writable_directory())
             }
             _ => {
+                if let (Some(win), Some(seat)) = (&self.window, &self.seat) {
+                    #[allow(clippy::cast_possible_truncation)]
+                    win.show_window_menu(seat, serial, (px.round() as i32, py.round() as i32));
+                }
                 self.close_popup();
                 return;
             }
@@ -626,6 +651,19 @@ impl WaylandClientData {
             PopupCommand::RestoreEntry(entry) => self.app.restore_entry(&entry),
             PopupCommand::EmptyTrash => self.app.action_empty_trash(),
             PopupCommand::ToggleTag { path, color } => self.app.toggle_tag_on_path(&path, color),
+            PopupCommand::ZoomWindow => {
+                if let Some(win) = &self.window {
+                    win.set_maximized();
+                }
+            }
+            PopupCommand::MinimizeWindow => {
+                if let Some(win) = &self.window {
+                    win.set_minimized();
+                }
+            }
+            PopupCommand::CloseWindow => {
+                self.app.request_quit();
+            }
         }
     }
 
@@ -719,6 +757,7 @@ const fn map_resize_edge(zone: ResizeEdgeZone) -> ResizeEdge {
 ///
 /// # Errors
 /// Returns `WaylandAppError` on Wayland connection, protocol binding, or rendering failure.
+#[allow(clippy::too_many_lines)]
 pub(crate) fn run(options: &StartupOptions) -> Result<(), WaylandAppError> {
     let conn = Connection::connect_to_env()?;
     let (globals, queue) = registry_queue_init(&conn)?;
@@ -739,6 +778,16 @@ pub(crate) fn run(options: &StartupOptions) -> Result<(), WaylandAppError> {
     window.set_title(&initial_title);
     window.set_app_id("org.rustyos.Files");
     window.set_min_size(Some((720, 440)));
+
+    let glass_manager: Option<RustyosLiquidGlassManagerV1> = globals.bind(&qh, 1..=1, ()).ok();
+    let window_glass = glass_manager.as_ref().map(|mgr| {
+        let g = mgr.get_surface_glass(window.wl_surface(), &qh, ());
+        g.set_corner_radius(12);
+        g.set_style(GlassStyle::Sidebar);
+        g.commit();
+        g
+    });
+
     window.commit();
 
     let mut data = WaylandClientData {
@@ -749,6 +798,8 @@ pub(crate) fn run(options: &StartupOptions) -> Result<(), WaylandAppError> {
         compositor_state,
         shm,
         xdg_shell,
+        glass_manager,
+        _window_glass: window_glass,
         pool,
         window: Some(window),
         main_buffers: Vec::new(),
@@ -929,6 +980,30 @@ delegate_pointer!(WaylandClientData);
 delegate_xdg_shell!(WaylandClientData);
 delegate_xdg_window!(WaylandClientData);
 delegate_xdg_popup!(WaylandClientData);
+
+impl Dispatch<RustyosLiquidGlassManagerV1, ()> for WaylandClientData {
+    fn event(
+        _state: &mut Self,
+        _proxy: &RustyosLiquidGlassManagerV1,
+        _event: crate::liquid_glass::protocol::rustyos_liquid_glass_manager_v1::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<RustyosSurfaceGlassV1, ()> for WaylandClientData {
+    fn event(
+        _state: &mut Self,
+        _proxy: &RustyosSurfaceGlassV1,
+        _event: crate::liquid_glass::protocol::rustyos_surface_glass_v1::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+    }
+}
 
 impl OutputHandler for WaylandClientData {
     fn output_state(&mut self) -> &mut OutputState {

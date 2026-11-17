@@ -1,6 +1,6 @@
 # RustyOS --- Architecture
 
-Статус: **актуально для реализации до `RUSTYOS-045`** (развитие новых
+Статус: **актуально для реализации до `RUSTYOS-088`** (развитие новых
 границ и протоколов по-прежнему требует ADR и `APPROVE:` по `AGENTS.md`).
 
 ## 1. Архитектурная модель
@@ -20,7 +20,7 @@ socket IPC (`rusty-ipc`) и `zwlr_layer_shell_v1`.
   - `state/wm_windows.rs` — `WindowMap`, workspaces, focus, fullscreen/maximize, foreign toplevel;
   - `state/shell_actions.rs` — TopBar, Dock, Spotlight, Overview, Switcher, Quick Settings и notifications;
   - `state/system_bridges.rs` — Lock Screen, PAM/logind, Polkit, Portal/ScreenCast, PipeWire, config и IPC;
-  - `state/wayland_handlers/` — сгруппированные Smithay/Wayland delegate-хендлеры (`core`, `seat_input`, `selection`, `session_lock`, `dmabuf_sync`, `desktop_protocols`);
+  - `state/wayland_handlers/` — сгруппированные Smithay/Wayland delegate-хендлеры (`core`, `seat_input`, `selection`, `session_lock`, `dmabuf_sync`, `desktop_protocols`, `liquid_glass`);
 - Wayland display/server lifecycle и клиентский input routing (`input/`: `mod`, `keyboard`, `pointer`, `shell_pointer`, `gestures`);
 - multi-output раскладка (`outputs.rs`) и интеграция с `rusty-wm`;
 - nested Winit backend (`winit_backend.rs`) и native DRM/KMS per-CRTC
@@ -29,7 +29,8 @@ socket IPC (`rusty-ipc`) и `zwlr_layer_shell_v1`.
   `wp_viewporter`, `zwp_relative_pointer_manager_v1` +
   `zwp_pointer_constraints_v1`, `wp_presentation` (`Vsync`/`HwClock`/`ZeroCopy`
   и `Refresh::Variable`/`Fixed`), `wp_cursor_shape_v1`, `xdg_activation_v1`,
-  `ext_idle_notify_v1` + `zwp_idle_inhibit_manager_v1`, `ext_session_lock_v1`;
+  `ext_idle_notify_v1` + `zwp_idle_inhibit_manager_v1`, `ext_session_lock_v1`,
+  собственный протокол `rustyos_liquid_glass_v1` (`protocols/rustyos-liquid-glass-v1.xml`);
 - `XWayland` интеграция и синхронизация clipboard (`xwayland.rs`);
 - рендер-инструментация (`frame_timing.rs`), конфигурация с атомарным
   сохранением и live reload (`~/.config/rustyos/config.toml` в `config.rs`),
@@ -110,16 +111,16 @@ RustyOS/
 │   │   └── src/
 │   │       ├── frame_composer.rs  # Backend-независимая сборка render list кадра, Z-order overlay/chrome/layer-shell, HiDPI scale, readback
 │   │       ├── state/         # RustyCompositorState, wm_windows, shell_actions, context_menu_actions, system_bridges, wayland_handlers/
-│   │       ├── shell_render/  # tokens, top_bar, dock, dock_stack, context_menu, quick_settings, updates_popover, spotlight_overview, lock_screen, modals, ssd
+│   │       ├── shell_render/  # tokens, top_bar (panel, menus, status, notifications), dock, dock_stack, context_menu, quick_settings, updates_popover, spotlight_overview, lock_screen, modals (polkit, portal, magnifier, settings), ssd
 │   │       ├── input/         # keyboard, pointer, shell_pointer, gestures
 │   │       └── surfaces/      # UiShapeCache, sdf, glyphs, xcursor, liquid_glass, window_shadow, window_minimize
 │   ├── rusty-wm/              # Детерминированная модель WM и workspace 1..9
 │   ├── rusty-animation/       # Refresh-rate independent animation engine
 │   ├── rusty-ipc/             # Версионируемый IPC-протокол compositor <-> shell
 │   └── rusty-services/        # Адаптеры NetworkManager, BlueZ, PipeWire, UPower, sysfs, logind, Polkit, Portal, file_manager, image_decode, updates
-│       └── src/               # lib (ServiceRegistry), power, connectivity, media, display_session, auth, logind, polkit, portal, file_manager, image_decode, updates
+│       └── src/               # lib (ServiceRegistry), power, connectivity, media, display_session, auth, logind, polkit, portal, file_manager (types, listing, trash, operations, metadata), image_decode, updates
 ├── apps/
-│   ├── rusty-files/           # Самостоятельный Wayland-файловый менеджер (Golden Gate CSD, Этапы A и B)
+│   ├── rusty-files/           # Самостоятельный Wayland-файловый менеджер (Golden Gate CSD, render: canvas, chrome, sidebar, views, dialogs, popup, mod; layout; state: types, tabs, dialogs, clipboard, search, input, navigation)
 │   ├── rusty-shell/           # Внешний процесс shell поверх Wayland layer-shell + IPC
 │   └── rusty-updater/         # Автономный GUI-клиент обновления Arch Linux и RustyOS (Golden Gate CSD, Этап B)
 ├── bin/
@@ -132,7 +133,7 @@ RustyOS/
 ├── scripts/
 │   └── install.sh
 └── docs/
-    ├── adr/                   # ADR-0001 .. ADR-0037
+    ├── adr/                   # ADR-0001 .. ADR-0047
     ├── DEVELOPMENT_ENVIRONMENT.md
     ├── GETTING_STARTED.md
     └── HARDWARE_MATRIX.md
@@ -172,18 +173,22 @@ RustyOS/
 Краткая карта типовых врезок для экономии контекста и поиска:
 
 - **Новый shell-оверлей / модал:**
-  1. Рендер и hit-test: `shell_render/modals.rs` -> реэкспорт и `ShellOverlayView` + `notifications_hidden_by_overlay` / `dock_tooltip_hidden_by_overlay` в `shell_render/mod.rs`.
+  1. Рендер и hit-test: `shell_render/modals/` -> реэкспорт и `ShellOverlayView` + `notifications_hidden_by_overlay` / `dock_tooltip_hidden_by_overlay` в `shell_render/mod.rs`.
   2. Композиция (Z-order `foreground_overlay`): `frame_composer.rs`.
   3. Состояние и fullscreen-bypass: `state/mod.rs` (`has_blocking_shell_overlay`, `should_hide_shell_chrome_for_fullscreen_on`, `active_unoccluded_fullscreen_window_on`) + взаимное закрытие в `state/shell_actions.rs` и `state/system_bridges.rs`.
   4. Pointer-перехват: `input/pointer.rs` (`space.output_geometry(&self.output)...to_physical(1)`) + `input/shell_pointer.rs`.
 - **Новый хоткей / пункт меню / IPC-команда:**
   1. IPC: `crates/rusty-ipc/src/lib.rs` (`ShellRequest`, `encode_line`, `decode_line`) -> обработка в `state/wm_windows.rs`.
-  2. Меню: `shell_render/top_bar.rs` (`TopBarMenuAction`, `MENU_*`, `top_bar_menu_items`) -> `state/shell_actions.rs` (`dispatch_top_bar_menu_action`).
+  2. Меню: `shell_render/top_bar/` (`TopBarMenuAction`, `MENU_*`, `top_bar_menu_items`) -> `state/shell_actions.rs` (`dispatch_top_bar_menu_action`).
   3. Клавиатура: `input/mod.rs` (`KeyIntercept`) -> `input/keyboard.rs` (`dispatch_key_intercept`, `classify_keyboard_input`, `match_shortcut`).
 - **Настройки `UserConfig` и live save/reload:**
   - `config.rs` (`UserConfig`, `parse_toml`, `to_toml_string`, `save_to_path`); `state/shell_actions.rs` (`sync_and_save_user_config`, `apply_user_config`, `reload_user_config`); `config_path` = `None` в тестах и `default_user_config_path()` в `winit_backend.rs`/`drm_backend.rs`.
-- **Контекстные меню (ПКМ Desktop / Dock):**
-  - `shell_render/context_menu.rs` (`ContextMenuState`, `ContextMenuEntry`, `ContextMenuAction`, `compute_context_menu_layout`, `generate_context_menu_elements`) + `ShellOverlayView::ContextMenu` в `shell_render/mod.rs`; `state/context_menu_actions.rs` (`open_desktop_context_menu`, `open_dock_context_menu`, `execute_context_menu_action`, `drain_trash_empty_results`) + `input/{pointer,shell_pointer,keyboard}.rs`.
+- **Контекстные меню и выпадающие списки (Desktop / Dock / Window Management / Clients):**
+  - Системные меню: `shell_render/context_menu.rs` (`ContextMenuState`, `ContextMenuEntry`, `ContextMenuAction`, `compute_context_menu_layout`, `generate_context_menu_elements`) + `ShellOverlayView::ContextMenu` в `shell_render/mod.rs`.
+  - Модульная подсистема: `crates/rusty-compositor/src/context_menu/` (`window_menu.rs`, `desktop_menu.rs`, `dock_menu.rs`, `actions.rs`, `mod.rs`) с фасадом в `state/context_menu_actions.rs`.
+  - Оконное управление: перехват правого клика на SSD-заголовках/кнопках (`input/pointer.rs`), глобальные хоткеи `Alt+Right` / `Super+Right` и Wayland CSD callback `show_window_menu` (`state/wayland_handlers/core.rs`).
+  - Клиентский стандарт 1:1 Liquid Glass Popover (`apps/rusty-files/src/render/popup.rs`): `MENU_POPOVER_RADIUS = 16`, инсетные плавающие пилюли ховера `HOVER_PILL_RADIUS = 8`, `HOVER_PILL_INSET_H = 6`, многостадийная SDF-тень, зеркальный верхний кант, колонка шорткатов (ADR-0043, D-051).
+  - First-party Wayland-протокол Liquid Glass `rustyos_liquid_glass_v1`: серверный менеджер `crates/rusty-compositor/src/state/wayland_handlers/liquid_glass.rs`, композиторная отрисовка в `frame_composer.rs` (`push_window_liquid_glass_elements`), клиентская интеграция в `apps/rusty-files` (`liquid_glass.rs`, `wayland.rs`) (ADR-0048, D-056).
 - **Нетривиальные сигнатуры и lint-правила:**
   - `KeyboardHandle::change_repeat_info(&self, rate: i32, delay: i32)` (порядок `(rate, delay)`, обратный к `seat.add_keyboard(xkb, delay, rate)`).
   - `set_output_rotation(id, rot, use_winit_fbo_flip)`: `use_winit_fbo_flip = name.eq_ignore_ascii_case("winit-0")` (`true` для Winit FBO, `false` для DRM/KMS).

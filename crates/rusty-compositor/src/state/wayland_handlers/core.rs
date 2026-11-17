@@ -19,7 +19,7 @@ use smithay::{
             protocol::{wl_buffer, wl_output::WlOutput, wl_seat, wl_surface::WlSurface},
         },
     },
-    utils::Serial,
+    utils::{Logical, Point, Serial},
     wayland::{
         buffer::BufferHandler,
         compositor::{self, CompositorClientState, CompositorHandler, CompositorState},
@@ -359,6 +359,25 @@ impl XdgShellHandler for RustyCompositorState {
         if let Some(win_id) = self.window_id_for_toplevel(&surface) {
             let serial = smithay::utils::SERIAL_COUNTER.next_serial();
             self.minimize_window(win_id, serial);
+        }
+    }
+
+    fn show_window_menu(
+        &mut self,
+        surface: ToplevelSurface,
+        _seat: smithay::reexports::wayland_server::protocol::wl_seat::WlSeat,
+        _serial: Serial,
+        location: Point<i32, Logical>,
+    ) {
+        if let Some(win_id) = self.window_id_for_toplevel(&surface)
+            && let Some(win) = self.wm.window(win_id)
+        {
+            let global_pos = Point::<f64, Logical>::from((
+                f64::from(win.geometry.x + location.x),
+                f64::from(win.geometry.y + location.y),
+            ));
+            self.wm.focus_and_raise(win_id);
+            self.open_window_context_menu(global_pos, win_id);
         }
     }
 

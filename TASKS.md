@@ -1349,6 +1349,413 @@ hardware/software context и низкие накладные расходы.
   - `cargo test --workspace --locked -- --test-threads=1` (`225 passed; 0 failed`).
 - **Risks:** Нет.
 
+### RUSTYOS-086 — Унифицированное системное контекстное меню по стандарту macOS 27 и модульная декомпозиция подсистемы меню
+
+- **Status:** Done (`RUSTYOS-086 Вариант 1` — утверждённый объём выполнен)
+- **Goal:** Реализовать унифицированное системное контекстное меню по правой кнопке мыши по стандарту macOS 27 Golden Gate для всех оконных поверхностей и приложений: вызов меню управления окном при клике на SSD-заголовок, рамку, по `Alt/Super+Right-Click` или через Wayland CSD `xdg_toplevel.show_window_menu`; тайлинг в левую/правую половину (`⌥←`/`⌥→`), Zoom (`⌥F`), перенос на мониторы (`⌥O`), назначение рабочих столов (`1..9`), сворачивание (`⌘M`), закрытие (`⌘W`) и принудительное завершение (`Alt` -> `Force Quit`); интеграция гибридного меню в `apps/rusty-files`; модульная декомпозиция разросшегося `context_menu_actions.rs` в подмодули `crates/rusty-compositor/src/context_menu/`; оформление ADR-0042 и записи D-050.
+- **Dependencies:** `RUSTYOS-064`, `RUSTYOS-081`, `ADR-0042`, `D-050`.
+- **Scope:**
+  - `crates/rusty-compositor/src/shell_render/context_menu.rs`: расширены перечисления `ContextMenuAction` (добавлены `WindowTileLeft`, `WindowTileRight`, `WindowToggleMaximize`, `WindowMoveToNextOutput`) и `ContextMenuTarget` (добавлен `Window(WindowId)`).
+  - `crates/rusty-compositor/src/context_menu/`: новая модульная подсистема контекстных меню:
+    - `window_menu.rs`: функции `build_window_context_entries` (полный набор оконных действий macOS 27) и `build_minimized_window_context_entries`;
+    - `desktop_menu.rs`: сканирование канваса Рабочего стола, сетка иконок, создание уникальных папок, переименование и удаление в корзину;
+    - `dock_menu.rs`: меню приложений Dock, стек и сортировка Загрузок, управление Корзиной и фоновые каналы очистки;
+    - `actions.rs`: диспетчер действий `execute_context_menu_action` и `execute_dock_or_window_context_action`, управление процессами, переключение модификатора `Alt` (`toggle_quit_force_in_entries`);
+    - `mod.rs`: центральный координатор контекстных меню, методы `RustyCompositorState` (`open_window_context_menu`, `open_desktop_context_menu`, `open_dock_context_menu`, обработка кликов, ховеров, клавиатурной навигации).
+  - `crates/rusty-compositor/src/state/context_menu_actions.rs`: легковесный фасад обратной совместимости, реэкспортирующий `crate::context_menu::*`.
+  - `crates/rusty-compositor/src/input/pointer.rs`: перехват правого клика (`button == 273`) на SSD-заголовках, кнопках и рамках с вызовом `open_window_context_menu`; поддержка `Alt+Right-Click` и `Super+Right-Click` на любой области окна для прямого открытия системного меню.
+  - `crates/rusty-compositor/src/state/wayland_handlers/core.rs`: реализация обработчика `show_window_menu` в `XdgShellHandler` для вызова системного меню по запросу CSD-приложений.
+  - `apps/rusty-files`: добавлены стандартные системные оконные команды (`ZoomWindow`, `MinimizeWindow`, `CloseWindow`) под разделителем в контекстном меню файлов, и трансляция правого клика по панели инструментов композитору через `win.show_window_menu`.
+  - `docs/adr/0042-unified-system-context-menu-and-modularization.md` и запись `D-050` в `DECISIONS.md`.
+- **Acceptance Criteria:**
+  - Правый клик по заголовку или рамке любого окна открывает системное меню управления окном;
+  - Меню содержит тайлинг (левая/правая половина), Zoom / Restore Size, Move to Desktop 1..9, Move to Next Display (при наличии >1 дисплея), Minimize и Close/Force Quit;
+  - При удержании `Alt` пункт «Close» динамически сменяется на красный «Force Quit»;
+  - CSD-приложения, вызывающие `xdg_toplevel.show_window_menu`, получают Liquid Glass меню композитора в заданной точке;
+  - В `rusty-files` контекстное меню содержит системные действия под разделителем, а клик по тулбару вызывает оконное меню;
+  - Монолитный файл `context_menu_actions.rs` декомпозирован на чистые подмодули.
+- **Tests:**
+  - `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`;
+  - `cargo test --workspace --locked` (все 226 тестов пройдены успешно).
+- **Risks:** Нет.
+
+### RUSTYOS-087 — 1:1 стандарт Liquid Glass Popover для клиентских xdg_popup поверхностей в rusty-files и декомпозиция рендера меню
+
+- **Status:** Done (`RUSTYOS-087 Вариант 1` — утверждённый объём выполнен)
+- **Goal:** Привести контекстные меню и выпадающие списки в `apps/rusty-files` к полному 1:1 визуальному и геометрическому соответствию со стандартом Liquid Glass композитора macOS 27 Golden Gate (`DESIGN.md` §10, §12): скругление 16px (`MENU_POPOVER_RADIUS`), многослойная гауссова SDF-тень, зеркальный верхний ободок (`rgba(255, 255, 255, 80)` / `38`), инсетные плавающие пилюли ховера 8px (`HOVER_PILL_RADIUS`) с отступом 6px, правая колонка горячих клавиш (`⇧⌘N`, `⌘T`, `Space`, `⌘I`, `⏎`, `⌘C`, `⌘X`, `⌘V`, `⌘D`, `⌘⌫`, `^⌘F`, `⌘M`, `⌘W`, `⇧⌘.`), тонкие разделители секций с отступом 12px; декомпозировать разросшийся `render.rs`, вынеся логику меню в изолированный модуль `apps/rusty-files/src/render/popup.rs`; оформить ADR-0043 и запись D-051.
+- **Dependencies:** `RUSTYOS-086`, `ADR-0043`, `D-051`.
+- **Scope:**
+  - `apps/rusty-files/src/render/popup.rs`: новый модуль рендеринга выпадающих меню и контекстных списков:
+    - Константы `MENU_POPOVER_RADIUS = 16`, `HOVER_PILL_RADIUS = 8`, `HOVER_PILL_INSET_H = 6`, `HOVER_PILL_INSET_V = 1`, `HAIRLINE_DIVIDER_INSET = 12`;
+    - Функция `shortcut_for_command` для маппинга стандартных клавиатурных комбинаций macOS 27;
+    - Функция `is_danger_command` для цветовой подсветки деструктивных операций (`popover_danger`);
+    - Функция `render_popup` с многостадийным SDF-шейдингом тени, полупрозрачной подложкой Liquid Glass, зеркальным верхним кантом, плавающими инсетными пилюлями ховера, монохромными и векторными глифами, цветовыми кружками тегов и правой колонкой шорткатов;
+    - Функция `render_popup_surface_pixels` для отрисовки в буфер Wayland-поверхности `xdg_popup`;
+    - Unit-тесты на геометрию, шорткаты и цвета.
+  - `apps/rusty-files/src/render.rs`:
+    - Добавлены токены `popover_bg`, `popover_border`, `popover_rim`, `popover_text_primary`, `popover_text_secondary`, `popover_text_muted`, `popover_danger`, `popover_separator` в структуру `Palette` и функцию `palette_for`;
+    - Удалена устаревшая плоская реализация `render_popup` (разгрузка монолитного файла);
+    - Подключен модуль `pub(crate) mod popup;` с реэкспортом `render_popup` и `render_popup_surface_pixels`.
+  - `apps/rusty-files/src/layout.rs`:
+    - Обновлены базовые ширины в `build_popup_entries`: контекстное и actions-меню расширены до 230px для комфортного размещения шорткатов без наложений.
+  - `docs/adr/0043-client-liquid-glass-popup-standard.md` и запись `D-051` в `DECISIONS.md`.
+- **Acceptance Criteria:**
+  - Контекстные меню и выпадающие списки в `rusty-files` имеют радиус скругления 16px, мягкую многослойную тень и полупрозрачную подложку Liquid Glass с зеркальным верхним кантом;
+  - Выделение пункта при ховере происходит через плавающую инсетную пилюлю со скруглением 8px и боковыми отступами 6px;
+  - Пункты меню содержат правую колонку горячих клавиш;
+  - Деструктивные действия подсвечиваются системным красным цветом `popover_danger`;
+  - Логика отрисовки меню изолирована в `apps/rusty-files/src/render/popup.rs`;
+  - Все тесты воркспейса проходят успешно, clippy и cargo fmt чисты.
+- **Tests:**
+  - `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`;
+  - `cargo test --workspace` (все 244 теста воркспейса пройдены успешно).
+- **Risks:** Нет.
+
+### RUSTYOS-088 — Модульная декомпозиция монолитных подсистем apps/rusty-files/src/state и crates/rusty-services/src/file_manager
+
+- **Status:** Done (`RUSTYOS-088 Вариант 1` — утверждённый объём выполнен)
+- **Goal:** Ликвидировать архитектурный долг и code smell двух крупнейших монолитных файлов проекта (`crates/rusty-services/src/file_manager.rs` на 3,240 строк и `apps/rusty-files/src/state.rs` на 3,298 строк), разбив их на чистые, строго сфокусированные субмодули (<700 строк логики) с полным сохранением 100% публичных API, контрактов и всей тестовой базы (244 теста рабочего пространства). Оформить ADR-0044 и запись D-052.
+- **Dependencies:** `RUSTYOS-087`, `ADR-0044`, `D-052`.
+- **Scope:**
+  - `crates/rusty-services/src/file_manager/`:
+    - `types.rs`: базовые типы данных (`FileEntry`, `FileSortField`, `FileViewMode`, `FileTagColor`), persisted структуры (`FileTagsConfig`, `UserFileLocations`), модели томов (`VolumeInfo`, `discover_mounts`);
+    - `listing.rs`: сканирование директорий, цели навигации `ListingTarget`, поиск, сортировка/фильтрация;
+    - `trash.rs`: реализация спецификации `FreeDesktop Trash` (листинг, `.trashinfo`, перемещение, восстановление, очистка);
+    - `operations.rs`: файловые операции (копирование, перемещение, переименование, дублирование, прогресс, отмена, разрешение конфликтов);
+    - `metadata.rs`: детальная инспекция метаданных `FileDetailedInfo`, текстовые превью `TextPreview`, автодополнение путей `Go to Folder`;
+    - `mod.rs`: публичный фасад со 100% re-exports и все 43 теста сервиса.
+  - `apps/rusty-files/src/state/`:
+    - `types.rs`: геометрические константы, плавная прокрутка `SmoothAxis`, `ColumnPane`, `SidebarRowItem`, `FileTabState`, типы попапов, сообщения очередей `mpsc`;
+    - `tabs.rs`: многовкладочный режим (создание, переключение, закрытие, снапшоты);
+    - `dialogs.rs`: модальные оверлеи (Quick Look, Get Info, Go to Folder, Rename, Transfer Conflict);
+    - `clipboard.rs`: буфер обмена (Copy/Cut/Paste), дублирование, перемещение в корзину, запуск фоновых потоков передачи;
+    - `search.rs`: поиск в папке и рекурсивный Home-поиск, кеш превью (LRU), назначение тегов;
+    - `input.rs`: обработка горячих клавиш, физика скроллинга, анимационные тики и мигание каретки;
+    - `navigation.rs`: навигация по папкам, история Back/Forward, сайдбар, хлебные крошки;
+    - `mod.rs`: структура `FilesAppState`, инициализация, фасад состояния и юнит-тесты.
+  - `docs/adr/0044-modular-decomposition-of-files-state-and-file-manager.md` и запись `D-052` в `DECISIONS.md`.
+- **Acceptance Criteria:**
+  - Все исходные файлы обеих подсистем декомпозированы на чистые модули (<700 строк логики на файл);
+  - Ни один публичный интерфейс, тип или сигнатура функции не сломаны;
+  - Все 43 теста `rusty-services` и 15 тестов `rusty-files` (все 244 теста воркспейса) проходят успешно;
+  - `cargo clippy --workspace --all-targets -- -D warnings` и `cargo fmt --all -- --check` чисты;
+  - ADR-0044 и D-052 зафиксированы.
+- **Tests:**
+  - `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`;
+  - `cargo test --workspace` (все 244 теста воркспейса пройдены успешно).
+- **Risks:** Нет.
+
+### RUSTYOS-089 — Модульная декомпозиция подсистемы рендеринга apps/rusty-files/src/render и консолидация разрозненных корней views.rs/dialogs.rs в layout.rs
+
+- **Status:** Done (`RUSTYOS-089 Вариант 1` — утверждённый объём выполнен)
+- **Goal:** Завершить полную модульную реорганизацию `apps/rusty-files`, ликвидировав оставшиеся разрозненные корни `render.rs` (2,614 строк), `views.rs` (1,185 строк) и `dialogs.rs` (1,053 строки). Консолидировать всю геометрию раскладок и хит-тестинга в канонический `layout.rs`, а код отрисовки декомпозировать на чистые сфокусированные слои в пакете `render/` (canvas, chrome, sidebar, views, dialogs, popup, mod) со 100% сохранением всех тестов воркспейса, оформлением ADR-0045 и фиксацией записи D-053.
+- **Dependencies:** `RUSTYOS-088`, `ADR-0045`, `D-053`.
+- **Scope:**
+  - `apps/rusty-files/src/layout.rs`:
+    - Консолидация структур геометрии и хит-тестинга из `views.rs` (`TabItemLayout`, `TabBarLayout`, `PathCrumbLayout`, `IconCellLayout`, `IconsGridLayout`, `GalleryLayout`, `compute_*`, `hit_test_*`);
+    - Консолидация структур геометрии и хит-тестинга из `dialogs.rs` (`QuickLookLayout`, `GetInfoLayout`, `GoToFolderLayout`, `ConflictDialogLayout`, `TransferDialogLayout`, `DialogOverlaysLayout`, `compute_*`, `hit_test_*`).
+  - `apps/rusty-files/src/render/`:
+    - `canvas.rs` (1,120 строк): загрузка Inter TTF шрифтов через `Fontdue`, `thread_local` кеш глифов, `Canvas<'a>` буфер пикселей и 2D SDF / RGSS-16 примитивы;
+    - `chrome.rs` (432 строки): CSD светофоры окна, пилюли режимов, поле поиска, search scope bar, вкладки `render_tab_bar` и хлебные крошки `render_path_bar`;
+    - `sidebar.rs` (128 строк): полупрозрачный Finder сайдбар, скроллбар и баннер корзины `render_trash_banner`;
+    - `views.rs` (1,204 строки): Miller Columns, List View, Icons Grid (64px SSAA), Gallery View, инспектор превью и строка состояния;
+    - `dialogs.rs` (783 строки): модальные листы и оверлеи (Quick Look, Get Info, Go to Folder, карточки конфликтов, инлайн-переименование);
+    - `popup.rs` (353 строки): Liquid Glass спецификация всплывающих окон и поверхностей `xdg_popup`;
+    - `mod.rs` (521 строка): токены `Palette`, `palette_for`, генерация кадров `render_window_pixels`, фасад реэкспорта со 100% обратной совместимостью и юнит-тесты рендерера.
+  - Упразднение старых монолитных корней `apps/rusty-files/src/render.rs`, `views.rs`, `dialogs.rs` и директив `mod views;` / `mod dialogs;` в `main.rs`.
+  - `docs/adr/0045-modular-decomposition-of-files-render-pipeline.md` и запись `D-053` в `DECISIONS.md`.
+- **Acceptance Criteria:**
+  - Корневые монолиты `render.rs`, `views.rs`, `dialogs.rs` полностью удалены;
+  - Вся геометрия и хит-тестинг централизованы в `layout.rs`;
+  - Подсистема отрисовки разделена на чистые слои в пакете `render/`;
+  - 100% сохранение работоспособности: все 244 теста воркспейса проходят успешно;
+  - `cargo clippy --workspace --all-targets -- -D warnings` и `cargo fmt --all -- --check` чисты;
+  - ADR-0045 и D-053 зафиксированы.
+- **Tests:**
+  - `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`;
+  - `cargo test --workspace` (все 244 теста воркспейса пройдены успешно).
+- **Risks:** Нет.
+
+### RUSTYOS-090 — Модульная декомпозиция подсистемы TopBar композитора crates/rusty-compositor/src/shell_render/top_bar по стандартам CutefishOS и macOS 27
+
+- **Status:** Done (`RUSTYOS-090 Вариант 1` — утверждённый объём выполнен)
+- **Goal:** Ликвидировать монолитный файл `crates/rusty-compositor/src/shell_render/top_bar.rs` (2,232 строки), декомпозировав его в чистую модульную структуру `top_bar/` (`panel.rs`, `menus.rs`, `status.rs`, `notifications.rs`, `mod.rs`) по стандартам CutefishOS и macOS 27. Сохранить 100% обратную совместимость всех публичных контрактов и все 244 теста рабочего пространства, оформить ADR-0046 и зафиксировать запись D-054.
+- **Dependencies:** `RUSTYOS-089`, `ADR-0046`, `D-054`.
+- **Scope:**
+  - `crates/rusty-compositor/src/shell_render/top_bar/`:
+    - `panel.rs` (661 строк): структуры настроек и геометрии панели (`TopBarLayoutOptions`, `TopBarLeftLayout`, `TopBarRightLayout`), телеметрия `TopBarTelemetry`, вычисление раскладок `compute_top_bar_left_layout*` и `compute_top_bar_right_layout*`, отрисовка базовой панели и воркспейсов `render_top_bar`, `render_top_bar_workspaces`, хит-тестинг воркспейсов и раскладки окон;
+    - `menus.rs` (759 строк): структуры и перечисления меню (`TopBarMenuHit`, `TopBarMenuAction`, `TopBarMenuEntry`, `TopBarMenuPopoverClick`, `MENU_POPOVER_RADIUS`), статические наборы меню, поповеры и их размеры (`top_bar_menu_popover_rect*`), хит-тестинг кликов и ховеров меню;
+    - `status.rs` (477 строк): структуры и константы трея (`TopBarTrayItem`, `MAX_TOP_BAR_TRAY_ITEMS`), геометрия и хит-тестинг слотов трея, статусных пилюль, бейджа обновлений, поиска и Control Center, отрисовка монохромных глифов `push_top_bar_right_glyphs`;
+    - `notifications.rs` (353 строк): структуры тостов и OSD (`NotificationToastView`, `MAX_VISIBLE_NOTIFICATIONS`, `OsdRenderState`), геометрия и хит-тестинг тостов уведомлений и бейджа, иконки приложений `notification_app_icon`, рендеринг OSD-пилюли громкости/яркости `generate_osd_elements` и `push_osd_level_bar`;
+    - `mod.rs` (17 строк): фасад со 100% обратной совместимостью re-exports.
+  - Упразднение монолитного файла `crates/rusty-compositor/src/shell_render/top_bar.rs`.
+  - `docs/adr/0046-modular-decomposition-of-top-bar.md` и запись `D-054` в `DECISIONS.md`.
+- **Acceptance Criteria:**
+  - Монолит `top_bar.rs` на 2,232 строки разделен на 4 подмодуля (<800 строк каждый);
+  - Внешний фасад `shell_render/mod.rs` и потребители не потребовали изменений;
+  - Все 244 теста воркспейса проходят успешно;
+  - `cargo clippy --workspace --all-targets -- -D warnings` и `cargo fmt --all -- --check` чисты;
+  - ADR-0046 и D-054 оформлены.
+- **Tests:**
+  - `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`;
+  - `cargo test --workspace` (все 244 теста воркспейса пройдены успешно).
+- **Risks:** Нет.
+
+### RUSTYOS-091 — Модульная декомпозиция подсистемы модальных диалогов crates/rusty-compositor/src/shell_render/modals по стандартам CutefishOS и macOS 27
+
+- **Status:** Done (`RUSTYOS-091 Вариант 1` — утверждённый объём выполнен)
+- **Goal:** Ликвидировать монолитный файл `crates/rusty-compositor/src/shell_render/modals.rs` (1,994 строки), декомпозировав его в чистую модульную структуру `modals/` (`polkit.rs`, `portal.rs`, `magnifier.rs`, `settings.rs`, `mod.rs`) по стандартам CutefishOS и macOS 27. Сохранить 100% обратную совместимость всех публичных контрактов и все 244 теста рабочего пространства, оформить ADR-0047 и зафиксировать запись D-055.
+- **Dependencies:** `RUSTYOS-090`, `ADR-0047`, `D-055`.
+- **Scope:**
+  - `crates/rusty-compositor/src/shell_render/modals/`:
+    - `polkit.rs` (408 строк): структуры (`PolkitPromptRenderState`, `PolkitHit`, `PolkitModalLayout`), геометрия и хит-тестинг `polkit_modal_layout`, `hit_test_polkit_dialog`, обёртка сообщений `wrap_polkit_two_lines`, отрисовка текста и Liquid Glass композита;
+    - `portal.rs` (442 строки): структуры (`PortalSourceRow`, `PortalPromptRenderState`, `PortalHit`, `PortalModalLayout`, `PORTAL_MAX_VISIBLE_ROWS`), геометрия списка и хит-тестинг `portal_visible_range`, `portal_modal_layout`, `hit_test_portal_dialog`, отрисовка текста и композита;
+    - `magnifier.rs` (73 строки): геометрия плавающей пилюли `pick_color_pill_rect`, отрисовка текста и Liquid Glass оверлея `render_pick_color_text`, `render_pick_color_composite`;
+    - `settings.rs` (1,104 строки): перечисления и модели (`SettingsTab`, `SettingsRenderState`, `SettingsHit`, `SettingsRowKind`, `SettingsRowEntry`), геометрия `settings_modal_layout`, `settings_row_pill_rect`, `settings_row_stepper_rects`, спецификация строк вкладок, хит-тестинг `hit_test_settings_modal`, отрисовка текста и интерактивных контролов;
+    - `mod.rs` (28 строк): общий хелпер `phys_to_logical_rect` и фасад со 100% обратной совместимостью re-exports.
+  - Упразднение монолитного файла `crates/rusty-compositor/src/shell_render/modals.rs`.
+  - `docs/adr/0047-modular-decomposition-of-shell-modals.md` и запись `D-055` в `DECISIONS.md`.
+- **Acceptance Criteria:**
+  - Монолит `modals.rs` на 1,994 строки разделен на 4 специализированных подмодуля;
+  - Внешний фасад `shell_render/mod.rs` и потребители не потребовали изменений;
+  - Все 244 теста воркспейса проходят успешно;
+  - `cargo clippy --workspace --all-targets -- -D warnings` и `cargo fmt --all -- --check` чисты;
+  - ADR-0047 и D-055 оформлены.
+- **Tests:**
+  - `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`;
+  - `cargo test --workspace` (все 244 теста воркспейса пройдены успешно).
+- **Risks:** Нет.
+
+### RUSTYOS-092 — Собственный Wayland-протокол Liquid Glass (rustyos_liquid_glass_v1), серверная реализация и интеграция в rusty-files
+
+- **Status:** Done (`RUSTYOS-092 Вариант 1` — утверждённый объём выполнен)
+- **Goal:** Реализовать собственный открытый first-party Wayland-протокол `rustyos_liquid_glass_v1` для запроса клиентскими поверхностями (попапы, контекстные меню, сайдбар) аппаратного размытия бэкдропа и эффекта Liquid Glass. Обеспечить серверную обработку и двойную буферизацию состояния стекла в `crates/rusty-compositor`, аппаратный рендеринг Liquid Glass в `frame_composer.rs`, клиентскую интеграцию в `apps/rusty-files`, оформить ADR-0048 и зафиксировать запись D-056.
+- **Dependencies:** `RUSTYOS-091`, `ADR-0048`, `D-056`.
+- **Scope:**
+  - `protocols/rustyos-liquid-glass-v1.xml`:
+    - Интерфейс `rustyos_liquid_glass_manager_v1` (фабрика декораторов поверхностей, запрос `get_surface_glass`, деструктор);
+    - Интерфейс `rustyos_surface_glass_v1` (запросы `set_region`, `set_corner_radius`, `set_style`, `set_tint`, `commit`, деструктор; пресеты стиля `Popover`, `Sidebar`, `ControlPill`, `BasePanel`, `Custom`).
+  - `crates/rusty-compositor/src/state/wayland_handlers/liquid_glass.rs`:
+    - Автогенерация интерфейсов и сервера с помощью `wayland-scanner`;
+    - Структура `LiquidGlassSurfaceCachedState` с реализацией `smithay::wayland::compositor::Cacheable`;
+    - `LiquidGlassManagerState` и регистрация глобала `RustyosLiquidGlassManagerV1` в дисплее;
+    - Реализации `GlobalDispatch` и `Dispatch` для менеджера и поверхности стекла;
+    - Хелперы `surface_liquid_glass_state` и `has_active_client_liquid_glass`.
+  - `crates/rusty-compositor/src/frame_composer.rs`:
+    - Активация `needs_backdrop_blur` при наличии активных клиентских поверхностей стекла;
+    - Функция `push_window_liquid_glass_elements` в цикле отрисовки окон, генерирующая аппаратные элементы `glass_panel_render_element` под попапами и сайдбаром в строгом Z-порядке front-to-back.
+  - `apps/rusty-files/src/liquid_glass.rs` и `apps/rusty-files/src/wayland.rs`:
+    - Клиентские биндинги `wayland-scanner` для протокола;
+    - Обнаружение глобала в реестре Wayland и привязка `RustyosLiquidGlassManagerV1`;
+    - Интеграция `RustyosSurfaceGlassV1` для всех `xdg_popup` (стиль Popover, 16px радиус) и главного окна (стиль Sidebar, 12px радиус);
+    - RAII-деструктор `Drop for ActiveWaylandPopup`.
+  - `docs/adr/0048-rustyos-liquid-glass-wayland-protocol.md` и запись `D-056` в `DECISIONS.md`.
+- **Acceptance Criteria:**
+  - Полная независимость: протокол `rustyos_liquid_glass_v1` является нативной разработкой RustyOS, свободным от протоколов сторонних DE;
+  - Серверная и клиентская части компилируются и взаимодействуют без сбоев;
+  - Все 250 тестов воркспейса проходят успешно;
+  - `cargo clippy --workspace --all-targets -- -D warnings` и `cargo fmt --all -- --check` чисты;
+  - ADR-0048 и D-056 оформлены.
+- **Tests:**
+  - `state::wayland_handlers::liquid_glass::tests::test_liquid_glass_style_conversions`;
+  - `state::wayland_handlers::liquid_glass::tests::test_liquid_glass_cached_state_defaults`;
+  - `state::wayland_handlers::liquid_glass::tests::test_liquid_glass_cached_state_commit_and_merge`;
+  - `state::tests::test_rustyos_liquid_glass_protocol_integration`;
+  - Все 250 тестов воркспейса (`cargo test --workspace`).
+- **Risks:** Нет.
+
+### RUSTYOS-093 — Приведение Liquid Glass контейнера Дока к эталону 1:1 macOS 27 Golden Gate
+
+- **Status:** Done (`RUSTYOS-093 Вариант 1` — утверждённый объём выполнен)
+- **Goal:** Устранить визуальные расхождения между рендерингом Дока RustyOS и эталоном macOS 27 Golden Gate: перевести контейнер на честную геометрию Pill Capsule (`radius = height / 2 = 34px`), внедрить непрерывный top-lit световой шельф в шейдере и SDF, контактное притенение нижней грани и мягкую объемную тень `push_soft_shadow` под доком.
+- **Dependencies:** `RUSTYOS-092`, `ADR-0049`, `D-057`.
+- **Scope:**
+  - `crates/rusty-compositor/src/shell_render/tokens.rs`:
+    - `DOCK_RADIUS = DOCK_HEIGHT / 2` (34px);
+    - `DOCK_CAP_PADDING = 14px` для предотвращения наложения крайних иконок на полукруглые торцы;
+  - `crates/rusty-compositor/src/shell_render/dock.rs`:
+    - Использование `DOCK_CAP_PADDING` при расчете длины капсулы и стартовой позиции иконок;
+  - `crates/rusty-compositor/src/shell_render/mod.rs`:
+    - Добавление `push_soft_shadow(out, shape_cache, renderer, capsule, DOCK_RADIUS, 20, 72)` под капсулой Дока в `push_dock_chrome_shapes`;
+    - Экспорт `DOCK_CAP_PADDING` в публичный интерфейс `shell_render`;
+  - `crates/rusty-compositor/src/surfaces/liquid_glass.rs` (`LIQUID_GLASS_FRAG`):
+    - Верхний источник света `light_top = vec2(-0.35, -0.94)` и расчет `top_shelf` для непрерывного горизонтального фасета;
+    - Контактное притенение нижней кромки `bottom_occlusion`;
+  - `crates/rusty-compositor/src/surfaces/sdf.rs`:
+    - Согласование аналитического CPU-семплера с моделью `top_shelf` и притенения нижней кромки;
+  - `apps/rusty-shell/src/wayland.rs`:
+    - Перевод радиуса контейнера Дока на `h / 2`;
+  - `crates/rusty-compositor/src/shell_render/tests.rs`:
+    - Обновление теста констант Дока под `DOCK_RADIUS = 34`;
+  - `docs/adr/0049-macos-27-pill-capsule-liquid-glass-dock.md` и запись `D-057` в `DECISIONS.md`.
+- **Acceptance Criteria:**
+  - Док визуально идентичен референсу macOS 27 Golden Gate (Pill Capsule, выразительный верхний шельф, мягкое парение над обоями);
+  - Все 250 тестов воркспейса проходят успешно;
+  - `cargo clippy --workspace --all-targets -- -D warnings` и `cargo fmt --all -- --check` чисты;
+  - Живая проверка в `--winit` подтверждена скриншотами.
+- **Tests:**
+  - `shell_render::tests::macos_dock_divider_gap_tooltip_and_radii_constants`;
+  - `surfaces::tests::dock_glass_and_icon_shadow_rasterize_cleanly`;
+  - Все 250 тестов воркспейса (`cargo test --workspace`).
+- **Risks:** Нет.
+
+### RUSTYOS-094 — Приведение контейнера Дока к точному референсу: радиус 18px, плоское матовое стекло, равномерный 1px кант
+
+- **Status:** Done (`RUSTYOS-094 Вариант 1` — утверждённый объём выполнен)
+- **Goal:** Устранить эффект выпуклости стекла и избыточную скруглённость контейнера Дока, приведя его в точное визуальное соответствие с референсом: радиус скругления 18px (прямые вертикальные боковины), удаление выпуклых искажений из шейдера и SDF, плоское матовое акриловое стекло с деликатной 1px окантовкой.
+- **Dependencies:** `RUSTYOS-093`, `ADR-0050`, `D-058`.
+- **Scope:**
+  - `crates/rusty-compositor/src/shell_render/tokens.rs`:
+    - `DOCK_RADIUS = 18px`;
+    - удаление искусственного `DOCK_CAP_PADDING`;
+  - `crates/rusty-compositor/src/shell_render/dock.rs`:
+    - возврат к стандартному `DOCK_PADDING = 8` для оси и длины капсулы;
+  - `crates/rusty-compositor/src/shell_render/mod.rs`:
+    - удаление `DOCK_CAP_PADDING` из публичных экспортов;
+  - `crates/rusty-compositor/src/surfaces/liquid_glass.rs` (`LIQUID_GLASS_FRAG`):
+    - удаление асимметричных `top_shelf` и `bottom_occlusion`, исключение 3D-выпуклости стекла;
+    - деликатный равномерный 1px кант по всему контуру;
+  - `crates/rusty-compositor/src/surfaces/sdf.rs`:
+    - приведение `diagonal_glass_rim` и `sample_glass_panel_pixel_themed` к плоскому матовому стеклу без выпуклого затемнения;
+  - `apps/rusty-shell/src/wayland.rs`:
+    - радиус контейнера Дока зафиксирован на `18.min(h / 2).max(1)`;
+  - `crates/rusty-compositor/src/shell_render/tests.rs` и `crates/rusty-compositor/src/surfaces/tests.rs`:
+    - обновление тестов констант под `DOCK_RADIUS = 18`;
+  - `docs/adr/0050-flat-frosted-liquid-glass-dock.md` и запись `D-058` в `DECISIONS.md`.
+- **Acceptance Criteria:**
+  - Контейнер Дока визуально идентичен прикреплённому референсу (радиус 18px, ровные боковины, плоское матовое стекло, тонкий равномерный 1px кант);
+  - Все 250 тестов воркспейса проходят успешно;
+  - `cargo clippy --workspace --all-targets -- -D warnings` и `cargo fmt --all -- --check` чисты;
+  - Живой `--winit` снимок подтверждён.
+- **Tests:**
+  - `shell_render::tests::macos_dock_divider_gap_tooltip_and_radii_constants`;
+  - `surfaces::tests::dock_glass_and_icon_shadow_rasterize_cleanly`;
+  - Все 250 тестов воркспейса (`cargo test --workspace`).
+- **Risks:** Нет.
+
+### RUSTYOS-095 — Калибровка Liquid Glass Дока по стандарту CutefishOS: удаление внешней тени и 3D-бликов
+
+- **Status:** Done (`RUSTYOS-095 Вариант 1` — утверждённый объём выполнен)
+- **Goal:** Устранить паразитную тень под контейнером Дока и угловые 3D-блики, создававшие эффект пластиковой кнопки, приведя материал Дока к стандарту CutefishOS (`cutefishos/cutefish-compositor`): плоское матовое стекло, тонкий равномерный 1px hairline кант без вспышек в углах, полное удаление drop shadow.
+- **Dependencies:** `RUSTYOS-094`, `ADR-0051`, `D-059`.
+- **Scope:**
+  - `crates/rusty-compositor/src/shell_render/mod.rs`:
+    - удаление вызова `push_soft_shadow(..., 20, 72)` под Доком в `push_dock_chrome_shapes`;
+  - `crates/rusty-compositor/src/surfaces/liquid_glass.rs`:
+    - шейдер `LIQUID_GLASS_FRAG`: удаление угловых бликов (`arc_tl`/`arc_br`) и внутреннего каустика для Дока, формирование чистого равномерного 1px hairline канта;
+    - `compute_glass_material`: обнуление вертикальной дымки `sheen = 0.0` для `GlassPanelStyle::Dock` в светлой и тёмной темах, тонкая равномерная окантовка `rim = 0.26` (Light) и `0.18` (Dark);
+  - `crates/rusty-compositor/src/surfaces/sdf.rs`:
+    - `sample_glass_panel_pixel_themed`: обнуление `sheen_limit = 0.0` для Дока, равномерный фактор канта `spec_dir = 1.0` по всему контуру;
+  - `crates/rusty-compositor/src/surfaces/tests.rs`:
+    - обновление теста `dock_glass_and_icon_shadow_rasterize_cleanly` под равномерный симметричный 1px кант;
+  - `docs/adr/0051-cutefish-calibrated-dock-glass-and-shadow-removal.md` и запись `D-059` в `DECISIONS.md`.
+- **Acceptance Criteria:**
+  - Под Доком отсутствует внешняя темная тень (drop shadow);
+  - Стекло Дока плоское и матовое, без пластиковых бликов в углах и вертикальной дымки;
+  - Контур оформлен тонким, ровным 1px hairline кантом;
+  - Все 250 тестов воркспейса проходят успешно;
+  - `cargo clippy --workspace --all-targets -- -D warnings` и `cargo fmt --all -- --check` чисты;
+  - Живой `--winit` снимок подтверждён.
+- **Tests:**
+  - `surfaces::tests::dock_glass_and_icon_shadow_rasterize_cleanly`;
+  - Все 250 тестов воркспейса (`cargo test --workspace`).
+- **Risks:** Нет.
+
+### RUSTYOS-096 — Устранение выпуклости и остаточных 3D-артефактов Liquid Glass Дока (dock_flat path)
+
+- **Status:** Done
+- **Goal:** После RUSTYOS-095 Dok-контейнер визуально оставался выпуклым из-за активных `lens_band` (рефракция 8.5px), `light_fresnel` (Fresnel-хайлайт) и `outer_bevel * rim` в GPU-шейдере и CPU-fallback пути. RUSTYOS-096 полностью подавляет эти артефакты для Дока через `dock_flat` маску.
+- **Dependencies:** `RUSTYOS-095`.
+- **Scope:**
+  - `crates/rusty-compositor/src/surfaces/liquid_glass.rs`:
+    - `compute_glass_material` Dock Light/Dark: `sat_refract_rim_sheen = [sat, 0.0, 0.0, 0.0]` (refract=0, rim=0, sheen=0);
+    - `LIQUID_GLASS_FRAG`: добавлена `dock_flat = step(refract + rim + sheen, 0.0001)` маска, `lens_band *= (1 - dock_flat)`, `light_fresnel *= (1 - dock_flat)`;
+    - тест `liquid_glass_pipeline_defaults_to_cpu_fallback_when_inactive`: обновлены assertions на `refract==0` и `rim==0` для Дока.
+  - `crates/rusty-compositor/src/surfaces/sdf.rs`:
+    - `sample_glass_panel_pixel_themed`: `rim_peak` Dock = 0.0, `light_fresnel` Dock = 0.0;
+    - `reduce_transparency` ветка: `rim_mix` Dock = 0.0.
+- **Acceptance Criteria:**
+  - Стекло Дока полностью плоское, матовое, без выпуклости, линзового эффекта и Fresnel-хайлайтов;
+  - Нет тени под/вокруг Дока;
+  - 170 тестов `rusty-compositor` и все workspace-тесты проходят;
+  - `cargo clippy` и `cargo fmt --check` чисты;
+  - Живой `--winit` прогон визуально подтверждён.
+- **Tests:** `surfaces::tests::dock_glass_and_icon_shadow_rasterize_cleanly`, `liquid_glass_pipeline_defaults_to_cpu_fallback_when_inactive`.
+- **Risks:** Нет.
+
+### RUSTYOS-097 — Устранение вертикального градиента t_v в base_glass_layer для Liquid Glass Дока
+
+- **Status:** Done
+- **Goal:** Полностью устранить вертикальный градиент `t_v` в альфе и RGB базового слоя `base_glass_layer` для `GlassPanelStyle::Dock` Light и Dark, сделав тинт стекла 100% однородным и плоским без 3D-перепадов яркости по вертикали (CutefishOS reference).
+- **Dependencies:** `RUSTYOS-096`.
+- **Scope:**
+  - `crates/rusty-compositor/src/surfaces/sdf.rs`:
+    - `base_glass_layer`: удаление `- 0.05 * t_v` / `- 12.0 * t_v` (Dark) и `- 0.04 * t_v` / `- 10.0 * t_v` (Light) для `GlassPanelStyle::Dock`;
+  - `crates/rusty-compositor/src/surfaces/tests.rs`:
+    - обновление проверки `dock_glass_and_icon_shadow_rasterize_cleanly`: утверждение строгой вертикальной симметрии `top_left_arc[3] == bottom_left_arc[3]`.
+- **Acceptance Criteria:**
+  - Однородный плоский цвет стекла Дока без перепада яркости верх/низ;
+  - 100% тестов воркспейса проходят (251 passed);
+  - `cargo clippy --workspace --all-targets -- -D warnings` и `cargo fmt --all -- --check` чисты;
+  - Живой `--winit` снимок подтверждён.
+- **Tests:** `surfaces::tests::dock_glass_and_icon_shadow_rasterize_cleanly`, все 251 тестов workspace.
+- **Risks:** Нет.
+
+### RUSTYOS-098 — Калибровка контейнера Дока по формулам CutefishOS: динамический радиус `thickness * 28 / 86`, нейтральный тинт 0.22 и 1px screen-blend hairline кант
+
+- **Status:** Done
+- **Goal:** Привести активный GPU-шейдер и геометрию Дока к эталону CutefishOS: пропорциональный радиус скругления углов (`thickness * 28 / 86`), нейтральный полупрозрачный серый тинт (alpha 0.22 при полной прозрачности) и равномерный 1px screen-blend hairline кант без выпуклости и угловых 3D-бликов.
+- **Dependencies:** `RUSTYOS-097`.
+- **Scope:**
+  - `crates/rusty-compositor/src/shell_render/tokens.rs` и `mod.rs`: добавление `compute_dock_radius(thickness)` по формуле `(thickness * 28 + 43) / 86` с клампом `12..=(thickness / 2).max(12)` и передача динамического радиуса в `push_dock_chrome_shapes`;
+  - `apps/rusty-shell/src/wayland.rs`: расчёт радиуса контейнера в `render_dock_pixels` по `((h * 28 + 43) / 86).min(h / 2).max(1)`;
+  - `crates/rusty-compositor/src/surfaces/liquid_glass.rs`: калибровка `compute_glass_material` для `GlassPanelStyle::Dock` (Light: `tint_rgba = [0.60, 0.60, 0.62, 0.10 + 0.12 * g]`, `sat_refract_rim_sheen = [1.30, 0.0, 0.35, 0.0]`; Dark: `[0.12, 0.12, 0.14, 0.14 + 0.14 * g]`, `[1.26, 0.0, 0.28, 0.0]`) и маска `dock_flat` в `LIQUID_GLASS_FRAG` с 1px screen-blend hairline кантом;
+  - `crates/rusty-compositor/src/surfaces/sdf.rs` и `tests.rs`: синхронизация CPU fallback (`base_glass_layer`, `sample_glass_panel_pixel_themed`) и обновление тестов `dock_glass_and_icon_shadow_rasterize_cleanly`, `liquid_glass_pipeline_defaults_to_cpu_fallback_when_inactive`.
+- **Acceptance Criteria:**
+  - Динамический радиус пропорционален высоте Дока (~16px при `icon_size = 36`, высоте 50px);
+  - Плоский нейтральный тинт Дока с равномерным 1px screen-blend hairline кантом в GPU и CPU путях;
+  - 100% тестов воркспейса проходят (251 passed), `clippy` и `fmt --check` чисты;
+  - Живой `--winit` прогон и визуальное сравнение с эталоном подтверждены.
+- **Tests:** `surfaces::tests::dock_glass_and_icon_shadow_rasterize_cleanly`, `liquid_glass_pipeline_defaults_to_cpu_fallback_when_inactive`, все 251 тестов workspace.
+- **Risks:** Нет.
+
+### RUSTYOS-099 — Точный перенос шейдера Liquid Glass из CutefishOS (`superellipse r*1.5`, 14px линза, направленный `uRim`), привязка Дока к `half_a` и выравнивание нижней зоны обоев
+
+- **Status:** Done
+- **Goal:** Воспроизвести 1:1 математику Liquid Glass из `CutefishOS` (`rounded_clip.glsl` + `glass_fragment_shader.glsl` + `DockWindow::glass()`) для Дока, убрать боковую белую рамку и устранить тёмный диагональный перепад обоев за Доком.
+- **Dependencies:** `RUSTYOS-098`.
+- **Scope:**
+  - `crates/rusty-compositor/src/surfaces/liquid_glass.rs`:
+    - в `LIQUID_GLASS_FRAG`: кубическая суперэллипса `r * 1.5` (`roundedDistance` + 4-точечный `roundedCoverage`), 14px суперэллиптический профиль линзы (`lensHeight`/`lensNormalAt`/`lensOffset`/`refractedDockAt`, `ior = 1.7`, `displacement = 36.0`) и 3-слойный направленный `uRim` (`shade`, `hairline`, `glow`, `lit = 1.0/0.35/0.0`);
+    - в `compute_glass_material`: `Light` `[0.60, 0.60, 0.60, 0.13 + 0.12 * g]`, `Dark` `[0.38, 0.38, 0.38, 0.15 + 0.14 * g]`, `[1.30, 36.0, 1.0, 0.0]`;
+    - в `make_glass_element`: выбор `buffers.half_a` для `GlassPanelStyle::Dock`;
+  - `crates/rusty-compositor/src/surfaces/sdf.rs` и `tests.rs`: сглаживание `sheet3` в `apply_golden_gate_folds`, общий `outward_normal_2d` и `dock_rim_alpha`, обновление тестов `liquid_glass_pipeline_defaults_to_cpu_fallback_when_inactive` и `dock_glass_and_icon_shadow_rasterize_cleanly`;
+  - `docs/adr/0052-cutefish-exact-superellipse-lens-and-rim-shader.md`, `DECISIONS.md` (`D-063`).
+- **Acceptance Criteria:**
+  - Док рендерится кубической суперэллипсой с 14px преломлением без пластиковых бликов и без белой обводки на боковых торцах;
+  - Нет тёмной диагональной складки обоев позади Дока;
+  - 100% тестов воркспейса (251 passed), `clippy` и `fmt` чисты;
+  - Живой `--winit` прогон (без ошибок GLES/шейдера) и визуальная сверка снимка с эталоном выполнены.
+- **Tests:** `surfaces::tests::dock_glass_and_icon_shadow_rasterize_cleanly`, `liquid_glass_pipeline_defaults_to_cpu_fallback_when_inactive`, все 251 тестов workspace.
+- **Risks:** Нет.
+
+### RUSTYOS-100 — Системная унификация Liquid Glass по эталону CutefishOS (`popupGlass` / `fishuiGlass`)
+
+- **Status:** Done
+- **Goal:** Распространить единый суперэллиптический пайплайн CutefishOS (`roundedDistance`/`roundedCoverage`, 14px рефракционная линза и 3-слойный направленный `uRim` без `sheen`/угловых вспышек) на все остальные части проекта: `Popover`, `ControlModule`, клиентские поверхности `rustyos_liquid_glass_v1` (`Sidebar`, `ControlPill`), меню, Control Center, Spotlight, уведомления, модальные окна и рендер пилюль/поповеров `rusty-files`.
+- **Dependencies:** `RUSTYOS-099`.
+- **Scope:**
+  - `crates/rusty-compositor/src/surfaces/liquid_glass.rs`: удаление ветвления `else` в `LIQUID_GLASS_FRAG`, внедрение единого RGSS-сэмплера `refractedAt` с `chroma` (`u_sat_refract.w`) и калибровка `compute_glass_material` (`Popover` = `popupGlass`, `ControlModule` = `fishuiGlass`);
+  - `crates/rusty-compositor/src/surfaces/sdf.rs` и `tests.rs`: однородный `base_glass_layer`, общий `cutefish_rim_alpha` без `sheen`/`diagonal_glass_rim`/`t_v`, обновление проверок в `liquid_glass_pipeline_defaults_to_cpu_fallback_when_inactive` и `dock_glass_and_icon_shadow_rasterize_cleanly`;
+  - `apps/rusty-files/src/render/sidebar.rs` и `popup.rs`: обновление `draw_glass_pill` и выделение `render_popup_chrome` с направленным верхним/нижним 1px `hairline` без резкой засветки;
+  - `docs/adr/0053-system-wide-cutefish-liquid-glass-unification.md`, `DECISIONS.md` (`D-064`).
+- **Acceptance Criteria:**
+  - Единый GPU-шейдер без легаси-ветки для всех стеклянных поверхностей композитора и Wayland-клиентов;
+  - 100% тестов воркспейса (251 passed), `cargo clippy --workspace --all-targets -- -D warnings` и `cargo fmt --all -- --check` чисты;
+  - Живой `--winit` прогон (Spotlight + Уведомление + `rusty-files` + Док) подтверждён визуально без GLES-ошибок.
+- **Tests:** Все 251 тестов workspace (`rusty-compositor`, `rusty-files`, `rusty-shell`, `rusty-ipc`, `rusty-services`, `rusty-settings`, `rusty-updater`).
+- **Risks:** Нет.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

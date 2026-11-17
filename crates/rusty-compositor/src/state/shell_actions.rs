@@ -1060,10 +1060,7 @@ impl RustyCompositorState {
         }
     }
 
-    pub(in crate::state) fn dock_key_for_hit(
-        &self,
-        hit: crate::shell_render::DockHit,
-    ) -> Option<String> {
+    pub(crate) fn dock_key_for_hit(&self, hit: crate::shell_render::DockHit) -> Option<String> {
         match hit {
             crate::shell_render::DockHit::PinnedFiles => Some("files".to_owned()),
             crate::shell_render::DockHit::ToggleOverview => Some("overview".to_owned()),

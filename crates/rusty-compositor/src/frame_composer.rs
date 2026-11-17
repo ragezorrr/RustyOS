@@ -426,7 +426,127 @@ fn collect_dock_windows(
     dock_windows
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_lines, clippy::cast_possible_wrap)]
+fn push_window_liquid_glass_elements(
+    backdrop_list: &mut Vec<CompositorRenderElement>,
+    renderer: &mut GlesRenderer,
+    shape_cache: &mut crate::surfaces::UiShapeCache,
+    state: &RustyCompositorState,
+    sw: &smithay::desktop::Window,
+    origin: (i32, i32),
+    titlebar_h: i32,
+) {
+    use smithay::wayland::seat::WaylandFocus;
+
+    let Some(root) = sw.wl_surface() else {
+        return;
+    };
+
+    let geo_loc = sw.geometry().loc;
+
+    // 1. Popup surfaces attached to this window
+    for (popup, popup_offset) in smithay::desktop::PopupManager::popups_for_surface(&root) {
+        let popup_surface = popup.wl_surface();
+        if let Some(glass) = crate::state::liquid_glass::surface_liquid_glass_state(popup_surface) {
+            let offset = sw.geometry().loc + popup_offset - popup.geometry().loc;
+            let popup_logical_loc = Point::<i32, Logical>::from((
+                origin.0 - geo_loc.x + offset.x,
+                origin.1 + titlebar_h - geo_loc.y + offset.y,
+            ));
+            let popup_sz = popup.geometry().size;
+            let (w, h) = if popup_sz.w > 0 && popup_sz.h > 0 {
+                (popup_sz.w, popup_sz.h)
+            } else {
+                (260, 200)
+            };
+            let style = match glass.style {
+                crate::state::liquid_glass::GlassStylePreset::Sidebar
+                | crate::state::liquid_glass::GlassStylePreset::ControlPill => {
+                    crate::surfaces::GlassPanelStyle::ControlModule
+                }
+                crate::state::liquid_glass::GlassStylePreset::BasePanel => {
+                    crate::surfaces::GlassPanelStyle::Dock
+                }
+                crate::state::liquid_glass::GlassStylePreset::Popover
+                | crate::state::liquid_glass::GlassStylePreset::Custom => {
+                    crate::surfaces::GlassPanelStyle::Popover
+                }
+            };
+            let radius = if glass.corner_radius > 0 {
+                glass.corner_radius as i32
+            } else {
+                16
+            };
+            if let Some(elem) = shape_cache.glass_panel_render_element(
+                renderer,
+                style,
+                w,
+                h,
+                radius,
+                state.glass_opacity,
+                state.reduce_transparency,
+                popup_logical_loc,
+            ) {
+                backdrop_list.push(elem);
+            }
+        }
+    }
+
+    // 2. Main window surface (e.g. sidebar or subregions)
+    if let Some(glass) = crate::state::liquid_glass::surface_liquid_glass_state(&root) {
+        let win_sz = sw.geometry().size;
+        let base_loc = Point::<i32, Logical>::from((origin.0, origin.1 + titlebar_h));
+        let style = match glass.style {
+            crate::state::liquid_glass::GlassStylePreset::Sidebar
+            | crate::state::liquid_glass::GlassStylePreset::ControlPill => {
+                crate::surfaces::GlassPanelStyle::ControlModule
+            }
+            crate::state::liquid_glass::GlassStylePreset::BasePanel => {
+                crate::surfaces::GlassPanelStyle::Dock
+            }
+            crate::state::liquid_glass::GlassStylePreset::Popover
+            | crate::state::liquid_glass::GlassStylePreset::Custom => {
+                crate::surfaces::GlassPanelStyle::Popover
+            }
+        };
+        let radius = if glass.corner_radius > 0 {
+            glass.corner_radius as i32
+        } else {
+            12
+        };
+
+        if let Some(ref regions) = glass.region {
+            for rect in regions {
+                let rect_loc = base_loc + rect.loc;
+                if let Some(elem) = shape_cache.glass_panel_render_element(
+                    renderer,
+                    style,
+                    rect.size.w,
+                    rect.size.h,
+                    radius,
+                    state.glass_opacity,
+                    state.reduce_transparency,
+                    rect_loc,
+                ) {
+                    backdrop_list.push(elem);
+                }
+            }
+        } else if let Some(elem) = shape_cache.glass_panel_render_element(
+            renderer,
+            style,
+            win_sz.w,
+            win_sz.h,
+            radius,
+            state.glass_opacity,
+            state.reduce_transparency,
+            base_loc,
+        ) {
+            backdrop_list.push(elem);
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn push_window_backdrop_elements(
     backdrop_list: &mut Vec<CompositorRenderElement>,
     renderer: &mut GlesRenderer,
@@ -511,6 +631,16 @@ fn push_window_backdrop_elements(
             )
             .into_iter()
             .map(CompositorRenderElement::Surface),
+        );
+
+        push_window_liquid_glass_elements(
+            backdrop_list,
+            renderer,
+            shape_cache,
+            state,
+            sw,
+            origin,
+            titlebar_h,
         );
     }
 
@@ -972,15 +1102,16 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
         && !state.ext_session_locked
         && !state.reduce_transparency
         && lock_progress <= 0.01
-        && if is_primary {
-            !hide_chrome_for_fullscreen
-                || state.osd.is_some()
-                || context_menu_here
-                || state.polkit_prompt.is_some()
-                || state.portal_prompt.is_some()
-        } else {
-            context_menu_here && !top_layer_surfaces_present && fullscreen_win.is_none()
-        };
+        && (state.has_active_client_liquid_glass()
+            || if is_primary {
+                !hide_chrome_for_fullscreen
+                    || state.osd.is_some()
+                    || context_menu_here
+                    || state.polkit_prompt.is_some()
+                    || state.portal_prompt.is_some()
+            } else {
+                context_menu_here && !top_layer_surfaces_present && fullscreen_win.is_none()
+            });
     if needs_backdrop_blur {
         let backdrop_logical = Size::<i32, Logical>::from((logical_size.w, logical_size.h));
         let _ = shape_cache.prepare_liquid_glass_backdrop(

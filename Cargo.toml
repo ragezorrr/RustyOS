@@ -38,6 +38,7 @@ smithay = { version = "0.7.0", default-features = false, features = [
 ] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+wayland-scanner = "0.31.11"
 zbus = "5"
 
 [workspace.lints.rust]

@@ -144,12 +144,9 @@ engineering.
 
 ## Ближайший порядок
 
-1.  Read-only аудит dev environment.
-2.  RUSTYOS-001: bootstrap и CI.
-3.  RUSTYOS-002: минимальный Smithay Winit compositor.
-4.  Отображение тестового Wayland client.
-5.  RUSTYOS-003: frame timing instrumentation.
-6.  Только затем расширение функциональности и native backend.
+1.  Фазы 1–7: Smithay compositor, DRM/KMS backend, Wayland protocols, Liquid Glass GPU pipeline, input, system bridges — выполнены (`RUSTYOS-001`–`RUSTYOS-075`).
+2.  Фаза 8 (Core UX) & 10 (Distribution): завершение повседневных десктопных рабочих процессов, файловый менеджер (`rusty-files`), центр обновлений (`rusty-updater`), сессионные мосты systemd/logind (`RUSTYOS-084`), унифицированные контекстные меню и Liquid Glass popover стандарт (`RUSTYOS-086`, `RUSTYOS-087`), модульная декомпозиция подсистем управления файлами (`RUSTYOS-088`) и рендеринга (`RUSTYOS-089`).
+3.  Подготовка дистрибутива, инсталлятора и проверочной матрицы VM.
 
 ## Правила закрытия фазы
 

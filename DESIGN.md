@@ -448,9 +448,12 @@ palettes (section 5.1); geometry, Liquid Glass clarity, and interactions target 
   `WINDOW_CORNER_RADIUS = 20`), centered header titlebar with traffic lights, hero summary card with
   `#007AFF`/`#0A84FF` Software Update squircle, filter pills (`All`, `RustyOS`, `Restart`), live progress bar,
   expandable `pacman` log view, and Polkit-backed upgrade actions without breaking Light/Dark tokens.
-- Menu bar dropdowns (`MENU_POPOVER_RADIUS = 16–20`): clear `Popover` liquid glass with leading
-  `UiGlyphKind` icons, hairline dividers, right-aligned shortcut column (`⌘`/`⌥`/`⌃`/`⇧` or compositor
-  equivalents), submenu chevrons (`>`), and a rounded accent pill highlight on hover.
+- Menu bar dropdowns and client popups (`MENU_POPOVER_RADIUS = 16–20`, ADR-0043): clear `Popover`
+  Liquid Glass with leading `UiGlyphKind` icons, hairline dividers, right-aligned shortcut column
+  (`⌘`/`⌥`/`⌃`/`⇧`), submenu chevrons (`>`), and a rounded accent pill highlight on hover (`HOVER_PILL_RADIUS = 8`,
+  `HOVER_PILL_INSET_H = 6`, `HOVER_PILL_INSET_V = 1`). All client application `xdg_popup` surfaces (context menus,
+  action popovers, and tag pickers in `rusty-files` and companion apps) must adhere 1:1 to this specification
+  with specular top rim and multi-stage soft shadows, never using flat opaque rectangular boxes or edge-to-edge highlights.
 - Spotlight (`ShellOverlayView::Spotlight`): dual-capsule layout matching `27-Golden-Gate-Spotlight-Search-v2.png`
   — a floating rounded search pill (`ControlModule` / dark gloss) separated cleanly above the results
   and category-filter `Popover` card.

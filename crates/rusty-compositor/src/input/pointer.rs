@@ -633,6 +633,18 @@ impl RustyCompositorState {
                     self.pointer_location.x,
                     self.pointer_location.y,
                 ) {
+                    if button == 273 {
+                        let win_id = match hit {
+                            crate::shell_render::SsdHit::TitlebarDrag(id)
+                            | crate::shell_render::SsdHit::Resize(id, _)
+                            | crate::shell_render::SsdHit::Close(id)
+                            | crate::shell_render::SsdHit::Minimize(id)
+                            | crate::shell_render::SsdHit::Maximize(id) => id,
+                        };
+                        self.wm.focus_and_raise(win_id);
+                        self.open_window_context_menu(self.pointer_location, win_id);
+                        return;
+                    }
                     match hit {
                         crate::shell_render::SsdHit::Close(win_id) => {
                             self.wm.focus_and_raise(win_id);
@@ -701,6 +713,29 @@ impl RustyCompositorState {
                             });
                             return;
                         }
+                    }
+                }
+
+                // Allow Alt+Right or Super+Right anywhere on a window (CSD/SSD) to open the system window menu
+                if button == 273 && (mods.alt || mods.logo) {
+                    let target_id = self
+                        .target_surface_under(self.pointer_location)
+                        .and_then(|(win_opt, _, _)| {
+                            win_opt.and_then(|w| self.window_id_for_smithay(&w))
+                        })
+                        .or_else(|| {
+                            #[allow(clippy::cast_possible_truncation)]
+                            self.wm
+                                .window_under_point(
+                                    self.pointer_location.x.round() as i32,
+                                    self.pointer_location.y.round() as i32,
+                                )
+                                .filter(|id| !self.is_window_minimized(*id))
+                        });
+                    if let Some(win_id) = target_id {
+                        self.wm.focus_and_raise(win_id);
+                        self.open_window_context_menu(self.pointer_location, win_id);
+                        return;
                     }
                 }
             }

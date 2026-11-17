@@ -15,6 +15,7 @@ smithay-client-toolkit = { version = "0.19.2", default-features = false, feature
 tracing.workspace = true
 tracing-subscriber.workspace = true
 wayland-client = "0.31.15"
+wayland-scanner.workspace = true
 
 [lints]
 workspace = true

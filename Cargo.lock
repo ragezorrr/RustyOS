@@ -1674,6 +1674,7 @@ dependencies = [
  "smithay",
  "tracing",
  "tracing-subscriber",
+ "wayland-scanner",
  "zbus",
 ]
 
@@ -1688,6 +1689,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "wayland-client",
+ "wayland-scanner",
 ]
 
 [[package]]

@@ -534,8 +534,8 @@ pub fn render_dock_pixels(canvas: &mut [u8], width: u32, height: u32, dock: &[cr
 
     canvas.fill(0);
 
-    // Concentric rounded glass Dock container without heavy capsule ends (`RUSTYOS-050`)
-    let radius = 20.min(h / 2).max(1);
+    // Flat frosted glass Dock container with CutefishOS corner radius (`RUSTYOS-098`)
+    let radius = ((h * 28 + 43) / 86).min(h / 2).max(1);
     fill_rounded_rect_with_rim(
         canvas,
         stride,

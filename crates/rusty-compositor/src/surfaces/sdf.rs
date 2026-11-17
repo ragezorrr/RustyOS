@@ -481,28 +481,29 @@ fn apply_golden_gate_folds(mut rgb: [f32; 3], norm_x: f32, norm_y: f32, is_dark:
     rgb[1] += (c2_amp * 0.92) * crest2;
     rgb[2] += (c2_amp * 0.78) * crest2;
 
-    let s3_y = 0.86 - 0.24 * (norm_x - 0.25) - 0.045 * ((norm_x - 0.55) * 4.5).sin();
+    // Softened lower wave in the Dock region (`RUSTYOS-099`) so no dark diagonal band reads as shadow behind Dock.
+    let s3_y = 0.86 - 0.12 * (norm_x - 0.25) - 0.025 * ((norm_x - 0.55) * 4.5).sin();
     let d3 = norm_y - s3_y;
-    let sheet3 = smoothstep01(-0.022, 0.040, d3);
+    let sheet3 = smoothstep01(-0.26, 0.22, d3);
     let s3_color = if is_dark {
         [
-            16.0 + 10.0 * (1.0 - norm_x),
             22.0 + 10.0 * (1.0 - norm_x),
-            36.0 + 14.0 * norm_x,
+            28.0 + 10.0 * (1.0 - norm_x),
+            42.0 + 12.0 * norm_x,
         ]
     } else {
         [
-            84.0 + 38.0 * (1.0 - norm_x),
-            106.0 + 32.0 * (1.0 - norm_x),
-            138.0 + 26.0 * norm_x,
+            128.0 + 26.0 * (1.0 - norm_x),
+            138.0 + 22.0 * (1.0 - norm_x),
+            162.0 + 14.0 * norm_x,
         ]
     };
-    rgb = fold_blend_rgb(rgb, s3_color, sheet3 * 0.92);
-    let crest3 = (-(d3 / 0.020).powi(2)).exp() * norm_x;
+    rgb = fold_blend_rgb(rgb, s3_color, sheet3 * 0.35);
+    let crest3 = (-(d3 / 0.045).powi(2)).exp() * norm_x;
     [
-        rgb[0] + 28.0 * crest3,
-        rgb[1] + 32.0 * crest3,
-        rgb[2] + 38.0 * crest3,
+        rgb[0] + 6.0 * crest3,
+        rgb[1] + 7.0 * crest3,
+        rgb[2] + 8.0 * crest3,
     ]
 }
 
@@ -825,35 +826,28 @@ pub(super) fn sample_glass_panel_pixel(
 fn base_glass_layer(
     style: GlassPanelStyle,
     is_dark: bool,
-    t_v: f32,
+    _t_v: f32,
     dither: f32,
     glass_scale: f32,
 ) -> [f32; 4] {
     let (base_a, rgb) = match (is_dark, style) {
-        (true, GlassPanelStyle::Dock) => (
-            (0.26 - 0.05 * t_v) * (0.45 + 0.55 * glass_scale),
-            [58.0 - 12.0 * t_v, 60.0 - 12.0 * t_v, 68.0 - 12.0 * t_v],
-        ),
-        (true, GlassPanelStyle::Popover) => (
-            (0.80 - 0.06 * t_v) * (0.50 + 0.50 * glass_scale),
-            [36.0 - 6.0 * t_v, 36.0 - 6.0 * t_v, 40.0 - 6.0 * t_v],
-        ),
-        (true, GlassPanelStyle::ControlModule) => (
-            (0.24 - 0.04 * t_v) * (0.48 + 0.52 * glass_scale),
-            [68.0 - 10.0 * t_v, 70.0 - 10.0 * t_v, 78.0 - 10.0 * t_v],
-        ),
-        (false, GlassPanelStyle::Dock) => (
-            (0.20 - 0.04 * t_v) * (0.44 + 0.56 * glass_scale),
-            [244.0 - 10.0 * t_v, 246.0 - 8.0 * t_v, 250.0 - 6.0 * t_v],
-        ),
-        (false, GlassPanelStyle::Popover) => (
-            (0.66 - 0.05 * t_v) * (0.52 + 0.48 * glass_scale),
-            [246.0 - 5.0 * t_v, 247.0 - 5.0 * t_v, 250.0 - 4.0 * t_v],
-        ),
-        (false, GlassPanelStyle::ControlModule) => (
-            (0.22 - 0.04 * t_v) * (0.48 + 0.52 * glass_scale),
-            [242.0 - 8.0 * t_v, 244.0 - 8.0 * t_v, 248.0 - 6.0 * t_v],
-        ),
+        // RUSTYOS-100: CutefishOS uniform glass layer across Dock, Popover (`popupGlass`), and ControlModule (`fishuiGlass`).
+        (true, GlassPanelStyle::Dock) => (0.29 * (0.45 + 0.55 * glass_scale), [96.0, 96.0, 98.0]),
+        (true, GlassPanelStyle::Popover) => {
+            (0.76 * (0.50 + 0.50 * glass_scale), [43.0, 43.0, 48.0])
+        }
+        (true, GlassPanelStyle::ControlModule) => {
+            (0.26 * (0.48 + 0.52 * glass_scale), [36.0, 36.0, 41.0])
+        }
+        (false, GlassPanelStyle::Dock) => {
+            (0.25 * (0.44 + 0.56 * glass_scale), [153.0, 153.0, 153.0])
+        }
+        (false, GlassPanelStyle::Popover) => {
+            (0.62 * (0.52 + 0.48 * glass_scale), [250.0, 250.0, 252.0])
+        }
+        (false, GlassPanelStyle::ControlModule) => {
+            (0.22 * (0.48 + 0.52 * glass_scale), [248.0, 248.0, 250.0])
+        }
     };
     [
         (rgb[0] + dither) * base_a,
@@ -863,7 +857,7 @@ fn base_glass_layer(
     ]
 }
 
-fn diagonal_glass_rim(u: f32, v: f32, hw: f32, hh: f32, r: f32, sd: f32) -> (f32, f32) {
+fn outward_normal_2d(u: f32, v: f32, hw: f32, hh: f32, r: f32) -> (f32, f32) {
     let px = u - hw;
     let py = v - hh;
     let hx = (hw - r).max(0.0);
@@ -872,7 +866,7 @@ fn diagonal_glass_rim(u: f32, v: f32, hw: f32, hh: f32, r: f32, sd: f32) -> (f32
     let qy = py.abs() - hy;
     let sx = if px >= 0.0 { 1.0 } else { -1.0 };
     let sy = if py >= 0.0 { 1.0 } else { -1.0 };
-    let (nx, ny) = if qx > 0.0 && qy > 0.0 {
+    if qx > 0.0 && qy > 0.0 {
         let rx = qx.max(1e-4);
         let ry = qy.max(1e-4);
         let len = rx.hypot(ry);
@@ -883,14 +877,19 @@ fn diagonal_glass_rim(u: f32, v: f32, hw: f32, hh: f32, r: f32, sd: f32) -> (f32
         let gy = (1.0 - blend) * sy;
         let glen = gx.hypot(gy).max(1e-4);
         (gx / glen, gy / glen)
+    }
+}
+
+fn cutefish_rim_alpha(outward_y: f32, sd: f32, rim_peak: f32) -> f32 {
+    let lit = outward_y.abs() * (1.0 - 0.65 * (0.5 + 0.5 * outward_y));
+    let inset = -sd;
+    let hairline = smoothstep01(1.2, 0.0, (inset - 1.0).abs());
+    let glow = if inset > 0.5 {
+        (-(inset - 2.0).max(0.0) / 1.7).exp() * 0.16
+    } else {
+        0.0
     };
-    let diag = std::f32::consts::FRAC_1_SQRT_2;
-    let d_tl = (-nx * diag - ny * diag).max(0.0);
-    let d_br = (nx * diag + ny * diag).max(0.0);
-    let spec_dir = d_tl.powi(7) + d_br.powi(7) * 0.62;
-    let rim_t = (sd + 0.6) / 1.4;
-    let outer_bevel = (-(rim_t * rim_t)).exp();
-    (outer_bevel, spec_dir)
+    ((hairline + glow) * lit * rim_peak).clamp(0.0, 0.55)
 }
 
 #[allow(clippy::cast_precision_loss, clippy::too_many_arguments)]
@@ -926,54 +925,37 @@ pub(super) fn sample_glass_panel_pixel_themed(
     let bx = usize::try_from(px.rem_euclid(4)).unwrap_or(0);
     let dither = (f32::from(BAYER4[by][bx]) / 16.0 - 0.5) * 0.9;
 
-    // Opposing diagonal corner-arc specular bevel matching GPU LIQUID_GLASS_FRAG (no 360° wire rim).
-    let (outer_bevel, spec_dir) = diagonal_glass_rim(u, v, hw, hh, r, sd);
-
     if reduce_transparency {
-        let (base_rgb, rim_scale, alpha) = match (is_dark, style) {
-            (true, GlassPanelStyle::Dock) => ([34.0, 34.0, 38.0], 1.0, 246.0 / 255.0),
-            (true, GlassPanelStyle::Popover) => ([38.0, 38.0, 42.0], 1.15, 248.0 / 255.0),
-            (true, GlassPanelStyle::ControlModule) => ([54.0, 54.0, 60.0], 0.90, 232.0 / 255.0),
-            (false, GlassPanelStyle::Dock) => ([236.0, 238.0, 243.0], 1.0, 246.0 / 255.0),
-            (false, GlassPanelStyle::Popover) => ([246.0, 247.0, 250.0], 1.15, 248.0 / 255.0),
-            (false, GlassPanelStyle::ControlModule) => ([226.0, 230.0, 238.0], 0.90, 236.0 / 255.0),
+        let (base_rgb, alpha) = match (is_dark, style) {
+            (true, GlassPanelStyle::Dock) => ([34.0, 34.0, 38.0], 246.0 / 255.0),
+            (true, GlassPanelStyle::Popover) => ([38.0, 38.0, 42.0], 248.0 / 255.0),
+            (true, GlassPanelStyle::ControlModule) => ([54.0, 54.0, 60.0], 232.0 / 255.0),
+            (false, GlassPanelStyle::Dock) => ([236.0, 238.0, 243.0], 246.0 / 255.0),
+            (false, GlassPanelStyle::Popover) => ([246.0, 247.0, 250.0], 248.0 / 255.0),
+            (false, GlassPanelStyle::ControlModule) => ([226.0, 230.0, 238.0], 236.0 / 255.0),
         };
-        let rim_mix = (outer_bevel * spec_dir * 0.14 * rim_scale).clamp(0.0, 0.30);
-        let r_col = (base_rgb[0] - 4.0 * t_v + dither) * (1.0 - rim_mix) + 255.0 * rim_mix;
-        let g_col = (base_rgb[1] - 4.0 * t_v + dither) * (1.0 - rim_mix) + 255.0 * rim_mix;
-        let b_col = (base_rgb[2] - 4.0 * t_v + dither) * (1.0 - rim_mix) + 255.0 * rim_mix;
-        return premul_pixel(r_col, g_col, b_col, alpha * cov);
+        return premul_pixel(
+            base_rgb[0] + dither,
+            base_rgb[1] + dither,
+            base_rgb[2] + dither,
+            alpha * cov,
+        );
     }
 
     let glass_scale = crate::config::clamp_glass_opacity(glass_opacity);
     let mut layer = base_glass_layer(style, is_dark, t_v, dither, glass_scale);
 
-    let sheen_limit = match style {
-        GlassPanelStyle::Dock => 0.22,
-        GlassPanelStyle::Popover => 0.16,
-        GlassPanelStyle::ControlModule => 0.20,
-    };
-    if t_v < sheen_limit && sd < -0.5 {
-        let sheen_peak = match (is_dark, style) {
-            (false, GlassPanelStyle::Dock | GlassPanelStyle::Popover) => 0.048,
-            (false, GlassPanelStyle::ControlModule) => 0.055,
-            (true, GlassPanelStyle::Dock | GlassPanelStyle::Popover) => 0.028,
-            (true, GlassPanelStyle::ControlModule) => 0.032,
-        };
-        let sheen_a = (1.0 - t_v / sheen_limit) * sheen_peak * glass_scale;
-        layer = blend_premul_over(layer, [255.0, 255.0, 255.0], sheen_a);
-    }
-
+    // RUSTYOS-100: Unified CutefishOS directional uRim across Dock, Popover, and ControlModule (no sheen/corner flares).
+    let (_nx, ny) = outward_normal_2d(u, v, hw, hh, r);
     let rim_peak = match (is_dark, style) {
-        (false, GlassPanelStyle::Dock) => 0.34,
-        (false, GlassPanelStyle::Popover) => 0.30,
-        (false, GlassPanelStyle::ControlModule) => 0.32,
-        (true, GlassPanelStyle::Dock) => 0.24,
-        (true, GlassPanelStyle::ControlModule) => 0.23,
-        (true, GlassPanelStyle::Popover) => 0.21,
+        (false, GlassPanelStyle::Dock) => 0.43,
+        (true, GlassPanelStyle::Dock) => 0.35,
+        (false, GlassPanelStyle::Popover) => 0.36,
+        (true, GlassPanelStyle::Popover) => 0.30,
+        (false, GlassPanelStyle::ControlModule) => 0.38,
+        (true, GlassPanelStyle::ControlModule) => 0.32,
     };
-    let light_fresnel = if is_dark { 0.0 } else { 0.04 };
-    let rim_alpha = (outer_bevel * (spec_dir * rim_peak + light_fresnel)).clamp(0.0, 0.55);
+    let rim_alpha = cutefish_rim_alpha(ny, sd, rim_peak);
     if rim_alpha > 0.001 {
         layer = blend_premul_over(layer, [255.0, 255.0, 255.0], rim_alpha);
     }

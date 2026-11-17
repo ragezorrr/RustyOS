@@ -548,9 +548,9 @@ fn popover_glass_and_traffic_lights_rasterize_cleanly() {
 fn dock_glass_and_icon_shadow_rasterize_cleanly() {
     let width = 320;
     let height = 68;
-    let radius = 22;
+    let radius = 18;
 
-    // Opposing diagonal Golden Gate corner-arc specular (no 360° wireframe contour).
+    // Directional CutefishOS uRim around the Dock: top brighter than bottom, horizontally symmetric.
     let corner = sample_dock_glass_pixel(0, 0, width, height, radius, 0.78, false);
     let top_center = sample_dock_glass_pixel(width / 2, 0, width, height, radius, 0.78, false);
     let bottom_straight =
@@ -564,9 +564,11 @@ fn dock_glass_and_icon_shadow_rasterize_cleanly() {
     let center = sample_dock_glass_pixel(width / 2, height / 2, width, height, radius, 0.78, false);
     assert_eq!(corner[3], 0);
     assert!(top_center[3] > 0);
-    assert!(top_left_arc[3] > top_right_arc[3] && top_left_arc[0] > top_right_arc[0]);
-    assert!(bottom_right_arc[3] > bottom_left_arc[3] && bottom_right_arc[0] > bottom_left_arc[0]);
-    assert!(bottom_straight[3] <= center[3] + 6);
+    assert_eq!(top_left_arc[3], top_right_arc[3]);
+    assert_eq!(bottom_left_arc[3], bottom_right_arc[3]);
+    // RUSTYOS-099: CutefishOS top rim lit=1.0 vs bottom lit=0.35 (sides=0.0)
+    assert!(top_left_arc[3] >= bottom_left_arc[3]);
+    assert!(bottom_straight[3] > 0);
     assert!(center[3] > 20 && center[3] <= 120);
 
     let dark_top_left = sample_glass_panel_pixel_themed(
@@ -591,7 +593,20 @@ fn dock_glass_and_icon_shadow_rasterize_cleanly() {
         GlassPanelStyle::ControlModule,
         true,
     );
-    assert!(dark_top_left[0] > dark_top_right[0] && dark_top_left[3] > dark_top_right[3]);
+    let dark_bottom_left = sample_glass_panel_pixel_themed(
+        7,
+        height - 8,
+        width,
+        height,
+        radius,
+        0.78,
+        false,
+        GlassPanelStyle::ControlModule,
+        true,
+    );
+    assert_eq!(dark_top_left[3], dark_top_right[3]);
+    assert!(dark_top_left[0].abs_diff(dark_top_right[0]) <= 1);
+    assert!(dark_top_left[0] > dark_bottom_left[0] && dark_top_left[3] > dark_bottom_left[3]);
 
     // Reduce-transparency mode falls back to opaque high-contrast obsidian-slate container.
     let opaque_center =

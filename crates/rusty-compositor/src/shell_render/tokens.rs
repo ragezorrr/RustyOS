@@ -180,8 +180,15 @@ pub const DOCK_ITEM_GAP: i32 = 6;
 /// Dock inner horizontal/vertical padding in logical pixels (`RUSTYOS-050`).
 pub const DOCK_PADDING: i32 = 8;
 
-/// Dock corner radius in logical pixels (`RUSTYOS-050`: concentric outer curve matching macOS Dock).
-pub const DOCK_RADIUS: i32 = 22;
+/// Dock corner radius in logical pixels (`RUSTYOS-094`: flat frosted glass container matching reference, radius 18px).
+pub const DOCK_RADIUS: i32 = 18;
+
+/// Computes dynamic Dock corner radius calibrated to `CutefishOS` standard (`thickness * 28 / 86`) (`RUSTYOS-098`).
+#[must_use]
+pub fn compute_dock_radius(thickness: i32) -> i32 {
+    let raw = (thickness * 28 + 43) / 86;
+    raw.clamp(12, (thickness / 2).max(12))
+}
 
 /// Extra horizontal spacing allocated for the hairline divider before Downloads/Trash (`RUSTYOS-050`).
 pub const DOCK_DIVIDER_GAP: i32 = 14;

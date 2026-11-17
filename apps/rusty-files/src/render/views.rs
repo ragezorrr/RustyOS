@@ -1,523 +1,537 @@
-//! Stage B Golden Gate views (`Icons` grid, `Gallery` + `Information` inspector,
-//! top `Tabs` bar, and clickable bottom `Path Bar`) (`RUSTYOS-066`).
-
-use std::path::PathBuf;
+//! File listing view renderers: Miller Columns, List View, Icon Grid, Gallery View, and Preview Inspector.
 
 use rusty_services::file_manager::{
-    FileDetailedInfo, FileEntry, FileTagColor, format_byte_size, format_unix_timestamp,
+    DecodedPreviewImage, FileDetailedInfo, FileEntry, FileSortField, FileSortOrder, FileTagColor,
+    format_byte_size, format_unix_timestamp,
 };
 
-use crate::icons::{
-    draw_close_x_glyph, draw_entry_icon, draw_large_entry_artwork, draw_plus_glyph,
+use crate::icons::{draw_chevron_aa, draw_entry_icon, draw_large_entry_artwork};
+use crate::layout::{
+    ColumnLayout, FilesLayout, GalleryLayout, IconCellLayout, IconsGridLayout, PreviewLayout, Rect,
 };
-use crate::layout::{FilesHit, Rect};
-use crate::render::{Canvas, Palette, overlay_scrollbar_color, rgba};
-use crate::state::{
-    CachedPreview, FilesAppState, GALLERY_BOTTOM_H, GALLERY_INFO_WIDTH, ICON_CELL_H, ICON_CELL_W,
-    TAB_BAR_HEIGHT,
-};
+use crate::render::canvas::Canvas;
+use crate::render::chrome::render_path_bar;
+use crate::render::{Palette, overlay_scrollbar_color, rgba};
+use crate::state::{CachedPreview, FilesAppState, ICON_CELL_H, LIST_ROW_HEIGHT, ROW_HEIGHT};
 
-/// Single open tab capsule geometry.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct TabItemLayout {
-    pub index: usize,
-    pub rect: Rect,
-    pub close_rect: Option<Rect>,
-    pub title: String,
-    pub active: bool,
-}
-
-/// Top tab strip geometry beneath toolbar.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct TabBarLayout {
-    pub bar_rect: Rect,
-    pub track_rect: Rect,
-    pub add_rect: Rect,
-    pub tabs: Vec<TabItemLayout>,
-}
-
-/// Clickable directory breadcrumb pill in bottom `Path Bar`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PathCrumbLayout {
-    pub label: String,
-    pub path: PathBuf,
-    pub rect: Rect,
-}
-
-/// Geometry of a single card inside `Icons` grid view.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct IconCellLayout {
-    pub row_idx: usize,
-    pub rect: Rect,
-    pub art_rect: Rect,
-    pub label_rect: Rect,
-}
-
-/// Complete computed `Icons` view geometry.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct IconsGridLayout {
-    pub area_rect: Rect,
-    pub cols: usize,
-    pub cells: Vec<IconCellLayout>,
-}
-
-/// Single filmstrip thumbnail slot in `Gallery` mode.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct GalleryThumbLayout {
-    pub row_idx: usize,
-    pub rect: Rect,
-}
-
-/// Complete computed `Gallery` mode geometry (`stage` + `filmstrip` + `Information` pane).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct GalleryLayout {
-    pub area_rect: Rect,
-    pub stage_rect: Rect,
-    pub strip_rect: Rect,
-    pub info_rect: Rect,
-    pub show_more_rect: Rect,
-    pub quick_look_btn: Rect,
-    pub get_info_btn: Rect,
-    pub open_btn: Rect,
-    pub trash_btn: Rect,
-    pub thumbs: Vec<GalleryThumbLayout>,
-    pub info_tags: Vec<(FileTagColor, Rect)>,
-    pub selected_entry: Option<FileEntry>,
-}
-
-/// Computes the Golden Gate segmented `Tabs` bar beneath the toolbar when visible.
-#[must_use]
-pub(crate) fn compute_tab_bar_layout(
+pub(crate) fn render_miller_columns(
+    c: &mut Canvas<'_>,
     state: &FilesAppState,
-    toolbar_x: i32,
-    width: i32,
-) -> Option<TabBarLayout> {
-    if !state.tab_bar_visible() {
-        return None;
-    }
-    let items = state.tab_titles();
-    if items.is_empty() {
-        return None;
-    }
-    let bar_rect = Rect::new(
-        toolbar_x,
-        54,
-        (width - toolbar_x - 10).max(180),
-        TAB_BAR_HEIGHT,
-    );
-    let add_rect = Rect::new(bar_rect.right() - 26, bar_rect.y + 3, 24, 24);
-    let track_rect = Rect::new(
-        bar_rect.x + 2,
-        bar_rect.y + 3,
-        (add_rect.x - bar_rect.x - 10).max(80),
-        24,
-    );
-
-    let count = i32::try_from(items.len()).unwrap_or(1).max(1);
-    let inner_w = (track_rect.w - 4).max(40);
-    let base_w = inner_w / count;
-    let rem = inner_w % count;
-
-    let mut cur_x = track_rect.x + 2;
-    let mut tabs = Vec::with_capacity(items.len());
-    let multi = items.len() > 1;
-    for (idx, (tab_idx, title, active)) in items.into_iter().enumerate() {
-        let extra = i32::from(i32::try_from(idx).unwrap_or(0) < rem);
-        let tab_w = (base_w + extra).max(24);
-        let rect = Rect::new(cur_x, track_rect.y + 2, tab_w, 20);
-        let close_rect = if multi && tab_w >= 46 {
-            Some(Rect::new(rect.right() - 18, rect.y + 2, 16, 16))
-        } else {
-            None
-        };
-        tabs.push(TabItemLayout {
-            index: tab_idx,
-            rect,
-            close_rect,
-            title,
-            active,
-        });
-        cur_x += tab_w;
-    }
-
-    Some(TabBarLayout {
-        bar_rect,
-        track_rect,
-        add_rect,
-        tabs,
-    })
+    layout: &FilesLayout,
+    pal: &Palette,
+) {
+    c.with_clip(layout.content_rect, |c| {
+        for col_layout in &layout.columns {
+            render_miller_column_pane(c, state, layout, col_layout, pal);
+        }
+    });
 }
 
-/// Computes clickable breadcrumb rectangles inside the bottom status bar.
-#[must_use]
-pub(crate) fn compute_path_breadcrumbs_layout(
+pub(crate) fn render_miller_column_pane(
+    c: &mut Canvas<'_>,
     state: &FilesAppState,
-    status_bar: Rect,
-    right_limit_x: i32,
-) -> Vec<PathCrumbLayout> {
-    let crumbs = state.path_breadcrumbs();
-    if crumbs.is_empty() {
-        return Vec::new();
-    }
-    let avail_right = right_limit_x.max(status_bar.x + 12);
-    let mut cursor_x = status_bar.x + 8;
-    let mut out = Vec::new();
-    let len = crumbs.len();
-    for (i, (label, path)) in crumbs.into_iter().enumerate() {
-        let max_seg_w = if i + 1 == len {
-            (avail_right - cursor_x).max(0)
-        } else {
-            130
-        };
-        if max_seg_w < 26 {
-            break;
-        }
-        let fitted = Canvas::fit_text(&label, max_seg_w - 18, 11.5, i + 1 == len);
-        if fitted.is_empty() {
-            continue;
-        }
-        let text_w = Canvas::measure_text(&fitted, 11.5, i + 1 == len);
-        let pill_w = (text_w + 16).min(avail_right - cursor_x);
-        if pill_w < 22 {
-            break;
-        }
-        out.push(PathCrumbLayout {
-            label: fitted,
-            path,
-            rect: Rect::new(cursor_x, status_bar.y + 3, pill_w, 19),
-        });
-        cursor_x += pill_w + 14;
-        if cursor_x + 24 >= avail_right {
-            break;
-        }
-    }
-    out
-}
-
-/// Computes `Icons` view grid cell positions inside `content_rect`.
-#[must_use]
-pub(crate) fn compute_icons_grid_layout(
-    state: &FilesAppState,
-    content_rect: Rect,
-) -> IconsGridLayout {
-    let cols = FilesAppState::icon_grid_columns_for_width(content_rect.w);
-    let grid_w = i32::try_from(cols).unwrap_or(1) * ICON_CELL_W;
-    let start_x = content_rect.x + ((content_rect.w - grid_w) / 2).max(10);
-    let entries_len = state.columns.first().map_or(0, |c| c.visible_entries.len());
-
-    let mut cells = Vec::new();
-    for idx in 0..entries_len {
-        let col = idx % cols;
-        let row = idx / cols;
-        let cx = start_x + i32::try_from(col).unwrap_or(0) * ICON_CELL_W;
-        let cy = content_rect.y + 12 + i32::try_from(row).unwrap_or(0) * ICON_CELL_H
-            - state.icons_scroll_y;
-        let rect = Rect::new(cx + 4, cy, ICON_CELL_W - 8, ICON_CELL_H - 6);
-        if rect.bottom() < content_rect.y || rect.y > content_rect.bottom() {
-            continue;
-        }
-        let art_rect = Rect::new(rect.x + (rect.w - 72) / 2, rect.y + 4, 72, 66);
-        let label_rect = Rect::new(rect.x + 2, rect.y + 72, rect.w - 4, 34);
-        cells.push(IconCellLayout {
-            row_idx: idx,
-            rect,
-            art_rect,
-            label_rect,
-        });
-    }
-
-    IconsGridLayout {
-        area_rect: content_rect,
-        cols,
-        cells,
-    }
-}
-
-/// Computes `Gallery` view stage, filmstrip thumbnails, and right `Information` panel geometry.
-#[must_use]
-pub(crate) fn compute_gallery_layout(state: &FilesAppState, content_rect: Rect) -> GalleryLayout {
-    let info_w = GALLERY_INFO_WIDTH.min((content_rect.w / 3).max(200));
-    let left_w = (content_rect.w - info_w).max(160);
-    let strip_h = GALLERY_BOTTOM_H.min((content_rect.h / 3).max(74));
-    let stage_h = (content_rect.h - strip_h).max(80);
-
-    let stage_rect = Rect::new(content_rect.x, content_rect.y, left_w, stage_h);
-    let strip_rect = Rect::new(content_rect.x, stage_rect.bottom(), left_w, strip_h);
-    let info_rect = Rect::new(
-        stage_rect.right(),
-        content_rect.y,
-        content_rect.right() - stage_rect.right(),
-        content_rect.h,
-    );
-
-    let entries = state
-        .columns
-        .first()
-        .map_or(&[][..], |c| c.visible_entries.as_slice());
-    let mut thumbs = Vec::new();
-    let card_sz = 56;
-    let card_step = 66;
-    let mut tx = strip_rect.x + 14 - state.gallery_strip_scroll_x;
-    let ty = strip_rect.y + ((strip_rect.h - card_sz) / 2).max(6);
-    for idx in 0..entries.len() {
-        let r = Rect::new(tx, ty, card_sz, card_sz);
-        if r.right() >= strip_rect.x && r.x <= strip_rect.right() {
-            thumbs.push(GalleryThumbLayout {
-                row_idx: idx,
-                rect: r,
-            });
-        }
-        tx += card_step;
-    }
-
-    let selected_entry = state
-        .columns
-        .first()
-        .and_then(|c| c.selected_entry().cloned());
-
-    let show_more_rect = Rect::new(info_rect.right() - 78, info_rect.y + 72, 66, 20);
-    let tags_top = if state.gallery_more_info {
-        info_rect.y + 236
-    } else {
-        info_rect.y + 188
+    layout: &FilesLayout,
+    col_layout: &ColumnLayout,
+    pal: &Palette,
+) {
+    let Some(col) = state.columns.get(col_layout.col_idx) else {
+        return;
     };
-    let mut info_tags = Vec::with_capacity(FileTagColor::ALL.len());
-    for (i, color) in FileTagColor::ALL.iter().enumerate() {
-        let dx = info_rect.x + 16 + i32::try_from(i).unwrap_or(0) * 28;
-        info_tags.push((*color, Rect::new(dx, tags_top, 20, 20)));
+    let is_focused_col =
+        col_layout.col_idx == state.active_column || col_layout.col_idx + 1 == state.columns.len();
+
+    // Column divider stops strictly at content_rect.bottom(), above the status bar margin
+    c.fill_rect(
+        Rect::new(
+            col_layout.rect.right() - 1,
+            layout.content_rect.y,
+            1,
+            layout.content_rect.h,
+        ),
+        pal.divider,
+    );
+
+    let col_clip = Rect::new(
+        col_layout.rect.x,
+        layout.content_rect.y,
+        col_layout.rect.w - 1,
+        layout.content_rect.h,
+    );
+
+    c.with_clip(col_clip, |c| {
+        if col.loading {
+            c.draw_text(
+                "Loading...",
+                col_layout.rect.x + 14,
+                col_layout.rect.y + 12,
+                12.5,
+                false,
+                pal.text_muted,
+                col_clip,
+            );
+            return;
+        }
+        if let Some(err) = &col.error {
+            let msg = Canvas::fit_text(err, col_layout.rect.w - 24, 12.0, false);
+            c.draw_text(
+                &msg,
+                col_layout.rect.x + 12,
+                col_layout.rect.y + 12,
+                12.0,
+                false,
+                rgba(220, 72, 72, 255),
+                col_clip,
+            );
+            return;
+        }
+        if col.visible_entries.is_empty() {
+            c.draw_text(
+                "Empty",
+                col_layout.rect.x + 16,
+                col_layout.rect.y + 14,
+                12.5,
+                false,
+                pal.text_muted,
+                col_clip,
+            );
+            return;
+        }
+
+        for &(row_idx, row_rect) in &col_layout.rows {
+            let Some(entry) = col.visible_entries.get(row_idx) else {
+                continue;
+            };
+            let selected = col.selected_index == Some(row_idx);
+            let primary_active = selected && is_focused_col;
+            render_miller_column_row(
+                c,
+                state,
+                entry,
+                row_rect,
+                col_clip,
+                selected,
+                primary_active,
+                pal,
+            );
+        }
+
+        let total_h = i32::try_from(col.visible_entries.len()).unwrap_or(0) * ROW_HEIGHT + 12;
+        c.draw_scrollbar(
+            col_clip,
+            col.scroll_y,
+            total_h,
+            overlay_scrollbar_color(pal.scrollbar, state.overlay_scrollbar_alpha),
+        );
+    });
+}
+
+#[allow(clippy::too_many_arguments, clippy::cast_precision_loss)]
+pub(crate) fn render_miller_column_row(
+    c: &mut Canvas<'_>,
+    state: &FilesAppState,
+    entry: &FileEntry,
+    row_rect: Rect,
+    col_clip: Rect,
+    selected: bool,
+    primary_active: bool,
+    pal: &Palette,
+) {
+    if selected {
+        let bg = if primary_active {
+            pal.accent
+        } else {
+            pal.secondary_select
+        };
+        c.fill_rounded_rect(row_rect, 7, bg);
     }
+    let fg = if primary_active {
+        pal.accent_text
+    } else {
+        pal.text_primary
+    };
+    draw_entry_icon(
+        c,
+        row_rect.x as f32 + 13.0,
+        row_rect.y as f32 + (row_rect.h as f32) * 0.5,
+        entry,
+        primary_active,
+        pal,
+    );
 
-    let action_y = info_rect.bottom() - 48;
-    let btn_w = ((info_rect.w - 32) / 4).max(36);
-    let quick_look_btn = Rect::new(info_rect.x + 10, action_y, btn_w, 36);
-    let get_info_btn = Rect::new(quick_look_btn.right() + 4, action_y, btn_w, 36);
-    let open_btn = Rect::new(get_info_btn.right() + 4, action_y, btn_w, 36);
-    let trash_btn = Rect::new(open_btn.right() + 4, action_y, btn_w, 36);
+    let tags = state.tags_for(&entry.path);
+    let tags_w = i32::try_from(tags.len().min(3)).unwrap_or(0) * 9;
+    let chev_w = if entry.is_navigable_dir() { 20 } else { 6 };
+    let text_w = (row_rect.w - 30 - tags_w - chev_w).max(20);
+    let label = Canvas::fit_text(&entry.name, text_w, 13.0, selected);
+    c.draw_text(
+        &label,
+        row_rect.x + 26,
+        row_rect.y + 5,
+        13.0,
+        selected,
+        fg,
+        col_clip,
+    );
 
-    GalleryLayout {
-        area_rect: content_rect,
-        stage_rect,
-        strip_rect,
-        info_rect,
-        show_more_rect,
-        quick_look_btn,
-        get_info_btn,
-        open_btn,
-        trash_btn,
-        thumbs,
-        info_tags,
-        selected_entry,
+    let mut dot_x = row_rect.right() - chev_w - 6;
+    for tag in tags.iter().take(3).rev() {
+        let [r, g, b] = tag.rgb();
+        c.fill_circle(dot_x, row_rect.y + 13, 3.5, rgba(r, g, b, 255));
+        dot_x -= 9;
+    }
+    if entry.is_navigable_dir() {
+        let chev_col = if primary_active {
+            pal.accent_text
+        } else {
+            pal.text_muted
+        };
+        draw_chevron_aa(
+            c,
+            row_rect.right() as f32 - 13.5,
+            row_rect.y as f32 + 13.0,
+            false,
+            1.9,
+            3.5,
+            1.35,
+            chev_col,
+        );
     }
 }
 
-/// Hit-tests top `Tabs` bar chrome controls.
-#[must_use]
-pub(crate) fn hit_test_tab_bar(tb: &TabBarLayout, px: f64, py: f64) -> Option<FilesHit> {
-    if !tb.bar_rect.contains_f64(px, py) {
-        return None;
-    }
-    if tb.add_rect.contains_f64(px, py) {
-        return Some(FilesHit::TabAdd);
-    }
-    for tab in &tb.tabs {
-        if let Some(close) = tab.close_rect
-            && close.contains_f64(px, py)
-        {
-            return Some(FilesHit::TabClose(tab.index));
+#[allow(clippy::cast_precision_loss)]
+pub(crate) fn render_preview_inspector(
+    c: &mut Canvas<'_>,
+    state: &FilesAppState,
+    preview: &PreviewLayout,
+    pal: &Palette,
+) {
+    let entry = &preview.entry;
+    let cx = preview.rect.x + preview.rect.w / 2;
+    let card_clip = preview.rect;
+
+    c.with_clip(card_clip, |c| {
+        let badge = Rect::new(cx - 32, preview.rect.y + 34, 64, 72);
+        c.fill_rounded_rect(badge, 12, pal.row_alt);
+        c.stroke_rounded_rect(badge, 12, pal.divider);
+        draw_entry_icon(
+            c,
+            badge.x as f32 + 32.0,
+            badge.y as f32 + 24.0,
+            entry,
+            false,
+            pal,
+        );
+        let kind_w = Canvas::measure_text(entry.kind_label(), 10.5, true);
+        c.draw_text(
+            entry.kind_label(),
+            cx - kind_w / 2,
+            badge.y + 44,
+            10.5,
+            true,
+            pal.text_secondary,
+            badge,
+        );
+
+        let name = Canvas::fit_text(&entry.name, preview.rect.w - 40, 15.0, true);
+        let name_w = Canvas::measure_text(&name, 15.0, true);
+        c.draw_text(
+            &name,
+            cx - name_w / 2,
+            preview.rect.y + 122,
+            15.0,
+            true,
+            pal.text_primary,
+            card_clip,
+        );
+
+        let meta_sub = format!(
+            "{}  -  {}",
+            entry.kind_label(),
+            format_byte_size(entry.size_bytes)
+        );
+        let meta_w = Canvas::measure_text(&meta_sub, 12.0, false);
+        c.draw_text(
+            &meta_sub,
+            cx - meta_w / 2,
+            preview.rect.y + 146,
+            12.0,
+            false,
+            pal.text_secondary,
+            card_clip,
+        );
+
+        if let Some(secs) = entry.modified_unix_secs {
+            let mod_text = format!("Modified: {}", format_unix_timestamp(secs));
+            let mw = Canvas::measure_text(&mod_text, 11.5, false);
+            c.draw_text(
+                &mod_text,
+                cx - mw / 2,
+                preview.rect.y + 174,
+                11.5,
+                false,
+                pal.text_muted,
+                card_clip,
+            );
         }
-        if tab.rect.contains_f64(px, py) {
-            return Some(FilesHit::TabSelect(tab.index));
-        }
-    }
-    Some(FilesHit::WindowDrag)
+
+        render_preview_actions_and_tags(c, state, preview, pal);
+    });
 }
 
-/// Hit-tests clickable `Path Bar` breadcrumb directories.
-#[must_use]
-pub(crate) fn hit_test_path_bar(crumbs: &[PathCrumbLayout], px: f64, py: f64) -> Option<FilesHit> {
-    crumbs
-        .iter()
-        .find(|c| c.rect.contains_f64(px, py))
-        .map(|c| FilesHit::PathCrumb(c.path.clone()))
+pub(crate) fn render_preview_actions_and_tags(
+    c: &mut Canvas<'_>,
+    state: &FilesAppState,
+    preview: &PreviewLayout,
+    pal: &Palette,
+) {
+    c.fill_rounded_rect(preview.open_btn, 14, pal.pill_bg);
+    c.stroke_rounded_rect(preview.open_btn, 14, pal.pill_border);
+    let open_w = Canvas::measure_text("Open", 12.5, true);
+    c.draw_text(
+        "Open",
+        preview.open_btn.x + (preview.open_btn.w - open_w) / 2,
+        preview.open_btn.y + 7,
+        12.5,
+        true,
+        pal.text_primary,
+        preview.open_btn,
+    );
+
+    let trash_label = if state.is_trash_view() {
+        "Put Back"
+    } else {
+        "Move to Trash"
+    };
+    c.fill_rounded_rect(preview.trash_btn, 14, pal.pill_bg);
+    c.stroke_rounded_rect(preview.trash_btn, 14, pal.pill_border);
+    let tl_w = Canvas::measure_text(trash_label, 12.0, false);
+    c.draw_text(
+        trash_label,
+        preview.trash_btn.x + (preview.trash_btn.w - tl_w) / 2,
+        preview.trash_btn.y + 7,
+        12.0,
+        false,
+        pal.text_primary,
+        preview.trash_btn,
+    );
+
+    let active_tags = state.tags_for(&preview.entry.path);
+    for (color, rect) in &preview.tag_dots {
+        let [r, g, b] = color.rgb();
+        c.fill_circle(rect.x + 8, rect.y + 8, 6.0, rgba(r, g, b, 255));
+        if active_tags.contains(color) {
+            c.fill_circle(rect.x + 8, rect.y + 8, 2.2, rgba(255, 255, 255, 255));
+        }
+    }
 }
 
-/// Hit-tests `Icons` view cells.
-#[must_use]
-pub(crate) fn hit_test_icons_grid(grid: &IconsGridLayout, px: f64, py: f64) -> Option<FilesHit> {
-    if !grid.area_rect.contains_f64(px, py) {
-        return None;
-    }
-    for cell in &grid.cells {
-        if cell.rect.contains_f64(px, py) {
-            return Some(FilesHit::IconCell { idx: cell.row_idx });
-        }
-    }
-    Some(FilesHit::IconsEmpty)
-}
-
-/// Hit-tests `Gallery` view stage, filmstrip, inspector `Show More`, tags, and bottom actions.
-#[must_use]
-pub(crate) fn hit_test_gallery(gal: &GalleryLayout, px: f64, py: f64) -> Option<FilesHit> {
-    if !gal.area_rect.contains_f64(px, py) {
-        return None;
-    }
-    for thumb in &gal.thumbs {
-        if thumb.rect.contains_f64(px, py) {
-            return Some(FilesHit::GalleryThumb { idx: thumb.row_idx });
-        }
-    }
-    if gal.info_rect.contains_f64(px, py) {
-        if gal.show_more_rect.contains_f64(px, py) {
-            return Some(FilesHit::GalleryShowMoreInfo);
-        }
-        if gal.quick_look_btn.contains_f64(px, py) {
-            return Some(FilesHit::GalleryQuickLookBtn);
-        }
-        if gal.get_info_btn.contains_f64(px, py) {
-            return Some(FilesHit::GalleryInfoBtn);
-        }
-        if gal.open_btn.contains_f64(px, py) {
-            return Some(FilesHit::GalleryOpenBtn);
-        }
-        if gal.trash_btn.contains_f64(px, py) {
-            return Some(FilesHit::GalleryTrashBtn);
-        }
-        if let Some(entry) = &gal.selected_entry {
-            for (color, rect) in &gal.info_tags {
-                if rect.contains_f64(px, py) {
-                    return Some(FilesHit::GalleryTag {
-                        path: entry.path.clone(),
-                        color: *color,
-                    });
+#[allow(clippy::cast_precision_loss)]
+pub(crate) fn render_list_view(
+    c: &mut Canvas<'_>,
+    state: &FilesAppState,
+    layout: &FilesLayout,
+    pal: &Palette,
+) {
+    let hdr_y = layout.content_rect.y;
+    for (field, rect) in &layout.list_headers {
+        c.draw_text(
+            field.label(),
+            rect.x + 12,
+            rect.y + 5,
+            11.5,
+            true,
+            pal.text_secondary,
+            *rect,
+        );
+        if state.sort_field == *field {
+            let label_w = Canvas::measure_text(field.label(), 11.5, true);
+            let cx = (rect.x + 18 + label_w) as f32;
+            let cy = rect.y as f32 + 12.5;
+            let pts = match state.sort_order {
+                FileSortOrder::Ascending => {
+                    [(cx - 3.0, cy + 1.5), (cx, cy - 1.5), (cx + 3.0, cy + 1.5)]
                 }
+                FileSortOrder::Descending => {
+                    [(cx - 3.0, cy - 1.5), (cx, cy + 1.5), (cx + 3.0, cy - 1.5)]
+                }
+            };
+            c.stroke_polyline_aa(&pts, false, 1.3, pal.text_secondary);
+        }
+    }
+    c.fill_rect(
+        Rect::new(
+            layout.content_rect.x + 8,
+            hdr_y + 25,
+            layout.content_rect.w - 16,
+            1,
+        ),
+        pal.divider,
+    );
+
+    let Some(col) = state.columns.first() else {
+        return;
+    };
+    let clip = Rect::new(
+        layout.content_rect.x,
+        hdr_y + 27,
+        layout.content_rect.w,
+        (layout.content_rect.h - 27).max(20),
+    );
+    let cols_x = list_column_offsets(layout);
+
+    c.with_clip(clip, |c| {
+        for &(row_idx, rect) in &layout.list_rows {
+            if let Some(entry) = col.visible_entries.get(row_idx) {
+                let selected = col.selected_index == Some(row_idx);
+                render_list_row(c, entry, rect, row_idx, selected, cols_x, clip, pal);
             }
         }
-        return None;
-    }
-    if gal.stage_rect.contains_f64(px, py) && gal.selected_entry.is_some() {
-        return Some(FilesHit::GalleryStageOpen);
-    }
-    None
+        let total_h = i32::try_from(col.visible_entries.len()).unwrap_or(0) * LIST_ROW_HEIGHT + 8;
+        c.draw_scrollbar(
+            clip,
+            state.list_scroll_y,
+            total_h,
+            overlay_scrollbar_color(pal.scrollbar, state.overlay_scrollbar_alpha),
+        );
+    });
 }
 
-/// Renders the Golden Gate segmented `Tabs` bar beneath the toolbar.
-pub(crate) fn render_tab_bar(c: &mut Canvas<'_>, tb: &TabBarLayout, pal: &Palette) {
-    let track_bg = if pal.is_dark {
-        rgba(48, 48, 54, 255)
-    } else {
-        rgba(232, 235, 241, 255)
-    };
-    c.fill_rounded_rect(tb.track_rect, 12, track_bg);
+pub(crate) fn list_column_offsets(layout: &FilesLayout) -> (i32, i32, i32) {
+    let date_x = layout
+        .list_headers
+        .iter()
+        .find(|(f, _)| *f == FileSortField::DateModified)
+        .map_or(layout.content_rect.x + 280, |(_, r)| r.x);
+    let size_x = layout
+        .list_headers
+        .iter()
+        .find(|(f, _)| *f == FileSortField::Size)
+        .map_or(date_x + 140, |(_, r)| r.x);
+    let kind_x = layout
+        .list_headers
+        .iter()
+        .find(|(f, _)| *f == FileSortField::Kind)
+        .map_or(size_x + 78, |(_, r)| r.x);
+    (date_x, size_x, kind_x)
+}
 
-    for (idx, tab) in tb.tabs.iter().enumerate() {
-        if idx > 0 && !tab.active && !tb.tabs[idx - 1].active {
-            c.fill_rect(
-                Rect::new(tab.rect.x, tab.rect.y + 4, 1, tab.rect.h - 8),
-                pal.divider,
-            );
-        }
-        if tab.active {
-            let active_fill = if pal.is_dark {
-                pal.pill_active
-            } else {
-                rgba(255, 255, 255, 255)
-            };
-            c.fill_rounded_rect(tab.rect, 10, active_fill);
-            c.stroke_rounded_rect(tab.rect, 10, pal.pill_border);
-        }
-        let max_label_w = if tab.close_rect.is_some() {
-            (tab.rect.w - 28).max(16)
-        } else {
-            (tab.rect.w - 16).max(16)
-        };
-        let label = Canvas::fit_text(&tab.title, max_label_w, 12.0, tab.active);
-        let tw = Canvas::measure_text(&label, 12.0, tab.active);
-        let tx = tab.rect.x + (tab.rect.w - tw) / 2;
-        c.draw_text(
-            &label,
-            tx,
-            tab.rect.y + 4,
-            12.0,
-            tab.active,
-            if tab.active {
-                pal.text_primary
-            } else {
-                pal.text_secondary
-            },
-            tab.rect,
-        );
-        if let Some(close) = tab.close_rect {
-            #[allow(clippy::cast_precision_loss)]
-            draw_close_x_glyph(
-                c,
-                close.x as f32 + 8.0,
-                close.y as f32 + 8.0,
-                3.2,
-                pal.text_muted,
-            );
-        }
+#[allow(clippy::cast_precision_loss, clippy::too_many_arguments)]
+pub(crate) fn render_list_row(
+    c: &mut Canvas<'_>,
+    entry: &FileEntry,
+    rect: Rect,
+    row_idx: usize,
+    selected: bool,
+    cols_x: (i32, i32, i32),
+    clip: Rect,
+    pal: &Palette,
+) {
+    let (date_x, size_x, kind_x) = cols_x;
+    if selected {
+        c.fill_rounded_rect(rect, 7, pal.accent);
+    } else if row_idx % 2 == 1 {
+        c.fill_rounded_rect(rect, 7, pal.row_alt);
     }
+    let fg = if selected {
+        pal.accent_text
+    } else {
+        pal.text_primary
+    };
+    let sub_fg = if selected {
+        pal.accent_text
+    } else {
+        pal.text_secondary
+    };
 
-    c.fill_rounded_rect(tb.add_rect, 12, pal.pill_bg);
-    c.stroke_rounded_rect(tb.add_rect, 12, pal.pill_border);
-    #[allow(clippy::cast_precision_loss)]
-    draw_plus_glyph(
+    draw_entry_icon(
         c,
-        tb.add_rect.x as f32 + 12.0,
-        tb.add_rect.y as f32 + 12.0,
-        4.2,
-        pal.text_primary,
+        rect.x as f32 + 15.0,
+        rect.y as f32 + (rect.h as f32) * 0.5,
+        entry,
+        selected,
+        pal,
+    );
+    let name = Canvas::fit_text(&entry.name, (date_x - rect.x - 36).max(60), 13.0, selected);
+    c.draw_text(&name, rect.x + 30, rect.y + 7, 13.0, selected, fg, clip);
+
+    let date_str = entry
+        .modified_unix_secs
+        .map_or_else(|| String::from("--"), format_unix_timestamp);
+    c.draw_text(&date_str, date_x + 8, rect.y + 7, 12.0, false, sub_fg, clip);
+
+    let size_str = if entry.is_navigable_dir() {
+        String::from("--")
+    } else {
+        format_byte_size(entry.size_bytes)
+    };
+    c.draw_text(&size_str, size_x + 8, rect.y + 7, 12.0, false, sub_fg, clip);
+    c.draw_text(
+        entry.kind_label(),
+        kind_x + 8,
+        rect.y + 7,
+        12.0,
+        false,
+        sub_fg,
+        clip,
     );
 }
 
-/// Renders clickable bottom `Path Bar` breadcrumb directories inside the status strip.
-pub(crate) fn render_path_bar(c: &mut Canvas<'_>, crumbs: &[PathCrumbLayout], pal: &Palette) {
-    let last_idx = crumbs.len().saturating_sub(1);
-    for (idx, crumb) in crumbs.iter().enumerate() {
-        let is_last = idx == last_idx;
-        if is_last {
-            c.fill_rounded_rect(crumb.rect, 6, pal.row_alt);
-        }
-        // Mini Golden Gate folder glyph before label
-        let icon_col = if pal.is_dark {
-            rgba(72, 164, 255, 255)
+pub(crate) fn render_status_bar(
+    c: &mut Canvas<'_>,
+    state: &FilesAppState,
+    layout: &FilesLayout,
+    pal: &Palette,
+) {
+    let summary = state.status_summary();
+    let status_right = layout.status_bar_rect.right() - 8;
+    if layout.path_crumbs.is_empty() {
+        let max_text_w = (status_right - layout.status_bar_rect.x - 12).max(40);
+        let fitted = Canvas::fit_text(&summary, max_text_w, 11.5, false);
+        let sum_w = Canvas::measure_text(&fitted, 11.5, false);
+        let text_x = layout.status_bar_rect.x + ((layout.status_bar_rect.w - sum_w) / 2).max(8);
+        let text_col = if state.status_message.is_some() {
+            pal.text_secondary
         } else {
-            rgba(56, 152, 246, 255)
+            pal.text_muted
         };
-        #[allow(clippy::cast_precision_loss)]
-        {
-            c.fill_rounded_rect_f(
-                crumb.rect.x as f32 + 4.0,
-                crumb.rect.y as f32 + 5.0,
-                9.0,
-                8.0,
-                1.5,
-                icon_col,
-            );
-        }
         c.draw_text(
-            &crumb.label,
-            crumb.rect.x + 16,
-            crumb.rect.y + 4,
-            11.0,
-            is_last,
-            if is_last {
-                pal.text_primary
-            } else {
-                pal.text_secondary
-            },
-            crumb.rect,
+            &fitted,
+            text_x,
+            layout.status_bar_rect.y + 6,
+            11.5,
+            false,
+            text_col,
+            layout.status_bar_rect,
         );
-        if !is_last {
-            #[allow(clippy::cast_precision_loss)]
-            let cx = crumb.rect.right() as f32 + 6.5;
-            #[allow(clippy::cast_precision_loss)]
-            let cy = crumb.rect.y as f32 + 9.5;
-            c.stroke_polyline_aa(
-                &[(cx - 2.0, cy - 3.0), (cx + 1.5, cy), (cx - 2.0, cy + 3.0)],
+    } else {
+        c.fill_rect(
+            Rect::new(
+                layout.status_bar_rect.x + 4,
+                layout.status_bar_rect.y,
+                layout.status_bar_rect.w - 8,
+                1,
+            ),
+            pal.divider,
+        );
+        render_path_bar(c, &layout.path_crumbs, pal);
+        let right_edge = layout
+            .path_crumbs
+            .last()
+            .map_or(layout.status_bar_rect.x + 12, |crumb| {
+                crumb.rect.right() + 12
+            });
+        let avail_summary = (status_right - right_edge - 8).max(0);
+        if avail_summary >= 36 {
+            let fitted = Canvas::fit_text(&summary, avail_summary, 11.5, false);
+            let sum_w = Canvas::measure_text(&fitted, 11.5, false);
+            c.draw_text(
+                &fitted,
+                status_right - sum_w,
+                layout.status_bar_rect.y + 6,
+                11.5,
                 false,
-                1.15,
-                pal.text_muted,
+                pal.text_secondary,
+                layout.status_bar_rect,
             );
         }
     }
@@ -577,7 +591,7 @@ pub(crate) fn render_icons_grid(
     });
 }
 
-fn render_single_icon_cell(
+pub(crate) fn render_single_icon_cell(
     c: &mut Canvas<'_>,
     state: &FilesAppState,
     cell: &IconCellLayout,
@@ -686,7 +700,7 @@ pub(crate) fn render_gallery_view(
     render_gallery_inspector(c, state, gal, pal);
 }
 
-fn render_gallery_stage(
+pub(crate) fn render_gallery_stage(
     c: &mut Canvas<'_>,
     state: &FilesAppState,
     gal: &GalleryLayout,
@@ -736,7 +750,7 @@ fn render_gallery_stage(
     });
 }
 
-fn render_gallery_filmstrip(
+pub(crate) fn render_gallery_filmstrip(
     c: &mut Canvas<'_>,
     state: &FilesAppState,
     gal: &GalleryLayout,
@@ -794,7 +808,7 @@ fn render_gallery_filmstrip(
     });
 }
 
-fn render_gallery_inspector(
+pub(crate) fn render_gallery_inspector(
     c: &mut Canvas<'_>,
     state: &FilesAppState,
     gal: &GalleryLayout,
@@ -856,7 +870,7 @@ fn render_gallery_inspector(
     });
 }
 
-fn render_inspector_header(
+pub(crate) fn render_inspector_header(
     c: &mut Canvas<'_>,
     state: &FilesAppState,
     gal: &GalleryLayout,
@@ -904,7 +918,7 @@ fn render_inspector_header(
     );
 }
 
-fn render_inspector_kv_rows(
+pub(crate) fn render_inspector_kv_rows(
     c: &mut Canvas<'_>,
     state: &FilesAppState,
     gal: &GalleryLayout,
@@ -964,7 +978,7 @@ fn render_inspector_kv_rows(
     }
 }
 
-fn render_inspector_tags_and_actions(
+pub(crate) fn render_inspector_tags_and_actions(
     c: &mut Canvas<'_>,
     state: &FilesAppState,
     gal: &GalleryLayout,
@@ -1040,7 +1054,7 @@ fn render_inspector_tags_and_actions(
 /// Blits an aspect-fitted thumbnail centered inside `bounds` with crisp frame border.
 pub(crate) fn draw_framed_thumbnail(
     c: &mut Canvas<'_>,
-    img: &rusty_services::file_manager::DecodedPreviewImage,
+    img: &DecodedPreviewImage,
     bounds: Rect,
     pal: &Palette,
 ) {
@@ -1063,7 +1077,7 @@ pub(crate) fn draw_framed_thumbnail(
 /// Blits a large centered aspect-fitted image with rounded corners inside `bounds`.
 pub(crate) fn draw_aspect_fitted_preview(
     c: &mut Canvas<'_>,
-    img: &rusty_services::file_manager::DecodedPreviewImage,
+    img: &DecodedPreviewImage,
     bounds: Rect,
     radius: i32,
     pal: &Palette,
@@ -1158,7 +1172,12 @@ pub(crate) fn render_text_preview_card(
     });
 }
 
-fn wrap_two_lines(name: &str, max_w: i32, size_px: f32, bold_line1: bool) -> (String, String) {
+pub(crate) fn wrap_two_lines(
+    name: &str,
+    max_w: i32,
+    size_px: f32,
+    bold_line1: bool,
+) -> (String, String) {
     if Canvas::measure_text(name, size_px, bold_line1) <= max_w {
         return (name.to_owned(), String::new());
     }

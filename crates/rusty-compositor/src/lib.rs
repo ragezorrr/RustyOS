@@ -5,6 +5,7 @@
 //! nested Smithay + Winit prototype (`RUSTYOS-002`).
 
 pub mod config;
+pub mod context_menu;
 pub mod dbus_notifications;
 pub mod drm_backend;
 mod frame_composer;

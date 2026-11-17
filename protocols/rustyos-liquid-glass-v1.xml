@@ -1,0 +1,104 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<protocol name="rustyos_liquid_glass_v1">
+  <copyright><![CDATA[
+    SPDX-FileCopyrightText: 2026 RustyOS Contributors
+    SPDX-License-Identifier: MIT OR Apache-2.0
+  ]]></copyright>
+
+  <interface name="rustyos_liquid_glass_manager_v1" version="1">
+    <description summary="Liquid Glass backdrop blur and frosted glass decoration manager">
+      Factory interface for creating liquid glass surface decorators.
+      Allows clients to request real-time compositor-side GPU frosted glass
+      effects behind their surfaces or designated subregions.
+    </description>
+
+    <request name="destroy" type="destructor">
+      <description summary="destroy the manager object">
+        Informs the compositor that the client will no longer use the
+        rustyos_liquid_glass_manager_v1 object.
+      </description>
+    </request>
+
+    <request name="get_surface_glass">
+      <description summary="create a liquid glass decorator for a wl_surface">
+        Instantiate a rustyos_surface_glass_v1 decoration object associated
+        with the specified wl_surface.
+      </description>
+      <arg name="id" type="new_id" interface="rustyos_surface_glass_v1" summary="the new liquid glass object"/>
+      <arg name="surface" type="object" interface="wl_surface" summary="the surface to apply glass effects to"/>
+    </request>
+  </interface>
+
+  <interface name="rustyos_surface_glass_v1" version="1">
+    <description summary="liquid glass decoration for a wl_surface">
+      Controls the optical backdrop blur, corner radius, vibrant tint, and
+      clipping region for a wl_surface. State changes are double-buffered and
+      take effect on the next wl_surface.commit.
+    </description>
+
+    <enum name="error">
+      <description summary="fatal protocol errors"/>
+      <entry name="already_constructed" value="0" summary="liquid glass already exists for this surface"/>
+      <entry name="invalid_style" value="1" summary="unrecognized glass style preset"/>
+    </enum>
+
+    <enum name="style">
+      <description summary="pre-configured optical style presets conforming to macOS 27 Golden Gate">
+        Style presets dictate backdrop blur strength, saturation boost,
+        specular border highlights, and chromatic transmission.
+      </description>
+      <entry name="popover" value="0" summary="High vibrancy menu/popover glass (16px corner radius default, saturated backdrop)"/>
+      <entry name="sidebar" value="1" summary="Subtle translucent sidebar glass (12px corner radius, high diffusion blur)"/>
+      <entry name="control_pill" value="2" summary="Compact segmented pill glass (fully rounded capsule)"/>
+      <entry name="base_panel" value="3" summary="Top bar or dock base panel glass"/>
+      <entry name="custom" value="4" summary="Custom glass parameters"/>
+    </enum>
+
+    <request name="destroy" type="destructor">
+      <description summary="destroy the liquid glass object">
+        Destroys the decorator object. Any active glass effect on the surface
+        is removed on the next wl_surface.commit.
+      </description>
+    </request>
+
+    <request name="set_region">
+      <description summary="specify subregion where glass effect is rendered">
+        Sets the region of the surface where the liquid glass backdrop should
+        be drawn. Passing a null wl_region indicates that the entire surface
+        bounds should receive the glass effect.
+      </description>
+      <arg name="region" type="object" interface="wl_region" allow-null="true" summary="bounding region or null for full surface"/>
+    </request>
+
+    <request name="set_corner_radius">
+      <description summary="set the rounded corner radius for the glass panel">
+        Specifies the physical corner radius in surface-local pixels.
+      </description>
+      <arg name="radius" type="uint" summary="corner radius in pixels"/>
+    </request>
+
+    <request name="set_style">
+      <description summary="set the optical glass style preset">
+        Selects one of the predefined optical styles from the style enum.
+      </description>
+      <arg name="style" type="uint" enum="style" summary="glass preset style"/>
+    </request>
+
+    <request name="set_tint">
+      <description summary="custom tint color overlay">
+        Sets an optional tint color (RGBA 0..255) overlay on the frosted glass.
+      </description>
+      <arg name="r" type="uint" summary="red component 0..255"/>
+      <arg name="g" type="uint" summary="green component 0..255"/>
+      <arg name="b" type="uint" summary="blue component 0..255"/>
+      <arg name="a" type="uint" summary="alpha component 0..255"/>
+    </request>
+
+    <request name="commit">
+      <description summary="explicit commit marker for glass state">
+        Signals that all pending glass attributes have been configured.
+        Pending changes are applied atomically on wl_surface.commit.
+      </description>
+    </request>
+  </interface>
+</protocol>

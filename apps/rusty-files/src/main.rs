@@ -1,12 +1,11 @@
 //! Binary entry point for `rusty-files`, RustyOS's standalone Golden Gate file manager
 //! (`RUSTYOS-065`, ADR-0030).
 
-mod dialogs;
 mod icons;
 mod layout;
+pub(crate) mod liquid_glass;
 mod render;
 mod state;
-mod views;
 mod wayland;
 
 use std::env;
@@ -29,6 +28,7 @@ where
             "--recents" => opts.open_recents = true,
             "--light" => opts.theme_override = Some(FilesThemeMode::LightGoldenGate),
             "--dark" => opts.theme_override = Some(FilesThemeMode::DarkPurpleGlass),
+            "--open-popup" => opts.open_test_popup = true,
             "--path" => {
                 let Some(dir) = iter.next() else {
                     return Err(String::from("--path requires a directory argument"));
@@ -84,6 +84,7 @@ mod tests {
                 open_trash: true,
                 open_recents: false,
                 theme_override: Some(FilesThemeMode::DarkPurpleGlass),
+                open_test_popup: false,
             }))
         );
         assert_eq!(
@@ -97,6 +98,17 @@ mod tests {
                 open_trash: false,
                 open_recents: false,
                 theme_override: Some(FilesThemeMode::LightGoldenGate),
+                open_test_popup: false,
+            }))
+        );
+        assert_eq!(
+            parse_args(["--open-popup".to_owned()]),
+            Ok(Some(StartupOptions {
+                initial_path: None,
+                open_trash: false,
+                open_recents: false,
+                theme_override: None,
+                open_test_popup: true,
             }))
         );
         assert!(parse_args(["--path".to_owned()]).is_err());

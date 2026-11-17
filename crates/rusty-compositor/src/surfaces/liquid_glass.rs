@@ -150,9 +150,7 @@ void main() {
 }
 ";
 
-/// GLSL ES 1.00 Golden Gate Liquid Glass composite fragment shader:
-/// analytical rounded-box SDF, optical edge lensing/dispersion, vibrance boost,
-/// light/dark frosted tint, top sheen, and directional specular bevel rim.
+/// GLSL ES 1.00 Liquid Glass composite fragment shader (`CutefishOS` superellipse model for Dock + Popover/ControlModule).
 pub(crate) const LIQUID_GLASS_FRAG: &str = r"#version 100
 
 //_DEFINES_
@@ -161,7 +159,11 @@ pub(crate) const LIQUID_GLASS_FRAG: &str = r"#version 100
 #extension GL_OES_EGL_image_external : require
 #endif
 
+#if defined(GL_FRAGMENT_PRECISION_HIGH)
+precision highp float;
+#else
 precision mediump float;
+#endif
 #if defined(EXTERNAL)
 uniform samplerExternalOES tex;
 #else
@@ -181,82 +183,176 @@ uniform vec4 u_sat_refract;
 uniform float tint;
 #endif
 
+vec2 cornerExtent(vec2 radius, vec2 halfSize) {
+    return clamp(radius * 1.5, vec2(0.0), halfSize);
+}
+
+vec2 cornerNormal(vec2 q, vec2 r) {
+    float m = max(q.x, q.y);
+    vec2 s = q / max(m, 0.0001);
+    return normalize(max(s * s / max(r, vec2(0.0001)), vec2(0.0001)));
+}
+
+float roundedDistance(vec2 p, vec2 halfSize, float r) {
+    vec2 r_ext = cornerExtent(vec2(r), halfSize);
+    vec2 edge = abs(p) - halfSize;
+    vec2 d = edge + r_ext;
+    if (min(r_ext.x, r_ext.y) <= 0.0 || min(d.x, d.y) <= 0.0)
+        return max(edge.x, edge.y);
+    vec2 q = d / r_ext;
+    float m = max(q.x, q.y);
+    vec2 s = q / max(m, 0.0001);
+    float u = pow(max(dot(s * s, s), 1.0), 1.0 / 3.0);
+    float l = m * u;
+    float denom = max(length(s * s / max(r_ext, vec2(0.0001))), 0.0001);
+    return (l - 1.0) * (u * u) / denom;
+}
+
+vec2 outwardAt(vec2 p, vec2 halfSize, float r) {
+    vec2 r_ext = cornerExtent(vec2(r), halfSize);
+    vec2 edge = abs(p) - halfSize;
+    vec2 q = edge + r_ext;
+    vec2 sgn = vec2(p.x >= 0.0 ? 1.0 : -1.0, p.y >= 0.0 ? 1.0 : -1.0);
+    if (min(r_ext.x, r_ext.y) <= 0.0 || min(q.x, q.y) <= 0.0)
+        return edge.x > edge.y ? vec2(sgn.x, 0.0) : vec2(0.0, sgn.y);
+    return sgn * cornerNormal(q / r_ext, r_ext);
+}
+
+float tangentCoverage(vec2 p, vec2 halfSize, float r, float pixelSize) {
+    vec2 r_ext = cornerExtent(vec2(r), halfSize);
+    vec2 edge = abs(p) - halfSize;
+    vec2 corner = edge + r_ext;
+    vec2 normal = edge.x > edge.y ? vec2(1.0, 0.0) : vec2(0.0, 1.0);
+    if (min(r_ext.x, r_ext.y) > 0.0 && min(corner.x, corner.y) > 0.0)
+        normal = cornerNormal(corner / r_ext, r_ext);
+    float t = -roundedDistance(p, halfSize, r);
+    vec2 extent = abs(normal) * (0.5 * pixelSize);
+    float a = max(extent.x, extent.y);
+    float b = min(extent.x, extent.y);
+    if (b < 0.001)
+        return clamp(0.5 + t / max(2.0 * a, 0.0001), 0.0, 1.0);
+    float u = abs(t);
+    if (u >= a + b)
+        return t > 0.0 ? 1.0 : 0.0;
+    if (u <= a - b)
+        return 0.5 + t / max(2.0 * a, 0.0001);
+    float tail = (a + b - u) * (a + b - u) / max(8.0 * a * b, 0.0001);
+    return t > 0.0 ? 1.0 - tail : tail;
+}
+
+float roundedCoverage(vec2 p, vec2 halfSize, float r) {
+    float distance = roundedDistance(p, halfSize, r);
+    if (distance < -1.0) return 1.0;
+    if (distance > 1.0) return 0.0;
+    vec2 r_ext = cornerExtent(vec2(r), halfSize);
+    vec2 corner = abs(p) - halfSize + r_ext;
+    if (min(r_ext.x, r_ext.y) <= 0.0 || min(corner.x, corner.y) < -0.5)
+        return tangentCoverage(p, halfSize, r, 1.0);
+    return 0.25 * (
+        tangentCoverage(p + vec2(-0.25, -0.25), halfSize, r, 0.5) +
+        tangentCoverage(p + vec2( 0.25, -0.25), halfSize, r, 0.5) +
+        tangentCoverage(p + vec2(-0.25,  0.25), halfSize, r, 0.5) +
+        tangentCoverage(p + vec2( 0.25,  0.25), halfSize, r, 0.5));
+}
+
+float lensHeight(float sd, float band) {
+    float t = clamp(-sd / max(band, 1.0), 0.0, 1.0);
+    if (t <= 0.0) return 0.0;
+    if (t >= 1.0) return 16.0;
+    float a = 1.0 - t;
+    float inner = max(1.0 - a * a * sqrt(a), 0.0);
+    return pow(max(inner, 0.000001), 0.4) * 16.0;
+}
+
+vec3 lensNormalAt(vec2 p, vec2 halfSize, float r, float band) {
+    vec2 outward = outwardAt(p, halfSize, r);
+    float slope = lensHeight(roundedDistance(p + outward, halfSize, r), band)
+                - lensHeight(roundedDistance(p, halfSize, r), band);
+    float limit = 16.0 / max(band * 0.7, 1.0);
+    return normalize(vec3(-outward * clamp(slope, -limit, limit), 1.0));
+}
+
+vec2 insideLens(vec2 p, vec2 halfSize, float r) {
+    float sd = roundedDistance(p, halfSize, r);
+    return sd > 0.0 ? p - outwardAt(p, halfSize, r) * (sd + 0.5) : p;
+}
+
+vec2 lensOffset(vec2 p, vec2 halfSize, float r, float band, float displacement) {
+    vec2 ip = insideLens(p, halfSize, r);
+    vec3 ray = refract(vec3(0.0, 0.0, -1.0), lensNormalAt(ip, halfSize, r, band), 1.0 / 1.7);
+    if (length(ray) < 0.0001)
+        return vec2(0.0);
+    return ray.xy / max(-ray.z, 0.45) * displacement;
+}
+
+vec3 sampleBackdrop(vec2 uv) {
+    vec4 s = texture2D(tex, clamp(uv, u_uv_bounds.xy, u_uv_bounds.zw));
+#if defined(NO_ALPHA)
+    s.a = 1.0;
+#endif
+    return s.rgb;
+}
+
+vec3 refractedAt(vec2 p, vec2 offset, vec2 halfSize, float r, float band,
+                 vec2 uv_per_px, vec2 texel, float displacement, float chroma) {
+    vec2 bend = lensOffset(p + offset, halfSize, r, band, displacement);
+    float reach = min(halfSize.x, halfSize.y) * 0.70;
+    float bend_len = length(bend);
+    if (bend_len > reach)
+        bend = bend * (reach / bend_len);
+    vec2 duv = bend * uv_per_px;
+    vec2 sampleUv = v_coords + offset * texel;
+    vec3 color;
+    color.r = sampleBackdrop(sampleUv + duv * (1.0 + chroma)).r;
+    color.g = sampleBackdrop(sampleUv + duv).g;
+    color.b = sampleBackdrop(sampleUv + duv * (1.0 - chroma)).b;
+    return color;
+}
+
 void main() {
     vec2 uv_size = max(u_uv_rect.zw, vec2(0.0001));
     vec2 panel_uv = clamp((v_coords - u_uv_rect.xy) / uv_size, 0.0, 1.0);
     vec2 panel_size = max(u_size_radius.xy, vec2(1.0));
-    vec2 p = panel_uv * panel_size - panel_size * 0.5;
+    vec2 halfSize = panel_size * 0.5;
+    vec2 p = panel_uv * panel_size - halfSize;
 
-    float radius = clamp(u_size_radius.z, 0.0, min(panel_size.x, panel_size.y) * 0.5);
-    vec2 half_ext = max(panel_size * 0.5 - vec2(radius), vec2(0.0));
-    vec2 q = abs(p) - half_ext;
-    float dist = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - radius;
-
-    float coverage = 1.0 - smoothstep(-0.75, 0.75, dist);
+    float radius = clamp(u_size_radius.z, 0.0, min(halfSize.x, halfSize.y));
+    float dist = roundedDistance(p, halfSize, radius);
+    float coverage = roundedCoverage(p, halfSize, radius);
     if (coverage <= 0.001) {
         gl_FragColor = vec4(0.0);
         return;
     }
 
-    vec2 sgn = vec2(p.x >= 0.0 ? 1.0 : -1.0, p.y >= 0.0 ? 1.0 : -1.0);
-    vec2 grad = vec2(0.0, -1.0);
-    if (q.x > 0.0 && q.y > 0.0) {
-        grad = sgn * normalize(max(q, vec2(0.0001)));
-    } else {
-        float blend = smoothstep(-2.0, 2.0, q.x - q.y);
-        vec2 straight = mix(vec2(0.0, sgn.y), vec2(sgn.x, 0.0), blend);
-        float len = length(straight);
-        grad = len > 0.0001 ? straight / len : vec2(0.0, -1.0);
-    }
-
-    float edge_depth = clamp(-dist, 0.0, 32.0);
-    float lens_band = exp(-edge_depth / 7.5) * smoothstep(22.0, 0.0, edge_depth);
     vec2 uv_per_px = uv_size / panel_size;
-    vec2 lens_uv = grad * (u_sat_refract.y * lens_band) * uv_per_px;
-    vec2 disp_uv = grad * (0.55 * lens_band) * uv_per_px;
-
-    vec2 uv_g = clamp(v_coords - lens_uv, u_uv_bounds.xy, u_uv_bounds.zw);
-    vec2 uv_r = clamp(v_coords - lens_uv - disp_uv, u_uv_bounds.xy, u_uv_bounds.zw);
-    vec2 uv_b = clamp(v_coords - lens_uv + disp_uv, u_uv_bounds.xy, u_uv_bounds.zw);
-
-    vec4 base_sample = texture2D(tex, uv_g);
-#if defined(NO_ALPHA)
-    base_sample.a = 1.0;
-#endif
-    vec3 bg = vec3(
-        texture2D(tex, uv_r).r,
-        base_sample.g,
-        texture2D(tex, uv_b).b
-    );
+    float band = clamp(14.0, 1.0, min(halfSize.x, halfSize.y));
+    vec2 texel = mix(0.75, 2.5, clamp(1.0 + dist / band, 0.0, 1.0)) * uv_per_px;
+    vec3 bg = 0.25 * (
+        refractedAt(p, vec2(0.375, -0.125), halfSize, radius, band, uv_per_px, texel, u_sat_refract.y, u_sat_refract.w) +
+        refractedAt(p, vec2(0.125, 0.375), halfSize, radius, band, uv_per_px, texel, u_sat_refract.y, u_sat_refract.w) +
+        refractedAt(p, vec2(-0.375, 0.125), halfSize, radius, band, uv_per_px, texel, u_sat_refract.y, u_sat_refract.w) +
+        refractedAt(p, vec2(-0.125, -0.375), halfSize, radius, band, uv_per_px, texel, u_sat_refract.y, u_sat_refract.w));
 
     float luma = dot(bg, vec3(0.2126, 0.7152, 0.0722));
-    bg = clamp(mix(vec3(luma), bg, u_sat_refract.x), 0.0, 1.0);
-
+    bg = max(mix(vec3(luma), bg, u_sat_refract.x), 0.0);
     vec3 glass = mix(bg, u_tint_rgba.rgb, u_tint_rgba.a);
 
-    float top_t = clamp(1.0 - panel_uv.y, 0.0, 1.0);
-    float sheen = top_t * top_t * top_t * u_sat_refract.w;
-    glass += vec3(sheen);
-
-    vec2 light_tl = normalize(vec2(-1.0, -1.0));
-    float d_tl = max(dot(grad, light_tl), 0.0);
-    float d_br = max(dot(grad, -light_tl), 0.0);
-    float d_tl2 = d_tl * d_tl;
-    float d_br2 = d_br * d_br;
-    float arc_tl = d_tl2 * d_tl2 * d_tl2 * d_tl;
-    float arc_br = d_br2 * d_br2 * d_br2 * d_br;
-    float spec_dir = arc_tl + arc_br * 0.62;
-
-    float rim_t = (dist + 0.6) / 1.4;
-    float outer_bevel = exp(-(rim_t * rim_t));
-    float inner_caustic = (1.0 - smoothstep(0.0, 6.0, edge_depth)) * smoothstep(0.0, 1.5, edge_depth);
-    float is_light = smoothstep(0.35, 0.75, u_tint_rgba.r);
-    float light_fresnel = outer_bevel * is_light * 0.04;
-    glass = clamp(
-        glass + vec3(light_fresnel + (outer_bevel + inner_caustic * 0.28) * u_sat_refract.z * spec_dir),
-        0.0,
-        1.0
-    );
+    vec2 outward = outwardAt(insideLens(p, halfSize, radius), halfSize, radius);
+    float rim_x = u_sat_refract.z;
+    float lit = abs(outward.y) * mix(1.0, 0.35, 0.5 + 0.5 * outward.y);
+    float inset = -dist;
+    float litWidth = 1.0;
+    float shadeWidth = 1.0;
+    float litStart = shadeWidth;
+    float hairline = clamp(min(inset + 0.5, litStart + litWidth) - max(inset - 0.5, litStart), 0.0, 1.0);
+    float glow = exp(-max(inset - litStart - litWidth, 0.0) / 1.7)
+               * clamp(inset + 0.5 - litStart, 0.0, 1.0);
+    float headroom = 1.0 - smoothstep(0.88, 1.0, dot(glass, vec3(0.2126, 0.7152, 0.0722)));
+    glass += rim_x * lit * headroom * 0.075 * glow;
+    glass = 1.0 - (1.0 - glass) * (1.0 - rim_x * lit * 0.43 * hairline);
+    float shade = (0.3 + 0.7 * outward.x * outward.x) * (1.0 - smoothstep(shadeWidth - 0.5, shadeWidth + 0.5, inset));
+    glass = mix(glass, glass * (1.0 - 0.1 * rim_x) - 0.05 * rim_x, shade);
+    glass = clamp(glass, 0.0, 1.0);
 
     float out_alpha = coverage * alpha;
 #if defined(DEBUG_FLAGS)
@@ -269,17 +365,17 @@ void main() {
 }
 ";
 
-/// Computed Liquid Glass material uniforms derived from Golden Gate Light/Dark theme + opacity.
+/// Computed Liquid Glass material uniforms derived from `CutefishOS` Light/Dark style + opacity.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct GlassMaterialUniforms {
     /// Target frosted tint RGB and blend weight `a` in `[0.0, 1.0]`.
     pub tint_rgba: [f32; 4],
-    /// Saturation multiplier, optical edge refraction strength in logical px,
-    /// directional rim weight, and top sheen weight.
+    /// Saturation multiplier, lens displacement in logical px,
+    /// directional `uRim` weight, and chromatic split fraction (`chroma`).
     pub sat_refract_rim_sheen: [f32; 4],
 }
 
-/// Computes Golden Gate Liquid Glass shader material parameters for `style`, `glass_opacity`, and polarity.
+/// Computes unified `CutefishOS` Liquid Glass shader material parameters for `style`, `glass_opacity`, and polarity.
 #[must_use]
 pub(crate) fn compute_glass_material(
     style: GlassPanelStyle,
@@ -288,29 +384,32 @@ pub(crate) fn compute_glass_material(
 ) -> GlassMaterialUniforms {
     let g = crate::config::clamp_glass_opacity(glass_opacity);
     match (style, is_dark) {
+        // Dock (`DockWindow::glass`): Light rgb=0.60 alpha=0.25, Dark rgb=0.38 alpha=0.29, saturation=1.30, displacement=36, rim=1.0, chroma=0.
         (GlassPanelStyle::Dock, false) => GlassMaterialUniforms {
-            tint_rgba: [0.98, 0.985, 1.0, 0.06 + 0.12 * g],
-            sat_refract_rim_sheen: [1.30, 8.5, 0.34, 0.08],
+            tint_rgba: [0.60, 0.60, 0.60, 0.13 + 0.12 * g],
+            sat_refract_rim_sheen: [1.30, 36.0, 1.0, 0.0],
         },
         (GlassPanelStyle::Dock, true) => GlassMaterialUniforms {
-            tint_rgba: [0.06, 0.065, 0.08, 0.14 + 0.16 * g],
-            sat_refract_rim_sheen: [1.26, 8.0, 0.24, 0.045],
+            tint_rgba: [0.38, 0.38, 0.38, 0.15 + 0.14 * g],
+            sat_refract_rim_sheen: [1.30, 36.0, 1.0, 0.0],
         },
+        // Popover (`popupGlass`): Light [1,1,1,0.60], Dark [0.17,0.17,0.19,0.60], saturation=1.20, displacement=20, rim=0.85, chroma=0.03 (`RUSTYOS-100`).
         (GlassPanelStyle::Popover, false) => GlassMaterialUniforms {
-            tint_rgba: [0.975, 0.98, 1.0, 0.14 + 0.18 * g],
-            sat_refract_rim_sheen: [1.24, 6.8, 0.30, 0.065],
+            tint_rgba: [1.0, 1.0, 1.0, 0.32 + 0.28 * g],
+            sat_refract_rim_sheen: [1.20, 20.0, 0.85, 0.03],
         },
         (GlassPanelStyle::Popover, true) => GlassMaterialUniforms {
-            tint_rgba: [0.09, 0.095, 0.115, 0.24 + 0.22 * g],
-            sat_refract_rim_sheen: [1.22, 6.5, 0.21, 0.04],
+            tint_rgba: [0.17, 0.17, 0.19, 0.34 + 0.26 * g],
+            sat_refract_rim_sheen: [1.20, 20.0, 0.85, 0.03],
         },
+        // ControlModule (`fishuiGlass` / Sidebar / ControlPill): Light [1,1,1,0.24], Dark [0.14,0.14,0.16,0.30], saturation=1.22, displacement=24, rim=0.90, chroma=0.03 (`RUSTYOS-100`).
         (GlassPanelStyle::ControlModule, false) => GlassMaterialUniforms {
-            tint_rgba: [0.98, 0.985, 1.0, 0.09 + 0.13 * g],
-            sat_refract_rim_sheen: [1.24, 7.8, 0.32, 0.065],
+            tint_rgba: [1.0, 1.0, 1.0, 0.10 + 0.14 * g],
+            sat_refract_rim_sheen: [1.22, 24.0, 0.90, 0.03],
         },
         (GlassPanelStyle::ControlModule, true) => GlassMaterialUniforms {
-            tint_rgba: [0.10, 0.105, 0.125, 0.16 + 0.16 * g],
-            sat_refract_rim_sheen: [1.22, 7.5, 0.23, 0.04],
+            tint_rgba: [0.14, 0.14, 0.16, 0.14 + 0.16 * g],
+            sat_refract_rim_sheen: [1.22, 24.0, 0.90, 0.03],
         },
     }
 }
@@ -689,7 +788,11 @@ impl LiquidGlassPipeline {
         let glass_pct = (crate::config::clamp_glass_opacity(glass_opacity) * 100.0).round() as u8;
         let is_dark = crate::shell_render::active_appearance().is_dark();
 
-        let half_tex = buffers.half_out.clone();
+        let half_tex = if style == GlassPanelStyle::Dock {
+            buffers.half_a.clone()
+        } else {
+            buffers.half_out.clone()
+        };
         let half_size = half_tex.size();
         let blur_snapshot = buffers.blur_damage.snapshot();
         let panel_rect = Rectangle::new(loc, Size::from((width, height)));
@@ -1177,12 +1280,22 @@ mod tests {
         let light = compute_glass_material(GlassPanelStyle::Dock, 0.85, false);
         let dark = compute_glass_material(GlassPanelStyle::Dock, 0.85, true);
         let dark_mod = compute_glass_material(GlassPanelStyle::ControlModule, 0.78, true);
-        assert!(light.tint_rgba[0] > 0.8 && dark.tint_rgba[0] < 0.2);
-        assert!(light.sat_refract_rim_sheen[2] > dark.sat_refract_rim_sheen[2]);
-        assert!(dark_mod.tint_rgba[3] < 0.35 && dark_mod.sat_refract_rim_sheen[1] >= 7.0);
+        assert!(light.tint_rgba[0] > 0.5 && dark.tint_rgba[0] < 0.45);
+        // RUSTYOS-099: CutefishOS exact Dock parameters — displacement=36.0, uRim.x=1.0, sheen=0.0
+        assert_eq!(
+            light.sat_refract_rim_sheen,
+            [1.30, 36.0, 1.0, 0.0],
+            "Dock light material must match CutefishOS"
+        );
+        assert_eq!(
+            dark.sat_refract_rim_sheen,
+            [1.30, 36.0, 1.0, 0.0],
+            "Dock dark material must match CutefishOS"
+        );
+        assert!(dark_mod.tint_rgba[3] < 0.35 && dark_mod.sat_refract_rim_sheen[1] >= 20.0);
         assert!(
-            LIQUID_GLASS_FRAG.contains("spec_dir")
-                && !LIQUID_GLASS_FRAG.contains("top_dir")
+            LIQUID_GLASS_FRAG.contains("refractedAt")
+                && !LIQUID_GLASS_FRAG.contains("corner_flares")
                 && !LIQUID_GLASS_FRAG.contains("caustic_band")
         );
     }

@@ -987,6 +987,103 @@ fn context_menu_dock_window_alt_force_quit_and_open_at_login() -> Result<(), Box
 }
 
 #[test]
+fn context_menu_window_management_actions_and_tiling() -> Result<(), Box<dyn Error>> {
+    use crate::shell_render::{ContextMenuAction, ContextMenuEntry, ContextMenuTarget};
+
+    let mut display: Display<RustyCompositorState> = Display::new()?;
+    let mut event_loop: EventLoop<RustyCompositorState> = EventLoop::try_new()?;
+    let mut compositor = RustyCompositorState::new(
+        &display,
+        "wayland-rustyos-ctx-win-test".to_owned(),
+        event_loop.get_signal(),
+        event_loop.handle(),
+        (1280, 800).into(),
+    )?;
+    let _ = (&mut display, &mut event_loop);
+
+    let w1 = compositor.wm.next_window_id();
+    let _ = compositor.wm.map_window(w1, Some((600, 400)));
+    let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+
+    // Open window context menu at (100.0, 100.0)
+    compositor.open_window_context_menu((100.0, 100.0).into(), w1);
+    let ctx = compositor
+        .context_menu
+        .as_ref()
+        .ok_or("missing window context menu")?;
+    assert_eq!(ctx.target, ContextMenuTarget::Window(w1));
+
+    // Verify tile left action presence
+    assert!(ctx.entries.iter().any(|e| matches!(
+        e,
+        ContextMenuEntry::Item {
+            action: ContextMenuAction::WindowTileLeft(id),
+            ..
+        } if *id == w1
+    )));
+
+    // Test Alt modifier dynamically toggling Close <-> Force Quit
+    compositor.sync_context_menu_alt_modifier(true);
+    let ctx_alt = compositor.context_menu.as_ref().ok_or("missing alt menu")?;
+    assert!(ctx_alt.entries.iter().any(|e| matches!(
+        e,
+        ContextMenuEntry::Item {
+            action: ContextMenuAction::WindowForceQuit(id),
+            danger: true,
+            ..
+        } if *id == w1
+    )));
+
+    compositor.sync_context_menu_alt_modifier(false);
+    let ctx_norm = compositor
+        .context_menu
+        .as_ref()
+        .ok_or("missing normal menu")?;
+    assert!(ctx_norm.entries.iter().any(|e| matches!(
+        e,
+        ContextMenuEntry::Item {
+            action: ContextMenuAction::WindowQuit(id),
+            danger: false,
+            ..
+        } if *id == w1
+    )));
+
+    // Execute WindowTileLeft
+    compositor.execute_context_menu_action(ContextMenuAction::WindowTileLeft(w1), serial);
+    assert!(compositor.context_menu.is_none());
+    let geo_left = compositor
+        .wm
+        .window(w1)
+        .map(|w| w.geometry)
+        .ok_or("missing w1")?;
+    assert_eq!(geo_left.x, compositor.wm.gap_px);
+
+    // Execute WindowTileRight
+    compositor.execute_context_menu_action(ContextMenuAction::WindowTileRight(w1), serial);
+    let geo_right = compositor
+        .wm
+        .window(w1)
+        .map(|w| w.geometry)
+        .ok_or("missing w1")?;
+    assert!(geo_right.x > geo_left.x);
+
+    // Execute WindowToggleMaximize
+    assert!(!compositor.wm.window(w1).ok_or("missing w1")?.maximized);
+    compositor.execute_context_menu_action(ContextMenuAction::WindowToggleMaximize(w1), serial);
+    assert!(compositor.wm.window(w1).ok_or("missing w1")?.maximized);
+
+    // Toggle back
+    compositor.execute_context_menu_action(ContextMenuAction::WindowToggleMaximize(w1), serial);
+    assert!(!compositor.wm.window(w1).ok_or("missing w1")?.maximized);
+
+    // Move to Workspace 2
+    compositor.execute_context_menu_action(ContextMenuAction::WindowMoveToWorkspace(w1, 2), serial);
+    assert_eq!(compositor.wm.window(w1).ok_or("missing w1")?.workspace.0, 2);
+
+    Ok(())
+}
+
+#[test]
 fn context_menu_downloads_sort_persists_toml_and_updates_items() -> Result<(), Box<dyn Error>> {
     use crate::config::{DownloadsSortMode, UserConfig};
     use crate::shell_render::{ContextMenuAction, ContextMenuEntry};
@@ -1464,5 +1561,22 @@ fn updates_popover_and_topbar_menu_workflow_persist_settings()
     assert!(!compositor.should_show_top_bar_updates());
 
     let _ = std::fs::remove_file(&cfg_path);
+    Ok(())
+}
+
+#[test]
+fn test_rustyos_liquid_glass_protocol_integration() -> Result<(), Box<dyn Error>> {
+    let display: Display<RustyCompositorState> = Display::new()?;
+    let event_loop: EventLoop<RustyCompositorState> = EventLoop::try_new()?;
+    let compositor = RustyCompositorState::new(
+        &display,
+        "rusty-test-liquid-glass".to_owned(),
+        event_loop.get_signal(),
+        event_loop.handle(),
+        (1280, 800).into(),
+    )?;
+
+    assert!(!compositor.has_active_client_liquid_glass());
+    assert!(compositor.active_liquid_glass_surfaces.is_empty());
     Ok(())
 }
