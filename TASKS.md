@@ -1843,6 +1843,22 @@ hardware/software context и низкие накладные расходы.
 - **Tests:** Все 256 unit-тестов workspace (`4` `rusty-animation`, `171` `rusty-compositor`, `15` `rusty-files`, `3` `rusty-ipc`, `43` `rusty-services`, `4` `rusty-settings`, `5` `rusty-shell`, `4` `rusty-updater`, `7` `rusty-wm`).
 - **Risks:** Нет.
 
+### RUSTYOS-106 — Исправление SDF-форм и сетки $D = 70\text{ px}$ в `Control Center` по эталону
+
+- **Status:** Done
+- **Goal:** Перевести `LIQUID_GLASS_FRAG` на чистый евклидов $L_2$ circular-arc SDF без сквиркл-искажений и выровнять все модули `Control Center` по точной эталонной сетке $D = 70\text{ px}, G = 12\text{ px}$.
+- **Dependencies:** `RUSTYOS-104`.
+- **Scope:**
+  - `crates/rusty-compositor/src/surfaces/liquid_glass.rs`: в `LIQUID_GLASS_FRAG` (`cornerExtent`, `cornerNormal`, `roundedDistance`, `outwardAt`, `tangentCoverage`) применён чистый евклидов $L_2$ SDF (`sdRoundBox`) для точных кругов, полукруглых капсул и скруглённых карточек без раздувания углов;
+  - `crates/rusty-compositor/src/shell_render/quick_settings.rs`: выровнена сетка `pop_w = 316, pop_h = 516, gap = 12, col_w = 152, btn_d = 70`: капсулы `Wi-Fi`/`Bluetooth`/`Power`/`Focus` `152×70` (`r = 35`) с концентрическим кружком иконки `46 px` (`pad = 12`), 4 круглые кнопки `70×70` (`r = 35`, `6 px` inset при активации), квадратная карточка `Now Playing` `152×152` (`r = 28`, обложка `44×44` `r = 12`), слайдерные карточки `Display`/`Sound` `316×66` (`r = 26`), кнопка `Lock Screen` `118×28` (`r = 14`);
+  - `crates/rusty-compositor/src/shell_render/tests.rs` и `src/input/tests.rs`: проверки `display_card.size.h == 66`, `sound_card.size.h == 66`, `layout_btn.size.w == layout_btn.size.h`, `now_playing_card.size.w == now_playing_card.size.h` и обновлённые координаты `track_y` (`qs_y + 373`) и `focus_y` (`qs_y + 281`);
+  - `DESIGN.md` (`§12.4`, `§12.5`), `docs/adr/0056-control-center-liquid-glass-alignment.md`, `DECISIONS.md` (`D-070`).
+- **Acceptance Criteria:**
+  - На живых `--winit`-скриншотах в `Light` и `Dark` кнопки-переключатели являются точными кругами `70×70`, капсулы `152×70` имеют концентрический кружок `46 px`, `Not Playing` — квадрат `152×152`, а `Display`/`Sound` — плашки `316×66` (`r = 26`) в 1:1 пропорциях с эталоном;
+  - `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings` и все 256 тестов workspace проходят без ошибок.
+- **Tests:** Все 256 unit-тестов workspace (`4` `rusty-animation`, `171` `rusty-compositor`, `15` `rusty-files`, `3` `rusty-ipc`, `43` `rusty-services`, `4` `rusty-settings`, `5` `rusty-shell`, `4` `rusty-updater`, `7` `rusty-wm`).
+- **Risks:** Нет.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

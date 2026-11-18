@@ -762,8 +762,13 @@ fn macos27_quick_settings_glass_and_volume_slider_hit_testing() {
     assert!(tinted[3] < 200 && tinted[3] >= 40);
     let opaque = scale_glass_rgba([20, 14, 34, 180], 0.40, true);
     assert!(opaque[3] >= 246);
-    assert_eq!(layout.display_card.size.h, 58);
-    assert_eq!(layout.sound_card.size.h, 58);
+    assert_eq!(layout.display_card.size.h, 66);
+    assert_eq!(layout.sound_card.size.h, 66);
+    assert_eq!(layout.layout_btn.size.w, layout.layout_btn.size.h);
+    assert_eq!(
+        layout.now_playing_card.size.w,
+        layout.now_playing_card.size.h
+    );
     assert_eq!(layout.wifi_pill.size.h, layout.bt_pill.size.h);
     assert_eq!(layout.power_pill.size.h, layout.focus_pill.size.h);
 }

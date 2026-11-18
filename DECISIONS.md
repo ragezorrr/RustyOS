@@ -763,6 +763,19 @@
                            рамок в rusty-files и
                            rusty-updater (ADR-0057)
   -----------------------------------------------------------------------
+   D-070                   Фаза 8/10 UI & Control    accepted
+                           Center Geometry (RUSTYOS-106):
+                           чистый евклидов L2 SDF
+                           (sdRoundBox) в
+                           LIQUID_GLASS_FRAG; точная
+                           сетка D=70, G=12: круги
+                           70x70 r=35, капсулы 152x70
+                           r=35 (иконка 46 px),
+                           Now Playing 152x152 r=28,
+                           Display/Sound 316x66 r=26,
+                           Lock Screen 118x28 r=14 в
+                           quick_settings.rs (ADR-0056)
+  -----------------------------------------------------------------------
 
 ## Открытые решения
 

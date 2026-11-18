@@ -904,7 +904,7 @@ fn macos27_pointer_hover_slider_drag_and_overview_space_switching()
     let track_left = f64::from(qs_x + 34);
     let track_right = f64::from(qs_x + qs_w - 34);
     let track_mid_x = f64::midpoint(track_left, track_right);
-    let track_y = f64::from(qs_y + 327);
+    let track_y = f64::from(qs_y + 373);
 
     compositor.toggle_quick_settings();
     compositor.pointer_location = (track_mid_x, track_y).into();
@@ -920,7 +920,7 @@ fn macos27_pointer_hover_slider_drag_and_overview_space_switching()
 
     let col_w = (qs_w - 12) / 2;
     let focus_x = f64::from(qs_x + col_w + 12 + col_w / 2);
-    let focus_y = f64::from(qs_y + 240);
+    let focus_y = f64::from(qs_y + 281);
     compositor.pointer_location = (focus_x, focus_y).into();
     compositor.handle_quick_settings_pointer_click(serial, 272);
     assert!(compositor.focus_mode);

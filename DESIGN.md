@@ -481,20 +481,17 @@ palettes (section 5.1); geometry, Liquid Glass clarity, and interactions target 
 ### 12.4 Control center and quick settings
 
 - Floating Liquid Glass islands anchored top-right (`TOP_BAR_HEIGHT + 10`) with no outer dark container box;
-  each island uses individual `GlassPanelStyle::ControlModule` glass and soft drop shadow (`(18, 42)`, `RUSTYOS-053`, `RUSTYOS-104`).
-- Matches `27-Golden-Gate-Finder-Control-Center.png` hierarchy: three stacked connectivity/status capsules
-  on the left (`Wi-Fi`, `Bluetooth`, `Power` with borderless `36 px` icon circles), square `Now Playing` card backed by
-  `MPRIS2` / `playerctl` on top-right, circular quick toggles (`Layout`, `Overview`, `Reduced Motion`,
-  `Transparency`, active state inset by `7 px` to preserve the outer `uRim`), right `Focus` capsule, full-capsule (`r = h / 2`) `Display` and `Sound` slider islands (`5 px` bright white active track + `12 px` circular thumb knob + borderless mute button), legible `popover_text_secondary`/`muted` capsule subtitles, and centered bottom `Lock Screen` pill.
+  each island uses individual `GlassPanelStyle::ControlModule` glass and soft drop shadow (`(18, 42)`, `RUSTYOS-053`, `RUSTYOS-104`, `RUSTYOS-106`).
+- Matches `27-Golden-Gate-Finder-Control-Center.png` hierarchy on a unified `D = 70 px`, `gap = 12 px` grid (`316 × 516`, `col_w = 152`): three stacked connectivity/status capsules on the left (`Wi-Fi`, `Bluetooth`, `Power` at `152 × 70, r = 35` with concentric borderless `46 px` icon circles at `pad = 12`), square `Now Playing` card (`152 × 152, r = 28`, `44 × 44` `r = 12` artwork tile) backed by `MPRIS2` / `playerctl` on top-right, circular quick toggles (`Layout`, `Overview`, `Reduced Motion`, `Transparency` at `70 × 70, r = 35`, active state rendered as `6 px` inset circle preserving outer `uRim`), right `Focus` capsule (`152 × 70, r = 35`), rounded capsule-card `Display` and `Sound` sliders (`316 × 66, r = 26`, `5 px` bright white active track + `12 px` circular thumb knob + borderless `30 px` mute circle), legible `popover_text_secondary`/`muted` capsule subtitles, and centered bottom `Lock Screen` pill (`118 × 28, r = 14`).
 
-### 12.5 Material and depth (Unified Superellipse Liquid Glass)
+### 12.5 Material and depth (Unified Liquid Glass)
 
 - **Backdrop Blur Pyramid (`LiquidGlassPipeline`, `surfaces/liquid_glass.rs`):**
   - 5-pass GLES Dual-Kawase down/upsample ladder (`scene 1/1 -> half_a 1/2 -> quarter_a 1/4 -> eighth_a 1/8 -> quarter_b 1/4 -> half_out 1/2`), gated by `OutputDamageTracker` with `BLUR_DAMAGE_PAD_PHYS = 32 px` padding so idle frames perform zero extra GPU passes.
   - On theme switch (`Light` <-> `Dark`) or wallpaper update (`wallpaper_revision`), `UiShapeCache::sync_wallpaper_revision` calls `LiquidGlassPipeline::invalidate_all()` so offscreen backdrops rebuild immediately without stale tinting.
 - **Single Unified Composite Shader (`LIQUID_GLASS_FRAG`):**
-  - All GPU glass surfaces — compositor overlays and Wayland clients via `rustyos_liquid_glass_v1` — share one branch-free GLSL ES 1.00 fragment shader (`ADR-0052`, `ADR-0053`):
-  - **Cubic superellipse SDF:** `cornerExtent = clamp(radius * 1.5, 0.0, halfSize)` with 4-point tangent-averaged anti-aliased edge coverage (`roundedCoverage`).
+  - All GPU glass surfaces — compositor overlays and Wayland clients via `rustyos_liquid_glass_v1` — share one branch-free GLSL ES 1.00 fragment shader (`ADR-0052`, `ADR-0053`, `RUSTYOS-106`):
+  - **Euclidean $L_2$ Circular-Arc SDF (`RUSTYOS-106`):** `sdRoundBox` (`rc = clamp(r, 0.0, min(halfSize.x, halfSize.y))`) with isotropic circular arcs and Euclidean normal `normalize(max(q * r, vec2(0.0001)))`, producing true circular toggles, $180^\circ$ capsule ends, and clean 4-point tangent-averaged anti-aliased edge coverage (`roundedCoverage`) aligned with CPU `sdf.rs`.
   - **14 px superellipse edge lens:** `lensHeight` over `band = 14.0 px` (`ior = 1.7`), 4-sample `refractedAt` sampling clamped to `u_uv_bounds` with optional chromatic channel shift (`u_sat_refract.w = chroma`), vibrance saturation boost (`u_sat_refract.x`), and target Light/Dark frosted tint mix (`u_tint_rgba`).
   - **3-layer directional `uRim` (`lit = abs(outward.y) * mix(1.0, 0.35, 0.5 + 0.5 * outward.y)`):** top edge weight `1.0`, bottom edge `0.35`, left/right vertical sides `0.0` (no side glare, no diagonal `d^7` corner flares, no vertical `sheen`):
     1. Outer `1 px` edge shade darkening (`shade`);

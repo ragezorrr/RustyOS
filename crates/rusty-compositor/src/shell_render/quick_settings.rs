@@ -126,7 +126,7 @@ pub enum QuickSettingsHit {
 
 pub(super) fn quick_settings_rect(width: i32, height: i32) -> (i32, i32, i32, i32) {
     let pop_w = 316.min((width - 24).max(240));
-    let pop_h = 456.min((height - TOP_BAR_HEIGHT - 20).max(240));
+    let pop_h = 516.min((height - TOP_BAR_HEIGHT - 20).max(240));
     let pop_x = width - pop_w - 12;
     let pop_y = TOP_BAR_HEIGHT + 10;
     (pop_x, pop_y, pop_w, pop_h)
@@ -167,16 +167,18 @@ pub(super) fn quick_settings_layout(width: i32, height: i32, anim_dy: i32) -> Qu
     let right_w = pw - col_w - gap;
     let left_x = px;
     let right_x = px + col_w + gap;
-    let btn_d = 66.min((col_w - 8) / 2);
+    let btn_d = (col_w - gap) / 2;
+    let row_h = btn_d;
+    let slider_card_h = 66;
 
-    let y_bt = py + 64;
-    let y_row3 = py + 130;
-    let y_row4 = y_row3 + 78;
-    let y_disp = y_row4 + 78;
-    let y_snd = y_disp + 70;
-    let y_lock = y_snd + 70;
+    let y_bt = py + row_h + gap;
+    let y_row3 = y_bt + row_h + gap;
+    let y_row4 = y_row3 + row_h + gap;
+    let y_disp = y_row4 + row_h + gap;
+    let y_snd = y_disp + slider_card_h + gap;
+    let y_lock = y_snd + slider_card_h + gap;
 
-    let media_btn_y = y_bt + 10;
+    let media_btn_y = py + 104;
     let media_btn_w = ((right_w - 16) / 3).max(28);
     let lock_w = 118.min(pw);
 
@@ -185,9 +187,12 @@ pub(super) fn quick_settings_layout(width: i32, height: i32, anim_dy: i32) -> Qu
         py,
         pw,
         ph,
-        wifi_pill: Rectangle::new(Point::from((left_x, py)), Size::from((col_w, 54))),
-        bt_pill: Rectangle::new(Point::from((left_x, y_bt)), Size::from((col_w, 54))),
-        now_playing_card: Rectangle::new(Point::from((right_x, py)), Size::from((right_w, 118))),
+        wifi_pill: Rectangle::new(Point::from((left_x, py)), Size::from((col_w, row_h))),
+        bt_pill: Rectangle::new(Point::from((left_x, y_bt)), Size::from((col_w, row_h))),
+        now_playing_card: Rectangle::new(
+            Point::from((right_x, py)),
+            Size::from((right_w, row_h * 2 + gap)),
+        ),
         media_prev_btn: Rectangle::new(
             Point::from((right_x + 8, media_btn_y)),
             Size::from((media_btn_w, 36)),
@@ -200,7 +205,7 @@ pub(super) fn quick_settings_layout(width: i32, height: i32, anim_dy: i32) -> Qu
             Point::from((right_x + 8 + media_btn_w * 2, media_btn_y)),
             Size::from((media_btn_w, 36)),
         ),
-        power_pill: Rectangle::new(Point::from((left_x, y_row3 + 3)), Size::from((col_w, 60))),
+        power_pill: Rectangle::new(Point::from((left_x, y_row3)), Size::from((col_w, row_h))),
         layout_btn: Rectangle::new(Point::from((right_x, y_row3)), Size::from((btn_d, btn_d))),
         overview_btn: Rectangle::new(
             Point::from((right_x + right_w - btn_d, y_row3)),
@@ -211,31 +216,28 @@ pub(super) fn quick_settings_layout(width: i32, height: i32, anim_dy: i32) -> Qu
             Point::from((left_x + col_w - btn_d, y_row4)),
             Size::from((btn_d, btn_d)),
         ),
-        focus_pill: Rectangle::new(
-            Point::from((right_x, y_row4 + 3)),
-            Size::from((right_w, 60)),
-        ),
-        display_card: Rectangle::new(Point::from((px, y_disp)), Size::from((pw, 58))),
+        focus_pill: Rectangle::new(Point::from((right_x, y_row4)), Size::from((right_w, row_h))),
+        display_card: Rectangle::new(Point::from((px, y_disp)), Size::from((pw, slider_card_h))),
         display_track: Rectangle::new(
-            Point::from((px + 34, y_disp + 31)),
-            Size::from(((pw - 68).max(24), 20)),
+            Point::from((px + 36, y_disp + 35)),
+            Size::from(((pw - 72).max(24), 20)),
         ),
-        sound_card: Rectangle::new(Point::from((px, y_snd)), Size::from((pw, 58))),
+        sound_card: Rectangle::new(Point::from((px, y_snd)), Size::from((pw, slider_card_h))),
         sound_track: Rectangle::new(
-            Point::from((px + 34, y_snd + 31)),
-            Size::from(((pw - 106).max(24), 20)),
+            Point::from((px + 36, y_snd + 35)),
+            Size::from(((pw - 110).max(24), 20)),
         ),
         sound_mute_zone: Rectangle::new(
-            Point::from((px + pw - 39, y_snd + 23)),
+            Point::from((px + pw - 42, y_snd + 30)),
             Size::from((30, 30)),
         ),
         sound_left_mute_zone: Rectangle::new(
-            Point::from((px + 8, y_snd + 28)),
+            Point::from((px + 10, y_snd + 33)),
             Size::from((24, 24)),
         ),
         lock_btn: Rectangle::new(
             Point::from((px + (pw - lock_w) / 2, y_lock)),
-            Size::from((lock_w, 30)),
+            Size::from((lock_w, 28)),
         ),
     }
 }
@@ -500,7 +502,7 @@ pub(super) fn render_control_center_capsule_text(
         } else {
             pal.popover_text_secondary
         },
-        Point::from((pill.loc.x + 54, top_y)),
+        Point::from((pill.loc.x + 66, top_y)),
     ) {
         elements.push(el);
     }
@@ -513,7 +515,7 @@ pub(super) fn render_control_center_capsule_text(
         } else {
             pal.popover_text_muted
         },
-        Point::from((pill.loc.x + 54, top_y + 16)),
+        Point::from((pill.loc.x + 66, top_y + 16)),
     ) {
         elements.push(el);
     }
@@ -540,7 +542,7 @@ pub(super) fn render_cc_secondary_labels(
         pal.popover_text_primary,
         Point::from((
             layout.now_playing_card.loc.x + 14,
-            layout.now_playing_card.loc.y + 53,
+            layout.now_playing_card.loc.y + 72,
         )),
     ) {
         elements.push(el);
@@ -563,7 +565,7 @@ pub(super) fn render_cc_secondary_labels(
         12.0,
         pal.popover_text_primary,
         Point::from((
-            layout.focus_pill.loc.x + 56,
+            layout.focus_pill.loc.x + 68,
             layout.focus_pill.loc.y + (layout.focus_pill.size.h - 15) / 2,
         )),
     ) {
@@ -580,7 +582,7 @@ pub(super) fn render_cc_secondary_labels(
             crate::text::FontWeight::Bold,
             12.0,
             pal.popover_text_primary,
-            Point::from((card.loc.x + 14, card.loc.y + 9)),
+            Point::from((card.loc.x + 16, card.loc.y + 11)),
         ) {
             elements.push(el);
         }
@@ -669,10 +671,10 @@ pub(super) fn push_cc_capsule_icon(
     inactive_glyph_rgba: [u8; 4],
 ) {
     let pal = ThemePalette::active();
-    let circle_d = 36;
-    let circle_x = pill.loc.x + 10;
+    let circle_d = 46;
+    let circle_x = pill.loc.x + 12;
     let circle_y = pill.loc.y + (pill.size.h - circle_d) / 2;
-    let glyph_size = 17;
+    let glyph_size = 19;
     if let Some(el) = shape_cache.ui_glyph_element(
         renderer,
         glyph,
@@ -717,8 +719,8 @@ pub(super) fn push_cc_now_playing_contents(
     let pal = ThemePalette::active();
     let card = layout.now_playing_card;
     let art_rect = Rectangle::new(
-        Point::from((card.loc.x + 14, card.loc.y + 12)),
-        Size::from((36, 36)),
+        Point::from((card.loc.x + 14, card.loc.y + 14)),
+        Size::from((44, 44)),
     );
     let note_rgba = if qs.media_active {
         [255, 255, 255, 248]
@@ -730,7 +732,7 @@ pub(super) fn push_cc_now_playing_contents(
         crate::surfaces::UiGlyphKind::MusicNote,
         16,
         note_rgba,
-        Point::from((art_rect.loc.x + 10, art_rect.loc.y + 10)),
+        Point::from((art_rect.loc.x + 14, art_rect.loc.y + 14)),
     ) {
         out.push(CompositorRenderElement::Memory(el));
     }
@@ -741,7 +743,7 @@ pub(super) fn push_cc_now_playing_contents(
     } else {
         [0, 0, 0, 20]
     };
-    push_rounded_glass_box(out, shape_cache, renderer, art_rect, 10, art_bg, None);
+    push_rounded_glass_box(out, shape_cache, renderer, art_rect, 12, art_bg, None);
 
     let play_kind = if qs.media_playing {
         crate::surfaces::UiGlyphKind::MediaPause
@@ -1035,22 +1037,33 @@ pub(super) fn push_cc_round_toggle_buttons(
             out.push(CompositorRenderElement::Memory(el));
         }
         if active {
-            let inset = 7;
-            let active_d = (btn_rect.size.w - inset * 2).max(20);
+            let inset = 6;
+            let inset_rect = Rectangle::new(
+                Point::from((btn_rect.loc.x + inset, btn_rect.loc.y + inset)),
+                Size::from((
+                    (btn_rect.size.w - inset * 2).max(20),
+                    (btn_rect.size.h - inset * 2).max(20),
+                )),
+            );
             let active_fill = if pal.is_dark {
-                pal.accent_hover_fill
+                [
+                    pal.accent_rgba[0],
+                    pal.accent_rgba[1],
+                    pal.accent_rgba[2],
+                    236,
+                ]
             } else {
                 [255, 255, 255, 242]
             };
-            if let Some(el) = shape_cache.circle_element(
+            push_rounded_glass_box(
+                out,
+                shape_cache,
                 renderer,
-                active_d,
+                inset_rect,
+                inset_rect.size.h / 2,
                 active_fill,
                 None,
-                Point::from((btn_rect.loc.x + inset, btn_rect.loc.y + inset)),
-            ) {
-                out.push(CompositorRenderElement::Memory(el));
-            }
+            );
         }
     }
 }
@@ -1141,15 +1154,15 @@ pub(super) fn render_quick_settings_composite(
     for (rect, radius) in [
         (layout.wifi_pill, layout.wifi_pill.size.h / 2),
         (layout.bt_pill, layout.bt_pill.size.h / 2),
-        (layout.now_playing_card, 24),
+        (layout.now_playing_card, 28),
         (layout.power_pill, layout.power_pill.size.h / 2),
         (layout.layout_btn, layout.layout_btn.size.h / 2),
         (layout.overview_btn, layout.overview_btn.size.h / 2),
         (layout.motion_btn, layout.motion_btn.size.h / 2),
         (layout.transparency_btn, layout.transparency_btn.size.h / 2),
         (layout.focus_pill, layout.focus_pill.size.h / 2),
-        (layout.display_card, layout.display_card.size.h / 2),
-        (layout.sound_card, layout.sound_card.size.h / 2),
+        (layout.display_card, 26),
+        (layout.sound_card, 26),
         (layout.lock_btn, layout.lock_btn.size.h / 2),
     ] {
         push_liquid_glass_panel(

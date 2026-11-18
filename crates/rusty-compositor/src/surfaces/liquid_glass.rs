@@ -184,28 +184,18 @@ uniform float tint;
 #endif
 
 vec2 cornerExtent(vec2 radius, vec2 halfSize) {
-    return clamp(radius * 1.5, vec2(0.0), halfSize);
+    float lim = min(halfSize.x, halfSize.y);
+    return vec2(clamp(radius.x, 0.0, lim));
 }
 
 vec2 cornerNormal(vec2 q, vec2 r) {
-    float m = max(q.x, q.y);
-    vec2 s = q / max(m, 0.0001);
-    return normalize(max(s * s / max(r, vec2(0.0001)), vec2(0.0001)));
+    return normalize(max(q * r, vec2(0.0001)));
 }
 
 float roundedDistance(vec2 p, vec2 halfSize, float r) {
-    vec2 r_ext = cornerExtent(vec2(r), halfSize);
-    vec2 edge = abs(p) - halfSize;
-    vec2 d = edge + r_ext;
-    if (min(r_ext.x, r_ext.y) <= 0.0 || min(d.x, d.y) <= 0.0)
-        return max(edge.x, edge.y);
-    vec2 q = d / r_ext;
-    float m = max(q.x, q.y);
-    vec2 s = q / max(m, 0.0001);
-    float u = pow(max(dot(s * s, s), 1.0), 1.0 / 3.0);
-    float l = m * u;
-    float denom = max(length(s * s / max(r_ext, vec2(0.0001))), 0.0001);
-    return (l - 1.0) * (u * u) / denom;
+    float rc = clamp(r, 0.0, min(halfSize.x, halfSize.y));
+    vec2 q = abs(p) - halfSize + vec2(rc);
+    return length(max(q, vec2(0.0))) + min(max(q.x, q.y), 0.0) - rc;
 }
 
 vec2 outwardAt(vec2 p, vec2 halfSize, float r) {

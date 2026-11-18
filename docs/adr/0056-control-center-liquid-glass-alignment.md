@@ -19,12 +19,16 @@ accepted
    - В [crates/rusty-compositor/src/surfaces/sdf.rs](file:///home/anc/RustyOS_Main/crates/rusty-compositor/src/surfaces/sdf.rs) (`base_glass_layer`, `sample_glass_panel_pixel_themed`): согласовать CPU/fallback-подложку Light `[184.0, 188.0, 198.0]` (`0.22 * (0.48 + 0.52 * glass_scale)`, `reduce_transparency` `[238.0, 240.0, 245.0]`), Dark `[60.0, 60.0, 68.0]` (`0.28 * ...`) и `rim_peak` `0.42` / `0.35`.
 
 2. **Обновление контролов и типографики Control Center ([crates/rusty-compositor/src/shell_render/quick_settings.rs](file:///home/anc/RustyOS_Main/crates/rusty-compositor/src/shell_render/quick_settings.rs)):**
-   - Слайдерные карточки `Display` и `Sound` переведены на полную капсулу (`r = card.size.h / 2 = 29`) и единую тень островов `Some((18, 42))`.
-   - Слайдер `push_cc_thin_slider` рендерит тонкий `5 px` белый активный трек с круглым `12 px` белым thumb-бегунком (`[0, 0, 0, 34]` микроободок), кнопка mute в `push_cc_sound_slider` и кружки капсул (`push_cc_capsule_icon`), а также `art_rect` (`r = 10`) в `push_cc_now_playing_contents` очищены от грубых рамок.
-   - Активный индикатор круглых тумблеров (`push_cc_round_toggle_buttons`) смещён на `7 px` внутрь, чтобы не перекрывать стеклянный `uRim`.
+   - Слайдерные карточки `Display` и `Sound` переведены на единую тень островов `Some((18, 42))` и скруглённый прямоугольный профиль (`316 × 66`, `r = 26`).
+   - Слайдер `push_cc_thin_slider` рендерит тонкий `5 px` белый активный трек с круглым `12 px` белым thumb-бегунком (`[0, 0, 0, 34]` микроободок), кнопка mute в `push_cc_sound_slider` и концентрические `46 px` кружки капсул (`push_cc_capsule_icon`, отступ `12 px`), а также `art_rect` (`44 × 44`, `r = 12`) в `push_cc_now_playing_contents` очищены от грубых рамок.
+   - Активный индикатор круглых переключателей (`push_cc_round_toggle_buttons`) смещён на `6 px` внутрь (`58 × 58`, `push_rounded_glass_box`), чтобы не перекрывать стеклянный `uRim`.
    - В `render_control_center_capsule_text` подписи активных капсул используют `pal.popover_text_secondary`, а заголовок неактивных — `pal.popover_text_secondary`, повышая читаемость в Light-режиме.
 
-3. **IPC и документация:**
+3. **Точная $L_2$-геометрия и сетка $D = 70\text{ px}, G = 12\text{ px}$ (`RUSTYOS-106`):**
+   - В `LIQUID_GLASS_FRAG` ([crates/rusty-compositor/src/surfaces/liquid_glass.rs](file:///home/anc/RustyOS_Main/crates/rusty-compositor/src/surfaces/liquid_glass.rs)) применён точный евклидов $L_2$ circular-arc SDF (`sdRoundBox`: `rc = clamp(r, 0.0, min(halfSize.x, halfSize.y))`) с нормалью `normalize(max(q * r, vec2(0.0001)))`, синхронизированный с `sdf.rs`, чтобы круги (`70 × 70`), капсулы (`152 × 70`) и карточки имели идеальные дуги без раздувания углов.
+   - В `quick_settings_layout` ([crates/rusty-compositor/src/shell_render/quick_settings.rs](file:///home/anc/RustyOS_Main/crates/rusty-compositor/src/shell_render/quick_settings.rs)) выровнена единая сетка (`pop_w = 316, pop_h = 516, gap = 12, col_w = 152, btn_d = 70`): капсулы `wifi_pill`, `bt_pill`, `power_pill`, `focus_pill` (`152 × 70`, `r = 35`), 4 круглые кнопки `layout_btn`, `overview_btn`, `motion_btn`, `transparency_btn` (`70 × 70`, `r = 35`), квадратная карточка `now_playing_card` (`152 × 152`, `r = 28`), карточки `Display`/`Sound` (`316 × 66`, `r = 26`), кнопка `lock_btn` (`118 × 28`, `r = 14`).
+
+4. **IPC и документация:**
    - В [crates/rusty-compositor/src/state/wm_windows.rs](file:///home/anc/RustyOS_Main/crates/rusty-compositor/src/state/wm_windows.rs) (`handle_launch_command_ipc`) добавлена обработка `"control-center" | "quick-settings"` -> `self.toggle_quick_settings()`.
    - Обновлены разделы `§12.4` и `§12.5` в [DESIGN.md](file:///home/anc/RustyOS_Main/DESIGN.md).
 
