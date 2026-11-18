@@ -66,13 +66,13 @@ pub(crate) const fn palette_for(theme: FilesThemeMode) -> Palette {
     match theme {
         FilesThemeMode::LightGoldenGate => Palette {
             window_bg: rgba(255, 255, 255, 255),
-            window_border: rgba(196, 200, 212, 165),
-            sidebar_bg: rgba(238, 239, 241, 255),
-            sidebar_border: rgba(218, 219, 223, 255),
-            sidebar_active: rgba(218, 219, 222, 255),
-            pill_bg: rgba(249, 250, 252, 255),
+            window_border: rgba(0, 0, 0, 24),
+            sidebar_bg: rgba(236, 237, 241, 255),
+            sidebar_border: rgba(218, 220, 226, 255),
+            sidebar_active: rgba(217, 218, 221, 255),
+            pill_bg: rgba(242, 243, 247, 255),
             pill_border: rgba(212, 217, 228, 195),
-            pill_active: rgba(232, 235, 242, 255),
+            pill_active: rgba(222, 224, 230, 255),
             divider: rgba(232, 234, 240, 255),
             scrollbar: rgba(140, 148, 162, 115),
             accent: rgba(0, 122, 255, 255),
@@ -95,13 +95,13 @@ pub(crate) const fn palette_for(theme: FilesThemeMode) -> Palette {
         },
         FilesThemeMode::DarkPurpleGlass => Palette {
             window_bg: rgba(30, 30, 32, 255),
-            window_border: rgba(255, 255, 255, 34),
-            sidebar_bg: rgba(41, 41, 44, 255),
-            sidebar_border: rgba(58, 58, 62, 255),
-            sidebar_active: rgba(66, 66, 70, 255),
-            pill_bg: rgba(44, 44, 49, 255),
+            window_border: rgba(255, 255, 255, 22),
+            sidebar_bg: rgba(38, 38, 40, 255),
+            sidebar_border: rgba(54, 54, 58, 255),
+            sidebar_active: rgba(62, 62, 65, 255),
+            pill_bg: rgba(44, 44, 46, 255),
             pill_border: rgba(98, 98, 108, 105),
-            pill_active: rgba(76, 76, 86, 255),
+            pill_active: rgba(64, 64, 68, 255),
             divider: rgba(52, 52, 58, 255),
             scrollbar: rgba(175, 178, 188, 115),
             accent: rgba(10, 132, 255, 255),
@@ -210,9 +210,9 @@ pub(crate) fn render_window_pixels_with_popup(
         render_popup(&mut c, popup, None, &pal);
     }
 
-    // Clip any outer-edge corner bleed before drawing crisp CSD hairline ring.
-    c.clip_rounded_corners(win_rect, WINDOW_CORNER_RADIUS);
+    // Draw 1px hairline border first, then mask anti-aliased rounded window corners.
     c.stroke_rounded_rect(win_rect, WINDOW_CORNER_RADIUS, pal.window_border);
+    c.clip_rounded_corners(win_rect, WINDOW_CORNER_RADIUS);
 }
 
 #[cfg(test)]
@@ -281,9 +281,9 @@ mod tests {
             });
             assert!(!net_has_accent, "Locations Network icon must be neutral");
         }
-        // Traffic light close button in edge-to-edge sidebar header is red (#FF5F57 -> BGRA [87, 95, 255, 255])
-        let red_idx = ((25 * w + 25) * 4) as usize;
-        assert_eq!(&buf[red_idx..red_idx + 4], &[87, 95, 255, 255]);
+        // Traffic light close button in edge-to-edge sidebar header (#EE5A6A -> BGRA [106, 90, 238, 255])
+        let red_idx = ((20 * w + 21) * 4) as usize;
+        assert_eq!(&buf[red_idx..red_idx + 4], &[106, 90, 238, 255]);
         // Content background white (#FFFFFF)
         let bg_idx = ((120 * w + 650) * 4) as usize;
         assert_eq!(&buf[bg_idx..bg_idx + 4], &[255, 255, 255, 255]);

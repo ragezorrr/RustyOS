@@ -33,7 +33,6 @@ pub(crate) fn render_tab_bar(c: &mut Canvas<'_>, tb: &TabBarLayout, pal: &Palett
                 rgba(255, 255, 255, 255)
             };
             c.fill_rounded_rect(tab.rect, 10, active_fill);
-            c.stroke_rounded_rect(tab.rect, 10, pal.pill_border);
         }
         let max_label_w = if tab.close_rect.is_some() {
             (tab.rect.w - 28).max(16)
@@ -69,7 +68,6 @@ pub(crate) fn render_tab_bar(c: &mut Canvas<'_>, tb: &TabBarLayout, pal: &Palett
     }
 
     c.fill_rounded_rect(tb.add_rect, 12, pal.pill_bg);
-    c.stroke_rounded_rect(tb.add_rect, 12, pal.pill_border);
     #[allow(clippy::cast_precision_loss)]
     draw_plus_glyph(
         c,
@@ -390,7 +388,6 @@ pub(crate) fn render_search_scope_bar(
     );
     if let Some(clear) = sb.clear_rect {
         c.fill_rounded_rect(clear, 10, pal.pill_bg);
-        c.stroke_rounded_rect(clear, 10, pal.pill_border);
         let tw = Canvas::measure_text("Clear", 11.5, false);
         c.draw_text(
             "Clear",

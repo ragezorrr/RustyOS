@@ -24,10 +24,10 @@ pub(crate) fn render_sidebar(
         pal.sidebar_border,
     );
 
-    // Golden Gate traffic lights concentric with top-left window corner radius (strictly above clip)
-    c.fill_circle_f(25.0, 25.0, 6.0, rgba(255, 95, 87, 255));
-    c.fill_circle_f(45.0, 25.0, 6.0, rgba(254, 188, 46, 255));
-    c.fill_circle_f(65.0, 25.0, 6.0, rgba(40, 200, 64, 255));
+    // Unified 14 px traffic lights matching `rusty-settings` (step 22 px, centers y = 20.0)
+    c.fill_circle_f(21.0, 20.0, 7.0, rgba(0xEE, 0x5A, 0x6A, 255));
+    c.fill_circle_f(43.0, 20.0, 7.0, rgba(0xF4, 0xB6, 0x3F, 255));
+    c.fill_circle_f(65.0, 20.0, 7.0, rgba(0x3C, 0xC6, 0x8A, 255));
 
     let clip = layout.sidebar_clip_rect;
     c.with_clip(clip, |c| {
@@ -49,7 +49,7 @@ pub(crate) fn render_sidebar(
 
             let selected = state.active_sidebar.as_ref() == Some(&item.location);
             if selected {
-                c.fill_rounded_rect(row.rect, 7, pal.sidebar_active);
+                c.fill_rounded_rect(row.rect, 10, pal.sidebar_active);
             }
             #[allow(clippy::cast_precision_loss)]
             draw_sidebar_icon(
@@ -82,19 +82,6 @@ pub(crate) fn render_sidebar(
 
 pub(crate) fn draw_glass_pill(c: &mut Canvas<'_>, rect: Rect, radius: i32, pal: &Palette) {
     c.fill_rounded_rect(rect, radius, pal.pill_bg);
-    if rect.w > radius * 2 && rect.h > 4 {
-        let (top_alpha, bot_alpha) = if pal.is_dark { (38, 14) } else { (110, 38) };
-        let span = rect.w - 2 * radius + 6;
-        c.fill_rect(
-            Rect::new(rect.x + radius - 3, rect.y + 1, span, 1),
-            rgba(255, 255, 255, top_alpha),
-        );
-        c.fill_rect(
-            Rect::new(rect.x + radius - 3, rect.y + rect.h - 2, span, 1),
-            rgba(255, 255, 255, bot_alpha),
-        );
-    }
-    c.stroke_rounded_rect(rect, radius, pal.pill_border);
 }
 
 pub(crate) fn render_trash_banner(
@@ -115,7 +102,6 @@ pub(crate) fn render_trash_banner(
     );
     if let Some(btn) = layout.empty_trash_btn_rect {
         c.fill_rounded_rect(btn, 12, pal.pill_bg);
-        c.stroke_rounded_rect(btn, 12, pal.pill_border);
         c.draw_text(
             "Empty",
             btn.x + 16,

@@ -90,10 +90,8 @@ pub(crate) struct Palette {
     pub window_bg: [u8; 4],
     pub window_border: [u8; 4],
     pub card_bg: [u8; 4],
-    pub card_border: [u8; 4],
     pub pill_bg: [u8; 4],
     pub pill_hover: [u8; 4],
-    pub pill_border: [u8; 4],
     pub row_alt: [u8; 4],
     pub row_selected: [u8; 4],
     pub divider: [u8; 4],
@@ -114,16 +112,14 @@ pub(crate) struct Palette {
 pub(crate) const fn palette_for(theme: FilesThemeMode) -> Palette {
     match theme {
         FilesThemeMode::LightGoldenGate => Palette {
-            window_bg: [245, 246, 248, 255],
-            window_border: [204, 208, 218, 210],
+            window_bg: [245, 246, 250, 255],
+            window_border: [0, 0, 0, 24],
             card_bg: [255, 255, 255, 255],
-            card_border: [224, 227, 234, 255],
-            pill_bg: [242, 244, 248, 255],
-            pill_hover: [231, 234, 240, 255],
-            pill_border: [212, 217, 228, 255],
-            row_alt: [249, 250, 252, 255],
+            pill_bg: [255, 255, 255, 255],
+            pill_hover: [236, 237, 241, 255],
+            row_alt: [249, 250, 253, 255],
             row_selected: [224, 237, 255, 255],
-            divider: [235, 237, 242, 255],
+            divider: [238, 239, 243, 255],
             accent: [0, 122, 255, 255],
             accent_hover: [0, 108, 235, 255],
             accent_soft: [228, 240, 255, 255],
@@ -137,16 +133,14 @@ pub(crate) const fn palette_for(theme: FilesThemeMode) -> Palette {
             scrollbar: [152, 158, 170, 165],
         },
         FilesThemeMode::DarkPurpleGlass => Palette {
-            window_bg: [30, 30, 32, 255],
-            window_border: [255, 255, 255, 36],
-            card_bg: [42, 42, 46, 255],
-            card_border: [62, 62, 68, 255],
-            pill_bg: [52, 52, 58, 255],
-            pill_hover: [66, 66, 74, 255],
-            pill_border: [76, 76, 86, 255],
-            row_alt: [36, 36, 40, 255],
+            window_bg: [28, 28, 29, 255],
+            window_border: [255, 255, 255, 22],
+            card_bg: [44, 44, 45, 255],
+            pill_bg: [44, 44, 45, 255],
+            pill_hover: [58, 58, 62, 255],
+            row_alt: [38, 38, 40, 255],
             row_selected: [22, 58, 98, 255],
-            divider: [54, 54, 60, 255],
+            divider: [56, 56, 60, 255],
             accent: [10, 132, 255, 255],
             accent_hover: [36, 148, 255, 255],
             accent_soft: [28, 56, 92, 255],
@@ -474,22 +468,21 @@ fn draw_refresh_icon(canvas: &mut Canvas<'_>, rect: Rect, color: [u8; 4]) {
 
 fn draw_traffic_lights(canvas: &mut Canvas<'_>, hover: Option<&UpdaterHit>) {
     let lights = [
-        (25.0_f32, 25.0_f32, [255, 95, 87, 255], [220, 65, 58, 255]),
-        (45.0, 25.0, [254, 188, 46, 255], [218, 154, 24, 255]),
-        (65.0, 25.0, [40, 200, 64, 255], [28, 168, 48, 255]),
+        (21.0_f32, 20.0_f32, [0xEE, 0x5A, 0x6A, 0xFF]),
+        (43.0, 20.0, [0xF4, 0xB6, 0x3F, 0xFF]),
+        (65.0, 20.0, [0x3C, 0xC6, 0x8A, 0xFF]),
     ];
-    for (cx, cy, fill, rim) in lights {
-        canvas.fill_circle(cx, cy, 6.2, rim);
-        canvas.fill_circle(cx, cy, 5.4, fill);
+    for (cx, cy, fill) in lights {
+        canvas.fill_circle(cx, cy, 7.0, fill);
     }
     let show_glyphs = matches!(
         hover,
         Some(UpdaterHit::TrafficClose | UpdaterHit::TrafficMinimize | UpdaterHit::TrafficMaximize)
     );
     if show_glyphs {
-        canvas.draw_text("x", 22, 18, 10.0, true, [64, 14, 12, 220]);
-        canvas.draw_text("-", 42, 18, 11.0, true, [74, 48, 8, 220]);
-        canvas.draw_text("+", 62, 18, 10.5, true, [12, 56, 18, 220]);
+        canvas.draw_text("x", 18, 13, 10.0, true, [0, 0, 0, 150]);
+        canvas.draw_text("-", 40, 13, 11.0, true, [0, 0, 0, 150]);
+        canvas.draw_text("+", 62, 13, 10.5, true, [0, 0, 0, 150]);
     }
 }
 
@@ -501,12 +494,12 @@ fn render_header_and_hero(
     hover: Option<&UpdaterHit>,
 ) {
     let title = "Software Update";
-    let tw = Canvas::measure_text(title, 13.5, true);
+    let tw = Canvas::measure_text(title, 13.0, true);
     canvas.draw_text(
         title,
         (layout.win_w - tw) / 2,
-        18,
-        13.5,
+        12,
+        13.0,
         true,
         pal.text_primary,
     );
@@ -517,12 +510,10 @@ fn render_header_and_hero(
     } else {
         pal.pill_bg
     };
-    canvas.fill_rounded_rect(layout.refresh_btn, 15, ref_bg);
-    canvas.stroke_rounded_rect(layout.refresh_btn, 15, pal.pill_border);
+    canvas.fill_rounded_rect(layout.refresh_btn, 14, ref_bg);
     draw_refresh_icon(canvas, layout.refresh_btn, pal.text_primary);
 
-    canvas.fill_rounded_rect(layout.hero_card, 14, pal.card_bg);
-    canvas.stroke_rounded_rect(layout.hero_card, 14, pal.card_border);
+    canvas.fill_rounded_rect(layout.hero_card, 12, pal.card_bg);
 
     let badge_bg = if app.tx_phase == UpdateTxPhase::Complete && !app.tx_restart_recommended {
         pal.success
@@ -644,8 +635,7 @@ fn render_progress_and_tabs(
     hover: Option<&UpdaterHit>,
 ) {
     if let (Some(pcard), Some(ptrack)) = (layout.progress_card, layout.progress_track) {
-        canvas.fill_rounded_rect(pcard, 11, pal.card_bg);
-        canvas.stroke_rounded_rect(pcard, 11, pal.card_border);
+        canvas.fill_rounded_rect(pcard, 12, pal.card_bg);
         let status = app
             .tx_summary
             .as_deref()
@@ -690,15 +680,14 @@ fn render_progress_and_tabs(
     for &(filter, rect) in &layout.filter_tabs {
         let active = app.filter == filter && !app.show_logs;
         let hovered = hover == Some(&UpdaterHit::FilterTab(filter));
-        let (bg, border, fg) = if active {
-            (pal.accent, pal.accent, [255, 255, 255, 255])
+        let (bg, fg) = if active {
+            (pal.accent, [255, 255, 255, 255])
         } else if hovered {
-            (pal.pill_hover, pal.pill_border, pal.text_primary)
+            (pal.pill_hover, pal.text_primary)
         } else {
-            (pal.pill_bg, pal.pill_border, pal.text_secondary)
+            (pal.pill_bg, pal.text_secondary)
         };
-        canvas.fill_rounded_rect(rect, 9, bg);
-        canvas.stroke_rounded_rect(rect, 9, border);
+        canvas.fill_rounded_rect(rect, 10, bg);
         let label = format!("{} ({})", filter.label(), app.filter_count(filter));
         canvas.draw_text_centered(rect, &label, 11.5, active, fg);
     }
@@ -716,8 +705,7 @@ fn render_progress_and_tabs(
     } else {
         pal.text_secondary
     };
-    canvas.fill_rounded_rect(layout.logs_toggle_btn, 9, log_bg);
-    canvas.stroke_rounded_rect(layout.logs_toggle_btn, 9, pal.pill_border);
+    canvas.fill_rounded_rect(layout.logs_toggle_btn, 10, log_bg);
     let log_label = if log_active { "Packages" } else { "View Log" };
     canvas.draw_text_centered(
         layout.logs_toggle_btn,
@@ -802,7 +790,6 @@ fn render_list_and_footer(
     hover: Option<&UpdaterHit>,
 ) {
     canvas.fill_rounded_rect(layout.list_card, 12, pal.card_bg);
-    canvas.stroke_rounded_rect(layout.list_card, 12, pal.card_border);
 
     let vp = layout.list_viewport;
     canvas.with_clip(vp, |c| {
@@ -890,8 +877,7 @@ fn render_list_and_footer(
         } else {
             pal.pill_bg
         };
-        canvas.fill_rounded_rect(rb, 8, rb_bg);
-        canvas.stroke_rounded_rect(rb, 8, pal.pill_border);
+        canvas.fill_rounded_rect(rb, 10, rb_bg);
         canvas.draw_text_centered(rb, "Rebuild RustyOS pkg", 11.0, true, pal.text_primary);
     }
 }

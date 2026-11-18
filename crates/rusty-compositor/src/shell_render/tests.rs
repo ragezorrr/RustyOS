@@ -904,7 +904,7 @@ fn macos_dock_divider_gap_tooltip_and_radii_constants() {
     assert_eq!(DOCK_RADIUS, 18);
     assert_eq!(DOCK_ICON_SIZE, 50);
     assert_eq!(DOCK_ITEM_GAP, 6);
-    assert_eq!(WINDOW_RADIUS, 20);
+    assert_eq!(WINDOW_RADIUS, 14);
     let last_app_slot_opt = dock_slot_rect(1280, 800, 2, 7);
     let downloads_slot_opt = dock_slot_rect(1280, 800, 2, 8);
     assert!(last_app_slot_opt.is_some());

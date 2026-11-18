@@ -1826,6 +1826,23 @@ hardware/software context и низкие накладные расходы.
 - **Tests:** Все 256 unit-тестов workspace (`4` `rusty-animation`, `171` `rusty-compositor`, `15` `rusty-files`, `3` `rusty-ipc`, `43` `rusty-services`, `4` `rusty-settings`, `5` `rusty-shell`, `4` `rusty-updater`, `7` `rusty-wm`).
 - **Risks:** Нет.
 
+### RUSTYOS-105 — Унификация `rusty-files`, `rusty-updater` и радиуса окон/теней композитора под стиль `rusty-settings`
+
+- **Status:** Done
+- **Goal:** Привести все системные CSD-окна (`rusty-files`, `rusty-updater`, `rusty-settings`) и радиус окон/теней композитора (`WINDOW_RADIUS`) к единому визуальному стандарту `rusty-settings`.
+- **Dependencies:** `RUSTYOS-103`, `RUSTYOS-104`.
+- **Scope:**
+  - `crates/rusty-compositor/src/shell_render/tokens.rs` и `tests.rs`: перевод `WINDOW_RADIUS` с `20` на `14` для точного совпадения теней `WindowShadowPipeline` и углов CSD-окон;
+  - `apps/rusty-settings/src/render.rs`: отрисовка `1 px` контура окна строго до `apply_window_corner_mask` и удаление лишнего квадратного `stroke_rounded_rect` вокруг кружков traffic lights;
+  - `apps/rusty-updater/src/{layout,render}.rs`: `WINDOW_CORNER_RADIUS = 14`, `TITLEBAR_HEIGHT = 42`, `14 px` traffic lights `(14/36/58, 13)`, палитра `#F5F6FA`/`#1C1C1D` + карточки `#FFFFFF`/`#2C2C2D` (`r = 12`) и пилюли без серых рамок;
+  - `apps/rusty-files/src/{layout.rs,render/{mod.rs,sidebar.rs,chrome.rs}}`: `WINDOW_CORNER_RADIUS = 14`, `14 px` traffic lights `(14/36/58, 13)`, палитра сайдбара `#ECEDF1`/`#262628`, активная строка `#D9DADD`/`#3E3E41` (`r = 10`), бесшовные капсулы тулбара/вкладок без рамок и обводка окна до маски;
+  - `DESIGN.md` (`§12.3`), `docs/adr/0057-unified-csd-window-style.md`, `DECISIONS.md` (`D-069`).
+- **Acceptance Criteria:**
+  - Живой `--winit` прогон в `Light` и `Dark` режимах с открытыми `rusty-files`, `rusty-updater --dry-run` и `rusty-settings` подтверждён визуально без EGL/GLES-ошибок;
+  - `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings` и все 256 тестов workspace проходят без ошибок.
+- **Tests:** Все 256 unit-тестов workspace (`4` `rusty-animation`, `171` `rusty-compositor`, `15` `rusty-files`, `3` `rusty-ipc`, `43` `rusty-services`, `4` `rusty-settings`, `5` `rusty-shell`, `4` `rusty-updater`, `7` `rusty-wm`).
+- **Risks:** Нет.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

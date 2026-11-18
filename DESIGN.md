@@ -425,30 +425,23 @@ palettes (section 5.1); geometry, Liquid Glass clarity, and interactions target 
 
 ### 12.3 Windows, Finder (`rusty-files`), menus, Spotlight, Notifications, and OSD
 
-- Window chrome (`SSD`): `WINDOW_RADIUS = 20` rounded corners at both top (`TITLEBAR_HEIGHT`) and
+- Window chrome (`SSD` & unified `CSD`): `WINDOW_RADIUS = 14` rounded corners at both top (`TITLEBAR_HEIGHT`) and
   bottom, theme-adaptive Light (`[245, 246, 250, 248]`) / Dark (`[48, 48, 54, 250]`) titlebars and
   titles (`ssd_frame_colors`), top 1 px specular rim, and a single-pass seamless analytical GLES SDF Gaussian drop shadow
   (`WindowShadowPipeline`: continuous contact + Y-shifted ambient glow with 4x4 ordered dithering
   replacing multi-offset strips and discrete `Solid` bands; CPU 9-slice fallback via continuous
-  corner + stretched edge buffers in `UiShapeCache`) (`generate_window_shadow_elements`, `RUSTYOS-075`).
-  System Settings runs as an independent movable, minimizable, maximizable, and resizable Wayland CSD window
-  (`apps/rusty-settings`, `882×600`, `min_size = 640×500`, `WINDOW_CORNER_RADIUS = 14`) with a flat
-  cool-grey sidebar (`#ECEDF1` Light / `#262628` Dark, zero Liquid Glass blur), borderless cards
-  (`#FFFFFF` / `#2C2C2D`) on `#F5F6FA` / `#1C1C1D`, `Light`/`Dark`/`Auto` preview tiles, and vertical
-  scrolling without dimming `TopBar` or `Dock`.
-- Titlebar traffic lights: `12 px` gel-lit buttons (`TrafficLightKind::{Close, Minimize, Maximize}`)
+  corner + stretched edge buffers in `UiShapeCache`) (`generate_window_shadow_elements`, `RUSTYOS-075`, `RUSTYOS-105`).
+  System apps (`apps/rusty-settings`, `apps/rusty-files`, `apps/rusty-updater`) share unified `WINDOW_CORNER_RADIUS = 14`,
+  `1 px` outer border clipped by the corner mask (`[0, 0, 0, 24]` Light / `[255, 255, 255, 22]` Dark),
+  and unified `14 px` traffic lights (`#EE5A6A` / `#F4B63F` / `#3CC68A`, centers `(21, 20)`, `(43, 20)`, `(65, 20)`):
+  - `rusty-settings` (`882×600`, `min_size = 640×500`): flat cool-grey sidebar (`#ECEDF1` Light / `#262628` Dark, `r = 10` active pill `#D9DADD`/`#3E3E41`), borderless cards (`#FFFFFF` / `#2C2C2D`, `r = 12`) on `#F5F6FA` / `#1C1C1D`, `Light`/`Dark`/`Auto` preview tiles, and vertical scrolling without dimming `TopBar` or `Dock`.
+- Titlebar traffic lights (`SSD`): `12 px` gel-lit buttons (`TrafficLightKind::{Close, Minimize, Maximize}`)
   revealing `×`, `−`, `+` hover glyphs (`hovered_traffic_light_window`).
-- System apps & Golden Gate parity (`27-Golden-Gate-Settings-General.png`, `27-Golden-Gate-Finder-Home-Folder.png`):
-  - `rusty-files` (`27-Golden-Gate-Finder-Home-Folder.png`, `Applications.png`,
-  `Finder-Network.png`): Sky Blue folder icons in BOTH Light and Dark appearances (never purple/lavender),
-  full-bleed edge-to-edge sidebar (`x=0, y=0..height`, matching the left window corners) containing the
-  traffic lights and a subtle `1 px` right divider (distinct from the floating inset sidebar card used in
-  `System Settings` / `Notes`), separated glass toolbar pills (`< | >`, view switcher, actions, search) above
-  the tab bar, and clean status bar without debug theme-toggle buttons.
-  - `rusty-updater` (*Software Update*, `RUSTYOS-077`): Golden Gate `Light & Dark` CSD window (`740x560`,
-  `WINDOW_CORNER_RADIUS = 20`), centered header titlebar with traffic lights, hero summary card with
-  `#007AFF`/`#0A84FF` Software Update squircle, filter pills (`All`, `RustyOS`, `Restart`), live progress bar,
-  expandable `pacman` log view, and Polkit-backed upgrade actions without breaking Light/Dark tokens.
+- System apps & visual parity:
+  - `rusty-files`: Sky Blue folder icons in BOTH Light and Dark appearances (never purple/lavender),
+    full-bleed edge-to-edge sidebar (`#ECEDF1` Light / `#262628` Dark, `r = 10` active row `#D9DADD`/`#3E3E41`) containing the unified `14 px` traffic lights and a subtle `1 px` right divider, borderless toolbar/tab capsules (`< | >`, view switcher, sort, actions, search), and clean status bar without debug theme-toggle buttons.
+  - `rusty-updater` (*Software Update*, `RUSTYOS-077`, `RUSTYOS-105`): `Light & Dark` CSD window (`740x560`,
+    `WINDOW_CORNER_RADIUS = 14`, `TITLEBAR_HEIGHT = 42`, background `#F5F6FA`/`#1C1C1D`), centered header titlebar with unified `14 px` traffic lights, borderless hero/progress/list cards (`#FFFFFF`/`#2C2C2D`, `r = 12`) with `#007AFF`/`#0A84FF` Software Update squircle, borderless filter pills (`All`, `RustyOS`, `Restart`, `View Log`), live progress bar, expandable `pacman` log view, and Polkit-backed upgrade actions.
 - Menu bar dropdowns and client popups (`MENU_POPOVER_RADIUS = 16–20`, ADR-0043): clear `Popover`
   Liquid Glass with leading `UiGlyphKind` icons, hairline dividers, right-aligned shortcut column
   (`⌘`/`⌥`/`⌃`/`⇧`), submenu chevrons (`>`), and a rounded accent pill highlight on hover (`HOVER_PILL_RADIUS = 8`,

@@ -18,8 +18,8 @@ use crate::state::{
     SIDEBAR_ROW_HEIGHT, SIDEBAR_SECTION_HEIGHT, ScrollTargetArea, SearchScope,
 };
 
-/// Window corner radius matching macOS 27 Golden Gate (`20 px`).
-pub(crate) const WINDOW_CORNER_RADIUS: i32 = 20;
+/// Unified window corner radius (`14 px`, matching `rusty-settings` and compositor shadows).
+pub(crate) const WINDOW_CORNER_RADIUS: i32 = 14;
 /// Edge-to-edge Finder sidebar width (`196 px`).
 pub(crate) const SIDEBAR_WIDTH: i32 = 196;
 /// Resize border hotspot thickness around CSD window edges.
@@ -332,9 +332,9 @@ pub(crate) fn compute_layout(state: &FilesAppState, surface_w: u32, surface_h: u
         SIDEBAR_WIDTH - 1,
         (sidebar_rect.bottom() - 6 - 50).max(40),
     );
-    let traffic_close = Rect::new(18, 18, 14, 14);
-    let traffic_min = Rect::new(38, 18, 14, 14);
-    let traffic_max = Rect::new(58, 18, 14, 14);
+    let traffic_close = Rect::new(14, 13, 14, 14);
+    let traffic_min = Rect::new(36, 13, 14, 14);
+    let traffic_max = Rect::new(58, 13, 14, 14);
 
     let sidebar_rows = layout_sidebar_rows(state, sidebar_rect, sidebar_clip_rect);
     let toolbar_x = sidebar_rect.right() + 12;

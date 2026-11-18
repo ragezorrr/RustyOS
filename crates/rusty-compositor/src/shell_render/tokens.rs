@@ -203,7 +203,7 @@ pub const DOCK_PINNED_COUNT: usize = 6;
 pub const DOCK_UTILITY_COUNT: usize = 2;
 
 /// SSD window frame & glass popover corner radius in logical pixels (`DESIGN.md` §12.3).
-pub const WINDOW_RADIUS: i32 = 20;
+pub const WINDOW_RADIUS: i32 = 14;
 
 /// Liquid Glass context/dropdown menu corner radius in logical pixels (`DESIGN.md` §12.3).
 pub(super) const MENU_POPOVER_RADIUS: i32 = 16;

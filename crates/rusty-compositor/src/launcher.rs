@@ -694,14 +694,8 @@ fn resolve_program_path_with(
     if candidate.is_absolute() || trimmed.contains('/') {
         return candidate.is_file().then(|| candidate.to_path_buf());
     }
-    if let Some(paths) = path_env {
-        for dir in env::split_paths(paths) {
-            let full = dir.join(candidate);
-            if full.is_file() {
-                return Some(full);
-            }
-        }
-    }
+    // Prefer sibling binaries next to the running compositor (`target/debug`, `/usr/bin`)
+    // before falling back to `PATH`, so dev `--winit` runs use matching freshly built apps.
     if let Some(dir) = exe_dir {
         let sibling = dir.join(candidate);
         if sibling.is_file() {
@@ -713,6 +707,14 @@ fn resolve_program_path_with(
             let parent_sibling = target_dir.join(candidate);
             if parent_sibling.is_file() {
                 return Some(parent_sibling);
+            }
+        }
+    }
+    if let Some(paths) = path_env {
+        for dir in env::split_paths(paths) {
+            let full = dir.join(candidate);
+            if full.is_file() {
+                return Some(full);
             }
         }
     }
@@ -1136,12 +1138,20 @@ Exec=firefox --private-window
         let base = std::env::temp_dir().join(format!("rustyos-bin-resolve-{}", std::process::id()));
         let _ = fs::remove_dir_all(&base);
         let deps = base.join("deps");
+        let path_dir = base.join("path_bin");
         fs::create_dir_all(&deps)?;
+        fs::create_dir_all(&path_dir)?;
         let bin = base.join("rusty-files");
+        let stale_path_bin = path_dir.join("rusty-files");
         fs::write(&bin, b"#!/bin/sh\n")?;
+        fs::write(&stale_path_bin, b"#!/bin/sh\n")?;
 
         let resolved_direct = resolve_program_path_with("rusty-files", None, Some(&base));
         assert_eq!(resolved_direct.as_deref(), Some(bin.as_path()));
+
+        let resolved_over_path =
+            resolve_program_path_with("rusty-files", Some(path_dir.as_os_str()), Some(&base));
+        assert_eq!(resolved_over_path.as_deref(), Some(bin.as_path()));
 
         let resolved_from_deps = resolve_program_path_with("rusty-files", None, Some(&deps));
         assert_eq!(resolved_from_deps.as_deref(), Some(bin.as_path()));

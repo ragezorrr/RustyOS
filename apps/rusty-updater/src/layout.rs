@@ -4,8 +4,8 @@ use rusty_services::updates::UpdateTxPhase;
 
 use crate::state::{UpdaterAppState, UpdaterFilter};
 
-pub(crate) const WINDOW_CORNER_RADIUS: i32 = 20;
-const TITLEBAR_HEIGHT: i32 = 52;
+pub(crate) const WINDOW_CORNER_RADIUS: i32 = 14;
+const TITLEBAR_HEIGHT: i32 = 42;
 const RESIZE_BORDER_PX: i32 = 5;
 
 /// Axis-aligned integer rectangle in surface-local coordinates.
@@ -104,10 +104,10 @@ pub(crate) fn compute_layout(app: &UpdaterAppState, width: u32, height: u32) -> 
     let pad = 20;
 
     let header_rect = Rect::new(0, 0, win_w, TITLEBAR_HEIGHT);
-    let traffic_close = Rect::new(18, 18, 14, 14);
-    let traffic_min = Rect::new(38, 18, 14, 14);
-    let traffic_max = Rect::new(58, 18, 14, 14);
-    let refresh_btn = Rect::new(win_w - pad - 30, 11, 30, 30);
+    let traffic_close = Rect::new(14, 13, 14, 14);
+    let traffic_min = Rect::new(36, 13, 14, 14);
+    let traffic_max = Rect::new(58, 13, 14, 14);
+    let refresh_btn = Rect::new(win_w - pad - 28, 7, 28, 28);
 
     let hero_card = Rect::new(pad, TITLEBAR_HEIGHT + 6, win_w - pad * 2, 92);
     let emblem_rect = Rect::new(hero_card.x + 18, hero_card.y + 22, 48, 48);

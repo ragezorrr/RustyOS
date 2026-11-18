@@ -523,8 +523,7 @@ pub(crate) fn render_window_pixels(
         c.fill_rounded_rect(thumb, 2, thumb_col);
     }
 
-    // 4. Anti-aliased outer rounded corners (radius = 14px) and 1px hairline border.
-    c.apply_window_corner_mask(WINDOW_CORNER_RADIUS);
+    // 4. 1px hairline border clipped cleanly by anti-aliased outer rounded corners (radius = 14px).
     c.stroke_rounded_rect(
         Rect::new(0, 0, layout.win_w, layout.win_h),
         WINDOW_CORNER_RADIUS as f32,
@@ -535,6 +534,7 @@ pub(crate) fn render_window_pixels(
             [0, 0, 0, 24]
         },
     );
+    c.apply_window_corner_mask(WINDOW_CORNER_RADIUS);
 }
 
 fn render_sidebar(
@@ -559,7 +559,6 @@ fn render_sidebar(
         let cx = rect.x as f32 + 7.0;
         let cy = rect.y as f32 + 7.0;
         c.fill_circle(cx, cy, 7.0, col);
-        c.stroke_rounded_rect(rect, 7.0, 0.8, [0, 0, 0, 26]);
         if tl_hovered {
             draw_traffic_glyph(c, cx, cy, glyph);
         }
