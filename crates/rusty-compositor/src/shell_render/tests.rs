@@ -70,6 +70,8 @@ fn generate_shell_render_elements_produces_non_empty_layout() {
         network_label: "Wi-Fi Connected",
         net_connected: true,
         wifi_enabled: true,
+        wifi_connected: true,
+        wifi_ssid: Some("Lab5G"),
         wifi_signal_percent: Some(80),
         bt_available: true,
         bt_powered: true,
@@ -2092,5 +2094,129 @@ fn top_bar_updates_indicator_and_popover_hit_testing() {
     assert_eq!(
         hit_test_updates_popover(screen, &state, 20.0, 20.0),
         UpdatesPopoverHit::OutsidePopover
+    );
+}
+
+#[test]
+fn wifi_ethernet_subtitle_isolation_works() {
+    // Ethernet label must never leak under Control Center's Wi-Fi capsule
+    assert_eq!(
+        quick_settings::concise_wifi_subtitle("Проводное соединение 1", true, false),
+        "Off"
+    );
+    assert_eq!(
+        quick_settings::concise_wifi_subtitle("Ethernet Connected", true, true),
+        "On"
+    );
+    assert_eq!(
+        quick_settings::concise_wifi_subtitle("Wi-Fi: Studio5G", true, true),
+        "Studio5G"
+    );
+    assert_eq!(
+        quick_settings::concise_wifi_subtitle_for_state(
+            "Проводное соединение 1",
+            true,
+            Some("Binotel"),
+            true,
+        ),
+        "Binotel"
+    );
+
+    let right = compute_top_bar_right_layout(1280, true, 0, "Wed Apr 1  9:41 AM");
+    assert!(check_top_bar_wifi_click_for_options(
+        1280,
+        "Wed Apr 1  9:41 AM",
+        TopBarLayoutOptions {
+            has_battery: true,
+            ..TopBarLayoutOptions::default()
+        },
+        f64::from(right.wifi_x + 10),
+        12.0,
+    ));
+}
+
+#[test]
+fn wifi_popover_layout_and_hit_testing_work() {
+    let screen = Size::from((1280, 800));
+    let right = compute_top_bar_right_layout(1280, true, 0, "Wed Apr 1  9:41 AM");
+
+    let net = rusty_services::NetworkStatus {
+        connected: true,
+        wired_connected: true,
+        wired_interface: Some("enp3s0".to_owned()),
+        wired_label: Some("Проводное соединение 1".to_owned()),
+        wifi_connected: false,
+        wifi_enabled: true,
+        interface: Some("enp3s0".to_owned()),
+        wifi_ssid: None,
+        wifi_signal_percent: None,
+        wifi_networks: vec![
+            rusty_services::WifiAccessPoint {
+                ssid: "Home5G".to_owned(),
+                signal_percent: 88,
+                secure: true,
+                connected: false,
+                known: true,
+            },
+            rusty_services::WifiAccessPoint {
+                ssid: "GuestWiFi".to_owned(),
+                signal_percent: 45,
+                secure: false,
+                connected: false,
+                known: false,
+            },
+        ],
+        status_label: "Проводное соединение 1".to_owned(),
+    };
+    let state = WifiPopoverRenderState {
+        glass_opacity: 0.78,
+        reduce_transparency: false,
+        network: &net,
+        anchor_right_x: right.wifi_x + 20,
+        hovered_hit: None,
+    };
+    let layout = compute_wifi_popover_layout(screen, &state);
+    assert!(layout.wired_rect.is_some());
+    assert_eq!(layout.known_rows.len(), 1);
+    assert_eq!(layout.other_rows.len(), 1);
+    assert_eq!(
+        hit_test_wifi_popover(
+            screen,
+            &state,
+            f64::from(layout.switch_rect.loc.x + 10),
+            f64::from(layout.switch_rect.loc.y + 10),
+        ),
+        WifiPopoverHit::ToggleWifi
+    );
+    assert_eq!(
+        hit_test_wifi_popover(
+            screen,
+            &state,
+            f64::from(layout.known_rows[0].rect.loc.x + 40),
+            f64::from(layout.known_rows[0].rect.loc.y + 12),
+        ),
+        WifiPopoverHit::SelectNetwork(0)
+    );
+    assert_eq!(
+        hit_test_wifi_popover(
+            screen,
+            &state,
+            f64::from(layout.other_rows[0].rect.loc.x + 40),
+            f64::from(layout.other_rows[0].rect.loc.y + 12),
+        ),
+        WifiPopoverHit::SelectNetwork(1)
+    );
+    assert_eq!(
+        hit_test_wifi_popover(
+            screen,
+            &state,
+            f64::from(layout.settings_rect.loc.x + 40),
+            f64::from(layout.settings_rect.loc.y + 12),
+        ),
+        WifiPopoverHit::OpenWifiSettings
+    );
+    assert_eq!(
+        hit_test_wifi_popover(screen, &state, 20.0, 20.0),
+        WifiPopoverHit::OutsidePopover
     );
 }

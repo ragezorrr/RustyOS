@@ -71,13 +71,14 @@ impl Default for SystemTelemetry {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum TelemetryCmd {
     RefreshNow,
     SetVolume(u8),
     ToggleMute,
     SetBluetoothPowered(bool),
     SetWifiEnabled(bool),
+    ConnectWifi(String),
     SetBrightness(u8),
     MediaControl(MediaAction),
     Session(SessionAction),
@@ -289,9 +290,20 @@ impl SystemMetricsHandle {
                     "Wi-Fi: On".clone_into(&mut guard.network.status_label);
                 }
             } else {
+                guard.network.wifi_connected = false;
                 guard.network.wifi_ssid = None;
                 guard.network.wifi_signal_percent = None;
-                if guard
+                for ap in &mut guard.network.wifi_networks {
+                    ap.connected = false;
+                }
+                if guard.network.wired_connected {
+                    guard.network.connected = true;
+                    guard.network.status_label = guard
+                        .network
+                        .wired_label
+                        .clone()
+                        .unwrap_or_else(|| "Ethernet Connected".to_owned());
+                } else if guard
                     .network
                     .interface
                     .as_deref()
@@ -307,6 +319,35 @@ impl SystemMetricsHandle {
         };
         self.push_cmd(TelemetryCmd::SetWifiEnabled(next_enabled));
         next_enabled
+    }
+
+    /// Connects to the given Wi-Fi `ssid` optimistically and dispatches `nmcli` asynchronously (`RUSTYOS-108`).
+    pub fn connect_wifi(&self, ssid: &str) {
+        let trimmed = ssid.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        if let Ok(mut guard) = self.shared.latest.lock() {
+            guard.network.connected = true;
+            guard.network.wifi_enabled = true;
+            guard.network.wifi_connected = true;
+            guard.network.wifi_ssid = Some(trimmed.to_owned());
+            let mut matched_sig = None;
+            for ap in &mut guard.network.wifi_networks {
+                ap.connected = ap.ssid == trimmed;
+                if ap.connected {
+                    ap.known = true;
+                    matched_sig = Some(ap.signal_percent);
+                }
+            }
+            if let Some(sig) = matched_sig {
+                guard.network.wifi_signal_percent = Some(sig);
+            }
+            if !guard.network.wired_connected {
+                guard.network.status_label = format!("Wi-Fi: {trimmed}");
+            }
+        }
+        self.push_cmd(TelemetryCmd::ConnectWifi(trimmed.to_owned()));
     }
 
     /// Toggles Bluetooth adapter power optimistically and applies via BlueZ asynchronously (`RUSTYOS-027`).
@@ -406,6 +447,9 @@ fn telemetry_worker_loop(shared: &SharedState) {
                 TelemetryCmd::SetWifiEnabled(enabled) => {
                     let _ = services.network.set_wifi_enabled(enabled);
                 }
+                TelemetryCmd::ConnectWifi(ssid) => {
+                    let _ = services.network.connect_wifi(&ssid);
+                }
                 TelemetryCmd::SetBrightness(pct) => {
                     let _ = services.brightness.set_percent(pct);
                 }
@@ -479,10 +523,15 @@ mod tests {
         let wifi_handle = SystemMetricsHandle::with_initial(SystemTelemetry {
             network: NetworkStatus {
                 connected: true,
+                wired_connected: false,
+                wired_interface: None,
+                wired_label: None,
+                wifi_connected: true,
                 wifi_enabled: true,
                 interface: Some("wlan0".to_owned()),
                 wifi_ssid: Some("LabNet".to_owned()),
                 wifi_signal_percent: Some(74),
+                wifi_networks: Vec::new(),
                 status_label: "Wi-Fi: LabNet".to_owned(),
             },
             media: MediaStatus {

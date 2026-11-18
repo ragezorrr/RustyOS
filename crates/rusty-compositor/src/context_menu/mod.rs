@@ -120,6 +120,7 @@ impl RustyCompositorState {
         }
         self.close_dock_stack();
         self.close_updates_popover();
+        self.close_wifi_popover();
         let tiles = self.build_dock_tiles();
         let bounces = self.dock_bounce_offsets();
         let view = self.dock_view_state(&tiles, &[], &bounces, self.dock_hover_slot);

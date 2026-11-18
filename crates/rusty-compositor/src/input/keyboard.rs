@@ -183,6 +183,10 @@ impl RustyCompositorState {
                 self.close_updates_popover();
                 info!("Closed Software Updates popover");
             }
+            KeyIntercept::WifiPopoverClose => {
+                self.close_wifi_popover();
+                info!("Closed Wi-Fi popover");
+            }
             KeyIntercept::TopBarMenuClose => {
                 self.close_top_bar_menu();
                 info!("Closed TopBar menu popover");
@@ -548,6 +552,9 @@ pub(super) fn classify_keyboard_input(
     }
     if state.updates_popover_open && sym.raw() == Keysym::Escape.raw() {
         return FilterResult::Intercept(KeyIntercept::UpdatesPopoverClose);
+    }
+    if state.wifi_popover_open && sym.raw() == Keysym::Escape.raw() {
+        return FilterResult::Intercept(KeyIntercept::WifiPopoverClose);
     }
     if state.settings_active
         && let Some(intercept) = classify_settings_key(modifiers, sym)

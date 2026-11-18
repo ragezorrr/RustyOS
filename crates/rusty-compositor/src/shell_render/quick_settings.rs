@@ -24,10 +24,14 @@ pub struct QuickSettingsRenderState<'a> {
     pub reduced_motion: bool,
     /// Human-readable network label (SSID / Ethernet / Disconnected).
     pub network_label: &'a str,
-    /// Whether network interface is up.
+    /// Whether any network interface is up.
     pub net_connected: bool,
     /// Live Wi-Fi radio enabled flag (`RUSTYOS-053`).
     pub wifi_enabled: bool,
+    /// True when Wi-Fi is actively connected to an SSID (`RUSTYOS-108`).
+    pub wifi_connected: bool,
+    /// Connected Wi-Fi SSID if active (`RUSTYOS-108`).
+    pub wifi_ssid: Option<&'a str>,
     /// Live Wi-Fi signal strength percentage (`0..=100`, `RUSTYOS-052`).
     pub wifi_signal_percent: Option<u8>,
     /// Whether a Bluetooth adapter is available (`RUSTYOS-027`).
@@ -401,7 +405,12 @@ pub(super) fn render_quick_settings_popover(
 ) {
     let layout = quick_settings_layout(width, height, 0);
     let solid_tiles = [
-        (layout.wifi_pill, qs.net_connected || qs.wifi_enabled),
+        (
+            layout.wifi_pill,
+            qs.wifi_enabled
+                || qs.wifi_connected
+                || (qs.net_connected && is_wifi_status_label(qs.network_label)),
+        ),
         (layout.bt_pill, qs.bt_available && qs.bt_powered),
         (layout.now_playing_card, false),
         (layout.power_pill, false),
@@ -449,19 +458,53 @@ pub(super) fn render_quick_settings_popover(
     );
 }
 
+pub(super) fn is_wifi_status_label(label: &str) -> bool {
+    let t = label.trim();
+    t.starts_with("Wi-Fi:") || t.eq_ignore_ascii_case("Wi-Fi Connected")
+}
+
+pub(super) fn concise_wifi_subtitle_for_state(
+    label: &str,
+    wifi_connected: bool,
+    wifi_ssid: Option<&str>,
+    wifi_enabled: bool,
+) -> String {
+    if wifi_connected {
+        if let Some(ssid) = wifi_ssid.map(str::trim).filter(|s| !s.is_empty()) {
+            return truncate_ascii(ssid, 11);
+        }
+        return "Connected".to_owned();
+    }
+    concise_wifi_subtitle(label, false, wifi_enabled)
+}
+
 pub(super) fn concise_wifi_subtitle(label: &str, connected: bool, wifi_enabled: bool) -> String {
-    let cleaned = label
-        .trim()
-        .strip_prefix("Wi-Fi:")
-        .map_or_else(|| label.trim(), str::trim);
-    if !wifi_enabled && !connected {
-        "Off".to_owned()
-    } else if !connected {
-        "Not Connected".to_owned()
-    } else if cleaned.eq_ignore_ascii_case("Wi-Fi Connected") || cleaned.is_empty() {
-        "Connected".to_owned()
+    let trimmed = label.trim();
+    if let Some(rest) = trimmed.strip_prefix("Wi-Fi:") {
+        let ssid = rest.trim();
+        if !wifi_enabled && !connected {
+            "Off".to_owned()
+        } else if ssid.is_empty() || ssid.eq_ignore_ascii_case("On") {
+            if wifi_enabled {
+                "On".to_owned()
+            } else {
+                "Off".to_owned()
+            }
+        } else {
+            truncate_ascii(ssid, 11)
+        }
+    } else if trimmed.eq_ignore_ascii_case("Wi-Fi Connected") {
+        if connected {
+            "Connected".to_owned()
+        } else if wifi_enabled {
+            "On".to_owned()
+        } else {
+            "Off".to_owned()
+        }
+    } else if wifi_enabled {
+        "On".to_owned()
     } else {
-        truncate_ascii(cleaned, 11)
+        "Off".to_owned()
     }
 }
 
@@ -615,7 +658,12 @@ pub(super) fn render_quick_settings_text(
     let _ = qs.frame_p50_us;
     let _ = qs.window_count;
 
-    let wifi_sub = concise_wifi_subtitle(qs.network_label, qs.net_connected, qs.wifi_enabled);
+    let wifi_sub = concise_wifi_subtitle_for_state(
+        qs.network_label,
+        qs.wifi_connected || (qs.net_connected && is_wifi_status_label(qs.network_label)),
+        qs.wifi_ssid,
+        qs.wifi_enabled,
+    );
     render_control_center_capsule_text(
         text_cache,
         renderer,
@@ -1081,7 +1129,9 @@ pub(super) fn render_quick_settings_composite(
     let inactive_glyph = pal.popover_icon;
     let blue_active = pal.accent_rgba;
 
-    let wifi_active = qs.net_connected || qs.wifi_enabled;
+    let wifi_connected =
+        qs.wifi_connected || (qs.net_connected && is_wifi_status_label(qs.network_label));
+    let wifi_active = qs.wifi_enabled || wifi_connected;
     push_cc_capsule_icon(
         out,
         shape_cache,
@@ -1089,7 +1139,7 @@ pub(super) fn render_quick_settings_composite(
         layout.wifi_pill,
         wifi_active,
         crate::surfaces::UiGlyphKind::Wifi {
-            connected: qs.net_connected,
+            connected: wifi_connected,
             signal_percent: qs.wifi_signal_percent,
         },
         blue_active,

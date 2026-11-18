@@ -282,6 +282,22 @@ pub fn check_top_bar_tray_click_for_telemetry(
     )
 }
 
+/// Option-aware hit-test for the right `TopBar` Wi-Fi / Ethernet indicator (`RUSTYOS-108`).
+#[must_use]
+pub fn check_top_bar_wifi_click_for_options(
+    screen_width: i32,
+    clock_text: &str,
+    opts: TopBarLayoutOptions,
+    x: f64,
+    y: f64,
+) -> bool {
+    if y < 0.0 || y > f64::from(TOP_BAR_HEIGHT) {
+        return false;
+    }
+    let right = compute_top_bar_right_layout_with_options(screen_width, clock_text, opts);
+    x >= f64::from(right.wifi_x - 3) && x < f64::from(right.wifi_x + 20 + 3)
+}
+
 /// Option-aware hit-test for the right `TopBar` Software Updates indicator (`RUSTYOS-076`).
 #[must_use]
 pub fn check_top_bar_updates_click_for_options(
@@ -439,17 +455,34 @@ pub(crate) fn push_top_bar_right_glyphs(
     {
         out.push(CompositorRenderElement::Memory(el));
     }
-    if let Some(el) = shape_cache.ui_glyph_element(
-        renderer,
-        UiGlyphKind::Wifi {
-            connected: t.net_connected,
-            signal_percent: t.wifi_signal_percent,
-        },
-        20,
-        white,
-        Point::from((right.wifi_x, TOP_BAR_ITEM_Y)),
-    ) {
-        out.push(CompositorRenderElement::Memory(el));
+    if t.wired_connected && !t.wifi_connected {
+        if let Some(el) = shape_cache.ui_glyph_element(
+            renderer,
+            UiGlyphKind::Ethernet,
+            20,
+            white,
+            Point::from((right.wifi_x, TOP_BAR_ITEM_Y)),
+        ) {
+            out.push(CompositorRenderElement::Memory(el));
+        }
+    } else {
+        let wifi_tint = if t.wifi_connected || t.wifi_enabled {
+            white
+        } else {
+            [255, 255, 255, 148]
+        };
+        if let Some(el) = shape_cache.ui_glyph_element(
+            renderer,
+            UiGlyphKind::Wifi {
+                connected: t.wifi_connected,
+                signal_percent: t.wifi_signal_percent,
+            },
+            20,
+            wifi_tint,
+            Point::from((right.wifi_x, TOP_BAR_ITEM_Y)),
+        ) {
+            out.push(CompositorRenderElement::Memory(el));
+        }
     }
     if let Some(el) = shape_cache.ui_glyph_element(
         renderer,

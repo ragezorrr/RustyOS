@@ -786,6 +786,18 @@
                            12 px шорткаты в нотации macOS
                            и xdg_popup r=13 в rusty-files
                            без правок Dock/CC (ADR-0058)
+
+   D-072                   Фаза 8/10 Разделение Ethernet и accepted
+                           Wi-Fi, TopBar, WifiPopover и
+                           страницы Settings > Wi-Fi /
+                           Network (RUSTYOS-108):
+                           раздельные поля Ethernet и Wi-Fi
+                           в NetworkStatus, иконка Ethernet
+                           в TopBar при wired && !wifi,
+                           поповер WifiPopover (r=13 / r_pill=7
+                           без правок Dock/CC и liquid_glass.rs)
+                           и отдельные страницы Wi-Fi / Network
+                           в rusty-settings (ADR-0059)
   -----------------------------------------------------------------------
 
 ## Открытые решения

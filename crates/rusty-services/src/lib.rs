@@ -40,9 +40,9 @@ mod media;
 mod power;
 
 pub use connectivity::{
-    BluetoothService, BluetoothStatus, NetworkService, NetworkStatus, format_bluetooth_label,
-    format_nm_network_status, format_nm_network_status_with_signal, parse_proc_net_wireless_signal,
-    wifi_signal_bars,
+    BluetoothService, BluetoothStatus, NetworkService, NetworkStatus, WifiAccessPoint,
+    format_bluetooth_label, format_nm_network_status, format_nm_network_status_with_signal,
+    parse_nmcli_wifi_list, parse_proc_net_wireless_signal, wifi_signal_bars,
 };
 pub use display_session::{
     BrightnessService, BrightnessStatus, SessionAction, SessionService, UserAccount, UserService,
@@ -149,6 +149,8 @@ mod tests {
     fn networkmanager_and_bluetooth_formatters_handle_all_states() {
         let wifi = format_nm_network_status("802-11-wireless", Some("Studio5G".to_owned()));
         assert!(wifi.connected);
+        assert!(wifi.wifi_connected);
+        assert!(!wifi.wired_connected);
         assert_eq!(wifi.wifi_ssid.as_deref(), Some("Studio5G"));
         assert_eq!(wifi.status_label, "Wi-Fi: Studio5G");
         assert_eq!(wifi.wifi_signal_percent, None);
@@ -177,10 +179,33 @@ Inter-| sta-|   Quality        |   Discarded packets               | Missed | WE
         assert_eq!(wifi_signal_bars(true, Some(57)), 3);
         assert_eq!(wifi_signal_bars(true, None), 3);
 
-        let eth = format_nm_network_status("802-3-ethernet", None);
+        let eth = format_nm_network_status_with_signal(
+            "802-3-ethernet",
+            Some("Проводное соединение 1".to_owned()),
+            Some("enp3s0".to_owned()),
+            None,
+        );
         assert!(eth.connected);
+        assert!(eth.wired_connected);
+        assert!(!eth.wifi_connected);
+        assert_eq!(eth.wired_interface.as_deref(), Some("enp3s0"));
+        assert_eq!(eth.wired_label.as_deref(), Some("Проводное соединение 1"));
         assert_eq!(eth.wifi_ssid, None);
-        assert_eq!(eth.status_label, "Ethernet Connected");
+        assert_eq!(eth.status_label, "Проводное соединение 1");
+
+        let parsed = parse_nmcli_wifi_list(
+            " :HomeNet:65:WPA2\n*:Office\\:5G:82:WPA2 WPA3\n :HomeNet:91:WPA2\n :FreeCafe:40:--\n ::55:WPA2\n",
+            &[String::from("HomeNet")],
+            None,
+        );
+        assert_eq!(parsed.len(), 3);
+        assert_eq!(parsed[0].ssid, "Office:5G");
+        assert!(parsed[0].connected && parsed[0].known && parsed[0].secure);
+        assert_eq!(parsed[1].ssid, "HomeNet");
+        assert_eq!(parsed[1].signal_percent, 91);
+        assert!(parsed[1].known && !parsed[1].connected);
+        assert_eq!(parsed[2].ssid, "FreeCafe");
+        assert!(!parsed[2].secure && !parsed[2].known);
     }
 
     #[test]

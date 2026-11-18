@@ -40,6 +40,7 @@ impl RustyCompositorState {
             self.window_switcher = None;
             self.close_quick_settings();
             self.close_updates_popover();
+            self.close_wifi_popover();
             self.close_overview();
             self.close_settings();
         }
@@ -63,6 +64,7 @@ impl RustyCompositorState {
             self.close_context_menu();
             self.close_top_bar_menu();
             self.close_updates_popover();
+            self.close_wifi_popover();
             self.window_switcher = None;
             self.close_launcher();
             self.close_overview();
@@ -109,6 +111,7 @@ impl RustyCompositorState {
         self.close_top_bar_menu();
         self.window_switcher = None;
         self.close_quick_settings();
+        self.close_wifi_popover();
         self.close_launcher();
         self.close_overview();
         self.close_settings();
@@ -202,6 +205,90 @@ impl RustyCompositorState {
         }
     }
 
+    /// Toggles the `TopBar` Wi-Fi & Ethernet popover (`RUSTYOS-108`).
+    pub fn toggle_wifi_popover(&mut self) {
+        if self.wifi_popover_open {
+            self.close_wifi_popover();
+        } else {
+            self.open_wifi_popover();
+        }
+    }
+
+    /// Opens the `TopBar` Wi-Fi & Ethernet popover and refreshes network telemetry (`RUSTYOS-108`).
+    pub fn open_wifi_popover(&mut self) {
+        if self.is_session_locked() {
+            return;
+        }
+        self.wifi_popover_open = true;
+        self.wifi_popover_hover = None;
+        self.close_dock_stack();
+        self.close_context_menu();
+        self.close_top_bar_menu();
+        self.close_updates_popover();
+        self.window_switcher = None;
+        self.close_quick_settings();
+        self.close_launcher();
+        self.close_overview();
+        self.close_settings();
+        self.telemetry.request_refresh();
+        self.shell_redraw_needed = true;
+    }
+
+    /// Closes the `TopBar` Wi-Fi & Ethernet popover (`RUSTYOS-108`).
+    pub fn close_wifi_popover(&mut self) {
+        if self.wifi_popover_open || self.wifi_popover_hover.is_some() {
+            self.wifi_popover_open = false;
+            self.wifi_popover_hover = None;
+            self.shell_redraw_needed = true;
+        }
+    }
+
+    /// Opens `rusty-settings --page wifi` when available, or falls back to the built-in modal (`RUSTYOS-108`).
+    pub fn open_wifi_settings_action(&mut self) {
+        self.close_wifi_popover();
+        if self.wayland_socket_exists() && self.launch_rusty_settings_args(&["--page", "wifi"]) {
+            self.shell_redraw_needed = true;
+            return;
+        }
+        self.settings_tab = crate::shell_render::SettingsTab::Security;
+        self.open_settings();
+    }
+
+    /// Builds [`crate::shell_render::WifiPopoverRenderState`] anchored below the `TopBar` network glyph (`RUSTYOS-108`).
+    #[must_use]
+    pub fn wifi_render_state<'a>(
+        &self,
+        output_width: i32,
+        network: &'a rusty_services::NetworkStatus,
+    ) -> crate::shell_render::WifiPopoverRenderState<'a> {
+        let tel = self.telemetry.snapshot();
+        let clock_text = if self.clock_24h {
+            tel.clock_date_24h.as_str()
+        } else {
+            tel.clock_date_hhmm.as_str()
+        };
+        let right = crate::shell_render::compute_top_bar_right_layout_with_options(
+            output_width,
+            clock_text,
+            crate::shell_render::TopBarLayoutOptions {
+                has_battery: tel.power.has_battery,
+                notification_count: self.notification_count,
+                show_volume: self.menubar_show_volume,
+                show_input_source: self.menubar_show_input_source,
+                show_workspaces: self.menubar_show_workspaces,
+                show_tray: self.menubar_show_tray,
+                show_updates: self.should_show_top_bar_updates(),
+            },
+        );
+        crate::shell_render::WifiPopoverRenderState {
+            glass_opacity: self.glass_opacity,
+            reduce_transparency: self.reduce_transparency,
+            network,
+            anchor_right_x: right.wifi_x + 20,
+            hovered_hit: self.wifi_popover_hover,
+        }
+    }
+
     /// Toggles a `TopBar` left menu dropdown popover (`RUSTYOS-048`, `RUSTYOS-068`).
     pub fn toggle_top_bar_menu(&mut self, menu: crate::shell_render::TopBarMenuHit) {
         if menu == crate::shell_render::TopBarMenuHit::Go
@@ -216,6 +303,7 @@ impl RustyCompositorState {
             self.close_context_menu();
             self.close_quick_settings();
             self.close_updates_popover();
+            self.close_wifi_popover();
             self.close_launcher();
             self.active_top_bar_menu = Some(menu);
             self.top_bar_menu_hover_row = None;
@@ -235,6 +323,7 @@ impl RustyCompositorState {
         self.dock_drag = None;
         self.close_dock_stack();
         self.updates_popover_hover = None;
+        self.wifi_popover_hover = None;
         self.top_bar_menu_hover_row = None;
         self.qs_slider_drag = None;
         self.hovered_notification_idx = None;
@@ -483,6 +572,7 @@ impl RustyCompositorState {
             self.close_launcher();
             self.close_quick_settings();
             self.close_updates_popover();
+            self.close_wifi_popover();
             self.close_top_bar_menu();
             self.close_overview();
             self.active_window_drag = None;
@@ -872,6 +962,7 @@ impl RustyCompositorState {
             self.close_launcher();
             self.close_quick_settings();
             self.close_updates_popover();
+            self.close_wifi_popover();
             self.close_settings();
             self.active_window_drag = None;
             self.active_window_resize = None;
@@ -1455,16 +1546,20 @@ impl RustyCompositorState {
         launched
     }
 
-    pub(in crate::state) fn launch_rusty_settings(&mut self) -> bool {
+    pub(in crate::state) fn launch_rusty_settings_args(&mut self, args: &[&str]) -> bool {
         let ipc_path = rusty_ipc::default_ipc_socket_path(&self.socket_name);
         let launched = self
             .launcher
-            .launch_program_with_args("rusty-settings", &[], &self.socket_name, &ipc_path)
+            .launch_program_with_args("rusty-settings", args, &self.socket_name, &ipc_path)
             .is_ok();
         if launched {
             self.trigger_app_bounce("settings", false);
         }
         launched
+    }
+
+    pub(in crate::state) fn launch_rusty_settings(&mut self) -> bool {
+        self.launch_rusty_settings_args(&[])
     }
 
     fn wayland_socket_exists(&self) -> bool {
@@ -1486,6 +1581,7 @@ impl RustyCompositorState {
         self.close_top_bar_menu();
         self.close_quick_settings();
         self.close_updates_popover();
+        self.close_wifi_popover();
         self.close_settings();
         self.close_launcher();
         self.close_overview();
@@ -1700,6 +1796,7 @@ impl RustyCompositorState {
         self.close_launcher();
         self.close_quick_settings();
         self.close_updates_popover();
+        self.close_wifi_popover();
         self.close_overview();
         self.close_top_bar_menu();
 

@@ -139,6 +139,8 @@ pub enum UiGlyphKind {
         connected: bool,
         signal_percent: Option<u8>,
     },
+    /// Crisp wired Ethernet LAN topology glyph for `TopBar` and `Wi-Fi` popover (`RUSTYOS-108`).
+    Ethernet,
     /// Speaker cone + wave arcs or mute slash.
     Volume { level_percent: u8, muted: bool },
     /// Rounded pill battery outline + level fill + optional charging bolt.

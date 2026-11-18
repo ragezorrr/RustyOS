@@ -72,6 +72,13 @@ pub(crate) struct SidebarItemLayout {
     pub selected: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ServiceBadgeKind {
+    Wifi,
+    Ethernet,
+    Firewall,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CardRowControl {
     Switch {
@@ -90,6 +97,24 @@ pub(crate) enum CardRowControl {
     Navigation {
         target: SettingsPage,
         leading: Option<SettingsPage>,
+    },
+    ServiceStatus {
+        badge_tint: [u8; 4],
+        badge_kind: ServiceBadgeKind,
+        subtitle: String,
+        dot_rgba: [u8; 4],
+        target: Option<SettingsPage>,
+    },
+    WifiHeaderSwitch {
+        subtitle: String,
+        action: RowControlId,
+        active: bool,
+    },
+    WifiNetwork {
+        connected: bool,
+        secure: bool,
+        signal_percent: u8,
+        action: RowControlId,
     },
     Info {
         value: String,
@@ -698,43 +723,255 @@ fn build_system_page_sections(
                 ),
             ],
         )],
-        SettingsPage::Wifi | SettingsPage::Network => vec![
-            place_card_section(
-                Some("Network Status"),
-                content_x,
-                cur_y,
-                content_w,
-                vec![
-                    row_info("Active Connection", app.network_status.clone()),
-                    row_info("Backend", String::from("NetworkManager / D-Bus")),
-                ],
-            ),
-            place_card_section(
-                Some("Security & Lock Screen"),
-                content_x,
-                cur_y,
-                content_w,
-                vec![
-                    row_switch(
-                        "Require Password on Lock",
-                        RowControlId::LockPasswordToggle,
-                        app.require_password_on_lock,
-                    ),
-                    row_switch(
-                        "Lock Screen on Sleep",
-                        RowControlId::LockSleepToggle,
-                        app.lock_on_sleep,
-                    ),
-                    row_switch(
-                        "Built-in Polkit Agent",
-                        RowControlId::PolkitToggle,
-                        app.enable_polkit_agent,
-                    ),
-                ],
-            ),
-        ],
+        SettingsPage::Wifi => build_wifi_page_sections(app, content_x, cur_y, content_w),
+        SettingsPage::Network => build_network_page_sections(app, content_x, cur_y, content_w),
         _ => Vec::new(),
     }
+}
+
+fn build_wifi_page_sections(
+    app: &SettingsAppState,
+    content_x: i32,
+    cur_y: &mut i32,
+    content_w: i32,
+) -> Vec<CardSectionLayout> {
+    let mut sections = Vec::new();
+    let mut header_rows = vec![RowSpec {
+        label: String::from("Wi-Fi"),
+        height: 62,
+        control: CardRowControl::WifiHeaderSwitch {
+            subtitle: String::from("Set up Wi-Fi to wirelessly connect to the internet."),
+            action: RowControlId::WifiEnabledToggle,
+            active: app.network.wifi_enabled,
+        },
+    }];
+    if app.network.wifi_connected || app.network.wifi_ssid.is_some() {
+        let active_name = app
+            .network
+            .wifi_ssid
+            .clone()
+            .unwrap_or_else(|| String::from("Connected Network"));
+        let sig_str = app.network.wifi_signal_percent.map_or_else(
+            || String::from("Connected"),
+            |s| format!("Connected · {s}%"),
+        );
+        header_rows.push(RowSpec {
+            label: active_name,
+            height: 54,
+            control: CardRowControl::ServiceStatus {
+                badge_tint: [0x00, 0x7A, 0xFF, 0xFF],
+                badge_kind: ServiceBadgeKind::Wifi,
+                subtitle: sig_str,
+                dot_rgba: [40, 205, 65, 255],
+                target: None,
+            },
+        });
+    }
+    sections.push(place_card_section(
+        None,
+        content_x,
+        cur_y,
+        content_w,
+        header_rows,
+    ));
+
+    if app.network.wifi_enabled {
+        append_wifi_network_sections(app, content_x, cur_y, content_w, &mut sections);
+    } else {
+        sections.push(place_card_section(
+            Some("Known Networks"),
+            content_x,
+            cur_y,
+            content_w,
+            vec![row_info("Wi-Fi Radio", String::from("Off"))],
+        ));
+    }
+
+    sections.push(place_card_section(
+        Some("Security & Lock Screen"),
+        content_x,
+        cur_y,
+        content_w,
+        vec![
+            row_switch(
+                "Require Password on Lock",
+                RowControlId::LockPasswordToggle,
+                app.require_password_on_lock,
+            ),
+            row_switch(
+                "Lock Screen on Sleep",
+                RowControlId::LockSleepToggle,
+                app.lock_on_sleep,
+            ),
+            row_switch(
+                "Built-in Polkit Agent",
+                RowControlId::PolkitToggle,
+                app.enable_polkit_agent,
+            ),
+        ],
+    ));
+    sections
+}
+
+fn append_wifi_network_sections(
+    app: &SettingsAppState,
+    content_x: i32,
+    cur_y: &mut i32,
+    content_w: i32,
+    sections: &mut Vec<CardSectionLayout>,
+) {
+    let mut known_rows = Vec::new();
+    let mut other_rows = Vec::new();
+    for (idx, ap) in app.network.wifi_networks.iter().enumerate() {
+        let row = RowSpec {
+            label: ap.ssid.clone(),
+            height: 40,
+            control: CardRowControl::WifiNetwork {
+                connected: ap.connected,
+                secure: ap.secure,
+                signal_percent: ap.signal_percent,
+                action: RowControlId::WifiConnectIndex(idx),
+            },
+        };
+        if ap.connected || ap.known {
+            known_rows.push(row);
+        } else {
+            other_rows.push(row);
+        }
+    }
+    if !known_rows.is_empty() {
+        sections.push(place_card_section(
+            Some("Known Networks"),
+            content_x,
+            cur_y,
+            content_w,
+            known_rows,
+        ));
+    }
+    other_rows.push(RowSpec {
+        label: String::from("Scan Nearby Networks"),
+        height: 44,
+        control: CardRowControl::Choice {
+            action: RowControlId::NetworkRefresh,
+            value: String::from("Refresh"),
+        },
+    });
+    sections.push(place_card_section(
+        Some("Other Networks"),
+        content_x,
+        cur_y,
+        content_w,
+        other_rows,
+    ));
+}
+
+fn build_network_page_sections(
+    app: &SettingsAppState,
+    content_x: i32,
+    cur_y: &mut i32,
+    content_w: i32,
+) -> Vec<CardSectionLayout> {
+    let mut sections = Vec::new();
+    let green_dot = [40, 205, 65, 255];
+    let amber_dot = [245, 166, 35, 255];
+    let gray_dot = [152, 152, 160, 255];
+
+    let (wifi_sub, wifi_dot) = if app.network.wifi_connected {
+        let name = app.network.wifi_ssid.as_deref().unwrap_or("Connected");
+        (format!("Connected · {name}"), green_dot)
+    } else if app.network.wifi_enabled {
+        (String::from("On · Not Connected"), amber_dot)
+    } else {
+        (String::from("Off"), gray_dot)
+    };
+    sections.push(place_card_section_with_gap(
+        None,
+        content_x,
+        cur_y,
+        content_w,
+        vec![RowSpec {
+            label: String::from("Wi-Fi"),
+            height: 54,
+            control: CardRowControl::ServiceStatus {
+                badge_tint: [0x00, 0x7A, 0xFF, 0xFF],
+                badge_kind: ServiceBadgeKind::Wifi,
+                subtitle: wifi_sub,
+                dot_rgba: wifi_dot,
+                target: Some(SettingsPage::Wifi),
+            },
+        }],
+        12,
+    ));
+
+    let (eth_sub, eth_dot) = if app.network.wired_connected {
+        let label = app.network.wired_interface.as_deref().map_or_else(
+            || String::from("Connected"),
+            |iface| format!("Connected · {iface}"),
+        );
+        (label, green_dot)
+    } else {
+        (String::from("Cable Unplugged"), gray_dot)
+    };
+    sections.push(place_card_section_with_gap(
+        None,
+        content_x,
+        cur_y,
+        content_w,
+        vec![RowSpec {
+            label: String::from("Ethernet"),
+            height: 54,
+            control: CardRowControl::ServiceStatus {
+                badge_tint: [0x00, 0x7A, 0xFF, 0xFF],
+                badge_kind: ServiceBadgeKind::Ethernet,
+                subtitle: eth_sub,
+                dot_rgba: eth_dot,
+                target: None,
+            },
+        }],
+        12,
+    ));
+
+    sections.push(place_card_section_with_gap(
+        None,
+        content_x,
+        cur_y,
+        content_w,
+        vec![RowSpec {
+            label: String::from("Firewall"),
+            height: 54,
+            control: CardRowControl::ServiceStatus {
+                badge_tint: [0xFF, 0x8D, 0x28, 0xFF],
+                badge_kind: ServiceBadgeKind::Firewall,
+                subtitle: String::from("Inactive"),
+                dot_rgba: gray_dot,
+                target: None,
+            },
+        }],
+        20,
+    ));
+
+    sections.push(place_card_section(
+        Some("Other Services"),
+        content_x,
+        cur_y,
+        content_w,
+        vec![
+            row_info(
+                "Primary Interface",
+                app.network
+                    .interface
+                    .clone()
+                    .unwrap_or_else(|| String::from("None")),
+            ),
+            row_info("Backend", String::from("NetworkManager / D-Bus")),
+            row_choice(
+                "Network Status",
+                RowControlId::NetworkRefresh,
+                String::from("Refresh"),
+            ),
+        ],
+    ));
+    sections
 }
 
 #[allow(clippy::cast_possible_truncation)]
@@ -896,13 +1133,15 @@ fn build_style_page_sections(
 }
 
 struct RowSpec {
-    label: &'static str,
+    label: String,
+    height: i32,
     control: CardRowControl,
 }
 
 fn row_switch(label: &'static str, action: RowControlId, active: bool) -> RowSpec {
     RowSpec {
-        label,
+        label: label.to_owned(),
+        height: 44,
         control: CardRowControl::Switch { action, active },
     }
 }
@@ -914,21 +1153,24 @@ fn row_stepper(
     value: String,
 ) -> RowSpec {
     RowSpec {
-        label,
+        label: label.to_owned(),
+        height: 44,
         control: CardRowControl::Stepper { down, up, value },
     }
 }
 
 fn row_choice(label: &'static str, action: RowControlId, value: String) -> RowSpec {
     RowSpec {
-        label,
+        label: label.to_owned(),
+        height: 44,
         control: CardRowControl::Choice { action, value },
     }
 }
 
 fn row_info(label: &'static str, value: String) -> RowSpec {
     RowSpec {
-        label,
+        label: label.to_owned(),
+        height: 44,
         control: CardRowControl::Info { value },
     }
 }
@@ -940,25 +1182,36 @@ fn place_card_section(
     content_w: i32,
     specs: Vec<RowSpec>,
 ) -> CardSectionLayout {
+    place_card_section_with_gap(title, content_x, cur_y, content_w, specs, 20)
+}
+
+fn place_card_section_with_gap(
+    title: Option<&str>,
+    content_x: i32,
+    cur_y: &mut i32,
+    content_w: i32,
+    specs: Vec<RowSpec>,
+    bottom_gap: i32,
+) -> CardSectionLayout {
     let section_label = title.map(|t| {
         let lbl_rect = Rect::new(content_x + 16, *cur_y, 260, 18);
         *cur_y += 22;
         (t.to_owned(), lbl_rect)
     });
-    let row_h = 44;
-    let card_h = i32::try_from(specs.len()).unwrap_or(1) * row_h;
+    let card_h: i32 = specs.iter().map(|s| s.height).sum::<i32>().max(44);
     let card_rect = Rect::new(content_x, *cur_y, content_w, card_h);
     let mut rows = Vec::with_capacity(specs.len());
-    for (idx, spec) in specs.into_iter().enumerate() {
-        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-        let ry = card_rect.y + (idx as i32) * row_h;
+    let mut ry = card_rect.y;
+    for spec in specs {
+        let rh = spec.height;
         rows.push(CardRowLayout {
-            rect: Rect::new(content_x, ry, content_w, row_h),
-            label: spec.label.to_owned(),
+            rect: Rect::new(content_x, ry, content_w, rh),
+            label: spec.label,
             control: spec.control,
         });
+        ry += rh;
     }
-    *cur_y = card_rect.bottom() + 20;
+    *cur_y = card_rect.bottom() + bottom_gap;
     CardSectionLayout {
         section_label,
         card_rect,
@@ -1062,7 +1315,7 @@ fn hit_test_appearance(app: &AppearanceCardsLayout, px: f64, py: f64) -> Option<
 
 fn hit_test_row(row: &CardRowLayout, px: f64, py: f64) -> Option<SettingsHit> {
     match &row.control {
-        CardRowControl::Switch { action, .. } => {
+        CardRowControl::Switch { action, .. } | CardRowControl::WifiHeaderSwitch { action, .. } => {
             if switch_rect(row.rect).contains_f64(px, py) || row.rect.contains_f64(px, py) {
                 return Some(SettingsHit::Control(*action));
             }
@@ -1081,12 +1334,21 @@ fn hit_test_row(row: &CardRowLayout, px: f64, py: f64) -> Option<SettingsHit> {
                 return Some(SettingsHit::StepperPlus(*up));
             }
         }
-        CardRowControl::Navigation { target, .. } => {
+        CardRowControl::Navigation { target, .. }
+        | CardRowControl::ServiceStatus {
+            target: Some(target),
+            ..
+        } => {
             if row.rect.contains_f64(px, py) {
                 return Some(SettingsHit::PushPage(*target));
             }
         }
-        CardRowControl::Info { .. } => {}
+        CardRowControl::WifiNetwork { action, .. } => {
+            if row.rect.contains_f64(px, py) {
+                return Some(SettingsHit::Control(*action));
+            }
+        }
+        CardRowControl::ServiceStatus { target: None, .. } | CardRowControl::Info { .. } => {}
     }
     None
 }
@@ -1158,5 +1420,84 @@ mod tests {
         if let Some(app_cards) = &scrolled.appearance {
             assert_eq!(app_cards.mode_card_rect.y, 78 - 36);
         }
+    }
+
+    #[test]
+    fn wifi_and_network_pages_expose_service_cards_and_ap_rows() {
+        let mut app = SettingsAppState::new(&StartupOptions::default());
+        let sample_net = rusty_services::NetworkStatus {
+            connected: true,
+            wired_connected: true,
+            wired_interface: Some(String::from("enp3s0")),
+            wired_label: Some(String::from("Wired")),
+            wifi_connected: true,
+            wifi_enabled: true,
+            interface: Some(String::from("enp3s0")),
+            wifi_ssid: Some(String::from("Lab5G")),
+            wifi_signal_percent: Some(82),
+            wifi_networks: vec![
+                rusty_services::WifiAccessPoint {
+                    ssid: String::from("Lab5G"),
+                    signal_percent: 82,
+                    secure: true,
+                    connected: true,
+                    known: true,
+                },
+                rusty_services::WifiAccessPoint {
+                    ssid: String::from("Lobby"),
+                    signal_percent: 45,
+                    secure: false,
+                    connected: false,
+                    known: false,
+                },
+            ],
+            status_label: String::from("Wi-Fi: Lab5G"),
+        };
+
+        app.current_page = SettingsPage::Network;
+        app.network = sample_net.clone();
+        let net_layout = compute_layout(&app, 882, 600);
+        assert!(net_layout.sections.len() >= 4);
+        let wifi_card_row = &net_layout.sections[0].rows[0];
+        assert_eq!(
+            hit_test(
+                &net_layout,
+                f64::from(wifi_card_row.rect.x + 80),
+                f64::from(wifi_card_row.rect.y + 20)
+            ),
+            Some(SettingsHit::PushPage(SettingsPage::Wifi))
+        );
+
+        app.current_page = SettingsPage::Wifi;
+        app.network = sample_net;
+        let wifi_layout = compute_layout(&app, 882, 600);
+        assert!(wifi_layout.sections.len() >= 3);
+        let header_row = &wifi_layout.sections[0].rows[0];
+        assert_eq!(
+            hit_test(
+                &wifi_layout,
+                f64::from(header_row.rect.right() - 24),
+                f64::from(header_row.rect.y + 24)
+            ),
+            Some(SettingsHit::Control(RowControlId::WifiEnabledToggle))
+        );
+        let ap0 = &wifi_layout.sections[1].rows[0];
+        assert_eq!(
+            hit_test(
+                &wifi_layout,
+                f64::from(ap0.rect.x + 60),
+                f64::from(ap0.rect.y + 18)
+            ),
+            Some(SettingsHit::Control(RowControlId::WifiConnectIndex(0)))
+        );
+        let ap1 = &wifi_layout.sections[2].rows[0];
+        assert_eq!(
+            hit_test(
+                &wifi_layout,
+                f64::from(ap1.rect.x + 60),
+                f64::from(ap1.rect.y + 18)
+            ),
+            Some(SettingsHit::Control(RowControlId::WifiConnectIndex(1)))
+        );
     }
 }

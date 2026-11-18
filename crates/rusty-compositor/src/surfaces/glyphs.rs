@@ -73,6 +73,24 @@ pub(super) fn sample_wifi_glyph_uv(
     blend_premul_over(out, [tint[0], tint[1], tint[2]], tint[3] * slash_cov)
 }
 
+pub(super) fn sample_ethernet_glyph_uv(u: f32, v: f32, edge: f32, tint: [f32; 4]) -> [f32; 4] {
+    let top_node = sd_rounded_box(u, v, 0.50, 0.25, 0.105, 0.08, 0.03);
+    let left_node = sd_rounded_box(u, v, 0.26, 0.75, 0.105, 0.08, 0.03);
+    let right_node = sd_rounded_box(u, v, 0.74, 0.75, 0.105, 0.08, 0.03);
+    let top_stem = sd_segment(u, v, 0.50, 0.33, 0.50, 0.51, 0.038);
+    let bus = sd_segment(u, v, 0.26, 0.51, 0.74, 0.51, 0.038);
+    let left_stem = sd_segment(u, v, 0.26, 0.51, 0.26, 0.67, 0.038);
+    let right_stem = sd_segment(u, v, 0.74, 0.51, 0.74, 0.67, 0.038);
+    let d = top_node
+        .min(left_node)
+        .min(right_node)
+        .min(top_stem)
+        .min(bus)
+        .min(left_stem)
+        .min(right_stem);
+    premul_tint(tint, sd_cov(d, edge))
+}
+
 pub(super) fn sample_volume_glyph_uv(
     u: f32,
     v: f32,
@@ -616,6 +634,7 @@ pub(super) fn sample_ui_glyph_pixel_rect(
                     connected,
                     signal_percent,
                 } => sample_wifi_glyph_uv(u, v, edge, tint, connected, signal_percent),
+                UiGlyphKind::Ethernet => sample_ethernet_glyph_uv(u, v, edge, tint),
                 UiGlyphKind::Volume {
                     level_percent,
                     muted,

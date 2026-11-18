@@ -50,6 +50,7 @@ mod tokens;
 mod top_bar;
 mod top_bar_menus;
 mod updates_popover;
+mod wifi_popover;
 
 pub use chrome_shapes::{
     generate_shell_chrome_composite_elements, generate_shell_overview_elements,
@@ -136,14 +137,14 @@ pub use top_bar::{
     check_top_bar_status_click_for_options, check_top_bar_status_click_for_telemetry,
     check_top_bar_tray_click, check_top_bar_tray_click_for_options,
     check_top_bar_tray_click_for_telemetry, check_top_bar_updates_click_for_options,
-    check_top_bar_workspace_click, check_top_bar_workspace_click_for_app,
-    check_top_bar_workspace_click_for_profile, check_top_bar_workspace_click_with_options,
-    compute_top_bar_left_layout, compute_top_bar_left_layout_for_profile,
-    compute_top_bar_left_layout_with_options, compute_top_bar_right_layout,
-    compute_top_bar_right_layout_with_options, generate_osd_elements, notification_toast_rects,
-    osd_pill_rect, top_bar_menu_entries, top_bar_menu_items, top_bar_menu_popover_rect,
-    top_bar_menu_popover_rect_for_profile, tray_slot_rects, tray_slot_rects_with_layout,
-    tray_slot_rects_with_options,
+    check_top_bar_wifi_click_for_options, check_top_bar_workspace_click,
+    check_top_bar_workspace_click_for_app, check_top_bar_workspace_click_for_profile,
+    check_top_bar_workspace_click_with_options, compute_top_bar_left_layout,
+    compute_top_bar_left_layout_for_profile, compute_top_bar_left_layout_with_options,
+    compute_top_bar_right_layout, compute_top_bar_right_layout_with_options, generate_osd_elements,
+    notification_toast_rects, osd_pill_rect, top_bar_menu_entries, top_bar_menu_items,
+    top_bar_menu_popover_rect, top_bar_menu_popover_rect_for_profile, tray_slot_rects,
+    tray_slot_rects_with_layout, tray_slot_rects_with_options,
 };
 pub use top_bar_menus::{
     AppShortcutAction, ResolvedTopBarMenuItem, TopBarAppProfile, classify_top_bar_app,
@@ -152,6 +153,10 @@ pub use top_bar_menus::{
 pub use updates_popover::{
     MAX_POPOVER_UPDATE_ITEMS, UpdatesPopoverHit, UpdatesPopoverLayout, UpdatesRenderState,
     compute_updates_popover_layout, hit_test_updates_popover,
+};
+pub use wifi_popover::{
+    WifiPopoverHit, WifiPopoverLayout, WifiPopoverRenderState, WifiPopoverRowSlot,
+    compute_wifi_popover_layout, hit_test_wifi_popover,
 };
 
 use dock::render_dock;
@@ -189,6 +194,8 @@ pub enum ShellOverlayView<'a> {
     DockStack(&'a DockStackRenderState<'a>),
     /// Software Updates popover anchored to `TopBar` (`RUSTYOS-076`).
     Updates(&'a UpdatesRenderState<'a>),
+    /// Wi-Fi & Ethernet `Liquid Glass` popover anchored to `TopBar` (`RUSTYOS-108`).
+    Wifi(&'a WifiPopoverRenderState<'a>),
 }
 
 /// Generates custom GLES render elements for `TopBar`, `Dock`, and active shell overlays.
@@ -234,7 +241,8 @@ pub fn generate_shell_render_elements(
         | ShellOverlayView::Settings(_)
         | ShellOverlayView::ContextMenu(_)
         | ShellOverlayView::DockStack(_)
-        | ShellOverlayView::Updates(_) => {}
+        | ShellOverlayView::Updates(_)
+        | ShellOverlayView::Wifi(_) => {}
         ShellOverlayView::Spotlight(spot) => {
             render_spotlight_modal(&mut elements, width, height, spot, has_text);
         }
@@ -262,6 +270,7 @@ pub(super) const fn notifications_hidden_by_overlay(overlay: ShellOverlayView<'_
             | ShellOverlayView::ContextMenu(_)
             | ShellOverlayView::DockStack(_)
             | ShellOverlayView::Updates(_)
+            | ShellOverlayView::Wifi(_)
     )
 }
 
@@ -277,6 +286,7 @@ pub(super) const fn dock_tooltip_hidden_by_overlay(overlay: ShellOverlayView<'_>
             | ShellOverlayView::ContextMenu(_)
             | ShellOverlayView::DockStack(_)
             | ShellOverlayView::Updates(_)
+            | ShellOverlayView::Wifi(_)
     )
 }
 

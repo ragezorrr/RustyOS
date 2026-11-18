@@ -65,6 +65,7 @@ pub(super) enum KeyIntercept {
     Portal(PortalKeyAction),
     QuickSettingsClose,
     UpdatesPopoverClose,
+    WifiPopoverClose,
     ToggleSettings,
     SettingsClose,
     SettingsNextTab,

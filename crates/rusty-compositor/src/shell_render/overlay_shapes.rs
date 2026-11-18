@@ -18,6 +18,7 @@ use super::tokens::{
 };
 use super::top_bar::notification_app_icon;
 use super::updates_popover::render_updates_composite;
+use super::wifi_popover::render_wifi_popover_composite;
 use super::{
     COLOR_ACCENT, COLOR_MUTED, COLOR_WARNING, CompositorRenderElement, NotificationToastView,
     ShellOverlayView, TopBarTelemetry, make_solid_element, notification_toast_rects,
@@ -338,6 +339,9 @@ fn build_foreground_overlay_shapes(
         }
         ShellOverlayView::Updates(up) => {
             render_updates_composite(&mut out, shape_cache, renderer, screen_size, up);
+        }
+        ShellOverlayView::Wifi(wifi) => {
+            render_wifi_popover_composite(&mut out, shape_cache, renderer, screen_size, wifi);
         }
     }
 

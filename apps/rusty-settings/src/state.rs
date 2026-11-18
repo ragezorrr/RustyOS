@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant, SystemTime};
 
-use rusty_services::{AudioService, NetworkService};
+use rusty_services::{AudioService, NetworkService, NetworkStatus};
 
 /// Predefined accent color palette.
 pub(crate) const ACCENT_COLORS: [[u8; 4]; 7] = [
@@ -212,6 +212,9 @@ pub(crate) enum RowControlId {
     VolumeUp,
     ToggleMute,
     CursorThemeCycle,
+    WifiEnabledToggle,
+    WifiConnectIndex(usize),
+    NetworkRefresh,
 }
 
 /// Mutable state backing the System Settings window.
@@ -269,6 +272,7 @@ pub(crate) struct SettingsAppState {
 
     // Live hardware/service readouts
     pub(crate) network_status: String,
+    pub(crate) network: NetworkStatus,
     pub(crate) volume_percent: u8,
     pub(crate) muted: bool,
 }
@@ -337,6 +341,7 @@ impl SettingsAppState {
             enable_polkit_agent: true,
             cursor_theme: String::from("Adwaita"),
             network_status: String::from("Checking..."),
+            network: NetworkStatus::default(),
             volume_percent: 65,
             muted: false,
         }
@@ -445,7 +450,8 @@ impl SettingsAppState {
 
     pub(crate) fn refresh_services(&mut self) {
         let net = NetworkService::new().query_status();
-        self.network_status = net.status_label;
+        self.network_status.clone_from(&net.status_label);
+        self.network = net;
         let audio = AudioService::new().query_status();
         self.volume_percent = audio.volume_percent.clamp(0, 100);
         self.muted = audio.muted;
@@ -774,6 +780,21 @@ impl SettingsAppState {
                 }
                 .clone_into(&mut self.cursor_theme);
                 let _ = update_config_entries(&[("ui", "cursor_theme", &self.cursor_theme)]);
+            }
+            RowControlId::WifiEnabledToggle => {
+                let next = !self.network.wifi_enabled;
+                self.network.wifi_enabled = next;
+                let _ = NetworkService::new().set_wifi_enabled(next);
+                self.refresh_services();
+            }
+            RowControlId::WifiConnectIndex(idx) => {
+                if let Some(ap) = self.network.wifi_networks.get(idx).cloned() {
+                    let _ = NetworkService::new().connect_wifi(&ap.ssid);
+                    self.refresh_services();
+                }
+            }
+            RowControlId::NetworkRefresh => {
+                self.refresh_services();
             }
             _ => {}
         }

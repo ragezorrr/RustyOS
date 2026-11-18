@@ -1289,10 +1289,14 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
             ac_online: tel.power.ac_online,
             battery_charging: tel.power.state == rusty_services::BatteryState::Charging,
             net_connected: tel.network.connected,
+            wired_connected: tel.network.wired_connected,
+            wifi_connected: tel.network.wifi_connected,
+            wifi_enabled: tel.network.wifi_enabled,
             wifi_signal_percent: tel.network.wifi_signal_percent,
             volume_percent: tel.audio.volume_percent,
             audio_muted: tel.audio.muted,
             quick_settings_open: state.quick_settings_active,
+            wifi_open: state.wifi_popover_open,
             updates_open: state.updates_popover_open,
             show_updates: state.should_show_top_bar_updates(),
             update_count: u32::try_from(state.updates_status.total_count).unwrap_or(u32::MAX),
@@ -1397,6 +1401,8 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
             network_label: &tel.network.status_label,
             net_connected: tel.network.connected,
             wifi_enabled: tel.network.wifi_enabled,
+            wifi_connected: tel.network.wifi_connected,
+            wifi_ssid: tel.network.wifi_ssid.as_deref(),
             wifi_signal_percent: tel.network.wifi_signal_percent,
             bt_available: tel.bluetooth.available,
             bt_powered: tel.bluetooth.powered,
@@ -1512,6 +1518,9 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
         let updates_view = state
             .updates_popover_open
             .then(|| state.updates_render_state(logical_size.w));
+        let wifi_view = state
+            .wifi_popover_open
+            .then(|| state.wifi_render_state(logical_size.w, &tel.network));
 
         let overlay = if let Some(pk) = polkit_view.as_ref() {
             ShellOverlayView::Polkit(pk)
@@ -1527,6 +1536,8 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
             ShellOverlayView::QuickSettings(qs)
         } else if let Some(up) = updates_view.as_ref() {
             ShellOverlayView::Updates(up)
+        } else if let Some(wifi) = wifi_view.as_ref() {
+            ShellOverlayView::Wifi(wifi)
         } else if let Some(ctx) = context_menu_view {
             ShellOverlayView::ContextMenu(ctx)
         } else if let Some(stack) = dock_stack_view.as_ref() {

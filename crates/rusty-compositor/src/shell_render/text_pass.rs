@@ -18,6 +18,7 @@ use super::tokens::{ThemePalette, anim_offset, truncate_ascii};
 use super::top_bar::{MENU_ITEM_HEIGHT, MENU_POPOVER_PAD_Y, MENU_SEPARATOR_HEIGHT};
 use super::top_bar_menus::{ResolvedTopBarMenuItem, resolve_top_bar_menu_entries};
 use super::updates_popover::render_updates_text;
+use super::wifi_popover::render_wifi_popover_text;
 use super::{
     DockViewState, NotificationToastView, ShellOverlayView, TEXT_BRIGHT, TEXT_MUTED,
     TOP_BAR_FONT_SIZE, TOP_BAR_ITEM_H, TOP_BAR_ITEM_Y, TopBarMenuHit, TopBarTelemetry,
@@ -182,6 +183,9 @@ pub(super) fn append_foreground_overlay_text(
         }
         ShellOverlayView::Updates(up) => {
             render_updates_text(text_cache, renderer, screen_size, up, elements);
+        }
+        ShellOverlayView::Wifi(wifi) => {
+            render_wifi_popover_text(text_cache, renderer, screen_size, wifi, elements);
         }
     }
 

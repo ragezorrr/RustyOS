@@ -27,6 +27,7 @@ impl RustyCompositorState {
             && !self.launcher_active
             && !self.quick_settings_active
             && !self.updates_popover_open
+            && !self.wifi_popover_open
             && !self.settings_active
             && !self.has_foreground_layer_surfaces()
             && !self.should_hide_shell_chrome_for_fullscreen();
@@ -301,6 +302,7 @@ impl RustyCompositorState {
             self.has_foreground_layer_surfaces() || self.should_hide_shell_chrome_for_fullscreen();
         self.update_dock_stack_hover(is_on_primary, chrome_hidden, local_x, local_y);
         self.update_updates_popover_hover(is_on_primary, chrome_hidden, local_x, local_y);
+        self.update_wifi_popover_hover(is_on_primary, chrome_hidden, local_x, local_y);
         let fullscreen_active = self
             .topmost_fullscreen_window_on(self.output_map.primary().id)
             .is_some();
@@ -334,6 +336,7 @@ impl RustyCompositorState {
             && !self.launcher_active
             && !self.quick_settings_active
             && !self.updates_popover_open
+            && !self.wifi_popover_open
             && self.window_switcher.is_none()
         {
             crate::shell_render::check_notification_click(
@@ -350,6 +353,7 @@ impl RustyCompositorState {
             && !self.launcher_active
             && !self.quick_settings_active
             && !self.updates_popover_open
+            && !self.wifi_popover_open
             && !self.overview_active
             && self.active_top_bar_menu.is_none()
             && self.window_switcher.is_none()
@@ -416,6 +420,37 @@ impl RustyCompositorState {
         };
         if self.updates_popover_hover != next_hover {
             self.updates_popover_hover = next_hover;
+            self.shell_redraw_needed = true;
+        }
+    }
+
+    fn update_wifi_popover_hover(
+        &mut self,
+        is_on_primary: bool,
+        chrome_hidden: bool,
+        local_x: f64,
+        local_y: f64,
+    ) {
+        if !(self.wifi_popover_open && is_on_primary && !chrome_hidden) {
+            return;
+        }
+        let logical_size = self.primary_output_logical_size();
+        let tel = self.telemetry.snapshot();
+        let wifi_view = self.wifi_render_state(logical_size.w, &tel.network);
+        let next_hover = match crate::shell_render::hit_test_wifi_popover(
+            logical_size,
+            &wifi_view,
+            local_x,
+            local_y,
+        ) {
+            hit @ (crate::shell_render::WifiPopoverHit::ToggleWifi
+            | crate::shell_render::WifiPopoverHit::SelectNetwork(_)
+            | crate::shell_render::WifiPopoverHit::OpenWifiSettings) => Some(hit),
+            crate::shell_render::WifiPopoverHit::InsidePopover
+            | crate::shell_render::WifiPopoverHit::OutsidePopover => None,
+        };
+        if self.wifi_popover_hover != next_hover {
+            self.wifi_popover_hover = next_hover;
             self.shell_redraw_needed = true;
         }
     }
@@ -531,6 +566,16 @@ impl RustyCompositorState {
             self.toggle_launcher();
             return true;
         }
+        if crate::shell_render::check_top_bar_wifi_click_for_options(
+            output_width,
+            clock_text,
+            opts,
+            x,
+            y,
+        ) {
+            self.toggle_wifi_popover();
+            return true;
+        }
         if crate::shell_render::check_top_bar_status_click_for_options(
             output_width,
             clock_text,
@@ -583,22 +628,34 @@ impl RustyCompositorState {
             self.tray_items.len(),
             x,
             y,
-        ) && let Some(item) = self.tray_items.get(tray_idx)
-        {
-            #[allow(clippy::cast_possible_truncation)]
-            let click_x = x.round() as i32;
-            #[allow(clippy::cast_possible_truncation)]
-            let click_y = y.round() as i32;
-            match button {
-                272 => self.tray.activate(&item.key, click_x, click_y),
-                273 => self.tray.context_menu(&item.key, click_x, click_y),
-                274 => self.tray.secondary_activate(&item.key, click_x, click_y),
-                _ => {}
-            }
-            return true;
+        ) {
+            return self.handle_top_bar_tray_item_click(tray_idx, button, x, y);
         }
 
         false
+    }
+
+    fn handle_top_bar_tray_item_click(
+        &mut self,
+        tray_idx: usize,
+        button: u32,
+        x: f64,
+        y: f64,
+    ) -> bool {
+        let Some(item) = self.tray_items.get(tray_idx) else {
+            return false;
+        };
+        #[allow(clippy::cast_possible_truncation)]
+        let click_x = x.round() as i32;
+        #[allow(clippy::cast_possible_truncation)]
+        let click_y = y.round() as i32;
+        match button {
+            272 => self.tray.activate(&item.key, click_x, click_y),
+            273 => self.tray.context_menu(&item.key, click_x, click_y),
+            274 => self.tray.secondary_activate(&item.key, click_x, click_y),
+            _ => {}
+        }
+        true
     }
 
     pub(super) fn handle_launcher_pointer_click(&mut self) {
@@ -631,7 +688,11 @@ impl RustyCompositorState {
             self.primary_local_coords(self.pointer_location);
         match crate::shell_render::check_quick_settings_click(output_size, local_x, local_y) {
             crate::shell_render::QuickSettingsHit::ToggleWifi => {
-                let _ = self.telemetry.toggle_wifi();
+                if button == 273 {
+                    self.open_wifi_popover();
+                } else {
+                    let _ = self.telemetry.toggle_wifi();
+                }
             }
             crate::shell_render::QuickSettingsHit::ToggleMute => {
                 self.telemetry.toggle_mute();
@@ -717,6 +778,36 @@ impl RustyCompositorState {
             | crate::shell_render::UpdatesPopoverHit::OpenUpdater => {}
             crate::shell_render::UpdatesPopoverHit::OutsidePopover => {
                 self.close_updates_popover();
+            }
+        }
+    }
+
+    pub(super) fn handle_wifi_popover_pointer_click(&mut self, button: u32) {
+        let (output_size, _on_primary, local_x, local_y) =
+            self.primary_local_coords(self.pointer_location);
+        let tel = self.telemetry.snapshot();
+        let view = self.wifi_render_state(output_size.w, &tel.network);
+        let hit = crate::shell_render::hit_test_wifi_popover(output_size, &view, local_x, local_y);
+        match hit {
+            crate::shell_render::WifiPopoverHit::ToggleWifi if button == 272 => {
+                let _ = self.telemetry.toggle_wifi();
+                self.shell_redraw_needed = true;
+            }
+            crate::shell_render::WifiPopoverHit::SelectNetwork(idx) if button == 272 => {
+                if let Some(ap) = tel.network.wifi_networks.get(idx) {
+                    self.telemetry.connect_wifi(&ap.ssid);
+                    self.shell_redraw_needed = true;
+                }
+            }
+            crate::shell_render::WifiPopoverHit::OpenWifiSettings if button == 272 => {
+                self.open_wifi_settings_action();
+            }
+            crate::shell_render::WifiPopoverHit::InsidePopover
+            | crate::shell_render::WifiPopoverHit::ToggleWifi
+            | crate::shell_render::WifiPopoverHit::SelectNetwork(_)
+            | crate::shell_render::WifiPopoverHit::OpenWifiSettings => {}
+            crate::shell_render::WifiPopoverHit::OutsidePopover => {
+                self.close_wifi_popover();
             }
         }
     }

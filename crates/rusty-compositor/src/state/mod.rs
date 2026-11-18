@@ -562,6 +562,10 @@ pub struct RustyCompositorState {
     pub updates_popover_open: bool,
     /// Currently hovered action button inside the open Software Updates popover (`RUSTYOS-076`).
     pub updates_popover_hover: Option<crate::shell_render::UpdatesPopoverHit>,
+    /// Whether the `TopBar` Wi-Fi & Ethernet Liquid Glass popover is open (`RUSTYOS-108`).
+    pub wifi_popover_open: bool,
+    /// Currently hovered row or control inside the open Wi-Fi popover (`RUSTYOS-108`).
+    pub wifi_popover_hover: Option<crate::shell_render::WifiPopoverHit>,
     /// Highest update count already announced with a HUD toast (`RUSTYOS-076`).
     pub updates_notified_count: usize,
     /// First-party Wayland Liquid Glass protocol state (`RUSTYOS-092`).
@@ -957,6 +961,8 @@ impl RustyCompositorState {
             updates_status: rusty_services::UpdateStatusSnapshot::default(),
             updates_popover_open: false,
             updates_popover_hover: None,
+            wifi_popover_open: false,
+            wifi_popover_hover: None,
             updates_notified_count: 0,
             launcher_active: false,
             launcher_anim: AnimatedValue::new_settled(0.0),
@@ -1390,6 +1396,7 @@ impl RustyCompositorState {
             || self.overview_active
             || self.quick_settings_active
             || self.updates_popover_open
+            || self.wifi_popover_open
             || self.settings_active
             || self.dock_stack.is_some()
             || self.context_menu.is_some()
@@ -1435,6 +1442,7 @@ impl RustyCompositorState {
             && !self.launcher_active
             && !self.quick_settings_active
             && !self.updates_popover_open
+            && !self.wifi_popover_open
             && self.window_switcher.is_none()
             && self.active_window_drag.is_none()
             && self.active_window_resize.is_none()
@@ -1968,6 +1976,7 @@ impl RustyCompositorState {
             let interactive_shell_open = self.launcher_active
                 || self.quick_settings_active
                 || self.updates_popover_open
+                || self.wifi_popover_open
                 || self.overview_active
                 || self.settings_active
                 || self
@@ -2008,6 +2017,7 @@ impl RustyCompositorState {
             let overlay_active = self.launcher_active
                 || self.quick_settings_active
                 || self.updates_popover_open
+                || self.wifi_popover_open
                 || self.overview_active
                 || self.settings_active
                 || self.window_switcher.is_some()

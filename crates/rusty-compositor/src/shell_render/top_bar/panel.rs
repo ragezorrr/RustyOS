@@ -50,6 +50,12 @@ pub struct TopBarTelemetry<'a> {
     pub battery_charging: bool,
     /// Whether an active network interface is up.
     pub net_connected: bool,
+    /// Whether a wired Ethernet interface is connected (`RUSTYOS-108`).
+    pub wired_connected: bool,
+    /// Whether a wireless Wi-Fi interface is actively connected (`RUSTYOS-108`).
+    pub wifi_connected: bool,
+    /// Whether the Wi-Fi radio is enabled (`RUSTYOS-108`).
+    pub wifi_enabled: bool,
     /// Live Wi-Fi signal strength percentage (`0..=100`, `RUSTYOS-052`).
     pub wifi_signal_percent: Option<u8>,
     /// Master output volume (`0..=100`).
@@ -58,6 +64,8 @@ pub struct TopBarTelemetry<'a> {
     pub audio_muted: bool,
     /// Whether the Quick Settings popover is currently open.
     pub quick_settings_open: bool,
+    /// Whether the Wi-Fi popover is currently open (`RUSTYOS-108`).
+    pub wifi_open: bool,
     /// Whether the Software Updates popover is currently open (`RUSTYOS-076`).
     pub updates_open: bool,
     /// Show Software Updates indicator in the Menu Bar right cluster (`RUSTYOS-076`).
@@ -121,10 +129,14 @@ impl Default for TopBarTelemetry<'static> {
             ac_online: false,
             battery_charging: false,
             net_connected: true,
+            wired_connected: false,
+            wifi_connected: true,
+            wifi_enabled: true,
             wifi_signal_percent: Some(100),
             volume_percent: 75,
             audio_muted: false,
             quick_settings_open: false,
+            wifi_open: false,
             updates_open: false,
             show_updates: false,
             update_count: 0,

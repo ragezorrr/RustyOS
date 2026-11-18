@@ -14,8 +14,8 @@ use fontdue::{Font, FontSettings};
 
 use crate::layout::{
     AppearanceCardsLayout, CARD_CORNER_RADIUS, CardRowControl, CardRowLayout, CardSectionLayout,
-    DockPositionCardLayout, Rect, SettingsHit, SettingsLayout, WINDOW_CORNER_RADIUS, choice_rect,
-    stepper_rects, switch_rect,
+    DockPositionCardLayout, Rect, ServiceBadgeKind, SettingsHit, SettingsLayout,
+    WINDOW_CORNER_RADIUS, choice_rect, stepper_rects, switch_rect,
 };
 use crate::state::{ACCENT_COLORS, SettingsAppState, SettingsPage, ThemeChoice};
 
@@ -902,7 +902,154 @@ fn render_card_section(c: &mut Canvas<'_>, sec: &CardSectionLayout, pal: &Palett
     }
 }
 
+fn render_network_service_row(c: &mut Canvas<'_>, row: &CardRowLayout, pal: &Palette) -> bool {
+    match &row.control {
+        CardRowControl::ServiceStatus {
+            badge_tint,
+            badge_kind,
+            subtitle,
+            dot_rgba,
+            target,
+        } => {
+            let icon_rect = Rect::new(row.rect.x + 16, row.rect.y + 11, 32, 32);
+            c.fill_gradient_squircle(icon_rect, 8, *badge_tint);
+            draw_service_badge_glyph(c, icon_rect, *badge_kind);
+            let tx = icon_rect.right() + 12;
+            c.draw_text(
+                &row.label,
+                tx,
+                row.rect.y + 11,
+                13.0,
+                true,
+                pal.text_primary,
+            );
+            c.fill_circle(tx as f32 + 4.0, row.rect.y as f32 + 34.5, 3.8, *dot_rgba);
+            c.draw_text(
+                subtitle,
+                tx + 12,
+                row.rect.y + 28,
+                11.5,
+                false,
+                pal.text_secondary,
+            );
+            if target.is_some() {
+                draw_chevron(
+                    c,
+                    row.rect.right() as f32 - 22.0,
+                    row.rect.y as f32 + row.rect.h as f32 * 0.5,
+                    false,
+                    pal.text_muted,
+                );
+            }
+            true
+        }
+        CardRowControl::WifiHeaderSwitch {
+            subtitle, active, ..
+        } => {
+            let icon_rect = Rect::new(row.rect.x + 16, row.rect.y + 15, 32, 32);
+            c.fill_gradient_squircle(icon_rect, 8, [0x00, 0x7A, 0xFF, 0xFF]);
+            draw_service_badge_glyph(c, icon_rect, ServiceBadgeKind::Wifi);
+            let tx = icon_rect.right() + 12;
+            c.draw_text(
+                &row.label,
+                tx,
+                row.rect.y + 12,
+                13.5,
+                true,
+                pal.text_primary,
+            );
+            c.draw_text(
+                subtitle,
+                tx,
+                row.rect.y + 32,
+                11.0,
+                false,
+                pal.text_secondary,
+            );
+            draw_toggle_switch(c, switch_rect(row.rect), *active, pal);
+            true
+        }
+        CardRowControl::WifiNetwork {
+            connected,
+            secure,
+            signal_percent,
+            ..
+        } => {
+            render_wifi_ap_row(c, row, pal, *connected, *secure, *signal_percent);
+            true
+        }
+        _ => false,
+    }
+}
+
+fn render_wifi_ap_row(
+    c: &mut Canvas<'_>,
+    row: &CardRowLayout,
+    pal: &Palette,
+    connected: bool,
+    secure: bool,
+    signal_percent: u8,
+) {
+    let row_mid_y = row.rect.y as f32 + row.rect.h as f32 * 0.5;
+    if connected {
+        let cx = row.rect.x as f32 + 20.0;
+        c.draw_segment(
+            cx - 4.0,
+            row_mid_y + 0.4,
+            cx - 1.2,
+            row_mid_y + 3.4,
+            0.9,
+            pal.text_primary,
+        );
+        c.draw_segment(
+            cx - 1.2,
+            row_mid_y + 3.4,
+            cx + 4.2,
+            row_mid_y - 3.0,
+            0.9,
+            pal.text_primary,
+        );
+    }
+    c.draw_text(
+        &row.label,
+        row.rect.x + 38,
+        row.rect.y + (row.rect.h - 14) / 2,
+        12.5,
+        connected,
+        pal.text_primary,
+    );
+    if secure {
+        draw_lock_icon(
+            c,
+            row.rect.right() as f32 - 64.0,
+            row_mid_y,
+            pal.text_secondary,
+        );
+    }
+    draw_wifi_signal_icon(
+        c,
+        row.rect.right() as f32 - 42.0,
+        row_mid_y + 4.2,
+        signal_percent,
+        pal,
+    );
+    let dots_x = row.rect.right() as f32 - 20.0;
+    c.stroke_rounded_rect(
+        Rect::new(dots_x as i32 - 7, row_mid_y as i32 - 7, 14, 14),
+        7.0,
+        1.1,
+        pal.text_muted,
+    );
+    for dx in [-3.0_f32, 0.0, 3.0] {
+        c.fill_circle(dots_x + dx, row_mid_y, 0.95, pal.text_muted);
+    }
+}
+
 fn render_card_row(c: &mut Canvas<'_>, row: &CardRowLayout, pal: &Palette) {
+    if render_network_service_row(c, row, pal) {
+        return;
+    }
+
     let label_x = match &row.control {
         CardRowControl::Navigation {
             leading: Some(icon_page),
@@ -925,14 +1072,7 @@ fn render_card_row(c: &mut Canvas<'_>, row: &CardRowLayout, pal: &Palette) {
 
     match &row.control {
         CardRowControl::Switch { active, .. } => {
-            let tr = switch_rect(row.rect);
-            c.fill_rounded_rect(tr, 10, if *active { pal.accent } else { pal.switch_off });
-            let knob_cx = if *active {
-                tr.right() as f32 - 10.0
-            } else {
-                tr.x as f32 + 10.0
-            };
-            c.fill_circle(knob_cx, tr.y as f32 + 10.0, 8.0, [255, 255, 255, 255]);
+            draw_toggle_switch(c, switch_rect(row.rect), *active, pal);
         }
         CardRowControl::Stepper { value, .. } => {
             let (minus, val_rect, plus) = stepper_rects(row.rect);
@@ -968,7 +1108,62 @@ fn render_card_row(c: &mut Canvas<'_>, row: &CardRowLayout, pal: &Palette) {
                 pal.text_secondary,
             );
         }
+        CardRowControl::ServiceStatus { .. }
+        | CardRowControl::WifiHeaderSwitch { .. }
+        | CardRowControl::WifiNetwork { .. } => {}
     }
+}
+
+fn draw_toggle_switch(c: &mut Canvas<'_>, tr: Rect, active: bool, pal: &Palette) {
+    c.fill_rounded_rect(tr, 10, if active { pal.accent } else { pal.switch_off });
+    let knob_cx = if active {
+        tr.right() as f32 - 10.0
+    } else {
+        tr.x as f32 + 10.0
+    };
+    c.fill_circle(knob_cx, tr.y as f32 + 10.0, 8.0, [255, 255, 255, 255]);
+}
+
+fn draw_service_badge_glyph(c: &mut Canvas<'_>, rect: Rect, kind: ServiceBadgeKind) {
+    let cx = rect.x as f32 + rect.w as f32 * 0.5;
+    let cy = rect.y as f32 + rect.h as f32 * 0.5;
+    let w = [255, 255, 255, 255];
+    match kind {
+        ServiceBadgeKind::Wifi => {
+            c.fill_circle(cx, cy + 5.2, 1.5, w);
+            draw_wifi_arc(c, cx, cy + 5.2, 4.6, w);
+            draw_wifi_arc(c, cx, cy + 5.2, 7.8, w);
+        }
+        ServiceBadgeKind::Ethernet => {
+            c.fill_rounded_rect(Rect::new(cx as i32 - 3, cy as i32 - 8, 6, 4), 1, w);
+            c.draw_segment(cx, cy - 4.0, cx, cy, 0.75, w);
+            c.draw_segment(cx - 6.0, cy, cx + 6.0, cy, 0.75, w);
+            c.draw_segment(cx - 6.0, cy, cx - 6.0, cy + 4.0, 0.75, w);
+            c.draw_segment(cx + 6.0, cy, cx + 6.0, cy + 4.0, 0.75, w);
+            c.fill_rounded_rect(Rect::new(cx as i32 - 9, cy as i32 + 3, 6, 4), 1, w);
+            c.fill_rounded_rect(Rect::new(cx as i32 + 3, cy as i32 + 3, 6, 4), 1, w);
+        }
+        ServiceBadgeKind::Firewall => {
+            c.stroke_rounded_rect(Rect::new(rect.x + 8, rect.y + 7, 16, 18), 5.5, 1.5, w);
+            c.draw_segment(cx - 3.0, cy - 1.5, cx + 3.0, cy - 1.5, 0.85, w);
+            c.draw_segment(cx + 1.0, cy - 3.5, cx + 3.2, cy - 1.5, 0.85, w);
+            c.draw_segment(cx - 3.0, cy + 2.5, cx + 3.0, cy + 2.5, 0.85, w);
+            c.draw_segment(cx - 3.2, cy + 2.5, cx - 1.0, cy + 4.5, 0.85, w);
+        }
+    }
+}
+
+fn draw_lock_icon(c: &mut Canvas<'_>, cx: f32, cy: f32, col: [u8; 4]) {
+    c.stroke_rounded_rect(Rect::new(cx as i32 - 3, cy as i32 - 6, 6, 6), 3.0, 1.1, col);
+    c.fill_rounded_rect(Rect::new(cx as i32 - 4, cy as i32 - 1, 8, 6), 2, col);
+}
+
+fn draw_wifi_signal_icon(c: &mut Canvas<'_>, cx: f32, cy: f32, signal_percent: u8, pal: &Palette) {
+    let dim = pal.text_disabled;
+    let lit = pal.text_primary;
+    c.fill_circle(cx, cy, 1.25, lit);
+    draw_wifi_arc(c, cx, cy, 3.6, if signal_percent > 28 { lit } else { dim });
+    draw_wifi_arc(c, cx, cy, 6.2, if signal_percent > 54 { lit } else { dim });
 }
 
 fn render_row_icon(c: &mut Canvas<'_>, rect: Rect, page: SettingsPage) {

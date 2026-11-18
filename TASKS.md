@@ -1876,6 +1876,24 @@ hardware/software context и низкие накладные расходы.
 - **Tests:** Все 256 unit-тестов workspace (`4` `rusty-animation`, `171` `rusty-compositor`, `15` `rusty-files`, `3` `rusty-ipc`, `43` `rusty-services`, `4` `rusty-settings`, `5` `rusty-shell`, `4` `rusty-updater`, `7` `rusty-wm`).
 - **Risks:** Нет.
 
+### RUSTYOS-108 — Разделение статусов `Ethernet` и `Wi-Fi`, всплывающее окно `Wi-Fi` сетей и редизайн страниц `Wi-Fi` и `Network` в `rusty-settings`
+
+- **Status:** Done
+- **Goal:** Чётко разделить состояния проводного (`Ethernet`) и беспроводного (`Wi-Fi`) подключений в `rusty-services`, `TopBar` и `Control Center`, добавить всплывающее окно `WifiPopover` (в стиле Golden Gate `r = 13` / `r_pill = 7`) по клику на иконку сети и переработать страницы `Wi-Fi` и `Network` в `rusty-settings` по эталонам `27-Golden-Gate-Settings-Wi-Fi.png` и `27-Golden-Gate-Settings-Network.png`.
+- **Dependencies:** `RUSTYOS-106`, `RUSTYOS-107`.
+- **Scope:**
+  - `crates/rusty-services/src/{connectivity.rs, lib.rs}`: добавлена структура `WifiAccessPoint`, раздельные поля `wired_connected`, `wired_interface`, `wired_label`, `wifi_connected`, `wifi_networks` в `NetworkStatus`, определение обоих интерфейсов в `query_network_via_dbus()` / `query_status()`, парсер `parse_nmcli_wifi_list` и методы `NetworkService::list_wifi_networks`, `NetworkService::connect_wifi`;
+  - `crates/rusty-compositor/src/surfaces/{mod.rs, glyphs.rs, tests.rs}`: добавлен SDF-глиф `UiGlyphKind::Ethernet` (`sample_ethernet_glyph_uv`) и тест `ethernet_glyph_rasterizes_cleanly`;
+  - `crates/rusty-compositor/src/shell_render/top_bar/{panel.rs, status.rs, chrome_shapes.rs, mod.rs}` и `quick_settings.rs`: отображение `UiGlyphKind::Ethernet` в `TopBar` при `wired_connected && !wifi_connected`, обработка `TopBarHit::Wifi` (`check_top_bar_wifi_click_for_options`), изоляция подписи капсулы `Wi-Fi` в `Control Center` (`wifi_connected`, `wifi_ssid`, `is_wifi_status_label`, `concise_wifi_subtitle_for_state`) без изменений геометрии `Control Center`, `Dock`, `liquid_glass.rs` и `sdf.rs`;
+  - `crates/rusty-compositor/src/shell_render/{wifi_popover.rs, overlay_shapes.rs, text_pass.rs, mod.rs, tests.rs}` + `telemetry.rs`, `state/*`, `input/*`, `context_menu/mod.rs`, `frame_composer.rs`: реализован `WifiPopover` (`ShellOverlayView::Wifi`, `MENU_POPOVER_RADIUS = 13`, `HOVER_PILL_RADIUS = 7` при инсете `5 px`), переключатель `Wi-Fi`, строка `Ethernet (<iface>) · Connected`, `Known Networks` / `Other Networks`, подключение (`TelemetryCmd::ConnectWifi`, `SystemMetricsHandle::connect_wifi`), `Wi-Fi Settings...`, `KeyIntercept::WifiPopoverClose` и правый клик `QuickSettingsHit::ToggleWifi`;
+  - `apps/rusty-settings/src/{state.rs, layout.rs, render.rs}`: раздельные страницы `SettingsPage::Wifi` (`WifiHeaderSwitch`, текущая сеть, `Known Networks`, `Other Networks`, `Refresh`) и `SettingsPage::Network` (карточки сервисов `Wi-Fi`, `Ethernet`, `Firewall` и `Other Services`);
+  - `docs/adr/0059-network-ethernet-wifi-popover-and-settings.md`, `DESIGN.md`, `ARCHITECTURE.md`, `DECISIONS.md` (`D-072`).
+- **Acceptance Criteria:**
+  - Живые `--winit` прогоны (Wayland/X11 smoke и `Light`/`Dark` снимки `Control Center`, `WifiPopover`, `Settings > Network` и `Settings > Wi-Fi`) подтверждают раздельное отображение `Ethernet` и `Wi-Fi` (включая одновременную работу `eno1` и `wlan0`) и отсутствие изменений в `liquid_glass.rs`, `sdf.rs`, `dock.rs` и геометрии `Control Center`;
+  - `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings` и все 260 тестов workspace проходят без ошибок.
+- **Tests:** Все 260 unit-тестов workspace (`4` `rusty-animation`, `174` `rusty-compositor`, `15` `rusty-files`, `3` `rusty-ipc`, `43` `rusty-services`, `5` `rusty-settings`, `5` `rusty-shell`, `4` `rusty-updater`, `7` `rusty-wm`).
+- **Risks:** Нет.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

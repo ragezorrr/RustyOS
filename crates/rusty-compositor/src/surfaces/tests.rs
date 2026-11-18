@@ -286,6 +286,25 @@ fn updates_glyph_rasterizes_cleanly_with_and_without_badge() {
 }
 
 #[test]
+fn ethernet_glyph_rasterizes_cleanly() {
+    let white = [245, 240, 255, 255];
+    let mut non_zero = 0_usize;
+    for py in 0..16 {
+        for px in 0..16 {
+            let p = sample_ui_glyph_pixel(px, py, 16, UiGlyphKind::Ethernet, white);
+            if p[3] > 24 {
+                non_zero += 1;
+            }
+        }
+    }
+    assert!(non_zero >= 18, "Ethernet glyph too sparse: {non_zero}");
+    assert_eq!(
+        sample_ui_glyph_pixel(0, 0, 16, UiGlyphKind::Ethernet, white)[3],
+        0
+    );
+}
+
+#[test]
 fn topbar_wifi_and_battery_glyphs_match_live_state() {
     let white = [245, 240, 255, 255];
 

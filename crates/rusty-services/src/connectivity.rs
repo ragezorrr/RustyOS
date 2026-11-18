@@ -1,16 +1,41 @@
 //! NetworkManager and BlueZ connectivity adapters (`RUSTYOS-011`, `RUSTYOS-027`, `RUSTYOS-052`).
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
 
 use zbus::zvariant::Value;
 
+/// Discovered or saved wireless access point entry (`RUSTYOS-108`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WifiAccessPoint {
+    /// Wireless network SSID.
+    pub ssid: String,
+    /// Signal strength percentage (`0..=100`).
+    pub signal_percent: u8,
+    /// True if the network requires WPA/WPA2/WPA3/WEP authentication.
+    pub secure: bool,
+    /// True if this access point is currently connected.
+    pub connected: bool,
+    /// True if a saved NetworkManager connection profile exists for this SSID (or it is connected).
+    pub known: bool,
+}
+
 /// Network connectivity status.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct NetworkStatus {
     /// True if an active network interface has an IP and is connected.
     pub connected: bool,
+    /// True if a wired Ethernet interface is connected (`RUSTYOS-108`).
+    pub wired_connected: bool,
+    /// Name of the active wired Ethernet interface, if connected (`RUSTYOS-108`).
+    pub wired_interface: Option<String>,
+    /// Human-readable label for the wired Ethernet connection (`RUSTYOS-108`).
+    pub wired_label: Option<String>,
+    /// True if a wireless interface is actively connected to an SSID (`RUSTYOS-108`).
+    pub wifi_connected: bool,
     /// True if the system Wi-Fi radio is enabled (`RUSTYOS-053`).
     pub wifi_enabled: bool,
     /// Name of the primary active interface (e.g., "wlan0", "eth0").
@@ -19,6 +44,8 @@ pub struct NetworkStatus {
     pub wifi_ssid: Option<String>,
     /// Live Wi-Fi signal strength percentage (`0..=100`) when connected over wireless (`RUSTYOS-052`).
     pub wifi_signal_percent: Option<u8>,
+    /// Available and known Wi-Fi networks sorted by connection/known/signal (`RUSTYOS-108`).
+    pub wifi_networks: Vec<WifiAccessPoint>,
     /// Human-readable status label for `TopBar`.
     pub status_label: String,
 }
@@ -27,10 +54,15 @@ impl Default for NetworkStatus {
     fn default() -> Self {
         Self {
             connected: false,
+            wired_connected: false,
+            wired_interface: None,
+            wired_label: None,
+            wifi_connected: false,
             wifi_enabled: false,
             interface: None,
             wifi_ssid: None,
             wifi_signal_percent: None,
+            wifi_networks: Vec::new(),
             status_label: "Disconnected".to_owned(),
         }
     }
@@ -79,6 +111,7 @@ impl NetworkService {
         }
 
         let mut status = NetworkStatus::default();
+        let mut wifi_iface = None;
 
         // Fallback: /sys/class/net operstate + nmcli
         let net_path = Path::new("/sys/class/net");
@@ -92,56 +125,104 @@ impl NetworkService {
                 if let Ok(st) = fs::read_to_string(operstate_file)
                     && st.trim() == "up"
                 {
-                    status.connected = true;
-                    status.interface = Some(dev_name.clone());
                     if dev_name.starts_with('w') {
-                        "Wi-Fi Connected".clone_into(&mut status.status_label);
-                    } else {
-                        "Ethernet Connected".clone_into(&mut status.status_label);
+                        status.wifi_connected = true;
+                        status.wifi_enabled = true;
+                        if wifi_iface.is_none() {
+                            wifi_iface = Some(dev_name.clone());
+                        }
+                    } else if !status.wired_connected {
+                        status.wired_connected = true;
+                        status.wired_interface = Some(dev_name.clone());
+                        status.wired_label = Some(format!("Ethernet ({dev_name})"));
+                    }
+                    if status.interface.is_none() {
+                        status.interface = Some(dev_name);
+                    }
+                    status.connected = true;
+                }
+            }
+        }
+
+        if let Some(iface) = wifi_iface.as_deref()
+            && let Ok(wireless) = fs::read_to_string("/proc/net/wireless")
+        {
+            status.wifi_signal_percent = parse_proc_net_wireless_signal(&wireless, Some(iface));
+        }
+
+        if let Ok(output) = Command::new("nmcli")
+            .args(["-t", "-f", "active,signal,ssid", "dev", "wifi"])
+            .output()
+            && output.status.success()
+        {
+            let text = String::from_utf8_lossy(&output.stdout);
+            for line in text.lines() {
+                if let Some(rest) = line.strip_prefix("yes:")
+                    && let Some((sig_raw, ssid_raw)) = rest.split_once(':')
+                {
+                    status.connected = true;
+                    status.wifi_connected = true;
+                    status.wifi_enabled = true;
+                    if let Ok(sig) = sig_raw.trim().parse::<u8>() {
+                        status.wifi_signal_percent = Some(sig.min(100));
+                    }
+                    let trimmed = ssid_raw.trim();
+                    if !trimmed.is_empty() {
+                        status.wifi_ssid = Some(trimmed.to_owned());
                     }
                     break;
                 }
             }
         }
 
-        if status.connected {
-            let is_wifi_iface = status
-                .interface
-                .as_deref()
-                .is_some_and(|iface| iface.starts_with('w'));
-            if is_wifi_iface {
-                status.wifi_enabled = true;
-                if let Ok(wireless) = fs::read_to_string("/proc/net/wireless") {
-                    status.wifi_signal_percent =
-                        parse_proc_net_wireless_signal(&wireless, status.interface.as_deref());
-                }
-            }
-            if let Ok(output) = Command::new("nmcli")
-                .args(["-t", "-f", "active,signal,ssid", "dev", "wifi"])
-                .output()
-                && output.status.success()
-            {
-                let text = String::from_utf8_lossy(&output.stdout);
-                for line in text.lines() {
-                    if let Some(rest) = line.strip_prefix("yes:")
-                        && let Some((sig_raw, ssid_raw)) = rest.split_once(':')
-                    {
-                        status.wifi_enabled = true;
-                        if let Ok(sig) = sig_raw.trim().parse::<u8>() {
-                            status.wifi_signal_percent = Some(sig.min(100));
-                        }
-                        let trimmed = ssid_raw.trim();
-                        if !trimmed.is_empty() {
-                            status.wifi_ssid = Some(trimmed.to_owned());
-                            status.status_label = format!("Wi-Fi: {trimmed}");
-                        }
-                        break;
-                    }
-                }
-            }
+        if status.wifi_enabled {
+            status.wifi_networks = list_wifi_networks_cached(status.wifi_ssid.as_deref());
         }
 
+        status.status_label = if status.wifi_connected {
+            status.wifi_ssid.as_ref().map_or_else(
+                || "Wi-Fi Connected".to_owned(),
+                |ssid| format!("Wi-Fi: {ssid}"),
+            )
+        } else if status.wired_connected {
+            status
+                .wired_label
+                .clone()
+                .unwrap_or_else(|| "Ethernet Connected".to_owned())
+        } else if status.wifi_enabled {
+            "Wi-Fi: On".to_owned()
+        } else {
+            "Disconnected".to_owned()
+        };
+
         status
+    }
+
+    /// Lists nearby Wi-Fi networks and marks saved profiles (`RUSTYOS-108`).
+    #[must_use]
+    pub fn list_wifi_networks(&self) -> Vec<WifiAccessPoint> {
+        let status = self.query_status();
+        list_wifi_networks_cached(status.wifi_ssid.as_deref())
+    }
+
+    /// Connects to the requested Wi-Fi network via `nmcli` (`RUSTYOS-108`).
+    #[must_use]
+    pub fn connect_wifi(&self, ssid: &str) -> bool {
+        let trimmed = ssid.trim();
+        if trimmed.is_empty() {
+            return false;
+        }
+        let up_saved = Command::new("nmcli")
+            .args(["connection", "up", "id", trimmed])
+            .status()
+            .is_ok_and(|s| s.success());
+        if up_saved {
+            return true;
+        }
+        Command::new("nmcli")
+            .args(["device", "wifi", "connect", trimmed])
+            .status()
+            .is_ok_and(|s| s.success())
     }
 
     /// Enables or disables the system Wi-Fi radio via `NetworkManager` D-Bus or `nmcli` (`RUSTYOS-053`).
@@ -210,10 +291,122 @@ pub const fn wifi_signal_bars(connected: bool, signal_percent: Option<u8>) -> u8
     }
 }
 
-fn query_wireless_signal_dbus(
+/// Parses `nmcli -t -f IN-USE,SSID,SIGNAL,SECURITY dev wifi list` output into sorted [`WifiAccessPoint`] items (`RUSTYOS-108`).
+#[must_use]
+pub fn parse_nmcli_wifi_list(
+    raw: &str,
+    saved_ssids: &[String],
+    active_ssid: Option<&str>,
+) -> Vec<WifiAccessPoint> {
+    let mut by_ssid: HashMap<String, WifiAccessPoint> = HashMap::new();
+    for line in raw.lines() {
+        let Some((in_use_raw, rest)) = line.split_once(':') else {
+            continue;
+        };
+        let Some((rest_ssid_sig, security_raw)) = rest.rsplit_once(':') else {
+            continue;
+        };
+        let Some((ssid_raw, signal_raw)) = rest_ssid_sig.rsplit_once(':') else {
+            continue;
+        };
+        let ssid = ssid_raw.replace("\\:", ":").trim().to_owned();
+        if ssid.is_empty() {
+            continue;
+        }
+        let signal_percent = signal_raw.trim().parse::<u8>().unwrap_or(0).min(100);
+        let sec_trim = security_raw.trim();
+        let secure = !sec_trim.is_empty() && sec_trim != "--";
+        let connected =
+            in_use_raw.trim() == "*" || active_ssid.is_some_and(|active| active == ssid);
+        let known = connected || saved_ssids.iter().any(|s| s == &ssid);
+
+        by_ssid
+            .entry(ssid.clone())
+            .and_modify(|existing| {
+                existing.connected |= connected;
+                existing.known |= known;
+                existing.secure |= secure;
+                if signal_percent > existing.signal_percent {
+                    existing.signal_percent = signal_percent;
+                }
+            })
+            .or_insert(WifiAccessPoint {
+                ssid,
+                signal_percent,
+                secure,
+                connected,
+                known,
+            });
+    }
+
+    let mut list: Vec<WifiAccessPoint> = by_ssid.into_values().collect();
+    list.sort_by(|a, b| {
+        b.connected
+            .cmp(&a.connected)
+            .then_with(|| b.known.cmp(&a.known))
+            .then_with(|| b.signal_percent.cmp(&a.signal_percent))
+            .then_with(|| {
+                a.ssid
+                    .to_ascii_lowercase()
+                    .cmp(&b.ssid.to_ascii_lowercase())
+            })
+    });
+    list
+}
+
+fn query_saved_wifi_ssids_nmcli() -> Vec<String> {
+    let Ok(output) = Command::new("nmcli")
+        .args(["-t", "-f", "NAME,TYPE", "connection", "show"])
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    text.lines()
+        .filter_map(|line| {
+            let (name, conn_type) = line.rsplit_once(':')?;
+            if conn_type.trim() == "802-11-wireless" {
+                let clean = name.replace("\\:", ":").trim().to_owned();
+                (!clean.is_empty()).then_some(clean)
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn list_wifi_networks_cached(active_ssid: Option<&str>) -> Vec<WifiAccessPoint> {
+    let Ok(output) = Command::new("nmcli")
+        .args([
+            "-t",
+            "-f",
+            "IN-USE,SSID,SIGNAL,SECURITY",
+            "dev",
+            "wifi",
+            "list",
+            "--rescan",
+            "no",
+        ])
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    let saved = query_saved_wifi_ssids_nmcli();
+    let raw = String::from_utf8_lossy(&output.stdout);
+    parse_nmcli_wifi_list(&raw, &saved, active_ssid)
+}
+
+fn query_active_device_signal_dbus(
     conn: &zbus::blocking::Connection,
     ac_props: &zbus::blocking::fdo::PropertiesProxy<'_>,
     ac_iface: &zbus::names::InterfaceName<'_>,
+    is_wifi: bool,
 ) -> (Option<String>, Option<u8>) {
     let Ok(devs_val) = ac_props.get(ac_iface.clone(), "Devices") else {
         return (None, None);
@@ -226,16 +419,6 @@ fn query_wireless_signal_dbus(
     };
     let Ok(dev_iface) =
         zbus::names::InterfaceName::from_static_str("org.freedesktop.NetworkManager.Device")
-    else {
-        return (None, None);
-    };
-    let Ok(wifi_iface) = zbus::names::InterfaceName::from_static_str(
-        "org.freedesktop.NetworkManager.Device.Wireless",
-    ) else {
-        return (None, None);
-    };
-    let Ok(access_point_iface) =
-        zbus::names::InterfaceName::from_static_str("org.freedesktop.NetworkManager.AccessPoint")
     else {
         return (None, None);
     };
@@ -255,6 +438,19 @@ fn query_wireless_signal_dbus(
             None
         }
     });
+    if !is_wifi {
+        return (iface_name, None);
+    }
+    let Ok(wifi_iface) = zbus::names::InterfaceName::from_static_str(
+        "org.freedesktop.NetworkManager.Device.Wireless",
+    ) else {
+        return (iface_name, None);
+    };
+    let Ok(access_point_iface) =
+        zbus::names::InterfaceName::from_static_str("org.freedesktop.NetworkManager.AccessPoint")
+    else {
+        return (iface_name, None);
+    };
     let Ok(access_point_val) = dev_props.get(wifi_iface, "ActiveAccessPoint") else {
         return (iface_name, None);
     };
@@ -309,8 +505,19 @@ fn query_network_via_dbus() -> Option<NetworkStatus> {
     );
     // NetworkManager states >= 50 correspond to ConnectedLocal / ConnectedSite / ConnectedGlobal.
     if nm_state < 50 {
+        let wifi_networks = if wireless_enabled {
+            list_wifi_networks_cached(None)
+        } else {
+            Vec::new()
+        };
         return Some(NetworkStatus {
             wifi_enabled: wireless_enabled,
+            wifi_networks,
+            status_label: if wireless_enabled {
+                "Wi-Fi: On".to_owned()
+            } else {
+                "Disconnected".to_owned()
+            },
             ..NetworkStatus::default()
         });
     }
@@ -340,10 +547,8 @@ fn query_network_via_dbus() -> Option<NetworkStatus> {
         {
             active_id = Some(id_str.as_str().to_owned());
         }
-        if is_wifi {
-            (active_iface, wifi_signal_percent) =
-                query_wireless_signal_dbus(&conn, &ac_props, &ac_iface);
-        }
+        (active_iface, wifi_signal_percent) =
+            query_active_device_signal_dbus(&conn, &ac_props, &ac_iface, is_wifi);
     }
     if is_wifi
         && wifi_signal_percent.is_none()
@@ -359,6 +564,17 @@ fn query_network_via_dbus() -> Option<NetworkStatus> {
         wifi_signal_percent,
     );
     status.wifi_enabled = wireless_enabled || status.wifi_ssid.is_some();
+    if status.wifi_enabled {
+        status.wifi_networks = list_wifi_networks_cached(status.wifi_ssid.as_deref());
+        // If Ethernet is primary while a secondary Wi-Fi interface is also connected, record it too.
+        if !status.wifi_connected
+            && let Some(active_ap) = status.wifi_networks.iter().find(|ap| ap.connected)
+        {
+            status.wifi_connected = true;
+            status.wifi_ssid = Some(active_ap.ssid.clone());
+            status.wifi_signal_percent = Some(active_ap.signal_percent);
+        }
+    }
     Some(status)
 }
 
@@ -401,6 +617,7 @@ pub fn format_nm_network_status_with_signal(
 ) -> NetworkStatus {
     let clean_id = active_id.filter(|s| !s.trim().is_empty());
     let is_wifi = conn_type.contains("wireless") || conn_type.contains("wifi");
+    let is_wired = !is_wifi && !conn_type.trim().is_empty();
     let status_label = match (&clean_id, is_wifi) {
         (Some(name), true) => format!("Wi-Fi: {name}"),
         (Some(name), false) => name.clone(),
@@ -409,6 +626,18 @@ pub fn format_nm_network_status_with_signal(
     };
     NetworkStatus {
         connected: true,
+        wired_connected: is_wired,
+        wired_interface: if is_wired { interface.clone() } else { None },
+        wired_label: if is_wired {
+            Some(
+                clean_id
+                    .clone()
+                    .unwrap_or_else(|| "Ethernet Connected".to_owned()),
+            )
+        } else {
+            None
+        },
+        wifi_connected: is_wifi,
         wifi_enabled: is_wifi,
         interface,
         wifi_ssid: if is_wifi { clean_id } else { None },
@@ -417,6 +646,7 @@ pub fn format_nm_network_status_with_signal(
         } else {
             None
         },
+        wifi_networks: Vec::new(),
         status_label,
     }
 }

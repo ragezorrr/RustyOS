@@ -314,6 +314,20 @@ fn build_chrome_shapes(
             None,
         );
     }
+    if top_telemetry.wifi_open {
+        push_rounded_glass_box(
+            &mut out,
+            shape_cache,
+            renderer,
+            Rectangle::new(
+                Point::from((right_layout.wifi_x - 4, TOP_BAR_ITEM_Y)),
+                Size::from((28, TOP_BAR_ITEM_H)),
+            ),
+            6,
+            [255, 255, 255, 42],
+            None,
+        );
+    }
     if top_telemetry.updates_open
         && let Some(ux) = right_layout.updates_x
     {

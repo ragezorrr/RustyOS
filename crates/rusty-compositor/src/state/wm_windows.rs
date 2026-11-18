@@ -228,6 +228,7 @@ impl RustyCompositorState {
         self.close_launcher();
         self.close_quick_settings();
         self.close_updates_popover();
+        self.close_wifi_popover();
         self.close_overview();
 
         let len = ordered.len();
