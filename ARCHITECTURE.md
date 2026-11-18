@@ -98,13 +98,20 @@ Event loop не должен блокироваться тяжёлыми опе�
 ### Системные приложения (`apps/rusty-files`, `apps/rusty-settings`, `apps/rusty-updater`)
 
 - Самостоятельные Wayland CSD-клиенты на базе `smithay-client-toolkit` и
-  `fontdue` со сквозной синхронизацией темы `Light` / `Dark`;
-- `rusty-files`: full-bleed/полупрозрачный sidebar, Icons/List/Columns/Gallery,
-  вкладки, clickable Path Bar, Quick Look, Get Info, Copy/Move, Trash, теги и Liquid Glass поповеры;
+  `fontdue` в едином эталонном стиле окон (`14 px` скругления и тень
+  `WINDOW_RADIUS = 14`, единые `14 px` traffic lights `#EE5A6A`/`#F4B63F`/`#3CC68A`
+  в `(14/36/58, 13)`, обводка до угловой маски и сквозная синхронизация темы
+  `Light` / `Dark` / `Auto`), запускаемые композитором с приоритетом `exe_dir`
+  над `PATH` (`launcher.rs`):
+- `rusty-files`: плоский edge-to-edge sidebar (`#ECEDF1`/`#262628`, активный пункт `r = 10` `#D9DADD`/`#3E3E41`),
+  бесшовные капсулы тулбара/вкладок без рамок, Icons/List/Columns/Gallery,
+  clickable Path Bar, Quick Look, Get Info, Copy/Move, Trash, теги и Liquid Glass поповеры;
 - `rusty-settings`: отдельное окно настроек (`882×600`, `org.rustyos.Settings`) с
-  плоским непрозрачным сайдбаром (`#ECEDF1`/`#262628`), карточками без рамок, скроллингом,
-  выбором темы (`Light`/`Dark`/`Auto`) и живой отправкой `v1|RELOAD_CONFIG` в композитор;
-- `rusty-updater`: окно *Software Update* со списком всех обновлений
+  плоским непрозрачным сайдбаром (`#ECEDF1`/`#262628`), карточками `#FFFFFF`/`#2C2C2D` (`r = 12`)
+  на фоне `#F5F6FA`/`#1C1C1D` без рамок, скроллингом, выбором темы (`Light`/`Dark`/`Auto`)
+  и живой отправкой `v1|RELOAD_CONFIG` в композитор;
+- `rusty-updater`: окно *Software Update* (`740×560`, шапка `42 px`) на фоне `#F5F6FA`/`#1C1C1D`
+  с карточками (`r = 12`) и пилюлями (`r = 10`) без рамок, списком обновлений
   Arch Linux и RustyOS (`checkupdates`), потоковым прогрессом/логом и
   запуском `pacman` через валидируемый Polkit-хелпер `rustyos-update-helper`.
 
@@ -142,7 +149,7 @@ RustyOS/
 ├── scripts/
 │   └── install.sh
 └── docs/
-    ├── adr/                   # ADR-0001 .. ADR-0055
+    ├── adr/                   # ADR-0001 .. ADR-0057
     ├── DEVELOPMENT_ENVIRONMENT.md
     ├── GETTING_STARTED.md
     └── HARDWARE_MATRIX.md
@@ -199,6 +206,10 @@ RustyOS/
   - Клиентский стандарт Liquid Glass Popover (`apps/rusty-files/src/render/popup.rs`): `MENU_POPOVER_RADIUS = 16`, инсетные плавающие пилюли ховера `HOVER_PILL_RADIUS = 8`, `HOVER_PILL_INSET_H = 6`, многостадийная SDF-тень, направленный внутренний `1 px` hairline (верх `100%`, низ `35%`), колонка шорткатов (ADR-0043, D-051, ADR-0053).
   - Унифицированный GPU-шейдер Liquid Glass и CPU-fallback (`crates/rusty-compositor/src/surfaces/liquid_glass.rs`, `sdf.rs`): `LIQUID_GLASS_FRAG` с кубическим суперэллипсом (`cornerExtent = 1.5*r`), 14 px линзой (`ior = 1.7`) и 3-слойным направленным `uRim` для `GlassPanelStyle::{Dock, Popover, ControlModule}` + `LiquidGlassPipeline::invalidate_all()` при смене темы/обоев (ADR-0052, ADR-0053).
   - First-party Wayland-протокол Liquid Glass `rustyos_liquid_glass_v1`: серверный менеджер `crates/rusty-compositor/src/state/wayland_handlers/liquid_glass.rs`, композиторная отрисовка в `frame_composer.rs` (`push_window_liquid_glass_elements`), клиентская интеграция в `apps/rusty-files` (`liquid_glass.rs`, `wayland.rs`) (ADR-0048, D-056).
+- **Эталонный стиль системных CSD-окон (`ADR-0055`, `ADR-0057`):**
+  - Единые константы окон и теней (`crates/rusty-compositor/src/shell_render/tokens.rs`, `apps/rusty-{settings,files,updater}/src/layout.rs`): `WINDOW_RADIUS = 14`, `WINDOW_CORNER_RADIUS = 14`, `1 px` внешний контур (`[0, 0, 0, 24]` Light / `[255, 255, 255, 22]` Dark) строго **до** угловой маски (`apply_window_corner_mask` / `clip_rounded_corners`).
+  - Единые `14 px` traffic lights (`Rect(14/36/58, 13, 14, 14)`, центры `(21/43/65, 20)`, `r = 7.0`, `#EE5A6A` / `#F4B63F` / `#3CC68A`, без квадратной рамки ореола, с hover-глифами).
+  - Сайдбар `#ECEDF1`/`#262628`, активный пункт `r = 10` (`#D9DADD`/`#3E3E41`), холст `#F5F6FA`/`#1C1C1D`, карточки (`CARD_CORNER_RADIUS = 12`, `#FFFFFF`/`#2C2C2D`) и капсулы тулбара/фильтров без серых рамок.
 - **Нетривиальные сигнатуры и lint-правила:**
   - `KeyboardHandle::change_repeat_info(&self, rate: i32, delay: i32)` (порядок `(rate, delay)`, обратный к `seat.add_keyboard(xkb, delay, rate)`).
   - `set_output_rotation(id, rot, use_winit_fbo_flip)`: `use_winit_fbo_flip = name.eq_ignore_ascii_case("winit-0")` (`true` для Winit FBO, `false` для DRM/KMS).

@@ -27,9 +27,14 @@ name: ui-ux-design
     client surfaces) use GPU `LiquidGlassElement` (`compute_glass_material`) with matching CPU
     `UiShapeCache::glass_panel_element` fallback (`cutefish_rim_alpha`).
   - Transparent `TopBar` with no opaque backing box under right status icons or placeholder block
-    behind the logo; standalone `System Settings` (`apps/rusty-settings`) uses a flat cool-grey
-    sidebar (`#ECEDF1` Light / `#262628` Dark) without Liquid Glass blur and never dims `TopBar`/`Dock`.
-  - Floating window chrome uses rounded top/bottom corners (`WINDOW_RADIUS = 20`) and Light/Dark
-    adaptive SSD frames (`ssd_frame_colors`), with clean toolbars and zero debug controls in status bars.
+    behind the logo.
+  - **Reference Window Style (`DESIGN.md` §6, `§12.3`, `ADR-0057`):** all system CSD/SSD windows
+    (`rusty-settings`, `rusty-files`, `rusty-updater`, and `WindowShadowPipeline`) share
+    `WINDOW_RADIUS = 14` / `WINDOW_CORNER_RADIUS = 14`, outer `1 px` border (`[0,0,0,24]` Light /
+    `[255,255,255,22]` Dark) drawn **before** the corner mask, and unified `14 px` traffic lights
+    (`#EE5A6A`/`#F4B63F`/`#3CC68A` at `Rect(14/36/58, 13, 14, 14)`, no box-stroke ring). Sidebars
+    use flat `#ECEDF1` Light / `#262628` Dark (zero backdrop blur) with `r = 10` `#D9DADD`/`#3E3E41`
+    active pills; content canvases use `#F5F6FA` / `#1C1C1D` with borderless `r = 12` `#FFFFFF`/`#2C2C2D`
+    cards and borderless toolbar/filter capsules, clean status bars, and never dim `TopBar`/`Dock`.
 - After UI changes, capture a live `--winit` screenshot in `scratch/` and inspect the PNG with
   `read_file` across Light and Dark modes (without mutating persistent `~/.config/rustyos/config.toml`).

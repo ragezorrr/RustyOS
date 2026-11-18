@@ -116,7 +116,7 @@ Rules:
 - Provide opaque fallbacks when transparency is unavailable or `reduce_transparency = true`.
 - Consider GPU and compositor performance (damage-gated Dual-Kawase FBO caching).
 
-Not every component needs glass effects — utility applications such as standalone `System Settings` (`apps/rusty-settings`) intentionally pair a flat opaque grey sidebar (`#ECEDF1` Light / `#262628` Dark) with a clean content canvas (`#F5F6FA` Light / `#1C1C1D` Dark) without backdrop blur.
+Not every component needs glass effects — desktop application windows (`apps/rusty-settings`, `apps/rusty-files`, `apps/rusty-updater`, and future CSD utilities) intentionally use the opaque **Reference Window Style** (flat cool-grey sidebar `#ECEDF1` Light / `#262628` Dark without backdrop blur, clean page canvas `#F5F6FA` Light / `#1C1C1D` Dark, and borderless cards/pills `#FFFFFF` / `#2C2C2D`), reserving `Liquid Glass` for shell overlays (`Dock`, `Control Center`, `Spotlight`, `Popovers`, `Notifications`, `OSD`).
 
 ### 4.3 Geometry
 
@@ -154,6 +154,13 @@ background = "#F5F6F8"
 surface = "#FFFFFF"
 surface_elevated = "#F5F6F8"
 surface_overlay = "#EBECEF"
+sidebar_bg = "#ECEDF1"
+sidebar_active = "#D9DADD"
+sidebar_divider = "#DADCE2"
+page_bg = "#F5F6FA"
+card_bg = "#FFFFFF"
+pill_bg = "#F2F3F7"
+window_border = "#00000018"
 
 accent = "#007AFF"
 accent_hover = "#1A88FF"
@@ -170,6 +177,13 @@ background = "#141518"
 surface = "#1E1E21"
 surface_elevated = "#26262A"
 surface_overlay = "#303036"
+sidebar_bg = "#262628"
+sidebar_active = "#3E3E41"
+sidebar_divider = "#36363A"
+page_bg = "#1C1C1D"
+card_bg = "#2C2C2D"
+pill_bg = "#2C2C2E"
+window_border = "#FFFFFF16"
 
 accent = "#0A84FF"
 accent_hover = "#409CFF"
@@ -185,17 +199,23 @@ border = "#FFFFFF1F"
 danger = "#E56B75"
 success = "#30D158"
 warning = "#E8C477"
+traffic_close = "#EE5A6A"
+traffic_minimize = "#F4B63F"
+traffic_maximize = "#3CC68A"
 ```
 
 ### 5.2 Radius
 
 ```toml
 [radius]
-small = 8      # controls, list rows
-medium = 12     # cards, buttons
-large = 20      # windows, menus, popovers, control-center tiles
-xlarge = 26     # Spotlight, large sheets
-pill = 999      # Dock capsule, toggles, menu-bar pills
+small = 8        # controls, list rows
+sidebar_row = 10 # active sidebar item pill, filter capsules
+medium = 12      # borderless group cards (CARD_CORNER_RADIUS = 12), buttons
+window = 14      # CSD & SSD windows, WindowShadowPipeline (WINDOW_CORNER_RADIUS / WINDOW_RADIUS = 14)
+popover = 16     # context menus, dropdown popovers (MENU_POPOVER_RADIUS = 16)
+large = 20       # Control Center tiles, notifications
+xlarge = 26      # Spotlight, large sheets
+pill = 999       # Dock capsule, Control Center sliders, search capsules, toggles
 ```
 
 ### 5.3 Spacing
@@ -228,14 +248,15 @@ Do not introduce arbitrary colors, spacing values or radii when an existing toke
 
 All system components must follow the same visual language.
 
-### Windows
+### Windows (Reference Window Style)
 
-- Consistent titlebar geometry.
-- Clear active and inactive states.
-- Predictable window controls.
-- Subtle elevation.
-- Consistent rounded corners.
-- Smooth but responsive transitions.
+Every system application window (`rusty-settings`, `rusty-files`, `rusty-updater`, and new CSD utilities) follows one unified contract (`ADR-0055`, `ADR-0057`):
+
+- **Corner Radius & Hairline Contour (`14 px`):** `WINDOW_CORNER_RADIUS = 14` on CSD clients and `WINDOW_RADIUS = 14` in compositor `SSD` & `WindowShadowPipeline` drop shadows. Draw the `1 px` outer border (`[0, 0, 0, 24]` Light / `[255, 255, 255, 22]` Dark) **before** applying the anti-aliased corner mask (`apply_window_corner_mask` / `clip_rounded_corners`) so rounded corners never darken unevenly.
+- **Traffic Lights (`14 px`, step `22 px`):** `Rect(14, 13, 14, 14)`, `Rect(36, 13, 14, 14)`, `Rect(58, 13, 14, 14)` (centers `(21.0, 20.0)`, `(43.0, 20.0)`, `(65.0, 20.0)`, `r = 7.0`) in `#EE5A6A` / `#F4B63F` / `#3CC68A`, rendered as pure anti-aliased circles without box-stroke rings and revealing `×`, `−`, `+` (`[0, 0, 0, 150]`) on group hover.
+- **Sidebar & Navigation:** flat cool-grey sidebar (`#ECEDF1` Light / `#262628` Dark) separated by a `1 px` right divider (`#DADCE2` / `#36363A`), neutral active item pill (`r = 10`, `#D9DADD` / `#3E3E41`), and borderless `Search` capsule (`r = 14`, accent focus ring only when active).
+- **Page Canvas, Borderless Cards & Capsules:** `#F5F6FA` (Light) / `#1C1C1D` (Dark) page canvas, borderless group cards (`CARD_CORNER_RADIUS = 12`, `#FFFFFF` / `#2C2C2D`, zero card border strokes) with `1 px` internal row dividers, and borderless toolbar/filter/action capsules (`#F2F3F7` / `#2C2C2E`).
+- **Scrolling & Live Theme Sync:** content and sidebar clip strictly below the header (`y >= HEADER_HEIGHT`) with proportional `4 px` (`r = 2`) scrollbars and live `config.toml` mtime + `v1|RELOAD_CONFIG` theme synchronization across compositor and clients.
 
 ### Dock
 
