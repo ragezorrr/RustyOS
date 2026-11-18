@@ -57,12 +57,12 @@ pub enum AppShortcutAction {
     ZoomReset,
 }
 
-/// Profile-resolved `TopBar` dropdown entry with owned or static label text (`RUSTYOS-068`).
+/// Profile-resolved `TopBar` dropdown entry with owned or static label text (`RUSTYOS-068`, `RUSTYOS-107`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResolvedTopBarMenuItem {
     Item {
         label: Cow<'static, str>,
-        icon: UiGlyphKind,
+        icon: Option<UiGlyphKind>,
         shortcut: Option<&'static str>,
         action: TopBarMenuAction,
     },
@@ -362,7 +362,7 @@ fn title_case_segment(seg: &str) -> String {
 
 const fn item(
     label: &'static str,
-    icon: UiGlyphKind,
+    icon: Option<UiGlyphKind>,
     shortcut: Option<&'static str>,
     action: TopBarMenuAction,
 ) -> ResolvedTopBarMenuItem {
@@ -386,23 +386,23 @@ fn build_active_app_menu(
     let mut entries = vec![
         ResolvedTopBarMenuItem::Item {
             label: Cow::Owned(format!("About {app}")),
-            icon: UiGlyphKind::Info,
+            icon: None,
             shortcut: None,
             action: TopBarMenuAction::AboutActiveApp,
         },
         ResolvedTopBarMenuItem::Separator,
         item(
             "System Settings...",
-            UiGlyphKind::ControlCenter,
-            Some("Super+,"),
+            Some(UiGlyphKind::ControlCenter),
+            Some("⌘,"),
             TopBarMenuAction::OpenSettings,
         ),
     ];
     if matches!(profile, TopBarAppProfile::Files) {
         entries.push(item(
             "Empty Trash...",
-            UiGlyphKind::Trash,
-            None,
+            Some(UiGlyphKind::Trash),
+            Some("⇧⌘⌫"),
             TopBarMenuAction::EmptyTrash,
         ));
     }
@@ -410,20 +410,20 @@ fn build_active_app_menu(
         ResolvedTopBarMenuItem::Separator,
         ResolvedTopBarMenuItem::Item {
             label: Cow::Owned(format!("Minimize {app}")),
-            icon: UiGlyphKind::WindowMin,
-            shortcut: None,
+            icon: None,
+            shortcut: Some("⌘H"),
             action: TopBarMenuAction::MinimizeFocused,
         },
         ResolvedTopBarMenuItem::Item {
             label: Cow::Owned(format!("Quit {app}")),
-            icon: UiGlyphKind::Close,
-            shortcut: None,
+            icon: None,
+            shortcut: Some("⌘Q"),
             action: TopBarMenuAction::QuitActiveApp,
         },
         ResolvedTopBarMenuItem::Item {
             label: Cow::Owned(format!("Force Quit {app}")),
-            icon: UiGlyphKind::Close,
-            shortcut: None,
+            icon: None,
+            shortcut: Some("⌥⌘Q"),
             action: TopBarMenuAction::ForceQuitActiveApp,
         },
     ]);
@@ -447,40 +447,40 @@ fn build_browser_file_menu() -> Vec<ResolvedTopBarMenuItem> {
     vec![
         item(
             "New Tab",
-            UiGlyphKind::WindowMax,
-            Some("Ctrl+T"),
+            None,
+            Some("⌃T"),
             TopBarMenuAction::AppShortcut(AppShortcutAction::NewTab),
         ),
         item(
             "New Window",
-            UiGlyphKind::LayoutSplit,
-            Some("Ctrl+N"),
+            None,
+            Some("⌃N"),
             TopBarMenuAction::AppShortcut(AppShortcutAction::NewWindow),
         ),
         ResolvedTopBarMenuItem::Separator,
         item(
             "Open Location...",
-            UiGlyphKind::Search,
-            Some("Ctrl+L"),
+            None,
+            Some("⌃L"),
             TopBarMenuAction::AppShortcut(AppShortcutAction::OpenLocation),
         ),
         item(
             "Save Page As...",
-            UiGlyphKind::Folder,
-            Some("Ctrl+S"),
+            None,
+            Some("⌃S"),
             TopBarMenuAction::AppShortcut(AppShortcutAction::SaveFile),
         ),
         ResolvedTopBarMenuItem::Separator,
         item(
             "Close Tab",
-            UiGlyphKind::Close,
-            Some("Ctrl+W"),
+            None,
+            Some("⌃W"),
             TopBarMenuAction::AppShortcut(AppShortcutAction::CloseTab),
         ),
         item(
             "Close Window",
-            UiGlyphKind::Close,
-            Some("Alt+Q"),
+            None,
+            Some("⌥Q"),
             TopBarMenuAction::CloseFocused,
         ),
     ]
@@ -490,27 +490,27 @@ fn build_terminal_file_menu() -> Vec<ResolvedTopBarMenuItem> {
     vec![
         item(
             "New Terminal Window",
-            UiGlyphKind::TerminalPrompt,
+            None,
             None,
             TopBarMenuAction::NewTerminal,
         ),
         item(
             "New Tab",
-            UiGlyphKind::WindowMax,
-            Some("Ctrl+Shift+T"),
+            None,
+            Some("⇧⌃T"),
             TopBarMenuAction::AppShortcut(AppShortcutAction::NewTabShift),
         ),
         ResolvedTopBarMenuItem::Separator,
         item(
             "Close Tab",
-            UiGlyphKind::Close,
-            Some("Ctrl+Shift+W"),
+            None,
+            Some("⇧⌃W"),
             TopBarMenuAction::AppShortcut(AppShortcutAction::CloseTabShift),
         ),
         item(
             "Close Window",
-            UiGlyphKind::Close,
-            Some("Alt+Q"),
+            None,
+            Some("⌥Q"),
             TopBarMenuAction::CloseFocused,
         ),
     ]
@@ -524,20 +524,20 @@ fn build_doc_file_menu(
     let mut entries = vec![
         item(
             new_label,
-            UiGlyphKind::WindowMax,
-            Some("Ctrl+N"),
+            None,
+            Some("⌃N"),
             TopBarMenuAction::AppShortcut(AppShortcutAction::NewWindow),
         ),
         item(
             "Open...",
-            UiGlyphKind::Folder,
-            Some("Ctrl+O"),
+            None,
+            Some("⌃O"),
             TopBarMenuAction::AppShortcut(AppShortcutAction::OpenFile),
         ),
         item(
             "Save",
-            UiGlyphKind::Folder,
-            Some("Ctrl+S"),
+            None,
+            Some("⌃S"),
             TopBarMenuAction::AppShortcut(AppShortcutAction::SaveFile),
         ),
         ResolvedTopBarMenuItem::Separator,
@@ -545,15 +545,15 @@ fn build_doc_file_menu(
     if has_close_tab {
         entries.push(item(
             close_tab_label,
-            UiGlyphKind::Close,
-            Some("Ctrl+W"),
+            None,
+            Some("⌃W"),
             TopBarMenuAction::AppShortcut(AppShortcutAction::CloseTab),
         ));
     }
     entries.push(item(
         "Close Window",
-        UiGlyphKind::Close,
-        Some("Alt+Q"),
+        None,
+        Some("⌥Q"),
         TopBarMenuAction::CloseFocused,
     ));
     entries
@@ -568,21 +568,21 @@ fn build_edit_menu(profile: TopBarAppProfile) -> Vec<ResolvedTopBarMenuItem> {
         TopBarAppProfile::Terminal => vec![
             item(
                 "Copy",
-                UiGlyphKind::Shortcuts,
-                Some("Ctrl+Shift+C"),
+                None,
+                Some("⇧⌃C"),
                 TopBarMenuAction::AppShortcut(AppShortcutAction::CopyShift),
             ),
             item(
                 "Paste",
-                UiGlyphKind::LayoutSplit,
-                Some("Ctrl+Shift+V"),
+                None,
+                Some("⇧⌃V"),
                 TopBarMenuAction::AppShortcut(AppShortcutAction::PasteShift),
             ),
             ResolvedTopBarMenuItem::Separator,
             item(
                 "Find...",
-                UiGlyphKind::Search,
-                Some("Ctrl+Shift+F"),
+                None,
+                Some("⇧⌃F"),
                 TopBarMenuAction::AppShortcut(AppShortcutAction::FindShift),
             ),
         ],
@@ -595,46 +595,46 @@ fn build_edit_menu(profile: TopBarAppProfile) -> Vec<ResolvedTopBarMenuItem> {
             vec![
                 item(
                     "Undo",
-                    UiGlyphKind::ArrowPrev,
-                    Some("Ctrl+Z"),
+                    None,
+                    Some("⌃Z"),
                     TopBarMenuAction::AppShortcut(AppShortcutAction::Undo),
                 ),
                 item(
                     "Redo",
-                    UiGlyphKind::ArrowNext,
-                    Some("Ctrl+Shift+Z"),
+                    None,
+                    Some("⇧⌃Z"),
                     TopBarMenuAction::AppShortcut(AppShortcutAction::Redo),
                 ),
                 ResolvedTopBarMenuItem::Separator,
                 item(
                     "Cut",
-                    UiGlyphKind::Shortcuts,
-                    Some("Ctrl+X"),
+                    None,
+                    Some("⌃X"),
                     TopBarMenuAction::AppShortcut(AppShortcutAction::Cut),
                 ),
                 item(
                     "Copy",
-                    UiGlyphKind::Shortcuts,
-                    Some("Ctrl+C"),
+                    None,
+                    Some("⌃C"),
                     TopBarMenuAction::AppShortcut(AppShortcutAction::Copy),
                 ),
                 item(
                     "Paste",
-                    UiGlyphKind::LayoutSplit,
-                    Some("Ctrl+V"),
+                    None,
+                    Some("⌃V"),
                     TopBarMenuAction::AppShortcut(AppShortcutAction::Paste),
                 ),
                 item(
                     "Select All",
-                    UiGlyphKind::Grid,
-                    Some("Ctrl+A"),
+                    None,
+                    Some("⌃A"),
                     TopBarMenuAction::AppShortcut(AppShortcutAction::SelectAll),
                 ),
                 ResolvedTopBarMenuItem::Separator,
                 item(
                     find_label,
-                    UiGlyphKind::Search,
-                    Some("Ctrl+F"),
+                    None,
+                    Some("⌃F"),
                     TopBarMenuAction::AppShortcut(AppShortcutAction::Find),
                 ),
             ]
@@ -651,87 +651,87 @@ fn build_view_menu(profile: TopBarAppProfile) -> Vec<ResolvedTopBarMenuItem> {
         TopBarAppProfile::Browser => vec![
             item(
                 "Reload Page",
-                UiGlyphKind::Refresh,
-                Some("Ctrl+R"),
+                None,
+                Some("⌃R"),
                 TopBarMenuAction::AppShortcut(AppShortcutAction::ReloadPage),
             ),
             ResolvedTopBarMenuItem::Separator,
             item(
                 "Zoom In",
-                UiGlyphKind::WindowMax,
-                Some("Ctrl++"),
+                None,
+                Some("⌃+"),
                 TopBarMenuAction::AppShortcut(AppShortcutAction::ZoomIn),
             ),
             item(
                 "Zoom Out",
-                UiGlyphKind::WindowMin,
-                Some("Ctrl+-"),
+                None,
+                Some("⌃-"),
                 TopBarMenuAction::AppShortcut(AppShortcutAction::ZoomOut),
             ),
             item(
                 "Actual Size",
-                UiGlyphKind::Refresh,
-                Some("Ctrl+0"),
+                None,
+                Some("⌃0"),
                 TopBarMenuAction::AppShortcut(AppShortcutAction::ZoomReset),
             ),
             ResolvedTopBarMenuItem::Separator,
             item(
                 "Toggle Fullscreen",
-                UiGlyphKind::WindowMax,
-                Some("Alt+F"),
+                None,
+                Some("⌥F"),
                 TopBarMenuAction::ToggleFullscreenFocused,
             ),
         ],
         TopBarAppProfile::Terminal | TopBarAppProfile::Editor => vec![
             item(
                 "Zoom In",
-                UiGlyphKind::WindowMax,
-                Some("Ctrl++"),
+                None,
+                Some("⌃+"),
                 TopBarMenuAction::AppShortcut(AppShortcutAction::ZoomIn),
             ),
             item(
                 "Zoom Out",
-                UiGlyphKind::WindowMin,
-                Some("Ctrl+-"),
+                None,
+                Some("⌃-"),
                 TopBarMenuAction::AppShortcut(AppShortcutAction::ZoomOut),
             ),
             item(
                 "Actual Size",
-                UiGlyphKind::Refresh,
-                Some("Ctrl+0"),
+                None,
+                Some("⌃0"),
                 TopBarMenuAction::AppShortcut(AppShortcutAction::ZoomReset),
             ),
             ResolvedTopBarMenuItem::Separator,
             item(
                 "Toggle Fullscreen",
-                UiGlyphKind::WindowMax,
-                Some("Alt+F"),
+                None,
+                Some("⌥F"),
                 TopBarMenuAction::ToggleFullscreenFocused,
             ),
             item(
                 "Toggle Float / Tile",
-                UiGlyphKind::LayoutSplit,
-                Some("Alt+L"),
+                None,
+                Some("⌥L"),
                 TopBarMenuAction::ToggleLayout,
             ),
         ],
         TopBarAppProfile::GenericApp => vec![
             item(
                 "Toggle Fullscreen",
-                UiGlyphKind::WindowMax,
-                Some("Alt+F"),
+                None,
+                Some("⌥F"),
                 TopBarMenuAction::ToggleFullscreenFocused,
             ),
             item(
                 "Workspace Overview",
-                UiGlyphKind::Grid,
-                Some("Super+Tab"),
+                None,
+                Some("⌘⇥"),
                 TopBarMenuAction::OpenOverview,
             ),
             item(
                 "Toggle Float / Tile",
-                UiGlyphKind::LayoutSplit,
-                Some("Alt+L"),
+                None,
+                Some("⌥L"),
                 TopBarMenuAction::ToggleLayout,
             ),
         ],

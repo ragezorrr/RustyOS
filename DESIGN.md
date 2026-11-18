@@ -212,7 +212,7 @@ small = 8        # controls, list rows
 sidebar_row = 10 # active sidebar item pill, filter capsules
 medium = 12      # borderless group cards (CARD_CORNER_RADIUS = 12), buttons
 window = 14      # CSD & SSD windows, WindowShadowPipeline (WINDOW_CORNER_RADIUS / WINDOW_RADIUS = 14)
-popover = 16     # context menus, dropdown popovers (MENU_POPOVER_RADIUS = 16)
+popover = 13     # context menus, dropdown popovers (MENU_POPOVER_RADIUS = 13, concentric HOVER_PILL_RADIUS = 7 at 5px inset)
 large = 20       # Control Center tiles, notifications
 xlarge = 26      # Spotlight, large sheets
 pill = 999       # Dock capsule, Control Center sliders, search capsules, toggles
@@ -275,13 +275,19 @@ Every system application window (`rusty-settings`, `rusty-files`, `rusty-updater
 - Readable labels and icons.
 - Predictable opening and closing behavior.
 
-### Menus and Popovers
+### Menus and Popovers (Reference Context & Dropdown Menu Style)
 
-- Clear hierarchy.
-- Consistent item heights.
-- Subtle hover states.
-- Keyboard accessibility.
-- Proper positioning and dismissal behavior.
+All compositor dropdowns, desktop context menus, and client application `xdg_popup` surfaces (`top_bar/menus.rs`, `shell_render/context_menu.rs`, `apps/rusty-files/src/render/popup.rs`, `ADR-0058`) share this 1:1 Golden Gate contract:
+
+- **Outer Geometry & Liquid Glass:** `MENU_POPOVER_RADIUS = 13`, `MENU_POPOVER_PAD_Y = 5`, `MENU_ITEM_HEIGHT = 24`, `MENU_SEPARATOR_HEIGHT = 9`, `GlassPanelStyle::Popover`, specular top rim (`100%` top / `35%` bottom directional hairline), and multi-stage soft shadow (`(16, 52)`).
+- **Client `xdg_popup` Compositor Contract:** client applications attach `rustyos_liquid_glass_v1` with `GlassStyle::Popover`, `corner_radius = 13`, and a `wl_region` matching the exact logical menu card `spec.layout.rect` (excluding any CPU shadow padding). When compositor glass is active (`has_compositor_glass == true`), the client SHM buffer stays transparent (`0x00000000` background, zero opaque `popover_bg` fill and zero duplicate CPU shadow), while `frame_composer.rs` (`push_client_popup_elements`) renders the popup **above** the main window and `PrepareBackdrop` pass (never inside `backdrop_list`) over `push_liquid_glass_panel(..., GlassPanelStyle::Popover, 13, Some((16, 52)))`.
+- **Concentric Hover Pill:** `HOVER_PILL_RADIUS = 7` (`13 - 5 ≈ 7`), `HOVER_PILL_INSET_H = 5`, `HOVER_PILL_INSET_V = 1` (`22 px` height inside `24 px` row), filled with `pal.accent_rgba` (`#007AFF` Light / `#0A84FF` Dark, or `#FF3B30` for destructive rows) and pure `#FFFFFF` text, icon, and shortcut on hover.
+- **Two-Mode Left Alignment & Section Consistency:**
+  - Shell menus (`top_bar/menus.rs`, `shell_render/context_menu.rs`): `x = 14 px` directly for iconless rows; `14×14 px` `UiGlyphKind` icon at `(mx + 14, row_y + 5)` + `13 px` label at `mx + 35` when an icon is present, aligned uniformly within each section.
+  - Client popups (`apps/rusty-files/src/render/popup.rs`): plain action rows (`!any_non_swatch_checked && swatch_rgb.is_none()`) start at `x + 14`; tag swatch rows (`swatch_rgb.is_some()`) center their `r = 4.8` circle at `cx = x + 19.0` (left edge `x + 14.2`, flush with `x + 14` text) with label at `x + 32` and active checkmark at `right - 18`; non-swatch checked menus (`SortMenu`) place the checkmark at `x + 14` and label at `x + 28`.
+- **Right Shortcut & Indicator Column:** `12 px` right-aligned macOS symbols (`⌘`, `⌥`, `⌃`, `⇧`, `⌫`, `▲`, `⇥`, `⏎`) at `right - 14`, or `12×12 px` `ChevronRight` / `Check` at `(mx + mw - 24, row_y + 6)`.
+- **Dividers:** `9 px` separator slot height with a `1 px` hairline centered at `y + 4` and `12 px` horizontal inset (`x + 12 .. x + w - 12`).
+- **Behavior:** Clear hierarchy, keyboard accessibility, and proper positioning and dismissal behavior.
 
 ### Controls
 
@@ -463,12 +469,7 @@ palettes (section 5.1); geometry, Liquid Glass clarity, and interactions target 
     full-bleed edge-to-edge sidebar (`#ECEDF1` Light / `#262628` Dark, `r = 10` active row `#D9DADD`/`#3E3E41`) containing the unified `14 px` traffic lights and a subtle `1 px` right divider, borderless toolbar/tab capsules (`< | >`, view switcher, sort, actions, search), and clean status bar without debug theme-toggle buttons.
   - `rusty-updater` (*Software Update*, `RUSTYOS-077`, `RUSTYOS-105`): `Light & Dark` CSD window (`740x560`,
     `WINDOW_CORNER_RADIUS = 14`, `TITLEBAR_HEIGHT = 42`, background `#F5F6FA`/`#1C1C1D`), centered header titlebar with unified `14 px` traffic lights, borderless hero/progress/list cards (`#FFFFFF`/`#2C2C2D`, `r = 12`) with `#007AFF`/`#0A84FF` Software Update squircle, borderless filter pills (`All`, `RustyOS`, `Restart`, `View Log`), live progress bar, expandable `pacman` log view, and Polkit-backed upgrade actions.
-- Menu bar dropdowns and client popups (`MENU_POPOVER_RADIUS = 16–20`, ADR-0043): clear `Popover`
-  Liquid Glass with leading `UiGlyphKind` icons, hairline dividers, right-aligned shortcut column
-  (`⌘`/`⌥`/`⌃`/`⇧`), submenu chevrons (`>`), and a rounded accent pill highlight on hover (`HOVER_PILL_RADIUS = 8`,
-  `HOVER_PILL_INSET_H = 6`, `HOVER_PILL_INSET_V = 1`). All client application `xdg_popup` surfaces (context menus,
-  action popovers, and tag pickers in `rusty-files` and companion apps) must adhere 1:1 to this specification
-  with specular top rim and multi-stage soft shadows, never using flat opaque rectangular boxes or edge-to-edge highlights.
+- Menu bar dropdowns, desktop context menus, and client `xdg_popup` surfaces (`MENU_POPOVER_RADIUS = 13`, `MENU_POPOVER_PAD_Y = 5`, `MENU_ITEM_HEIGHT = 24`, `MENU_SEPARATOR_HEIGHT = 9`, `§6`, `ADR-0043`, `ADR-0058`): clear `GlassPanelStyle::Popover` Liquid Glass (`push_client_popup_elements` / `push_liquid_glass_panel` over `PrepareBackdrop`, scoped via `wl_region = spec.layout.rect` with transparent client SHM buffers when compositor glass is active — never inside `backdrop_list`, never opaque `popover_bg` boxes), two-mode left alignment (`x = 14 px` for iconless rows; `14×14 px` `UiGlyphKind` icon at `x = 14 px` + `13 px` label at `x = 35 px`, or `rusty-files` `14/28/32 px` with swatch dot at `cx = x + 19.0`), `9 px` hairline dividers (`12 px` inset), right-aligned `12 px` shortcut column (`⌘`/`⌥`/`⌃`/`⇧`/`⌫`/`▲`/`⇥`/`⏎`), submenu chevrons (`>`), and concentric accent pill highlight on hover (`HOVER_PILL_RADIUS = 7`, `HOVER_PILL_INSET_H = 5`, `HOVER_PILL_INSET_V = 1`, pure `#FFFFFF` text/icon/shortcut on hover).
 - Spotlight (`ShellOverlayView::Spotlight`): dual-capsule layout matching `27-Golden-Gate-Spotlight-Search-v2.png`
   — a floating rounded search pill (`ControlModule` / dark gloss) separated cleanly above the results
   and category-filter `Popover` card.

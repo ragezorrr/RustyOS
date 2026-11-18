@@ -7,8 +7,8 @@ use crate::shell_render::top_bar_menus::{
 
 use super::panel::compute_top_bar_left_layout_for_profile;
 
-/// Corner radius for floating Menu Bar dropdowns and Notification cards (`DESIGN.md` §12.3–12.6).
-pub const MENU_POPOVER_RADIUS: i32 = 16;
+/// Corner radius for concentric Menu Bar and context menu popovers (`DESIGN.md` §12.3, ADR-0058).
+pub const MENU_POPOVER_RADIUS: i32 = 13;
 
 /// Interactive click target inside the `TopBar` Left Menu area (`RUSTYOS-038`/`049`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -112,15 +112,15 @@ pub enum TopBarMenuAction {
     CloseFocused,
 }
 
-/// Rich menu item entry with leading SDF glyph, optional shortcut label, and separator (`RUSTYOS-051`).
+/// Rich menu item entry with optional leading SDF glyph, optional shortcut label, and separator (`RUSTYOS-051`, `RUSTYOS-107`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TopBarMenuEntry {
     /// Clickable action row.
     Item {
         /// Visible label.
         label: &'static str,
-        /// Leading `4x4` SSAA SDF glyph.
-        icon: crate::surfaces::UiGlyphKind,
+        /// Optional leading `4x4` SSAA SDF glyph (`None` aligns text directly on left inset).
+        icon: Option<crate::surfaces::UiGlyphKind>,
         /// Optional right-aligned real keybinding hint.
         shortcut: Option<&'static str>,
         /// Target compositor / WM action.
@@ -144,72 +144,72 @@ pub enum TopBarMenuPopoverClick {
 pub(crate) const MENU_SYSTEM: &[TopBarMenuEntry] = &[
     TopBarMenuEntry::Item {
         label: "About RustyOS",
-        icon: crate::surfaces::UiGlyphKind::Info,
+        icon: Some(crate::surfaces::UiGlyphKind::Info),
         shortcut: None,
         action: TopBarMenuAction::AboutRustyOs,
     },
     TopBarMenuEntry::Separator,
     TopBarMenuEntry::Item {
         label: "System Settings...",
-        icon: crate::surfaces::UiGlyphKind::ControlCenter,
-        shortcut: Some("Super+,"),
+        icon: Some(crate::surfaces::UiGlyphKind::ControlCenter),
+        shortcut: Some("⌘,"),
         action: TopBarMenuAction::OpenSettings,
     },
     TopBarMenuEntry::Item {
         label: "Check for Updates...",
-        icon: crate::surfaces::UiGlyphKind::Updates { available: false },
+        icon: Some(crate::surfaces::UiGlyphKind::Updates { available: false }),
         shortcut: None,
         action: TopBarMenuAction::CheckForUpdates,
     },
     TopBarMenuEntry::Item {
         label: "Reload Config",
-        icon: crate::surfaces::UiGlyphKind::Refresh,
-        shortcut: Some("Super+Shift+R"),
+        icon: Some(crate::surfaces::UiGlyphKind::Refresh),
+        shortcut: Some("⇧⌘R"),
         action: TopBarMenuAction::ReloadConfig,
     },
     TopBarMenuEntry::Separator,
     TopBarMenuEntry::Item {
         label: "Workspace Overview",
-        icon: crate::surfaces::UiGlyphKind::Grid,
-        shortcut: Some("Super+Tab"),
+        icon: None,
+        shortcut: Some("⌘⇥"),
         action: TopBarMenuAction::OpenOverview,
     },
     TopBarMenuEntry::Item {
         label: "Control Center",
-        icon: crate::surfaces::UiGlyphKind::ControlCenter,
-        shortcut: Some("Alt+S"),
+        icon: None,
+        shortcut: Some("⌥S"),
         action: TopBarMenuAction::OpenControlCenter,
     },
     TopBarMenuEntry::Separator,
     TopBarMenuEntry::Item {
         label: "Lock Screen",
-        icon: crate::surfaces::UiGlyphKind::Lock,
-        shortcut: Some("Super+L"),
+        icon: None,
+        shortcut: Some("⌘L"),
         action: TopBarMenuAction::LockSession,
     },
     TopBarMenuEntry::Item {
         label: "Sleep",
-        icon: crate::surfaces::UiGlyphKind::Moon,
+        icon: None,
         shortcut: None,
         action: TopBarMenuAction::Sleep,
     },
     TopBarMenuEntry::Item {
         label: "Restart...",
-        icon: crate::surfaces::UiGlyphKind::Refresh,
+        icon: None,
         shortcut: None,
         action: TopBarMenuAction::Restart,
     },
     TopBarMenuEntry::Item {
         label: "Shut Down...",
-        icon: crate::surfaces::UiGlyphKind::PowerSymbol,
+        icon: None,
         shortcut: None,
         action: TopBarMenuAction::ShutDown,
     },
     TopBarMenuEntry::Separator,
     TopBarMenuEntry::Item {
         label: "Log Out...",
-        icon: crate::surfaces::UiGlyphKind::Close,
-        shortcut: Some("Super+Shift+Q"),
+        icon: None,
+        shortcut: Some("⇧⌘Q"),
         action: TopBarMenuAction::LogOut,
     },
 ];
@@ -217,34 +217,34 @@ pub(crate) const MENU_SYSTEM: &[TopBarMenuEntry] = &[
 pub(crate) const MENU_ACTIVE_APP: &[TopBarMenuEntry] = &[
     TopBarMenuEntry::Item {
         label: "About Files",
-        icon: crate::surfaces::UiGlyphKind::Info,
+        icon: None,
         shortcut: None,
         action: TopBarMenuAction::AboutRustyOs,
     },
     TopBarMenuEntry::Separator,
     TopBarMenuEntry::Item {
         label: "System Settings...",
-        icon: crate::surfaces::UiGlyphKind::ControlCenter,
-        shortcut: Some("Super+,"),
+        icon: Some(crate::surfaces::UiGlyphKind::ControlCenter),
+        shortcut: Some("⌘,"),
         action: TopBarMenuAction::OpenSettings,
     },
     TopBarMenuEntry::Item {
         label: "Empty Trash...",
-        icon: crate::surfaces::UiGlyphKind::Trash,
-        shortcut: None,
+        icon: Some(crate::surfaces::UiGlyphKind::Trash),
+        shortcut: Some("⇧⌘⌫"),
         action: TopBarMenuAction::EmptyTrash,
     },
     TopBarMenuEntry::Separator,
     TopBarMenuEntry::Item {
         label: "Minimize Window",
-        icon: crate::surfaces::UiGlyphKind::WindowMin,
-        shortcut: Some("Alt+H"),
+        icon: None,
+        shortcut: Some("⌥H"),
         action: TopBarMenuAction::MinimizeFocused,
     },
     TopBarMenuEntry::Item {
         label: "Close Window",
-        icon: crate::surfaces::UiGlyphKind::Close,
-        shortcut: Some("Alt+W"),
+        icon: None,
+        shortcut: Some("⌥W"),
         action: TopBarMenuAction::CloseFocused,
     },
 ];
@@ -252,34 +252,34 @@ pub(crate) const MENU_ACTIVE_APP: &[TopBarMenuEntry] = &[
 pub(crate) const MENU_FILE: &[TopBarMenuEntry] = &[
     TopBarMenuEntry::Item {
         label: "New Files Window",
-        icon: crate::surfaces::UiGlyphKind::Folder,
-        shortcut: None,
+        icon: Some(crate::surfaces::UiGlyphKind::Folder),
+        shortcut: Some("⌘N"),
         action: TopBarMenuAction::OpenFiles,
     },
     TopBarMenuEntry::Item {
         label: "New Desktop Folder",
-        icon: crate::surfaces::UiGlyphKind::Folder,
-        shortcut: None,
+        icon: Some(crate::surfaces::UiGlyphKind::Folder),
+        shortcut: Some("⇧⌘N"),
         action: TopBarMenuAction::NewDesktopFolder,
     },
     TopBarMenuEntry::Item {
         label: "New Terminal",
-        icon: crate::surfaces::UiGlyphKind::TerminalPrompt,
-        shortcut: None,
+        icon: Some(crate::surfaces::UiGlyphKind::TerminalPrompt),
+        shortcut: Some("⌥⏎"),
         action: TopBarMenuAction::NewTerminal,
     },
     TopBarMenuEntry::Separator,
     TopBarMenuEntry::Item {
         label: "Spotlight Search",
-        icon: crate::surfaces::UiGlyphKind::Search,
-        shortcut: Some("Super+Space"),
+        icon: Some(crate::surfaces::UiGlyphKind::Search),
+        shortcut: Some("⌘Space"),
         action: TopBarMenuAction::OpenSpotlight,
     },
     TopBarMenuEntry::Separator,
     TopBarMenuEntry::Item {
         label: "Close Window",
-        icon: crate::surfaces::UiGlyphKind::Close,
-        shortcut: Some("Alt+W"),
+        icon: None,
+        shortcut: Some("⌥W"),
         action: TopBarMenuAction::CloseFocused,
     },
 ];
@@ -287,20 +287,20 @@ pub(crate) const MENU_FILE: &[TopBarMenuEntry] = &[
 pub(crate) const MENU_EDIT: &[TopBarMenuEntry] = &[
     TopBarMenuEntry::Item {
         label: "Toggle Float / Tile",
-        icon: crate::surfaces::UiGlyphKind::LayoutSplit,
-        shortcut: Some("Alt+L"),
+        icon: Some(crate::surfaces::UiGlyphKind::LayoutSplit),
+        shortcut: Some("⌥L"),
         action: TopBarMenuAction::ToggleLayout,
     },
     TopBarMenuEntry::Separator,
     TopBarMenuEntry::Item {
         label: "Toggle Reduced Motion",
-        icon: crate::surfaces::UiGlyphKind::Motion,
-        shortcut: Some("Alt+R"),
+        icon: None,
+        shortcut: Some("⌥R"),
         action: TopBarMenuAction::ToggleReducedMotion,
     },
     TopBarMenuEntry::Item {
         label: "Toggle Opaque Panels",
-        icon: crate::surfaces::UiGlyphKind::Transparency,
+        icon: None,
         shortcut: None,
         action: TopBarMenuAction::ToggleReduceTransparency,
     },
@@ -309,20 +309,20 @@ pub(crate) const MENU_EDIT: &[TopBarMenuEntry] = &[
 pub(crate) const MENU_VIEW: &[TopBarMenuEntry] = &[
     TopBarMenuEntry::Item {
         label: "Workspace Overview",
-        icon: crate::surfaces::UiGlyphKind::Grid,
-        shortcut: Some("Super+Tab"),
+        icon: None,
+        shortcut: Some("⌘⇥"),
         action: TopBarMenuAction::OpenOverview,
     },
     TopBarMenuEntry::Item {
         label: "Control Center",
-        icon: crate::surfaces::UiGlyphKind::ControlCenter,
-        shortcut: Some("Alt+S"),
+        icon: None,
+        shortcut: Some("⌥S"),
         action: TopBarMenuAction::OpenControlCenter,
     },
     TopBarMenuEntry::Separator,
     TopBarMenuEntry::Item {
         label: "Refresh Metrics",
-        icon: crate::surfaces::UiGlyphKind::Refresh,
+        icon: None,
         shortcut: None,
         action: TopBarMenuAction::RefreshMetrics,
     },
@@ -331,57 +331,57 @@ pub(crate) const MENU_VIEW: &[TopBarMenuEntry] = &[
 pub(crate) const MENU_GO: &[TopBarMenuEntry] = &[
     TopBarMenuEntry::Item {
         label: "Recents",
-        icon: crate::surfaces::UiGlyphKind::Search,
-        shortcut: None,
+        icon: Some(crate::surfaces::UiGlyphKind::Search),
+        shortcut: Some("⇧⌘F"),
         action: TopBarMenuAction::GoRecents,
     },
     TopBarMenuEntry::Item {
         label: "Desktop",
-        icon: crate::surfaces::UiGlyphKind::Folder,
-        shortcut: None,
+        icon: Some(crate::surfaces::UiGlyphKind::Folder),
+        shortcut: Some("⇧⌘D"),
         action: TopBarMenuAction::GoDesktop,
     },
     TopBarMenuEntry::Item {
         label: "Documents",
-        icon: crate::surfaces::UiGlyphKind::Folder,
-        shortcut: None,
+        icon: Some(crate::surfaces::UiGlyphKind::Folder),
+        shortcut: Some("⇧⌘O"),
         action: TopBarMenuAction::GoDocuments,
     },
     TopBarMenuEntry::Item {
         label: "Downloads",
-        icon: crate::surfaces::UiGlyphKind::Folder,
-        shortcut: None,
+        icon: Some(crate::surfaces::UiGlyphKind::Folder),
+        shortcut: Some("⌥⌘L"),
         action: TopBarMenuAction::GoDownloads,
     },
     TopBarMenuEntry::Item {
         label: "Home",
-        icon: crate::surfaces::UiGlyphKind::Folder,
-        shortcut: None,
+        icon: Some(crate::surfaces::UiGlyphKind::Folder),
+        shortcut: Some("⇧⌘H"),
         action: TopBarMenuAction::GoHome,
     },
     TopBarMenuEntry::Item {
         label: "Trash",
-        icon: crate::surfaces::UiGlyphKind::Trash,
-        shortcut: None,
+        icon: Some(crate::surfaces::UiGlyphKind::Trash),
+        shortcut: Some("⇧⌘⌫"),
         action: TopBarMenuAction::GoTrash,
     },
     TopBarMenuEntry::Separator,
     TopBarMenuEntry::Item {
         label: "Workspace Overview",
-        icon: crate::surfaces::UiGlyphKind::Grid,
-        shortcut: Some("Super+Tab"),
+        icon: None,
+        shortcut: Some("⌘▲"),
         action: TopBarMenuAction::OpenOverview,
     },
     TopBarMenuEntry::Item {
         label: "Next Workspace",
-        icon: crate::surfaces::UiGlyphKind::ArrowNext,
-        shortcut: None,
+        icon: None,
+        shortcut: Some("⌘]"),
         action: TopBarMenuAction::NextWorkspace,
     },
     TopBarMenuEntry::Item {
         label: "Previous Workspace",
-        icon: crate::surfaces::UiGlyphKind::ArrowPrev,
-        shortcut: None,
+        icon: None,
+        shortcut: Some("⌘["),
         action: TopBarMenuAction::PrevWorkspace,
     },
 ];
@@ -389,34 +389,34 @@ pub(crate) const MENU_GO: &[TopBarMenuEntry] = &[
 pub(crate) const MENU_WINDOW: &[TopBarMenuEntry] = &[
     TopBarMenuEntry::Item {
         label: "Focus Next Window",
-        icon: crate::surfaces::UiGlyphKind::ArrowNext,
-        shortcut: Some("Alt+J"),
+        icon: None,
+        shortcut: Some("⌥J"),
         action: TopBarMenuAction::FocusNextWindow,
     },
     TopBarMenuEntry::Separator,
     TopBarMenuEntry::Item {
         label: "Maximize / Restore",
-        icon: crate::surfaces::UiGlyphKind::WindowMax,
-        shortcut: Some("Alt+M"),
+        icon: None,
+        shortcut: Some("⌥M"),
         action: TopBarMenuAction::ToggleMaximizeFocused,
     },
     TopBarMenuEntry::Item {
         label: "Minimize Window",
-        icon: crate::surfaces::UiGlyphKind::WindowMin,
-        shortcut: Some("Alt+H"),
+        icon: None,
+        shortcut: Some("⌥H"),
         action: TopBarMenuAction::MinimizeFocused,
     },
     TopBarMenuEntry::Item {
         label: "Toggle Float / Tile",
-        icon: crate::surfaces::UiGlyphKind::LayoutSplit,
-        shortcut: Some("Alt+L"),
+        icon: None,
+        shortcut: Some("⌥L"),
         action: TopBarMenuAction::ToggleLayout,
     },
     TopBarMenuEntry::Separator,
     TopBarMenuEntry::Item {
         label: "Close Window",
-        icon: crate::surfaces::UiGlyphKind::Close,
-        shortcut: Some("Alt+W"),
+        icon: None,
+        shortcut: Some("⌥W"),
         action: TopBarMenuAction::CloseFocused,
     },
 ];
@@ -424,20 +424,20 @@ pub(crate) const MENU_WINDOW: &[TopBarMenuEntry] = &[
 pub(crate) const MENU_HELP: &[TopBarMenuEntry] = &[
     TopBarMenuEntry::Item {
         label: "About RustyOS",
-        icon: crate::surfaces::UiGlyphKind::Info,
+        icon: Some(crate::surfaces::UiGlyphKind::Info),
         shortcut: None,
         action: TopBarMenuAction::AboutRustyOs,
     },
     TopBarMenuEntry::Item {
         label: "Keyboard Shortcuts",
-        icon: crate::surfaces::UiGlyphKind::Shortcuts,
+        icon: Some(crate::surfaces::UiGlyphKind::Shortcuts),
         shortcut: None,
         action: TopBarMenuAction::ShowShortcuts,
     },
     TopBarMenuEntry::Separator,
     TopBarMenuEntry::Item {
         label: "Refresh Metrics",
-        icon: crate::surfaces::UiGlyphKind::Refresh,
+        icon: None,
         shortcut: None,
         action: TopBarMenuAction::RefreshMetrics,
     },
@@ -536,8 +536,8 @@ pub const fn top_bar_menu_items(
     }
 }
 
-pub(crate) const MENU_POPOVER_PAD_Y: i32 = 6;
-pub(crate) const MENU_ITEM_HEIGHT: i32 = 28;
+pub(crate) const MENU_POPOVER_PAD_Y: i32 = 5;
+pub(crate) const MENU_ITEM_HEIGHT: i32 = 24;
 pub(crate) const MENU_SEPARATOR_HEIGHT: i32 = 9;
 
 /// Computes the glass dropdown popover rectangle anchored beneath `menu` (`RUSTYOS-048`/`051`).
@@ -569,23 +569,27 @@ pub fn top_bar_menu_popover_rect_for_profile(
     };
     let entries = resolve_top_bar_menu_entries(profile, active_app_name, menu);
     let mut content_h = 0;
-    let mut pop_w = 256;
+    let mut pop_w = 228;
     for entry in &entries {
         match entry {
             ResolvedTopBarMenuItem::Item {
-                label, shortcut, ..
+                label,
+                icon,
+                shortcut,
+                ..
             } => {
                 content_h += MENU_ITEM_HEIGHT;
+                let left_x = if icon.is_some() { 35 } else { 14 };
                 let label_w = crate::text::measure_ui_text_width(
                     label,
-                    12.0,
+                    13.0,
                     crate::text::FontWeight::Regular,
                 );
                 let shortcut_w = shortcut.map_or(0, |s| {
-                    crate::text::measure_ui_text_width(s, 11.0, crate::text::FontWeight::Regular)
+                    crate::text::measure_ui_text_width(s, 12.0, crate::text::FontWeight::Regular)
                         + 18
                 });
-                pop_w = pop_w.max(34 + label_w + shortcut_w + 22);
+                pop_w = pop_w.max(left_x + label_w + shortcut_w + 18);
             }
             ResolvedTopBarMenuItem::Separator => {
                 content_h += MENU_SEPARATOR_HEIGHT;

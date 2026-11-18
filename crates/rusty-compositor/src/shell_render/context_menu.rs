@@ -103,15 +103,15 @@ pub enum ContextMenuAction {
     OpenSubmenu,
 }
 
-/// Visual and interactive row entry inside a context menu panel (`RUSTYOS-064`).
+/// Visual and interactive row entry inside a context menu panel (`RUSTYOS-064`, `RUSTYOS-107`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ContextMenuEntry {
     /// Interactive action or submenu parent item.
     Item {
         /// Primary menu row title.
         label: String,
-        /// Leading monochrome glyph (`UiGlyphKind`).
-        icon: UiGlyphKind,
+        /// Optional leading monochrome glyph (`UiGlyphKind`); `None` aligns label directly on `x = 14`.
+        icon: Option<UiGlyphKind>,
         /// Optional right-aligned keyboard shortcut or size/meta hint.
         right_hint: Option<String>,
         /// Draws a leading/trailing state checkmark (`✓`) when `true`.
@@ -130,12 +130,27 @@ pub enum ContextMenuEntry {
 }
 
 impl ContextMenuEntry {
-    /// Creates an enabled leaf context menu item.
+    /// Creates an enabled leaf context menu item with a leading icon.
     #[must_use]
     pub fn item(label: impl Into<String>, icon: UiGlyphKind, action: ContextMenuAction) -> Self {
         Self::Item {
             label: label.into(),
-            icon,
+            icon: Some(icon),
+            right_hint: None,
+            checked: false,
+            enabled: true,
+            danger: false,
+            action,
+            submenu: Vec::new(),
+        }
+    }
+
+    /// Creates an enabled leaf context menu item without a leading icon (`x = 14` left inset).
+    #[must_use]
+    pub fn text_item(label: impl Into<String>, action: ContextMenuAction) -> Self {
+        Self::Item {
+            label: label.into(),
+            icon: None,
             right_hint: None,
             checked: false,
             enabled: true,
@@ -154,7 +169,7 @@ impl ContextMenuEntry {
     ) -> Self {
         Self::Item {
             label: label.into(),
-            icon,
+            icon: Some(icon),
             right_hint: None,
             checked: false,
             enabled: !submenu.is_empty(),
@@ -162,6 +177,15 @@ impl ContextMenuEntry {
             action: ContextMenuAction::OpenSubmenu,
             submenu,
         }
+    }
+
+    /// Removes the leading icon so the row label aligns at `x = 14 px`.
+    #[must_use]
+    pub fn without_icon(mut self) -> Self {
+        if let Self::Item { icon, .. } = &mut self {
+            *icon = None;
+        }
+        self
     }
 
     /// Attaches a right-aligned shortcut or detail hint to an [`Self::Item`].
@@ -316,21 +340,23 @@ fn measure_panel_size(entries: &[ContextMenuEntry]) -> (i32, i32) {
         match entry {
             ContextMenuEntry::Item {
                 label,
+                icon,
                 right_hint,
                 checked,
                 submenu,
                 ..
             } => {
                 let shown = truncate_ascii(label, 28);
-                let label_w = crate::text::measure_ui_text_width(&shown, 12.0, FontWeight::Regular);
+                let left_x = if icon.is_some() { 35 } else { 14 };
+                let label_w = crate::text::measure_ui_text_width(&shown, 13.0, FontWeight::Regular);
                 let right_w = if !submenu.is_empty() || *checked {
                     24
                 } else if let Some(hint) = right_hint {
-                    crate::text::measure_ui_text_width(hint, 11.0, FontWeight::Regular) + 18
+                    crate::text::measure_ui_text_width(hint, 12.0, FontWeight::Regular) + 18
                 } else {
                     0
                 };
-                max_w = max_w.max(36 + label_w + 16 + right_w + 14);
+                max_w = max_w.max(left_x + label_w + 18 + right_w + 14);
                 content_h += MENU_ITEM_HEIGHT;
             }
             ContextMenuEntry::Separator => {
@@ -695,6 +721,7 @@ fn render_panel_text(
     for (idx, (entry, row_rect)) in entries.iter().zip(rows).enumerate() {
         let ContextMenuEntry::Item {
             label,
+            icon,
             right_hint,
             enabled,
             danger,
@@ -715,34 +742,134 @@ fn render_panel_text(
             pal.popover_text_primary
         };
         let shown = truncate_ascii(label, 28);
-        if let Some(el) = text_cache.render_label(
-            renderer,
-            &shown,
-            12.0,
-            fg,
-            Point::from((mx + 34, row_rect.loc.y + 6)),
-        ) {
+        let text_x = if icon.is_some() { mx + 35 } else { mx + 14 };
+        let (_, label_h) = text_cache.measure_text(&shown, 13.0);
+        let label_y = row_rect.loc.y + (MENU_ITEM_HEIGHT - label_h) / 2;
+        if let Some(el) =
+            text_cache.render_label(renderer, &shown, 13.0, fg, Point::from((text_x, label_y)))
+        {
             elements.push(el);
         }
         if submenu.is_empty()
             && let Some(hint) = right_hint
         {
-            let (hint_w, _) = text_cache.measure_text(hint, 11.0);
-            let hint_fg = if hovered {
-                [245, 248, 255, 255]
+            let (hint_w, _) = text_cache.measure_text(hint, 12.0);
+            let hint_fg = if !*enabled {
+                pal.popover_text_disabled
+            } else if hovered {
+                [255, 255, 255, 255]
             } else {
                 pal.popover_text_muted
             };
             if let Some(el) = text_cache.render_label(
                 renderer,
                 hint,
-                11.0,
+                12.0,
                 hint_fg,
-                Point::from((mx + mw - 14 - hint_w, row_rect.loc.y + 7)),
+                Point::from((mx + mw - 14 - hint_w, label_y + 1)),
             ) {
                 elements.push(el);
             }
         }
+    }
+}
+
+fn render_panel_row_shapes(
+    shape_cache: &mut crate::surfaces::UiShapeCache,
+    renderer: &mut GlesRenderer,
+    panel_rect: Rectangle<i32, smithay::utils::Physical>,
+    row_y: i32,
+    entry: &ContextMenuEntry,
+    is_selected: bool,
+    out: &mut Vec<CompositorRenderElement>,
+) {
+    let pal = ThemePalette::active();
+    let mx = panel_rect.loc.x;
+    let mw = panel_rect.size.w;
+    let ContextMenuEntry::Item {
+        icon,
+        checked,
+        enabled,
+        danger,
+        submenu,
+        ..
+    } = entry
+    else {
+        out.push(CompositorRenderElement::Solid(make_solid_element(
+            Rectangle::new(Point::from((mx + 12, row_y + 4)), Size::from((mw - 24, 1))),
+            pal.popover_separator,
+        )));
+        return;
+    };
+
+    let hovered = *enabled && is_selected;
+    let fg_tint = if !*enabled {
+        pal.popover_text_disabled
+    } else if hovered {
+        [255, 255, 255, 255]
+    } else if *danger {
+        pal.popover_danger
+    } else {
+        pal.popover_icon
+    };
+    if let Some(glyph) = icon
+        && let Some(el) = shape_cache.ui_glyph_element(
+            renderer,
+            *glyph,
+            14,
+            fg_tint,
+            Point::from((mx + 14, row_y + 5)),
+        )
+    {
+        out.push(CompositorRenderElement::Memory(el));
+    }
+    if !submenu.is_empty() {
+        let chevron_tint = if !*enabled {
+            pal.popover_text_disabled
+        } else if hovered {
+            [255, 255, 255, 255]
+        } else {
+            pal.popover_text_primary
+        };
+        if let Some(el) = shape_cache.ui_glyph_element(
+            renderer,
+            UiGlyphKind::ChevronRight,
+            12,
+            chevron_tint,
+            Point::from((mx + mw - 24, row_y + 6)),
+        ) {
+            out.push(CompositorRenderElement::Memory(el));
+        }
+    } else if *checked
+        && let Some(el) = shape_cache.ui_glyph_element(
+            renderer,
+            UiGlyphKind::Check,
+            12,
+            if hovered {
+                [255, 255, 255, 255]
+            } else if !*enabled {
+                pal.popover_text_disabled
+            } else {
+                pal.accent_rgba
+            },
+            Point::from((mx + mw - 24, row_y + 6)),
+        )
+    {
+        out.push(CompositorRenderElement::Memory(el));
+    }
+    if hovered {
+        push_rounded_glass_box(
+            out,
+            shape_cache,
+            renderer,
+            Rectangle::new(
+                Point::from((mx + 5, row_y + 1)),
+                Size::from((mw - 10, MENU_ITEM_HEIGHT - 2)),
+            ),
+            7,
+            pal.accent_rgba,
+            None,
+        );
     }
 }
 
@@ -758,87 +885,16 @@ fn render_panel_shapes(
     reduce_transparency: bool,
     out: &mut Vec<CompositorRenderElement>,
 ) {
-    let pal = ThemePalette::active();
-    let mx = panel_rect.loc.x;
-    let mw = panel_rect.size.w;
-
     for (idx, (entry, row_rect)) in entries.iter().zip(rows).enumerate() {
-        let row_y = row_rect.loc.y;
-        match entry {
-            ContextMenuEntry::Item {
-                icon,
-                checked,
-                enabled,
-                danger,
-                submenu,
-                ..
-            } => {
-                let hovered = *enabled && selected_row == Some(idx);
-                let icon_tint = if !*enabled {
-                    pal.popover_text_disabled
-                } else if hovered {
-                    [255, 255, 255, 255]
-                } else if *danger {
-                    pal.popover_danger
-                } else {
-                    pal.popover_icon
-                };
-                if let Some(el) = shape_cache.ui_glyph_element(
-                    renderer,
-                    *icon,
-                    14,
-                    icon_tint,
-                    Point::from((mx + 13, row_y + 7)),
-                ) {
-                    out.push(CompositorRenderElement::Memory(el));
-                }
-                if !submenu.is_empty() {
-                    if let Some(el) = shape_cache.ui_glyph_element(
-                        renderer,
-                        UiGlyphKind::ChevronRight,
-                        12,
-                        icon_tint,
-                        Point::from((mx + mw - 22, row_y + 8)),
-                    ) {
-                        out.push(CompositorRenderElement::Memory(el));
-                    }
-                } else if *checked
-                    && let Some(el) = shape_cache.ui_glyph_element(
-                        renderer,
-                        UiGlyphKind::Check,
-                        12,
-                        if hovered {
-                            [255, 255, 255, 255]
-                        } else {
-                            pal.accent_rgba
-                        },
-                        Point::from((mx + mw - 22, row_y + 8)),
-                    )
-                {
-                    out.push(CompositorRenderElement::Memory(el));
-                }
-                if hovered {
-                    push_rounded_glass_box(
-                        out,
-                        shape_cache,
-                        renderer,
-                        Rectangle::new(
-                            Point::from((mx + 6, row_y + 1)),
-                            Size::from((mw - 12, MENU_ITEM_HEIGHT - 2)),
-                        ),
-                        8,
-                        pal.accent_hover_fill,
-                        Some(pal.accent_hover_border),
-                    );
-                }
-            }
-            ContextMenuEntry::Separator => {
-                out.push(CompositorRenderElement::Solid(make_solid_element(
-                    Rectangle::new(Point::from((mx + 12, row_y + 4)), Size::from((mw - 24, 1))),
-                    pal.popover_separator,
-                )));
-            }
-        }
+        render_panel_row_shapes(
+            shape_cache,
+            renderer,
+            panel_rect,
+            row_rect.loc.y,
+            entry,
+            selected_row == Some(idx),
+            out,
+        );
     }
 
     push_liquid_glass_panel(

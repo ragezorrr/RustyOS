@@ -36,5 +36,16 @@ name: ui-ux-design
     use flat `#ECEDF1` Light / `#262628` Dark (zero backdrop blur) with `r = 10` `#D9DADD`/`#3E3E41`
     active pills; content canvases use `#F5F6FA` / `#1C1C1D` with borderless `r = 12` `#FFFFFF`/`#2C2C2D`
     cards and borderless toolbar/filter capsules, clean status bars, and never dim `TopBar`/`Dock`.
+  - **Reference Context & Dropdown Menu Style (`DESIGN.md` §6, `§12.3`, `ADR-0058`):** all shell
+    menus (`top_bar/menus.rs`, `shell_render/context_menu.rs`) and client `xdg_popup` menus
+    (`apps/rusty-files/src/render/popup.rs`, future Wayland apps) share `MENU_POPOVER_RADIUS = 13`,
+    `MENU_POPOVER_PAD_Y = 5`, `MENU_ITEM_HEIGHT = 24`, `MENU_SEPARATOR_HEIGHT = 9`, concentric hover
+    pill (`HOVER_PILL_RADIUS = 7`, `HOVER_PILL_INSET_H = 5`, `HOVER_PILL_INSET_V = 1`, pure `#FFFFFF`
+    hover text/icons/shortcuts), two-mode left alignment (`14 px` without icon, `14 px` icon + `35 px`
+    label in shell; `x + 14` text / `cx = x + 19.0` + `x + 32` swatches / `x + 14` check + `x + 28` text
+    in `rusty-files`), `12 px` right-aligned macOS shortcuts, and `GlassPanelStyle::Popover` (`(16, 52)`
+    shadow). Client `xdg_popup`s must attach `rustyos_liquid_glass_v1` with `wl_region = spec.layout.rect`,
+    keep transparent SHM backgrounds when compositor glass is active, and render in
+    `frame_composer.rs::push_client_popup_elements` above windows and `PrepareBackdrop`.
 - After UI changes, capture a live `--winit` screenshot in `scratch/` and inspect the PNG with
   `read_file` across Light and Dark modes (without mutating persistent `~/.config/rustyos/config.toml`).

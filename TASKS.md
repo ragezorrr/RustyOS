@@ -1859,6 +1859,23 @@ hardware/software context и низкие накладные расходы.
 - **Tests:** Все 256 unit-тестов workspace (`4` `rusty-animation`, `171` `rusty-compositor`, `15` `rusty-files`, `3` `rusty-ipc`, `43` `rusty-services`, `4` `rusty-settings`, `5` `rusty-shell`, `4` `rusty-updater`, `7` `rusty-wm`).
 - **Risks:** Нет.
 
+### RUSTYOS-107 — Унификация контекстных и выпадающих меню под эталон `macOS 27 Golden Gate`
+
+- **Status:** Done
+- **Goal:** Привести выпадающие меню верхней панели, системные контекстные меню и клиентские `xdg_popup` меню `rusty-files` к единой концентрической геометрии (`r = 13` / `r_pill = 7`, `24 px` строки), двухрежимному левому выравниванию и правой колонке шорткатов без изменения `Liquid Glass` шейдера, `Dock` и `Control Center`.
+- **Dependencies:** `RUSTYOS-105`, `RUSTYOS-106`.
+- **Scope:**
+  - `crates/rusty-compositor/src/shell_render/{tokens.rs, mod.rs, overlay_shapes.rs, top_bar/menus.rs}`: `MENU_POPOVER_RADIUS = 13` (для карточек уведомлений сохранён радиус `16`), `MENU_POPOVER_PAD_Y = 5`, `MENU_ITEM_HEIGHT = 24`, `MENU_SEPARATOR_HEIGHT = 9`, `pop_w = 228`, `pub(crate) fn push_liquid_glass_panel`;
+  - `crates/rusty-compositor/src/shell_render/{top_bar_menus.rs, chrome_shapes.rs, text_pass.rs}`: `icon: Option<UiGlyphKind>`, единое выравнивание секций (`x = 14 px` без иконки / `14 px` глиф + `x = 35 px` текст `13 px`), плашка ховера `(mx + 5, row_y + 1, mw - 10, 22)` (`r = 7`) и шорткаты `12 px` (`⌘`/`⌥`/`⇧`/`⌃`/`⌫`/`▲`/`⇥`);
+  - `crates/rusty-compositor/src/{shell_render/context_menu.rs, context_menu/desktop_menu.rs, frame_composer.rs}`: `icon: Option<UiGlyphKind>`, `text_item`, `.without_icon()`, `render_panel_row_shapes`, `r = 7` плашка, шеврон/галочка на `mx + mw - 24`, шорткаты `⇧⌘N`, `⌥⏎`, `⌃▲`, `⌥L`, а также `push_client_popup_elements` / `push_popup_glass_panels` для рендера клиентских `xdg_popup` поверх `PrepareBackdrop`, основных окон и `Dock` (исключены из `backdrop_list`);
+  - `apps/rusty-files/src/{layout.rs, render/popup.rs, wayland.rs}`: `row_h = 24`, `total_h = 10 + ...`, `MENU_POPOVER_RADIUS = 13`, `HOVER_PILL_RADIUS = 7`, `HOVER_PILL_INSET_H = 5`, `wl_region = spec.layout.rect` в `sync_popup_surface`, прозрачный SHM-фон при активном композиторном стекле (`render_popup_surface_pixels_with_glass`), раздельные `any_non_swatch_checked` / `swatch_rgb` (`x + 14` текст, `cx = x + 19.0` + `x + 32` для тегов, `x + 14` чекмарк + `x + 28` для `SortMenu`) и обновлённые unit-тесты;
+  - `DESIGN.md` (`§6 Menus and Popovers`, `§12.3`), `ARCHITECTURE.md` (`§7`), `.agents/skills/ui-ux-design/SKILL.md`, `docs/adr/0058-unified-context-menu-design.md`, `DECISIONS.md` (`D-071`).
+- **Acceptance Criteria:**
+  - Живые `--winit` прогоны (Wayland/X11 smoke и `Light`/`Dark` снимки `Go`, `System`, `Desktop` и клиентского `xdg_popup` `rusty-files`) подтверждают концентрические углы `13/7`, строки `24 px`, двухрежимное выравнивание и отсутствие каких-либо изменений в `liquid_glass.rs`, `sdf.rs`, `dock.rs` и `quick_settings.rs`;
+  - `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings` и все 256 тестов workspace проходят без ошибок.
+- **Tests:** Все 256 unit-тестов workspace (`4` `rusty-animation`, `171` `rusty-compositor`, `15` `rusty-files`, `3` `rusty-ipc`, `43` `rusty-services`, `4` `rusty-settings`, `5` `rusty-shell`, `4` `rusty-updater`, `7` `rusty-wm`).
+- **Risks:** Нет.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

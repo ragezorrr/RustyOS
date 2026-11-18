@@ -148,7 +148,7 @@ pub fn scan_desktop_canvas_items(desktop_dir: &Path) -> Vec<DesktopCanvasItem> {
     items
 }
 
-/// Builds root Desktop context menu entries (`RUSTYOS-064`).
+/// Builds root Desktop context menu entries (`RUSTYOS-064`, `RUSTYOS-107`).
 #[must_use]
 pub fn build_desktop_context_entries(tiling_active: bool) -> Vec<ContextMenuEntry> {
     vec![
@@ -156,7 +156,8 @@ pub fn build_desktop_context_entries(tiling_active: bool) -> Vec<ContextMenuEntr
             "New Folder",
             UiGlyphKind::Plus,
             ContextMenuAction::DesktopNewFolder,
-        ),
+        )
+        .with_hint("⇧⌘N"),
         ContextMenuEntry::item(
             "Open Desktop in Files",
             UiGlyphKind::Folder,
@@ -179,18 +180,19 @@ pub fn build_desktop_context_entries(tiling_active: bool) -> Vec<ContextMenuEntr
             UiGlyphKind::TerminalPrompt,
             ContextMenuAction::DesktopOpenTerminal,
         )
-        .with_hint("Alt+Return"),
+        .with_hint("⌥⏎"),
         ContextMenuEntry::item(
             "Mission Control",
             UiGlyphKind::Grid,
             ContextMenuAction::DesktopMissionControl,
-        ),
+        )
+        .with_hint("⌃▲"),
         ContextMenuEntry::item(
             "Tile Windows",
             UiGlyphKind::LayoutSplit,
             ContextMenuAction::DesktopToggleLayoutMode,
         )
-        .with_hint("Alt+L")
+        .with_hint("⌥L")
         .with_checked(tiling_active),
     ]
 }

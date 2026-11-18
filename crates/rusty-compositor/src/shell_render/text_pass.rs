@@ -385,7 +385,10 @@ pub(super) fn append_chrome_text(
         {
             match entry {
                 ResolvedTopBarMenuItem::Item {
-                    label, shortcut, ..
+                    label,
+                    icon,
+                    shortcut,
+                    ..
                 } => {
                     let hovered = top_telemetry.menu_hover_row == Some(entry_idx);
                     let fg = if hovered {
@@ -393,28 +396,31 @@ pub(super) fn append_chrome_text(
                     } else {
                         pal.popover_text_primary
                     };
+                    let text_x = if icon.is_some() { mx + 35 } else { mx + 14 };
+                    let (_, label_h) = text_cache.measure_text(&label, 13.0);
+                    let label_y = row_y + (MENU_ITEM_HEIGHT - label_h) / 2;
                     if let Some(el) = text_cache.render_label(
                         renderer,
                         &label,
-                        12.0,
+                        13.0,
                         fg,
-                        Point::from((mx + 34, row_y + 6)),
+                        Point::from((text_x, label_y)),
                     ) {
                         elements.push(el);
                     }
                     if let Some(hint) = shortcut {
-                        let (hint_w, _) = text_cache.measure_text(hint, 11.0);
+                        let (hint_w, _) = text_cache.measure_text(hint, 12.0);
                         let hint_fg = if hovered {
-                            [245, 248, 255, 255]
+                            [255, 255, 255, 255]
                         } else {
                             pal.popover_text_muted
                         };
                         if let Some(el) = text_cache.render_label(
                             renderer,
                             hint,
-                            11.0,
+                            12.0,
                             hint_fg,
-                            Point::from((mx + mw - 14 - hint_w, row_y + 7)),
+                            Point::from((mx + mw - 14 - hint_w, label_y + 1)),
                         ) {
                             elements.push(el);
                         }

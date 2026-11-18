@@ -178,19 +178,21 @@ fn build_chrome_shapes(
             match entry {
                 ResolvedTopBarMenuItem::Item { icon, .. } => {
                     let hovered = top_telemetry.menu_hover_row == Some(entry_idx);
-                    let icon_tint = if hovered {
-                        [255, 255, 255, 255]
-                    } else {
-                        pal.popover_icon
-                    };
-                    if let Some(el) = shape_cache.ui_glyph_element(
-                        renderer,
-                        icon,
-                        14,
-                        icon_tint,
-                        Point::from((mx + 14, row_y + 7)),
-                    ) {
-                        out.push(CompositorRenderElement::Memory(el));
+                    if let Some(glyph) = icon {
+                        let icon_tint = if hovered {
+                            [255, 255, 255, 255]
+                        } else {
+                            pal.popover_icon
+                        };
+                        if let Some(el) = shape_cache.ui_glyph_element(
+                            renderer,
+                            glyph,
+                            14,
+                            icon_tint,
+                            Point::from((mx + 14, row_y + 5)),
+                        ) {
+                            out.push(CompositorRenderElement::Memory(el));
+                        }
                     }
                     if hovered {
                         push_rounded_glass_box(
@@ -198,11 +200,11 @@ fn build_chrome_shapes(
                             shape_cache,
                             renderer,
                             Rectangle::new(
-                                Point::from((mx + 6, row_y + 1)),
-                                Size::from((mw - 12, MENU_ITEM_HEIGHT - 2)),
+                                Point::from((mx + 5, row_y + 1)),
+                                Size::from((mw - 10, MENU_ITEM_HEIGHT - 2)),
                             ),
-                            8,
-                            pal.accent_hover_fill,
+                            7,
+                            pal.accent_rgba,
                             None,
                         );
                     }

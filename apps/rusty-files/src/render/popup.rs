@@ -1,11 +1,12 @@
 //! macOS 27 Golden Gate Liquid Glass popover and context menu rendering for `rusty-files`
-//! (`RUSTYOS-087`, ADR-0043).
+//! (`RUSTYOS-087`, `RUSTYOS-107`, ADR-0043, ADR-0058).
 //!
 //! Provides 1:1 visual parity with compositor-managed popovers (`crates/rusty-compositor/src/shell_render/context_menu.rs`):
-//! - Corner radius `MENU_POPOVER_RADIUS = 16`;
+//! - Concentric corner radius `MENU_POPOVER_RADIUS = 13` with `HOVER_PILL_RADIUS = 7` and `5 px` padding;
 //! - Multi-stage soft Gaussian drop shadow;
 //! - Translucent Liquid Glass material with specular top rim highlight;
-//! - Inset floating hover pills (`HOVER_PILL_RADIUS = 8`, `HOVER_PILL_INSET_H = 6`, `HOVER_PILL_INSET_V = 1`);
+//! - Inset floating hover pills (`HOVER_PILL_RADIUS = 7`, `HOVER_PILL_INSET_H = 5`, `HOVER_PILL_INSET_V = 1`);
+//! - Two-mode left alignment (`14 px` without checkmarks/swatches; `28 px` with checkmarks; `36 px` with tag swatches);
 //! - Right-aligned keyboard shortcut column (`⌘O`, `⌘I`, `⌘⌫`, `^⌘F`, `⌘M`, `⌘W`);
 //! - Hairline dividers with 12px horizontal inset;
 //! - Danger color tint for destructive commands (`Empty Trash`, `Move to Trash`).
@@ -15,14 +16,14 @@ use rusty_services::file_manager::FilesThemeMode;
 use super::{Canvas, Palette, palette_for, rgba};
 use crate::layout::{PopupCommand, PopupLayout, Rect};
 
-/// Corner radius matching macOS 27 Golden Gate popovers (`16 px`).
-pub(crate) const MENU_POPOVER_RADIUS: i32 = 16;
+/// Concentric outer corner radius matching macOS 27 Golden Gate popovers (`13 px`).
+pub(crate) const MENU_POPOVER_RADIUS: i32 = 13;
 
-/// Corner radius for the floating hover pill (`8 px`).
-pub(crate) const HOVER_PILL_RADIUS: i32 = 8;
+/// Concentric corner radius for the floating hover pill (`7 px` inside `5 px` padding).
+pub(crate) const HOVER_PILL_RADIUS: i32 = 7;
 
-/// Horizontal inset for the floating hover pill (`6 px`).
-pub(crate) const HOVER_PILL_INSET_H: i32 = 6;
+/// Horizontal inset for the floating hover pill (`5 px`).
+pub(crate) const HOVER_PILL_INSET_H: i32 = 5;
 
 /// Vertical inset for the floating hover pill (`1 px`).
 pub(crate) const HOVER_PILL_INSET_V: i32 = 1;
@@ -69,8 +70,9 @@ pub(crate) const fn is_danger_command(cmd: &PopupCommand) -> bool {
     matches!(cmd, PopupCommand::EmptyTrash | PopupCommand::MoveToTrash(_))
 }
 
-/// Renders a standalone native `xdg_popup` surface buffer (`ARGB8888`) with Liquid Glass
-/// multi-stage soft drop shadow, translucent popover body, and floating hover highlight pill.
+/// Renders a standalone native `xdg_popup` surface buffer (`ARGB8888`) with optional
+/// compositor Liquid Glass backing (`has_compositor_glass == true`) or CPU fallback chrome.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn render_popup_surface_pixels(
     buf: &mut [u8],
     width: u32,
@@ -79,10 +81,25 @@ pub(crate) fn render_popup_surface_pixels(
     hover_idx: Option<usize>,
     theme: FilesThemeMode,
 ) {
+    render_popup_surface_pixels_with_glass(buf, width, height, popup, hover_idx, theme, false);
+}
+
+/// Renders a standalone native `xdg_popup` surface buffer (`ARGB8888`); when
+/// `has_compositor_glass == true`, skips CPU shadow/opaque fill so the compositor
+/// `LiquidGlassElement` (`GlassPanelStyle::Popover`, `r = 13`) provides live blur and rim.
+pub(crate) fn render_popup_surface_pixels_with_glass(
+    buf: &mut [u8],
+    width: u32,
+    height: u32,
+    popup: &PopupLayout,
+    hover_idx: Option<usize>,
+    theme: FilesThemeMode,
+    has_compositor_glass: bool,
+) {
     let pal = palette_for(theme);
     let mut c = Canvas::new(buf, width, height);
     c.clear();
-    render_popup(&mut c, popup, hover_idx, &pal);
+    render_popup_with_chrome(&mut c, popup, hover_idx, &pal, !has_compositor_glass);
 }
 
 /// Draws the soft shadow, translucent glass body, directional hairline rim, and outer shade border.
@@ -90,12 +107,12 @@ pub(crate) fn render_popup_surface_pixels(
 fn render_popup_chrome(c: &mut Canvas<'_>, r: Rect, pal: &Palette) {
     let shadow_layers = [
         // (dx, dy, grow_x, grow_y, radius, alpha)
-        (0, 4, 7, 8, 21, 5),
-        (0, 3, 5, 6, 20, 9),
-        (0, 3, 4, 5, 19, 14),
-        (0, 2, 3, 4, 18, 19),
-        (0, 1, 2, 2, 17, 25),
-        (0, 1, 1, 1, 16, 32),
+        (0, 4, 7, 8, 18, 5),
+        (0, 3, 5, 6, 17, 9),
+        (0, 3, 4, 5, 16, 14),
+        (0, 2, 3, 4, 15, 19),
+        (0, 1, 2, 2, 14, 25),
+        (0, 1, 1, 1, 13, 32),
     ];
     for (dx, dy, gx, gy, rad, a) in shadow_layers {
         c.fill_rounded_rect(
@@ -116,17 +133,17 @@ fn render_popup_chrome(c: &mut Canvas<'_>, r: Rect, pal: &Palette) {
         bot_rim_alpha,
     );
     c.stroke_line_aa(
-        r.x as f32 + 16.0,
+        r.x as f32 + 13.0,
         r.y as f32 + 1.2,
-        (r.x + r.w) as f32 - 16.0,
+        (r.x + r.w) as f32 - 13.0,
         r.y as f32 + 1.2,
         1.0,
         pal.popover_rim,
     );
     c.stroke_line_aa(
-        r.x as f32 + 16.0,
+        r.x as f32 + 13.0,
         (r.y + r.h) as f32 - 1.2,
-        (r.x + r.w) as f32 - 16.0,
+        (r.x + r.w) as f32 - 13.0,
         (r.y + r.h) as f32 - 1.2,
         1.0,
         bot_rim,
@@ -135,15 +152,32 @@ fn render_popup_chrome(c: &mut Canvas<'_>, r: Rect, pal: &Palette) {
     c.stroke_rounded_rect(r, MENU_POPOVER_RADIUS, pal.popover_border);
 }
 
-/// Renders a `CutefishOS`-calibrated Liquid Glass popup/context menu.
-#[allow(clippy::cast_precision_loss)]
+/// Renders an inline/CPU Liquid Glass popup/context menu with full CPU chrome fallback.
 pub(crate) fn render_popup(
     c: &mut Canvas<'_>,
     popup: &PopupLayout,
     hover_idx: Option<usize>,
     pal: &Palette,
 ) {
-    render_popup_chrome(c, popup.rect, pal);
+    render_popup_with_chrome(c, popup, hover_idx, pal, true);
+}
+
+/// Renders a `CutefishOS`-calibrated Liquid Glass popup/context menu.
+#[allow(clippy::cast_precision_loss)]
+fn render_popup_with_chrome(
+    c: &mut Canvas<'_>,
+    popup: &PopupLayout,
+    hover_idx: Option<usize>,
+    pal: &Palette,
+    draw_chrome: bool,
+) {
+    if draw_chrome {
+        render_popup_chrome(c, popup.rect, pal);
+    }
+    let any_non_swatch_checked = popup
+        .items
+        .iter()
+        .any(|i| i.checked && i.swatch_rgb.is_none());
 
     // Render individual rows
     for (idx, item) in popup.items.iter().enumerate() {
@@ -174,9 +208,13 @@ pub(crate) fn render_popup(
             c.fill_rounded_rect(pill, HOVER_PILL_RADIUS, pal.accent);
         }
 
-        // Checkmark indicator (left-aligned)
+        // Checkmark indicator: trailing on tag rows, leading on checked menus (e.g. SortMenu)
         if item.checked {
-            let cx = item.rect.x as f32 + 13.0;
+            let cx = if item.swatch_rgb.is_some() {
+                (item.rect.right() - 18) as f32
+            } else {
+                item.rect.x as f32 + 14.0
+            };
             let cy = item.rect.y as f32 + (item.rect.h as f32 / 2.0);
             c.stroke_polyline_aa(
                 &[
@@ -190,24 +228,29 @@ pub(crate) fn render_popup(
             );
         }
 
-        // Color tag swatch (for tag pickers)
+        // Two-mode left alignment:
+        // - Tag swatches: 5px circle centered at x + 19 (left edge x + 14), text at x + 32
+        // - Non-swatch checked menus (Sort/View): check at x + 14, text at x + 28
+        // - Plain rows (Open..Move to Trash): text directly at x + 14 flush with tag circles
         let text_x = if let Some([sr, sg, sb]) = item.swatch_rgb {
-            let cx = item.rect.x as f32 + 25.0;
+            let cx = item.rect.x as f32 + 19.0;
             let cy = item.rect.y as f32 + (item.rect.h as f32 / 2.0);
             c.fill_circle_f(cx, cy, 4.8, rgba(sr, sg, sb, 255));
             c.stroke_circle_f(cx, cy, 4.8, 1.0, rgba(0, 0, 0, 30));
-            item.rect.x + 38
+            item.rect.x + 32
+        } else if any_non_swatch_checked {
+            item.rect.x + 28
         } else {
-            item.rect.x + 24
+            item.rect.x + 14
         };
 
         // Right-aligned keyboard shortcut
         let shortcut = shortcut_for_command(cmd);
-        let shortcut_w = shortcut.map_or(0, |sc| Canvas::measure_text(sc, 11.5, false));
+        let shortcut_w = shortcut.map_or(0, |sc| Canvas::measure_text(sc, 12.0, false));
 
         // Primary row label text
         let max_label_w = (item.rect.right() - text_x - shortcut_w - 18).max(30);
-        let label = Canvas::fit_text(&item.label, max_label_w, 12.5, false);
+        let label = Canvas::fit_text(&item.label, max_label_w, 13.0, false);
         let label_col = if hovered {
             pal.accent_text
         } else if is_danger_command(cmd) {
@@ -216,17 +259,17 @@ pub(crate) fn render_popup(
             pal.popover_text_primary
         };
         let text_y = item.rect.y + ((item.rect.h - 14) / 2);
-        c.draw_text(&label, text_x, text_y, 12.5, false, label_col, item.rect);
+        c.draw_text(&label, text_x, text_y, 13.0, false, label_col, item.rect);
 
         // Draw keyboard shortcut badge if present
         if let Some(sc) = shortcut {
             let sc_col = if hovered {
-                rgba(255, 255, 255, 210)
+                pal.accent_text
             } else {
                 pal.popover_text_secondary
             };
             let sc_x = item.rect.right() - shortcut_w - 14;
-            c.draw_text(sc, sc_x, text_y + 1, 11.5, false, sc_col, item.rect);
+            c.draw_text(sc, sc_x, text_y + 1, 12.0, false, sc_col, item.rect);
         }
     }
 }
@@ -302,21 +345,21 @@ mod tests {
     fn test_liquid_glass_popup_rendering_tokens_and_geometry() {
         let items = vec![
             PopupItemLayout {
-                rect: Rect::new(14, 14, 202, 28),
+                rect: Rect::new(8, 13, 214, 24),
                 label: String::from("New Folder"),
                 checked: false,
                 swatch_rgb: None,
                 command: Some(PopupCommand::NewFolder),
             },
             PopupItemLayout {
-                rect: Rect::new(14, 42, 202, 9),
+                rect: Rect::new(8, 37, 214, 9),
                 label: String::new(),
                 checked: false,
                 swatch_rgb: None,
                 command: None,
             },
             PopupItemLayout {
-                rect: Rect::new(14, 51, 202, 28),
+                rect: Rect::new(8, 46, 214, 24),
                 label: String::from("Move to Trash"),
                 checked: false,
                 swatch_rgb: None,
@@ -336,12 +379,12 @@ mod tests {
             },
         ];
         let layout = PopupLayout {
-            rect: Rect::new(8, 8, 214, 80),
+            rect: Rect::new(8, 8, 214, 67),
             items,
         };
 
         let pw = 230_u32;
-        let ph = 96_u32;
+        let ph = 83_u32;
         let mut buf = vec![0_u8; (pw * ph * 4) as usize];
 
         // Render with first item hovered in Light theme
@@ -355,14 +398,14 @@ mod tests {
         );
 
         let pal = palette_for(FilesThemeMode::LightGoldenGate);
-        // Verify hover pill fill at row 0 mid-point (x + 14 + 10 = 24, y = 14 + 14 = 28)
-        let pill_idx = ((28 * pw + 24) * 4) as usize;
+        // Verify hover pill fill at row 0 mid-point inside left margin of pill (x = 8 + 10 = 18, y = 13 + 12 = 25)
+        let pill_idx = ((25 * pw + 18) * 4) as usize;
         assert_eq!(buf[pill_idx + 2], pal.accent[0]); // R
         assert_eq!(buf[pill_idx + 1], pal.accent[1]); // G
         assert_eq!(buf[pill_idx], pal.accent[2]); // B
 
-        // Verify popover background body inside unhovered area has high alpha (Liquid Glass)
-        let body_idx = ((70 * pw + 30) * 4) as usize;
+        // Verify popover background body inside unhovered bottom padding has high alpha (Liquid Glass)
+        let body_idx = ((72 * pw + 30) * 4) as usize;
         assert!(buf[body_idx + 3] >= 235);
     }
 }

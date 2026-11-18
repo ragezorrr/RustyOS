@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use rusty_services::file_manager::ListingTarget;
 use smithay_client_toolkit::{
-    compositor::{CompositorHandler, CompositorState, Surface},
+    compositor::{CompositorHandler, CompositorState, Region, Surface},
     delegate_compositor, delegate_output, delegate_pointer, delegate_registry, delegate_seat,
     delegate_shm, delegate_xdg_popup, delegate_xdg_shell, delegate_xdg_window,
     output::{OutputHandler, OutputState},
@@ -51,7 +51,7 @@ use crate::layout::{
     compute_popup_surface_spec, hit_test, scroll_area_at,
 };
 use crate::liquid_glass::{GlassStyle, RustyosLiquidGlassManagerV1, RustyosSurfaceGlassV1};
-use crate::render::{render_popup_surface_pixels, render_window_pixels_with_popup};
+use crate::render::{render_popup_surface_pixels_with_glass, render_window_pixels_with_popup};
 use crate::state::OpenPopupMenu;
 use crate::state::{FilesAppState, ScrollTargetArea, SearchScope, StartupOptions};
 use rusty_services::file_manager::UserFileLocations;
@@ -243,7 +243,12 @@ impl WaylandClientData {
 
         let glass = self.glass_manager.as_ref().map(|mgr| {
             let g = mgr.get_surface_glass(popup.wl_surface(), &self.qh, ());
-            g.set_corner_radius(16);
+            if let Ok(region) = Region::new(&self.compositor_state) {
+                let r = spec.layout.rect;
+                region.add(r.x, r.y, r.w, r.h);
+                g.set_region(Some(region.wl_region()));
+            }
+            g.set_corner_radius(13);
             g.set_style(GlassStyle::Popover);
             g.commit();
             g
@@ -952,7 +957,15 @@ fn draw_popup_surface(
         WaylandAppError::ShmPool(String::from("Popup SHM slot unexpectedly busy"))
     })?;
 
-    render_popup_surface_pixels(canvas, w, h, &ap.spec.layout, ap.hover_idx, theme);
+    render_popup_surface_pixels_with_glass(
+        canvas,
+        w,
+        h,
+        &ap.spec.layout,
+        ap.hover_idx,
+        theme,
+        ap.glass.is_some(),
+    );
     ap.popup
         .xdg_surface()
         .set_window_geometry(0, 0, w as i32, h as i32);

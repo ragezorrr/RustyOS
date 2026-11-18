@@ -19,9 +19,9 @@ use super::tokens::{
 use super::top_bar::notification_app_icon;
 use super::updates_popover::render_updates_composite;
 use super::{
-    COLOR_ACCENT, COLOR_MUTED, COLOR_WARNING, CompositorRenderElement, MENU_POPOVER_RADIUS,
-    NotificationToastView, ShellOverlayView, TopBarTelemetry, make_solid_element,
-    notification_toast_rects, notifications_hidden_by_overlay, switcher_layout,
+    COLOR_ACCENT, COLOR_MUTED, COLOR_WARNING, CompositorRenderElement, NotificationToastView,
+    ShellOverlayView, TopBarTelemetry, make_solid_element, notification_toast_rects,
+    notifications_hidden_by_overlay, switcher_layout,
 };
 
 /// Generates foreground system/interactive overlay elements (`Polkit`, `Portal`, `PickColor`,
@@ -385,7 +385,7 @@ fn build_foreground_overlay_shapes(
                 shape_cache,
                 renderer,
                 card,
-                MENU_POPOVER_RADIUS,
+                16,
                 crate::surfaces::GlassPanelStyle::Popover,
                 top_telemetry.glass_opacity,
                 top_telemetry.reduce_transparency,
