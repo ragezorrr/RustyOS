@@ -141,7 +141,8 @@ impl SettingsPage {
             Self::Appearance => [0x03, 0xB4, 0xCB, 0xFF],
             Self::Wallpaper => [0x34, 0xB4, 0xA7, 0xFF],
             Self::DockDesktop => [0x85, 0x85, 0xFC, 0xFF],
-            Self::Notifications | Self::Sound => [0xF1, 0x68, 0x84, 0xFF],
+            Self::Notifications => [0xFF, 0x3B, 0x30, 0xFF],
+            Self::Sound => [0xF1, 0x68, 0x84, 0xFF],
             Self::Display => [0x00, 0x87, 0xED, 0xFF],
             Self::Keyboard => [0x5E, 0x6A, 0xD2, 0xFF],
             Self::Mouse | Self::CursorStyle => [0x33, 0x85, 0xFF, 0xFF],
@@ -215,6 +216,12 @@ pub(crate) enum RowControlId {
     WifiEnabledToggle,
     WifiConnectIndex(usize),
     NetworkRefresh,
+    NotifAllowToggle,
+    NotifShowPreviewsCycle,
+    NotifWhenSleepingToggle,
+    NotifWhenLockedToggle,
+    NotifMirroringCycle,
+    NotifAppToggle(usize),
 }
 
 /// Mutable state backing the System Settings window.
@@ -257,6 +264,12 @@ pub(crate) struct SettingsAppState {
     pub(crate) menubar_volume: bool,
     pub(crate) clock_24h: bool,
     pub(crate) updates_enabled: bool,
+    pub(crate) notif_allow: bool,
+    pub(crate) notif_show_previews: String,
+    pub(crate) notif_when_sleeping: bool,
+    pub(crate) notif_when_locked: bool,
+    pub(crate) notif_mirroring_off: bool,
+    pub(crate) notif_app_enabled: [bool; 5],
     pub(crate) display_scale: f64,
     pub(crate) prefer_max_refresh: bool,
     pub(crate) vrr_mode: String,
@@ -328,6 +341,12 @@ impl SettingsAppState {
             menubar_volume: false,
             clock_24h: true,
             updates_enabled: true,
+            notif_allow: true,
+            notif_show_previews: String::from("When Unlocked"),
+            notif_when_sleeping: false,
+            notif_when_locked: true,
+            notif_mirroring_off: true,
+            notif_app_enabled: [true; 5],
             display_scale: 1.0,
             prefer_max_refresh: true,
             vrr_mode: String::from("fullscreen"),
@@ -796,6 +815,46 @@ impl SettingsAppState {
             RowControlId::NetworkRefresh => {
                 self.refresh_services();
             }
+            other => self.apply_notification_action(other),
+        }
+    }
+
+    fn apply_notification_action(&mut self, action: RowControlId) {
+        match action {
+            RowControlId::NotifAllowToggle => {
+                self.notif_allow = !self.notif_allow;
+                let v = bool_str(self.notif_allow);
+                let _ = update_config_entries(&[("notifications", "allow", v)]);
+            }
+            RowControlId::NotifShowPreviewsCycle => {
+                let (next_label, toml_val) = match self.notif_show_previews.as_str() {
+                    "When Unlocked" => ("Never", "never"),
+                    "Never" => ("Always", "always"),
+                    _ => ("When Unlocked", "when_unlocked"),
+                };
+                next_label.clone_into(&mut self.notif_show_previews);
+                let _ = update_config_entries(&[("notifications", "show_previews", toml_val)]);
+            }
+            RowControlId::NotifWhenSleepingToggle => {
+                self.notif_when_sleeping = !self.notif_when_sleeping;
+                let v = bool_str(self.notif_when_sleeping);
+                let _ = update_config_entries(&[("notifications", "when_sleeping", v)]);
+            }
+            RowControlId::NotifWhenLockedToggle => {
+                self.notif_when_locked = !self.notif_when_locked;
+                let v = bool_str(self.notif_when_locked);
+                let _ = update_config_entries(&[("notifications", "when_locked", v)]);
+            }
+            RowControlId::NotifMirroringCycle => {
+                self.notif_mirroring_off = !self.notif_mirroring_off;
+                let v = bool_str(self.notif_mirroring_off);
+                let _ = update_config_entries(&[("notifications", "mirroring_off", v)]);
+            }
+            RowControlId::NotifAppToggle(idx) => {
+                if let Some(enabled) = self.notif_app_enabled.get_mut(idx) {
+                    *enabled = !*enabled;
+                }
+            }
             _ => {}
         }
     }
@@ -881,6 +940,18 @@ impl SettingsAppState {
             ("ui", "clock_24h") => self.clock_24h = parse_bool(val),
             ("ui", "cursor_theme") if !val.is_empty() => val.clone_into(&mut self.cursor_theme),
             ("updates", "enabled") => self.updates_enabled = parse_bool(val),
+            ("notifications", "allow") => self.notif_allow = parse_bool(val),
+            ("notifications", "show_previews") => {
+                let norm = match val.trim().to_ascii_lowercase().as_str() {
+                    "always" => "Always",
+                    "never" | "off" => "Never",
+                    _ => "When Unlocked",
+                };
+                norm.clone_into(&mut self.notif_show_previews);
+            }
+            ("notifications", "when_sleeping") => self.notif_when_sleeping = parse_bool(val),
+            ("notifications", "when_locked") => self.notif_when_locked = parse_bool(val),
+            ("notifications", "mirroring_off") => self.notif_mirroring_off = parse_bool(val),
             _ => self.apply_toml_device_kv(section, key, val),
         }
     }

@@ -590,6 +590,43 @@ pub(super) fn sample_trash_glyph_uv(u: f32, v: f32, edge: f32, tint: [f32; 4]) -
     premul_tint(tint, sd_cov(d, edge))
 }
 
+pub(super) fn sample_cloud_sun_glyph_uv(u: f32, v: f32, edge: f32, tint: [f32; 4]) -> [f32; 4] {
+    let base_cloud = sd_rounded_box(u, v, 0.46, 0.63, 0.27, 0.13, 0.12);
+    let left_bump = sd_circle(u, v, 0.36, 0.54, 0.16);
+    let mid_bump = sd_circle(u, v, 0.51, 0.49, 0.18);
+    let cloud_sd = base_cloud.min(left_bump).min(mid_bump);
+    let cloud_cov = sd_cov(cloud_sd, edge);
+
+    let sun_sd = sd_circle(u, v, 0.67, 0.34, 0.145);
+    let ray_a = sd_segment(u, v, 0.67, 0.12, 0.67, 0.15, 0.026);
+    let ray_b = sd_segment(u, v, 0.85, 0.34, 0.89, 0.34, 0.026);
+    let ray_c = sd_segment(u, v, 0.80, 0.21, 0.84, 0.17, 0.024);
+    let sun_total = sun_sd.min(ray_a).min(ray_b).min(ray_c);
+    let sun_cov = sd_cov(sun_total, edge) * 0.72;
+
+    if sun_cov <= 0.0 {
+        return premul_tint(tint, cloud_cov);
+    }
+    let warm_tint = [tint[0], (tint[1] * 0.92).min(255.0), tint[2] * 0.42];
+    let sun_out = [
+        warm_tint[0] * tint[3] * sun_cov,
+        warm_tint[1] * tint[3] * sun_cov,
+        warm_tint[2] * tint[3] * sun_cov,
+        tint[3] * sun_cov,
+    ];
+    blend_premul_over(sun_out, [tint[0], tint[1], tint[2]], tint[3] * cloud_cov)
+}
+
+pub(super) fn sample_checklist_glyph_uv(u: f32, v: f32, edge: f32, tint: [f32; 4]) -> [f32; 4] {
+    let mut d = 1e6_f32;
+    for ry in [0.30_f32, 0.50_f32, 0.70_f32] {
+        let dot = sd_circle(u, v, 0.23, ry, 0.052);
+        let bar = sd_segment(u, v, 0.37, ry, 0.80, ry, 0.044);
+        d = d.min(dot).min(bar);
+    }
+    premul_tint(tint, sd_cov(d, edge))
+}
+
 #[cfg(test)]
 #[allow(clippy::cast_precision_loss)]
 pub(super) fn sample_ui_glyph_pixel(
@@ -677,6 +714,8 @@ pub(super) fn sample_ui_glyph_pixel_rect(
                 UiGlyphKind::Check => sample_check_glyph_uv(u, v, edge, tint),
                 UiGlyphKind::ChevronRight => sample_chevron_right_glyph_uv(u, v, edge, tint),
                 UiGlyphKind::Trash => sample_trash_glyph_uv(u, v, edge, tint),
+                UiGlyphKind::CloudSun => sample_cloud_sun_glyph_uv(u, v, edge, tint),
+                UiGlyphKind::Checklist => sample_checklist_glyph_uv(u, v, edge, tint),
             };
             sum[0] += s[0];
             sum[1] += s[1];

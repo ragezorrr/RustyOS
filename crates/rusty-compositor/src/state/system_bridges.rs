@@ -821,6 +821,7 @@ impl RustyCompositorState {
         self.close_quick_settings();
         self.close_updates_popover();
         self.close_wifi_popover();
+        self.close_notification_center();
         self.close_top_bar_menu();
         self.close_overview();
         self.deactivate_focused_shortcut_inhibitor();
@@ -861,6 +862,7 @@ impl RustyCompositorState {
         self.close_quick_settings();
         self.close_updates_popover();
         self.close_wifi_popover();
+        self.close_notification_center();
         self.close_overview();
         self.close_settings();
         self.close_top_bar_menu();

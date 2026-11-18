@@ -564,6 +564,10 @@ impl RustyCompositorState {
                 self.handle_wifi_popover_pointer_click(button);
                 return;
             }
+            if self.notification_center_open {
+                self.handle_notification_center_pointer_click(button);
+                return;
+            }
 
             if self.dock_stack.is_some() && self.handle_dock_stack_pointer_press(button) {
                 return;

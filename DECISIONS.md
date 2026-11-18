@@ -798,6 +798,19 @@
                            без правок Dock/CC и liquid_glass.rs)
                            и отдельные страницы Wi-Fi / Network
                            в rusty-settings (ADR-0059)
+
+   D-073                   Фаза 8/10 Разделение триггеров accepted
+                           Control Center и Clock в TopBar,
+                           правая панель Notification Center
+                           (RUSTYOS-109): история уведомлений
+                           после истечения TTL тоста, ведущая
+                           карточка + заголовок с очисткой +
+                           стопка, виджет Weather и интерактивный
+                           Reminders, Edit Widgets, секция
+                           [notifications] и страница
+                           Settings > Notifications (#FF3B30)
+                           без правок Dock/CC/liquid_glass.rs
+                           (ADR-0060)
   -----------------------------------------------------------------------
 
 ## Открытые решения

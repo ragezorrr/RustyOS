@@ -1296,6 +1296,7 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
             volume_percent: tel.audio.volume_percent,
             audio_muted: tel.audio.muted,
             quick_settings_open: state.quick_settings_active,
+            notification_center_open: state.notification_center_open,
             wifi_open: state.wifi_popover_open,
             updates_open: state.updates_popover_open,
             show_updates: state.should_show_top_bar_updates(),
@@ -1318,7 +1319,18 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
             show_volume: state.menubar_show_volume,
         };
 
-        let toast_views: Vec<NotificationToastView<'_>> = if state.focus_mode {
+        let lock_hidden_preview = matches!(
+            state.user_config.notifications_show_previews,
+            crate::config::NotificationPreviewsMode::Never
+        ) || (state.is_session_locked()
+            && matches!(
+                state.user_config.notifications_show_previews,
+                crate::config::NotificationPreviewsMode::WhenUnlocked
+            ));
+        let suppress_toasts = state.focus_mode
+            || !state.user_config.notifications_allow
+            || (state.is_session_locked() && !state.user_config.notifications_when_locked);
+        let toast_views: Vec<NotificationToastView<'_>> = if suppress_toasts {
             Vec::new()
         } else {
             state
@@ -1331,7 +1343,11 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
                     id: n.id,
                     urgency: n.urgency,
                     title: &n.title,
-                    body: &n.body,
+                    body: if lock_hidden_preview {
+                        "Notification preview hidden"
+                    } else {
+                        &n.body
+                    },
                     hovered: state.hovered_notification_idx == Some(idx),
                 })
                 .collect()
@@ -1521,6 +1537,10 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
         let wifi_view = state
             .wifi_popover_open
             .then(|| state.wifi_render_state(logical_size.w, &tel.network));
+        let nc_items = state.build_notification_center_items();
+        let nc_view = state
+            .notification_center_open
+            .then(|| state.notification_center_render_state(&nc_items, lock_hidden_preview));
 
         let overlay = if let Some(pk) = polkit_view.as_ref() {
             ShellOverlayView::Polkit(pk)
@@ -1538,6 +1558,8 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
             ShellOverlayView::Updates(up)
         } else if let Some(wifi) = wifi_view.as_ref() {
             ShellOverlayView::Wifi(wifi)
+        } else if let Some(nc) = nc_view.as_ref() {
+            ShellOverlayView::NotificationCenter(nc)
         } else if let Some(ctx) = context_menu_view {
             ShellOverlayView::ContextMenu(ctx)
         } else if let Some(stack) = dock_stack_view.as_ref() {

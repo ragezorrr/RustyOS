@@ -41,6 +41,7 @@ mod dock;
 mod dock_stack;
 mod lock_screen;
 mod modals;
+mod notification_center;
 mod overlay_shapes;
 mod quick_settings;
 mod spotlight_overview;
@@ -91,6 +92,11 @@ pub use modals::{
     SettingsHit, SettingsRenderState, SettingsTab, hit_test_polkit_dialog, hit_test_portal_dialog,
     hit_test_settings_modal,
 };
+pub use notification_center::{
+    DEFAULT_NOTIFICATION_TASKS, NotificationCardSlot, NotificationCenterHit,
+    NotificationCenterItemView, NotificationCenterLayout, NotificationCenterRenderState,
+    compute_notification_center_layout, hit_test_notification_center,
+};
 pub use quick_settings::{
     QuickSettingsHit, QuickSettingsRenderState, QuickSettingsSliderDrag,
     check_quick_settings_click, check_quick_settings_slider_drag, quick_settings_slider_percent,
@@ -124,27 +130,28 @@ pub use top_bar::{
     MAX_TOP_BAR_TRAY_ITEMS, MAX_VISIBLE_NOTIFICATIONS, MENU_POPOVER_RADIUS, NotificationToastView,
     OsdRenderState, TopBarLayoutOptions, TopBarLeftLayout, TopBarMenuAction, TopBarMenuEntry,
     TopBarMenuHit, TopBarMenuPopoverClick, TopBarRightLayout, TopBarTelemetry, TopBarTrayItem,
-    check_notification_click, check_top_bar_kbd_click, check_top_bar_kbd_click_for_options,
-    check_top_bar_kbd_click_for_telemetry, check_top_bar_layout_click,
-    check_top_bar_layout_click_for_app, check_top_bar_layout_click_for_profile,
-    check_top_bar_layout_click_with_options, check_top_bar_menu_click,
-    check_top_bar_menu_click_for_app, check_top_bar_menu_click_for_profile,
-    check_top_bar_menu_popover_click, check_top_bar_menu_popover_click_for_profile,
-    check_top_bar_menu_popover_hover_row, check_top_bar_menu_popover_hover_row_for_profile,
-    check_top_bar_notification_click, check_top_bar_notification_click_for_options,
-    check_top_bar_notification_click_for_telemetry, check_top_bar_search_click_for_options,
-    check_top_bar_search_click_for_telemetry, check_top_bar_status_click,
-    check_top_bar_status_click_for_options, check_top_bar_status_click_for_telemetry,
-    check_top_bar_tray_click, check_top_bar_tray_click_for_options,
-    check_top_bar_tray_click_for_telemetry, check_top_bar_updates_click_for_options,
-    check_top_bar_wifi_click_for_options, check_top_bar_workspace_click,
-    check_top_bar_workspace_click_for_app, check_top_bar_workspace_click_for_profile,
-    check_top_bar_workspace_click_with_options, compute_top_bar_left_layout,
-    compute_top_bar_left_layout_for_profile, compute_top_bar_left_layout_with_options,
-    compute_top_bar_right_layout, compute_top_bar_right_layout_with_options, generate_osd_elements,
-    notification_toast_rects, osd_pill_rect, top_bar_menu_entries, top_bar_menu_items,
-    top_bar_menu_popover_rect, top_bar_menu_popover_rect_for_profile, tray_slot_rects,
-    tray_slot_rects_with_layout, tray_slot_rects_with_options,
+    check_notification_click, check_top_bar_clock_click_for_options, check_top_bar_kbd_click,
+    check_top_bar_kbd_click_for_options, check_top_bar_kbd_click_for_telemetry,
+    check_top_bar_layout_click, check_top_bar_layout_click_for_app,
+    check_top_bar_layout_click_for_profile, check_top_bar_layout_click_with_options,
+    check_top_bar_menu_click, check_top_bar_menu_click_for_app,
+    check_top_bar_menu_click_for_profile, check_top_bar_menu_popover_click,
+    check_top_bar_menu_popover_click_for_profile, check_top_bar_menu_popover_hover_row,
+    check_top_bar_menu_popover_hover_row_for_profile, check_top_bar_notification_click,
+    check_top_bar_notification_click_for_options, check_top_bar_notification_click_for_telemetry,
+    check_top_bar_search_click_for_options, check_top_bar_search_click_for_telemetry,
+    check_top_bar_status_click, check_top_bar_status_click_for_options,
+    check_top_bar_status_click_for_telemetry, check_top_bar_tray_click,
+    check_top_bar_tray_click_for_options, check_top_bar_tray_click_for_telemetry,
+    check_top_bar_updates_click_for_options, check_top_bar_wifi_click_for_options,
+    check_top_bar_workspace_click, check_top_bar_workspace_click_for_app,
+    check_top_bar_workspace_click_for_profile, check_top_bar_workspace_click_with_options,
+    compute_top_bar_left_layout, compute_top_bar_left_layout_for_profile,
+    compute_top_bar_left_layout_with_options, compute_top_bar_right_layout,
+    compute_top_bar_right_layout_with_options, generate_osd_elements, notification_toast_rects,
+    osd_pill_rect, top_bar_menu_entries, top_bar_menu_items, top_bar_menu_popover_rect,
+    top_bar_menu_popover_rect_for_profile, tray_slot_rects, tray_slot_rects_with_layout,
+    tray_slot_rects_with_options,
 };
 pub use top_bar_menus::{
     AppShortcutAction, ResolvedTopBarMenuItem, TopBarAppProfile, classify_top_bar_app,
@@ -196,6 +203,8 @@ pub enum ShellOverlayView<'a> {
     Updates(&'a UpdatesRenderState<'a>),
     /// Wi-Fi & Ethernet `Liquid Glass` popover anchored to `TopBar` (`RUSTYOS-108`).
     Wifi(&'a WifiPopoverRenderState<'a>),
+    /// Right-edge `Notification Center` stack and widgets (`RUSTYOS-109`).
+    NotificationCenter(&'a NotificationCenterRenderState<'a>),
 }
 
 /// Generates custom GLES render elements for `TopBar`, `Dock`, and active shell overlays.
@@ -242,7 +251,8 @@ pub fn generate_shell_render_elements(
         | ShellOverlayView::ContextMenu(_)
         | ShellOverlayView::DockStack(_)
         | ShellOverlayView::Updates(_)
-        | ShellOverlayView::Wifi(_) => {}
+        | ShellOverlayView::Wifi(_)
+        | ShellOverlayView::NotificationCenter(_) => {}
         ShellOverlayView::Spotlight(spot) => {
             render_spotlight_modal(&mut elements, width, height, spot, has_text);
         }
@@ -271,6 +281,7 @@ pub(super) const fn notifications_hidden_by_overlay(overlay: ShellOverlayView<'_
             | ShellOverlayView::DockStack(_)
             | ShellOverlayView::Updates(_)
             | ShellOverlayView::Wifi(_)
+            | ShellOverlayView::NotificationCenter(_)
     )
 }
 
@@ -287,6 +298,7 @@ pub(super) const fn dock_tooltip_hidden_by_overlay(overlay: ShellOverlayView<'_>
             | ShellOverlayView::DockStack(_)
             | ShellOverlayView::Updates(_)
             | ShellOverlayView::Wifi(_)
+            | ShellOverlayView::NotificationCenter(_)
     )
 }
 

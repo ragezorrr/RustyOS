@@ -7,7 +7,7 @@ use super::dock::{ComputedDockLayout, ComputedDockSlot, dock_tooltip_rect_and_la
 use super::spotlight_overview::render_overview_text;
 use super::text_pass::append_chrome_text;
 use super::tokens::{
-    RGBA_ACCENT, RGBA_ACCENT_MUTED, RGBA_BORDER, RGBA_DANGER, ThemePalette, anim_offset, premul,
+    RGBA_ACCENT, RGBA_BORDER, RGBA_DANGER, ThemePalette, anim_offset, premul,
     push_liquid_glass_panel, push_rounded_glass_box, push_soft_shadow, resolved_icon_to_element,
     rgba_to_premul_color32f, title_hue_seed,
 };
@@ -286,20 +286,6 @@ fn build_chrome_shapes(
         }
     }
 
-    if top_telemetry.notification_count > 0 {
-        push_rounded_glass_box(
-            &mut out,
-            shape_cache,
-            renderer,
-            Rectangle::new(
-                Point::from((right_layout.notif_x, TOP_BAR_ITEM_Y)),
-                Size::from((right_layout.notif_w, TOP_BAR_ITEM_H)),
-            ),
-            10,
-            RGBA_ACCENT_MUTED,
-            Some(RGBA_ACCENT),
-        );
-    }
     if top_telemetry.quick_settings_open {
         push_rounded_glass_box(
             &mut out,
@@ -308,6 +294,20 @@ fn build_chrome_shapes(
             Rectangle::new(
                 Point::from((right_layout.control_center_x - 5, TOP_BAR_ITEM_Y)),
                 Size::from((right_layout.control_center_w + 10, TOP_BAR_ITEM_H)),
+            ),
+            6,
+            [255, 255, 255, 42],
+            None,
+        );
+    }
+    if top_telemetry.notification_center_open {
+        push_rounded_glass_box(
+            &mut out,
+            shape_cache,
+            renderer,
+            Rectangle::new(
+                Point::from((right_layout.clock_x - 5, TOP_BAR_ITEM_Y)),
+                Size::from((right_layout.clock_w + 10, TOP_BAR_ITEM_H)),
             ),
             6,
             [255, 255, 255, 42],

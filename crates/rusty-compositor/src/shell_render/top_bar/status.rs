@@ -401,6 +401,22 @@ pub fn check_top_bar_status_click_for_telemetry(
     )
 }
 
+/// Option-aware hit-test for the `TopBar` Clock / date label toggling Notification Center (`RUSTYOS-109`).
+#[must_use]
+pub fn check_top_bar_clock_click_for_options(
+    screen_width: i32,
+    clock_text: &str,
+    opts: TopBarLayoutOptions,
+    x: f64,
+    y: f64,
+) -> bool {
+    if y < 0.0 || y > f64::from(TOP_BAR_HEIGHT) {
+        return false;
+    }
+    let right = compute_top_bar_right_layout_with_options(screen_width, clock_text, opts);
+    x >= f64::from(right.clock_x - 2) && x < f64::from(right.clock_x + right.clock_w + 8)
+}
+
 /// Draws monochrome macOS Menu Bar glyphs (`[Volume] · [Battery] · Wi-Fi · Search · Control Center`) (`RUSTYOS-036`, `RUSTYOS-049`).
 pub(crate) fn push_top_bar_right_glyphs(
     out: &mut Vec<CompositorRenderElement>,

@@ -440,22 +440,23 @@ fn notification_toast_and_badge_hit_testing_match_rendered_bounds() {
     assert_eq!(check_notification_click(size, 4, 100.0, 200.0), None);
     assert_eq!(check_notification_click(size, 0, 1100.0, 60.0), None);
 
-    // TopBar unread notification badge pill hit-testing
+    // macOS 27 TopBar hides any legacy `N:k` counter pill; Clock opens Notification Center.
     let (bx, by, bw, bh) = notification_badge_rect(size.w);
-    assert!(check_top_bar_notification_click(
+    assert_eq!(bw, 0);
+    assert!(!check_top_bar_notification_click(
         size.w,
         2,
-        f64::from(bx + bw / 2),
+        f64::from(bx),
         f64::from(by + bh / 2)
     ));
     assert!(!check_top_bar_notification_click(
         size.w,
         0,
-        f64::from(bx + bw / 2),
+        f64::from(bx),
         f64::from(by + bh / 2)
     ));
 
-    // TopBar keyboard layout pill (`EN`/`RU`) avoids notification badge when present
+    // TopBar keyboard layout pill (`EN`/`RU`) stays anchored consistently regardless of alerts
     let (kbd_x, kbd_y, kbd_w, kbd_h) = kbd_badge_rect(size.w, 0);
     assert!(check_top_bar_kbd_click(
         size.w,
@@ -464,6 +465,7 @@ fn notification_toast_and_badge_hit_testing_match_rendered_bounds() {
         f64::from(kbd_y + kbd_h / 2)
     ));
     let (notif_kbd_x, notif_kbd_y, notif_kbd_w, notif_kbd_h) = kbd_badge_rect(size.w, 2);
+    assert_eq!(notif_kbd_x, kbd_x);
     assert!(notif_kbd_x + notif_kbd_w <= bx);
     assert!(check_top_bar_kbd_click(
         size.w,
@@ -2218,5 +2220,127 @@ fn wifi_popover_layout_and_hit_testing_work() {
     assert_eq!(
         hit_test_wifi_popover(screen, &state, 20.0, 20.0),
         WifiPopoverHit::OutsidePopover
+    );
+}
+
+#[test]
+fn top_bar_clock_and_control_center_click_regions_are_disjoint() {
+    let screen_w = 1280;
+    let clock_text = "Wed Apr 1  9:41 AM";
+    let opts = TopBarLayoutOptions::default();
+    let right = compute_top_bar_right_layout_with_options(screen_w, clock_text, opts);
+
+    let cc_mid = f64::from(right.control_center_x + right.control_center_w / 2);
+    let clock_mid = f64::from(right.clock_x + right.clock_w / 2);
+    assert!(check_top_bar_status_click_for_options(
+        screen_w, clock_text, opts, cc_mid, 12.0
+    ));
+    assert!(!check_top_bar_clock_click_for_options(
+        screen_w, clock_text, opts, cc_mid, 12.0
+    ));
+    assert!(check_top_bar_clock_click_for_options(
+        screen_w, clock_text, opts, clock_mid, 12.0
+    ));
+    assert!(!check_top_bar_status_click_for_options(
+        screen_w, clock_text, opts, clock_mid, 12.0
+    ));
+}
+
+#[test]
+fn notification_center_layout_and_hit_testing_work() {
+    let screen = Size::from((1280, 800));
+    let items = [
+        NotificationCenterItemView {
+            id: 101,
+            urgency: rusty_ipc::Urgency::Normal,
+            title: "Backup Complete",
+            body: "Snapshot stored safely.",
+        },
+        NotificationCenterItemView {
+            id: 102,
+            urgency: rusty_ipc::Urgency::Low,
+            title: "Messages",
+            body: "Ready for review.",
+        },
+        NotificationCenterItemView {
+            id: 103,
+            urgency: rusty_ipc::Urgency::Critical,
+            title: "Software Update",
+            body: "2 packages pending.",
+        },
+    ];
+    let state = NotificationCenterRenderState {
+        glass_opacity: crate::config::DEFAULT_GLASS_OPACITY,
+        reduce_transparency: false,
+        hide_previews: false,
+        notifications: &items,
+        task_states: [false, true, false, false],
+        task_labels: DEFAULT_NOTIFICATION_TASKS,
+        hovered_hit: None,
+        location_name: "Local Station",
+    };
+    let layout = compute_notification_center_layout(screen, &state);
+    assert!(layout.lead_card.is_some());
+    assert!(layout.clear_all_rect.is_some());
+    assert_eq!(layout.stack_cards.len(), 2);
+    assert!(
+        layout.panel_rect.loc.y + layout.panel_rect.size.h
+            <= screen.h - DOCK_HEIGHT - DOCK_MARGIN_BOTTOM,
+        "Notification Center overlapped Dock on 1280x800: bottom={}",
+        layout.panel_rect.loc.y + layout.panel_rect.size.h
+    );
+
+    if let Some(clear) = layout.clear_all_rect {
+        assert_eq!(
+            hit_test_notification_center(
+                screen,
+                &state,
+                f64::from(clear.loc.x + 10),
+                f64::from(clear.loc.y + 10),
+            ),
+            NotificationCenterHit::ClearAll
+        );
+    }
+    if let Some(lead) = layout.lead_card {
+        assert_eq!(
+            hit_test_notification_center(
+                screen,
+                &state,
+                f64::from(lead.card_rect.loc.x + 60),
+                f64::from(lead.card_rect.loc.y + 20),
+            ),
+            NotificationCenterHit::DismissNotification(101)
+        );
+    }
+    assert_eq!(
+        hit_test_notification_center(
+            screen,
+            &state,
+            f64::from(layout.task_rows[2].loc.x + 20),
+            f64::from(layout.task_rows[2].loc.y + 12),
+        ),
+        NotificationCenterHit::ToggleTask(2)
+    );
+    assert_eq!(
+        hit_test_notification_center(
+            screen,
+            &state,
+            f64::from(layout.edit_widgets_rect.loc.x + 30),
+            f64::from(layout.edit_widgets_rect.loc.y + 12),
+        ),
+        NotificationCenterHit::EditWidgets
+    );
+    assert_eq!(
+        hit_test_notification_center(
+            screen,
+            &state,
+            f64::from(layout.close_panel_rect.loc.x + 12),
+            f64::from(layout.close_panel_rect.loc.y + 12),
+        ),
+        NotificationCenterHit::ClosePanel
+    );
+    assert_eq!(
+        hit_test_notification_center(screen, &state, 20.0, 20.0),
+        NotificationCenterHit::OutsidePanel
     );
 }

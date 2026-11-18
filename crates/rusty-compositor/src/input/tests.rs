@@ -1508,3 +1508,59 @@ fn app_shortcut_resolves_across_non_latin_xkb_layouts_and_guards_focus()
     assert_eq!(active_after, seq.original_layout);
     Ok(())
 }
+
+#[test]
+fn top_bar_clock_opens_notification_center_and_persists_after_toast_expiry()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (_display, _event_loop, mut compositor) =
+        test_compositor_state("rusty-test-notification-center")?;
+
+    let id = compositor.push_notification_at(
+        rusty_ipc::Urgency::Normal,
+        "Files".to_owned(),
+        "Archive extracted cleanly".to_owned(),
+        std::time::Duration::from_secs(1),
+    );
+    assert_eq!(compositor.notifications.len(), 1);
+    assert_eq!(compositor.notification_history.len(), 1);
+
+    // Floating toast expires cleanly without wiping Notification Center history.
+    compositor.expire_notifications_at(std::time::Duration::from_secs(30));
+    assert_eq!(compositor.notifications.len(), 0);
+    assert_eq!(compositor.notification_history.len(), 1);
+
+    let tel = compositor.telemetry.snapshot();
+    let clock_text = tel.clock_date_hhmm.as_str();
+    let opts = crate::shell_render::TopBarLayoutOptions {
+        has_battery: tel.power.has_battery,
+        ..crate::shell_render::TopBarLayoutOptions::default()
+    };
+    let right =
+        crate::shell_render::compute_top_bar_right_layout_with_options(1280, clock_text, opts);
+    let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+
+    // Clicking TopBar Clock opens Notification Center instead of Quick Settings.
+    compositor.pointer_location = (f64::from(right.clock_x + 12), 12.0).into();
+    assert!(compositor.handle_top_bar_pointer_click(1280, serial, 272));
+    assert!(compositor.notification_center_open);
+    assert!(!compositor.quick_settings_active);
+
+    // Checklist task toggle updates Reminders count/state cleanly.
+    compositor.toggle_notification_center_task(1);
+    assert!(compositor.notification_center_tasks[1]);
+
+    // Opening Control Center mutually closes Notification Center.
+    compositor.pointer_location = (f64::from(right.control_center_x + 10), 12.0).into();
+    assert!(compositor.handle_top_bar_pointer_click(1280, serial, 272));
+    assert!(compositor.quick_settings_active);
+    assert!(!compositor.notification_center_open);
+
+    // Re-open and dismiss history card by ID.
+    compositor.open_notification_center();
+    assert!(compositor.notification_center_open);
+    assert!(compositor.dismiss_notification(id));
+    assert_eq!(compositor.notification_history.len(), 0);
+    compositor.close_notification_center();
+    assert!(!compositor.notification_center_open);
+    Ok(())
+}

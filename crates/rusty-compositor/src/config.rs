@@ -172,6 +172,41 @@ impl WindowShadowMode {
     }
 }
 
+/// Notification Center content preview visibility policy (`RUSTYOS-109`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NotificationPreviewsMode {
+    /// Always show full notification body text.
+    Always,
+    /// Show notification body text only while the session is unlocked.
+    #[default]
+    WhenUnlocked,
+    /// Hide body preview text in Notification Center and banners.
+    Never,
+}
+
+impl NotificationPreviewsMode {
+    /// Parses `[notifications].show_previews` from TOML.
+    #[must_use]
+    pub fn parse(raw: &str) -> Option<Self> {
+        match strip_toml_quotes(raw).trim().to_ascii_lowercase().as_str() {
+            "always" => Some(Self::Always),
+            "when_unlocked" | "unlocked" => Some(Self::WhenUnlocked),
+            "never" | "off" => Some(Self::Never),
+            _ => None,
+        }
+    }
+
+    /// Canonical TOML value (`"always"`, `"when_unlocked"`, `"never"`).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Always => "always",
+            Self::WhenUnlocked => "when_unlocked",
+            Self::Never => "never",
+        }
+    }
+}
+
 /// Default frosted glass opacity factor across macOS 27 shell surfaces (`RUSTYOS-048`).
 pub const DEFAULT_GLASS_OPACITY: f32 = 0.78;
 /// Minimum allowed glass opacity factor (`0.35..=1.0`).
@@ -629,6 +664,16 @@ pub struct UserConfig {
     pub updates_interval_minutes: u32,
     /// Show the updates indicator in the `TopBar` Menu Bar when updates are available (`RUSTYOS-076`).
     pub updates_show_in_menu_bar: bool,
+    /// Master switch allowing notification banners and Notification Center entries (`RUSTYOS-109`).
+    pub notifications_allow: bool,
+    /// Body preview visibility policy (`Always`, `WhenUnlocked`, `Never`) (`RUSTYOS-109`).
+    pub notifications_show_previews: NotificationPreviewsMode,
+    /// Allow notifications when display is sleeping (`RUSTYOS-109`).
+    pub notifications_when_sleeping: bool,
+    /// Allow notifications when screen is locked (`RUSTYOS-109`).
+    pub notifications_when_locked: bool,
+    /// Suppress notifications while mirroring or screen sharing (`RUSTYOS-109`).
+    pub notifications_mirroring_off: bool,
 }
 
 /// Default interval between background update checks (`180` minutes / 3 hours) (`RUSTYOS-076`).
@@ -689,6 +734,11 @@ impl Default for UserConfig {
             updates_enabled: true,
             updates_interval_minutes: DEFAULT_UPDATES_INTERVAL_MINUTES,
             updates_show_in_menu_bar: true,
+            notifications_allow: true,
+            notifications_show_previews: NotificationPreviewsMode::WhenUnlocked,
+            notifications_when_sleeping: false,
+            notifications_when_locked: true,
+            notifications_mirroring_off: true,
         }
     }
 }
@@ -835,6 +885,7 @@ impl UserConfig {
             ("security", _) => self.apply_security_kv(key, val),
             ("dock", _) => self.apply_dock_kv(key, val),
             ("updates", _) => self.apply_updates_kv(key, val),
+            ("notifications", _) => self.apply_notifications_kv(key, val),
             _ => {
                 if let Some(raw_output) = section.strip_prefix("display.outputs.") {
                     self.apply_output_kv(strip_toml_quotes(raw_output), key, val);
@@ -1009,6 +1060,37 @@ impl UserConfig {
             "show_in_menu_bar" => {
                 if let Ok(b) = val.parse::<bool>() {
                     self.updates_show_in_menu_bar = b;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn apply_notifications_kv(&mut self, key: &str, val: &str) {
+        match key {
+            "allow" => {
+                if let Ok(b) = val.parse::<bool>() {
+                    self.notifications_allow = b;
+                }
+            }
+            "show_previews" => {
+                if let Some(mode) = NotificationPreviewsMode::parse(val) {
+                    self.notifications_show_previews = mode;
+                }
+            }
+            "when_sleeping" => {
+                if let Ok(b) = val.parse::<bool>() {
+                    self.notifications_when_sleeping = b;
+                }
+            }
+            "when_locked" => {
+                if let Ok(b) = val.parse::<bool>() {
+                    self.notifications_when_locked = b;
+                }
+            }
+            "mirroring_off" => {
+                if let Ok(b) = val.parse::<bool>() {
+                    self.notifications_mirroring_off = b;
                 }
             }
             _ => {}
@@ -1205,6 +1287,7 @@ impl UserConfig {
         self.append_security_toml(&mut out);
         self.append_dock_toml(&mut out);
         self.append_updates_toml(&mut out);
+        self.append_notifications_toml(&mut out);
 
         let _ = writeln!(out, "\n[autostart]");
         let escaped_cmds: Vec<String> = self
@@ -1241,6 +1324,21 @@ impl UserConfig {
             clamp_updates_interval_minutes(self.updates_interval_minutes)
         );
         let _ = writeln!(out, "show_in_menu_bar = {}", self.updates_show_in_menu_bar);
+    }
+
+    fn append_notifications_toml(&self, out: &mut String) {
+        use std::fmt::Write as _;
+
+        let _ = writeln!(out, "\n[notifications]");
+        let _ = writeln!(out, "allow = {}", self.notifications_allow);
+        let _ = writeln!(
+            out,
+            "show_previews = \"{}\"",
+            self.notifications_show_previews.as_str()
+        );
+        let _ = writeln!(out, "when_sleeping = {}", self.notifications_when_sleeping);
+        let _ = writeln!(out, "when_locked = {}", self.notifications_when_locked);
+        let _ = writeln!(out, "mirroring_off = {}", self.notifications_mirroring_off);
     }
 
     fn append_dock_toml(&self, out: &mut String) {
@@ -1945,5 +2043,33 @@ mod tests {
 
         let high = UserConfig::parse_toml("[updates]\ncheck_interval_minutes = 999999\n");
         assert_eq!(high.updates_interval_minutes, MAX_UPDATES_INTERVAL_MINUTES);
+    }
+
+    #[test]
+    fn parses_notifications_section_and_roundtrips() {
+        let defaults = UserConfig::default();
+        assert!(defaults.notifications_allow);
+        assert_eq!(
+            defaults.notifications_show_previews,
+            NotificationPreviewsMode::WhenUnlocked
+        );
+        assert!(!defaults.notifications_when_sleeping);
+        assert!(defaults.notifications_when_locked);
+        assert!(defaults.notifications_mirroring_off);
+
+        let parsed = UserConfig::parse_toml(
+            "[notifications]\nallow = false\nshow_previews = \"never\"\nwhen_sleeping = true\nwhen_locked = false\nmirroring_off = false\n",
+        );
+        assert!(!parsed.notifications_allow);
+        assert_eq!(
+            parsed.notifications_show_previews,
+            NotificationPreviewsMode::Never
+        );
+        assert!(parsed.notifications_when_sleeping);
+        assert!(!parsed.notifications_when_locked);
+        assert!(!parsed.notifications_mirroring_off);
+
+        let reparsed = UserConfig::parse_toml(&parsed.to_toml_string());
+        assert_eq!(reparsed, parsed);
     }
 }

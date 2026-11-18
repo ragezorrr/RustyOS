@@ -28,6 +28,7 @@ impl RustyCompositorState {
             && !self.quick_settings_active
             && !self.updates_popover_open
             && !self.wifi_popover_open
+            && !self.notification_center_open
             && !self.settings_active
             && !self.has_foreground_layer_surfaces()
             && !self.should_hide_shell_chrome_for_fullscreen();
@@ -303,6 +304,7 @@ impl RustyCompositorState {
         self.update_dock_stack_hover(is_on_primary, chrome_hidden, local_x, local_y);
         self.update_updates_popover_hover(is_on_primary, chrome_hidden, local_x, local_y);
         self.update_wifi_popover_hover(is_on_primary, chrome_hidden, local_x, local_y);
+        self.update_notification_center_hover(is_on_primary, chrome_hidden, local_x, local_y);
         let fullscreen_active = self
             .topmost_fullscreen_window_on(self.output_map.primary().id)
             .is_some();
@@ -337,6 +339,7 @@ impl RustyCompositorState {
             && !self.quick_settings_active
             && !self.updates_popover_open
             && !self.wifi_popover_open
+            && !self.notification_center_open
             && self.window_switcher.is_none()
         {
             crate::shell_render::check_notification_click(
@@ -354,6 +357,7 @@ impl RustyCompositorState {
             && !self.quick_settings_active
             && !self.updates_popover_open
             && !self.wifi_popover_open
+            && !self.notification_center_open
             && !self.overview_active
             && self.active_top_bar_menu.is_none()
             && self.window_switcher.is_none()
@@ -451,6 +455,39 @@ impl RustyCompositorState {
         };
         if self.wifi_popover_hover != next_hover {
             self.wifi_popover_hover = next_hover;
+            self.shell_redraw_needed = true;
+        }
+    }
+
+    fn update_notification_center_hover(
+        &mut self,
+        is_on_primary: bool,
+        chrome_hidden: bool,
+        local_x: f64,
+        local_y: f64,
+    ) {
+        if !(self.notification_center_open && is_on_primary && !chrome_hidden) {
+            return;
+        }
+        let logical_size = self.primary_output_logical_size();
+        let items = self.build_notification_center_items();
+        let nc_view = self.notification_center_render_state(&items, false);
+        let next_hover = match crate::shell_render::hit_test_notification_center(
+            logical_size,
+            &nc_view,
+            local_x,
+            local_y,
+        ) {
+            hit @ (crate::shell_render::NotificationCenterHit::DismissNotification(_)
+            | crate::shell_render::NotificationCenterHit::ClearAll
+            | crate::shell_render::NotificationCenterHit::ToggleTask(_)
+            | crate::shell_render::NotificationCenterHit::EditWidgets
+            | crate::shell_render::NotificationCenterHit::ClosePanel) => Some(hit),
+            crate::shell_render::NotificationCenterHit::InsidePanel
+            | crate::shell_render::NotificationCenterHit::OutsidePanel => None,
+        };
+        if self.notification_center_hover != next_hover {
+            self.notification_center_hover = next_hover;
             self.shell_redraw_needed = true;
         }
     }
@@ -586,14 +623,14 @@ impl RustyCompositorState {
             self.toggle_quick_settings();
             return true;
         }
-        if crate::shell_render::check_top_bar_notification_click_for_options(
+        if crate::shell_render::check_top_bar_clock_click_for_options(
             output_width,
             clock_text,
             opts,
             x,
             y,
         ) {
-            self.clear_notifications();
+            self.toggle_notification_center();
             return true;
         }
         if crate::shell_render::check_top_bar_updates_click_for_options(
@@ -606,6 +643,18 @@ impl RustyCompositorState {
             self.toggle_updates_popover();
             return true;
         }
+        self.handle_top_bar_right_accessory_click(output_width, clock_text, opts, button, x, y)
+    }
+
+    fn handle_top_bar_right_accessory_click(
+        &mut self,
+        output_width: i32,
+        clock_text: &str,
+        opts: crate::shell_render::TopBarLayoutOptions,
+        button: u32,
+        x: f64,
+        y: f64,
+    ) -> bool {
         if crate::shell_render::check_top_bar_kbd_click_for_options(
             output_width,
             clock_text,
@@ -809,6 +858,47 @@ impl RustyCompositorState {
             crate::shell_render::WifiPopoverHit::OutsidePopover => {
                 self.close_wifi_popover();
             }
+        }
+    }
+
+    pub(super) fn handle_notification_center_pointer_click(&mut self, button: u32) {
+        let (output_size, _on_primary, local_x, local_y) =
+            self.primary_local_coords(self.pointer_location);
+        let items = self.build_notification_center_items();
+        let view = self.notification_center_render_state(&items, false);
+        let hit =
+            crate::shell_render::hit_test_notification_center(output_size, &view, local_x, local_y);
+        match hit {
+            crate::shell_render::NotificationCenterHit::DismissNotification(id)
+                if button == 272 =>
+            {
+                self.dismiss_notification(id);
+                self.notification_center_hover = None;
+                self.shell_redraw_needed = true;
+            }
+            crate::shell_render::NotificationCenterHit::ClearAll if button == 272 => {
+                self.clear_notifications();
+                self.notification_center_hover = None;
+                self.shell_redraw_needed = true;
+            }
+            crate::shell_render::NotificationCenterHit::ToggleTask(idx) if button == 272 => {
+                self.toggle_notification_center_task(idx);
+            }
+            crate::shell_render::NotificationCenterHit::EditWidgets if button == 272 => {
+                self.open_notification_settings_action();
+            }
+            crate::shell_render::NotificationCenterHit::ClosePanel if button == 272 => {
+                self.close_notification_center();
+            }
+            crate::shell_render::NotificationCenterHit::OutsidePanel => {
+                self.close_notification_center();
+            }
+            crate::shell_render::NotificationCenterHit::InsidePanel
+            | crate::shell_render::NotificationCenterHit::DismissNotification(_)
+            | crate::shell_render::NotificationCenterHit::ClearAll
+            | crate::shell_render::NotificationCenterHit::ToggleTask(_)
+            | crate::shell_render::NotificationCenterHit::EditWidgets
+            | crate::shell_render::NotificationCenterHit::ClosePanel => {}
         }
     }
 

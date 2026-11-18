@@ -1894,6 +1894,24 @@ hardware/software context и низкие накладные расходы.
 - **Tests:** Все 260 unit-тестов workspace (`4` `rusty-animation`, `174` `rusty-compositor`, `15` `rusty-files`, `3` `rusty-ipc`, `43` `rusty-services`, `5` `rusty-settings`, `5` `rusty-shell`, `4` `rusty-updater`, `7` `rusty-wm`).
 - **Risks:** Нет.
 
+### RUSTYOS-109 — `Notification Center`, разделение триггеров `Control Center` / `Clock` и редизайн вкладки `Notifications` в `rusty-settings`
+
+- **Status:** Done
+- **Goal:** Отделить клик по часам от триггера `Control Center` в `TopBar`, реализовать правую панель `Notification Center` (карточки уведомлений из персистентной истории, заголовок с очисткой, виджет `Weather` и интерактивный список `Reminders`, переход `Edit Widgets`) и обновить вкладку `Notifications` в `rusty-settings` по эталонам `27-Golden-Gate-Notification-Center.png` и `27-Golden-Gate-Settings-Notifications.png` без изменений `liquid_glass.rs`, `Dock` и `Control Center`.
+- **Dependencies:** `RUSTYOS-107`, `RUSTYOS-108`.
+- **Scope:**
+  - `crates/rusty-compositor/src/config.rs` и `frame_composer.rs`: добавлены `NotificationPreviewsMode` (`Always`, `WhenUnlocked`, `Never`), поля `notifications_allow`, `notifications_show_previews`, `notifications_when_sleeping`, `notifications_when_locked`, `notifications_mirroring_off` в `UserConfig`, `apply_notifications_kv` / `append_notifications_toml` и применение политик скрытия уведомлений;
+  - `crates/rusty-compositor/src/surfaces/{mod.rs, glyphs.rs, tests.rs}`: добавлены SDF-глифы `UiGlyphKind::CloudSun` (`sample_cloud_sun_glyph_uv`) и `UiGlyphKind::Checklist` (`sample_checklist_glyph_uv`);
+  - `crates/rusty-compositor/src/shell_render/top_bar/{panel.rs, status.rs, chrome_shapes.rs, notifications.rs, mod.rs}`: разделены зоны `status_hit_x`/`status_hit_w` и `check_top_bar_clock_click_for_options`, добавлен флаг `TopBarTelemetry::notification_center_open` с подсветкой-пилюлей позади часов и убран устаревший синий бейдж `N:k` из `TopBar` (`notif_w = 0`);
+  - `crates/rusty-compositor/src/shell_render/{notification_center.rs, overlay_shapes.rs, text_pass.rs, mod.rs, tests.rs}` + `state/*`, `input/*`, `context_menu/mod.rs`: добавлены `ShellOverlayView::NotificationCenter`, `NotificationCenterRenderState`, `NotificationCenterHit`, персистентная история `notification_history` (сохраняющаяся после истечения TTL тоста), ведущая карточка + заголовок с `ClearAll` + стопка карточек, виджет `Weather` (`r = 22`) с почасовым прогнозом, интерактивный `Reminders` (`notification_center_tasks`), `Edit Widgets` / `ClosePanel`, `KeyIntercept::NotificationCenterClose` (`Escape`) и взаимное закрытие оверлеев при нетронутых `liquid_glass.rs`, `sdf.rs`, `dock.rs` и `quick_settings.rs`;
+  - `apps/rusty-settings/src/{state.rs, layout.rs, render.rs}`: акцент `#FF3B30`, страница `SettingsPage::Notifications` с карточкой заголовка, политиками `Notification Center`, перечнем `Application Notifications` (5 приложений с векторными скворклами), `Menu Bar & Updates` и записью в `[notifications]` `config.toml`;
+  - `docs/adr/0060-notification-center-and-settings.md`, `DESIGN.md`, `ARCHITECTURE.md`, `DECISIONS.md` (`D-073`).
+- **Acceptance Criteria:**
+  - Живые `--winit` прогоны (Wayland/X11 smoke и `Light`/`Dark` снимки `Notification Center`, раздельного открытия `Control Center` и `Settings > Notifications`) подтверждают раздельное поведение триггеров `Clock` / `Control Center`, переключение задач в `Reminders`, сохранение уведомлений в истории и отсутствие каких-либо правок в `liquid_glass.rs`, `sdf.rs`, `dock.rs` и `quick_settings.rs`;
+  - `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings` и все 265 тестов workspace проходят без ошибок.
+- **Tests:** Все 265 unit-тестов workspace (`4` `rusty-animation`, `178` `rusty-compositor`, `15` `rusty-files`, `3` `rusty-ipc`, `43` `rusty-services`, `6` `rusty-settings`, `5` `rusty-shell`, `4` `rusty-updater`, `7` `rusty-wm`).
+- **Risks:** Нет.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

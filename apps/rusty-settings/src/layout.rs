@@ -79,6 +79,16 @@ pub(crate) enum ServiceBadgeKind {
     Firewall,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NotificationAppKind {
+    Bell,
+    Files,
+    Terminal,
+    Browser,
+    Updater,
+    Settings,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CardRowControl {
     Switch {
@@ -114,6 +124,18 @@ pub(crate) enum CardRowControl {
         connected: bool,
         secure: bool,
         signal_percent: u8,
+        action: RowControlId,
+    },
+    NotificationHeader {
+        subtitle: String,
+        action: RowControlId,
+        active: bool,
+    },
+    NotificationAppRow {
+        app_kind: NotificationAppKind,
+        badge_tint: [u8; 4],
+        subtitle: String,
+        active: bool,
         action: RowControlId,
     },
     Info {
@@ -689,44 +711,176 @@ fn build_system_page_sections(
                 ],
             )]
         }
-        SettingsPage::Notifications => vec![place_card_section(
-            Some("Menu Bar & Alerts"),
-            content_x,
-            cur_y,
-            content_w,
-            vec![
-                row_switch(
-                    "Show Workspace Strip",
-                    RowControlId::MenubarWorkspacesToggle,
-                    app.menubar_workspaces,
-                ),
-                row_switch(
-                    "Show System Tray Applets",
-                    RowControlId::MenubarTrayToggle,
-                    app.menubar_tray,
-                ),
-                row_switch(
-                    "Show Input Source Badge",
-                    RowControlId::MenubarInputToggle,
-                    app.menubar_input,
-                ),
-                row_switch(
-                    "Show Volume Indicator",
-                    RowControlId::MenubarVolumeToggle,
-                    app.menubar_volume,
-                ),
-                row_switch("24-Hour Clock", RowControlId::Clock24hToggle, app.clock_24h),
-                row_switch(
-                    "Automatic Update Checks",
-                    RowControlId::UpdatesEnabledToggle,
-                    app.updates_enabled,
-                ),
-            ],
-        )],
+        SettingsPage::Notifications => {
+            build_notifications_page_sections(app, content_x, cur_y, content_w)
+        }
         SettingsPage::Wifi => build_wifi_page_sections(app, content_x, cur_y, content_w),
         SettingsPage::Network => build_network_page_sections(app, content_x, cur_y, content_w),
         _ => Vec::new(),
     }
+}
+
+fn build_notifications_page_sections(
+    app: &SettingsAppState,
+    content_x: i32,
+    cur_y: &mut i32,
+    content_w: i32,
+) -> Vec<CardSectionLayout> {
+    let mut sections = vec![
+        place_card_section_with_gap(
+            None,
+            content_x,
+            cur_y,
+            content_w,
+            vec![RowSpec {
+                label: String::from("Notifications"),
+                height: 64,
+                control: CardRowControl::NotificationHeader {
+                    subtitle: String::from(
+                        "Customize banners, sounds, and Notification Center behavior.",
+                    ),
+                    action: RowControlId::NotifAllowToggle,
+                    active: app.notif_allow,
+                },
+            }],
+            18,
+        ),
+        place_card_section(
+            Some("Notification Center"),
+            content_x,
+            cur_y,
+            content_w,
+            vec![
+                row_choice(
+                    "Show previews",
+                    RowControlId::NotifShowPreviewsCycle,
+                    app.notif_show_previews.clone(),
+                ),
+                row_switch(
+                    "when display is sleeping",
+                    RowControlId::NotifWhenSleepingToggle,
+                    app.notif_when_sleeping,
+                ),
+                row_switch(
+                    "when screen is locked",
+                    RowControlId::NotifWhenLockedToggle,
+                    app.notif_when_locked,
+                ),
+                row_choice(
+                    "when mirroring or sharing the display",
+                    RowControlId::NotifMirroringCycle,
+                    String::from(if app.notif_mirroring_off {
+                        "Notifications Off"
+                    } else {
+                        "Allow"
+                    }),
+                ),
+            ],
+        ),
+    ];
+
+    append_notification_app_rows_section(app, content_x, cur_y, content_w, &mut sections);
+
+    sections.push(place_card_section(
+        Some("Menu Bar & Updates"),
+        content_x,
+        cur_y,
+        content_w,
+        vec![
+            row_switch("24-Hour Clock", RowControlId::Clock24hToggle, app.clock_24h),
+            row_switch(
+                "Automatic Update Checks",
+                RowControlId::UpdatesEnabledToggle,
+                app.updates_enabled,
+            ),
+            row_switch(
+                "Show Workspace Strip",
+                RowControlId::MenubarWorkspacesToggle,
+                app.menubar_workspaces,
+            ),
+            row_switch(
+                "Show System Tray Applets",
+                RowControlId::MenubarTrayToggle,
+                app.menubar_tray,
+            ),
+            row_switch(
+                "Show Input Source Badge",
+                RowControlId::MenubarInputToggle,
+                app.menubar_input,
+            ),
+            row_switch(
+                "Show Volume Indicator",
+                RowControlId::MenubarVolumeToggle,
+                app.menubar_volume,
+            ),
+        ],
+    ));
+    sections
+}
+
+fn append_notification_app_rows_section(
+    app: &SettingsAppState,
+    content_x: i32,
+    cur_y: &mut i32,
+    content_w: i32,
+    sections: &mut Vec<CardSectionLayout>,
+) {
+    let app_specs: [(&str, NotificationAppKind, [u8; 4]); 5] = [
+        (
+            "Files",
+            NotificationAppKind::Files,
+            [0x0A, 0x84, 0xFF, 0xFF],
+        ),
+        (
+            "Terminal",
+            NotificationAppKind::Terminal,
+            [0x36, 0x3A, 0x45, 0xFF],
+        ),
+        (
+            "Browser",
+            NotificationAppKind::Browser,
+            [0x24, 0x91, 0xFF, 0xFF],
+        ),
+        (
+            "Software Update",
+            NotificationAppKind::Updater,
+            [0x34, 0xC7, 0x59, 0xFF],
+        ),
+        (
+            "System Settings",
+            NotificationAppKind::Settings,
+            [0x76, 0x7A, 0x84, 0xFF],
+        ),
+    ];
+    let app_rows = app_specs
+        .into_iter()
+        .enumerate()
+        .map(|(idx, (name, kind, tint))| {
+            let active = app.notif_app_enabled.get(idx).copied().unwrap_or(true);
+            RowSpec {
+                label: name.to_owned(),
+                height: 52,
+                control: CardRowControl::NotificationAppRow {
+                    app_kind: kind,
+                    badge_tint: tint,
+                    subtitle: String::from(if active {
+                        "Banners, Badges, Sounds"
+                    } else {
+                        "Off"
+                    }),
+                    active,
+                    action: RowControlId::NotifAppToggle(idx),
+                },
+            }
+        })
+        .collect();
+    sections.push(place_card_section(
+        Some("Application Notifications"),
+        content_x,
+        cur_y,
+        content_w,
+        app_rows,
+    ));
 }
 
 fn build_wifi_page_sections(
@@ -1315,7 +1469,15 @@ fn hit_test_appearance(app: &AppearanceCardsLayout, px: f64, py: f64) -> Option<
 
 fn hit_test_row(row: &CardRowLayout, px: f64, py: f64) -> Option<SettingsHit> {
     match &row.control {
-        CardRowControl::Switch { action, .. } | CardRowControl::WifiHeaderSwitch { action, .. } => {
+        CardRowControl::WifiNetwork { action, .. }
+        | CardRowControl::NotificationAppRow { action, .. } => {
+            if row.rect.contains_f64(px, py) {
+                return Some(SettingsHit::Control(*action));
+            }
+        }
+        CardRowControl::Switch { action, .. }
+        | CardRowControl::WifiHeaderSwitch { action, .. }
+        | CardRowControl::NotificationHeader { action, .. } => {
             if switch_rect(row.rect).contains_f64(px, py) || row.rect.contains_f64(px, py) {
                 return Some(SettingsHit::Control(*action));
             }
@@ -1341,11 +1503,6 @@ fn hit_test_row(row: &CardRowLayout, px: f64, py: f64) -> Option<SettingsHit> {
         } => {
             if row.rect.contains_f64(px, py) {
                 return Some(SettingsHit::PushPage(*target));
-            }
-        }
-        CardRowControl::WifiNetwork { action, .. } => {
-            if row.rect.contains_f64(px, py) {
-                return Some(SettingsHit::Control(*action));
             }
         }
         CardRowControl::ServiceStatus { target: None, .. } | CardRowControl::Info { .. } => {}
@@ -1499,5 +1656,35 @@ mod tests {
             ),
             Some(SettingsHit::Control(RowControlId::WifiConnectIndex(1)))
         );
+    }
+
+    #[test]
+    fn notifications_page_exposes_header_policies_and_app_rows() {
+        let mut app = SettingsAppState::new(&StartupOptions::default());
+        app.current_page = SettingsPage::Notifications;
+        let layout = compute_layout(&app, 882, 600);
+        assert!(layout.sections.len() >= 4);
+
+        let hero_row = &layout.sections[0].rows[0];
+        assert_eq!(
+            hit_test(
+                &layout,
+                f64::from(hero_row.rect.x + 80),
+                f64::from(hero_row.rect.y + 24)
+            ),
+            Some(SettingsHit::Control(RowControlId::NotifAllowToggle))
+        );
+
+        let app0 = &layout.sections[2].rows[0];
+        assert_eq!(
+            hit_test(
+                &layout,
+                f64::from(app0.rect.x + 80),
+                f64::from(app0.rect.y + 20)
+            ),
+            Some(SettingsHit::Control(RowControlId::NotifAppToggle(0)))
+        );
+        app.apply_row_action(RowControlId::NotifAppToggle(0));
+        assert!(!app.notif_app_enabled[0]);
     }
 }

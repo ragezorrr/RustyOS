@@ -64,6 +64,8 @@ pub struct TopBarTelemetry<'a> {
     pub audio_muted: bool,
     /// Whether the Quick Settings popover is currently open.
     pub quick_settings_open: bool,
+    /// Whether the Notification Center drawer is currently open (`RUSTYOS-109`).
+    pub notification_center_open: bool,
     /// Whether the Wi-Fi popover is currently open (`RUSTYOS-108`).
     pub wifi_open: bool,
     /// Whether the Software Updates popover is currently open (`RUSTYOS-076`).
@@ -136,6 +138,7 @@ impl Default for TopBarTelemetry<'static> {
             volume_percent: 75,
             audio_muted: false,
             quick_settings_open: false,
+            notification_center_open: false,
             wifi_open: false,
             updates_open: false,
             show_updates: false,
@@ -356,17 +359,12 @@ pub fn compute_top_bar_right_layout_with_options(
 
     let status_pill_x = control_center_x - 3;
     let status_pill_w = control_center_w + 6;
-    let status_hit_x = left_cursor - 4;
-    let status_hit_w = (right_edge - status_hit_x).max(88);
+    let status_hit_x = control_center_x - 5;
+    let status_hit_w = (clock_x - 2 - status_hit_x).max(28);
 
-    let (notif_x, notif_w) = if opts.notification_count > 0 {
-        let nw = 38;
-        let nx = left_cursor - 8 - nw;
-        left_cursor = nx;
-        (nx, nw)
-    } else {
-        (left_cursor, 0)
-    };
+    // macOS 27 Golden Gate (`27-Golden-Gate-Notification-Center.png`) never draws an `N:k` pill in
+    // the Menu Bar; Notification Center opens directly from the Clock. Keep layout slot empty.
+    let (notif_x, notif_w) = (left_cursor, 0);
 
     let updates_w = 22;
     let updates_x = if opts.show_updates {

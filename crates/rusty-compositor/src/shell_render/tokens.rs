@@ -414,7 +414,6 @@ pub(super) fn truncate_ascii(text: &str, max_chars: usize) -> String {
 pub(super) const RGBA_SURFACE_ELEVATED: [u8; 4] = [38, 38, 42, 245]; // #26262A @ 0.96
 pub(super) const RGBA_SURFACE_OVERLAY: [u8; 4] = [48, 48, 54, 250]; // #303036 @ 0.98
 pub(super) const RGBA_ACCENT: [u8; 4] = [10, 132, 255, 255]; // #0A84FF
-pub(super) const RGBA_ACCENT_MUTED: [u8; 4] = [0, 98, 204, 255]; // #0062CC
 pub(super) const RGBA_BORDER: [u8; 4] = [255, 255, 255, 31];
 pub(super) const RGBA_BORDER_HIGHLIGHT: [u8; 4] = [255, 255, 255, 56];
 pub(super) const RGBA_DANGER: [u8; 4] = [255, 69, 58, 255];

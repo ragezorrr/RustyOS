@@ -10,6 +10,7 @@ use super::dock_stack::render_dock_stack_text;
 use super::modals::{
     render_pick_color_text, render_polkit_text, render_portal_text, render_settings_text,
 };
+use super::notification_center::render_notification_center_text;
 use super::quick_settings::render_quick_settings_text;
 use super::spotlight_overview::{
     render_overview_text, render_switcher_text, spotlight_results_rect, spotlight_search_pill_rect,
@@ -186,6 +187,9 @@ pub(super) fn append_foreground_overlay_text(
         }
         ShellOverlayView::Wifi(wifi) => {
             render_wifi_popover_text(text_cache, renderer, screen_size, wifi, elements);
+        }
+        ShellOverlayView::NotificationCenter(nc) => {
+            render_notification_center_text(text_cache, renderer, screen_size, nc, elements);
         }
     }
 
@@ -509,23 +513,6 @@ pub(super) fn append_chrome_text(
             pure_white,
             kbd_bounds,
         ) {
-            elements.push(el);
-        }
-    }
-
-    if top_telemetry.notification_count > 0 {
-        let badge_label = if top_telemetry.notification_count > 99 {
-            "N:99+".to_owned()
-        } else {
-            format!("N:{}", top_telemetry.notification_count)
-        };
-        let badge_bounds = Rectangle::new(
-            Point::from((right_layout.notif_x, ws_y)),
-            Size::from((right_layout.notif_w, ws_btn_height)),
-        );
-        if let Some(el) =
-            text_cache.render_label_centered(renderer, &badge_label, 10.5, pure_white, badge_bounds)
-        {
             elements.push(el);
         }
     }

@@ -41,6 +41,7 @@ impl RustyCompositorState {
             self.close_quick_settings();
             self.close_updates_popover();
             self.close_wifi_popover();
+            self.close_notification_center();
             self.close_overview();
             self.close_settings();
         }
@@ -65,6 +66,7 @@ impl RustyCompositorState {
             self.close_top_bar_menu();
             self.close_updates_popover();
             self.close_wifi_popover();
+            self.close_notification_center();
             self.window_switcher = None;
             self.close_launcher();
             self.close_overview();
@@ -112,6 +114,7 @@ impl RustyCompositorState {
         self.window_switcher = None;
         self.close_quick_settings();
         self.close_wifi_popover();
+        self.close_notification_center();
         self.close_launcher();
         self.close_overview();
         self.close_settings();
@@ -227,6 +230,7 @@ impl RustyCompositorState {
         self.close_updates_popover();
         self.window_switcher = None;
         self.close_quick_settings();
+        self.close_notification_center();
         self.close_launcher();
         self.close_overview();
         self.close_settings();
@@ -289,6 +293,102 @@ impl RustyCompositorState {
         }
     }
 
+    /// Toggles the right-edge `Notification Center` drawer (`RUSTYOS-109`).
+    pub fn toggle_notification_center(&mut self) {
+        if self.notification_center_open {
+            self.close_notification_center();
+        } else {
+            self.open_notification_center();
+        }
+    }
+
+    /// Opens `Notification Center` and closes competing shell overlays (`RUSTYOS-109`).
+    pub fn open_notification_center(&mut self) {
+        if self.is_session_locked() {
+            return;
+        }
+        self.notification_center_open = true;
+        self.notification_center_hover = None;
+        self.close_dock_stack();
+        self.close_context_menu();
+        self.close_top_bar_menu();
+        self.close_updates_popover();
+        self.close_wifi_popover();
+        self.window_switcher = None;
+        self.close_quick_settings();
+        self.close_launcher();
+        self.close_overview();
+        self.close_settings();
+        self.telemetry.request_refresh();
+        self.shell_redraw_needed = true;
+    }
+
+    /// Closes `Notification Center` (`RUSTYOS-109`).
+    pub fn close_notification_center(&mut self) {
+        if self.notification_center_open || self.notification_center_hover.is_some() {
+            self.notification_center_open = false;
+            self.notification_center_hover = None;
+            self.shell_redraw_needed = true;
+        }
+    }
+
+    /// Toggles completion state of task `idx` inside the Reminders widget (`RUSTYOS-109`).
+    pub fn toggle_notification_center_task(&mut self, idx: usize) {
+        if let Some(done) = self.notification_center_tasks.get_mut(idx) {
+            *done = !*done;
+            self.shell_redraw_needed = true;
+        }
+    }
+
+    /// Opens `rusty-settings --page notifications` from `Edit Widgets` (`RUSTYOS-109`).
+    pub fn open_notification_settings_action(&mut self) {
+        self.close_notification_center();
+        if self.wayland_socket_exists()
+            && self.launch_rusty_settings_args(&["--page", "notifications"])
+        {
+            self.shell_redraw_needed = true;
+            return;
+        }
+        self.settings_tab = crate::shell_render::SettingsTab::MenuBar;
+        self.open_settings();
+    }
+
+    /// Builds newest-first items backed by [`Self::notification_history`] (`RUSTYOS-109`).
+    #[must_use]
+    pub fn build_notification_center_items(
+        &self,
+    ) -> Vec<crate::shell_render::NotificationCenterItemView<'_>> {
+        self.notification_history
+            .iter()
+            .rev()
+            .map(|n| crate::shell_render::NotificationCenterItemView {
+                id: n.id,
+                urgency: n.urgency,
+                title: &n.title,
+                body: &n.body,
+            })
+            .collect()
+    }
+
+    /// Builds [`crate::shell_render::NotificationCenterRenderState`] for rendering and hit-testing (`RUSTYOS-109`).
+    #[must_use]
+    pub fn notification_center_render_state<'a>(
+        &'a self,
+        items: &'a [crate::shell_render::NotificationCenterItemView<'a>],
+        hide_previews: bool,
+    ) -> crate::shell_render::NotificationCenterRenderState<'a> {
+        crate::shell_render::NotificationCenterRenderState {
+            glass_opacity: self.glass_opacity,
+            reduce_transparency: self.reduce_transparency,
+            hide_previews,
+            notifications: items,
+            task_states: self.notification_center_tasks,
+            task_labels: crate::shell_render::DEFAULT_NOTIFICATION_TASKS,
+            hovered_hit: self.notification_center_hover,
+            location_name: "Local Station",
+        }
+    }
+
     /// Toggles a `TopBar` left menu dropdown popover (`RUSTYOS-048`, `RUSTYOS-068`).
     pub fn toggle_top_bar_menu(&mut self, menu: crate::shell_render::TopBarMenuHit) {
         if menu == crate::shell_render::TopBarMenuHit::Go
@@ -304,6 +404,7 @@ impl RustyCompositorState {
             self.close_quick_settings();
             self.close_updates_popover();
             self.close_wifi_popover();
+            self.close_notification_center();
             self.close_launcher();
             self.active_top_bar_menu = Some(menu);
             self.top_bar_menu_hover_row = None;
@@ -324,6 +425,7 @@ impl RustyCompositorState {
         self.close_dock_stack();
         self.updates_popover_hover = None;
         self.wifi_popover_hover = None;
+        self.notification_center_hover = None;
         self.top_bar_menu_hover_row = None;
         self.qs_slider_drag = None;
         self.hovered_notification_idx = None;
@@ -573,6 +675,7 @@ impl RustyCompositorState {
             self.close_quick_settings();
             self.close_updates_popover();
             self.close_wifi_popover();
+            self.close_notification_center();
             self.close_top_bar_menu();
             self.close_overview();
             self.active_window_drag = None;
@@ -723,6 +826,7 @@ impl RustyCompositorState {
         now: Duration,
     ) -> u64 {
         const MAX_QUEUE_LEN: usize = 16;
+        const MAX_HISTORY_LEN: usize = 32;
         self.next_notification_id = self.next_notification_id.saturating_add(1);
         let ttl = match urgency {
             Urgency::Low => Duration::from_secs(4),
@@ -730,7 +834,7 @@ impl RustyCompositorState {
             Urgency::Critical => Duration::from_secs(12),
         };
         let id = self.next_notification_id;
-        self.notifications.push(CompositorNotification {
+        let item = CompositorNotification {
             id,
             dbus_id: None,
             urgency,
@@ -738,10 +842,16 @@ impl RustyCompositorState {
             body,
             created_at: now,
             ttl,
-        });
+        };
+        self.notifications.push(item.clone());
+        self.notification_history.push(item);
         if self.notifications.len() > MAX_QUEUE_LEN {
             let excess = self.notifications.len() - MAX_QUEUE_LEN;
             self.notifications.drain(0..excess);
+        }
+        if self.notification_history.len() > MAX_HISTORY_LEN {
+            let excess = self.notification_history.len() - MAX_HISTORY_LEN;
+            self.notification_history.drain(0..excess);
         }
         self.sync_notification_count();
         id
@@ -767,6 +877,7 @@ impl RustyCompositorState {
         expire_after: Option<Duration>,
     ) {
         const MAX_QUEUE_LEN: usize = 12;
+        const MAX_HISTORY_LEN: usize = 32;
         let now = self.start_time.elapsed();
         let default_ttl = match urgency {
             Urgency::Low => Duration::from_secs(4),
@@ -783,17 +894,29 @@ impl RustyCompositorState {
         {
             existing.dbus_id = Some(dbus_id);
             existing.urgency = urgency;
-            existing.title = title;
-            existing.body = body;
+            existing.title.clone_from(&title);
+            existing.body.clone_from(&body);
             existing.created_at = now;
             existing.ttl = ttl;
+            if let Some(hist) = self
+                .notification_history
+                .iter_mut()
+                .find(|n| n.dbus_id == Some(replaces_id))
+            {
+                hist.dbus_id = Some(dbus_id);
+                hist.urgency = urgency;
+                hist.title = title;
+                hist.body = body;
+                hist.created_at = now;
+                hist.ttl = ttl;
+            }
             self.sync_notification_count();
             return;
         }
 
         self.next_notification_id = self.next_notification_id.saturating_add(1);
         let id = self.next_notification_id;
-        self.notifications.push(CompositorNotification {
+        let item = CompositorNotification {
             id,
             dbus_id: Some(dbus_id),
             urgency,
@@ -801,10 +924,16 @@ impl RustyCompositorState {
             body,
             created_at: now,
             ttl,
-        });
+        };
+        self.notifications.push(item.clone());
+        self.notification_history.push(item);
         if self.notifications.len() > MAX_QUEUE_LEN {
             let excess = self.notifications.len() - MAX_QUEUE_LEN;
             self.notifications.drain(0..excess);
+        }
+        if self.notification_history.len() > MAX_HISTORY_LEN {
+            let excess = self.notification_history.len() - MAX_HISTORY_LEN;
+            self.notification_history.drain(0..excess);
         }
         self.sync_notification_count();
     }
@@ -832,6 +961,7 @@ impl RustyCompositorState {
                 }
                 crate::dbus_notifications::DbusNotificationCommand::Close { id } => {
                     self.notifications.retain(|n| n.dbus_id != Some(id));
+                    self.notification_history.retain(|n| n.dbus_id != Some(id));
                     self.sync_notification_count();
                 }
             }
@@ -902,17 +1032,20 @@ impl RustyCompositorState {
         }
     }
 
-    /// Dismisses a single active notification by ID (`RUSTYOS-024`).
+    /// Dismisses a single active notification by ID (`RUSTYOS-024`, `RUSTYOS-109`).
     pub fn dismiss_notification(&mut self, id: u64) -> bool {
         let prev_len = self.notifications.len();
+        let prev_hist = self.notification_history.len();
         self.notifications.retain(|n| n.id != id);
+        self.notification_history.retain(|n| n.id != id);
         self.sync_notification_count();
-        self.notifications.len() < prev_len
+        self.notifications.len() < prev_len || self.notification_history.len() < prev_hist
     }
 
-    /// Clears all active notifications from the HUD queue (`RUSTYOS-024`).
+    /// Clears all active notifications from the HUD queue and Notification Center (`RUSTYOS-024`, `RUSTYOS-109`).
     pub fn clear_notifications(&mut self) {
         self.notifications.clear();
+        self.notification_history.clear();
         self.sync_notification_count();
     }
 
@@ -963,6 +1096,7 @@ impl RustyCompositorState {
             self.close_quick_settings();
             self.close_updates_popover();
             self.close_wifi_popover();
+            self.close_notification_center();
             self.close_settings();
             self.active_window_drag = None;
             self.active_window_resize = None;
@@ -1582,6 +1716,7 @@ impl RustyCompositorState {
         self.close_quick_settings();
         self.close_updates_popover();
         self.close_wifi_popover();
+        self.close_notification_center();
         self.close_settings();
         self.close_launcher();
         self.close_overview();
@@ -1797,6 +1932,7 @@ impl RustyCompositorState {
         self.close_quick_settings();
         self.close_updates_popover();
         self.close_wifi_popover();
+        self.close_notification_center();
         self.close_overview();
         self.close_top_bar_menu();
 

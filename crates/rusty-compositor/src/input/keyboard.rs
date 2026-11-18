@@ -187,6 +187,10 @@ impl RustyCompositorState {
                 self.close_wifi_popover();
                 info!("Closed Wi-Fi popover");
             }
+            KeyIntercept::NotificationCenterClose => {
+                self.close_notification_center();
+                info!("Closed Notification Center");
+            }
             KeyIntercept::TopBarMenuClose => {
                 self.close_top_bar_menu();
                 info!("Closed TopBar menu popover");
@@ -555,6 +559,9 @@ pub(super) fn classify_keyboard_input(
     }
     if state.wifi_popover_open && sym.raw() == Keysym::Escape.raw() {
         return FilterResult::Intercept(KeyIntercept::WifiPopoverClose);
+    }
+    if state.notification_center_open && sym.raw() == Keysym::Escape.raw() {
+        return FilterResult::Intercept(KeyIntercept::NotificationCenterClose);
     }
     if state.settings_active
         && let Some(intercept) = classify_settings_key(modifiers, sym)

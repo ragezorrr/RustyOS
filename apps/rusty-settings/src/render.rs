@@ -14,8 +14,8 @@ use fontdue::{Font, FontSettings};
 
 use crate::layout::{
     AppearanceCardsLayout, CARD_CORNER_RADIUS, CardRowControl, CardRowLayout, CardSectionLayout,
-    DockPositionCardLayout, Rect, ServiceBadgeKind, SettingsHit, SettingsLayout,
-    WINDOW_CORNER_RADIUS, choice_rect, stepper_rects, switch_rect,
+    DockPositionCardLayout, NotificationAppKind, Rect, ServiceBadgeKind, SettingsHit,
+    SettingsLayout, WINDOW_CORNER_RADIUS, choice_rect, stepper_rects, switch_rect,
 };
 use crate::state::{ACCENT_COLORS, SettingsAppState, SettingsPage, ThemeChoice};
 
@@ -978,7 +978,109 @@ fn render_network_service_row(c: &mut Canvas<'_>, row: &CardRowLayout, pal: &Pal
             render_wifi_ap_row(c, row, pal, *connected, *secure, *signal_percent);
             true
         }
+        _ => render_notification_settings_row(c, row, pal),
+    }
+}
+
+fn render_notification_settings_row(
+    c: &mut Canvas<'_>,
+    row: &CardRowLayout,
+    pal: &Palette,
+) -> bool {
+    match &row.control {
+        CardRowControl::NotificationHeader {
+            subtitle, active, ..
+        } => {
+            let icon_rect = Rect::new(row.rect.x + 16, row.rect.y + 16, 32, 32);
+            c.fill_gradient_squircle(icon_rect, 8, [0xFF, 0x3B, 0x30, 0xFF]);
+            draw_notification_app_glyph(c, icon_rect, NotificationAppKind::Bell);
+            let tx = icon_rect.right() + 12;
+            c.draw_text(
+                &row.label,
+                tx,
+                row.rect.y + 13,
+                13.5,
+                true,
+                pal.text_primary,
+            );
+            c.draw_text(
+                subtitle,
+                tx,
+                row.rect.y + 33,
+                11.0,
+                false,
+                pal.text_secondary,
+            );
+            draw_toggle_switch(c, switch_rect(row.rect), *active, pal);
+            true
+        }
+        CardRowControl::NotificationAppRow {
+            app_kind,
+            badge_tint,
+            subtitle,
+            active,
+            ..
+        } => {
+            let icon_rect = Rect::new(row.rect.x + 16, row.rect.y + 10, 32, 32);
+            c.fill_gradient_squircle(icon_rect, 8, *badge_tint);
+            draw_notification_app_glyph(c, icon_rect, *app_kind);
+            let tx = icon_rect.right() + 12;
+            c.draw_text(
+                &row.label,
+                tx,
+                row.rect.y + 10,
+                13.0,
+                true,
+                pal.text_primary,
+            );
+            c.draw_text(
+                subtitle,
+                tx,
+                row.rect.y + 28,
+                11.0,
+                false,
+                pal.text_secondary,
+            );
+            draw_toggle_switch(c, switch_rect(row.rect), *active, pal);
+            true
+        }
         _ => false,
+    }
+}
+
+fn draw_notification_app_glyph(c: &mut Canvas<'_>, rect: Rect, kind: NotificationAppKind) {
+    let cx = rect.x as f32 + rect.w as f32 * 0.5;
+    let cy = rect.y as f32 + rect.h as f32 * 0.5;
+    let w = [255, 255, 255, 255];
+    match kind {
+        NotificationAppKind::Bell => {
+            c.stroke_rounded_rect(Rect::new(rect.x + 10, rect.y + 8, 12, 12), 5.0, 1.4, w);
+            c.draw_segment(cx - 7.0, cy + 4.5, cx + 7.0, cy + 4.5, 0.85, w);
+            c.fill_circle(cx, cy + 6.5, 1.5, w);
+        }
+        NotificationAppKind::Files => {
+            c.fill_rounded_rect(Rect::new(rect.x + 8, rect.y + 10, 16, 12), 2, w);
+            c.fill_rounded_rect(Rect::new(rect.x + 8, rect.y + 8, 8, 4), 1, w);
+        }
+        NotificationAppKind::Terminal => {
+            c.draw_segment(cx - 6.0, cy - 3.0, cx - 2.0, cy + 0.5, 1.1, w);
+            c.draw_segment(cx - 2.0, cy + 0.5, cx - 6.0, cy + 4.0, 1.1, w);
+            c.draw_segment(cx, cy + 4.0, cx + 6.0, cy + 4.0, 1.0, w);
+        }
+        NotificationAppKind::Browser => {
+            c.stroke_rounded_rect(Rect::new(rect.x + 7, rect.y + 7, 18, 18), 9.0, 1.4, w);
+            c.draw_segment(cx - 3.0, cy + 3.0, cx + 3.0, cy - 3.0, 1.2, w);
+        }
+        NotificationAppKind::Updater => {
+            c.stroke_rounded_rect(Rect::new(rect.x + 7, rect.y + 7, 18, 18), 9.0, 1.4, w);
+            c.draw_segment(cx, cy - 4.0, cx, cy + 4.0, 1.0, w);
+            c.draw_segment(cx - 3.5, cy + 1.0, cx, cy + 4.5, 1.0, w);
+            c.draw_segment(cx + 3.5, cy + 1.0, cx, cy + 4.5, 1.0, w);
+        }
+        NotificationAppKind::Settings => {
+            c.stroke_rounded_rect(Rect::new(rect.x + 8, rect.y + 8, 16, 16), 8.0, 2.0, w);
+            c.fill_circle(cx, cy, 2.2, w);
+        }
     }
 }
 
@@ -1110,7 +1212,9 @@ fn render_card_row(c: &mut Canvas<'_>, row: &CardRowLayout, pal: &Palette) {
         }
         CardRowControl::ServiceStatus { .. }
         | CardRowControl::WifiHeaderSwitch { .. }
-        | CardRowControl::WifiNetwork { .. } => {}
+        | CardRowControl::WifiNetwork { .. }
+        | CardRowControl::NotificationHeader { .. }
+        | CardRowControl::NotificationAppRow { .. } => {}
     }
 }
 

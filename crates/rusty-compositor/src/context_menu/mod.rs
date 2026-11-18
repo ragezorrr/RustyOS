@@ -66,6 +66,7 @@ impl RustyCompositorState {
         entries: Vec<ContextMenuEntry>,
     ) {
         self.close_top_bar_menu();
+        self.close_notification_center();
         self.clear_shell_hover_states();
         self.context_menu = Some(ContextMenuState::new(
             output_id,
@@ -121,6 +122,7 @@ impl RustyCompositorState {
         self.close_dock_stack();
         self.close_updates_popover();
         self.close_wifi_popover();
+        self.close_notification_center();
         let tiles = self.build_dock_tiles();
         let bounces = self.dock_bounce_offsets();
         let view = self.dock_view_state(&tiles, &[], &bounces, self.dock_hover_slot);

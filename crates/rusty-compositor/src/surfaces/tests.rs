@@ -302,6 +302,27 @@ fn ethernet_glyph_rasterizes_cleanly() {
         sample_ui_glyph_pixel(0, 0, 16, UiGlyphKind::Ethernet, white)[3],
         0
     );
+
+    let mut cloud_pixels = 0_usize;
+    let mut list_pixels = 0_usize;
+    for py in 0..18 {
+        for px in 0..18 {
+            if sample_ui_glyph_pixel(px, py, 18, UiGlyphKind::CloudSun, white)[3] > 24 {
+                cloud_pixels += 1;
+            }
+            if sample_ui_glyph_pixel(px, py, 18, UiGlyphKind::Checklist, white)[3] > 24 {
+                list_pixels += 1;
+            }
+        }
+    }
+    assert!(
+        cloud_pixels >= 24,
+        "CloudSun glyph too sparse: {cloud_pixels}"
+    );
+    assert!(
+        list_pixels >= 24,
+        "Checklist glyph too sparse: {list_pixels}"
+    );
 }
 
 #[test]

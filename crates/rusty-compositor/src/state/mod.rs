@@ -566,6 +566,12 @@ pub struct RustyCompositorState {
     pub wifi_popover_open: bool,
     /// Currently hovered row or control inside the open Wi-Fi popover (`RUSTYOS-108`).
     pub wifi_popover_hover: Option<crate::shell_render::WifiPopoverHit>,
+    /// Whether the right-edge `Notification Center` drawer is open (`RUSTYOS-109`).
+    pub notification_center_open: bool,
+    /// Currently hovered interactive region inside `Notification Center` (`RUSTYOS-109`).
+    pub notification_center_hover: Option<crate::shell_render::NotificationCenterHit>,
+    /// Interactive task toggle states displayed in the Notification Center Reminders widget (`RUSTYOS-109`).
+    pub notification_center_tasks: [bool; 4],
     /// Highest update count already announced with a HUD toast (`RUSTYOS-076`).
     pub updates_notified_count: usize,
     /// First-party Wayland Liquid Glass protocol state (`RUSTYOS-092`).
@@ -645,6 +651,8 @@ pub struct RustyCompositorState {
     pub notification_count: u32,
     /// Active desktop notification queue rendered in Notification HUD & exposed via IPC (`RUSTYOS-024`).
     pub notifications: Vec<CompositorNotification>,
+    /// Persistent delivered notification history shown in Notification Center (`RUSTYOS-109`).
+    pub notification_history: Vec<CompositorNotification>,
     /// Non-blocking D-Bus `org.freedesktop.Notifications` bridge (`RUSTYOS-026`).
     pub dbus_notifications: crate::dbus_notifications::DbusNotificationHandle,
     /// Non-blocking D-Bus `org.kde.StatusNotifierWatcher` system tray bridge (`RUSTYOS-032`).
@@ -963,6 +971,9 @@ impl RustyCompositorState {
             updates_popover_hover: None,
             wifi_popover_open: false,
             wifi_popover_hover: None,
+            notification_center_open: false,
+            notification_center_hover: None,
+            notification_center_tasks: [false; 4],
             updates_notified_count: 0,
             launcher_active: false,
             launcher_anim: AnimatedValue::new_settled(0.0),
@@ -1000,6 +1011,7 @@ impl RustyCompositorState {
             client_surface_committed: false,
             notification_count: 0,
             notifications: Vec::new(),
+            notification_history: Vec::new(),
             dbus_notifications: crate::dbus_notifications::DbusNotificationHandle::default(),
             tray: crate::tray::TrayWatcherHandle::default(),
             tray_items: Vec::new(),
@@ -1397,6 +1409,7 @@ impl RustyCompositorState {
             || self.quick_settings_active
             || self.updates_popover_open
             || self.wifi_popover_open
+            || self.notification_center_open
             || self.settings_active
             || self.dock_stack.is_some()
             || self.context_menu.is_some()
@@ -1443,6 +1456,7 @@ impl RustyCompositorState {
             && !self.quick_settings_active
             && !self.updates_popover_open
             && !self.wifi_popover_open
+            && !self.notification_center_open
             && self.window_switcher.is_none()
             && self.active_window_drag.is_none()
             && self.active_window_resize.is_none()
@@ -1977,6 +1991,7 @@ impl RustyCompositorState {
                 || self.quick_settings_active
                 || self.updates_popover_open
                 || self.wifi_popover_open
+                || self.notification_center_open
                 || self.overview_active
                 || self.settings_active
                 || self
@@ -2018,6 +2033,7 @@ impl RustyCompositorState {
                 || self.quick_settings_active
                 || self.updates_popover_open
                 || self.wifi_popover_open
+                || self.notification_center_open
                 || self.overview_active
                 || self.settings_active
                 || self.window_switcher.is_some()

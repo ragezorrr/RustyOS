@@ -136,7 +136,9 @@ pub fn check_top_bar_notification_click_for_options(
         return false;
     }
     let layout = compute_top_bar_right_layout_with_options(screen_width, clock_text, opts);
-    x >= f64::from(layout.notif_x) && x < f64::from(layout.notif_x + layout.notif_w)
+    layout.notif_w > 0
+        && x >= f64::from(layout.notif_x)
+        && x < f64::from(layout.notif_x + layout.notif_w)
 }
 
 /// Telemetry-aware hit-test for the `TopBar` unread notification badge (`RUSTYOS-048`).

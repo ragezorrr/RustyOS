@@ -66,6 +66,7 @@ pub(super) enum KeyIntercept {
     QuickSettingsClose,
     UpdatesPopoverClose,
     WifiPopoverClose,
+    NotificationCenterClose,
     ToggleSettings,
     SettingsClose,
     SettingsNextTab,

@@ -212,8 +212,12 @@ pub enum UiGlyphKind {
     Check,
     /// Right chevron `>` glyph for submenu rows (`RUSTYOS-064`).
     ChevronRight,
-    /// Minimal wastebasket outline for Trash actions (`RUSTYOS-064`).
+    /// Crisp trash/wastebasket glyph.
     Trash,
+    /// Partly-sunny cloud + sun rays glyph for the Notification Center Weather widget (`RUSTYOS-109`).
+    CloudSun,
+    /// Circular checklist icon (`dots + bars`) for the Notification Center Reminders widget (`RUSTYOS-109`).
+    Checklist,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

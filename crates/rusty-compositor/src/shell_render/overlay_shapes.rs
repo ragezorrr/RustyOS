@@ -9,6 +9,7 @@ use super::modals::{
     render_pick_color_composite, render_polkit_composite, render_portal_composite,
     render_settings_composite,
 };
+use super::notification_center::render_notification_center_composite;
 use super::quick_settings::render_quick_settings_composite;
 use super::spotlight_overview::{spotlight_results_rect, spotlight_search_pill_rect};
 use super::text_pass::append_foreground_overlay_text;
@@ -342,6 +343,9 @@ fn build_foreground_overlay_shapes(
         }
         ShellOverlayView::Wifi(wifi) => {
             render_wifi_popover_composite(&mut out, shape_cache, renderer, screen_size, wifi);
+        }
+        ShellOverlayView::NotificationCenter(nc) => {
+            render_notification_center_composite(&mut out, shape_cache, renderer, screen_size, nc);
         }
     }
 
