@@ -478,15 +478,16 @@ palettes (section 5.1); geometry, Liquid Glass clarity, and interactions target 
   - Капсула `Wi-Fi` в Control Center отображает только состояние Wi-Fi (активный `SSID`, `On` или `Off`) и не подменяется проводным статусом; геометрия и радиусы островов Control Center и `Dock` не изменяются.
 - Notification Center (`ShellOverlayView::NotificationCenter`, `RUSTYOS-109`, `ADR-0060`):
   - Клик по блоку часов в `TopBar` (`check_top_bar_clock_click_for_options`) открывает правую панель `Notification Center` независимо от иконки `Control Center` (`status_hit_x .. clock_x - 2`) с подсветкой-пилюлей позади часов; устаревший синий счётчик `N:k` в `TopBar` не отображается (как в `27-Golden-Gate-Notification-Center.png`).
-  - Компоновка по референсу `27-Golden-Gate-Notification-Center.png`: ведущая карточка уведомления, заголовок `Notification Center` с кнопкой `ClearAll`, стопка персистентных карточек из `notification_history` (сохраняемых после истечения TTL баннера), карточка `Weather` (`r = 22`, небесно-голубой градиент и почасовая полоса с `UiGlyphKind::{Sun, CloudSun}`), интерактивный виджет `Reminders` (`UiGlyphKind::Checklist`, переключение задач) и панель с кнопками `Edit Widgets` / `ClosePanel`, ограниченная сверху над `Dock` без изменения `liquid_glass.rs`, `Dock` и `Control Center`.
+  - Компоновка по референсу `27-Golden-Gate-Notification-Center.png`: ведущая карточка уведомления, заголовок `Notification Center` с кнопкой `ClearAll`, стопка персистентных карточек из `notification_history` (сохраняемых после истечения TTL баннера), карточка `Weather` (`r = 22`, небесно-голубой градиент и почасовая полоса с `UiGlyphKind::{Sun, CloudSun}`), интерактивный виджет `Reminders` (`UiGlyphKind::Checklist`, переключение задач) и панель с кнопками `Edit Widgets` / `ClosePanel`, ограниченная сверху над `Dock` без изменения `Dock` и `Control Center`.
+  - Материал и типографика карточек уведомлений (`RUSTYOS-110`, `ADR-0061`): единый изолированный стиль `GlassPanelStyle::NotificationCard` (`r = 22`, `344×68`, спокойное матовое тонирование без цветовых просветов фона и широкой линзы `Popover`), концентричная `38×38` иконка на `x + 16` (в палитре Golden Gate `#007AFF` без legacy purple в `BuiltinAppIcon::RustySystem` / `WindowFallback`), жирный заголовок (`FontWeight::Bold`), перенос до 2 контрастных строк тела через `wrap_notification_lines` без метки `"now"`.
 - Spotlight (`ShellOverlayView::Spotlight`): dual-capsule layout matching `27-Golden-Gate-Spotlight-Search-v2.png`
   — a floating rounded search pill (`ControlModule` / dark gloss) separated cleanly above the results
   and category-filter `Popover` card.
 - App Switcher (`Alt/Super+Tab`): clear `LiquidGlassElement` bar with subtle rounded highlight on the
   selected app icon (no opaque square boxes per slot).
-- Notification HUD & OSD: `Popover` toast cards (plus long-term right-edge `Notification Center` stack)
-  with `38x38` squircle app icons and hover close (`×`) circle; centered OSD pills pairing `22x22`
-  glyphs with rounded `h = 8, r = 4` level bars.
+- Notification HUD & OSD: `NotificationCard` toasts (`344×68, r = 22`) sharing chrome and multi-line typography
+  with `Notification Center`, `38x38` squircle app icons (без legacy purple) and theme-aware hover close (`×`) circle;
+  centered OSD pills (`Popover`) pairing `22x22` glyphs with rounded `h = 8, r = 4` level bars.
 
 ### 12.4 Control center and quick settings
 

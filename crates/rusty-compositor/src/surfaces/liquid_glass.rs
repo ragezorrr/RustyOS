@@ -402,6 +402,15 @@ pub(crate) fn compute_glass_material(
             tint_rgba: [0.24, 0.24, 0.27, 0.15 + 0.15 * g],
             sat_refract_rim_sheen: [1.30, 34.0, 1.0, 0.01],
         },
+        // NotificationCard (`RUSTYOS-110`): calm frosted veil suppressing color bleed and heavy edge lens.
+        (GlassPanelStyle::NotificationCard, false) => GlassMaterialUniforms {
+            tint_rgba: [0.94, 0.94, 0.95, 0.56 + 0.24 * g],
+            sat_refract_rim_sheen: [1.0, 3.0, 0.22, 0.0],
+        },
+        (GlassPanelStyle::NotificationCard, true) => GlassMaterialUniforms {
+            tint_rgba: [0.16, 0.16, 0.18, 0.62 + 0.22 * g],
+            sat_refract_rim_sheen: [1.0, 3.0, 0.22, 0.0],
+        },
     }
 }
 
@@ -792,7 +801,9 @@ impl LiquidGlassPipeline {
 
         let half_tex = match style {
             GlassPanelStyle::Dock => buffers.half_a.clone(),
-            GlassPanelStyle::ControlModule | GlassPanelStyle::Popover => buffers.half_out.clone(),
+            GlassPanelStyle::ControlModule
+            | GlassPanelStyle::Popover
+            | GlassPanelStyle::NotificationCard => buffers.half_out.clone(),
         };
         let half_size = half_tex.size();
         let blur_snapshot = buffers.blur_damage.snapshot();
@@ -1282,6 +1293,8 @@ mod tests {
         let dark = compute_glass_material(GlassPanelStyle::Dock, 0.85, true);
         let light_mod = compute_glass_material(GlassPanelStyle::ControlModule, 0.78, false);
         let dark_mod = compute_glass_material(GlassPanelStyle::ControlModule, 0.78, true);
+        let light_notif = compute_glass_material(GlassPanelStyle::NotificationCard, 0.78, false);
+        let dark_notif = compute_glass_material(GlassPanelStyle::NotificationCard, 0.78, true);
         assert!(light.tint_rgba[0] > 0.5 && dark.tint_rgba[0] < 0.45);
         assert_eq!(
             light.sat_refract_rim_sheen,
@@ -1297,6 +1310,9 @@ mod tests {
         assert_eq!(dark_mod.sat_refract_rim_sheen, [1.30, 34.0, 1.0, 0.01]);
         assert!(light_mod.tint_rgba[0] >= 0.70 && light_mod.tint_rgba[3] < 0.28);
         assert!(dark_mod.tint_rgba[0] < 0.30 && dark_mod.tint_rgba[3] < 0.35);
+        assert_eq!(light_notif.sat_refract_rim_sheen, [1.0, 3.0, 0.22, 0.0]);
+        assert_eq!(dark_notif.sat_refract_rim_sheen, [1.0, 3.0, 0.22, 0.0]);
+        assert!(light_notif.tint_rgba[3] > 0.70 && dark_notif.tint_rgba[3] > 0.72);
         assert!(
             LIQUID_GLASS_FRAG.contains("refractedAt")
                 && !LIQUID_GLASS_FRAG.contains("corner_flares")

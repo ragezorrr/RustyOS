@@ -1912,6 +1912,22 @@ hardware/software context и низкие накладные расходы.
 - **Tests:** Все 265 unit-тестов workspace (`4` `rusty-animation`, `178` `rusty-compositor`, `15` `rusty-files`, `3` `rusty-ipc`, `43` `rusty-services`, `6` `rusty-settings`, `5` `rusty-shell`, `4` `rusty-updater`, `7` `rusty-wm`).
 - **Risks:** Нет.
 
+### RUSTYOS-110 — Изолированный стиль `GlassPanelStyle::NotificationCard`, унификация тостов и `Notification Center` и палитра Golden Gate в `icons.rs`
+
+- **Status:** Done
+- **Goal:** Привести карточки уведомлений (всплывающие тосты и `Notification Center`) к эталону `27-Golden-Gate-Notification-Center.png` без цветовых пятен фона и грубой кромки, унифицировать геометрию и многострочную типографику без `"now"` и убрать legacy purple в системных иконках, не затрагивая `Dock`, `ControlModule` и `Popover`.
+- **Dependencies:** `RUSTYOS-109`.
+- **Scope:**
+  - `crates/rusty-compositor/src/surfaces/{mod.rs, liquid_glass.rs, sdf.rs, tests.rs}`: добавлен вариант `GlassPanelStyle::NotificationCard` (матовое тонирование `0.56 + 0.24*g` Light / `0.62 + 0.22*g` Dark, `refract = 3.0`, `rim = 0.22`, `sat = 1.0`, `chroma = 0.0` и CPU-fallback в `sdf.rs`) при полностью неизменных `Dock`, `ControlModule` и `Popover` и добавлен тест `notification_card_glass_rasterizes_cleanly`;
+  - `crates/rusty-compositor/src/icons.rs`: замена фиолетового цвета в `BuiltinAppIcon::RustySystem` (`paint_rusty_system_glyph`), пресете `WindowFallback` и мозаике `Overview` на синюю палитру Golden Gate (`#007AFF`), добавлена проверка синего канала в `resolves_adwaita_legacy_places_and_generates_distinct_squircle_icons`;
+  - `crates/rusty-compositor/src/shell_render/{top_bar/notifications.rs, notification_center.rs, overlay_shapes.rs, text_pass.rs, tests.rs}`: вынесены общие константы (`NOTIFICATION_CARD_WIDTH = 344`, `NOTIFICATION_CARD_HEIGHT = 68`, `NOTIFICATION_CARD_RADIUS = 22`, `NOTIFICATION_ICON_OFFSET_X = 16`, `NOTIFICATION_TEXT_OFFSET_X = 66`) и хелперы `push_notification_card_chrome`, `wrap_notification_lines`, `push_notification_card_text_lines` (жирный заголовок, до 2 контрастных строк тела, без `"now"`), добавлен unit-тест `notification_card_line_wrapping_handles_multiline_and_single_line`;
+  - `docs/adr/0061-notification-card-material-and-typography.md`, `DESIGN.md`, `ARCHITECTURE.md`, `DECISIONS.md` (`D-074`).
+- **Acceptance Criteria:**
+  - Живые `--winit` прогоны (Wayland/X11 smoke и `Light`/`Dark` снимки тостов, `Notification Center`, `Control Center` и `Dock`) подтверждают матовую однородность `NotificationCard`, отсутствие фиолетовой fallback-иконки, единый стиль тостов/карточек и неизменность `Dock`, `Control Center` и меню `Popover`;
+  - `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings` и все 267 тестов workspace проходят без ошибок.
+- **Tests:** Все 267 unit-тестов workspace (`4` `rusty-animation`, `180` `rusty-compositor`, `15` `rusty-files`, `3` `rusty-ipc`, `43` `rusty-services`, `6` `rusty-settings`, `5` `rusty-shell`, `4` `rusty-updater`, `7` `rusty-wm`).
+- **Risks:** Нет.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

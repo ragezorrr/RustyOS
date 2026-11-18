@@ -15,8 +15,10 @@ use super::quick_settings::render_quick_settings_text;
 use super::spotlight_overview::{
     render_overview_text, render_switcher_text, spotlight_results_rect, spotlight_search_pill_rect,
 };
-use super::tokens::{ThemePalette, anim_offset, truncate_ascii};
-use super::top_bar::{MENU_ITEM_HEIGHT, MENU_POPOVER_PAD_Y, MENU_SEPARATOR_HEIGHT};
+use super::tokens::{ThemePalette, anim_offset};
+use super::top_bar::{
+    MENU_ITEM_HEIGHT, MENU_POPOVER_PAD_Y, MENU_SEPARATOR_HEIGHT, push_notification_card_text_lines,
+};
 use super::top_bar_menus::{ResolvedTopBarMenuItem, resolve_top_bar_menu_entries};
 use super::updates_popover::render_updates_text;
 use super::wifi_popover::render_wifi_popover_text;
@@ -196,30 +198,15 @@ pub(super) fn append_foreground_overlay_text(
     if !notifications_hidden_by_overlay(overlay) && !notifications.is_empty() {
         let rects = notification_toast_rects(screen_size, notifications.len());
         for (toast, card) in notifications.iter().zip(rects) {
-            let tx = card.loc.x;
-            let ty = card.loc.y;
-
-            let title_text = truncate_ascii(toast.title, 28);
-            if let Some(el) = text_cache.render_label(
+            push_notification_card_text_lines(
+                text_cache,
                 renderer,
-                &title_text,
-                12.5,
-                pal.popover_text_primary,
-                Point::from((tx + 62, ty + 13)),
-            ) {
-                elements.push(el);
-            }
-
-            let body_text = truncate_ascii(toast.body, 36);
-            if let Some(el) = text_cache.render_label(
-                renderer,
-                &body_text,
-                10.5,
-                pal.popover_text_muted,
-                Point::from((tx + 62, ty + 35)),
-            ) {
-                elements.push(el);
-            }
+                card,
+                toast.title,
+                toast.body,
+                &pal,
+                elements,
+            );
         }
     }
 }

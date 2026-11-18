@@ -790,14 +790,14 @@ fn sample_squircle_uv(u: f32, v: f32, edge: f32, icon: BuiltinAppIcon) -> [f32; 
         BuiltinAppIcon::Browser => ([250.0, 251.0, 255.0], [224.0, 229.0, 240.0]),
         BuiltinAppIcon::Notes => ([252.0, 251.0, 246.0], [235.0, 233.0, 226.0]),
         BuiltinAppIcon::Settings => ([178.0, 182.0, 190.0], [114.0, 118.0, 128.0]),
-        BuiltinAppIcon::RustySystem => ([152.0, 102.0, 252.0], [76.0, 34.0, 154.0]),
+        BuiltinAppIcon::RustySystem => ([58.0, 148.0, 255.0], [10.0, 92.0, 218.0]),
         BuiltinAppIcon::Updater => ([54.0, 172.0, 255.0], [0.0, 110.0, 245.0]),
         BuiltinAppIcon::Downloads | BuiltinAppIcon::Trash | BuiltinAppIcon::TrashFull => {
             ([0.0; 3], [0.0; 3])
         }
         BuiltinAppIcon::WindowFallback { hue_seed, active } => {
             let palettes: [([f32; 3], [f32; 3]); 4] = [
-                ([139.0, 92.0, 246.0], [76.0, 29.0, 149.0]),
+                ([58.0, 152.0, 252.0], [12.0, 96.0, 214.0]),
                 ([45.0, 212.0, 191.0], [15.0, 118.0, 110.0]),
                 ([244.0, 114.0, 182.0], [157.0, 23.0, 77.0]),
                 ([96.0, 165.0, 250.0], [30.0, 64.0, 175.0]),
@@ -840,7 +840,7 @@ fn paint_overview_glyph(u: f32, v: f32, edge: f32, mut col: [f32; 4]) -> [f32; 4
         [52.0, 211.0, 153.0],
         [248.0, 113.0, 113.0],
         [251.0, 191.0, 36.0],
-        [167.0, 139.0, 250.0],
+        [96.0, 165.0, 250.0],
         [148.0, 163.0, 184.0],
     ];
     for (idx, &tile_color) in tile_colors.iter().enumerate() {
@@ -949,8 +949,8 @@ fn paint_rusty_system_glyph(u: f32, v: f32, edge: f32, mut col: [f32; 4]) -> [f3
     let outer_cov = sq_cov(outer_sd, edge);
     if outer_cov > 0.0 {
         let grad = lerp_rgb(
-            [255.0, 250.0, 255.0],
-            [218.0, 198.0, 255.0],
+            [255.0, 255.0, 255.0],
+            [220.0, 236.0, 255.0],
             (v - 0.2) * 1.6,
         );
         col = blend_rgba(col, [grad[0], grad[1], grad[2], outer_cov * 0.96]);
@@ -965,11 +965,11 @@ fn paint_rusty_system_glyph(u: f32, v: f32, edge: f32, mut col: [f32; 4]) -> [f3
     let hole_sd = crate::surfaces::signed_distance_polygon(u, v, &hole);
     let hole_cov = sq_cov(hole_sd, edge);
     if hole_cov > 0.0 {
-        col = blend_rgba(col, [104.0, 52.0, 194.0, hole_cov * 0.92]);
+        col = blend_rgba(col, [14.0, 96.0, 214.0, hole_cov * 0.94]);
     }
     let core_cov = sq_cov((u - 0.50).hypot(v - 0.50) - 0.055, edge);
     if core_cov > 0.0 {
-        col = blend_rgba(col, [252.0, 246.0, 255.0, core_cov * 0.95]);
+        col = blend_rgba(col, [252.0, 254.0, 255.0, core_cov * 0.96]);
     }
     col
 }
@@ -1309,6 +1309,12 @@ mod tests {
         assert_ne!(browser_center, notes_center);
         assert_ne!(settings_center, downloads_center);
         assert_ne!(rusty_center, overview_center);
+        let rusty_bg = sample_builtin_squircle_pixel(10, 24, 48, BuiltinAppIcon::RustySystem);
+        // Argb8888 premultiplied pixel order is `[B, G, R, A]`.
+        assert!(
+            rusty_bg[0] > rusty_bg[1] && rusty_bg[0] > rusty_bg[2],
+            "RustySystem icon background must use Golden Gate blue, got {rusty_bg:?}"
+        );
         assert_ne!(updater_center, notes_center);
         assert_ne!(downloads_center, trash_center);
 

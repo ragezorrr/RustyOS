@@ -17,7 +17,7 @@ use super::tokens::{
     ThemePalette, anim_offset, push_liquid_glass_panel, push_rounded_glass_box,
     resolved_icon_to_element,
 };
-use super::top_bar::notification_app_icon;
+use super::top_bar::push_notification_card_chrome;
 use super::updates_popover::render_updates_composite;
 use super::wifi_popover::render_wifi_popover_composite;
 use super::{
@@ -349,55 +349,26 @@ fn build_foreground_overlay_shapes(
         }
     }
 
-    // 2b. Floating top-right Notification HUD toasts (`RUSTYOS-024`/`051`)
+    // 2b. Floating top-right Notification HUD toasts (`RUSTYOS-024`/`110`)
     if !notifications_hidden_by_overlay(overlay) && !notifications.is_empty() {
+        let pal = ThemePalette::active();
         let rects = notification_toast_rects(screen_size, notifications.len());
         for (toast, card) in notifications.iter().zip(rects) {
-            let tx = card.loc.x;
-            let ty = card.loc.y;
-            let tw = card.size.w;
-
-            if toast.hovered {
-                if let Some(el) = shape_cache.ui_glyph_element(
-                    renderer,
-                    crate::surfaces::UiGlyphKind::Close,
-                    10,
-                    [255, 255, 255, 255],
-                    Point::from((tx + tw - 23, ty + 15)),
-                ) {
-                    out.push(CompositorRenderElement::Memory(el));
-                }
-                if let Some(el) = shape_cache.circle_element(
-                    renderer,
-                    20,
-                    [255, 255, 255, 42],
-                    Some([255, 255, 255, 76]),
-                    Point::from((tx + tw - 28, ty + 10)),
-                ) {
-                    out.push(CompositorRenderElement::Memory(el));
-                }
-            }
-
-            let app_icon = notification_app_icon(toast.title);
-            if let Some(icon_el) = shape_cache.icons.builtin_squircle_icon_element(
-                renderer,
-                app_icon,
-                38,
-                Point::from((tx + 14, ty + 15)),
-            ) {
-                out.push(CompositorRenderElement::Memory(icon_el));
-            }
-
-            push_liquid_glass_panel(
+            let close_rect = Rectangle::new(
+                Point::from((card.loc.x + card.size.w - 28, card.loc.y + 10)),
+                Size::from((20, 20)),
+            );
+            push_notification_card_chrome(
                 &mut out,
                 shape_cache,
                 renderer,
                 card,
-                16,
-                crate::surfaces::GlassPanelStyle::Popover,
+                close_rect,
+                toast.title,
+                toast.hovered,
                 top_telemetry.glass_opacity,
                 top_telemetry.reduce_transparency,
-                Some((12, 46)),
+                &pal,
             );
         }
     }

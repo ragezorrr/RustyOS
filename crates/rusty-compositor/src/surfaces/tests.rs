@@ -585,6 +585,45 @@ fn popover_glass_and_traffic_lights_rasterize_cleanly() {
 }
 
 #[test]
+fn notification_card_glass_rasterizes_cleanly() {
+    let card_corner = sample_glass_panel_pixel_themed(
+        0,
+        0,
+        344,
+        68,
+        22,
+        0.78,
+        false,
+        GlassPanelStyle::NotificationCard,
+        false,
+    );
+    let card_light = sample_glass_panel_pixel_themed(
+        172,
+        34,
+        344,
+        68,
+        22,
+        0.78,
+        false,
+        GlassPanelStyle::NotificationCard,
+        false,
+    );
+    let card_dark = sample_glass_panel_pixel_themed(
+        172,
+        34,
+        344,
+        68,
+        22,
+        0.78,
+        false,
+        GlassPanelStyle::NotificationCard,
+        true,
+    );
+    assert_eq!(card_corner[3], 0);
+    assert!(card_light[0] > card_dark[0] && card_light[3] >= 180 && card_dark[3] >= 190);
+}
+
+#[test]
 fn dock_glass_and_icon_shadow_rasterize_cleanly() {
     let width = 320;
     let height = 68;

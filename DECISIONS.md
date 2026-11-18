@@ -811,6 +811,17 @@
                            Settings > Notifications (#FF3B30)
                            без правок Dock/CC/liquid_glass.rs
                            (ADR-0060)
+
+   D-074                   Фаза 8/10 Стиль GlassPanelStyle::  accepted
+                           NotificationCard, унифицированные
+                           тосты/карточки уведомлений и
+                           синяя палитра Golden Gate в
+                           icons.rs (RUSTYOS-110): матовый
+                           баланс r=22 (refract=3.0, rim=0.22),
+                           концентричный отступ иконки x+16,
+                           многострочное перенесение текста
+                           без "now", без изменений в Dock,
+                           ControlModule и Popover (ADR-0061)
   -----------------------------------------------------------------------
 
 ## Открытые решения

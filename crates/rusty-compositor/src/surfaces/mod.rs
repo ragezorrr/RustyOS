@@ -92,6 +92,8 @@ pub enum GlassPanelStyle {
     Popover,
     /// Lighter inner glass tile/track inside Control Center (`RUSTYOS-051`).
     ControlModule,
+    /// Frosted uniform notification card used by Notification Center & HUD toasts (`RUSTYOS-110`).
+    NotificationCard,
 }
 
 /// Interactive macOS-style window traffic light button kind (`RUSTYOS-051`).

@@ -21,13 +21,17 @@ use super::tokens::{
     DOCK_HEIGHT, DOCK_MARGIN_BOTTOM, TOP_BAR_HEIGHT, ThemePalette, make_solid_element,
     push_liquid_glass_panel, push_rounded_glass_box, push_soft_shadow, truncate_ascii,
 };
-use super::top_bar::notification_app_icon;
+use super::top_bar::{
+    NOTIFICATION_CARD_HEIGHT, NOTIFICATION_CARD_RADIUS, NOTIFICATION_CARD_RIGHT_MARGIN,
+    NOTIFICATION_CARD_TOP_MARGIN, NOTIFICATION_CARD_WIDTH, push_notification_card_chrome,
+    push_notification_card_text_lines,
+};
 
-const NC_WIDTH: i32 = 344;
-const NC_RIGHT_MARGIN: i32 = 14;
-const NC_TOP_MARGIN: i32 = 12;
-const NC_CARD_HEIGHT: i32 = 68;
-const NC_CARD_RADIUS: i32 = 20;
+const NC_WIDTH: i32 = NOTIFICATION_CARD_WIDTH;
+const NC_RIGHT_MARGIN: i32 = NOTIFICATION_CARD_RIGHT_MARGIN;
+const NC_TOP_MARGIN: i32 = NOTIFICATION_CARD_TOP_MARGIN;
+const NC_CARD_HEIGHT: i32 = NOTIFICATION_CARD_HEIGHT;
+const NC_CARD_RADIUS: i32 = NOTIFICATION_CARD_RADIUS;
 const NC_WIDGET_RADIUS: i32 = 22;
 const NC_WEATHER_HEIGHT: i32 = 148;
 const NC_REMINDERS_HEIGHT: i32 = 136;
@@ -459,42 +463,18 @@ fn render_notification_card_text(
     pal: &ThemePalette,
     elements: &mut Vec<MemoryRenderBufferRenderElement<GlesRenderer>>,
 ) {
-    let x = slot.card_rect.loc.x;
-    let y = slot.card_rect.loc.y;
-    let w = slot.card_rect.size.w;
-
-    push_bold_label(
-        text_cache,
-        renderer,
-        &truncate_ascii(item.title, 26),
-        13.0,
-        pal.popover_text_primary,
-        (x + 64, y + 13),
-        elements,
-    );
     let body_src = if hide_previews {
         "Notification preview hidden"
     } else {
         item.body
     };
-    push_label(
+    push_notification_card_text_lines(
         text_cache,
         renderer,
-        &truncate_ascii(body_src, 34),
-        11.5,
-        pal.popover_text_secondary,
-        (x + 64, y + 34),
-        elements,
-    );
-
-    let (nw, _) = text_cache.measure_text("now", 10.5);
-    push_label(
-        text_cache,
-        renderer,
-        "now",
-        10.5,
-        pal.popover_text_muted,
-        (x + w - 16 - nw, y + 14),
+        slot.card_rect,
+        item.title,
+        body_src,
+        pal,
         elements,
     );
 }
@@ -752,61 +732,26 @@ fn push_notification_card_composite(
     state: &NotificationCenterRenderState<'_>,
     pal: &ThemePalette,
 ) {
-    let x = slot.card_rect.loc.x;
-    let y = slot.card_rect.loc.y;
     let hovered = state.hovered_hit == Some(NotificationCenterHit::DismissNotification(slot.id));
-
-    if hovered {
-        let close_fill = if pal.is_dark {
-            [255, 255, 255, 44]
-        } else {
-            [0, 0, 0, 26]
-        };
-        if let Some(el) = shape_cache.ui_glyph_element(
-            renderer,
-            UiGlyphKind::Close,
-            10,
-            pal.popover_icon,
-            Point::from((slot.close_rect.loc.x + 5, slot.close_rect.loc.y + 5)),
-        ) {
-            out.push(CompositorRenderElement::Memory(el));
-        }
-        if let Some(el) = shape_cache.circle_element(
-            renderer,
-            20,
-            close_fill,
-            Some(pal.border_highlight_rgba),
-            Point::from((slot.close_rect.loc.x, slot.close_rect.loc.y)),
-        ) {
-            out.push(CompositorRenderElement::Memory(el));
-        }
-    }
-
-    let app_icon = notification_app_icon(item.title);
-    if let Some(icon_el) = shape_cache.icons.builtin_squircle_icon_element(
-        renderer,
-        app_icon,
-        38,
-        Point::from((x + 14, y + 15)),
-    ) {
-        out.push(CompositorRenderElement::Memory(icon_el));
-    }
-
-    push_liquid_glass_panel(
+    push_notification_card_chrome(
         out,
         shape_cache,
         renderer,
         slot.card_rect,
-        NC_CARD_RADIUS,
-        GlassPanelStyle::Popover,
+        slot.close_rect,
+        item.title,
+        hovered,
         state.glass_opacity,
         state.reduce_transparency,
-        Some((14, 44)),
+        pal,
     );
 
     if slot.has_stack_edge {
         let lip = Rectangle::new(
-            Point::from((x + 10, slot.card_rect.loc.y + slot.card_rect.size.h - 14)),
+            Point::from((
+                slot.card_rect.loc.x + 10,
+                slot.card_rect.loc.y + slot.card_rect.size.h - 14,
+            )),
             Size::from(((slot.card_rect.size.w - 20).max(80), 20)),
         );
         push_liquid_glass_panel(
@@ -814,8 +759,8 @@ fn push_notification_card_composite(
             shape_cache,
             renderer,
             lip,
-            16,
-            GlassPanelStyle::Popover,
+            18,
+            GlassPanelStyle::NotificationCard,
             state.glass_opacity,
             state.reduce_transparency,
             Some((10, 32)),
@@ -1122,8 +1067,8 @@ pub(super) fn render_notification_center_composite(
             shape_cache,
             renderer,
             empty_rect,
-            16,
-            GlassPanelStyle::Popover,
+            NC_CARD_RADIUS,
+            GlassPanelStyle::NotificationCard,
             state.glass_opacity,
             state.reduce_transparency,
             Some((12, 36)),

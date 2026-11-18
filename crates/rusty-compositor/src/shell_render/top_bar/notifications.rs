@@ -1,7 +1,8 @@
 //! `TopBar` notification HUD toasts, unread notification badges, and floating OSD pills (`RUSTYOS-090`).
 
+use smithay::backend::renderer::element::memory::MemoryRenderBufferRenderElement;
 use smithay::backend::renderer::gles::GlesRenderer;
-use smithay::utils::{Point, Rectangle, Size};
+use smithay::utils::{Physical, Point, Rectangle, Size};
 
 use crate::shell_render::CompositorRenderElement;
 use crate::shell_render::tokens::{
@@ -14,6 +15,18 @@ use crate::shell_render::tokens::{TOP_BAR_ITEM_H, TOP_BAR_ITEM_Y};
 #[cfg(test)]
 use super::panel::compute_top_bar_right_layout;
 use super::panel::{TopBarLayoutOptions, compute_top_bar_right_layout_with_options};
+
+/// Shared notification card geometry matching `27-Golden-Gate-Notification-Center.png` (`RUSTYOS-110`).
+pub(crate) const NOTIFICATION_CARD_WIDTH: i32 = 344;
+pub(crate) const NOTIFICATION_CARD_HEIGHT: i32 = 68;
+pub(crate) const NOTIFICATION_CARD_RADIUS: i32 = 22;
+pub(crate) const NOTIFICATION_CARD_RIGHT_MARGIN: i32 = 14;
+pub(crate) const NOTIFICATION_CARD_TOP_MARGIN: i32 = 12;
+const NOTIFICATION_ICON_SIZE: i32 = 38;
+const NOTIFICATION_ICON_OFFSET_X: i32 = 16;
+const NOTIFICATION_ICON_OFFSET_Y: i32 = 15;
+const NOTIFICATION_TEXT_OFFSET_X: i32 = 66;
+const NOTIFICATION_TEXT_RIGHT_PAD: i32 = 18;
 
 /// Active notification toast view rendered in the top-right Notification HUD (`RUSTYOS-024`).
 #[derive(Debug, Clone)]
@@ -55,11 +68,11 @@ pub fn notification_toast_rects(
         return Vec::new();
     }
     let width = screen_size.w.max(320);
-    let toast_w = 340.min((width - 32).max(200));
-    let toast_h = 68;
+    let toast_w = NOTIFICATION_CARD_WIDTH.min((width - 28).max(200));
+    let toast_h = NOTIFICATION_CARD_HEIGHT;
     let gap = 10;
-    let toast_x = width - toast_w - 16;
-    let start_y = TOP_BAR_HEIGHT + 12;
+    let toast_x = (width - toast_w - NOTIFICATION_CARD_RIGHT_MARGIN).max(14);
+    let start_y = TOP_BAR_HEIGHT + NOTIFICATION_CARD_TOP_MARGIN;
 
     let mut rects = Vec::with_capacity(visible);
     for idx in 0..visible {
@@ -352,4 +365,277 @@ fn push_osd_level_bar(
         },
         Some(pal.border_rgba),
     );
+}
+
+/// Appends unified Golden Gate chrome (hover close circle, app squircle, `NotificationCard` glass)
+/// for both floating HUD toasts and Notification Center stack cards (`RUSTYOS-110`).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn push_notification_card_chrome(
+    out: &mut Vec<CompositorRenderElement>,
+    shape_cache: &mut crate::surfaces::UiShapeCache,
+    renderer: &mut GlesRenderer,
+    card_rect: Rectangle<i32, Physical>,
+    close_rect: Rectangle<i32, Physical>,
+    title: &str,
+    close_hovered: bool,
+    glass_opacity: f32,
+    reduce_transparency: bool,
+    pal: &ThemePalette,
+) {
+    if close_hovered {
+        let close_fill = if pal.is_dark {
+            [255, 255, 255, 44]
+        } else {
+            [0, 0, 0, 26]
+        };
+        if let Some(el) = shape_cache.ui_glyph_element(
+            renderer,
+            crate::surfaces::UiGlyphKind::Close,
+            10,
+            pal.popover_icon,
+            Point::from((close_rect.loc.x + 5, close_rect.loc.y + 5)),
+        ) {
+            out.push(CompositorRenderElement::Memory(el));
+        }
+        if let Some(el) = shape_cache.circle_element(
+            renderer,
+            20,
+            close_fill,
+            Some(pal.border_highlight_rgba),
+            Point::from((close_rect.loc.x, close_rect.loc.y)),
+        ) {
+            out.push(CompositorRenderElement::Memory(el));
+        }
+    }
+
+    let app_icon = notification_app_icon(title);
+    if let Some(icon_el) = shape_cache.icons.builtin_squircle_icon_element(
+        renderer,
+        app_icon,
+        NOTIFICATION_ICON_SIZE,
+        Point::from((
+            card_rect.loc.x + NOTIFICATION_ICON_OFFSET_X,
+            card_rect.loc.y + NOTIFICATION_ICON_OFFSET_Y,
+        )),
+    ) {
+        out.push(CompositorRenderElement::Memory(icon_el));
+    }
+
+    push_liquid_glass_panel(
+        out,
+        shape_cache,
+        renderer,
+        card_rect,
+        NOTIFICATION_CARD_RADIUS,
+        crate::surfaces::GlassPanelStyle::NotificationCard,
+        glass_opacity,
+        reduce_transparency,
+        Some((14, 44)),
+    );
+}
+
+fn truncate_text_to_width(
+    text_cache: &crate::text::TextCache,
+    text: &str,
+    weight: crate::text::FontWeight,
+    size_px: f32,
+    max_w: i32,
+) -> String {
+    let trimmed = text.trim();
+    if trimmed.is_empty() || max_w <= 8 {
+        return String::new();
+    }
+    if !text_cache.has_font()
+        || text_cache.measure_text_weighted(trimmed, weight, size_px).0 <= max_w
+    {
+        return trimmed.to_owned();
+    }
+    let mut best_end = 0usize;
+    for (idx, ch) in trimmed.char_indices() {
+        let next_end = idx + ch.len_utf8();
+        let cand = format!("{}...", &trimmed[..next_end]);
+        if text_cache.measure_text_weighted(&cand, weight, size_px).0 <= max_w {
+            best_end = next_end;
+        } else {
+            break;
+        }
+    }
+    if best_end == 0 {
+        let mut first = trimmed
+            .chars()
+            .next()
+            .map(|c| c.to_string())
+            .unwrap_or_default();
+        first.push_str("...");
+        first
+    } else {
+        format!("{}...", &trimmed[..best_end])
+    }
+}
+
+#[must_use]
+pub(crate) fn wrap_notification_lines(
+    text_cache: &crate::text::TextCache,
+    text: &str,
+    size_px: f32,
+    max_w: i32,
+    max_lines: usize,
+) -> Vec<String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() || max_lines == 0 || max_w <= 8 {
+        return Vec::new();
+    }
+    let weight = crate::text::FontWeight::Regular;
+    let mut lines: Vec<String> = Vec::new();
+    let paragraphs: Vec<&str> = trimmed
+        .split('\n')
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .collect();
+
+    for (p_idx, para) in paragraphs.iter().enumerate() {
+        if lines.len() >= max_lines {
+            break;
+        }
+        let mut cur = String::new();
+        let words: Vec<&str> = para.split_whitespace().collect();
+        for (w_idx, &word) in words.iter().enumerate() {
+            let cand = if cur.is_empty() {
+                word.to_owned()
+            } else {
+                format!("{cur} {word}")
+            };
+            if !text_cache.has_font()
+                || text_cache.measure_text_weighted(&cand, weight, size_px).0 <= max_w
+            {
+                cur = cand;
+                continue;
+            }
+            if cur.is_empty() {
+                lines.push(truncate_text_to_width(
+                    text_cache, word, weight, size_px, max_w,
+                ));
+            } else if lines.len() + 1 == max_lines {
+                let combined = format!("{cur} {}", words[w_idx..].join(" "));
+                lines.push(truncate_text_to_width(
+                    text_cache, &combined, weight, size_px, max_w,
+                ));
+                return lines;
+            } else {
+                lines.push(cur);
+                cur = String::new();
+                word.clone_into(&mut cur);
+            }
+            if lines.len() >= max_lines {
+                return lines;
+            }
+        }
+        if !cur.is_empty() {
+            if lines.len() + 1 == max_lines && p_idx + 1 < paragraphs.len() {
+                let appended = format!("{cur} {}", paragraphs[p_idx + 1]);
+                lines.push(truncate_text_to_width(
+                    text_cache, &appended, weight, size_px, max_w,
+                ));
+                return lines;
+            }
+            lines.push(cur);
+        }
+    }
+    if let Some(last) = lines.last_mut()
+        && text_cache.has_font()
+        && text_cache.measure_text_weighted(last, weight, size_px).0 > max_w
+    {
+        *last = truncate_text_to_width(text_cache, last, weight, size_px, max_w);
+    }
+    lines
+}
+
+/// Appends unified Golden Gate title and 1-2 line wrapped body labels without `"now"` (`RUSTYOS-110`).
+pub(crate) fn push_notification_card_text_lines(
+    text_cache: &mut crate::text::TextCache,
+    renderer: &mut GlesRenderer,
+    card_rect: Rectangle<i32, Physical>,
+    title: &str,
+    body: &str,
+    pal: &ThemePalette,
+    elements: &mut Vec<MemoryRenderBufferRenderElement<GlesRenderer>>,
+) {
+    let tx = card_rect.loc.x + NOTIFICATION_TEXT_OFFSET_X;
+    let ty = card_rect.loc.y;
+    let max_w =
+        (card_rect.size.w - NOTIFICATION_TEXT_OFFSET_X - NOTIFICATION_TEXT_RIGHT_PAD).max(80);
+    let body_lines = wrap_notification_lines(text_cache, body, 11.5, max_w, 2);
+
+    let (title_size, title_y) = match body_lines.len() {
+        0 => (13.0, ty + 25),
+        1 => (13.0, ty + 16),
+        _ => (12.5, ty + 9),
+    };
+    let title_fit = truncate_text_to_width(
+        text_cache,
+        title,
+        crate::text::FontWeight::Bold,
+        title_size,
+        max_w,
+    );
+    if !title_fit.is_empty()
+        && let Some(el) = text_cache.render_label_weighted(
+            renderer,
+            &title_fit,
+            crate::text::FontWeight::Bold,
+            title_size,
+            pal.popover_text_primary,
+            Point::from((tx, title_y)),
+        )
+    {
+        elements.push(el);
+    }
+
+    let lead_body_fg = if pal.is_dark {
+        [228, 228, 236, 255]
+    } else {
+        [38, 40, 48, 255]
+    };
+    for (idx, line) in body_lines.iter().enumerate() {
+        let line_y = if body_lines.len() >= 2 {
+            ty + 26 + i32::try_from(idx).unwrap_or(0) * 16
+        } else {
+            ty + 35
+        };
+        let fg = if idx == 0 {
+            lead_body_fg
+        } else {
+            pal.popover_text_secondary
+        };
+        if let Some(el) =
+            text_cache.render_label(renderer, line, 11.5, fg, Point::from((tx, line_y)))
+        {
+            elements.push(el);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn notification_card_line_wrapping_handles_multiline_and_single_line() {
+        let cache = crate::text::TextCache::default();
+        let multi = wrap_notification_lines(
+            &cache,
+            "hey buddy\n—— Stephen Hackett stephen@hackett.fm",
+            11.5,
+            260,
+            2,
+        );
+        assert_eq!(multi.len(), 2);
+        assert_eq!(multi[0], "hey buddy");
+        assert_eq!(multi[1], "—— Stephen Hackett stephen@hackett.fm");
+
+        let rects = notification_toast_rects(Size::from((1280, 800)), 1);
+        assert_eq!(rects.len(), 1);
+        assert_eq!(rects[0].size, Size::from((344, 68)));
+        assert_eq!(rects[0].loc.x, 1280 - 344 - 14);
+    }
 }
