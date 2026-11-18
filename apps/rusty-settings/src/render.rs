@@ -54,6 +54,48 @@ struct CachedGlyph {
 thread_local! {
     static GLYPH_CACHE: RefCell<HashMap<GlyphKey, CachedGlyph>> =
         RefCell::new(HashMap::with_capacity(256));
+    static SPRITE_CACHE: RefCell<Vec<(SpriteKey, Vec<u8>)>> = RefCell::new(Vec::with_capacity(32));
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SpriteKey {
+    RowIcon(SettingsPage, i32, i32),
+    ServiceBadge(ServiceBadgeKind, [u8; 4], i32, i32),
+    NotifBadge(NotificationAppKind, [u8; 4], i32, i32),
+    ThemePreview(ThemeChoice, i32, i32),
+}
+
+fn blit_cached_sprite(
+    c: &mut Canvas<'_>,
+    dst: Rect,
+    key: SpriteKey,
+    draw: impl FnOnce(&mut Canvas<'_>, Rect),
+) {
+    if c.is_clipped_out(dst) || dst.w <= 0 || dst.h <= 0 {
+        return;
+    }
+    SPRITE_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if let Some((_, sprite)) = cache.iter().find(|(k, _)| *k == key) {
+            c.blit_premul_bgra(dst, sprite);
+            return;
+        }
+        let Ok(byte_len) =
+            usize::try_from(dst.w).and_then(|w| usize::try_from(dst.h).map(|h| w * h * 4))
+        else {
+            return;
+        };
+        let mut sprite = vec![0_u8; byte_len];
+        let local_rect = Rect::new(0, 0, dst.w, dst.h);
+        {
+            let mut sc = Canvas::new(&mut sprite, dst.w as u32, dst.h as u32);
+            draw(&mut sc, local_rect);
+        }
+        c.blit_premul_bgra(dst, &sprite);
+        if cache.len() < 96 {
+            cache.push((key, sprite));
+        }
+    });
 }
 
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -270,7 +312,7 @@ impl<'a> Canvas<'a> {
         self.buf[idx + 3] = (alpha + da).min(255) as u8;
     }
 
-    fn fill_rect(&mut self, rect: Rect, color: [u8; 4]) {
+    fn clamped_bounds(&self, rect: Rect) -> (i32, i32, i32, i32) {
         let mut x0 = rect.x.max(0);
         let mut y0 = rect.y.max(0);
         let mut x1 = rect.right().min(self.w);
@@ -281,11 +323,109 @@ impl<'a> Canvas<'a> {
             x1 = x1.min(clip.right());
             y1 = y1.min(clip.bottom());
         }
+        (x0, y0, x1, y1)
+    }
+
+    fn is_clipped_out(&self, rect: Rect) -> bool {
+        let (x0, y0, x1, y1) = self.clamped_bounds(rect);
+        x0 >= x1 || y0 >= y1
+    }
+
+    fn blend_span_opaque(&mut self, py: i32, x0: i32, x1: i32, color: [u8; 4]) {
+        if py < 0 || py >= self.h || x0 >= x1 || color[3] == 0 {
+            return;
+        }
+        let row_start = (py * self.w + x0) as usize * 4;
+        let row_end = (py * self.w + x1) as usize * 4;
+        if row_end > self.buf.len() {
+            return;
+        }
+        if color[3] == 255 {
+            let px = [color[2], color[1], color[0], 255];
+            let (chunks, _) = self.buf[row_start..row_end].as_chunks_mut::<4>();
+            chunks.fill(px);
+            return;
+        }
+        let alpha = u16::from(color[3]);
+        let inv = 255 - alpha;
+        let sb = div_255(u16::from(color[2]) * alpha);
+        let sg = div_255(u16::from(color[1]) * alpha);
+        let sr = div_255(u16::from(color[0]) * alpha);
+        for dst in self.buf[row_start..row_end].as_chunks_mut::<4>().0 {
+            let db = div_255(u16::from(dst[0]) * inv);
+            let dg = div_255(u16::from(dst[1]) * inv);
+            let dr = div_255(u16::from(dst[2]) * inv);
+            let da = div_255(u16::from(dst[3]) * inv);
+            dst[0] = (sb + db).min(255) as u8;
+            dst[1] = (sg + dg).min(255) as u8;
+            dst[2] = (sr + dr).min(255) as u8;
+            dst[3] = (alpha + da).min(255) as u8;
+        }
+    }
+
+    fn blit_premul_bgra(&mut self, dst: Rect, sprite: &[u8]) {
+        let (x0, y0, x1, y1) = self.clamped_bounds(dst);
+        if x0 >= x1 || y0 >= y1 || dst.w <= 0 || dst.h <= 0 {
+            return;
+        }
         for py in y0..y1 {
+            let sy = (py - dst.y) as usize;
+            let row_src_base = sy * dst.w as usize;
+            let row_dst_base = (py * self.w) as usize;
             for px in x0..x1 {
-                self.blend_px(px, py, color, 255);
+                let sx = (px - dst.x) as usize;
+                let s_idx = (row_src_base + sx) * 4;
+                let sa = sprite[s_idx + 3];
+                if sa == 0 {
+                    continue;
+                }
+                let d_idx = (row_dst_base + px as usize) * 4;
+                if d_idx + 3 >= self.buf.len() {
+                    break;
+                }
+                if sa == 255 {
+                    self.buf[d_idx..d_idx + 4].copy_from_slice(&sprite[s_idx..s_idx + 4]);
+                    continue;
+                }
+                let inv = 255 - u16::from(sa);
+                for ch in 0..4 {
+                    let s_ch = u16::from(sprite[s_idx + ch]);
+                    let d_ch = div_255(u16::from(self.buf[d_idx + ch]) * inv);
+                    self.buf[d_idx + ch] = (s_ch + d_ch).min(255) as u8;
+                }
             }
         }
+    }
+
+    fn fill_rect(&mut self, rect: Rect, color: [u8; 4]) {
+        let (x0, y0, x1, y1) = self.clamped_bounds(rect);
+        if x0 >= x1 || y0 >= y1 {
+            return;
+        }
+        for py in y0..y1 {
+            self.blend_span_opaque(py, x0, x1, color);
+        }
+    }
+
+    fn rounded_interior_span(
+        rect: Rect,
+        margin_edge: i32,
+        margin_corner: i32,
+        x0: i32,
+        x1: i32,
+        py: i32,
+    ) -> Option<(i32, i32)> {
+        if py < rect.y + margin_edge || py >= rect.bottom() - margin_edge {
+            return None;
+        }
+        let pad_x = if py >= rect.y + margin_corner && py < rect.bottom() - margin_corner {
+            margin_edge
+        } else {
+            margin_corner
+        };
+        let sx0 = (rect.x + pad_x).max(x0);
+        let sx1 = (rect.right() - pad_x).min(x1);
+        (sx0 < sx1).then_some((sx0, sx1))
     }
 
     #[allow(
@@ -294,20 +434,37 @@ impl<'a> Canvas<'a> {
         clippy::cast_sign_loss
     )]
     fn fill_rounded_rect(&mut self, rect: Rect, radius: i32, color: [u8; 4]) {
-        let x0 = rect.x.max(0);
-        let y0 = rect.y.max(0);
-        let x1 = rect.right().min(self.w);
-        let y1 = rect.bottom().min(self.h);
+        let (x0, y0, x1, y1) = self.clamped_bounds(rect);
+        if x0 >= x1 || y0 >= y1 {
+            return;
+        }
         let cx = rect.x as f32 + rect.w as f32 * 0.5;
         let cy = rect.y as f32 + rect.h as f32 * 0.5;
         let rw = rect.w as f32;
         let rh = rect.h as f32;
-        let rad = radius as f32;
+        let rad = (radius as f32).min(rw * 0.5).min(rh * 0.5).max(0.0);
+        let corner_pad = rad.ceil() as i32 + 2;
         for py in y0..y1 {
-            for px in x0..x1 {
-                let cov = aa_cov8(px, py, |x, y| sd_rounded_box(x - cx, y - cy, rw, rh, rad));
-                if cov > 0 {
-                    self.blend_px(px, py, color, cov);
+            if let Some((sx0, sx1)) = Self::rounded_interior_span(rect, 2, corner_pad, x0, x1, py) {
+                for px in x0..sx0 {
+                    let cov = aa_cov8(px, py, |x, y| sd_rounded_box(x - cx, y - cy, rw, rh, rad));
+                    if cov > 0 {
+                        self.blend_px(px, py, color, cov);
+                    }
+                }
+                self.blend_span_opaque(py, sx0, sx1, color);
+                for px in sx1..x1 {
+                    let cov = aa_cov8(px, py, |x, y| sd_rounded_box(x - cx, y - cy, rw, rh, rad));
+                    if cov > 0 {
+                        self.blend_px(px, py, color, cov);
+                    }
+                }
+            } else {
+                for px in x0..x1 {
+                    let cov = aa_cov8(px, py, |x, y| sd_rounded_box(x - cx, y - cy, rw, rh, rad));
+                    if cov > 0 {
+                        self.blend_px(px, py, color, cov);
+                    }
                 }
             }
         }
@@ -319,23 +476,39 @@ impl<'a> Canvas<'a> {
         clippy::cast_sign_loss
     )]
     fn stroke_rounded_rect(&mut self, rect: Rect, radius: f32, stroke_w: f32, color: [u8; 4]) {
-        let x0 = rect.x.max(0);
-        let y0 = rect.y.max(0);
-        let x1 = rect.right().min(self.w);
-        let y1 = rect.bottom().min(self.h);
+        let (x0, y0, x1, y1) = self.clamped_bounds(rect);
+        if x0 >= x1 || y0 >= y1 {
+            return;
+        }
         let cx = rect.x as f32 + rect.w as f32 * 0.5;
         let cy = rect.y as f32 + rect.h as f32 * 0.5;
         let rw = rect.w as f32;
         let rh = rect.h as f32;
+        let rad = radius.min(rw * 0.5).min(rh * 0.5).max(0.0);
+        let edge_pad = stroke_w.ceil() as i32 + 2;
+        let corner_pad = rad.ceil() as i32 + edge_pad;
         for py in y0..y1 {
-            for px in x0..x1 {
-                let cov = aa_cov8(px, py, |x, y| {
-                    let d = sd_rounded_box(x - cx, y - cy, rw, rh, radius);
-                    // Inside `[ -stroke_w, 0 ]`
-                    (d + stroke_w * 0.5).abs() - stroke_w * 0.5
-                });
-                if cov > 0 {
-                    self.blend_px(px, py, color, cov);
+            if let Some((sx0, sx1)) =
+                Self::rounded_interior_span(rect, edge_pad, corner_pad, x0, x1, py)
+            {
+                for px in (x0..sx0).chain(sx1..x1) {
+                    let cov = aa_cov8(px, py, |x, y| {
+                        let d = sd_rounded_box(x - cx, y - cy, rw, rh, rad);
+                        (d + stroke_w * 0.5).abs() - stroke_w * 0.5
+                    });
+                    if cov > 0 {
+                        self.blend_px(px, py, color, cov);
+                    }
+                }
+            } else {
+                for px in x0..x1 {
+                    let cov = aa_cov8(px, py, |x, y| {
+                        let d = sd_rounded_box(x - cx, y - cy, rw, rh, rad);
+                        (d + stroke_w * 0.5).abs() - stroke_w * 0.5
+                    });
+                    if cov > 0 {
+                        self.blend_px(px, py, color, cov);
+                    }
                 }
             }
         }
@@ -347,12 +520,15 @@ impl<'a> Canvas<'a> {
         clippy::cast_sign_loss
     )]
     fn fill_circle(&mut self, cx: f32, cy: f32, radius: f32, color: [u8; 4]) {
-        let x0 = (cx - radius - 1.5).floor() as i32;
-        let y0 = (cy - radius - 1.5).floor() as i32;
-        let x1 = (cx + radius + 1.5).ceil() as i32;
-        let y1 = (cy + radius + 1.5).ceil() as i32;
-        for py in y0.max(0)..y1.min(self.h) {
-            for px in x0.max(0)..x1.min(self.w) {
+        let bounds = Rect::new(
+            (cx - radius - 1.5).floor() as i32,
+            (cy - radius - 1.5).floor() as i32,
+            ((radius + 1.5) * 2.0).ceil() as i32 + 1,
+            ((radius + 1.5) * 2.0).ceil() as i32 + 1,
+        );
+        let (x0, y0, x1, y1) = self.clamped_bounds(bounds);
+        for py in y0..y1 {
+            for px in x0..x1 {
                 let cov = aa_cov8(px, py, |x, y| (x - cx).hypot(y - cy) - radius);
                 if cov > 0 {
                     self.blend_px(px, py, color, cov);
@@ -367,28 +543,45 @@ impl<'a> Canvas<'a> {
         clippy::cast_sign_loss
     )]
     fn fill_gradient_squircle(&mut self, rect: Rect, radius: i32, bottom_tint: [u8; 4]) {
+        let (x0, y0, x1, y1) = self.clamped_bounds(rect);
+        if x0 >= x1 || y0 >= y1 {
+            return;
+        }
         let top_tint = [
             (f32::from(bottom_tint[0]) * 1.15).round().min(255.0) as u8,
             (f32::from(bottom_tint[1]) * 1.15).round().min(255.0) as u8,
             (f32::from(bottom_tint[2]) * 1.15).round().min(255.0) as u8,
             255,
         ];
-        let x0 = rect.x.max(0);
-        let y0 = rect.y.max(0);
-        let x1 = rect.right().min(self.w);
-        let y1 = rect.bottom().min(self.h);
         let cx = rect.x as f32 + rect.w as f32 * 0.5;
         let cy = rect.y as f32 + rect.h as f32 * 0.5;
         let rw = rect.w as f32;
         let rh = rect.h as f32;
-        let rad = radius as f32;
+        let rad = (radius as f32).min(rw * 0.5).min(rh * 0.5).max(0.0);
+        let corner_pad = rad.ceil() as i32 + 2;
         for py in y0..y1 {
             let t = ((py - rect.y) as f32 / rh.max(1.0)).clamp(0.0, 1.0);
             let col = lerp_rgba(top_tint, bottom_tint, t);
-            for px in x0..x1 {
-                let cov = aa_cov8(px, py, |x, y| sd_rounded_box(x - cx, y - cy, rw, rh, rad));
-                if cov > 0 {
-                    self.blend_px(px, py, col, cov);
+            if let Some((sx0, sx1)) = Self::rounded_interior_span(rect, 2, corner_pad, x0, x1, py) {
+                for px in x0..sx0 {
+                    let cov = aa_cov8(px, py, |x, y| sd_rounded_box(x - cx, y - cy, rw, rh, rad));
+                    if cov > 0 {
+                        self.blend_px(px, py, col, cov);
+                    }
+                }
+                self.blend_span_opaque(py, sx0, sx1, col);
+                for px in sx1..x1 {
+                    let cov = aa_cov8(px, py, |x, y| sd_rounded_box(x - cx, y - cy, rw, rh, rad));
+                    if cov > 0 {
+                        self.blend_px(px, py, col, cov);
+                    }
+                }
+            } else {
+                for px in x0..x1 {
+                    let cov = aa_cov8(px, py, |x, y| sd_rounded_box(x - cx, y - cy, rw, rh, rad));
+                    if cov > 0 {
+                        self.blend_px(px, py, col, cov);
+                    }
                 }
             }
         }
@@ -396,12 +589,13 @@ impl<'a> Canvas<'a> {
 
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     fn draw_segment(&mut self, ax: f32, ay: f32, bx: f32, by: f32, radius: f32, color: [u8; 4]) {
-        let x0 = (ax.min(bx) - radius - 2.0).floor() as i32;
-        let y0 = (ay.min(by) - radius - 2.0).floor() as i32;
-        let x1 = (ax.max(bx) + radius + 2.0).ceil() as i32;
-        let y1 = (ay.max(by) + radius + 2.0).ceil() as i32;
-        for py in y0.max(0)..y1.min(self.h) {
-            for px in x0.max(0)..x1.min(self.w) {
+        let bx0 = (ax.min(bx) - radius - 2.0).floor() as i32;
+        let by0 = (ay.min(by) - radius - 2.0).floor() as i32;
+        let bx1 = (ax.max(bx) + radius + 2.0).ceil() as i32;
+        let by1 = (ay.max(by) + radius + 2.0).ceil() as i32;
+        let (x0, y0, x1, y1) = self.clamped_bounds(Rect::new(bx0, by0, bx1 - bx0, by1 - by0));
+        for py in y0..y1 {
+            for px in x0..x1 {
                 let cov = aa_cov8(px, py, |x, y| sd_segment(x, y, ax, ay, bx, by, radius));
                 if cov > 0 {
                     self.blend_px(px, py, color, cov);
@@ -428,6 +622,11 @@ impl<'a> Canvas<'a> {
         clippy::cast_precision_loss
     )]
     fn draw_text(&mut self, text: &str, x: i32, y: i32, size_px: f32, bold: bool, color: [u8; 4]) {
+        if let Some(clip) = self.clip
+            && (y >= clip.bottom() || y + size_px.ceil() as i32 + 4 <= clip.y || x >= clip.right())
+        {
+            return;
+        }
         let baseline = y + (size_px * 0.84).round() as i32;
         let mut pen_x = x;
         for ch in text.chars() {
@@ -636,6 +835,9 @@ fn render_sidebar(
 
     c.clip = Some(layout.sidebar_viewport);
     for cat in &layout.categories {
+        if c.is_clipped_out(cat.rect) {
+            continue;
+        }
         c.draw_text(
             cat.label,
             cat.rect.x,
@@ -647,6 +849,9 @@ fn render_sidebar(
     }
 
     for item in &layout.sidebar_items {
+        if c.is_clipped_out(item.rect) {
+            continue;
+        }
         let is_hovered = hover == Some(&SettingsHit::SidebarItem(item.page));
         if item.selected {
             c.fill_rounded_rect(item.rect, 10, pal.sidebar_active);
@@ -787,12 +992,21 @@ fn render_appearance_page(c: &mut Canvas<'_>, app: &AppearanceCardsLayout, pal: 
     }
 }
 
+fn render_theme_preview_artwork(c: &mut Canvas<'_>, art: Rect, choice: ThemeChoice) {
+    blit_cached_sprite(
+        c,
+        art,
+        SpriteKey::ThemePreview(choice, art.w, art.h),
+        |sc, local_art| render_theme_preview_direct(sc, local_art, choice),
+    );
+}
+
 #[allow(
     clippy::cast_possible_truncation,
     clippy::cast_precision_loss,
     clippy::cast_sign_loss
 )]
-fn render_theme_preview_artwork(c: &mut Canvas<'_>, art: Rect, choice: ThemeChoice) {
+fn render_theme_preview_direct(c: &mut Canvas<'_>, art: Rect, choice: ThemeChoice) {
     let cx = art.x as f32 + art.w as f32 * 0.5;
     let cy = art.y as f32 + art.h as f32 * 0.5;
     let rw = art.w as f32;
@@ -913,11 +1127,19 @@ fn render_dock_positions_card(c: &mut Canvas<'_>, dp: &DockPositionCardLayout, p
 }
 
 fn render_card_section(c: &mut Canvas<'_>, sec: &CardSectionLayout, pal: &Palette) {
-    if let Some((title, rect)) = &sec.section_label {
+    if let Some((title, rect)) = &sec.section_label
+        && !c.is_clipped_out(*rect)
+    {
         c.draw_text(title, rect.x, rect.y, 12.0, false, pal.text_primary);
+    }
+    if c.is_clipped_out(sec.card_rect) {
+        return;
     }
     c.fill_rounded_rect(sec.card_rect, CARD_CORNER_RADIUS, pal.card_bg);
     for (idx, row) in sec.rows.iter().enumerate() {
+        if c.is_clipped_out(row.rect) {
+            continue;
+        }
         render_card_row(c, row, pal);
         if idx + 1 < sec.rows.len() {
             c.fill_rect(
@@ -926,6 +1148,30 @@ fn render_card_section(c: &mut Canvas<'_>, sec: &CardSectionLayout, pal: &Palett
             );
         }
     }
+}
+
+fn render_service_badge(c: &mut Canvas<'_>, rect: Rect, tint: [u8; 4], kind: ServiceBadgeKind) {
+    blit_cached_sprite(
+        c,
+        rect,
+        SpriteKey::ServiceBadge(kind, tint, rect.w, rect.h),
+        |sc, local| {
+            sc.fill_gradient_squircle(local, 8, tint);
+            draw_service_badge_glyph(sc, local, kind);
+        },
+    );
+}
+
+fn render_notif_badge(c: &mut Canvas<'_>, rect: Rect, tint: [u8; 4], kind: NotificationAppKind) {
+    blit_cached_sprite(
+        c,
+        rect,
+        SpriteKey::NotifBadge(kind, tint, rect.w, rect.h),
+        |sc, local| {
+            sc.fill_gradient_squircle(local, 8, tint);
+            draw_notification_app_glyph(sc, local, kind);
+        },
+    );
 }
 
 fn render_network_service_row(c: &mut Canvas<'_>, row: &CardRowLayout, pal: &Palette) -> bool {
@@ -938,8 +1184,7 @@ fn render_network_service_row(c: &mut Canvas<'_>, row: &CardRowLayout, pal: &Pal
             target,
         } => {
             let icon_rect = Rect::new(row.rect.x + 16, row.rect.y + 11, 32, 32);
-            c.fill_gradient_squircle(icon_rect, 8, *badge_tint);
-            draw_service_badge_glyph(c, icon_rect, *badge_kind);
+            render_service_badge(c, icon_rect, *badge_tint, *badge_kind);
             let tx = icon_rect.right() + 12;
             c.draw_text(
                 &row.label,
@@ -973,8 +1218,12 @@ fn render_network_service_row(c: &mut Canvas<'_>, row: &CardRowLayout, pal: &Pal
             subtitle, active, ..
         } => {
             let icon_rect = Rect::new(row.rect.x + 16, row.rect.y + 15, 32, 32);
-            c.fill_gradient_squircle(icon_rect, 8, [0x00, 0x7A, 0xFF, 0xFF]);
-            draw_service_badge_glyph(c, icon_rect, ServiceBadgeKind::Wifi);
+            render_service_badge(
+                c,
+                icon_rect,
+                [0x00, 0x7A, 0xFF, 0xFF],
+                ServiceBadgeKind::Wifi,
+            );
             let tx = icon_rect.right() + 12;
             c.draw_text(
                 &row.label,
@@ -1018,8 +1267,12 @@ fn render_notification_settings_row(
             subtitle, active, ..
         } => {
             let icon_rect = Rect::new(row.rect.x + 16, row.rect.y + 16, 32, 32);
-            c.fill_gradient_squircle(icon_rect, 8, [0xFF, 0x3B, 0x30, 0xFF]);
-            draw_notification_app_glyph(c, icon_rect, NotificationAppKind::Bell);
+            render_notif_badge(
+                c,
+                icon_rect,
+                [0xFF, 0x3B, 0x30, 0xFF],
+                NotificationAppKind::Bell,
+            );
             let tx = icon_rect.right() + 12;
             c.draw_text(
                 &row.label,
@@ -1048,8 +1301,7 @@ fn render_notification_settings_row(
             ..
         } => {
             let icon_rect = Rect::new(row.rect.x + 16, row.rect.y + 10, 32, 32);
-            c.fill_gradient_squircle(icon_rect, 8, *badge_tint);
-            draw_notification_app_glyph(c, icon_rect, *app_kind);
+            render_notif_badge(c, icon_rect, *badge_tint, *app_kind);
             let tx = icon_rect.right() + 12;
             c.draw_text(
                 &row.label,
@@ -1297,6 +1549,15 @@ fn draw_wifi_signal_icon(c: &mut Canvas<'_>, cx: f32, cy: f32, signal_percent: u
 }
 
 fn render_row_icon(c: &mut Canvas<'_>, rect: Rect, page: SettingsPage) {
+    blit_cached_sprite(
+        c,
+        rect,
+        SpriteKey::RowIcon(page, rect.w, rect.h),
+        |sc, local| render_row_icon_direct(sc, local, page),
+    );
+}
+
+fn render_row_icon_direct(c: &mut Canvas<'_>, rect: Rect, page: SettingsPage) {
     c.fill_gradient_squircle(rect, 6, page.icon_tint());
     draw_sidebar_glyph(c, rect, page);
 }
@@ -1423,4 +1684,62 @@ fn draw_chevron(c: &mut Canvas<'_>, cx: f32, cy: f32, left: bool, col: [u8; 4]) 
     let dir = if left { -1.0 } else { 1.0 };
     c.draw_segment(cx - 2.0 * dir, cy - 3.8, cx + 2.0 * dir, cy, 0.75, col);
     c.draw_segment(cx + 2.0 * dir, cy, cx - 2.0 * dir, cy + 3.8, 0.75, col);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fast_rounded_rect_matches_bruteforce_sdf_coverage() {
+        let w = 80_u32;
+        let h = 50_u32;
+        let rect = Rect::new(8, 6, 60, 34);
+        let color = [0x22, 0x66, 0xAA, 0xFF];
+
+        let mut fast_buf = vec![0_u8; (w * h * 4) as usize];
+        let mut fast = Canvas::new(&mut fast_buf, w, h);
+        fast.fill_rounded_rect(rect, 10, color);
+
+        let mut ref_buf = vec![0_u8; (w * h * 4) as usize];
+        let mut ref_c = Canvas::new(&mut ref_buf, w, h);
+        let cx = rect.x as f32 + rect.w as f32 * 0.5;
+        let cy = rect.y as f32 + rect.h as f32 * 0.5;
+        for py in rect.y..rect.bottom() {
+            for px in rect.x..rect.right() {
+                let cov = aa_cov8(px, py, |x, y| {
+                    sd_rounded_box(x - cx, y - cy, rect.w as f32, rect.h as f32, 10.0)
+                });
+                if cov > 0 {
+                    ref_c.blend_px(px, py, color, cov);
+                }
+            }
+        }
+        assert_eq!(fast_buf, ref_buf);
+    }
+
+    #[test]
+    fn cached_row_icon_and_theme_preview_match_direct_render() {
+        let w = 140_u32;
+        let h = 90_u32;
+        let icon_rect = Rect::new(10, 10, 24, 24);
+        let preview_rect = Rect::new(20, 12, 108, 68);
+
+        let mut direct_buf = vec![240_u8; (w * h * 4) as usize];
+        {
+            let mut dc = Canvas::new(&mut direct_buf, w, h);
+            render_row_icon_direct(&mut dc, icon_rect, SettingsPage::Appearance);
+            render_theme_preview_direct(&mut dc, preview_rect, ThemeChoice::Auto);
+        }
+
+        let mut cached_buf = vec![240_u8; (w * h * 4) as usize];
+        for _ in 0..2 {
+            cached_buf.fill(240);
+            let mut cc = Canvas::new(&mut cached_buf, w, h);
+            render_row_icon(&mut cc, icon_rect, SettingsPage::Appearance);
+            render_theme_preview_artwork(&mut cc, preview_rect, ThemeChoice::Auto);
+        }
+
+        assert_eq!(cached_buf, direct_buf);
+    }
 }

@@ -224,23 +224,77 @@ pub(crate) enum RowControlId {
     NotifAppToggle(usize),
 }
 
+/// Coalesced UI damage scope for partial `wl_surface::damage_buffer` updates (`RUSTYOS-112`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum DamageScope {
+    #[default]
+    None,
+    Caret,
+    Sidebar,
+    Page,
+    Full,
+}
+
+impl DamageScope {
+    #[must_use]
+    pub(crate) const fn merge(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::None, x) | (x, Self::None) => x,
+            (Self::Full, _)
+            | (_, Self::Full)
+            | (Self::Sidebar, Self::Page)
+            | (Self::Page, Self::Sidebar) => Self::Full,
+            (Self::Caret, Self::Caret) => Self::Caret,
+            (Self::Caret | Self::Sidebar, Self::Sidebar) | (Self::Sidebar, Self::Caret) => {
+                Self::Sidebar
+            }
+            (Self::Caret | Self::Page, Self::Page) | (Self::Page, Self::Caret) => Self::Page,
+        }
+    }
+}
+
+/// Snapshot of live NetworkManager and audio service status (`RUSTYOS-112`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ServiceSnapshot {
+    pub(crate) network: NetworkStatus,
+    pub(crate) volume_percent: u8,
+    pub(crate) muted: bool,
+}
+
+/// Asynchronous service command executed off the Wayland GUI thread (`RUSTYOS-112`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ServiceCommand {
+    Refresh,
+    SetVolume(u8),
+    ToggleMute,
+    SetWifiEnabled(bool),
+    ConnectWifi(String),
+}
+
 /// Mutable state backing the System Settings window.
 #[derive(Debug, Clone)]
 #[allow(clippy::struct_excessive_bools)]
 pub(crate) struct SettingsAppState {
     pub(crate) running: bool,
     pub(crate) dirty: bool,
+    damage_scope: DamageScope,
     pub(crate) maximized: bool,
     pub(crate) theme_choice: ThemeChoice,
     pub(crate) resolved_dark: bool,
     theme_locked: bool,
     last_config_mtime: Option<SystemTime>,
+    last_config_poll: Option<Instant>,
     pub(crate) accent_index: usize,
     pub(crate) current_page: SettingsPage,
     pub(crate) history: Vec<SettingsPage>,
     pub(crate) history_idx: usize,
     pub(crate) page_scroll_y: i32,
     pub(crate) sidebar_scroll_y: i32,
+    page_scroll_f: f64,
+    page_scroll_target: f64,
+    sidebar_scroll_f: f64,
+    sidebar_scroll_target: f64,
+    last_scroll_tick: Option<Instant>,
     pub(crate) search_focused: bool,
     pub(crate) search_query: String,
     pub(crate) caret_visible: bool,
@@ -288,6 +342,7 @@ pub(crate) struct SettingsAppState {
     pub(crate) network: NetworkStatus,
     pub(crate) volume_percent: u8,
     pub(crate) muted: bool,
+    pending_service_cmds: Vec<ServiceCommand>,
 }
 
 impl SettingsAppState {
@@ -301,7 +356,7 @@ impl SettingsAppState {
             state.resolved_dark = matches!(theme_override, ThemeChoice::Dark);
             state.theme_locked = true;
         }
-        state.refresh_services();
+        state.pending_service_cmds.push(ServiceCommand::Refresh);
         state
     }
 
@@ -309,17 +364,24 @@ impl SettingsAppState {
         Self {
             running: true,
             dirty: true,
+            damage_scope: DamageScope::Full,
             maximized: false,
             theme_choice: ThemeChoice::Light,
             resolved_dark: false,
             theme_locked: false,
             last_config_mtime: None,
+            last_config_poll: None,
             accent_index: 0,
             current_page: initial_page,
             history: vec![initial_page],
             history_idx: 0,
             page_scroll_y: 0,
             sidebar_scroll_y: 0,
+            page_scroll_f: 0.0,
+            page_scroll_target: 0.0,
+            sidebar_scroll_f: 0.0,
+            sidebar_scroll_target: 0.0,
+            last_scroll_tick: None,
             search_focused: false,
             search_query: String::new(),
             caret_visible: true,
@@ -363,6 +425,7 @@ impl SettingsAppState {
             network: NetworkStatus::default(),
             volume_percent: 65,
             muted: false,
+            pending_service_cmds: Vec::new(),
         }
     }
 
@@ -385,12 +448,62 @@ impl SettingsAppState {
         self.resolved_dark
     }
 
+    pub(crate) fn mark_dirty(&mut self, scope: DamageScope) {
+        self.dirty = true;
+        self.damage_scope = self.damage_scope.merge(scope);
+    }
+
+    #[must_use]
+    pub(crate) fn take_damage_scope(&mut self) -> DamageScope {
+        let scope = if self.dirty && self.damage_scope == DamageScope::None {
+            DamageScope::Full
+        } else {
+            self.damage_scope
+        };
+        self.dirty = false;
+        self.damage_scope = DamageScope::None;
+        scope
+    }
+
+    #[must_use]
+    pub(crate) fn take_pending_service_commands(&mut self) -> Vec<ServiceCommand> {
+        std::mem::take(&mut self.pending_service_cmds)
+    }
+
+    fn queue_service_refresh_for_page(&mut self, page: SettingsPage) {
+        if matches!(
+            page,
+            SettingsPage::Wifi | SettingsPage::Network | SettingsPage::Sound
+        ) {
+            self.pending_service_cmds.push(ServiceCommand::Refresh);
+        }
+    }
+
+    fn reset_page_scroll(&mut self) {
+        self.page_scroll_y = 0;
+        self.page_scroll_f = 0.0;
+        self.page_scroll_target = 0.0;
+        if (self.sidebar_scroll_target - self.sidebar_scroll_f).abs() < 0.25 {
+            self.last_scroll_tick = None;
+        }
+    }
+
+    fn reset_sidebar_scroll(&mut self) {
+        self.sidebar_scroll_y = 0;
+        self.sidebar_scroll_f = 0.0;
+        self.sidebar_scroll_target = 0.0;
+        if (self.page_scroll_target - self.page_scroll_f).abs() < 0.25 {
+            self.last_scroll_tick = None;
+        }
+    }
+
     pub(crate) fn go_back(&mut self) {
         if self.can_go_back() {
             self.history_idx -= 1;
             self.current_page = self.history[self.history_idx];
-            self.page_scroll_y = 0;
-            self.dirty = true;
+            self.reset_page_scroll();
+            self.queue_service_refresh_for_page(self.current_page);
+            self.mark_dirty(DamageScope::Full);
         }
     }
 
@@ -398,8 +511,9 @@ impl SettingsAppState {
         if self.can_go_forward() {
             self.history_idx += 1;
             self.current_page = self.history[self.history_idx];
-            self.page_scroll_y = 0;
-            self.dirty = true;
+            self.reset_page_scroll();
+            self.queue_service_refresh_for_page(self.current_page);
+            self.mark_dirty(DamageScope::Full);
         }
     }
 
@@ -414,11 +528,12 @@ impl SettingsAppState {
         }
         self.history_idx = self.history.len() - 1;
         self.current_page = page;
-        self.page_scroll_y = 0;
-        self.refresh_services();
-        self.dirty = true;
+        self.reset_page_scroll();
+        self.queue_service_refresh_for_page(page);
+        self.mark_dirty(DamageScope::Full);
     }
 
+    #[cfg(test)]
     pub(crate) fn scroll_by(
         &mut self,
         in_sidebar: bool,
@@ -426,27 +541,132 @@ impl SettingsAppState {
         max_sidebar_scroll: i32,
         max_page_scroll: i32,
     ) -> bool {
-        if delta_y == 0 {
+        self.scroll_smooth_by(
+            in_sidebar,
+            f64::from(delta_y),
+            max_sidebar_scroll,
+            max_page_scroll,
+            false,
+        )
+    }
+
+    /// Accumulates fractional or animated scroll deltas for sidebar or content pane (`RUSTYOS-112`).
+    #[allow(clippy::cast_possible_truncation)]
+    pub(crate) fn scroll_smooth_by(
+        &mut self,
+        in_sidebar: bool,
+        delta_px: f64,
+        max_sidebar_scroll: i32,
+        max_page_scroll: i32,
+        animate: bool,
+    ) -> bool {
+        if delta_px.abs() < 1e-4 {
             return false;
         }
-        if in_sidebar && max_sidebar_scroll > 0 {
-            let next = (self.sidebar_scroll_y + delta_y).clamp(0, max_sidebar_scroll);
-            if next != self.sidebar_scroll_y {
-                self.sidebar_scroll_y = next;
-                self.dirty = true;
+        let max_scroll = if in_sidebar {
+            max_sidebar_scroll
+        } else {
+            max_page_scroll
+        };
+        if max_scroll <= 0 {
+            return false;
+        }
+        let max_f = f64::from(max_scroll);
+        let (pos_i, pos_f, target) = if in_sidebar {
+            (
+                &mut self.sidebar_scroll_y,
+                &mut self.sidebar_scroll_f,
+                &mut self.sidebar_scroll_target,
+            )
+        } else {
+            (
+                &mut self.page_scroll_y,
+                &mut self.page_scroll_f,
+                &mut self.page_scroll_target,
+            )
+        };
+        let next_target = (*target + delta_px).clamp(0.0, max_f);
+        *target = next_target;
+        if !animate || self.reduced_motion {
+            *pos_f = next_target;
+            let next_i = next_target.round() as i32;
+            if next_i != *pos_i {
+                *pos_i = next_i;
+                self.mark_dirty(if in_sidebar {
+                    DamageScope::Sidebar
+                } else {
+                    DamageScope::Page
+                });
                 return true;
             }
             return false;
         }
-        if !in_sidebar && max_page_scroll > 0 {
-            let next = (self.page_scroll_y + delta_y).clamp(0, max_page_scroll);
-            if next != self.page_scroll_y {
-                self.page_scroll_y = next;
-                self.dirty = true;
-                return true;
-            }
+        if (*target - *pos_f).abs() < 0.05 {
+            return false;
+        }
+        if self.last_scroll_tick.is_none() {
+            self.last_scroll_tick = Instant::now().checked_sub(Duration::from_millis(8));
+        }
+        self.step_scroll_animation(Instant::now())
+    }
+
+    #[must_use]
+    pub(crate) fn is_scroll_animating(&self) -> bool {
+        self.last_scroll_tick.is_some()
+            && ((self.page_scroll_target - self.page_scroll_f).abs() >= 0.25
+                || (self.sidebar_scroll_target - self.sidebar_scroll_f).abs() >= 0.25)
+    }
+
+    #[allow(clippy::cast_possible_truncation)]
+    pub(crate) fn step_scroll_animation(&mut self, now: Instant) -> bool {
+        let Some(prev) = self.last_scroll_tick else {
+            return false;
+        };
+        let dt = now
+            .saturating_duration_since(prev)
+            .as_secs_f64()
+            .clamp(0.001, 0.05);
+        self.last_scroll_tick = Some(now);
+        let alpha = 1.0 - (-22.0 * dt).exp();
+
+        let mut changed_scope = DamageScope::None;
+        let sidebar_done = step_scroll_axis(
+            &mut self.sidebar_scroll_y,
+            &mut self.sidebar_scroll_f,
+            self.sidebar_scroll_target,
+            alpha,
+            DamageScope::Sidebar,
+            &mut changed_scope,
+        );
+        let page_done = step_scroll_axis(
+            &mut self.page_scroll_y,
+            &mut self.page_scroll_f,
+            self.page_scroll_target,
+            alpha,
+            DamageScope::Page,
+            &mut changed_scope,
+        );
+        if sidebar_done && page_done {
+            self.last_scroll_tick = None;
+        }
+        if changed_scope != DamageScope::None {
+            self.mark_dirty(changed_scope);
+            return true;
         }
         false
+    }
+
+    #[allow(clippy::cast_possible_truncation)]
+    pub(crate) fn clamp_scroll_bounds(&mut self, max_sidebar_scroll: i32, max_page_scroll: i32) {
+        let max_s = f64::from(max_sidebar_scroll.max(0));
+        self.sidebar_scroll_target = self.sidebar_scroll_target.clamp(0.0, max_s);
+        self.sidebar_scroll_f = self.sidebar_scroll_f.clamp(0.0, max_s);
+        self.sidebar_scroll_y = self.sidebar_scroll_y.clamp(0, max_sidebar_scroll.max(0));
+
+        let max_p = f64::from(max_page_scroll.max(0));
+        self.page_scroll_target = self.page_scroll_target.clamp(0.0, max_p);
+        self.page_scroll_f = self.page_scroll_f.clamp(0.0, max_p);
+        self.page_scroll_y = self.page_scroll_y.clamp(0, max_page_scroll.max(0));
     }
 
     #[must_use]
@@ -467,13 +687,21 @@ impl SettingsAppState {
             .collect()
     }
 
-    pub(crate) fn refresh_services(&mut self) {
-        let net = NetworkService::new().query_status();
-        self.network_status.clone_from(&net.status_label);
-        self.network = net;
-        let audio = AudioService::new().query_status();
-        self.volume_percent = audio.volume_percent.clamp(0, 100);
-        self.muted = audio.muted;
+    pub(crate) fn apply_service_snapshot(&mut self, snap: ServiceSnapshot) -> bool {
+        let clamped_vol = snap.volume_percent.clamp(0, 100);
+        let changed = self.network_status != snap.network.status_label
+            || self.network != snap.network
+            || self.volume_percent != clamped_vol
+            || self.muted != snap.muted;
+        if !changed {
+            return false;
+        }
+        self.network_status.clone_from(&snap.network.status_label);
+        self.network = snap.network;
+        self.volume_percent = clamped_vol;
+        self.muted = snap.muted;
+        self.mark_dirty(DamageScope::Page);
+        true
     }
 
     pub(crate) fn choose_appearance(&mut self, choice: ThemeChoice) {
@@ -494,7 +722,7 @@ impl SettingsAppState {
             update_config_entries(&[("ui", "theme", theme_val), ("ui", "theme_mode", mode_val)]);
         self.last_config_mtime = current_config_mtime();
         notify_compositor_reload();
-        self.dirty = true;
+        self.mark_dirty(DamageScope::Full);
     }
 
     pub(crate) fn choose_accent(&mut self, idx: usize) {
@@ -503,7 +731,7 @@ impl SettingsAppState {
         let val = clamped.to_string();
         let _ = update_config_entries(&[("ui", "accent_index", &val)]);
         self.last_config_mtime = current_config_mtime();
-        self.dirty = true;
+        self.mark_dirty(DamageScope::Full);
     }
 
     pub(crate) fn update_caret_blink(&mut self, now: Instant) -> bool {
@@ -514,7 +742,7 @@ impl SettingsAppState {
         if now.saturating_duration_since(self.last_caret_blink) >= Duration::from_millis(530) {
             self.caret_visible = !self.caret_visible;
             self.last_caret_blink = now;
-            self.dirty = true;
+            self.mark_dirty(DamageScope::Caret);
             return true;
         }
         false
@@ -525,6 +753,7 @@ impl SettingsAppState {
         if !self.search_focused {
             return false;
         }
+        let mut navigated = false;
         match sym {
             "Escape" => {
                 if self.search_query.is_empty() {
@@ -539,6 +768,7 @@ impl SettingsAppState {
             "Return" => {
                 if let Some(first) = self.visible_sidebar_pages().first().copied() {
                     self.navigate_to(first);
+                    navigated = true;
                 }
             }
             other if other.len() == 1 => {
@@ -549,13 +779,62 @@ impl SettingsAppState {
             _ => return false,
         }
         self.caret_visible = true;
-        self.sidebar_scroll_y = 0;
+        self.reset_sidebar_scroll();
         self.last_caret_blink = Instant::now();
-        self.dirty = true;
+        self.mark_dirty(if navigated {
+            DamageScope::Full
+        } else {
+            DamageScope::Sidebar
+        });
+        true
+    }
+
+    fn try_apply_service_action(&mut self, action: RowControlId) -> bool {
+        match action {
+            RowControlId::VolumeDown => {
+                let target = self.volume_percent.saturating_sub(5);
+                self.volume_percent = target;
+                self.pending_service_cmds
+                    .push(ServiceCommand::SetVolume(target));
+            }
+            RowControlId::VolumeUp => {
+                let target = self.volume_percent.saturating_add(5).min(100);
+                self.volume_percent = target;
+                self.pending_service_cmds
+                    .push(ServiceCommand::SetVolume(target));
+            }
+            RowControlId::ToggleMute => {
+                self.muted = !self.muted;
+                self.pending_service_cmds.push(ServiceCommand::ToggleMute);
+            }
+            RowControlId::WifiEnabledToggle => {
+                let next = !self.network.wifi_enabled;
+                self.network.wifi_enabled = next;
+                self.pending_service_cmds
+                    .push(ServiceCommand::SetWifiEnabled(next));
+            }
+            RowControlId::WifiConnectIndex(idx) => {
+                let Some(ap) = self.network.wifi_networks.get(idx).cloned() else {
+                    return true;
+                };
+                self.network_status = format!("Connecting to {}...", ap.ssid);
+                self.pending_service_cmds
+                    .push(ServiceCommand::ConnectWifi(ap.ssid));
+            }
+            RowControlId::NetworkRefresh => {
+                self.network_status = String::from("Refreshing...");
+                self.pending_service_cmds.push(ServiceCommand::Refresh);
+            }
+            _ => return false,
+        }
+        self.mark_dirty(DamageScope::Page);
         true
     }
 
     pub(crate) fn apply_row_action(&mut self, action: RowControlId) {
+        if self.try_apply_service_action(action) {
+            return;
+        }
         match action {
             RowControlId::ToggleReduceTransparency => {
                 self.reduce_transparency = !self.reduce_transparency;
@@ -591,7 +870,7 @@ impl SettingsAppState {
         }
         self.last_config_mtime = current_config_mtime();
         notify_compositor_reload();
-        self.dirty = true;
+        self.mark_dirty(DamageScope::Page);
     }
 
     fn apply_device_action(&mut self, action: RowControlId) {
@@ -777,20 +1056,6 @@ impl SettingsAppState {
                 let v = bool_str(self.enable_polkit_agent);
                 let _ = update_config_entries(&[("security", "enable_polkit_agent", v)]);
             }
-            RowControlId::VolumeDown => {
-                let target = self.volume_percent.saturating_sub(5);
-                let _ = AudioService::new().set_volume(target);
-                self.refresh_services();
-            }
-            RowControlId::VolumeUp => {
-                let target = self.volume_percent.saturating_add(5).min(100);
-                let _ = AudioService::new().set_volume(target);
-                self.refresh_services();
-            }
-            RowControlId::ToggleMute => {
-                let _ = AudioService::new().toggle_mute();
-                self.refresh_services();
-            }
             RowControlId::CursorThemeCycle => {
                 if self.cursor_theme == "Adwaita" {
                     "breeze_cursors"
@@ -799,21 +1064,6 @@ impl SettingsAppState {
                 }
                 .clone_into(&mut self.cursor_theme);
                 let _ = update_config_entries(&[("ui", "cursor_theme", &self.cursor_theme)]);
-            }
-            RowControlId::WifiEnabledToggle => {
-                let next = !self.network.wifi_enabled;
-                self.network.wifi_enabled = next;
-                let _ = NetworkService::new().set_wifi_enabled(next);
-                self.refresh_services();
-            }
-            RowControlId::WifiConnectIndex(idx) => {
-                if let Some(ap) = self.network.wifi_networks.get(idx).cloned() {
-                    let _ = NetworkService::new().connect_wifi(&ap.ssid);
-                    self.refresh_services();
-                }
-            }
-            RowControlId::NetworkRefresh => {
-                self.refresh_services();
             }
             other => self.apply_notification_action(other),
         }
@@ -859,6 +1109,16 @@ impl SettingsAppState {
         }
     }
 
+    pub(crate) fn poll_external_config_if_due(&mut self, now: Instant) -> bool {
+        if let Some(last) = self.last_config_poll
+            && now.saturating_duration_since(last) < Duration::from_millis(200)
+        {
+            return false;
+        }
+        self.last_config_poll = Some(now);
+        self.poll_external_config()
+    }
+
     pub(crate) fn poll_external_config(&mut self) -> bool {
         if self.theme_locked {
             return false;
@@ -867,7 +1127,7 @@ impl SettingsAppState {
         if mtime.is_some() && mtime != self.last_config_mtime {
             self.last_config_mtime = mtime;
             self.load_from_disk();
-            self.dirty = true;
+            self.mark_dirty(DamageScope::Full);
             return true;
         }
         false
@@ -1157,6 +1417,121 @@ fn notify_compositor_reload() {
     }
 }
 
+#[allow(clippy::cast_possible_truncation)]
+fn step_scroll_axis(
+    pos_i: &mut i32,
+    pos_f: &mut f64,
+    target: f64,
+    alpha: f64,
+    scope: DamageScope,
+    changed_scope: &mut DamageScope,
+) -> bool {
+    let diff = target - *pos_f;
+    if diff.abs() < 0.25 {
+        *pos_f = target;
+        let next_i = target.round() as i32;
+        if next_i != *pos_i {
+            *pos_i = next_i;
+            *changed_scope = changed_scope.merge(scope);
+        }
+        return true;
+    }
+    *pos_f += diff * alpha;
+    if (target - *pos_f).abs() < 0.25 {
+        *pos_f = target;
+        let next_i = target.round() as i32;
+        if next_i != *pos_i {
+            *pos_i = next_i;
+            *changed_scope = changed_scope.merge(scope);
+        }
+        return true;
+    }
+    let next_i = pos_f.round() as i32;
+    if next_i != *pos_i {
+        *pos_i = next_i;
+        *changed_scope = changed_scope.merge(scope);
+    }
+    false
+}
+
+/// Queries live NetworkManager and audio status (`RUSTYOS-112`).
+#[must_use]
+pub(crate) fn query_service_snapshot() -> ServiceSnapshot {
+    let network = NetworkService::new().query_status();
+    let audio = AudioService::new().query_status();
+    ServiceSnapshot {
+        network,
+        volume_percent: audio.volume_percent.clamp(0, 100),
+        muted: audio.muted,
+    }
+}
+
+/// Collapses redundant queued service commands before worker execution (`RUSTYOS-112`).
+#[must_use]
+pub(crate) fn coalesce_service_commands(cmds: Vec<ServiceCommand>) -> Vec<ServiceCommand> {
+    let mut had_refresh = false;
+    let mut set_volume = None;
+    let mut toggle_mute = false;
+    let mut set_wifi = None;
+    let mut connect_ssid = None;
+
+    for cmd in cmds {
+        match cmd {
+            ServiceCommand::Refresh => had_refresh = true,
+            ServiceCommand::SetVolume(v) => set_volume = Some(v),
+            ServiceCommand::ToggleMute => toggle_mute = !toggle_mute,
+            ServiceCommand::SetWifiEnabled(en) => {
+                set_wifi = Some(en);
+                if !en {
+                    connect_ssid = None;
+                }
+            }
+            ServiceCommand::ConnectWifi(ssid) => connect_ssid = Some(ssid),
+        }
+    }
+
+    let mut out = Vec::new();
+    if let Some(en) = set_wifi {
+        out.push(ServiceCommand::SetWifiEnabled(en));
+    }
+    if let Some(ssid) = connect_ssid {
+        out.push(ServiceCommand::ConnectWifi(ssid));
+    }
+    if let Some(v) = set_volume {
+        out.push(ServiceCommand::SetVolume(v));
+    }
+    if toggle_mute {
+        out.push(ServiceCommand::ToggleMute);
+    }
+    if out.is_empty() && had_refresh {
+        out.push(ServiceCommand::Refresh);
+    }
+    out
+}
+
+/// Executes a coalesced batch of service commands and queries fresh snapshot (`RUSTYOS-112`).
+#[must_use]
+pub(crate) fn execute_coalesced_service_batch(cmds: Vec<ServiceCommand>) -> ServiceSnapshot {
+    for cmd in coalesce_service_commands(cmds) {
+        match cmd {
+            ServiceCommand::Refresh => {}
+            ServiceCommand::SetVolume(v) => {
+                let _ = AudioService::new().set_volume(v);
+            }
+            ServiceCommand::ToggleMute => {
+                let _ = AudioService::new().toggle_mute();
+            }
+            ServiceCommand::SetWifiEnabled(en) => {
+                let _ = NetworkService::new().set_wifi_enabled(en);
+            }
+            ServiceCommand::ConnectWifi(ssid) => {
+                let _ = NetworkService::new().connect_wifi(&ssid);
+            }
+        }
+    }
+    query_service_snapshot()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1181,5 +1556,63 @@ mod tests {
             st.visible_sidebar_pages(),
             vec![SettingsPage::Wifi, SettingsPage::Network]
         );
+    }
+
+    #[test]
+    fn smooth_scroll_accumulates_subpixel_deltas_and_eases_to_target() {
+        let mut st = SettingsAppState::defaults_with_page(SettingsPage::Keyboard);
+        assert!(!st.scroll_smooth_by(false, 0.4, 100, 400, false));
+        assert!(st.scroll_smooth_by(false, 0.4, 100, 400, false));
+        assert_eq!(st.page_scroll_y, 1);
+        assert!(!st.scroll_smooth_by(false, 0.6, 100, 400, false));
+        assert_eq!(st.page_scroll_y, 1);
+        assert!(st.scroll_smooth_by(false, 0.4, 100, 400, false));
+        assert_eq!(st.page_scroll_y, 2);
+
+        // Discrete wheel impulse animates smoothly when !reduced_motion
+        let mut anim = SettingsAppState::defaults_with_page(SettingsPage::Keyboard);
+        assert!(anim.scroll_smooth_by(false, 36.0, 0, 400, true));
+        assert!(anim.page_scroll_y > 0 && anim.page_scroll_y < 36);
+        assert!(anim.is_scroll_animating());
+        let mut t = Instant::now();
+        for _ in 0..40 {
+            t += Duration::from_millis(16);
+            let _ = anim.step_scroll_animation(t);
+        }
+        assert_eq!(anim.page_scroll_y, 36);
+        assert!(!anim.is_scroll_animating());
+
+        // Reduced motion snaps immediately without trailing ticks
+        let mut rm = SettingsAppState::defaults_with_page(SettingsPage::Keyboard);
+        rm.reduced_motion = true;
+        assert!(rm.scroll_smooth_by(false, 36.0, 0, 400, true));
+        assert_eq!(rm.page_scroll_y, 36);
+        assert!(!rm.is_scroll_animating());
+    }
+
+    #[test]
+    fn damage_scope_merges_and_coalesces_service_commands() {
+        assert_eq!(
+            DamageScope::Caret.merge(DamageScope::Sidebar),
+            DamageScope::Sidebar
+        );
+        assert_eq!(
+            DamageScope::Sidebar.merge(DamageScope::Page),
+            DamageScope::Full
+        );
+
+        let coalesced = coalesce_service_commands(vec![
+            ServiceCommand::Refresh,
+            ServiceCommand::SetVolume(45),
+            ServiceCommand::SetVolume(55),
+            ServiceCommand::ToggleMute,
+            ServiceCommand::ToggleMute,
+            ServiceCommand::Refresh,
+        ]);
+        assert_eq!(coalesced, vec![ServiceCommand::SetVolume(55)]);
+
+        let refresh_only =
+            coalesce_service_commands(vec![ServiceCommand::Refresh, ServiceCommand::Refresh]);
+        assert_eq!(refresh_only, vec![ServiceCommand::Refresh]);
     }
 }

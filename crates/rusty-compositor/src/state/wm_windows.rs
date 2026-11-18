@@ -836,6 +836,24 @@ impl RustyCompositorState {
         None
     }
 
+    /// Computes client-declared minimum `(width, height)` including SSD titlebar and clamped to work area (`RUSTYOS-112`).
+    #[must_use]
+    pub fn floating_min_bounds(&self, win_id: WindowId) -> Option<(i32, i32)> {
+        let (min_w, min_h) = self.window_min_size(win_id)?;
+        let titlebar_h = self.window_titlebar_height(win_id);
+        let work_area = self.floating_work_area();
+        let desired_w = min_w.min(work_area.width);
+        let desired_h = min_h.saturating_add(titlebar_h).min(work_area.height);
+        Some((desired_w, desired_h))
+    }
+
+    /// Returns the firm interactive resize minimum `(width, height)` for `win_id` (`RUSTYOS-112`).
+    #[must_use]
+    pub fn effective_window_min_size(&self, win_id: WindowId) -> (i32, i32) {
+        self.floating_min_bounds(win_id)
+            .map_or((240, 160), |(w, h)| (w.max(240), h.max(160)))
+    }
+
     /// Expands a non-maximized floating window if client `min_size` exceeds its current box (`RUSTYOS-030`).
     pub fn ensure_floating_min_size(&mut self, win_id: WindowId) -> bool {
         if self.wm.active_layout_mode() != LayoutMode::Floating
@@ -852,13 +870,10 @@ impl RustyCompositorState {
             return false;
         }
         let current = wm_win.geometry;
-        let Some((min_w, min_h)) = self.window_min_size(win_id) else {
+        let Some((desired_w, desired_h)) = self.floating_min_bounds(win_id) else {
             return false;
         };
-        let titlebar_h = self.window_titlebar_height(win_id);
         let work_area = self.floating_work_area();
-        let desired_w = min_w.min(work_area.width);
-        let desired_h = min_h.saturating_add(titlebar_h).min(work_area.height);
         if desired_w <= current.width && desired_h <= current.height {
             return false;
         }
@@ -872,7 +887,10 @@ impl RustyCompositorState {
             new_w,
             new_h,
         );
-        if self.wm.resize_window(win_id, target) {
+        if self
+            .wm
+            .resize_window_with_min(win_id, target, desired_w, desired_h)
+        {
             self.animations.snap_window_immediate(
                 win_id.0,
                 LogicalRect::new(target.x, target.y, target.width, target.height),

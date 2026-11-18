@@ -764,14 +764,14 @@ impl LiquidGlassPipeline {
         }
     }
 
-    /// Creates a Liquid Glass GPU shader element sampling the active output's blurred backdrop,
-    /// returning `None` if no valid GLES backdrop is prepared (triggering CPU fallback).
+    /// Creates a Liquid Glass GPU shader element drawn at `draw_loc` while sampling blurred
+    /// scene coordinates at `backdrop_loc` (`RUSTYOS-112`, used for local offscreen snapshots).
     #[allow(
         clippy::too_many_arguments,
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss
     )]
-    pub(crate) fn make_glass_element(
+    pub(crate) fn make_glass_element_with_backdrop_loc(
         &mut self,
         renderer: &mut GlesRenderer,
         style: GlassPanelStyle,
@@ -780,7 +780,8 @@ impl LiquidGlassPipeline {
         radius: i32,
         glass_opacity: f32,
         reduce_transparency: bool,
-        loc: Point<i32, Logical>,
+        draw_loc: Point<i32, Logical>,
+        backdrop_loc: Point<i32, Logical>,
     ) -> Option<LiquidGlassElement> {
         if reduce_transparency || width <= 0 || height <= 0 {
             return None;
@@ -807,19 +808,19 @@ impl LiquidGlassPipeline {
         };
         let half_size = half_tex.size();
         let blur_snapshot = buffers.blur_damage.snapshot();
-        let panel_rect = Rectangle::new(loc, Size::from((width, height)));
+        let panel_rect = Rectangle::new(backdrop_loc, Size::from((width, height)));
         let (src_in_half, uv_rect, uv_bounds) =
             compute_panel_src_and_uv(panel_rect, self.active_scale, buffers.phys_size, half_size);
         let material = compute_glass_material(style, f32::from(glass_pct) / 100.0, is_dark);
 
         let params_hash =
             compute_panel_params_hash(style, width, height, clamped_r, glass_pct, is_dark, uv_rect);
-        let stable_id = self.resolve_slot_id(output_id, style, loc, w_u16, h_u16, params_hash);
+        let stable_id = self.resolve_slot_id(output_id, style, draw_loc, w_u16, h_u16, params_hash);
 
         let inner = TextureRenderElement::from_texture_with_damage(
             stable_id.clone(),
             renderer.context_id(),
-            loc.to_f64().to_physical(1.0),
+            draw_loc.to_f64().to_physical(1.0),
             half_tex,
             1,
             Transform::Normal,

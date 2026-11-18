@@ -218,6 +218,10 @@ RustyOS/
     - `crates/rusty-compositor/src/aa.rs` (`R2_TAPS_16`, `LinearAccum`): 16-точечный субпиксельный сэмплинг в линейном свете с `GLYPH_BUFFER_SCALE = 2` (`2x` `HiDPI` буферы в `icons.rs`, `surfaces/glyphs.rs`, а также `R2_TAPS_16` в `surfaces/sdf.rs`);
     - `crates/rusty-services/src/image_decode.rs` (`downscale_lanczos_linear`): сепарабельный `Lanczos-3` downsampling в линейном свете для внешних `.png` (`load_png_as_bgra_scaled`) и `SNI` (`argb32_be_to_premul_bgra`);
     - `apps/rusty-settings/src/render.rs`, `apps/rusty-updater/src/render.rs`: 4-tap `RGSS` (`aa_cov8`) для скруглённых прямоугольников, скворклов, кругов, сегментов и эмблем.
+  - Resize-минимум, минимизация и плавность `rusty-settings` (`RUSTYOS-112`, `ADR-0063`, `D-076`):
+    - `crates/rusty-wm/src/lib.rs` + `crates/rusty-compositor/src/{state/wm_windows.rs, input/pointer.rs}`: `WindowManager::resize_window_with_min`, `effective_window_min_size`, `compute_resized_rect_with_min`;
+    - `crates/rusty-compositor/src/{frame_composer.rs, surfaces/liquid_glass.rs, surfaces/window_minimize.rs}`: `push_window_elements_with_options`, `should_skip_uncommitted_bound_window`, `make_glass_element_with_backdrop_loc`, premul `WINDOW_MINIMIZE_FRAG` с `u_bounds_px` и 4-tap `sample_filtered`;
+    - `apps/rusty-settings/src/{state.rs, wayland.rs, render.rs}`: фоновый worker `execute_coalesced_service_batch` + `calloop::ping`, субпиксельный/плавный скролл `scroll_smooth_by` / `step_scroll_animation`, `DamageScope`, сканлайны `rounded_interior_span` и `SPRITE_CACHE`.
 - **Эталонный стиль системных CSD-окон (`ADR-0055`, `ADR-0057`):**
   - Единые константы окон и теней (`crates/rusty-compositor/src/shell_render/tokens.rs`, `apps/rusty-{settings,files,updater}/src/layout.rs`): `WINDOW_RADIUS = 14`, `WINDOW_CORNER_RADIUS = 14`, `1 px` внешний контур (`[0, 0, 0, 24]` Light / `[255, 255, 255, 22]` Dark) строго **до** угловой маски (`apply_window_corner_mask` / `clip_rounded_corners`).
   - Единые `14 px` traffic lights (`Rect(14/36/58, 13, 14, 14)`, центры `(21/43/65, 20)`, `r = 7.0`, `#EE5A6A` / `#F4B63F` / `#3CC68A`, без квадратной рамки ореола, с hover-глифами).

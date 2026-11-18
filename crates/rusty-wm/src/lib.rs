@@ -693,12 +693,31 @@ impl WindowManager {
     }
 
     /// Resizes and repositions a window to `rect` in logical space (`RUSTYOS-022`),
-    /// enforcing minimum interactive bounds and clearing any maximized or fullscreen flag.
+    /// enforcing minimum interactive bounds `(240, 160)` and clearing any maximized or fullscreen flag.
     pub fn resize_window(&mut self, id: WindowId, rect: Rect) -> bool {
+        self.resize_window_with_min(id, rect, 240, 160)
+    }
+
+    /// Resizes and repositions a window to `rect` in logical space while enforcing explicit
+    /// minimum bounds `(min_w, min_h)` so windows stop cleanly at client minimum sizes (`RUSTYOS-112`).
+    pub fn resize_window_with_min(
+        &mut self,
+        id: WindowId,
+        rect: Rect,
+        min_w: i32,
+        min_h: i32,
+    ) -> bool {
         let Some(win) = self.windows.iter_mut().find(|w| w.id == id) else {
             return false;
         };
-        let sanitized = Rect::new(rect.x, rect.y, rect.width.max(240), rect.height.max(160));
+        let floor_w = min_w.max(64);
+        let floor_h = min_h.max(64);
+        let sanitized = Rect::new(
+            rect.x,
+            rect.y,
+            rect.width.max(floor_w),
+            rect.height.max(floor_h),
+        );
         win.maximized = false;
         win.fullscreen = false;
         win.geometry = sanitized;
@@ -1020,6 +1039,11 @@ mod tests {
         assert_eq!(
             resized.as_ref().map(|w| w.saved_floating_geometry),
             Some(Rect::new(150, 90, 240, 160))
+        );
+        assert!(wm.resize_window_with_min(w1, Rect::new(150, 90, 480, 320), 640, 500));
+        assert_eq!(
+            wm.window(w1).map(|w| w.geometry),
+            Some(Rect::new(150, 90, 640, 500))
         );
     }
 

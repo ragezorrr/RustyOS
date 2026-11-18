@@ -1,6 +1,8 @@
 //! Wayland CSD (`xdg_toplevel`) event loop and input dispatch for `rusty-settings` (`RUSTYOS-103`).
 
 use std::fmt;
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use smithay_client_toolkit::{
@@ -9,7 +11,8 @@ use smithay_client_toolkit::{
     delegate_shm, delegate_xdg_shell, delegate_xdg_window,
     output::{OutputHandler, OutputState},
     reexports::{
-        calloop::EventLoop, calloop_wayland_source::WaylandSource,
+        calloop::{EventLoop, ping},
+        calloop_wayland_source::WaylandSource,
         protocols::xdg::shell::client::xdg_toplevel::ResizeEdge,
     },
     registry::{ProvidesRegistryState, RegistryState},
@@ -41,7 +44,10 @@ use crate::layout::{
     ResizeEdgeZone, SIDEBAR_WIDTH, SettingsHit, SettingsLayout, compute_layout, hit_test,
 };
 use crate::render::render_window_pixels;
-use crate::state::{SettingsAppState, StartupOptions};
+use crate::state::{
+    DamageScope, ServiceCommand, ServiceSnapshot, SettingsAppState, StartupOptions,
+    execute_coalesced_service_batch,
+};
 
 const DEFAULT_WIDTH: u32 = 882;
 const DEFAULT_HEIGHT: u32 = 600;
@@ -99,6 +105,7 @@ impl From<WaylandError> for WaylandAppError {
     }
 }
 
+#[allow(clippy::struct_excessive_bools)]
 struct SettingsClient {
     qh: QueueHandle<Self>,
     registry_state: RegistryState,
@@ -118,11 +125,14 @@ struct SettingsClient {
     width: u32,
     height: u32,
     configured: bool,
+    pointer_inside: bool,
     pointer_pos: (f64, f64),
     hover_hit: Option<SettingsHit>,
     last_click_at: Option<Instant>,
     app: SettingsAppState,
     layout_cache: Option<SettingsLayout>,
+    service_tx: Sender<ServiceCommand>,
+    service_rx: Receiver<ServiceSnapshot>,
 }
 
 impl SettingsClient {
@@ -139,6 +149,12 @@ impl SettingsClient {
         self.layout()
     }
 
+    fn flush_pending_service_commands(&mut self) {
+        for cmd in self.app.take_pending_service_commands() {
+            let _ = self.service_tx.send(cmd);
+        }
+    }
+
     fn execute_left_click(&mut self, px: f64, py: f64, serial: u32) {
         let now = Instant::now();
         let double_click = self
@@ -146,11 +162,11 @@ impl SettingsClient {
             .is_some_and(|t| now.saturating_duration_since(t) <= Duration::from_millis(380));
         self.last_click_at = Some(now);
 
-        let layout = self.layout();
+        let layout = self.current_layout();
         let hit = hit_test(&layout, px, py);
         if !matches!(hit, Some(SettingsHit::SearchField)) && self.app.search_focused {
             self.app.search_focused = false;
-            self.app.dirty = true;
+            self.app.mark_dirty(DamageScope::Sidebar);
         }
         let Some(hit) = hit else {
             return;
@@ -200,7 +216,7 @@ impl SettingsClient {
             SettingsHit::SearchField => {
                 self.app.search_focused = true;
                 self.app.caret_visible = true;
-                self.app.dirty = true;
+                self.app.mark_dirty(DamageScope::Sidebar);
             }
             SettingsHit::SidebarItem(page) | SettingsHit::PushPage(page) => {
                 self.app.navigate_to(page);
@@ -226,7 +242,29 @@ impl SettingsClient {
                 self.layout_cache = None;
             }
         }
+        self.flush_pending_service_commands();
     }
+}
+
+fn spawn_service_worker(wake: ping::Ping) -> (Sender<ServiceCommand>, Receiver<ServiceSnapshot>) {
+    let (cmd_tx, cmd_rx) = mpsc::channel();
+    let (snap_tx, snap_rx) = mpsc::channel();
+    let _ = thread::Builder::new()
+        .name(String::from("settings-services"))
+        .spawn(move || {
+            while let Ok(first) = cmd_rx.recv() {
+                let mut batch = vec![first];
+                while let Ok(next) = cmd_rx.try_recv() {
+                    batch.push(next);
+                }
+                let snap = execute_coalesced_service_batch(batch);
+                if snap_tx.send(snap).is_err() {
+                    break;
+                }
+                wake.ping();
+            }
+        });
+    (cmd_tx, snap_rx)
 }
 
 pub(crate) fn run(opts: &StartupOptions) -> Result<(), WaylandAppError> {
@@ -247,6 +285,10 @@ pub(crate) fn run(opts: &StartupOptions) -> Result<(), WaylandAppError> {
     window.set_min_size(Some((640, 500)));
     window.commit();
 
+    let (wake_ping, wake_source) =
+        ping::make_ping().map_err(|e| WaylandAppError::EventLoop(e.to_string()))?;
+    let (service_tx, service_rx) = spawn_service_worker(wake_ping);
+
     let mut client = SettingsClient {
         qh,
         registry_state: RegistryState::new(&globals),
@@ -266,23 +308,37 @@ pub(crate) fn run(opts: &StartupOptions) -> Result<(), WaylandAppError> {
         width: DEFAULT_WIDTH,
         height: DEFAULT_HEIGHT,
         configured: false,
+        pointer_inside: false,
         pointer_pos: (0.0, 0.0),
         hover_hit: None,
         last_click_at: None,
         app: SettingsAppState::new(opts),
         layout_cache: None,
+        service_tx,
+        service_rx,
     };
+    client.flush_pending_service_commands();
 
     let mut event_loop: EventLoop<'static, SettingsClient> =
         EventLoop::try_new().map_err(|e| WaylandAppError::EventLoop(e.to_string()))?;
     WaylandSource::new(conn.clone(), queue)
         .insert(event_loop.handle())
         .map_err(|e| WaylandAppError::EventLoop(format!("{e:?}")))?;
+    event_loop
+        .handle()
+        .insert_source(wake_source, |(), (), client| {
+            while let Ok(snap) = client.service_rx.try_recv() {
+                if client.app.apply_service_snapshot(snap) {
+                    client.layout_cache = None;
+                }
+            }
+        })
+        .map_err(|e| WaylandAppError::EventLoop(format!("{e:?}")))?;
 
     while client.app.running {
         let now = Instant::now();
         let _ = client.app.update_caret_blink(now);
-        if client.app.poll_external_config() {
+        if client.app.poll_external_config_if_due(now) {
             client.layout_cache = None;
         }
         if let Some(sent_at) = client.frame_sent_at
@@ -290,13 +346,17 @@ pub(crate) fn run(opts: &StartupOptions) -> Result<(), WaylandAppError> {
         {
             client.frame_sent_at = None;
         }
+        if client.app.step_scroll_animation(now) {
+            client.layout_cache = None;
+        }
         if client.configured && client.frame_sent_at.is_none() && client.app.dirty {
             draw_frame(&mut client)?;
-            client.app.dirty = false;
         }
         conn.flush()?;
 
-        let timeout = if client.app.search_focused {
+        let timeout = if client.app.is_scroll_animating() {
+            Some(Duration::from_millis(8))
+        } else if client.app.search_focused {
             Some(Duration::from_millis(250))
         } else {
             Some(Duration::from_millis(400))
@@ -330,9 +390,52 @@ fn acquire_reusable_buffer(
     Ok(buffers.len() - 1)
 }
 
+fn damage_rect_for_scope(
+    scope: DamageScope,
+    layout: &SettingsLayout,
+    w: u32,
+    h: u32,
+) -> (i32, i32, i32, i32) {
+    let wi = i32::try_from(w).unwrap_or(1).max(1);
+    let hi = i32::try_from(h).unwrap_or(1).max(1);
+    match scope {
+        DamageScope::Caret => {
+            let x0 = (layout.search_rect.x - 1).clamp(0, wi);
+            let y0 = (layout.search_rect.y - 1).clamp(0, hi);
+            let x1 = (layout.search_rect.right() + 1).clamp(x0, wi);
+            let y1 = (layout.search_rect.bottom() + 1).clamp(y0, hi);
+            if x1 > x0 && y1 > y0 {
+                (x0, y0, x1 - x0, y1 - y0)
+            } else {
+                (0, 0, wi, hi)
+            }
+        }
+        DamageScope::Sidebar => (0, 0, (SIDEBAR_WIDTH + 2).min(wi), hi),
+        DamageScope::Page => {
+            let px = SIDEBAR_WIDTH.min(wi.saturating_sub(1));
+            (px, 0, (wi - px).max(1), hi)
+        }
+        DamageScope::Full | DamageScope::None => (0, 0, wi, hi),
+    }
+}
+
 #[allow(clippy::cast_possible_wrap)]
 fn draw_frame(client: &mut SettingsClient) -> Result<(), WaylandAppError> {
-    let layout = client.layout();
+    let mut layout = client.current_layout();
+    let prev_page_scroll = client.app.page_scroll_y;
+    let prev_side_scroll = client.app.sidebar_scroll_y;
+    client
+        .app
+        .clamp_scroll_bounds(layout.max_sidebar_scroll, layout.max_page_scroll);
+    if client.app.page_scroll_y != prev_page_scroll
+        || client.app.sidebar_scroll_y != prev_side_scroll
+    {
+        layout = client.layout();
+    }
+    if client.pointer_inside {
+        client.hover_hit = hit_test(&layout, client.pointer_pos.0, client.pointer_pos.1);
+    }
+
     let Some(win) = &client.window else {
         return Ok(());
     };
@@ -356,11 +459,14 @@ fn draw_frame(client: &mut SettingsClient) -> Result<(), WaylandAppError> {
         &layout,
         client.hover_hit.as_ref(),
     );
+    let damage_scope = client.app.take_damage_scope();
+    let (dx, dy, dw, dh) = damage_rect_for_scope(damage_scope, &layout, w, h);
+
     win.set_window_geometry(0, 0, w, h);
     buf_ref
         .attach_to(win.wl_surface())
         .map_err(|e| WaylandAppError::ShmPool(format!("{e:?}")))?;
-    win.wl_surface().damage_buffer(0, 0, w as i32, h as i32);
+    win.wl_surface().damage_buffer(dx, dy, dw, dh);
     win.wl_surface().frame(&client.qh, win.wl_surface().clone());
     win.commit();
     client.frame_sent_at = Some(Instant::now());
@@ -491,7 +597,7 @@ impl WindowHandler for SettingsClient {
             self.layout_cache = None;
             self.app.maximized = configure.is_maximized();
             self.configured = true;
-            self.app.dirty = true;
+            self.app.mark_dirty(DamageScope::Full);
         }
     }
 }
@@ -539,6 +645,30 @@ impl SeatHandler for SettingsClient {
     fn remove_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat) {}
 }
 
+const fn hit_damage_scope(hit: Option<&SettingsHit>) -> DamageScope {
+    match hit {
+        None | Some(SettingsHit::ResizeEdge(_) | SettingsHit::WindowDrag) => DamageScope::None,
+        Some(
+            SettingsHit::TrafficClose
+            | SettingsHit::TrafficMinimize
+            | SettingsHit::TrafficMaximize
+            | SettingsHit::SearchField
+            | SettingsHit::SidebarItem(_),
+        ) => DamageScope::Sidebar,
+        Some(
+            SettingsHit::NavBack
+            | SettingsHit::NavForward
+            | SettingsHit::SelectTheme(_)
+            | SettingsHit::SelectAccent(_)
+            | SettingsHit::PushPage(_)
+            | SettingsHit::DockPosTile(_)
+            | SettingsHit::Control(_)
+            | SettingsHit::StepperMinus(_)
+            | SettingsHit::StepperPlus(_),
+        ) => DamageScope::Page,
+    }
+}
+
 impl PointerHandler for SettingsClient {
     fn pointer_frame(
         &mut self,
@@ -551,16 +681,25 @@ impl PointerHandler for SettingsClient {
             self.pointer_pos = ev.position;
             match ev.kind {
                 PointerEventKind::Enter { .. } | PointerEventKind::Motion { .. } => {
+                    self.pointer_inside = true;
                     let layout = self.current_layout();
                     let next = hit_test(&layout, ev.position.0, ev.position.1);
                     if next != self.hover_hit {
+                        let scope = hit_damage_scope(self.hover_hit.as_ref())
+                            .merge(hit_damage_scope(next.as_ref()));
                         self.hover_hit = next;
-                        self.app.dirty = true;
+                        if scope != DamageScope::None {
+                            self.app.mark_dirty(scope);
+                        }
                     }
                 }
                 PointerEventKind::Leave { .. } => {
-                    if self.hover_hit.take().is_some() {
-                        self.app.dirty = true;
+                    self.pointer_inside = false;
+                    if let Some(prev) = self.hover_hit.take() {
+                        let scope = hit_damage_scope(Some(&prev));
+                        if scope != DamageScope::None {
+                            self.app.mark_dirty(scope);
+                        }
                     }
                 }
                 PointerEventKind::Press {
@@ -573,19 +712,18 @@ impl PointerHandler for SettingsClient {
                 PointerEventKind::Axis {
                     vertical, source, ..
                 } => {
-                    let delta = axis_scroll_delta(vertical, source);
-                    if delta != 0 {
+                    let (delta_px, is_discrete) = axis_scroll_delta_px(vertical, source);
+                    if delta_px.abs() >= 1e-4 {
                         let layout = self.current_layout();
                         let in_sidebar = self.pointer_pos.0 < f64::from(SIDEBAR_WIDTH);
-                        if self.app.scroll_by(
+                        if self.app.scroll_smooth_by(
                             in_sidebar,
-                            delta,
+                            delta_px,
                             layout.max_sidebar_scroll,
                             layout.max_page_scroll,
+                            is_discrete,
                         ) {
-                            let next_layout = self.layout();
-                            self.hover_hit =
-                                hit_test(&next_layout, self.pointer_pos.0, self.pointer_pos.1);
+                            self.layout_cache = None;
                         }
                     }
                 }
@@ -595,23 +733,21 @@ impl PointerHandler for SettingsClient {
     }
 }
 
-#[allow(clippy::cast_possible_truncation)]
-fn axis_scroll_delta(axis: AxisScroll, source: Option<wl_pointer::AxisSource>) -> i32 {
+fn axis_scroll_delta_px(axis: AxisScroll, source: Option<wl_pointer::AxisSource>) -> (f64, bool) {
     if axis.discrete != 0 {
-        return axis.discrete * 32;
+        return (f64::from(axis.discrete) * 32.0, true);
     }
-    if axis.absolute.abs() < 0.01 {
-        return 0;
+    if axis.absolute.abs() < 1e-4 {
+        return (0.0, false);
     }
-    let scale = if matches!(
+    if matches!(
         source,
         Some(wl_pointer::AxisSource::Wheel | wl_pointer::AxisSource::WheelTilt)
     ) {
-        2.8
+        (axis.absolute * 2.8, true)
     } else {
-        1.25
-    };
-    (axis.absolute * scale).round() as i32
+        (axis.absolute * 1.25, false)
+    }
 }
 
 impl Dispatch<wl_keyboard::WlKeyboard, ()> for SettingsClient {
@@ -641,7 +777,7 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for SettingsClient {
                     // Ctrl+F focuses Search
                     state.app.search_focused = true;
                     state.app.caret_visible = true;
-                    state.app.dirty = true;
+                    state.app.mark_dirty(DamageScope::Sidebar);
                     return;
                 }
                 if state.mod_ctrl && key == 16 {
@@ -651,6 +787,7 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for SettingsClient {
                 let sym = evdev_key_to_sym(key, state.mod_shift);
                 if !sym.is_empty() && state.app.handle_search_key(sym) {
                     state.layout_cache = None;
+                    state.flush_pending_service_commands();
                     return;
                 }
                 if !state.app.search_focused {
@@ -666,11 +803,12 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for SettingsClient {
                         _ => 0,
                     };
                     if delta != 0
-                        && state.app.scroll_by(
+                        && state.app.scroll_smooth_by(
                             false,
-                            delta,
+                            f64::from(delta),
                             layout.max_sidebar_scroll,
                             layout.max_page_scroll,
+                            true,
                         )
                     {
                         state.layout_cache = None;

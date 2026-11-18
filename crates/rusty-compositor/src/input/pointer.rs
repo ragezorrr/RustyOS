@@ -222,14 +222,19 @@ impl RustyCompositorState {
             let dx = (pos.x - resize.start_pointer.x).round() as i32;
             #[allow(clippy::cast_possible_truncation)]
             let dy = (pos.y - resize.start_pointer.y).round() as i32;
-            let target_rect = compute_resized_rect(
+            let (min_w, min_h) = self.effective_window_min_size(resize.window_id);
+            let target_rect = compute_resized_rect_with_min(
                 resize.start_rect,
                 resize.edges,
                 dx,
                 dy,
                 crate::shell_render::TOP_BAR_HEIGHT,
+                min_w,
+                min_h,
             );
-            if self.wm.resize_window(resize.window_id, target_rect)
+            if self
+                .wm
+                .resize_window_with_min(resize.window_id, target_rect, min_w, min_h)
                 && let Some(win) = self.wm.window(resize.window_id)
             {
                 let rect = win.geometry;
@@ -343,8 +348,12 @@ impl RustyCompositorState {
 
         if button_state == ButtonState::Released {
             self.active_window_drag = None;
-            self.active_window_resize = None;
+            let ended_resize = self.active_window_resize.take().is_some();
             self.qs_slider_drag = None;
+            if ended_resize {
+                self.sync_space_with_wm(serial);
+                self.shell_redraw_needed = true;
+            }
             if button == 272
                 && let Some(drag) = self.dock_drag.take()
             {
@@ -1011,6 +1020,7 @@ pub fn clamp_relative_pointer(
     )
 }
 
+#[cfg(test)]
 pub(super) fn compute_resized_rect(
     start: rusty_wm::Rect,
     edges: crate::shell_render::ResizeEdges,
@@ -1018,8 +1028,20 @@ pub(super) fn compute_resized_rect(
     dy: i32,
     min_top: i32,
 ) -> rusty_wm::Rect {
-    const MIN_W: i32 = 240;
-    const MIN_H: i32 = 160;
+    compute_resized_rect_with_min(start, edges, dx, dy, min_top, 240, 160)
+}
+
+pub(super) fn compute_resized_rect_with_min(
+    start: rusty_wm::Rect,
+    edges: crate::shell_render::ResizeEdges,
+    dx: i32,
+    dy: i32,
+    min_top: i32,
+    min_w: i32,
+    min_h: i32,
+) -> rusty_wm::Rect {
+    let min_w = min_w.max(64);
+    let min_h = min_h.max(64);
 
     let mut x = start.x;
     let mut y = start.y;
@@ -1027,22 +1049,22 @@ pub(super) fn compute_resized_rect(
     let mut h = start.height;
 
     if edges.right {
-        w = (start.width + dx).max(MIN_W);
+        w = (start.width + dx).max(min_w);
     } else if edges.left {
         let right_edge = start.x + start.width;
-        let max_left = right_edge - MIN_W;
+        let max_left = right_edge - min_w;
         x = (start.x + dx).min(max_left);
         w = right_edge - x;
     }
 
     if edges.bottom {
-        h = (start.height + dy).max(MIN_H);
+        h = (start.height + dy).max(min_h);
     } else if edges.top {
         let bottom_edge = start.y + start.height;
-        let max_top = bottom_edge - MIN_H;
+        let max_top = bottom_edge - min_h;
         let bounded_min_top = min_top.min(max_top);
         y = (start.y + dy).clamp(bounded_min_top, max_top);
-        h = (bottom_edge - y).max(MIN_H);
+        h = (bottom_edge - y).max(min_h);
     }
 
     rusty_wm::Rect::new(x, y, w, h)

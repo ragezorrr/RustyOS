@@ -541,13 +541,21 @@ impl UiShapeCache {
         window_id: u64,
         win_rect: Rectangle<i32, Logical>,
         dock_rect: Rectangle<i32, Logical>,
+        output_scale: f64,
         progress: f64,
         effect: crate::config::DockMinimizeEffect,
         position: crate::config::DockPosition,
     ) -> Option<crate::shell_render::CompositorRenderElement> {
         self.window_minimize
             .make_warp_element(
-                renderer, window_id, win_rect, dock_rect, progress, effect, position,
+                renderer,
+                window_id,
+                win_rect,
+                dock_rect,
+                output_scale,
+                progress,
+                effect,
+                position,
             )
             .map(crate::shell_render::CompositorRenderElement::ShaderTexture)
     }
@@ -591,7 +599,7 @@ impl UiShapeCache {
         reduce_transparency: bool,
         loc: Point<i32, Logical>,
     ) -> Option<crate::shell_render::CompositorRenderElement> {
-        if let Some(el) = self.liquid_glass.make_glass_element(
+        self.glass_panel_render_element_at(
             renderer,
             style,
             width,
@@ -600,6 +608,35 @@ impl UiShapeCache {
             glass_opacity,
             reduce_transparency,
             loc,
+            loc,
+        )
+    }
+
+    /// Variant of [`Self::glass_panel_render_element`] separating draw destination from sampled
+    /// screen backdrop coordinates (`RUSTYOS-112`, for offscreen minimize snapshot capture).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn glass_panel_render_element_at(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        style: GlassPanelStyle,
+        width: i32,
+        height: i32,
+        radius: i32,
+        glass_opacity: f32,
+        reduce_transparency: bool,
+        draw_loc: Point<i32, Logical>,
+        backdrop_loc: Point<i32, Logical>,
+    ) -> Option<crate::shell_render::CompositorRenderElement> {
+        if let Some(el) = self.liquid_glass.make_glass_element_with_backdrop_loc(
+            renderer,
+            style,
+            width,
+            height,
+            radius,
+            glass_opacity,
+            reduce_transparency,
+            draw_loc,
+            backdrop_loc,
         ) {
             return Some(crate::shell_render::CompositorRenderElement::ShaderTexture(
                 el,
@@ -613,7 +650,7 @@ impl UiShapeCache {
             radius,
             glass_opacity,
             reduce_transparency,
-            loc,
+            draw_loc,
         )
         .map(crate::shell_render::CompositorRenderElement::Memory)
     }

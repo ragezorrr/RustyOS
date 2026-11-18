@@ -832,6 +832,21 @@
                            4-tap RGSS (aa_cov8) в
                            rusty-settings и rusty-updater
                            (ADR-0062)
+
+   D-076                   Фаза 8/10 Жёсткий min_size при     accepted
+                           resize, очистка минимизации/стекла
+                           и плавность rusty-settings
+                           (RUSTYOS-112): пер-оконный
+                           compute_resized_rect_with_min и
+                           resize_window_with_min, снапшот
+                           минимизации без тени с экранным
+                           Liquid Glass backdrop, premul +
+                           4-tap префильтрация в шейдере,
+                           пропуск хрома незакоммиченных
+                           клиентов, фоновый service worker,
+                           субпиксельный/плавный скролл,
+                           сканлайн-заливки, SPRITE_CACHE и
+                           точечный damage_buffer (ADR-0063)
   -----------------------------------------------------------------------
 
 ## Открытые решения

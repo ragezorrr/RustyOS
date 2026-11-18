@@ -230,6 +230,34 @@ fn compute_resized_rect_clamps_minimum_bounds_and_top_bar() {
     assert_eq!(top_left.width, 240);
     assert_eq!(top_left.y, 32);
     assert_eq!(top_left.height, (100 + 300) - 32);
+
+    // Firm client minimum (e.g. rusty-settings 640x500) stops left/top drag without sliding opposite edge.
+    let settings_start = rusty_wm::Rect::new(200, 100, 882, 600);
+    let clamped_tl = compute_resized_rect_with_min(
+        settings_start,
+        crate::shell_render::ResizeEdges {
+            left: true,
+            top: true,
+            ..Default::default()
+        },
+        450,
+        280,
+        24,
+        640,
+        500,
+    );
+    assert_eq!(
+        clamped_tl,
+        rusty_wm::Rect::new(200 + 882 - 640, 100 + 600 - 500, 640, 500)
+    );
+    assert_eq!(
+        clamped_tl.x + clamped_tl.width,
+        settings_start.x + settings_start.width
+    );
+    assert_eq!(
+        clamped_tl.y + clamped_tl.height,
+        settings_start.y + settings_start.height
+    );
 }
 
 #[test]

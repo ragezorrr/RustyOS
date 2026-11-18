@@ -49,10 +49,24 @@ varying vec2 v_coords;
 uniform vec4 u_win_uv;
 uniform vec4 u_dock_uv;
 uniform vec4 u_params;
+uniform vec4 u_bounds_px;
 
 #if defined(DEBUG_FLAGS)
 uniform float tint;
 #endif
+
+vec4 sample_filtered(vec2 uv, vec2 half_texel, vec2 step_uv) {
+    vec2 lo = half_texel;
+    vec2 hi = vec2(1.0) - half_texel;
+    if (step_uv.x <= half_texel.x * 2.5 && step_uv.y <= half_texel.y * 2.5) {
+        return texture2D(tex, clamp(uv, lo, hi));
+    }
+    vec4 c0 = texture2D(tex, clamp(uv + vec2(-0.375, -0.125) * step_uv, lo, hi));
+    vec4 c1 = texture2D(tex, clamp(uv + vec2( 0.125, -0.375) * step_uv, lo, hi));
+    vec4 c2 = texture2D(tex, clamp(uv + vec2( 0.375,  0.125) * step_uv, lo, hi));
+    vec4 c3 = texture2D(tex, clamp(uv + vec2(-0.125,  0.375) * step_uv, lo, hi));
+    return (c0 + c1 + c2 + c3) * 0.25;
+}
 
 void main() {
     float t = clamp(u_params.x, 0.0, 1.0);
@@ -125,33 +139,45 @@ void main() {
         return;
     }
 
+    float bounds_a_px = (edge < 0.5) ? u_bounds_px.y : u_bounds_px.x;
+    float bounds_c_px = (edge < 0.5) ? u_bounds_px.x : u_bounds_px.y;
+    float px_v = 1.0 / max(span_a * bounds_a_px, 1.0);
+    float px_c = 1.0 / max(span_c * bounds_c_px, 1.0);
+
     vec2 sample_uv;
+    vec2 step_uv;
     if (edge < 0.5) {
         sample_uv = vec2(uv_c, raw_v);
+        step_uv = min(vec2(px_c, px_v) * 0.75, vec2(0.06));
     } else if (edge < 1.5) {
         sample_uv = vec2(1.0 - raw_v, uv_c);
+        step_uv = min(vec2(px_v, px_c) * 0.75, vec2(0.06));
     } else {
         sample_uv = vec2(raw_v, uv_c);
+        step_uv = min(vec2(px_v, px_c) * 0.75, vec2(0.06));
     }
 
-    vec2 tex_clamped = clamp(sample_uv, vec2(0.001), vec2(0.999));
-    vec4 color = texture2D(tex, tex_clamped);
+    vec2 half_texel = vec2(0.5) / max(u_bounds_px.zw, vec2(1.0));
+    vec4 color = sample_filtered(sample_uv, half_texel, step_uv);
 #if defined(NO_ALPHA)
     color.a = 1.0;
 #endif
 
-    float aa_a = min(smoothstep(0.0, 0.004, raw_v), smoothstep(1.0, 0.996, raw_v));
-    float aa_c = min(smoothstep(0.0, 0.004, uv_c), smoothstep(1.0, 0.996, uv_c));
-    float end_fade = 1.0 - smoothstep(0.88, 1.0, t);
-    float out_alpha = color.a * aa_a * aa_c * end_fade * alpha;
+    float fw_a = clamp(px_v * 0.9, 0.0015, 0.25);
+    float fw_c = clamp(px_c * 0.9, 0.0015, 0.25);
+    float aa_a = min(smoothstep(0.0, fw_a, raw_v), smoothstep(1.0, 1.0 - fw_a, raw_v));
+    float aa_c = min(smoothstep(0.0, fw_c, uv_c), smoothstep(1.0, 1.0 - fw_c, uv_c));
+    float end_fade = 1.0 - smoothstep(0.76, 0.99, t);
+    float mask = clamp(aa_a * aa_c * end_fade * alpha, 0.0, 1.0);
+    color = color * mask;
 
 #if defined(DEBUG_FLAGS)
     if (tint == 1.0) {
-        color.rgb = vec3(0.0, 0.2, 0.0) + color.rgb * 0.8;
+        color = vec4(0.0, 0.2 * mask, 0.0, 0.2 * mask) + color * 0.8;
     }
 #endif
 
-    gl_FragColor = vec4(color.rgb * out_alpha, out_alpha);
+    gl_FragColor = color;
 }
 ";
 
@@ -203,6 +229,7 @@ impl WindowMinimizePipeline {
             UniformName::new("u_win_uv", UniformType::_4f),
             UniformName::new("u_dock_uv", UniformType::_4f),
             UniformName::new("u_params", UniformType::_4f),
+            UniformName::new("u_bounds_px", UniformType::_4f),
         ];
         match renderer.compile_custom_texture_shader(WINDOW_MINIMIZE_FRAG, &uniforms) {
             Ok(prog) => {
@@ -308,6 +335,7 @@ impl WindowMinimizePipeline {
         window_id: u64,
         win_rect: Rectangle<i32, Logical>,
         dock_rect: Rectangle<i32, Logical>,
+        output_scale: f64,
         progress: f64,
         effect: DockMinimizeEffect,
         position: DockPosition,
@@ -344,6 +372,9 @@ impl WindowMinimizePipeline {
             snap.damage.add([Rectangle::from_size(tex_size)]);
         }
 
+        let clamped_scale = crate::config::clamp_display_scale(output_scale) as f32;
+        let bounds_phys_w = (bounds.size.w.max(1) as f32 * clamped_scale).max(1.0);
+        let bounds_phys_h = (bounds.size.h.max(1) as f32 * clamped_scale).max(1.0);
         let uniforms = vec![
             Uniform::new(
                 "u_win_uv",
@@ -360,6 +391,15 @@ impl WindowMinimizePipeline {
                     if is_genie { 1.0 } else { 0.0 },
                     f32::from(edge_u8),
                     0.0,
+                ),
+            ),
+            Uniform::new(
+                "u_bounds_px",
+                UniformValue::_4f(
+                    bounds_phys_w,
+                    bounds_phys_h,
+                    tex_size.w.max(1) as f32,
+                    tex_size.h.max(1) as f32,
                 ),
             ),
         ];
@@ -435,6 +475,7 @@ mod tests {
         assert!(WINDOW_MINIMIZE_FRAG.contains("u_win_uv"));
         assert!(WINDOW_MINIMIZE_FRAG.contains("u_dock_uv"));
         assert!(WINDOW_MINIMIZE_FRAG.contains("u_params"));
+        assert!(WINDOW_MINIMIZE_FRAG.contains("u_bounds_px"));
     }
 
     #[test]

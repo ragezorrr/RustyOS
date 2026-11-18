@@ -1944,6 +1944,23 @@ hardware/software context и низкие накладные расходы.
 - **Tests:** Все 270 unit-тестов workspace (`4` `rusty-animation`, `182` `rusty-compositor`, `15` `rusty-files`, `3` `rusty-ipc`, `44` `rusty-services`, `6` `rusty-settings`, `5` `rusty-shell`, `4` `rusty-updater`, `7` `rusty-wm`).
 - **Risks:** Нет.
 
+### RUSTYOS-112 — Ограничение минимального размера при resize без отскока, исправление фона/шейдера минимизации и плавность `rusty-settings`
+
+- **Status:** Done
+- **Goal:** Устранить отскок/съезжание при интерактивном уменьшении окна до минимального размера, исправить артефакты фона/тени/стекла и premultiplied-шейдера при минимизации (а также тень до первого `commit`) и повысить отзывчивость и плавность `rusty-settings`.
+- **Dependencies:** `RUSTYOS-111`.
+- **Scope:**
+  - `crates/rusty-wm/src/lib.rs`, `crates/rusty-compositor/src/{state/wm_windows.rs, input/pointer.rs, input/tests.rs}`: добавлены `WindowManager::resize_window_with_min`, `floating_min_bounds`, `effective_window_min_size` и `compute_resized_rect_with_min` для жёсткой фиксации минимальных размеров клиента без смещения противоположной границы и отскока;
+  - `crates/rusty-compositor/src/{frame_composer.rs, surfaces/mod.rs, surfaces/liquid_glass.rs, surfaces/window_minimize.rs}`: выделен `push_window_elements_with_options` (минимизационный снапшот с `include_shadow = false`, экранным `glass_backdrop_offset` через `make_glass_element_with_backdrop_loc` / `glass_panel_render_element_at` после `prepare_liquid_glass_backdrop`, пропуск пустого хрома до первого коммита клиента через `should_skip_uncommitted_bound_window`), в `WINDOW_MINIMIZE_FRAG` исправлено premultiplied-умножение (`color * mask`), добавлены 4-tap `sample_filtered`, `u_bounds_px` и плавный `smoothstep(0.76, 0.99, t)`;
+  - `apps/rusty-settings/src/{state.rs, wayland.rs, render.rs}`: вынесены `ServiceCommand` / `ServiceSnapshot` / `execute_coalesced_service_batch` в фоновый worker с `calloop::ping`, добавлены субпиксельный/плавный скролл (`scroll_smooth_by`, `step_scroll_animation`), троттлинг `poll_external_config_if_due` (`200 ms`), точечный `wl_surface::damage_buffer` (`DamageScope`), быстрые сканлайны `blend_span_opaque` / `rounded_interior_span`, отсечение невидимых строк по `clip` и кэш premultiplied BGRA-спрайтов `SPRITE_CACHE`;
+  - `docs/adr/0063-resize-min-bounds-minimize-cleanup-and-settings-smoothness.md`, `ARCHITECTURE.md`, `DECISIONS.md` (`D-076`).
+- **Acceptance Criteria:**
+  - Перетаскивание любой границы resize `rusty-settings` ниже `640×500` жёстко фиксирует размер без смещения противоположного края и баунса;
+  - Минимизация и восстановление `Light`/`Dark` окон (включая `rusty-files` с `Liquid Glass`) проходят без тёмных клиньев тени, плоского серого прямоугольника стекла и ложной рамки до первого кадра;
+  - Прогон `--winit` (X11 и вложенный Wayland без EGL/shader ошибок), визуальный осмотр снимков, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings` и все 275 unit-тестов workspace проходят без ошибок.
+- **Tests:** 275 unit-тестов workspace (`4` `rusty-animation`, `183` `rusty-compositor`, `15` `rusty-files`, `3` `rusty-ipc`, `44` `rusty-services`, `10` `rusty-settings`, `5` `rusty-shell`, `4` `rusty-updater`, `7` `rusty-wm`).
+- **Risks:** Нет.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance
