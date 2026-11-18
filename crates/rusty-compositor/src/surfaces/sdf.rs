@@ -652,7 +652,6 @@ pub(super) fn sample_fallback_avatar_pixel(
     seed: u32,
     selected: bool,
 ) -> [u8; 4] {
-    const SUBSAMPLES: [f32; 4] = [0.125, 0.375, 0.625, 0.875];
     let dim = diameter.max(1) as f32;
     let edge = 1.05 / dim;
     let palette = match seed % 4 {
@@ -661,9 +660,9 @@ pub(super) fn sample_fallback_avatar_pixel(
         2 => ([158.0_f32, 128.0, 96.0], [232.0_f32, 214.0, 188.0]),
         _ => ([94.0_f32, 148.0, 142.0], [214.0_f32, 232.0, 194.0]),
     };
-    let mut sum = [0.0_f32; 4];
-    for sy in SUBSAMPLES {
-        for sx in SUBSAMPLES {
+    let mut acc = crate::aa::LinearAccum::default();
+    for (sx, sy) in crate::aa::R2_TAPS_16 {
+        {
             let u = (px as f32 + sx) / dim;
             let v = (py as f32 + sy) / dim;
             let outer = sd_circle(u, v, 0.5, 0.5, 0.475);
@@ -694,23 +693,10 @@ pub(super) fn sample_fallback_avatar_pixel(
                 blue = blue * (1.0 - rim_cov) + 255.0 * rim_cov;
             }
 
-            sum[0] += red * cov;
-            sum[1] += green * cov;
-            sum[2] += blue * cov;
-            sum[3] += cov;
+            acc.add_straight([red, green, blue], cov);
         }
     }
-    let avg_a = (sum[3] * 0.0625).clamp(0.0, 1.0);
-    if avg_a <= 0.001 {
-        return [0, 0, 0, 0];
-    }
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    [
-        (sum[2] * 0.0625).clamp(0.0, 255.0).round() as u8,
-        (sum[1] * 0.0625).clamp(0.0, 255.0).round() as u8,
-        (sum[0] * 0.0625).clamp(0.0, 255.0).round() as u8,
-        (avg_a * 255.0).clamp(0.0, 255.0).round() as u8,
-    ]
+    acc.finish_bgra()
 }
 
 pub(crate) fn signed_distance_polygon(px: f32, py: f32, verts: &[(f32, f32)]) -> f32 {
@@ -990,7 +976,6 @@ pub(super) fn sample_traffic_light_pixel(
     focused: bool,
     hovered_glyph: bool,
 ) -> [u8; 4] {
-    const SUBSAMPLES: [f32; 4] = [0.125, 0.375, 0.625, 0.875];
     let dim = diameter.max(1) as f32;
     let edge = 1.05 / dim;
     let active_look = focused || hovered_glyph;
@@ -1024,9 +1009,9 @@ pub(super) fn sample_traffic_light_pixel(
         )
     };
 
-    let mut sum = [0.0_f32; 4];
-    for sy in SUBSAMPLES {
-        for sx in SUBSAMPLES {
+    let mut acc = crate::aa::LinearAccum::default();
+    for (sx, sy) in crate::aa::R2_TAPS_16 {
+        {
             let u = (px as f32 + sx) / dim;
             let v = (py as f32 + sy) / dim;
             let body_sd = sd_circle(u, v, 0.50, 0.50, 0.44);
@@ -1074,23 +1059,10 @@ pub(super) fn sample_traffic_light_pixel(
                 rgb
             };
             let out_a = (prem[3] * body_cov).clamp(0.0, 1.0);
-            sum[0] += rgb[0] * out_a;
-            sum[1] += rgb[1] * out_a;
-            sum[2] += rgb[2] * out_a;
-            sum[3] += out_a;
+            acc.add_straight(rgb, out_a);
         }
     }
-    let avg_a = (sum[3] * 0.0625).clamp(0.0, 1.0);
-    if avg_a <= 0.001 {
-        return [0, 0, 0, 0];
-    }
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    [
-        (sum[2] * 0.0625).clamp(0.0, 255.0).round() as u8,
-        (sum[1] * 0.0625).clamp(0.0, 255.0).round() as u8,
-        (sum[0] * 0.0625).clamp(0.0, 255.0).round() as u8,
-        (avg_a * 255.0).clamp(0.0, 255.0).round() as u8,
-    ]
+    acc.finish_bgra()
 }
 
 #[allow(clippy::cast_precision_loss)]

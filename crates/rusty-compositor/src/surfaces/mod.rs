@@ -25,6 +25,7 @@ mod xcursor;
 pub use liquid_glass::LiquidGlassElement;
 pub use sdf::ShadowEdgeSide;
 
+pub(crate) use glyphs::GLYPH_BUFFER_SCALE;
 use glyphs::rasterize_ui_glyph_buffer_rect;
 pub(crate) use sdf::signed_distance_polygon;
 use sdf::{
@@ -1067,7 +1068,7 @@ impl UiShapeCache {
         self.ui_glyph_rect_element(renderer, kind, size_px, size_px, tint_rgba, loc)
     }
 
-    /// Returns a GPU-cached 4x4 SSAA rectangular procedural icon element positioned at `loc`.
+    /// Returns a GPU-cached 16-tap `R2` SSAA rectangular procedural icon element (`2x` `HiDPI` buffer) positioned at `loc`.
     pub fn ui_glyph_rect_element(
         &mut self,
         renderer: &mut GlesRenderer,

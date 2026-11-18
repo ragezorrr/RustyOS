@@ -184,6 +184,36 @@ fn sd_segment(px: f32, py: f32, ax: f32, ay: f32, bx: f32, by: f32, rad: f32) ->
     (pax - bax * t).hypot(pay - bay * t) - rad
 }
 
+/// 4-tap rotated-grid supersampled edge coverage `0..=255` for a signed-distance field, evaluated at
+/// the pixel `(px, py)` in absolute canvas coordinates (`RUSTYOS-111`).
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
+)]
+fn aa_cov8(px: i32, py: i32, sd: impl Fn(f32, f32) -> f32) -> u8 {
+    const TAPS: [(f32, f32); 4] = [
+        (-0.375, -0.125),
+        (0.125, -0.375),
+        (0.375, 0.125),
+        (-0.125, 0.375),
+    ];
+    let cx = px as f32 + 0.5;
+    let cy = py as f32 + 0.5;
+    let d0 = sd(cx, cy);
+    if d0 <= -1.0 {
+        return 255;
+    }
+    if d0 >= 1.2 {
+        return 0;
+    }
+    let mut sum = 0.0_f32;
+    for (ox, oy) in TAPS {
+        sum += (0.5 - sd(cx + ox, cy + oy)).clamp(0.0, 1.0);
+    }
+    (sum * 0.25 * 255.0).round() as u8
+}
+
 struct Canvas<'a> {
     buf: &'a mut [u8],
     w: i32,
@@ -275,9 +305,8 @@ impl<'a> Canvas<'a> {
         let rad = radius as f32;
         for py in y0..y1 {
             for px in x0..x1 {
-                let d = sd_rounded_box(px as f32 + 0.5 - cx, py as f32 + 0.5 - cy, rw, rh, rad);
-                if d < 0.6 {
-                    let cov = ((0.6 - d).clamp(0.0, 1.0) * 255.0).round() as u8;
+                let cov = aa_cov8(px, py, |x, y| sd_rounded_box(x - cx, y - cy, rw, rh, rad));
+                if cov > 0 {
                     self.blend_px(px, py, color, cov);
                 }
             }
@@ -300,11 +329,12 @@ impl<'a> Canvas<'a> {
         let rh = rect.h as f32;
         for py in y0..y1 {
             for px in x0..x1 {
-                let d = sd_rounded_box(px as f32 + 0.5 - cx, py as f32 + 0.5 - cy, rw, rh, radius);
-                // Inside `[ -stroke_w, 0 ]`
-                let ring_d = (d + stroke_w * 0.5).abs() - stroke_w * 0.5;
-                if ring_d < 0.6 {
-                    let cov = ((0.6 - ring_d).clamp(0.0, 1.0) * 255.0).round() as u8;
+                let cov = aa_cov8(px, py, |x, y| {
+                    let d = sd_rounded_box(x - cx, y - cy, rw, rh, radius);
+                    // Inside `[ -stroke_w, 0 ]`
+                    (d + stroke_w * 0.5).abs() - stroke_w * 0.5
+                });
+                if cov > 0 {
                     self.blend_px(px, py, color, cov);
                 }
             }
@@ -323,9 +353,8 @@ impl<'a> Canvas<'a> {
         let y1 = (cy + radius + 1.5).ceil() as i32;
         for py in y0.max(0)..y1.min(self.h) {
             for px in x0.max(0)..x1.min(self.w) {
-                let d = (px as f32 + 0.5 - cx).hypot(py as f32 + 0.5 - cy) - radius;
-                if d < 0.6 {
-                    let cov = ((0.6 - d).clamp(0.0, 1.0) * 255.0).round() as u8;
+                let cov = aa_cov8(px, py, |x, y| (x - cx).hypot(y - cy) - radius);
+                if cov > 0 {
                     self.blend_px(px, py, color, cov);
                 }
             }
@@ -357,9 +386,8 @@ impl<'a> Canvas<'a> {
             let t = ((py - rect.y) as f32 / rh.max(1.0)).clamp(0.0, 1.0);
             let col = lerp_rgba(top_tint, bottom_tint, t);
             for px in x0..x1 {
-                let d = sd_rounded_box(px as f32 + 0.5 - cx, py as f32 + 0.5 - cy, rw, rh, rad);
-                if d < 0.6 {
-                    let cov = ((0.6 - d).clamp(0.0, 1.0) * 255.0).round() as u8;
+                let cov = aa_cov8(px, py, |x, y| sd_rounded_box(x - cx, y - cy, rw, rh, rad));
+                if cov > 0 {
                     self.blend_px(px, py, col, cov);
                 }
             }
@@ -374,10 +402,8 @@ impl<'a> Canvas<'a> {
         let y1 = (ay.max(by) + radius + 2.0).ceil() as i32;
         for py in y0.max(0)..y1.min(self.h) {
             for px in x0.max(0)..x1.min(self.w) {
-                #[allow(clippy::cast_precision_loss)]
-                let d = sd_segment(px as f32 + 0.5, py as f32 + 0.5, ax, ay, bx, by, radius);
-                if d < 0.6 {
-                    let cov = ((0.6 - d).clamp(0.0, 1.0) * 255.0).round() as u8;
+                let cov = aa_cov8(px, py, |x, y| sd_segment(x, y, ax, ay, bx, by, radius));
+                if cov > 0 {
                     self.blend_px(px, py, color, cov);
                 }
             }
@@ -1295,15 +1321,15 @@ fn draw_sidebar_glyph(c: &mut Canvas<'_>, rect: Rect, page: SettingsPage) {
             // White ring + filled left half
             for py in rect.y + 4..rect.bottom() - 4 {
                 for px in rect.x + 4..rect.right() - 4 {
-                    let dx = px as f32 + 0.5 - cx;
-                    let dy = py as f32 + 0.5 - cy;
-                    let r = dx.hypot(dy);
-                    let ring_d = (r - 5.9).abs() - 0.75;
-                    let fill_d = (r - 6.2).max(dx);
-                    let d = ring_d.min(fill_d);
-                    if d < 0.6 {
-                        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                        let cov = ((0.6 - d).clamp(0.0, 1.0) * 255.0).round() as u8;
+                    let cov = aa_cov8(px, py, |x, y| {
+                        let dx = x - cx;
+                        let dy = y - cy;
+                        let r = dx.hypot(dy);
+                        let ring_d = (r - 5.9).abs() - 0.75;
+                        let fill_d = (r - 6.2).max(dx);
+                        ring_d.min(fill_d)
+                    });
+                    if cov > 0 {
                         c.blend_px(px, py, w, cov);
                     }
                 }
@@ -1373,14 +1399,15 @@ fn draw_wifi_arc(c: &mut Canvas<'_>, cx: f32, cy: f32, r: f32, col: [u8; 4]) {
     let y1 = cy.ceil() as i32;
     for py in y0..y1 {
         for px in x0..x1 {
-            let dx = px as f32 + 0.5 - cx;
-            let dy = py as f32 + 0.5 - cy;
-            if dy > -dx.abs() * 0.8 {
-                continue;
-            }
-            let d = (dx.hypot(dy) - r).abs() - 0.65;
-            if d < 0.6 {
-                let cov = ((0.6 - d).clamp(0.0, 1.0) * 255.0).round() as u8;
+            let cov = aa_cov8(px, py, |x, y| {
+                let dx = x - cx;
+                let dy = y - cy;
+                if dy > -dx.abs() * 0.8 {
+                    return 1.0e3;
+                }
+                (dx.hypot(dy) - r).abs() - 0.65
+            });
+            if cov > 0 {
                 c.blend_px(px, py, col, cov);
             }
         }

@@ -1928,6 +1928,22 @@ hardware/software context и низкие накладные расходы.
 - **Tests:** Все 267 unit-тестов workspace (`4` `rusty-animation`, `180` `rusty-compositor`, `15` `rusty-files`, `3` `rusty-ipc`, `43` `rusty-services`, `6` `rusty-settings`, `5` `rusty-shell`, `4` `rusty-updater`, `7` `rusty-wm`).
 - **Risks:** Нет.
 
+### RUSTYOS-111 — Устранение «лесенки» на иконках и глифах (`16-tap R2`, `2x HiDPI`-буферы, `Lanczos-3` PNG и `RGSS` в приложениях)
+
+- **Status:** Done
+- **Goal:** Устранить зубчатость краёв (aliasing) на процедурных скворклах и UI-глифах оболочки (включая magnification в `Dock`), внешних `.png`/`SNI`-иконках и векторных иконках `rusty-settings` / `rusty-updater` без добавления новых внешних зависимостей.
+- **Dependencies:** `RUSTYOS-110`.
+- **Scope:**
+  - `crates/rusty-compositor/src/aa.rs`, `lib.rs`, `icons.rs`, `surfaces/{mod.rs, glyphs.rs, sdf.rs}`: добавлены `R2_TAPS_16` и `LinearAccum` (сглаживание в линейном свете без sRGB-каймы), перевод `sample_builtin_squircle_pixel`, `sample_ui_glyph_pixel_rect`, `sample_fallback_avatar_pixel` и `sample_traffic_light_pixel` на `R2_TAPS_16`, `GLYPH_BUFFER_SCALE = 2` (`scale = 2` в `rasterize_builtin_squircle_buffer`, `rasterize_ui_glyph_buffer_rect` и `load_png_as_bgra_scaled`) + unit-тесты `r2_taps_are_distinct_in_both_axes` и `linear_accum_preserves_constant_color_and_coverage`;
+  - `crates/rusty-services/src/image_decode.rs`: добавлен сепарабельный `downscale_lanczos_linear` (`lanczos_axis_weights`, sRGB ↔ linear LUT) в `scale_rgba_rect_to_premul_bgra` для `.png` и `argb32_be_to_premul_bgra` + unit-тест `lanczos_linear_downscale_preserves_color_alpha_and_softens_edges`;
+  - `apps/rusty-settings/src/render.rs`, `apps/rusty-updater/src/render.rs`: добавлен 4-tap rotated grid SSAA (`aa_cov8`) для скворклов, кругов, сегментов, `draw_wifi_arc`, `draw_updater_emblem` и `draw_refresh_icon`;
+  - `docs/adr/0062-icon-antialiasing-and-hidpi-buffers.md`, `DESIGN.md`, `ARCHITECTURE.md`, `DECISIONS.md` (`D-075`).
+- **Acceptance Criteria:**
+  - Живой `--winit` прогон (Wayland/X11 smoke и `Light`/`Dark` снимки `TopBar`, `Dock`, увеличенной при наведении иконки `Dock`, уведомлений, `400%` зум-срезов, `rusty-settings` и `rusty-updater`) подтверждает плавные края и отсутствие `EGL_BAD_SURFACE` / shader ошибок;
+  - `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings` и все 270 тестов workspace проходят без ошибок.
+- **Tests:** Все 270 unit-тестов workspace (`4` `rusty-animation`, `182` `rusty-compositor`, `15` `rusty-files`, `3` `rusty-ipc`, `44` `rusty-services`, `6` `rusty-settings`, `5` `rusty-shell`, `4` `rusty-updater`, `7` `rusty-wm`).
+- **Risks:** Нет.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

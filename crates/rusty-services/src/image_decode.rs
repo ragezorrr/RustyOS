@@ -118,6 +118,9 @@ pub fn scale_rgba_rect_to_premul_bgra(
     if rgba.len() != src_w.checked_mul(src_h)?.checked_mul(4)? {
         return None;
     }
+    if (dst_w < src_w || dst_h < src_h) && src_w.checked_mul(src_h)? <= LANCZOS_MAX_SRC_PIXELS {
+        return Some(downscale_lanczos_linear(src_w, src_h, rgba, dst_w, dst_h));
+    }
 
     let total_bytes = dst_w.checked_mul(dst_h)?.checked_mul(4)?;
     let mut out = vec![0_u8; total_bytes];
@@ -134,6 +137,146 @@ pub fn scale_rgba_rect_to_premul_bgra(
         }
     }
     Some(out)
+}
+
+/// Largest source (in pixels) routed through the memory-hungry `f32` Lanczos downscaler (`RUSTYOS-111`).
+const LANCZOS_MAX_SRC_PIXELS: usize = 2048 * 2048;
+
+#[inline]
+fn lanczos3(x: f32) -> f32 {
+    let x = x.abs();
+    if x < 1e-6 {
+        1.0
+    } else if x >= 3.0 {
+        0.0
+    } else {
+        let px = std::f32::consts::PI * x;
+        3.0 * px.sin() * (px / 3.0).sin() / (px * px)
+    }
+}
+
+/// Per-destination-index `(first_src_index, normalized weights)` for a separable Lanczos-3 axis pass.
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss
+)]
+fn lanczos_axis_weights(src_len: usize, dst_len: usize) -> Vec<(usize, Vec<f32>)> {
+    let ratio = src_len as f32 / dst_len as f32;
+    let filter_scale = ratio.max(1.0);
+    let support = 3.0 * filter_scale;
+    (0..dst_len)
+        .map(|d| {
+            let center = (d as f32 + 0.5) * ratio - 0.5;
+            let lo = ((center - support).ceil() as i64).max(0) as usize;
+            let hi = (((center + support).floor() as i64).min(src_len as i64 - 1) as usize).max(lo);
+            let mut ws: Vec<f32> = (lo..=hi)
+                .map(|i| lanczos3((i as f32 - center) / filter_scale))
+                .collect();
+            let sum: f32 = ws.iter().sum();
+            if sum.abs() < 1e-6 {
+                ws = vec![1.0];
+            } else {
+                for w in &mut ws {
+                    *w /= sum;
+                }
+            }
+            (lo, ws)
+        })
+        .collect()
+}
+
+fn srgb_to_linear_f32(c: f32) -> f32 {
+    if c <= 0.040_45 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+fn linear_to_srgb_f32(c: f32) -> f32 {
+    let c = c.clamp(0.0, 1.0);
+    if c <= 0.003_130_8 {
+        c * 12.92
+    } else {
+        1.055 * c.powf(1.0 / 2.4) - 0.055
+    }
+}
+
+/// High-quality area-aware downscale: separable Lanczos-3 in linear light on premultiplied colour,
+/// returning premultiplied `Argb8888` (`[B, G, R, A]`) without stair-stepping or dark fringes (`RUSTYOS-111`).
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
+)]
+fn downscale_lanczos_linear(
+    src_w: usize,
+    src_h: usize,
+    rgba: &[u8],
+    dst_w: usize,
+    dst_h: usize,
+) -> Vec<u8> {
+    let mut lut = [0.0_f32; 256];
+    for (i, v) in lut.iter_mut().enumerate() {
+        *v = srgb_to_linear_f32(i as f32 / 255.0);
+    }
+    let mut lin = vec![0.0_f32; src_w * src_h * 4];
+    let (lin_px, _) = lin.as_chunks_mut::<4>();
+    let (src_px, _) = rgba.as_chunks::<4>();
+    for (dst, px) in lin_px.iter_mut().zip(src_px) {
+        let a = f32::from(px[3]) / 255.0;
+        dst[0] = lut[usize::from(px[0])] * a;
+        dst[1] = lut[usize::from(px[1])] * a;
+        dst[2] = lut[usize::from(px[2])] * a;
+        dst[3] = a;
+    }
+
+    let wx = lanczos_axis_weights(src_w, dst_w);
+    let wy = lanczos_axis_weights(src_h, dst_h);
+
+    let mut tmp = vec![0.0_f32; dst_w * src_h * 4];
+    for y in 0..src_h {
+        for (dx, (start, ws)) in wx.iter().enumerate() {
+            let mut acc = [0.0_f32; 4];
+            for (k, w) in ws.iter().enumerate() {
+                let o = (y * src_w + start + k) * 4;
+                for (a, v) in acc.iter_mut().zip(&lin[o..o + 4]) {
+                    *a += v * w;
+                }
+            }
+            let o = (y * dst_w + dx) * 4;
+            tmp[o..o + 4].copy_from_slice(&acc);
+        }
+    }
+
+    let mut out = vec![0_u8; dst_w * dst_h * 4];
+    for (dy, (start, ws)) in wy.iter().enumerate() {
+        for dx in 0..dst_w {
+            let mut acc = [0.0_f32; 4];
+            for (k, w) in ws.iter().enumerate() {
+                let o = ((start + k) * dst_w + dx) * 4;
+                for (a, v) in acc.iter_mut().zip(&tmp[o..o + 4]) {
+                    *a += v * w;
+                }
+            }
+            let alpha = acc[3].clamp(0.0, 1.0);
+            let off = (dy * dst_w + dx) * 4;
+            if alpha <= 1.0 / 512.0 {
+                continue;
+            }
+            let enc = |lin_premul: f32| -> u8 {
+                let straight = linear_to_srgb_f32(lin_premul.clamp(0.0, alpha) / alpha);
+                (straight * alpha * 255.0).clamp(0.0, 255.0).round() as u8
+            };
+            out[off] = enc(acc[2]);
+            out[off + 1] = enc(acc[1]);
+            out[off + 2] = enc(acc[0]);
+            out[off + 3] = (alpha * 255.0).round() as u8;
+        }
+    }
+    out
 }
 
 #[inline]
@@ -1151,6 +1294,39 @@ mod tests {
         let (w3, h3, rgba3) = decode_ppm_rgba_limited(p3, 64).ok_or("p3 decode failed")?;
         assert_eq!((w3, h3), (1, 1));
         assert_eq!(rgba3, vec![12, 34, 56, 255]);
+        Ok(())
+    }
+
+    #[test]
+    fn lanczos_linear_downscale_preserves_color_alpha_and_softens_edges() -> Result<(), String> {
+        // Solid opaque colour stays exact after 8x8 -> 3x3 downscale (`[B, G, R, A]`).
+        let solid: Vec<u8> = (0..64).flat_map(|_| [200_u8, 100, 50, 255]).collect();
+        let out = scale_rgba_to_premul_bgra(8, 8, &solid, 3).ok_or("solid downscale failed")?;
+        for px in out.as_chunks::<4>().0 {
+            assert!(i32::from(px[0]).abs_diff(50) <= 1, "{px:?}");
+            assert!(i32::from(px[1]).abs_diff(100) <= 1, "{px:?}");
+            assert!(i32::from(px[2]).abs_diff(200) <= 1, "{px:?}");
+            assert_eq!(px[3], 255);
+        }
+
+        // Left half opaque white / right half fully transparent: 16x16 -> 5x5 yields smooth coverage
+        // ramp (intermediate alpha) with premultiplied invariant `rgb <= alpha`.
+        let mut half = vec![0_u8; 16 * 16 * 4];
+        for y in 0..16 {
+            for x in 0..8 {
+                let o = (y * 16 + x) * 4;
+                half[o..o + 4].copy_from_slice(&[255, 255, 255, 255]);
+            }
+        }
+        let out = scale_rgba_to_premul_bgra(16, 16, &half, 5).ok_or("half downscale failed")?;
+        let row: Vec<[u8; 4]> = out[2 * 5 * 4..3 * 5 * 4].as_chunks::<4>().0.to_vec();
+        assert!(row[0][3] >= 240 && row[1][3] >= 240, "{row:?}");
+        assert!(row[3][3] <= 15 && row[4][3] <= 15, "{row:?}");
+        assert!(row[2][3] > 32 && row[2][3] < 224, "{row:?}");
+        assert!(
+            row.iter()
+                .all(|p| p[0] <= p[3] && p[1] <= p[3] && p[2] <= p[3])
+        );
         Ok(())
     }
 }

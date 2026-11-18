@@ -367,8 +367,11 @@ impl IconCache {
         };
         if !self.buffers.contains_key(&key) {
             let path = self.resolve_icon_path(icon_name);
-            let decoded = path.and_then(|p| load_png_as_bgra(&p, usize::from(size_u16)));
-            let buf = decoded.map(|bgra| upload_bgra_buffer(i32::from(size_u16), &bgra));
+            let decoded = path.and_then(|p| load_png_as_bgra_scaled(&p, usize::from(size_u16)));
+            let buf = decoded.and_then(|(dev_size, scale, bgra)| {
+                let dev_px = i32::try_from(dev_size).ok()?;
+                Some(upload_bgra_buffer_scaled(dev_px, scale, &bgra))
+            });
             self.buffers.insert(key.clone(), buf);
         }
         self.buffers.get(&key).and_then(Option::as_ref)
@@ -485,24 +488,35 @@ fn element_from_icon_buffer(
 }
 
 fn upload_bgra_buffer(size_px: i32, bgra: &[u8]) -> MemoryRenderBuffer {
+    upload_bgra_buffer_scaled(size_px, 1, bgra)
+}
+
+fn upload_bgra_buffer_scaled(dev_px: i32, scale: i32, bgra: &[u8]) -> MemoryRenderBuffer {
     MemoryRenderBuffer::from_slice(
         bgra,
         Fourcc::Argb8888,
-        (size_px, size_px),
-        1,
+        (dev_px, dev_px),
+        scale,
         Transform::Normal,
         None,
     )
 }
 
-fn load_png_as_bgra(path: &Path, dst_size: usize) -> Option<Vec<u8>> {
+fn load_png_as_bgra_scaled(path: &Path, logical_size: usize) -> Option<(usize, i32, Vec<u8>)> {
     let meta = fs::metadata(path).ok()?;
     if usize::try_from(meta.len()).unwrap_or(usize::MAX) > MAX_PNG_FILE_BYTES {
         return None;
     }
     let bytes = fs::read(path).ok()?;
     let (w, h, rgba) = decode_png_rgba(&bytes)?;
-    scale_rgba_to_premul_bgra(w, h, &rgba, dst_size)
+    let scale = if w >= logical_size.saturating_mul(2) && h >= logical_size.saturating_mul(2) {
+        crate::surfaces::GLYPH_BUFFER_SCALE
+    } else {
+        1
+    };
+    let dev_size = logical_size.checked_mul(usize::try_from(scale).ok()?)?;
+    let bgra = scale_rgba_to_premul_bgra(w, h, &rgba, dev_size)?;
+    Some((dev_size, scale, bgra))
 }
 
 fn discover_icon_search_roots() -> Vec<PathBuf> {
@@ -1086,47 +1100,35 @@ fn paint_squircle_glyph(
 fn sample_builtin_squircle_pixel(px: i32, py: i32, size_px: i32, icon: BuiltinAppIcon) -> [u8; 4] {
     let dim = size_px.max(1) as f32;
     let edge = 1.15 / dim;
-    let mut sum = [0.0_f32; 4];
-    for sy in [0.125_f32, 0.375, 0.625, 0.875] {
-        for sx in [0.125_f32, 0.375, 0.625, 0.875] {
-            let u = (px as f32 + sx) / dim;
-            let v = (py as f32 + sy) / dim;
-            let s = sample_squircle_uv(u, v, edge, icon);
-            let a = s[3].clamp(0.0, 1.0);
-            sum[0] += s[0] * a;
-            sum[1] += s[1] * a;
-            sum[2] += s[2] * a;
-            sum[3] += a;
-        }
+    let mut acc = crate::aa::LinearAccum::default();
+    for (sx, sy) in crate::aa::R2_TAPS_16 {
+        let u = (px as f32 + sx) / dim;
+        let v = (py as f32 + sy) / dim;
+        let s = sample_squircle_uv(u, v, edge, icon);
+        acc.add_straight([s[0], s[1], s[2]], s[3]);
     }
-    let avg_a = (sum[3] * (1.0 / 16.0)).clamp(0.0, 1.0);
-    if avg_a <= 0.001 {
-        return [0, 0, 0, 0];
-    }
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    [
-        (sum[2] * (1.0 / 16.0)).clamp(0.0, 255.0).round() as u8,
-        (sum[1] * (1.0 / 16.0)).clamp(0.0, 255.0).round() as u8,
-        (sum[0] * (1.0 / 16.0)).clamp(0.0, 255.0).round() as u8,
-        (avg_a * 255.0).clamp(0.0, 255.0).round() as u8,
-    ]
+    acc.finish_bgra()
 }
 
+/// Rasterizes a procedural squircle icon into a `2x` `HiDPI` buffer (`scale = 2`, `RUSTYOS-111`);
+/// the logical size stays `size_px`.
 fn rasterize_builtin_squircle_buffer(icon: BuiltinAppIcon, size_px: i32) -> MemoryRenderBuffer {
-    let dim = usize::try_from(size_px).unwrap_or(1).max(1);
+    let scale = crate::surfaces::GLYPH_BUFFER_SCALE;
+    let dev_px = size_px * scale;
+    let dim = usize::try_from(dev_px).unwrap_or(1).max(1);
     let mut bgra = vec![0_u8; dim * dim * 4];
-    for py in 0..size_px {
-        for px in 0..size_px {
+    for py in 0..dev_px {
+        for px in 0..dev_px {
             let row = usize::try_from(py).unwrap_or(0);
             let col = usize::try_from(px).unwrap_or(0);
             let idx = (row * dim + col) * 4;
             if idx + 4 <= bgra.len() {
-                let p = sample_builtin_squircle_pixel(px, py, size_px, icon);
+                let p = sample_builtin_squircle_pixel(px, py, dev_px, icon);
                 bgra[idx..idx + 4].copy_from_slice(&p);
             }
         }
     }
-    upload_bgra_buffer(size_px, &bgra)
+    upload_bgra_buffer_scaled(dev_px, scale, &bgra)
 }
 
 #[cfg(test)]

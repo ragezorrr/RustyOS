@@ -822,6 +822,16 @@
                            многострочное перенесение текста
                            без "now", без изменений в Dock,
                            ControlModule и Popover (ADR-0061)
+
+   D-075                   Фаза 8/10 Конвейер сглаживания     accepted
+                           иконок и глифов (RUSTYOS-111):
+                           16-tap R2 + LinearAccum, 2x HiDPI
+                           буферы (GLYPH_BUFFER_SCALE = 2),
+                           сепарабельный Lanczos-3 downscale
+                           в линейном свете для PNG/SNI и
+                           4-tap RGSS (aa_cov8) в
+                           rusty-settings и rusty-updater
+                           (ADR-0062)
   -----------------------------------------------------------------------
 
 ## Открытые решения

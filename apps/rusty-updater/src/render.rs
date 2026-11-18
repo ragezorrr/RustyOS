@@ -186,6 +186,36 @@ fn sd_segment(px: f32, py: f32, ax: f32, ay: f32, bx: f32, by: f32, rad: f32) ->
     (pax - bax * t).hypot(pay - bay * t) - rad
 }
 
+/// 4-tap rotated-grid supersampled edge coverage `0..=255` for a signed-distance field, evaluated at
+/// the pixel `(px, py)` in absolute canvas coordinates (`RUSTYOS-111`).
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
+)]
+fn aa_cov8(px: i32, py: i32, sd: impl Fn(f32, f32) -> f32) -> u8 {
+    const TAPS: [(f32, f32); 4] = [
+        (-0.375, -0.125),
+        (0.125, -0.375),
+        (0.375, 0.125),
+        (-0.125, 0.375),
+    ];
+    let cx = px as f32 + 0.5;
+    let cy = py as f32 + 0.5;
+    let d0 = sd(cx, cy);
+    if d0 <= -1.0 {
+        return 255;
+    }
+    if d0 >= 1.2 {
+        return 0;
+    }
+    let mut sum = 0.0_f32;
+    for (ox, oy) in TAPS {
+        sum += (0.5 - sd(cx + ox, cy + oy)).clamp(0.0, 1.0);
+    }
+    (sum * 0.25 * 255.0).round() as u8
+}
+
 struct Canvas<'a> {
     buf: &'a mut [u8],
     w: i32,
@@ -289,9 +319,8 @@ impl<'a> Canvas<'a> {
         let rad = radius as f32;
         for py in eff.y..eff.bottom() {
             for px in eff.x..eff.right() {
-                let d = sd_rounded_box(px as f32 + 0.5 - cx, py as f32 + 0.5 - cy, rw, rh, rad);
-                if d < 0.6 {
-                    let cov = ((0.6 - d).clamp(0.0, 1.0) * 255.0).round() as u8;
+                let cov = aa_cov8(px, py, |x, y| sd_rounded_box(x - cx, y - cy, rw, rh, rad));
+                if cov > 0 {
                     self.blend_px(px, py, color, cov);
                 }
             }
@@ -339,9 +368,8 @@ impl<'a> Canvas<'a> {
         let eff = self.effective_clip(Rect::new(bx0, by0, bx1 - bx0, by1 - by0));
         for py in eff.y..eff.bottom() {
             for px in eff.x..eff.right() {
-                let d = (px as f32 + 0.5 - cx).hypot(py as f32 + 0.5 - cy) - radius;
-                if d < 0.6 {
-                    let cov = ((0.6 - d).clamp(0.0, 1.0) * 255.0).round() as u8;
+                let cov = aa_cov8(px, py, |x, y| (x - cx).hypot(y - cy) - radius);
+                if cov > 0 {
                     self.blend_px(px, py, color, cov);
                 }
             }
@@ -424,15 +452,16 @@ fn draw_updater_emblem(canvas: &mut Canvas<'_>, rect: Rect, color: [u8; 4]) {
     let eff = canvas.effective_clip(rect);
     for py in eff.y..eff.bottom() {
         for px in eff.x..eff.right() {
-            let ux = (px as f32 + 0.5 - cx) / scale;
-            let uy = (py as f32 + 0.5 - cy) / scale;
-            let ring = (ux.hypot(uy) - 0.62).abs() - 0.095;
-            let stem = sd_segment(ux, uy, 0.0, -0.34, 0.0, 0.30, 0.095);
-            let wing_l = sd_segment(ux, uy, -0.26, 0.06, 0.0, 0.33, 0.095);
-            let wing_r = sd_segment(ux, uy, 0.26, 0.06, 0.0, 0.33, 0.095);
-            let d = ring.min(stem).min(wing_l).min(wing_r) * scale;
-            if d < 0.6 {
-                let cov = ((0.6 - d).clamp(0.0, 1.0) * 255.0).round() as u8;
+            let cov = aa_cov8(px, py, |x, y| {
+                let ux = (x - cx) / scale;
+                let uy = (y - cy) / scale;
+                let ring = (ux.hypot(uy) - 0.62).abs() - 0.095;
+                let stem = sd_segment(ux, uy, 0.0, -0.34, 0.0, 0.30, 0.095);
+                let wing_l = sd_segment(ux, uy, -0.26, 0.06, 0.0, 0.33, 0.095);
+                let wing_r = sd_segment(ux, uy, 0.26, 0.06, 0.0, 0.33, 0.095);
+                ring.min(stem).min(wing_l).min(wing_r) * scale
+            });
+            if cov > 0 {
                 canvas.blend_px(px, py, color, cov);
             }
         }
@@ -450,16 +479,17 @@ fn draw_refresh_icon(canvas: &mut Canvas<'_>, rect: Rect, color: [u8; 4]) {
     let eff = canvas.effective_clip(rect);
     for py in eff.y..eff.bottom() {
         for px in eff.x..eff.right() {
-            let ux = (px as f32 + 0.5 - cx) / 7.5;
-            let uy = (py as f32 + 0.5 - cy) / 7.5;
-            let ring = (ux.hypot(uy) - 0.68).abs() - 0.12;
-            let gap = ux > 0.15 && uy < -0.10 && uy > -0.65;
-            let arc = if gap { 1.0 } else { ring };
-            let head_a = sd_segment(ux, uy, 0.22, -0.82, 0.68, -0.45, 0.11);
-            let head_b = sd_segment(ux, uy, 0.68, -0.45, 0.26, -0.18, 0.11);
-            let d = arc.min(head_a).min(head_b) * 7.5;
-            if d < 0.6 {
-                let cov = ((0.6 - d).clamp(0.0, 1.0) * 255.0).round() as u8;
+            let cov = aa_cov8(px, py, |x, y| {
+                let ux = (x - cx) / 7.5;
+                let uy = (y - cy) / 7.5;
+                let ring = (ux.hypot(uy) - 0.68).abs() - 0.12;
+                let gap = ux > 0.15 && uy < -0.10 && uy > -0.65;
+                let arc = if gap { 1.0 } else { ring };
+                let head_a = sd_segment(ux, uy, 0.22, -0.82, 0.68, -0.45, 0.11);
+                let head_b = sd_segment(ux, uy, 0.68, -0.45, 0.26, -0.18, 0.11);
+                arc.min(head_a).min(head_b) * 7.5
+            });
+            if cov > 0 {
                 canvas.blend_px(px, py, color, cov);
             }
         }

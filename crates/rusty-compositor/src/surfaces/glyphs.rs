@@ -648,7 +648,6 @@ pub(super) fn sample_ui_glyph_pixel_rect(
     kind: UiGlyphKind,
     tint_rgba: [u8; 4],
 ) -> [u8; 4] {
-    const SUBSAMPLES: [f32; 4] = [0.125, 0.375, 0.625, 0.875];
     let dim_h = height_px.max(1) as f32;
     let dim_w = width_px.max(1) as f32;
     let aspect = dim_w / dim_h;
@@ -659,9 +658,9 @@ pub(super) fn sample_ui_glyph_pixel_rect(
         f32::from(tint_rgba[2]),
         f32::from(tint_rgba[3]) / 255.0,
     ];
-    let mut sum = [0.0_f32; 4];
-    for sy in SUBSAMPLES {
-        for sx in SUBSAMPLES {
+    let mut acc = crate::aa::LinearAccum::default();
+    for (sx, sy) in crate::aa::R2_TAPS_16 {
+        {
             let u_iso = (px as f32 + sx) / dim_h;
             let u = u_iso - (aspect - 1.0) * 0.5;
             let v = (py as f32 + sy) / dim_h;
@@ -717,59 +716,51 @@ pub(super) fn sample_ui_glyph_pixel_rect(
                 UiGlyphKind::CloudSun => sample_cloud_sun_glyph_uv(u, v, edge, tint),
                 UiGlyphKind::Checklist => sample_checklist_glyph_uv(u, v, edge, tint),
             };
-            sum[0] += s[0];
-            sum[1] += s[1];
-            sum[2] += s[2];
-            sum[3] += s[3];
+            acc.add_premul([s[0], s[1], s[2]], s[3]);
         }
     }
-    let avg_a = (sum[3] * 0.0625).clamp(0.0, 1.0);
-    if avg_a <= 0.001 {
-        return [0, 0, 0, 0];
-    }
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    [
-        (sum[2] * 0.0625).clamp(0.0, 255.0).round() as u8,
-        (sum[1] * 0.0625).clamp(0.0, 255.0).round() as u8,
-        (sum[0] * 0.0625).clamp(0.0, 255.0).round() as u8,
-        (avg_a * 255.0).clamp(0.0, 255.0).round() as u8,
-    ]
+    acc.finish_bgra()
 }
 
+/// Rasterizes a glyph into a `2x` `HiDPI` buffer (`scale = 2`) so fractional placement and Dock/UI
+/// scaling stay crisp (`RUSTYOS-111`); the logical size stays `width_px x height_px`.
 pub(super) fn rasterize_ui_glyph_buffer_rect(
     kind: UiGlyphKind,
     width_px: i32,
     height_px: i32,
     tint_rgba: [u8; 4],
 ) -> MemoryRenderBuffer {
+    let dev_w = width_px * GLYPH_BUFFER_SCALE;
+    let dev_h = height_px * GLYPH_BUFFER_SCALE;
     let mut mem_buf = MemoryRenderBuffer::new(
         Fourcc::Argb8888,
-        (width_px, height_px),
-        1,
+        (dev_w, dev_h),
+        GLYPH_BUFFER_SCALE,
         Transform::Normal,
         None,
     );
     {
         let mut ctx = mem_buf.render();
         let _ = ctx.draw(|pixels| {
-            let w_u = usize::try_from(width_px).unwrap_or(0);
-            for py in 0..height_px {
-                for px in 0..width_px {
+            let w_u = usize::try_from(dev_w).unwrap_or(0);
+            for py in 0..dev_h {
+                for px in 0..dev_w {
                     let row = usize::try_from(py).unwrap_or(0);
                     let col = usize::try_from(px).unwrap_or(0);
                     let idx = (row * w_u + col) * 4;
                     if idx + 4 <= pixels.len() {
-                        let p = sample_ui_glyph_pixel_rect(
-                            px, py, width_px, height_px, kind, tint_rgba,
-                        );
+                        let p = sample_ui_glyph_pixel_rect(px, py, dev_w, dev_h, kind, tint_rgba);
                         pixels[idx..idx + 4].copy_from_slice(&p);
                     }
                 }
             }
             Ok::<_, std::convert::Infallible>(vec![smithay::utils::Rectangle::from_size(
-                Size::from((width_px, height_px)),
+                Size::from((dev_w, dev_h)),
             )])
         });
     }
     mem_buf
 }
+
+/// `HiDPI` backing scale for procedural glyph and squircle icon buffers (`RUSTYOS-111`).
+pub(crate) const GLYPH_BUFFER_SCALE: i32 = 2;

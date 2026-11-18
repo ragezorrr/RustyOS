@@ -488,6 +488,7 @@ palettes (section 5.1); geometry, Liquid Glass clarity, and interactions target 
 - Notification HUD & OSD: `NotificationCard` toasts (`344×68, r = 22`) sharing chrome and multi-line typography
   with `Notification Center`, `38x38` squircle app icons (без legacy purple) and theme-aware hover close (`×`) circle;
   centered OSD pills (`Popover`) pairing `22x22` glyphs with rounded `h = 8, r = 4` level bars.
+- Icon & Glyph Rendering Quality (`RUSTYOS-111`, `ADR-0062`): все процедурные скворклы, UI-глифы (`Dock`, `TopBar`, меню, `Notification Center`), traffic lights и системные окна используют `16-tap R2` (`LinearAccum` в линейном свете) или `4-tap RGSS` (`aa_cov8`) без ортогональной лесенки, `2x` `HiDPI` буферы (`GLYPH_BUFFER_SCALE = 2`) и сепарабельное `Lanczos-3` сжатие для `.png`/`SNI`.
 
 ### 12.4 Control center and quick settings
 

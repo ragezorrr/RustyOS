@@ -4,6 +4,7 @@
 //! (`wl_compositor`, `wl_shm`, `xdg_wm_base`, `wl_seat`, `wl_output`), and the Phase 1
 //! nested Smithay + Winit prototype (`RUSTYOS-002`).
 
+mod aa;
 pub mod config;
 pub mod context_menu;
 pub mod dbus_notifications;
