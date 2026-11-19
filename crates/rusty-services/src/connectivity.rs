@@ -198,31 +198,78 @@ impl NetworkService {
         status
     }
 
-    /// Lists nearby Wi-Fi networks and marks saved profiles (`RUSTYOS-108`).
+    /// Lists nearby Wi-Fi networks using cached scan data and marks saved profiles (`RUSTYOS-108`).
     #[must_use]
     pub fn list_wifi_networks(&self) -> Vec<WifiAccessPoint> {
         let status = self.query_status();
         list_wifi_networks_cached(status.wifi_ssid.as_deref())
     }
 
+    /// Triggers a fresh Wi-Fi scan via `nmcli` and returns sorted access points (`RUSTYOS-117`).
+    #[must_use]
+    pub fn rescan_wifi_networks(&self) -> Vec<WifiAccessPoint> {
+        let status = self.query_status();
+        let active = status.wifi_ssid.as_deref();
+        let fresh = list_wifi_networks_with_rescan(active, true);
+        if fresh.is_empty() {
+            list_wifi_networks_with_rescan(active, false)
+        } else {
+            fresh
+        }
+    }
+
+    /// Connects to a Wi-Fi SSID (with optional passphrase) via `nmcli`, returning clear diagnostics (`RUSTYOS-117`).
+    ///
+    /// # Errors
+    ///
+    /// Returns a human-readable `nmcli` error message when the SSID is empty or connection fails.
+    pub fn connect_wifi_with_password(
+        &self,
+        ssid: &str,
+        password: Option<&str>,
+    ) -> Result<(), String> {
+        let trimmed = ssid.trim();
+        if trimmed.is_empty() {
+            return Err(String::from("Wi-Fi network name cannot be empty"));
+        }
+        let clean_pw = password.filter(|pw| !pw.is_empty());
+        if clean_pw.is_none()
+            && Command::new("nmcli")
+                .args(["connection", "up", "id", trimmed])
+                .status()
+                .is_ok_and(|s| s.success())
+        {
+            return Ok(());
+        }
+
+        let mut cmd = Command::new("nmcli");
+        cmd.args(["device", "wifi", "connect", trimmed]);
+        if let Some(pw) = clean_pw {
+            cmd.args(["password", pw]);
+        }
+        match cmd.output() {
+            Ok(out) if out.status.success() => Ok(()),
+            Ok(out) => {
+                let err = String::from_utf8_lossy(&out.stderr).trim().to_owned();
+                let msg = if err.is_empty() {
+                    String::from_utf8_lossy(&out.stdout).trim().to_owned()
+                } else {
+                    err
+                };
+                Err(if msg.is_empty() {
+                    format!("Failed to connect to Wi-Fi '{trimmed}'")
+                } else {
+                    msg
+                })
+            }
+            Err(err) => Err(format!("Unable to run nmcli: {err}")),
+        }
+    }
+
     /// Connects to the requested Wi-Fi network via `nmcli` (`RUSTYOS-108`).
     #[must_use]
     pub fn connect_wifi(&self, ssid: &str) -> bool {
-        let trimmed = ssid.trim();
-        if trimmed.is_empty() {
-            return false;
-        }
-        let up_saved = Command::new("nmcli")
-            .args(["connection", "up", "id", trimmed])
-            .status()
-            .is_ok_and(|s| s.success());
-        if up_saved {
-            return true;
-        }
-        Command::new("nmcli")
-            .args(["device", "wifi", "connect", trimmed])
-            .status()
-            .is_ok_and(|s| s.success())
+        self.connect_wifi_with_password(ssid, None).is_ok()
     }
 
     /// Enables or disables the system Wi-Fi radio via `NetworkManager` D-Bus or `nmcli` (`RUSTYOS-053`).
@@ -378,7 +425,8 @@ fn query_saved_wifi_ssids_nmcli() -> Vec<String> {
         .collect()
 }
 
-fn list_wifi_networks_cached(active_ssid: Option<&str>) -> Vec<WifiAccessPoint> {
+fn list_wifi_networks_with_rescan(active_ssid: Option<&str>, rescan: bool) -> Vec<WifiAccessPoint> {
+    let rescan_arg = if rescan { "yes" } else { "no" };
     let Ok(output) = Command::new("nmcli")
         .args([
             "-t",
@@ -388,7 +436,7 @@ fn list_wifi_networks_cached(active_ssid: Option<&str>) -> Vec<WifiAccessPoint> 
             "wifi",
             "list",
             "--rescan",
-            "no",
+            rescan_arg,
         ])
         .output()
     else {
@@ -400,6 +448,10 @@ fn list_wifi_networks_cached(active_ssid: Option<&str>) -> Vec<WifiAccessPoint> 
     let saved = query_saved_wifi_ssids_nmcli();
     let raw = String::from_utf8_lossy(&output.stdout);
     parse_nmcli_wifi_list(&raw, &saved, active_ssid)
+}
+
+fn list_wifi_networks_cached(active_ssid: Option<&str>) -> Vec<WifiAccessPoint> {
+    list_wifi_networks_with_rescan(active_ssid, false)
 }
 
 fn query_active_device_signal_dbus(

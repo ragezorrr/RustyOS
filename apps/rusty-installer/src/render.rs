@@ -19,11 +19,11 @@ use rusty_services::file_manager::accent_rgba_for_index;
 use crate::disks::DualBootKind;
 use crate::layout::{
     CARD_CORNER_RADIUS, InstallerHit, InstallerLayout, PILL_CORNER_RADIUS, Rect, StepContentLayout,
-    TextFieldRect, ThemeTileRect, WINDOW_CORNER_RADIUS, WelcomeAction,
+    TextFieldRect, ThemeTileRect, WINDOW_CORNER_RADIUS, WelcomeAction, WifiRowRect,
 };
 use crate::state::{
     BootloaderKind, DiskInstallMode, InstallPhase, InstallerAppState, KEYBOARD_PRESETS,
-    LANGUAGE_OPTIONS, TextFieldId, ThemeChoice,
+    LANGUAGE_OPTIONS, TextFieldId, ThemeChoice, WizardMode,
 };
 
 const INTER_REGULAR_BYTES: &[u8] = include_bytes!("../../../assets/fonts/Inter-Regular.ttf");
@@ -668,44 +668,62 @@ fn render_content(
             summary_lines,
             pal,
         ),
+        other => render_content_oobe_and_net(c, app, layout.content_rect, other, hover, pal),
+    }
+}
+
+fn render_content_oobe_and_net(
+    c: &mut Canvas<'_>,
+    app: &InstallerAppState,
+    content_rect: Rect,
+    content: &StepContentLayout,
+    hover: Option<InstallerHit>,
+    pal: &Palette,
+) {
+    match content {
         StepContentLayout::Hello { hero_emblem, rows } => {
-            render_oobe_hello(c, layout.content_rect, *hero_emblem, rows, hover, pal);
+            render_oobe_hello(c, content_rect, *hero_emblem, rows, hover, pal);
         }
         StepContentLayout::Keyboard { rows } => {
-            render_oobe_keyboard(c, layout.content_rect, rows, hover, pal);
+            render_oobe_keyboard(c, content_rect, rows, hover, pal);
         }
         StepContentLayout::Network {
             card_rect,
+            wifi_toggle_btn,
             refresh_btn,
+            wifi_rows,
+            password_field,
+            connect_btn,
         } => render_network_step(
             c,
             app,
-            layout.content_rect,
+            content_rect,
             *card_rect,
+            *wifi_toggle_btn,
             *refresh_btn,
+            wifi_rows,
+            password_field.as_ref(),
+            *connect_btn,
             hover,
             pal,
         ),
         StepContentLayout::OobeAccount {
             fields,
             autologin_row,
-        } => render_oobe_account(c, app, layout.content_rect, fields, *autologin_row, pal),
+        } => render_oobe_account(c, app, content_rect, fields, *autologin_row, pal),
         StepContentLayout::Appearance {
             tiles,
             accent_card,
             swatches,
-        } => render_oobe_appearance(c, layout.content_rect, tiles, *accent_card, swatches, pal),
+        } => render_oobe_appearance(c, content_rect, tiles, *accent_card, swatches, pal),
         StepContentLayout::Finish {
             hero_emblem,
             summary_card,
-        } => render_oobe_finish(
-            c,
-            app,
-            layout.content_rect,
-            *hero_emblem,
-            *summary_card,
-            pal,
-        ),
+        } => render_oobe_finish(c, app, content_rect, *hero_emblem, *summary_card, pal),
+        StepContentLayout::Welcome { .. }
+        | StepContentLayout::SelectDisk { .. }
+        | StepContentLayout::AccountAndStyle { .. }
+        | StepContentLayout::Installing { .. } => {}
     }
 }
 
@@ -1178,9 +1196,11 @@ fn render_installing(
 ) {
     draw_rustyos_emblem(c, emblem_rect, pal.accent, pal.dark);
     let started = app.phase != InstallPhase::Review;
+    let has_failed = app.install_error.is_some();
     let heading = match app.phase {
         InstallPhase::Finished => "Installation Complete",
         InstallPhase::Running => "Installing RustyOS...",
+        InstallPhase::Review if has_failed => "Installation Failed",
         InstallPhase::Review => "Ready to Install RustyOS",
     };
     c.draw_text_centered(
@@ -1188,17 +1208,34 @@ fn render_installing(
         heading,
         20.0,
         true,
-        pal.text_primary,
+        if has_failed {
+            pal.danger
+        } else {
+            pal.text_primary
+        },
     );
-    c.draw_text_centered(
-        Rect::new(area.x, emblem_rect.bottom() + 34, area.w, 20),
-        &app.stage_message,
-        13.0,
-        false,
-        pal.text_secondary,
-    );
+    let msg_w = c.text_width(&app.stage_message, 13.0, false);
+    if msg_w <= area.w - 48 {
+        c.draw_text_centered(
+            Rect::new(area.x, emblem_rect.bottom() + 34, area.w, 20),
+            &app.stage_message,
+            13.0,
+            false,
+            pal.text_secondary,
+        );
+    } else {
+        c.draw_text_clipped(
+            area.x + 24,
+            emblem_rect.bottom() + 48,
+            &app.stage_message,
+            13.0,
+            false,
+            pal.text_secondary,
+            area.right() - 24,
+        );
+    }
 
-    if started {
+    if started || has_failed {
         c.fill_rounded_rect(progress_rect, 6, pal.pill_bg);
         let frac = app.progress_anim.current().clamp(0.0, 1.0);
         let fill_w = (f64::from(progress_rect.w) * frac).round() as i32;
@@ -1206,7 +1243,7 @@ fn render_installing(
             c.fill_rounded_rect(
                 Rect::new(progress_rect.x, progress_rect.y, fill_w, progress_rect.h),
                 6,
-                pal.accent,
+                if has_failed { pal.danger } else { pal.accent },
             );
         }
         c.fill_rounded_rect(toggle_logs_btn, 14, pal.pill_bg);
@@ -1256,33 +1293,84 @@ fn render_installing(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_network_step(
     c: &mut Canvas<'_>,
     app: &InstallerAppState,
     area: Rect,
     card_rect: Rect,
+    wifi_toggle_btn: Rect,
     refresh_btn: Rect,
+    wifi_rows: &[WifiRowRect],
+    password_field: Option<&TextFieldRect>,
+    connect_btn: Option<Rect>,
     hover: Option<InstallerHit>,
     pal: &Palette,
 ) {
     c.draw_text(
-        area.x + 48,
-        area.y + 42,
-        "Connect to Your Network",
-        22.0,
+        area.x + 36,
+        area.y + 34,
+        "Connect to the Internet",
+        21.0,
         true,
         pal.text_primary,
     );
-    c.draw_text(
-        area.x + 48,
-        area.y + 68,
-        "Network access enables Arch package updates and Firefox browsing right away.",
-        13.5,
+    c.draw_text_clipped(
+        area.x + 36,
+        area.y + 56,
+        if app.mode == WizardMode::Install {
+            "Ethernet is detected automatically, or select a Wi-Fi network to download Arch & RustyOS packages."
+        } else {
+            "Network access enables Arch package updates and installing optional apps right away."
+        },
+        13.0,
         false,
         pal.text_secondary,
+        area.right() - 36,
     );
+    render_network_status_card(c, app, card_rect, wifi_toggle_btn, refresh_btn, hover, pal);
+    render_wifi_list_and_auth(
+        c,
+        app,
+        area,
+        card_rect.bottom(),
+        wifi_rows,
+        password_field,
+        connect_btn,
+        hover,
+        pal,
+    );
+}
+
+fn render_network_status_card(
+    c: &mut Canvas<'_>,
+    app: &InstallerAppState,
+    card_rect: Rect,
+    wifi_toggle_btn: Rect,
+    refresh_btn: Rect,
+    hover: Option<InstallerHit>,
+    pal: &Palette,
+) {
     c.fill_rounded_rect(card_rect, CARD_CORNER_RADIUS, pal.card_bg);
     c.stroke_rounded_rect(card_rect, CARD_CORNER_RADIUS, 1.0, pal.card_border);
+
+    let tbg = if hover == Some(InstallerHit::ToggleWifi) {
+        pal.pill_hover
+    } else {
+        pal.pill_bg
+    };
+    c.fill_rounded_rect(wifi_toggle_btn, 14, tbg);
+    c.draw_text_centered(
+        wifi_toggle_btn,
+        if app.network.wifi_enabled {
+            "Wi-Fi: On"
+        } else {
+            "Wi-Fi: Off"
+        },
+        12.0,
+        true,
+        pal.text_primary,
+    );
 
     let rbg = if hover == Some(InstallerHit::RefreshNetwork) {
         pal.pill_hover
@@ -1290,50 +1378,193 @@ fn render_network_step(
         pal.pill_bg
     };
     c.fill_rounded_rect(refresh_btn, 14, rbg);
-    c.draw_text_centered(refresh_btn, "Refresh", 12.5, true, pal.text_primary);
+    c.draw_text_centered(
+        refresh_btn,
+        if app.network.scanning {
+            "Scanning..."
+        } else {
+            "Scan"
+        },
+        12.0,
+        true,
+        pal.text_primary,
+    );
 
-    let badge = Rect::new(card_rect.x + 20, card_rect.y + 24, 46, 46);
-    c.fill_rounded_rect(badge, 12, pal.accent_soft);
+    let badge = Rect::new(card_rect.x + 16, card_rect.y + 15, 44, 44);
+    let badge_bg = if app.network.internet_ready {
+        pal.accent_soft
+    } else {
+        pal.pill_bg
+    };
+    c.fill_rounded_rect(badge, 11, badge_bg);
     c.draw_text_centered(
         badge,
         if app.network.ethernet_online {
             "ETH"
+        } else if app.network.wifi_connected {
+            "OK"
         } else {
             "NET"
         },
         13.0,
         true,
-        pal.accent,
+        if app.network.internet_ready {
+            pal.accent
+        } else {
+            pal.text_secondary
+        },
     );
     c.draw_text(
-        badge.right() + 16,
-        card_rect.y + 42,
-        if app.network.ethernet_online || app.network.active_ssid.is_some() {
-            "Connected"
+        badge.right() + 14,
+        card_rect.y + 33,
+        if app.network.internet_ready {
+            "Internet Connected"
         } else {
-            "Network Status"
+            "Not Connected"
         },
-        15.5,
+        15.0,
         true,
         pal.text_primary,
     );
     c.draw_text_clipped(
-        badge.right() + 16,
-        card_rect.y + 66,
+        badge.right() + 14,
+        card_rect.y + 53,
         &app.network.detail,
-        13.0,
-        false,
-        pal.text_secondary,
-        refresh_btn.x - 12,
-    );
-    c.draw_text(
-        card_rect.x + 22,
-        card_rect.bottom() - 26,
-        "You can also connect to Wi-Fi later via the Menu Bar icon or Settings.",
         12.5,
         false,
-        pal.text_muted,
+        pal.text_secondary,
+        wifi_toggle_btn.x - 10,
     );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_wifi_list_and_auth(
+    c: &mut Canvas<'_>,
+    app: &InstallerAppState,
+    area: Rect,
+    card_bottom: i32,
+    wifi_rows: &[WifiRowRect],
+    password_field: Option<&TextFieldRect>,
+    connect_btn: Option<Rect>,
+    hover: Option<InstallerHit>,
+    pal: &Palette,
+) {
+    if wifi_rows.is_empty() {
+        c.draw_text_clipped(
+            area.x + 36,
+            card_bottom + 26,
+            if app.network.wifi_enabled {
+                "No Wi-Fi networks found yet — click Scan, or plug in Ethernet / USB tethering."
+            } else {
+                "Wi-Fi radio is turned off."
+            },
+            12.5,
+            false,
+            pal.text_muted,
+            area.right() - 36,
+        );
+    } else {
+        for row in wifi_rows {
+            let hovered = hover == Some(InstallerHit::SelectWifi(row.idx));
+            let bg = if row.selected {
+                pal.accent_soft
+            } else if hovered {
+                pal.pill_hover
+            } else {
+                pal.card_bg
+            };
+            let border = if row.selected {
+                pal.accent
+            } else {
+                pal.card_border
+            };
+            c.fill_rounded_rect(row.rect, 10, bg);
+            c.stroke_rounded_rect(row.rect, 10, if row.selected { 1.6 } else { 1.0 }, border);
+            let status_txt = if row.ap.connected {
+                format!("Connected  •  {}%", row.ap.signal_percent)
+            } else if row.ap.known {
+                format!("Saved  •  {}%", row.ap.signal_percent)
+            } else if row.ap.secure {
+                format!("Secured  •  {}%", row.ap.signal_percent)
+            } else {
+                format!("Open  •  {}%", row.ap.signal_percent)
+            };
+            let title_limit = row.rect.right() - 170;
+            c.draw_text_clipped(
+                row.rect.x + 14,
+                row.rect.y + 22,
+                &row.ap.ssid,
+                13.5,
+                true,
+                pal.text_primary,
+                title_limit,
+            );
+            c.draw_text_clipped(
+                row.rect.right() - 156,
+                row.rect.y + 22,
+                &status_txt,
+                12.0,
+                row.ap.connected,
+                if row.ap.connected {
+                    pal.accent
+                } else {
+                    pal.text_secondary
+                },
+                row.rect.right() - 12,
+            );
+        }
+    }
+
+    render_wifi_auth_controls(c, app, area, password_field, connect_btn, hover, pal);
+}
+
+fn render_wifi_auth_controls(
+    c: &mut Canvas<'_>,
+    app: &InstallerAppState,
+    area: Rect,
+    password_field: Option<&TextFieldRect>,
+    connect_btn: Option<Rect>,
+    hover: Option<InstallerHit>,
+    pal: &Palette,
+) {
+    if let Some(pf) = password_field {
+        draw_text_field(c, app, pf, pal);
+    }
+    if let Some(btn) = connect_btn {
+        let cbg = if hover == Some(InstallerHit::ConnectWifi) {
+            [
+                pal.accent[0].saturating_add(14),
+                pal.accent[1].saturating_add(14),
+                pal.accent[2].saturating_add(14),
+                255,
+            ]
+        } else {
+            pal.accent
+        };
+        c.fill_rounded_rect(btn, 14, cbg);
+        c.draw_text_centered(
+            btn,
+            if app.network.connecting_ssid.is_some() {
+                "Connecting..."
+            } else {
+                "Connect"
+            },
+            12.5,
+            true,
+            [255, 255, 255, 255],
+        );
+    }
+    if let Some(err) = &app.network.connect_error {
+        c.draw_text_clipped(
+            area.x + 36,
+            area.bottom() - 2,
+            err,
+            12.0,
+            false,
+            pal.danger,
+            area.right() - 36,
+        );
+    }
 }
 
 fn render_oobe_account(
@@ -1658,6 +1889,7 @@ fn draw_text_field(
         TextFieldId::Hostname => app.account.hostname.as_str(),
         TextFieldId::Password => app.account.password.as_str(),
         TextFieldId::ConfirmPassword => app.account.confirm_password.as_str(),
+        TextFieldId::WifiPassword => app.wifi_password.as_str(),
     };
     let display = if field.masked {
         "•".repeat(raw.chars().count())
@@ -1776,5 +2008,31 @@ mod tests {
                 "center glass body alpha must be >= 215"
             );
         }
+    }
+
+    #[test]
+    fn renders_install_network_wifi_and_failure_details_cleanly() {
+        let mut app = InstallerAppState::new(&StartupOptions {
+            mode: WizardMode::Install,
+            env_kind: crate::state::RunEnv::Demo,
+            ..Default::default()
+        });
+        app.install_step = crate::state::InstallStep::Network;
+        app.select_wifi_row(1);
+        let net_layout = compute_layout(&app, 800, 580);
+        let mut buf = vec![0_u8; 800 * 580 * 4];
+        render_window_pixels(&mut buf, 800, 580, &app, &net_layout, None, true);
+        assert_eq!(buf[3], 0);
+        assert!(buf.iter().skip(3).step_by(4).any(|&a| a >= 215));
+
+        app.install_step = crate::state::InstallStep::Installing;
+        app.install_error = Some(String::from("Installer failed: error: core.db unreachable"));
+        app.show_logs = true;
+        app.log_lines.push(String::from(
+            "[stderr] error: failed to synchronize all databases",
+        ));
+        let err_layout = compute_layout(&app, 800, 580);
+        render_window_pixels(&mut buf, 800, 580, &app, &err_layout, None, true);
+        assert_eq!(buf[3], 0);
     }
 }

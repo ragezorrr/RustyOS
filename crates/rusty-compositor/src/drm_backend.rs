@@ -43,7 +43,7 @@ use smithay::{
         session::{Event as SessionEvent, Session, libseat::LibSeatSession},
         udev::{UdevBackend, UdevEvent},
     },
-    desktop::utils::{OutputPresentationFeedback, send_frames_surface_tree},
+    desktop::utils::OutputPresentationFeedback,
     output::{Mode as OutputMode, Scale},
     reexports::{
         calloop::{
@@ -569,46 +569,21 @@ pub(crate) fn vblank_client_grace_duration(vrefresh_hz: u32) -> Duration {
     Duration::from_micros(grace_us)
 }
 
-fn surface_tree_has_pending_frame_callbacks(
-    surface: &smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
+fn is_client_forwarded_only_input<B: smithay::backend::input::InputBackend>(
+    event: &InputEvent<B>,
 ) -> bool {
-    use smithay::wayland::compositor::{
-        SurfaceAttributes, TraversalAction, with_surface_tree_downward,
-    };
-    let mut has_callbacks = false;
-    with_surface_tree_downward(
-        surface,
-        (),
-        |_, _, &()| TraversalAction::DoChildren(()),
-        |_, states, &()| {
-            if !states
-                .cached_state
-                .get::<SurfaceAttributes>()
-                .current()
-                .frame_callbacks
-                .is_empty()
-            {
-                has_callbacks = true;
-            }
-        },
-        |_, _, &()| true,
-    );
-    has_callbacks
+    matches!(
+        event,
+        InputEvent::PointerAxis { .. } | InputEvent::Keyboard { .. }
+    )
 }
 
-fn output_has_pending_frame_callbacks(
-    state: &RustyCompositorState,
-    target_output: &smithay::output::Output,
+const fn should_immediate_full_redraw_after_input(
+    client_forwarded_only: bool,
+    shell_redraw_needed: bool,
+    pending_screenshot: bool,
 ) -> bool {
-    if state.ext_session_locked {
-        return state
-            .ext_lock_surface_for_output(target_output)
-            .is_some_and(|lock| surface_tree_has_pending_frame_callbacks(lock.wl_surface()));
-    }
-    state.space.elements().any(|window| {
-        smithay::wayland::seat::WaylandFocus::wl_surface(window)
-            .is_some_and(|root| surface_tree_has_pending_frame_callbacks(&root))
-    })
+    !client_forwarded_only || shell_redraw_needed || pending_screenshot
 }
 
 impl DrmRuntime {
@@ -858,28 +833,13 @@ impl DrmRuntime {
             .output_map
             .get(output_id)
             .map_or_else(|| state.output.clone(), |entry| entry.output.clone());
-        let had_frame_callbacks = output_has_pending_frame_callbacks(state, &target_output);
+        let had_frame_callbacks = state.output_has_pending_frame_callbacks(&target_output);
 
         let elapsed = state.elapsed();
         if state.ext_session_locked {
             state.confirm_pending_session_lock();
-            if let Some(lock_surf) = state.ext_lock_surface_for_output(&target_output) {
-                send_frames_surface_tree(
-                    lock_surf.wl_surface(),
-                    &target_output,
-                    elapsed,
-                    Some(Duration::ZERO),
-                    |_, _| Some(target_output.clone()),
-                );
-            }
-        } else {
-            for window in state.space.elements() {
-                window.send_frame(&target_output, elapsed, Some(Duration::ZERO), |_, _| {
-                    Some(target_output.clone())
-                });
-            }
-            state.send_ime_popup_frames(&target_output, elapsed);
         }
+        state.send_output_frame_callbacks(&target_output, elapsed);
         state.space.refresh();
         state.popups.cleanup();
         state.cleanup_ime_popups();
@@ -1567,7 +1527,7 @@ fn try_run_native_drm_session_once(
                 event,
                 InputEvent::PointerMotion { .. } | InputEvent::PointerMotionAbsolute { .. }
             );
-            let is_axis_only = matches!(event, InputEvent::PointerAxis { .. });
+            let client_forwarded_only = is_client_forwarded_only_input(&event);
             let prev_ptr = app_state.pointer_location;
             app_state.process_input_event(event);
             let _ = app_state.display_handle.flush_clients();
@@ -1590,7 +1550,11 @@ fn try_run_native_drm_session_once(
                 );
                 rt.mark_outputs_dirty(&dirty_ids);
                 rt.render_ready_outputs(app_state, false);
-            } else if !is_axis_only || app_state.take_shell_redraw_needed() {
+            } else if should_immediate_full_redraw_after_input(
+                client_forwarded_only,
+                app_state.take_shell_redraw_needed(),
+                app_state.pending_screenshot.is_some(),
+            ) {
                 rt.mark_all_dirty();
                 rt.render_ready_outputs(app_state, false);
             }
@@ -2576,5 +2540,17 @@ mod tests {
         assert!(!has_parent_graphical_session_in(Some("  "), Some("")));
         assert!(has_parent_graphical_session_in(Some("wayland-0"), None));
         assert!(has_parent_graphical_session_in(None, Some(":0")));
+    }
+
+    #[test]
+    fn client_forwarded_keyboard_and_axis_input_defer_redraw_until_commit() {
+        assert!(!should_immediate_full_redraw_after_input(
+            true, false, false
+        ));
+        assert!(should_immediate_full_redraw_after_input(true, true, false));
+        assert!(should_immediate_full_redraw_after_input(true, false, true));
+        assert!(should_immediate_full_redraw_after_input(
+            false, false, false
+        ));
     }
 }

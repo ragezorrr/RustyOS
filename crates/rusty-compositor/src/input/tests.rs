@@ -462,6 +462,64 @@ struct MockPointerAbs {
     norm_y: f64,
 }
 
+struct MockKeyEvent {
+    time: u64,
+    key_code: u32,
+    state: KeyState,
+    count: u32,
+}
+
+struct MockKeyBackend;
+
+impl InputBackend for MockKeyBackend {
+    type Device = MockTouchpadDevice;
+    type KeyboardKeyEvent = MockKeyEvent;
+    type PointerAxisEvent = smithay::backend::input::UnusedEvent;
+    type PointerButtonEvent = smithay::backend::input::UnusedEvent;
+    type PointerMotionEvent = smithay::backend::input::UnusedEvent;
+    type PointerMotionAbsoluteEvent = smithay::backend::input::UnusedEvent;
+    type GestureSwipeBeginEvent = smithay::backend::input::UnusedEvent;
+    type GestureSwipeUpdateEvent = smithay::backend::input::UnusedEvent;
+    type GestureSwipeEndEvent = smithay::backend::input::UnusedEvent;
+    type GesturePinchBeginEvent = smithay::backend::input::UnusedEvent;
+    type GesturePinchUpdateEvent = smithay::backend::input::UnusedEvent;
+    type GesturePinchEndEvent = smithay::backend::input::UnusedEvent;
+    type GestureHoldBeginEvent = smithay::backend::input::UnusedEvent;
+    type GestureHoldEndEvent = smithay::backend::input::UnusedEvent;
+    type TouchDownEvent = smithay::backend::input::UnusedEvent;
+    type TouchUpEvent = smithay::backend::input::UnusedEvent;
+    type TouchMotionEvent = smithay::backend::input::UnusedEvent;
+    type TouchCancelEvent = smithay::backend::input::UnusedEvent;
+    type TouchFrameEvent = smithay::backend::input::UnusedEvent;
+    type TabletToolAxisEvent = smithay::backend::input::UnusedEvent;
+    type TabletToolProximityEvent = smithay::backend::input::UnusedEvent;
+    type TabletToolTipEvent = smithay::backend::input::UnusedEvent;
+    type TabletToolButtonEvent = smithay::backend::input::UnusedEvent;
+    type SwitchToggleEvent = smithay::backend::input::UnusedEvent;
+    type SpecialEvent = std::convert::Infallible;
+}
+
+impl Event<MockKeyBackend> for MockKeyEvent {
+    fn time(&self) -> u64 {
+        self.time
+    }
+    fn device(&self) -> MockTouchpadDevice {
+        MockTouchpadDevice
+    }
+}
+
+impl smithay::backend::input::KeyboardKeyEvent<MockKeyBackend> for MockKeyEvent {
+    fn key_code(&self) -> smithay::backend::input::Keycode {
+        smithay::backend::input::Keycode::new(self.key_code)
+    }
+    fn state(&self) -> KeyState {
+        self.state
+    }
+    fn count(&self) -> u32 {
+        self.count
+    }
+}
+
 struct MockGestureBackend;
 
 impl InputBackend for MockGestureBackend {
@@ -1590,5 +1648,58 @@ fn top_bar_clock_opens_notification_center_and_persists_after_toast_expiry()
     assert_eq!(compositor.notification_history.len(), 0);
     compositor.close_notification_center();
     assert!(!compositor.notification_center_open);
+    Ok(())
+}
+
+#[test]
+fn client_forwarded_typing_does_not_mark_shell_redraw_while_launcher_typing_does()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (_display, _event_loop, mut compositor) =
+        test_compositor_state("rusty-test-keyboard-redraw")?;
+    let _ = compositor.take_shell_redraw_needed();
+
+    // Linux KEY_A (30) + evdev/XKB offset (8) = 38.
+    compositor.process_input_event(InputEvent::<MockKeyBackend>::Keyboard {
+        event: MockKeyEvent {
+            time: 1_000,
+            key_code: 38,
+            state: KeyState::Pressed,
+            count: 1,
+        },
+    });
+    assert!(
+        !compositor.take_shell_redraw_needed(),
+        "Forwarded client keystroke must not force a stale pre-commit compositor frame"
+    );
+
+    compositor.process_input_event(InputEvent::<MockKeyBackend>::Keyboard {
+        event: MockKeyEvent {
+            time: 1_050,
+            key_code: 38,
+            state: KeyState::Released,
+            count: 0,
+        },
+    });
+    assert!(
+        !compositor.take_shell_redraw_needed(),
+        "Forwarded client key release must not force a stale pre-commit compositor frame"
+    );
+
+    compositor.toggle_launcher();
+    let _ = compositor.take_shell_redraw_needed();
+    compositor.process_input_event(InputEvent::<MockKeyBackend>::Keyboard {
+        event: MockKeyEvent {
+            time: 1_100,
+            key_code: 38,
+            state: KeyState::Pressed,
+            count: 1,
+        },
+    });
+    assert!(
+        compositor.take_shell_redraw_needed(),
+        "Spotlight launcher typing intercept must immediately request a shell redraw"
+    );
+    assert_eq!(compositor.launcher.query, "a");
+
     Ok(())
 }

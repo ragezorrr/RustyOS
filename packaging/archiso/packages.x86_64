@@ -1,11 +1,11 @@
 amd-ucode
-archinstall
 arch-install-scripts
 base
+base-devel
 dosfstools
 e2fsprogs
 efibootmgr
-firefox
+git
 gptfdisk
 greetd
 grub
@@ -27,6 +27,7 @@ seatd
 sudo
 syslinux
 systemd-resolvconf
+ttf-jetbrains-mono
 wireplumber
 xdg-desktop-portal
 xdg-desktop-portal-gtk

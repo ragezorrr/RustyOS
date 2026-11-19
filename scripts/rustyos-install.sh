@@ -172,10 +172,34 @@ partition_suffix() {
     fi
 }
 
+cleanup_install_mounts() {
+    if [[ -d "${MOUNT_ROOT}/etc/pacman.d/gnupg" ]] && command -v gpgconf >/dev/null 2>&1; then
+        gpgconf --homedir "${MOUNT_ROOT}/etc/pacman.d/gnupg" --kill all >/dev/null 2>&1 || true
+    fi
+    if command -v fuser >/dev/null 2>&1; then
+        fuser -km "${MOUNT_ROOT}" >/dev/null 2>&1 || true
+    fi
+    umount -R "${MOUNT_ROOT}" >/dev/null 2>&1 || umount -lR "${MOUNT_ROOT}" >/dev/null 2>&1 || true
+}
+
 assert_unmounted_non_root() {
     local dev="$1"
     local mounted
     mounted="$(lsblk -nr -o MOUNTPOINTS "${dev}" 2>/dev/null | grep -v '^$' || true)"
+    if [[ -n "${mounted}" ]]; then
+        local non_installer_mnts=""
+        local m
+        while IFS= read -r m; do
+            [[ -z "${m}" ]] && continue
+            if [[ "${m}" != "${MOUNT_ROOT}" && "${m}" != "${MOUNT_ROOT}/"* ]]; then
+                non_installer_mnts+="${m} "
+            fi
+        done <<<"${mounted}"
+        if [[ -z "${non_installer_mnts}" ]]; then
+            cleanup_install_mounts
+            mounted="$(lsblk -nr -o MOUNTPOINTS "${dev}" 2>/dev/null | grep -v '^$' || true)"
+        fi
+    fi
     if [[ -n "${mounted}" ]]; then
         echo "Error: target '${dev}' has active mountpoints (${mounted}); refusing" >&2
         exit 3
@@ -292,9 +316,11 @@ run_dry_plan() {
         fi
     fi
 
-    emit_step 55 pacstrap "[dry-run] Would run pacstrap -K ${MOUNT_ROOT}: base linux linux-firmware networkmanager pipewire wireplumber seatd polkit mesa xorg-xwayland firefox greetd sudo ${boot_pkg} rustyos-git"
+    emit_step 40 keyring "[dry-run] Would initialize pacman-key and refresh archlinux-keyring"
+    emit_step 55 pacstrap "[dry-run] Would run pacstrap -K ${MOUNT_ROOT}: base linux linux-firmware networkmanager pipewire wireplumber seatd polkit mesa xorg-xwayland ttf-jetbrains-mono git base-devel greetd sudo ${boot_pkg} rustyos-git"
     emit_step 75 system "[dry-run] Would set timezone=${TIMEZONE_VAL}, locale=${LOCALE_VAL}, keymap=${KEYMAP_VAL}, hostname=${HOSTNAME_VAL}, user=${USERNAME_VAL}"
     emit_step 88 desktop "[dry-run] Would write /etc/greetd/config.toml (autologin=${AUTOLOGIN}) and ~/.config/rustyos/config.toml (theme=${APPEARANCE}, accent=${ACCENT_INDEX}, kb=${KB_LAYOUT}, oobe=${INSTALL_OOBE})"
+    emit_step 90 yay "[dry-run] Would build and install optional yay-bin AUR helper for ${USERNAME_VAL} (with safe fallback)"
     if [[ "${INSTALL_MODE}" == "dual-boot" ]]; then
         emit_step 96 bootloader "[dry-run] Would install ${BOOTLOADER} with dual-boot preservation (entries/rustyos.conf or os-prober) and initramfs"
     else
@@ -303,11 +329,61 @@ run_dry_plan() {
     emit_step 100 done "[dry-run] Installation plan verified cleanly (no disk writes performed)"
 }
 
+check_network_preflight() {
+    emit_step 3 netcheck "Verifying internet access for package installation"
+    if command -v curl >/dev/null 2>&1; then
+        if curl -fsIL --connect-timeout 5 --max-time 8 https://geo.mirror.pkgbuild.com/ >/dev/null 2>&1 \
+            || curl -fsIL --connect-timeout 5 --max-time 8 https://archlinux.org/ >/dev/null 2>&1; then
+            return 0
+        fi
+    elif ip route show default 2>/dev/null | grep -q . || ip -6 route show default 2>/dev/null | grep -q .; then
+        return 0
+    fi
+    echo "Error: no active internet connection detected. Connect to Ethernet or Wi-Fi first (required by pacstrap). Full log: /tmp/rustyos-install.log" >&2
+    exit 6
+}
+
+install_optional_yay_bin() {
+    local build_dir="/tmp/rustyos-yay-build"
+    emit_step 90 yay "Installing yay AUR helper (yay-bin) for ${USERNAME_VAL}"
+    rm -rf "${MOUNT_ROOT}${build_dir}"
+    mkdir -p "${MOUNT_ROOT}${build_dir}"
+    if ! arch-chroot "${MOUNT_ROOT}" chown -R "${USERNAME_VAL}:${USERNAME_VAL}" "${build_dir}"; then
+        rm -rf "${MOUNT_ROOT}${build_dir}"
+        echo "Warning: failed to prepare ${build_dir} for yay-bin build; continuing without yay." >&2
+        return 0
+    fi
+    if arch-chroot "${MOUNT_ROOT}" su - "${USERNAME_VAL}" -c \
+        "git clone --depth=1 https://aur.archlinux.org/yay-bin.git '${build_dir}/src' && cd '${build_dir}/src' && makepkg -f --noconfirm --noprogressbar"
+    then
+        local pkg_list=()
+        local pkg_file
+        for pkg_file in "${MOUNT_ROOT}${build_dir}"/src/yay-bin-*.pkg.tar.*; do
+            [[ -e "${pkg_file}" ]] || continue
+            case "${pkg_file}" in
+                *-debug-*.pkg.tar.*|*.sig) continue ;;
+            esac
+            pkg_list+=("${pkg_file#${MOUNT_ROOT}}")
+        done
+        if [[ "${#pkg_list[@]}" -gt 0 ]] && arch-chroot "${MOUNT_ROOT}" pacman -U --noconfirm "${pkg_list[@]}"; then
+            rm -rf "${MOUNT_ROOT}${build_dir}"
+            return 0
+        fi
+    fi
+    rm -rf "${MOUNT_ROOT}${build_dir}"
+    echo "Warning: optional yay-bin AUR installation failed (network/AUR unreachable); system installation continues without yay." >&2
+    return 0
+}
+
 install_system() {
     if [[ "$(id -u)" -ne 0 ]]; then
         echo "Error: real installation requires root privileges (use pkexec / sudo, or pass --dry-run)" >&2
         exit 4
     fi
+    : > /tmp/rustyos-install.log
+    chmod 0644 /tmp/rustyos-install.log 2>/dev/null || true
+    exec > >(tee -a /tmp/rustyos-install.log) 2> >(tee -a /tmp/rustyos-install.log >&2)
+
     if [[ "${INSTALL_MODE}" == "whole-disk" && "${CONFIRM_ERASE}" -ne 1 ]]; then
         echo "Error: pass --confirm-erase to confirm destructive partitioning of ${TARGET_DISK}" >&2
         exit 2
@@ -316,23 +392,22 @@ install_system() {
         echo "Error: pass --confirm-dualboot to confirm dual-boot partition installation" >&2
         exit 2
     fi
-    for tool in sgdisk blockdev mkfs.fat mkfs.ext4 pacstrap genfstab arch-chroot partprobe blkid; do
+    for tool in sgdisk blockdev mkfs.fat mkfs.ext4 pacman pacman-key pacstrap genfstab arch-chroot partprobe blkid; do
         if ! command -v "${tool}" >/dev/null 2>&1; then
             echo "Error: required installation tool '${tool}' not found in PATH" >&2
             exit 5
         fi
     done
 
+    check_network_preflight
+
     local efi_part root_part format_efi=0 boot_pkg="efibootmgr" boot_disk=""
     if [[ "${BOOTLOADER}" == "grub" ]]; then
         boot_pkg="grub efibootmgr os-prober"
     fi
 
-    cleanup_mounts() {
-        umount -R "${MOUNT_ROOT}" >/dev/null 2>&1 || true
-    }
-    trap cleanup_mounts EXIT
-    umount -R "${MOUNT_ROOT}" >/dev/null 2>&1 || true
+    trap cleanup_install_mounts EXIT
+    cleanup_install_mounts
     mkdir -p "${MOUNT_ROOT}"
 
     if [[ "${INSTALL_MODE}" == "whole-disk" ]]; then
@@ -450,16 +525,31 @@ install_system() {
         fi
     fi
 
-    local pacman_conf_arg=()
+    local pacstrap_conf_arg=() host_pacman_conf_arg=()
     if [[ -f /etc/pacman-rustyos-install.conf ]]; then
-        pacman_conf_arg=(-C /etc/pacman-rustyos-install.conf)
+        pacstrap_conf_arg=(-C /etc/pacman-rustyos-install.conf)
+        host_pacman_conf_arg=(--config /etc/pacman-rustyos-install.conf)
     fi
+    if ! grep -qE '^[[:space:]]*Server[[:space:]]*=' /etc/pacman.d/mirrorlist 2>/dev/null; then
+        mkdir -p /etc/pacman.d
+        cat <<'EOF' > /etc/pacman.d/mirrorlist
+Server = https://geo.mirror.pkgbuild.com/$repo/os/$arch
+Server = https://fastly.mirror.pkgbuild.com/$repo/os/$arch
+Server = https://berlin.mirror.pkgbuild.com/$repo/os/$arch
+Server = https://mirror.rackspace.com/archlinux/$repo/os/$arch
+EOF
+    fi
+
+    emit_step 40 keyring "Initializing pacman keyring and updating archlinux-keyring"
+    pacman-key --init
+    pacman-key --populate archlinux
+    pacman -Sy --noconfirm --needed "${host_pacman_conf_arg[@]}" archlinux-keyring
 
     emit_step 45 pacstrap "Installing base system, Wayland desktop, and RustyOS packages"
     # shellcheck disable=SC2086
-    pacstrap -K "${pacman_conf_arg[@]}" "${MOUNT_ROOT}" \
+    pacstrap -K "${pacstrap_conf_arg[@]}" "${MOUNT_ROOT}" \
         base linux linux-firmware networkmanager pipewire wireplumber \
-        seatd polkit mesa xorg-xwayland firefox greetd sudo \
+        seatd polkit mesa xorg-xwayland ttf-jetbrains-mono git base-devel greetd sudo \
         ${boot_pkg} rustyos-git
 
     emit_step 75 system "Configuring timezone, locale, hostname, and user ${USERNAME_VAL}"
@@ -481,8 +571,21 @@ EOF
     chmod 0440 "${MOUNT_ROOT}/etc/sudoers.d/10-wheel"
 
     emit_step 85 desktop "Configuring greetd, NetworkManager, and RustyOS preferences"
-    if [[ -f /etc/pacman.conf ]] && grep -q '^\[rustyos\]' /etc/pacman.conf && ! grep -q '^\[rustyos\]' "${MOUNT_ROOT}/etc/pacman.conf"; then
-        awk '/^\[rustyos\]/,/^$/' /etc/pacman.conf >> "${MOUNT_ROOT}/etc/pacman.conf"
+    if [[ -f "${MOUNT_ROOT}/etc/pacman.conf" ]] && ! grep -q '^\[rustyos\]$' "${MOUNT_ROOT}/etc/pacman.conf"; then
+        if [[ -f /etc/pacman.conf ]] && grep -q '^\[rustyos\]$' /etc/pacman.conf; then
+            printf '\n' >> "${MOUNT_ROOT}/etc/pacman.conf"
+            awk '/^\[rustyos\]$/,/^$/' /etc/pacman.conf >> "${MOUNT_ROOT}/etc/pacman.conf"
+        elif [[ -f /etc/pacman-rustyos-install.conf ]] && grep -q '^\[rustyos\]$' /etc/pacman-rustyos-install.conf; then
+            printf '\n' >> "${MOUNT_ROOT}/etc/pacman.conf"
+            awk '/^\[rustyos\]$/,/^$/' /etc/pacman-rustyos-install.conf >> "${MOUNT_ROOT}/etc/pacman.conf"
+        else
+            cat <<'EOF' >> "${MOUNT_ROOT}/etc/pacman.conf"
+
+[rustyos]
+SigLevel = Optional TrustAll
+Server = https://ragezorrr.github.io/RustyOS/repo/$arch
+EOF
+        fi
     fi
     if [[ -d /opt/rustyos-repo ]]; then
         mkdir -p "${MOUNT_ROOT}/opt/rustyos-repo"
@@ -536,6 +639,7 @@ EOF
     arch-chroot "${MOUNT_ROOT}" chown -R "${USERNAME_VAL}:${USERNAME_VAL}" "/home/${USERNAME_VAL}/.config"
 
     arch-chroot "${MOUNT_ROOT}" systemctl enable NetworkManager greetd
+    install_optional_yay_bin
 
     emit_step 95 bootloader "Installing ${BOOTLOADER}"
     if [[ "${BOOTLOADER}" == "grub" ]]; then

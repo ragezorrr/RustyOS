@@ -181,7 +181,11 @@ impl InstallerClient {
                 self.layout_cache = None;
             }
             Keysym::Return | Keysym::KP_Enter => {
-                self.app.go_next(Instant::now());
+                if self.app.caret.focused_field == Some(crate::state::TextFieldId::WifiPassword) {
+                    self.app.connect_selected_wifi();
+                } else {
+                    self.app.go_next(Instant::now());
+                }
                 self.layout_cache = None;
             }
             _ => {
@@ -246,6 +250,12 @@ impl InstallerClient {
                 self.app.go_next(now);
                 self.layout_cache = None;
             }
+            other => self.dispatch_content_hit(other, now),
+        }
+    }
+
+    fn dispatch_content_hit(&mut self, hit: InstallerHit, now: Instant) {
+        match hit {
             InstallerHit::WelcomeCard(action) => match action {
                 WelcomeAction::InstallToDisk => {
                     self.app.go_next(now);
@@ -280,7 +290,22 @@ impl InstallerClient {
                     self.layout_cache = None;
                 }
             }
-            InstallerHit::RefreshNetwork => self.app.spawn_network_probe(),
+            InstallerHit::RefreshNetwork => {
+                self.app.spawn_network_probe_with_scan(true);
+                self.layout_cache = None;
+            }
+            InstallerHit::ToggleWifi => {
+                self.app.toggle_wifi_radio();
+                self.layout_cache = None;
+            }
+            InstallerHit::SelectWifi(idx) => {
+                self.app.select_wifi_row(idx);
+                self.layout_cache = None;
+            }
+            InstallerHit::ConnectWifi => {
+                self.app.connect_selected_wifi();
+                self.layout_cache = None;
+            }
             InstallerHit::FocusField(field) => {
                 self.app.caret.focused_field = Some(field);
                 self.app.caret.visible = true;
@@ -306,6 +331,13 @@ impl InstallerClient {
                 self.app.win.dirty = true;
                 self.layout_cache = None;
             }
+            InstallerHit::ResizeEdge(_)
+            | InstallerHit::WindowDrag
+            | InstallerHit::TrafficClose
+            | InstallerHit::TrafficMinimize
+            | InstallerHit::TrafficMaximize
+            | InstallerHit::BackButton
+            | InstallerHit::PrimaryButton => {}
         }
     }
 

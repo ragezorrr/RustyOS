@@ -21,16 +21,16 @@ depends=(
   'seatd'
   'dbus'
   'fontconfig'
-  'adwaita-icon-theme'
+  'ttf-jetbrains-mono'
   'xorg-xwayland'
   'pipewire'
   'xdg-desktop-portal'
   'polkit'
   'pacman-contrib'
-  'firefox'
 )
 makedepends=('rust' 'cargo' 'git' 'pkgconf')
 optdepends=(
+  'firefox: optional Mozilla web browser'
   'sddm: graphical Wayland session login chooser'
   'greetd: minimal login manager alternative'
   'networkmanager: Wi-Fi status and network toggles in Control Center'

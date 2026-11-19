@@ -23,7 +23,7 @@ use smithay::{
     },
     utils::{IsAlive, Logical, Point, Rectangle, Serial},
     wayland::{
-        compositor::{self, TraversalAction},
+        compositor::{self, SurfaceAttributes, TraversalAction, with_surface_tree_downward},
         input_method::{InputMethodHandler, PopupSurface as ImePopupSurface},
         seat::WaylandFocus,
         shell::{
@@ -782,6 +782,77 @@ impl RustyCompositorState {
         }
     }
 
+    /// Emits Wayland frame callbacks across all visible toplevels, `xdg_popup`s,
+    /// `layer_shell` surfaces (and their popups), and active IME popups on `target_output`.
+    pub fn send_output_frame_callbacks(&self, target_output: &Output, elapsed: Duration) {
+        if self.ext_session_locked {
+            if let Some(lock_surf) = self.ext_lock_surface_for_output(target_output) {
+                send_frames_surface_tree(
+                    lock_surf.wl_surface(),
+                    target_output,
+                    elapsed,
+                    Some(Duration::ZERO),
+                    |_, _| Some(target_output.clone()),
+                );
+            }
+            return;
+        }
+
+        for window in self.space.elements() {
+            window.send_frame(target_output, elapsed, Some(Duration::ZERO), |_, _| {
+                Some(target_output.clone())
+            });
+        }
+        let layer_map = layer_map_for_output(target_output);
+        for layer in layer_map.layers() {
+            let root = layer.wl_surface();
+            send_frames_surface_tree(
+                root,
+                target_output,
+                elapsed,
+                Some(Duration::ZERO),
+                |_, _| Some(target_output.clone()),
+            );
+            for (popup, _) in PopupManager::popups_for_surface(root) {
+                send_frames_surface_tree(
+                    popup.wl_surface(),
+                    target_output,
+                    elapsed,
+                    Some(Duration::ZERO),
+                    |_, _| Some(target_output.clone()),
+                );
+            }
+        }
+        drop(layer_map);
+        self.send_ime_popup_frames(target_output, elapsed);
+    }
+
+    /// Returns `true` when any visible surface or popup tree on `target_output` has pending
+    /// Wayland `wl_surface.frame()` callbacks awaiting the next presentation.
+    #[must_use]
+    pub fn output_has_pending_frame_callbacks(&self, target_output: &Output) -> bool {
+        if self.ext_session_locked {
+            return self
+                .ext_lock_surface_for_output(target_output)
+                .is_some_and(|lock| surface_tree_has_pending_frame_callbacks(lock.wl_surface()));
+        }
+        if self.space.elements().any(|window| {
+            WaylandFocus::wl_surface(window)
+                .is_some_and(|root| surface_and_popups_have_pending_frame_callbacks(&root))
+        }) {
+            return true;
+        }
+        let has_layer_callbacks = layer_map_for_output(target_output)
+            .layers()
+            .any(|layer| surface_and_popups_have_pending_frame_callbacks(layer.wl_surface()));
+        if has_layer_callbacks {
+            return true;
+        }
+        self.ime_popups_for_output(target_output)
+            .into_iter()
+            .any(|(popup, _)| surface_tree_has_pending_frame_callbacks(popup.wl_surface()))
+    }
+
     /// Returns `true` if the window uses client-side decorations (CSD) and should not
     /// be wrapped with a RustyOS SSD titlebar (`RUSTYOS-030`).
     #[must_use]
@@ -1526,4 +1597,32 @@ impl RustyCompositorState {
             }
         }
     }
+}
+
+fn surface_tree_has_pending_frame_callbacks(surface: &WlSurface) -> bool {
+    let mut has_callbacks = false;
+    with_surface_tree_downward(
+        surface,
+        (),
+        |_, _, &()| TraversalAction::DoChildren(()),
+        |_, states, &()| {
+            if !states
+                .cached_state
+                .get::<SurfaceAttributes>()
+                .current()
+                .frame_callbacks
+                .is_empty()
+            {
+                has_callbacks = true;
+            }
+        },
+        |_, _, &()| true,
+    );
+    has_callbacks
+}
+
+fn surface_and_popups_have_pending_frame_callbacks(root: &WlSurface) -> bool {
+    surface_tree_has_pending_frame_callbacks(root)
+        || PopupManager::popups_for_surface(root)
+            .any(|(popup, _)| surface_tree_has_pending_frame_callbacks(popup.wl_surface()))
 }

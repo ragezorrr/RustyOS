@@ -41,7 +41,20 @@ impl RustyCompositorState {
         );
 
         if let Some(action) = intercepted {
+            let needs_redraw = !matches!(
+                action,
+                KeyIntercept::LockScreenConsume
+                    | KeyIntercept::LauncherConsume
+                    | KeyIntercept::SwitcherConsume
+                    | KeyIntercept::DesktopInlineRenameConsume
+                    | KeyIntercept::SwitchVt(_)
+                    | KeyIntercept::Security(SecurityKeyAction::Consume)
+                    | KeyIntercept::Portal(PortalKeyAction::Consume)
+            );
             self.dispatch_key_intercept(action, serial);
+            if needs_redraw {
+                self.shell_redraw_needed = true;
+            }
         }
         self.refresh_keyboard_layout_label();
     }

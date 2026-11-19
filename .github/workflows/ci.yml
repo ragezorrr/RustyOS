@@ -69,8 +69,8 @@ jobs:
           pacman -Syu --noconfirm \
             git rust pkgconf gnupg \
             wayland libxkbcommon mesa libglvnd libinput systemd-libs seatd \
-            dbus fontconfig adwaita-icon-theme xorg-xwayland pipewire \
-            xdg-desktop-portal polkit pacman-contrib firefox desktop-file-utils libxml2
+            dbus fontconfig ttf-jetbrains-mono xorg-xwayland pipewire \
+            xdg-desktop-portal polkit pacman-contrib desktop-file-utils libxml2
 
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -215,8 +215,8 @@ jobs:
           pacman -Syu --noconfirm \
             git rust pkgconf archiso pacman-contrib \
             wayland libxkbcommon mesa libglvnd libinput systemd-libs seatd \
-            dbus fontconfig adwaita-icon-theme xorg-xwayland pipewire \
-            xdg-desktop-portal polkit firefox
+            dbus fontconfig ttf-jetbrains-mono xorg-xwayland pipewire \
+            xdg-desktop-portal polkit
 
       - name: Checkout repository
         uses: actions/checkout@v4

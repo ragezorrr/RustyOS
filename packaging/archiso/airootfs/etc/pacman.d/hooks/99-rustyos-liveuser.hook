@@ -1,0 +1,16 @@
+[Trigger]
+Operation = Install
+Operation = Upgrade
+Type = Package
+Target = rustyos-git
+
+[Action]
+Description = Configuring RustyOS Live user 'liveuser', locale, and live services...
+When = PostTransaction
+Depends = glibc
+Depends = shadow
+Depends = seatd
+Depends = greetd
+Depends = networkmanager
+Depends = systemd
+Exec = /usr/bin/sh /usr/local/bin/rustyos-liveuser-setup

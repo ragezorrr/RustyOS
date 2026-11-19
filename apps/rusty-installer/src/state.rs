@@ -13,8 +13,8 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 use rusty_animation::{AnimatedValue, Easing};
-use rusty_services::NetworkService;
 use rusty_services::file_manager::{FilesThemeMode, UserFileLocations, clamp_accent_index};
+use rusty_services::{NetworkService, WifiAccessPoint};
 
 use crate::disks::{
     DualBootKind, DualBootTargetInfo, TargetDiskInfo, collect_dualboot_targets, demo_target_disks,
@@ -75,6 +75,7 @@ pub(crate) enum ThemeSync {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InstallStep {
     Welcome,
+    Network,
     SelectDisk,
     AccountStyle,
     Installing,
@@ -85,9 +86,10 @@ impl InstallStep {
     pub(crate) const fn index(self) -> usize {
         match self {
             Self::Welcome => 0,
-            Self::SelectDisk => 1,
-            Self::AccountStyle => 2,
-            Self::Installing => 3,
+            Self::Network => 1,
+            Self::SelectDisk => 2,
+            Self::AccountStyle => 3,
+            Self::Installing => 4,
         }
     }
 
@@ -95,6 +97,7 @@ impl InstallStep {
     pub(crate) const fn title(self) -> &'static str {
         match self {
             Self::Welcome => "Install RustyOS",
+            Self::Network => "Internet & Wi-Fi",
             Self::SelectDisk => "Select Destination Disk",
             Self::AccountStyle => "Account & Appearance",
             Self::Installing => "Installing RustyOS",
@@ -175,6 +178,7 @@ pub(crate) enum TextFieldId {
     Hostname,
     Password,
     ConfirmPassword,
+    WifiPassword,
 }
 
 impl TextFieldId {
@@ -188,12 +192,18 @@ impl TextFieldId {
 
     #[must_use]
     pub(crate) fn next(self) -> Self {
+        if self == Self::WifiPassword {
+            return Self::WifiPassword;
+        }
         let idx = Self::ALL.iter().position(|f| *f == self).unwrap_or(0);
         Self::ALL[(idx + 1) % Self::ALL.len()]
     }
 
     #[must_use]
     pub(crate) fn prev(self) -> Self {
+        if self == Self::WifiPassword {
+            return Self::WifiPassword;
+        }
         let idx = Self::ALL.iter().position(|f| *f == self).unwrap_or(0);
         Self::ALL[(idx + Self::ALL.len() - 1) % Self::ALL.len()]
     }
@@ -211,18 +221,33 @@ pub(crate) struct StartupOptions {
 }
 
 #[derive(Debug, Clone)]
+#[allow(clippy::struct_excessive_bools)]
 pub(crate) struct NetworkSummary {
     pub ethernet_online: bool,
+    pub wifi_enabled: bool,
+    pub wifi_connected: bool,
+    pub internet_ready: bool,
+    pub scanning: bool,
+    pub connecting_ssid: Option<String>,
     pub active_ssid: Option<String>,
     pub detail: String,
+    pub connect_error: Option<String>,
+    pub wifi_networks: Vec<WifiAccessPoint>,
 }
 
 impl Default for NetworkSummary {
     fn default() -> Self {
         Self {
             ethernet_online: false,
+            wifi_enabled: true,
+            wifi_connected: false,
+            internet_ready: false,
+            scanning: false,
+            connecting_ssid: None,
             active_ssid: None,
             detail: String::from("Checking network interfaces..."),
+            connect_error: None,
+            wifi_networks: Vec::new(),
         }
     }
 }
@@ -256,6 +281,11 @@ pub(crate) struct CaretState {
 pub(crate) enum WorkerEvent {
     DisksLoaded(Vec<TargetDiskInfo>),
     NetworkLoaded(NetworkSummary),
+    WifiConnectCompleted {
+        ok: bool,
+        detail: String,
+        summary: NetworkSummary,
+    },
     InstallStep {
         pct: u8,
         stage: String,
@@ -297,6 +327,8 @@ pub(crate) struct InstallerAppState {
     pub dualboot_targets: Vec<DualBootTargetInfo>,
     pub selected_dualboot_idx: Option<usize>,
     pub network: NetworkSummary,
+    pub selected_wifi_idx: Option<usize>,
+    pub wifi_password: String,
     pub account: AccountDraft,
     pub caret: CaretState,
     pub form_error: Option<String>,
@@ -371,7 +403,13 @@ impl InstallerAppState {
             selected_disk_idx: None,
             dualboot_targets: Vec::new(),
             selected_dualboot_idx: None,
-            network: NetworkSummary::default(),
+            network: if is_demo {
+                demo_network_summary()
+            } else {
+                NetworkSummary::default()
+            },
+            selected_wifi_idx: is_demo.then_some(0),
+            wifi_password: String::new(),
             account: AccountDraft {
                 full_name: String::from("RustyOS User"),
                 username: String::from("rusty"),
@@ -447,27 +485,165 @@ impl InstallerAppState {
             });
     }
 
+    #[must_use]
+    pub(crate) fn selected_wifi(&self) -> Option<&WifiAccessPoint> {
+        self.selected_wifi_idx
+            .and_then(|i| self.network.wifi_networks.get(i))
+    }
+
     pub(crate) fn spawn_network_probe(&mut self) {
+        self.spawn_network_probe_with_scan(false);
+    }
+
+    pub(crate) fn spawn_network_probe_with_scan(&mut self, rescan: bool) {
+        if self.network.scanning {
+            return;
+        }
+        self.network.scanning = true;
+        self.win.dirty = true;
+
+        if self.env_kind == RunEnv::Demo {
+            self.network = demo_network_summary();
+            if self.selected_wifi_idx.is_none() && !self.network.wifi_networks.is_empty() {
+                self.selected_wifi_idx = Some(0);
+            }
+            return;
+        }
+
         let tx = self.event_tx.clone();
         let wake = self.wake_ping.clone();
         let _ = thread::Builder::new()
             .name(String::from("installer-net-probe"))
             .spawn(move || {
-                let status = NetworkService::new().query_status();
-                let summary = NetworkSummary {
-                    ethernet_online: status.wired_connected,
-                    active_ssid: status.wifi_ssid.clone(),
-                    detail: if status.wired_connected {
-                        String::from("Ethernet link is connected and ready")
-                    } else if let Some(ssid) = &status.wifi_ssid {
-                        format!("Connected to Wi-Fi '{ssid}'")
-                    } else if status.wifi_enabled {
-                        String::from("Wi-Fi radio is enabled; select a network in Settings")
-                    } else {
-                        String::from("No active connection; offline setup available")
-                    },
-                };
+                let summary = query_network_summary(rescan);
                 let _ = tx.send(WorkerEvent::NetworkLoaded(summary));
+                if let Some(cb) = wake {
+                    cb();
+                }
+            });
+    }
+
+    pub(crate) fn toggle_wifi_radio(&mut self) {
+        let next = !self.network.wifi_enabled;
+        self.network.connect_error = None;
+        self.form_error = None;
+
+        if self.env_kind == RunEnv::Demo {
+            if next {
+                self.network = demo_network_summary();
+                self.selected_wifi_idx = Some(0);
+            } else {
+                self.network.wifi_enabled = false;
+                self.network.wifi_connected = false;
+                self.network.active_ssid = None;
+                self.network.internet_ready = self.network.ethernet_online;
+                self.network.wifi_networks.clear();
+                self.network.detail = String::from("Wi-Fi radio turned off");
+                self.selected_wifi_idx = None;
+            }
+            self.win.dirty = true;
+            return;
+        }
+
+        self.network.scanning = true;
+        self.win.dirty = true;
+        let tx = self.event_tx.clone();
+        let wake = self.wake_ping.clone();
+        let _ = thread::Builder::new()
+            .name(String::from("installer-wifi-toggle"))
+            .spawn(move || {
+                let svc = NetworkService::new();
+                let _ = svc.set_wifi_enabled(next);
+                let summary = query_network_summary(next);
+                let _ = tx.send(WorkerEvent::NetworkLoaded(summary));
+                if let Some(cb) = wake {
+                    cb();
+                }
+            });
+    }
+
+    pub(crate) fn select_wifi_row(&mut self, idx: usize) {
+        let Some(ap) = self.network.wifi_networks.get(idx).cloned() else {
+            return;
+        };
+        if self.selected_wifi_idx != Some(idx) {
+            self.wifi_password.clear();
+        }
+        self.selected_wifi_idx = Some(idx);
+        self.network.connect_error = None;
+        self.form_error = None;
+        if ap.secure && !ap.known && !ap.connected {
+            self.caret.focused_field = Some(TextFieldId::WifiPassword);
+            self.caret.visible = true;
+            self.caret.last_blink = Instant::now();
+        } else {
+            self.caret.focused_field = None;
+        }
+        self.win.dirty = true;
+    }
+
+    pub(crate) fn connect_selected_wifi(&mut self) {
+        if self.network.connecting_ssid.is_some() {
+            return;
+        }
+        let Some(ap) = self.selected_wifi().cloned() else {
+            self.network.connect_error = Some(String::from("Select a Wi-Fi network first"));
+            self.win.dirty = true;
+            return;
+        };
+        let needs_pw = ap.secure && !ap.known && self.wifi_password.is_empty();
+        if needs_pw && !ap.connected {
+            self.caret.focused_field = Some(TextFieldId::WifiPassword);
+            self.network.connect_error = Some(format!(
+                "Enter the Wi-Fi password for '{}' and click Connect",
+                ap.ssid
+            ));
+            self.win.dirty = true;
+            return;
+        }
+
+        self.network.connect_error = None;
+        self.form_error = None;
+        self.network.connecting_ssid = Some(ap.ssid.clone());
+        self.win.dirty = true;
+
+        if self.env_kind == RunEnv::Demo {
+            let mut summary = demo_network_summary();
+            for item in &mut summary.wifi_networks {
+                item.connected = item.ssid == ap.ssid;
+                if item.connected {
+                    item.known = true;
+                }
+            }
+            summary.active_ssid = Some(ap.ssid.clone());
+            summary.wifi_connected = true;
+            summary.internet_ready = true;
+            summary.detail = format!("Connected to Wi-Fi '{}'", ap.ssid);
+            self.network = summary;
+            self.wifi_password.clear();
+            self.caret.focused_field = None;
+            return;
+        }
+
+        let password = (!self.wifi_password.is_empty()).then(|| self.wifi_password.clone());
+        let ssid = ap.ssid;
+        let tx = self.event_tx.clone();
+        let wake = self.wake_ping.clone();
+        let _ = thread::Builder::new()
+            .name(String::from("installer-wifi-connect"))
+            .spawn(move || {
+                let svc = NetworkService::new();
+                let (ok, detail) = match svc.connect_wifi_with_password(&ssid, password.as_deref())
+                {
+                    Ok(()) => (true, format!("Connected to Wi-Fi '{ssid}'")),
+                    Err(err) => (false, err),
+                };
+                let summary = query_network_summary(false);
+                let _ = tx.send(WorkerEvent::WifiConnectCompleted {
+                    ok,
+                    detail,
+                    summary,
+                });
                 if let Some(cb) = wake {
                     cb();
                 }
@@ -521,7 +697,28 @@ impl InstallerAppState {
                     self.disks = list;
                     self.refresh_dualboot_and_defaults();
                 }
-                WorkerEvent::NetworkLoaded(summary) => self.network = summary,
+                WorkerEvent::NetworkLoaded(summary) => {
+                    let prev_err = self.network.connect_error.take();
+                    self.network = summary;
+                    self.network.connect_error = prev_err;
+                    self.sync_selected_wifi_idx();
+                }
+                WorkerEvent::WifiConnectCompleted {
+                    ok,
+                    detail,
+                    summary,
+                } => {
+                    self.network = summary;
+                    if ok {
+                        self.wifi_password.clear();
+                        self.caret.focused_field = None;
+                        self.network.connect_error = None;
+                        self.form_error = None;
+                    } else {
+                        self.network.connect_error = Some(detail);
+                    }
+                    self.sync_selected_wifi_idx();
+                }
                 WorkerEvent::InstallStep {
                     pct,
                     stage,
@@ -555,6 +752,10 @@ impl InstallerAppState {
                         );
                     } else {
                         self.phase = InstallPhase::Review;
+                        self.stage_message = String::from(
+                            "Installation stopped. Review log details below or /tmp/rustyos-install.log.",
+                        );
+                        self.show_logs = true;
                         self.install_error = Some(message.clone());
                     }
                     self.push_log(message);
@@ -645,11 +846,13 @@ impl InstallerAppState {
                     return;
                 }
                 self.install_step = match self.install_step {
-                    InstallStep::Welcome | InstallStep::SelectDisk => InstallStep::Welcome,
+                    InstallStep::Welcome | InstallStep::Network => InstallStep::Welcome,
+                    InstallStep::SelectDisk => InstallStep::Network,
                     InstallStep::AccountStyle => InstallStep::SelectDisk,
                     InstallStep::Installing => {
                         self.phase = InstallPhase::Review;
                         self.install_error = None;
+                        self.show_logs = false;
                         InstallStep::AccountStyle
                     }
                 };
@@ -678,7 +881,20 @@ impl InstallerAppState {
 
     fn advance_install(&mut self, now: Instant) {
         match self.install_step {
-            InstallStep::Welcome => self.install_step = InstallStep::SelectDisk,
+            InstallStep::Welcome => {
+                self.spawn_network_probe();
+                self.install_step = InstallStep::Network;
+            }
+            InstallStep::Network => {
+                if self.env_kind == RunEnv::Live && !self.dry_run && !self.network.internet_ready {
+                    self.form_error = Some(String::from(
+                        "Connect Ethernet or a Wi-Fi network before continuing (required by pacstrap).",
+                    ));
+                    return;
+                }
+                self.caret.focused_field = None;
+                self.install_step = InstallStep::SelectDisk;
+            }
             InstallStep::SelectDisk => {
                 match self.disk_mode {
                     DiskInstallMode::WholeDisk => {
@@ -806,6 +1022,29 @@ impl InstallerAppState {
         Ok(())
     }
 
+    fn sync_selected_wifi_idx(&mut self) {
+        if self.network.wifi_networks.is_empty() {
+            self.selected_wifi_idx = None;
+            return;
+        }
+        if let Some(active) = &self.network.active_ssid
+            && let Some(pos) = self
+                .network
+                .wifi_networks
+                .iter()
+                .position(|ap| &ap.ssid == active)
+        {
+            self.selected_wifi_idx = Some(pos);
+            return;
+        }
+        if self
+            .selected_wifi_idx
+            .is_none_or(|idx| idx >= self.network.wifi_networks.len())
+        {
+            self.selected_wifi_idx = Some(0);
+        }
+    }
+
     pub(crate) fn active_field_mut(&mut self) -> Option<&mut String> {
         match self.caret.focused_field? {
             TextFieldId::FullName => Some(&mut self.account.full_name),
@@ -813,6 +1052,7 @@ impl InstallerAppState {
             TextFieldId::Hostname => Some(&mut self.account.hostname),
             TextFieldId::Password => Some(&mut self.account.password),
             TextFieldId::ConfirmPassword => Some(&mut self.account.confirm_password),
+            TextFieldId::WifiPassword => Some(&mut self.wifi_password),
         }
     }
 
@@ -1148,7 +1388,7 @@ fn execute_install_process(
     }
 
     let status = child.wait();
-    let err_tail = child
+    let raw_stderr = child
         .stderr
         .take()
         .map(|se| {
@@ -1156,9 +1396,18 @@ fn execute_install_process(
                 .lines()
                 .map_while(Result::ok)
                 .collect::<Vec<_>>()
-                .join(" | ")
         })
         .unwrap_or_default();
+
+    for line in &raw_stderr {
+        let trimmed = line.trim();
+        if !trimmed.is_empty() {
+            let _ = tx.send(WorkerEvent::InstallLog(format!("[stderr] {trimmed}")));
+        }
+    }
+
+    let stderr_joined = raw_stderr.join("\n");
+    let err_tail = format_installer_error_tail(&stderr_joined);
 
     let (success, message) = match status {
         Ok(s) if s.success() => (
@@ -1169,11 +1418,122 @@ fn execute_install_process(
                 String::from("RustyOS installation completed successfully!")
             },
         ),
-        Ok(s) => (false, format!("Installer exited with {s}: {err_tail}")),
+        Ok(s) => (false, format!("Installer failed ({s}): {err_tail}")),
         Err(e) => (false, format!("Failed waiting on installer: {e}")),
     };
     let _ = tx.send(WorkerEvent::InstallCompleted { success, message });
     ping_callback(wake);
+}
+
+fn demo_network_summary() -> NetworkSummary {
+    NetworkSummary {
+        ethernet_online: false,
+        wifi_enabled: true,
+        wifi_connected: true,
+        internet_ready: true,
+        scanning: false,
+        connecting_ssid: None,
+        active_ssid: Some(String::from("RustyOS-5G")),
+        detail: String::from("Connected to Wi-Fi 'RustyOS-5G' (Demo)"),
+        connect_error: None,
+        wifi_networks: vec![
+            WifiAccessPoint {
+                ssid: String::from("RustyOS-5G"),
+                signal_percent: 88,
+                secure: true,
+                connected: true,
+                known: true,
+            },
+            WifiAccessPoint {
+                ssid: String::from("Studio-Home"),
+                signal_percent: 72,
+                secure: true,
+                connected: false,
+                known: false,
+            },
+            WifiAccessPoint {
+                ssid: String::from("Guest-Open"),
+                signal_percent: 54,
+                secure: false,
+                connected: false,
+                known: false,
+            },
+        ],
+    }
+}
+
+fn query_network_summary(rescan: bool) -> NetworkSummary {
+    let svc = NetworkService::new();
+    let status = svc.query_status();
+    let wifi_networks = if rescan && status.wifi_enabled {
+        svc.rescan_wifi_networks()
+    } else {
+        status.wifi_networks
+    };
+    let active_ssid = status.wifi_ssid.or_else(|| {
+        wifi_networks
+            .iter()
+            .find(|ap| ap.connected)
+            .map(|ap| ap.ssid.clone())
+    });
+    let internet_ready = status.connected || status.wired_connected || active_ssid.is_some();
+    let detail = if status.wired_connected {
+        String::from("Ethernet link is connected and ready")
+    } else if let Some(ssid) = &active_ssid {
+        format!("Connected to Wi-Fi '{ssid}'")
+    } else if status.wifi_enabled {
+        String::from("Wi-Fi radio is on — select a network below and click Connect")
+    } else {
+        String::from("Wi-Fi radio is off — turn Wi-Fi on or plug in Ethernet")
+    };
+    NetworkSummary {
+        ethernet_online: status.wired_connected,
+        wifi_enabled: status.wifi_enabled,
+        wifi_connected: status.wifi_connected || active_ssid.is_some(),
+        internet_ready,
+        scanning: false,
+        connecting_ssid: None,
+        active_ssid,
+        detail,
+        connect_error: None,
+        wifi_networks,
+    }
+}
+
+#[must_use]
+pub(crate) fn format_installer_error_tail(stderr: &str) -> String {
+    let lines: Vec<&str> = stderr
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    if lines.is_empty() {
+        return String::from("see /tmp/rustyos-install.log");
+    }
+    let error_lines: Vec<&str> = lines
+        .iter()
+        .copied()
+        .filter(|l| {
+            let low = l.to_ascii_lowercase();
+            low.starts_with("error:")
+                || low.contains("failed to")
+                || low.contains("could not")
+                || low.contains("==> error")
+        })
+        .collect();
+    let chosen = if error_lines.is_empty() {
+        &lines[lines.len().saturating_sub(2)..]
+    } else {
+        &error_lines[error_lines.len().saturating_sub(2)..]
+    };
+    let joined = chosen.join(" | ");
+    if joined.chars().count() > 220 {
+        let mut short: String = joined.chars().take(217).collect();
+        short.push_str("...");
+        short
+    } else {
+        joined
+    }
 }
 
 fn unsafe_uid_nonzero() -> bool {
@@ -1380,6 +1740,8 @@ mod tests {
         assert_eq!(st.install_step, InstallStep::Welcome);
         let now = Instant::now();
         st.go_next(now);
+        assert_eq!(st.install_step, InstallStep::Network);
+        st.go_next(now);
         assert_eq!(st.install_step, InstallStep::SelectDisk);
         assert!(
             st.selected_disk()
@@ -1460,6 +1822,7 @@ mod tests {
         let now = Instant::now();
         st.go_next(now);
         st.go_next(now);
+        st.go_next(now);
         st.account.password = String::from("secret12");
         st.account.confirm_password = String::from("secret12");
         st.go_next(now);
@@ -1479,7 +1842,7 @@ mod tests {
     }
 
     #[test]
-    fn dualboot_mode_builds_safe_args_and_runs_dry_backend() {
+    fn dualboot_mode_builds_safe_args_and_runs_dry_run() {
         let script =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../scripts/rustyos-install.sh");
         let opts = StartupOptions {
@@ -1491,6 +1854,7 @@ mod tests {
         };
         let mut st = InstallerAppState::new(&opts);
         let now = Instant::now();
+        st.go_next(now);
         st.go_next(now);
         st.disk_mode = DiskInstallMode::DualBoot;
         assert!(st.selected_dualboot().is_some());
@@ -1527,5 +1891,56 @@ mod tests {
                 .iter()
                 .any(|l| l.contains("Preserves existing"))
         );
+    }
+
+    #[test]
+    fn installer_error_tail_prioritizes_final_error_over_mke2fs_and_gpg_noise() {
+        let stderr = "\
+mke2fs 1.47.4 (6-Mar-2026)
+gpg: /mnt/rustyos-install/etc/pacman.d/gnupg/trustdb.gpg: trustdb created
+gpg: Generating pacman keyring master key...
+error: failed retrieving file 'core.db' from mirror.example.org : Could not resolve host
+==> ERROR: Failed to install packages to new root
+";
+        let tail = format_installer_error_tail(stderr);
+        assert!(!tail.contains("mke2fs"));
+        assert!(!tail.contains("trustdb"));
+        assert!(tail.contains("core.db"));
+        assert!(tail.contains("Failed to install packages"));
+    }
+
+    #[test]
+    fn install_network_step_blocks_offline_live_and_connects_wifi_in_demo() {
+        let mut live = InstallerAppState::new(&StartupOptions {
+            mode: WizardMode::Install,
+            env_kind: RunEnv::Live,
+            dry_run: false,
+            ..Default::default()
+        });
+        let now = Instant::now();
+        live.install_step = InstallStep::Network;
+        live.network.internet_ready = false;
+        live.go_next(now);
+        assert_eq!(live.install_step, InstallStep::Network);
+        assert!(live.form_error.is_some());
+
+        live.network.ethernet_online = true;
+        live.network.internet_ready = true;
+        live.go_next(now);
+        assert_eq!(live.install_step, InstallStep::SelectDisk);
+
+        let mut demo = InstallerAppState::new(&StartupOptions {
+            mode: WizardMode::Install,
+            env_kind: RunEnv::Demo,
+            dry_run: true,
+            ..Default::default()
+        });
+        demo.install_step = InstallStep::Network;
+        demo.select_wifi_row(1);
+        assert_eq!(demo.caret.focused_field, Some(TextFieldId::WifiPassword));
+        demo.wifi_password = String::from("wifi-pass-123");
+        demo.connect_selected_wifi();
+        assert_eq!(demo.network.active_ssid.as_deref(), Some("Studio-Home"));
+        assert_eq!(demo.wifi_password, "");
     }
 }

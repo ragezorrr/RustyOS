@@ -11,7 +11,6 @@ use smithay::{
         },
         winit::{self, WinitEvent, WinitGraphicsBackend},
     },
-    desktop::utils::send_frames_surface_tree,
     input::pointer::{CursorIcon, CursorImageStatus},
     reexports::{
         calloop::{
@@ -365,24 +364,7 @@ fn render_winit_frame(
 
     let mut presentation_feedback = state.take_presentation_feedback(&state.output, &render_states);
     let elapsed = state.elapsed();
-    if state.ext_session_locked {
-        if let Some(lock_surf) = state.ext_lock_surface_for_output(&state.output) {
-            send_frames_surface_tree(
-                lock_surf.wl_surface(),
-                &state.output,
-                elapsed,
-                Some(Duration::ZERO),
-                |_, _| Some(state.output.clone()),
-            );
-        }
-    } else {
-        for window in state.space.elements() {
-            window.send_frame(&state.output, elapsed, Some(Duration::ZERO), |_, _| {
-                Some(state.output.clone())
-            });
-        }
-        state.send_ime_popup_frames(&state.output, elapsed);
-    }
+    state.send_output_frame_callbacks(&state.output, elapsed);
 
     state.space.refresh();
     state.popups.cleanup();

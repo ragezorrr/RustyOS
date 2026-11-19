@@ -83,6 +83,9 @@ pub(crate) enum InstallerHit {
     SelectLanguage(usize),
     SelectKeyboard(usize),
     RefreshNetwork,
+    ToggleWifi,
+    SelectWifi(usize),
+    ConnectWifi,
     FocusField(TextFieldId),
     ToggleAutologin,
     SelectTheme(ThemeChoice),
@@ -121,6 +124,14 @@ pub(crate) struct TextFieldRect {
     pub label: &'static str,
     pub rect: Rect,
     pub masked: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct WifiRowRect {
+    pub idx: usize,
+    pub rect: Rect,
+    pub ap: rusty_services::WifiAccessPoint,
+    pub selected: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -169,7 +180,11 @@ pub(crate) enum StepContentLayout {
     },
     Network {
         card_rect: Rect,
+        wifi_toggle_btn: Rect,
         refresh_btn: Rect,
+        wifi_rows: Vec<WifiRowRect>,
+        password_field: Option<TextFieldRect>,
+        connect_btn: Option<Rect>,
     },
     OobeAccount {
         fields: Vec<TextFieldRect>,
@@ -263,9 +278,10 @@ fn footer_meta(app: &InstallerAppState) -> (usize, usize, bool, &'static str, &'
             let show_back =
                 app.install_step != InstallStep::Welcome && app.phase != InstallPhase::Running;
             let primary = match app.install_step {
-                InstallStep::Welcome | InstallStep::SelectDisk | InstallStep::AccountStyle => {
-                    "Continue"
-                }
+                InstallStep::Welcome
+                | InstallStep::Network
+                | InstallStep::SelectDisk
+                | InstallStep::AccountStyle => "Continue",
                 InstallStep::Installing if app.phase == InstallPhase::Finished => {
                     if app.dry_run || app.env_kind == RunEnv::Demo {
                         "Preview Setup"
@@ -275,9 +291,12 @@ fn footer_meta(app: &InstallerAppState) -> (usize, usize, bool, &'static str, &'
                 }
                 InstallStep::Installing if app.phase == InstallPhase::Running => "Installing...",
                 InstallStep::Installing if app.dry_run => "Run Simulation",
+                InstallStep::Installing if app.disk_mode == DiskInstallMode::DualBoot => {
+                    "Install RustyOS"
+                }
                 InstallStep::Installing => "Erase & Install",
             };
-            (4, app.install_step.index(), show_back, "Back", primary)
+            (5, app.install_step.index(), show_back, "Back", primary)
         }
         WizardMode::Oobe => {
             let show_back = app.oobe_step != OobeStep::Hello;
@@ -293,9 +312,57 @@ fn footer_meta(app: &InstallerAppState) -> (usize, usize, bool, &'static str, &'
 fn compute_install_content(app: &InstallerAppState, c: Rect) -> StepContentLayout {
     match app.install_step {
         InstallStep::Welcome => compute_install_welcome(c),
+        InstallStep::Network => compute_network_content(app, c),
         InstallStep::SelectDisk => compute_install_select_disk(app, c),
         InstallStep::AccountStyle => compute_install_account_style(app, c),
         InstallStep::Installing => compute_install_progress(app, c),
+    }
+}
+
+fn compute_network_content(app: &InstallerAppState, c: Rect) -> StepContentLayout {
+    let card_rect = Rect::new(c.x + 36, c.y + 72, c.w - 72, 74);
+    let refresh_btn = Rect::new(card_rect.right() - 102, card_rect.y + 22, 86, 30);
+    let wifi_toggle_btn = Rect::new(refresh_btn.x - 110, card_rect.y + 22, 98, 30);
+
+    let list_y = card_rect.bottom() + 12;
+    let max_rows = usize::try_from(((c.bottom() - list_y - 54) / 42).clamp(1, 4)).unwrap_or(1);
+    let wifi_rows: Vec<WifiRowRect> = app
+        .network
+        .wifi_networks
+        .iter()
+        .take(max_rows)
+        .enumerate()
+        .map(|(i, ap)| WifiRowRect {
+            idx: i,
+            rect: Rect::new(c.x + 36, list_y + idx_i32(i) * 42, c.w - 72, 36),
+            ap: ap.clone(),
+            selected: app.selected_wifi_idx == Some(i),
+        })
+        .collect();
+
+    let selected_ap = app.selected_wifi();
+    let row_end_y = list_y + idx_i32(wifi_rows.len()) * 42;
+    let action_y = (row_end_y + 12).min(c.bottom() - 40);
+
+    let password_field = selected_ap
+        .filter(|ap| ap.secure && !ap.connected)
+        .map(|_| TextFieldRect {
+            id: TextFieldId::WifiPassword,
+            label: "Wi-Fi Password",
+            rect: Rect::new(c.x + 36, action_y, c.w - 196, 30),
+            masked: true,
+        });
+    let connect_btn = selected_ap
+        .filter(|ap| !ap.connected)
+        .map(|_| Rect::new(c.right() - 148, action_y, 112, 30));
+
+    StepContentLayout::Network {
+        card_rect,
+        wifi_toggle_btn,
+        refresh_btn,
+        wifi_rows,
+        password_field,
+        connect_btn,
     }
 }
 
@@ -514,10 +581,7 @@ fn compute_oobe_content(app: &InstallerAppState, c: Rect) -> StepContentLayout {
                 })
                 .collect(),
         },
-        OobeStep::Network => StepContentLayout::Network {
-            card_rect: Rect::new(c.x + 48, c.y + 88, c.w - 96, 150),
-            refresh_btn: Rect::new(c.right() - 158, c.y + 104, 94, 30),
-        },
+        OobeStep::Network => compute_network_content(app, c),
         OobeStep::Account => compute_oobe_account(c),
         OobeStep::Appearance => compute_oobe_appearance(app, c),
         OobeStep::Finish => StepContentLayout::Finish {
@@ -634,27 +698,14 @@ fn hit_content(content: &StepContentLayout, px: f64, py: f64) -> Option<Installe
             refresh_btn,
             boot_systemd,
             boot_grub,
-        } => {
-            if mode_whole.contains_f64(px, py) {
-                return Some(InstallerHit::SelectDiskMode(DiskInstallMode::WholeDisk));
-            }
-            if mode_dualboot.contains_f64(px, py) {
-                return Some(InstallerHit::SelectDiskMode(DiskInstallMode::DualBoot));
-            }
-            if refresh_btn.contains_f64(px, py) {
-                return Some(InstallerHit::RefreshDisks);
-            }
-            if boot_systemd.contains_f64(px, py) {
-                return Some(InstallerHit::SetBootloader(BootloaderKind::SystemdBoot));
-            }
-            if boot_grub.contains_f64(px, py) {
-                return Some(InstallerHit::SetBootloader(BootloaderKind::Grub));
-            }
-            cards
-                .iter()
-                .find(|c| c.selectable && c.rect.contains_f64(px, py))
-                .map(|c| InstallerHit::SelectDisk(c.idx))
-        }
+        } => hit_select_disk_content(
+            [*mode_whole, *mode_dualboot],
+            cards,
+            *refresh_btn,
+            [*boot_systemd, *boot_grub],
+            px,
+            py,
+        ),
         StepContentLayout::AccountAndStyle {
             fields,
             kb_chips,
@@ -690,9 +741,22 @@ fn hit_content(content: &StepContentLayout, px: f64, py: f64) -> Option<Installe
             .iter()
             .find(|r| r.rect.contains_f64(px, py))
             .map(|r| InstallerHit::SelectKeyboard(r.idx)),
-        StepContentLayout::Network { refresh_btn, .. } => refresh_btn
-            .contains_f64(px, py)
-            .then_some(InstallerHit::RefreshNetwork),
+        StepContentLayout::Network {
+            wifi_toggle_btn,
+            refresh_btn,
+            wifi_rows,
+            password_field,
+            connect_btn,
+            ..
+        } => hit_network_content(
+            *wifi_toggle_btn,
+            *refresh_btn,
+            wifi_rows,
+            password_field.as_ref(),
+            *connect_btn,
+            px,
+            py,
+        ),
         StepContentLayout::OobeAccount {
             fields,
             autologin_row,
@@ -714,6 +778,66 @@ fn hit_content(content: &StepContentLayout, px: f64, py: f64) -> Option<Installe
             .or_else(|| hit_swatches(swatches, px, py)),
         StepContentLayout::Finish { .. } => None,
     }
+}
+
+fn hit_select_disk_content(
+    modes: [Rect; 2],
+    cards: &[DiskCardRect],
+    refresh_btn: Rect,
+    bootloaders: [Rect; 2],
+    px: f64,
+    py: f64,
+) -> Option<InstallerHit> {
+    if modes[0].contains_f64(px, py) {
+        return Some(InstallerHit::SelectDiskMode(DiskInstallMode::WholeDisk));
+    }
+    if modes[1].contains_f64(px, py) {
+        return Some(InstallerHit::SelectDiskMode(DiskInstallMode::DualBoot));
+    }
+    if refresh_btn.contains_f64(px, py) {
+        return Some(InstallerHit::RefreshDisks);
+    }
+    if bootloaders[0].contains_f64(px, py) {
+        return Some(InstallerHit::SetBootloader(BootloaderKind::SystemdBoot));
+    }
+    if bootloaders[1].contains_f64(px, py) {
+        return Some(InstallerHit::SetBootloader(BootloaderKind::Grub));
+    }
+    cards
+        .iter()
+        .find(|c| c.selectable && c.rect.contains_f64(px, py))
+        .map(|c| InstallerHit::SelectDisk(c.idx))
+}
+
+fn hit_network_content(
+    wifi_toggle_btn: Rect,
+    refresh_btn: Rect,
+    wifi_rows: &[WifiRowRect],
+    password_field: Option<&TextFieldRect>,
+    connect_btn: Option<Rect>,
+    px: f64,
+    py: f64,
+) -> Option<InstallerHit> {
+    if wifi_toggle_btn.contains_f64(px, py) {
+        return Some(InstallerHit::ToggleWifi);
+    }
+    if refresh_btn.contains_f64(px, py) {
+        return Some(InstallerHit::RefreshNetwork);
+    }
+    if let Some(btn) = connect_btn
+        && btn.contains_f64(px, py)
+    {
+        return Some(InstallerHit::ConnectWifi);
+    }
+    if let Some(pf) = password_field
+        && pf.rect.contains_f64(px, py)
+    {
+        return Some(InstallerHit::FocusField(pf.id));
+    }
+    wifi_rows
+        .iter()
+        .find(|r| r.rect.contains_f64(px, py))
+        .map(|r| InstallerHit::SelectWifi(r.idx))
 }
 
 fn hit_swatches(

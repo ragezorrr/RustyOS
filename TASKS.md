@@ -2029,6 +2029,38 @@ hardware/software context и низкие накладные расходы.
 - **Tests:** 302 unit-теста workspace (`4` `rusty-animation`, `186` `rusty-compositor`, `16` `rusty-files`, `9` `rusty-installer`, `3` `rusty-ipc`, `44` `rusty-services`, `10` `rusty-settings`, `5` `rusty-shell`, `14` `rusty-terminal`, `4` `rusty-updater`, `7` `rusty-wm`).
 - **Risks:** Нет.
 
+### RUSTYOS-117 — Проверка интернета, выбор Wi-Fi в `--install` и диагностика ошибок `pacstrap` + Live ISO user/DRM-исправления
+
+- **Status:** Done
+- **Goal:** Обеспечить автоопределение интернета и подключение к Wi-Fi (с паролем) прямо внутри `rusty-installer --install`, раннюю preflight-проверку сети до разметки диска, читаемый хвост ошибок с кнопкой `Details` и стабильную автозагрузку Live ISO.
+- **Dependencies:** `RUSTYOS-116`.
+- **Scope:**
+  - `crates/rusty-services/src/connectivity.rs`: добавлены `rescan_wifi_networks` (`nmcli --rescan yes`) и `connect_wifi_with_password` (переиспользование `connect_wifi`);
+  - `apps/rusty-installer/src/{state.rs, layout.rs, render.rs, wayland.rs}`: добавлен шаг `InstallStep::Network` (`Internet & Wi-Fi`) с автоопределением Ethernet/Wi-Fi через `NetworkManager`, переключателем `Wi-Fi: On/Off`, сканированием, выбором SSID, полем `TextFieldId::WifiPassword` (включая `Enter`), проверкой `internet_ready` перед продолжением в `--live`, подписью `Install RustyOS` для Dual-Boot и корректным отображением хвоста ошибок (`format_installer_error_tail`, авто-раскрытие `Details`);
+  - `scripts/rustyos-install.sh`: preflight-проверка сети (`check_network_preflight`) до разметки диска и запись лога в `/tmp/rustyos-install.log`;
+  - `crates/rusty-compositor/src/drm_backend.rs`, `bin/rustyos-session`, `packaging/archiso/`: исправлен порядок хука (`99-rustyos-liveuser.hook` -> `rustyos-liveuser-setup`, создание `liveuser`/`greeter` после `20-systemd-sysusers.hook`, маска `systemd-firstboot.service`, `/etc/locale.conf`, `/etc/vconsole.conf`), перебор и ранжирование DRM GPU до `simpledrm`, привязка `EGLDisplay`, отказ без тихого `exit 0` на TTY.
+- **Acceptance Criteria:**
+  - `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, `sh -n`, `bash -n`, `--dry-run`, `--drm-probe` и живые `--winit` прогоны Wayland + X11 с запуском `rusty-installer --install --demo` пройдены без ошибок.
+- **Tests:** 307 unit-тестов workspace (`4` `rusty-animation`, `188` `rusty-compositor`, `16` `rusty-files`, `12` `rusty-installer`, `3` `rusty-ipc`, `44` `rusty-services`, `10` `rusty-settings`, `5` `rusty-shell`, `14` `rusty-terminal`, `4` `rusty-updater`, `7` `rusty-wm`).
+- **Risks:** На хосте нет `mkarchiso` до установки `archiso`, поэтому финальный прогон новой Live ISO сборки выполняется локально после `sudo pacman -S archiso` или через `workflow_dispatch` `arch-live-iso`.
+
+### RUSTYOS-118 — Оптимизация пакетов ISO/PKGBUILD, моноширинный шрифт терминала, keyring-фикс и опциональный `yay-bin`
+
+- **Status:** Done (`RUSTYOS-118 Вариант 1` — утверждённый объём выполнен)
+- **Goal:** Убрать лишние пакеты (`adwaita-icon-theme`/`adwaita-cursors`, `archinstall`, обязательный `firefox`), обеспечить моноширинный шрифт `ttf-jetbrains-mono` в `rusty-terminal`, автоматизировать `pacman-key` + `archlinux-keyring` перед `pacstrap` и установить `yay-bin` из AUR в целевую систему с безопасным fallback.
+- **Dependencies:** `RUSTYOS-117`.
+- **Scope:**
+  - `packaging/arch/PKGBUILD`: удалены `'adwaita-icon-theme'` и обязательный `'firefox'` (перенесён в `optdepends`), добавлен `'ttf-jetbrains-mono'`;
+  - `packaging/archiso/packages.x86_64`: удалены `archinstall` и `firefox`, добавлены `ttf-jetbrains-mono`, `git`, `base-devel`;
+  - `scripts/rustyos-install.sh`: проверка инструментов `pacman`/`pacman-key`, автоинициализация `pacman-key --init`, `pacman-key --populate archlinux` и `pacman -Sy --noconfirm --needed archlinux-keyring` до `pacstrap`, обновление состава пакетов (`ttf-jetbrains-mono git base-devel` вместо `firefox`), функция `install_optional_yay_bin` (непривилегированный `makepkg` под пользователем + `pacman -U` в `arch-chroot` с мягким fallback) и гарантированная запись секции `[rustyos]` в `/etc/pacman.conf`;
+  - `.github/workflows/ci.yml`, `apps/rusty-installer/src/render.rs`: синхронизированы зависимости CI (`ttf-jetbrains-mono` вместо `adwaita-icon-theme` и `firefox`) и текст экрана `Internet & Wi-Fi`;
+  - параллельно исправлены два локальных бага: deferred keyboard redraw в `drm_backend.rs`/`keyboard.rs` (уменьшает задержку ввода в Firefox) и общие `send_output_frame_callbacks` / `output_has_pending_frame_callbacks` в `wm_windows.rs` (включая `xdg_popup`, `layer_shell` и IME).
+- **Acceptance Criteria:**
+  - `bash -n packaging/arch/PKGBUILD scripts/rustyos-install.sh scripts/install.sh packaging/archiso/profiledef.sh packaging/archiso/build-iso.sh`, `sh -n packaging/archiso/airootfs/usr/local/bin/rustyos-liveuser-setup`, YAML-проверка `.github/workflows/ci.yml` и `--dry-run` (`dual-boot` и `whole-disk`) проходят без ошибок;
+  - `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, `cargo build --workspace --bins`, `--drm-probe` и живые `--winit` прогоны (`Wayland` и `X11`) завершаются без ошибок.
+- **Tests:** 309 unit-тестов workspace (`4` `rusty-animation`, `190` `rusty-compositor`, `16` `rusty-files`, `12` `rusty-installer`, `3` `rusty-ipc`, `44` `rusty-services`, `10` `rusty-settings`, `5` `rusty-shell`, `14` `rusty-terminal`, `4` `rusty-updater`, `7` `rusty-wm`).
+- **Risks:** Сборка `yay-bin` в целевой системе зависит от доступности `aur.archlinux.org` и GitHub во время установки; при сетевом сбое установка системы продолжается с предупреждением без фатальной ошибки.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance
