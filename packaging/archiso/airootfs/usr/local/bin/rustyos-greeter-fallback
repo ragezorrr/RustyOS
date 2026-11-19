@@ -1,0 +1,7 @@
+#!/bin/sh
+if [ -s /tmp/rustyos-session-last-error.log ]; then
+    printf '\n=== RustyOS Live Session Error Log ===\n'
+    cat /tmp/rustyos-session-last-error.log
+    printf '\n'
+fi
+exec /usr/bin/agreety --cmd "/usr/bin/rustyos-session --drm"

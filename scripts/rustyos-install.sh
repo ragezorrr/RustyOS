@@ -480,7 +480,7 @@ EOF
     printf '%%wheel ALL=(ALL:ALL) ALL\n' > "${MOUNT_ROOT}/etc/sudoers.d/10-wheel"
     chmod 0440 "${MOUNT_ROOT}/etc/sudoers.d/10-wheel"
 
-    emit_step 85 desktop "Configuring greetd, NetworkManager, seatd, and RustyOS preferences"
+    emit_step 85 desktop "Configuring greetd, NetworkManager, and RustyOS preferences"
     if [[ -f /etc/pacman.conf ]] && grep -q '^\[rustyos\]' /etc/pacman.conf && ! grep -q '^\[rustyos\]' "${MOUNT_ROOT}/etc/pacman.conf"; then
         awk '/^\[rustyos\]/,/^$/' /etc/pacman.conf >> "${MOUNT_ROOT}/etc/pacman.conf"
     fi
@@ -495,9 +495,13 @@ EOF
 [terminal]
 vt = 1
 
-[default_session]
+[initial_session]
 command = "/usr/bin/rustyos-session --drm"
 user = "${USERNAME_VAL}"
+
+[default_session]
+command = "/usr/bin/agreety --cmd /usr/bin/rustyos-session"
+user = "greeter"
 EOF
     else
         cat <<'EOF' > "${MOUNT_ROOT}/etc/greetd/config.toml"
@@ -531,7 +535,7 @@ EOF
     fi
     arch-chroot "${MOUNT_ROOT}" chown -R "${USERNAME_VAL}:${USERNAME_VAL}" "/home/${USERNAME_VAL}/.config"
 
-    arch-chroot "${MOUNT_ROOT}" systemctl enable NetworkManager seatd greetd
+    arch-chroot "${MOUNT_ROOT}" systemctl enable NetworkManager greetd
 
     emit_step 95 bootloader "Installing ${BOOTLOADER}"
     if [[ "${BOOTLOADER}" == "grub" ]]; then

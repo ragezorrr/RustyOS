@@ -1,3 +1,4 @@
+amd-ucode
 archinstall
 arch-install-scripts
 base
@@ -8,6 +9,7 @@ firefox
 gptfdisk
 greetd
 grub
+intel-ucode
 linux
 linux-firmware
 mesa

@@ -1094,6 +1094,165 @@ pub fn mode_refresh_interval_us(vrefresh: u32) -> u64 {
     (1_000_000 / hz).max(1_000)
 }
 
+const MAX_TTY_DRM_RETRY_ATTEMPTS: usize = 25;
+const TTY_DRM_RETRY_INTERVAL: Duration = Duration::from_millis(200);
+
+fn has_parent_graphical_session_in(wayland: Option<&str>, x11: Option<&str>) -> bool {
+    wayland.is_some_and(|v| !v.trim().is_empty()) || x11.is_some_and(|v| !v.trim().is_empty())
+}
+
+fn has_parent_graphical_session() -> bool {
+    let wayland = std::env::var("WAYLAND_DISPLAY").ok();
+    let x11 = std::env::var("DISPLAY").ok();
+    has_parent_graphical_session_in(wayland.as_deref(), x11.as_deref())
+}
+
+fn is_software_drm_driver(driver_name: &str) -> bool {
+    matches!(
+        driver_name.trim(),
+        "simple-framebuffer" | "simpledrm" | "vgem" | "vkms"
+    )
+}
+
+fn drm_driver_name_for_node(path: &Path) -> Option<String> {
+    let file_name = path.file_name()?.to_str()?;
+    let driver_link = PathBuf::from("/sys/class/drm")
+        .join(file_name)
+        .join("device/driver");
+    let target = fs::read_link(driver_link).ok()?;
+    Some(target.file_name()?.to_string_lossy().into_owned())
+}
+
+fn rank_drm_candidates(mut candidates: Vec<(PathBuf, bool, bool)>) -> Vec<PathBuf> {
+    candidates.sort_by_key(
+        |(_, has_render, is_software)| match (*is_software, *has_render) {
+            (false, true) => 0_u8,
+            (false, false) => 1_u8,
+            (true, true) => 2_u8,
+            (true, false) => 3_u8,
+        },
+    );
+    candidates.into_iter().map(|(path, _, _)| path).collect()
+}
+
+fn collect_candidate_drm_paths(udev_backend: Option<&UdevBackend>) -> Vec<PathBuf> {
+    let mut raw_paths: Vec<PathBuf> = Vec::new();
+    let mut push_unique = |path: PathBuf| {
+        if !raw_paths.contains(&path) {
+            raw_paths.push(path);
+        }
+    };
+
+    if let Some(udev) = udev_backend {
+        for (_, path) in udev.device_list() {
+            if DrmNode::from_path(path).is_ok_and(|node| node.ty() == NodeType::Primary) {
+                push_unique(path.to_path_buf());
+            }
+        }
+    }
+
+    for idx in 0..8 {
+        let candidate = PathBuf::from(format!("/dev/dri/card{idx}"));
+        if candidate.exists()
+            && DrmNode::from_path(&candidate).is_ok_and(|node| node.ty() == NodeType::Primary)
+        {
+            push_unique(candidate);
+        }
+    }
+
+    let candidates = raw_paths
+        .into_iter()
+        .map(|path| {
+            let has_render = DrmNode::from_path(&path).is_ok_and(|node| {
+                node.node_with_type(NodeType::Render)
+                    .and_then(Result::ok)
+                    .is_some()
+            });
+            let is_software =
+                drm_driver_name_for_node(&path).is_some_and(|drv| is_software_drm_driver(&drv));
+            (path, has_render, is_software)
+        })
+        .collect();
+    rank_drm_candidates(candidates)
+}
+
+struct OpenedDrmCandidate {
+    primary_path: PathBuf,
+    primary_node: DrmNode,
+    drm_device: DrmDevice,
+    drm_notifier: smithay::backend::drm::DrmDeviceNotifier,
+    gbm_device: GbmDevice<DrmDeviceFd>,
+    renderer: GlesRenderer,
+    _egl_display: EGLDisplay,
+    setups: Vec<PrimaryConnectorSetup>,
+    primary_surface: DrmSurface,
+}
+
+fn try_open_drm_candidate(
+    session: &mut LibSeatSession,
+    primary_path: &Path,
+    prefer_max_refresh: bool,
+) -> Result<OpenedDrmCandidate, String> {
+    let primary_node = DrmNode::from_path(primary_path).map_err(|err| {
+        format!(
+            "{}: invalid primary DRM node: {err}",
+            primary_path.display()
+        )
+    })?;
+    let fd = session
+        .open(
+            primary_path,
+            OFlags::RDWR | OFlags::CLOEXEC | OFlags::NOCTTY | OFlags::NONBLOCK,
+        )
+        .map_err(|err| {
+            format!(
+                "{}: session device open failed: {err:?}",
+                primary_path.display()
+            )
+        })?;
+    let drm_fd = DrmDeviceFd::new(DeviceFd::from(fd));
+    let (mut drm_device, drm_notifier) = DrmDevice::new(drm_fd, false)
+        .map_err(|err| format!("{}: DrmDevice::new failed: {err}", primary_path.display()))?;
+
+    let setups = find_all_connected_connectors_with_prefs(&drm_device, prefer_max_refresh, None);
+    let Some(setup) = setups.first().cloned() else {
+        return Err(format!(
+            "{}: no connected DRM connector with a compatible CRTC and mode",
+            primary_path.display()
+        ));
+    };
+
+    let gbm_device = GbmDevice::new(drm_device.device_fd().clone())
+        .map_err(|err| format!("{}: GbmDevice::new failed: {err}", primary_path.display()))?;
+    let (egl_display, renderer) =
+        init_gbm_egl_renderer(&gbm_device, Some(primary_path)).map_err(|err| {
+            format!(
+                "{}: GBM EGL renderer init failed: {err}",
+                primary_path.display()
+            )
+        })?;
+    let primary_surface = drm_device
+        .create_surface(setup.crtc, setup.mode, &[setup.connector])
+        .map_err(|err| {
+            format!(
+                "{}: DRM surface creation failed: {err}",
+                primary_path.display()
+            )
+        })?;
+
+    Ok(OpenedDrmCandidate {
+        primary_path: primary_path.to_path_buf(),
+        primary_node,
+        drm_device,
+        drm_notifier,
+        gbm_device,
+        renderer,
+        _egl_display: egl_display,
+        setups,
+        primary_surface,
+    })
+}
+
 /// Executes the native DRM/KMS backend (`--drm` / `--kms`).
 ///
 /// Attempts to acquire `LibSeatSession`, DRM Master, `DrmCompositor`, and `LibinputInputBackend`
@@ -1108,6 +1267,11 @@ pub fn run_native_drm_kms(config: &CompositorConfig) -> Result<BootstrapReport, 
     match try_run_native_drm_session(config)? {
         SessionStartOutcome::Completed(report) => Ok(*report),
         SessionStartOutcome::DeferToProbe(reason) => {
+            if !has_parent_graphical_session() {
+                return Err(CompositorError::BackendInit(format!(
+                    "Native DRM/KMS startup failed on TTY/greeter session: {reason}"
+                )));
+            }
             warn!(
                 reason = %reason,
                 "Active graphical session holds DRM Master; falling back to non-invasive DRM/GBM/EGL hardware verification"
@@ -1133,14 +1297,47 @@ pub fn run_native_drm_kms(config: &CompositorConfig) -> Result<BootstrapReport, 
     }
 }
 
-#[allow(clippy::too_many_lines)]
 fn try_run_native_drm_session(
     config: &CompositorConfig,
 ) -> Result<SessionStartOutcome, CompositorError> {
-    let Ok((mut session, session_notifier)) = LibSeatSession::new() else {
-        return Ok(SessionStartOutcome::DeferToProbe(
-            "libseat session open failed".to_owned(),
-        ));
+    if has_parent_graphical_session() {
+        return try_run_native_drm_session_once(config);
+    }
+
+    for attempt in 0..MAX_TTY_DRM_RETRY_ATTEMPTS {
+        match try_run_native_drm_session_once(config)? {
+            completed @ SessionStartOutcome::Completed(_) => return Ok(completed),
+            SessionStartOutcome::DeferToProbe(reason) => {
+                if attempt + 1 >= MAX_TTY_DRM_RETRY_ATTEMPTS {
+                    return Ok(SessionStartOutcome::DeferToProbe(reason));
+                }
+                if attempt == 0 || attempt % 5 == 4 {
+                    info!(
+                        attempt = attempt + 1,
+                        max_attempts = MAX_TTY_DRM_RETRY_ATTEMPTS,
+                        reason = %reason,
+                        "Waiting for seat/DRM/KMS readiness during startup..."
+                    );
+                }
+                std::thread::sleep(TTY_DRM_RETRY_INTERVAL);
+            }
+        }
+    }
+
+    unreachable!("loop returns on final attempt")
+}
+
+#[allow(clippy::too_many_lines)]
+fn try_run_native_drm_session_once(
+    config: &CompositorConfig,
+) -> Result<SessionStartOutcome, CompositorError> {
+    let (mut session, session_notifier) = match LibSeatSession::new() {
+        Ok(pair) => pair,
+        Err(err) => {
+            return Ok(SessionStartOutcome::DeferToProbe(format!(
+                "libseat session open failed: {err}"
+            )));
+        }
     };
     let seat_name = session.seat();
 
@@ -1149,81 +1346,51 @@ fn try_run_native_drm_session(
             "udev backend scan failed".to_owned(),
         ));
     };
-    let Some((_, primary_path)) = udev_backend.device_list().find(|(_, path)| {
-        DrmNode::from_path(path).is_ok_and(|node| node.ty() == NodeType::Primary)
-    }) else {
+    let candidate_paths = collect_candidate_drm_paths(Some(&udev_backend));
+    if candidate_paths.is_empty() {
         return Ok(SessionStartOutcome::DeferToProbe(
-            "no primary DRM node reported by udev".to_owned(),
+            "no primary DRM node reported by udev or /dev/dri".to_owned(),
         ));
-    };
-
-    let primary_node = match DrmNode::from_path(primary_path) {
-        Ok(node) => node,
-        Err(err) => {
-            return Ok(SessionStartOutcome::DeferToProbe(format!(
-                "invalid primary DRM node: {err}"
-            )));
-        }
-    };
-
-    let fd = match session.open(
-        primary_path,
-        OFlags::RDWR | OFlags::CLOEXEC | OFlags::NOCTTY | OFlags::NONBLOCK,
-    ) {
-        Ok(fd) => fd,
-        Err(err) => {
-            return Ok(SessionStartOutcome::DeferToProbe(format!(
-                "session device open failed: {err:?}"
-            )));
-        }
-    };
-
-    let drm_fd = DrmDeviceFd::new(DeviceFd::from(fd));
-    let (mut drm_device, drm_notifier) = match DrmDevice::new(drm_fd, false) {
-        Ok(pair) => pair,
-        Err(err) => {
-            return Ok(SessionStartOutcome::DeferToProbe(format!(
-                "DrmDevice::new failed: {err}"
-            )));
-        }
-    };
-
-    let gbm_device = match GbmDevice::new(drm_device.device_fd().clone()) {
-        Ok(gbm) => gbm,
-        Err(err) => {
-            return Ok(SessionStartOutcome::DeferToProbe(format!(
-                "GbmDevice::new failed: {err}"
-            )));
-        }
-    };
-
-    let (_egl_display, renderer) = match init_gbm_egl_renderer(&gbm_device) {
-        Ok(pair) => pair,
-        Err(err) => {
-            return Ok(SessionStartOutcome::DeferToProbe(format!(
-                "GBM EGL renderer init failed: {err}"
-            )));
-        }
-    };
+    }
 
     let user_cfg = crate::config::UserConfig::load_default();
-    let setups =
-        find_all_connected_connectors_with_prefs(&drm_device, user_cfg.prefer_max_refresh, None);
-    let Some(setup) = setups.first().cloned() else {
+    let mut selected: Option<OpenedDrmCandidate> = None;
+    let mut failure_reasons: Vec<String> = Vec::new();
+    for path in &candidate_paths {
+        match try_open_drm_candidate(&mut session, path, user_cfg.prefer_max_refresh) {
+            Ok(candidate) => {
+                info!(
+                    primary_node = %candidate.primary_path.display(),
+                    connector = %candidate.setups[0].connector_name,
+                    "Selected DRM/KMS device for native session"
+                );
+                selected = Some(candidate);
+                break;
+            }
+            Err(reason) => {
+                warn!(reason = %reason, "Skipping candidate primary DRM node");
+                failure_reasons.push(reason);
+            }
+        }
+    }
+
+    let Some(OpenedDrmCandidate {
+        primary_path: _,
+        primary_node,
+        drm_device,
+        drm_notifier,
+        gbm_device,
+        renderer,
+        _egl_display,
+        setups,
+        primary_surface,
+    }) = selected
+    else {
         return Ok(SessionStartOutcome::DeferToProbe(
-            "no connected DRM connector with a compatible CRTC and mode".to_owned(),
+            failure_reasons.join("; "),
         ));
     };
-
-    let primary_surface =
-        match drm_device.create_surface(setup.crtc, setup.mode, &[setup.connector]) {
-            Ok(surface) => surface,
-            Err(err) => {
-                return Ok(SessionStartOutcome::DeferToProbe(format!(
-                    "DRM surface creation failed: {err}"
-                )));
-            }
-        };
+    let setup = setups[0].clone();
 
     let mut libinput = Libinput::new_with_udev(LibinputSessionInterface::from(session.clone()));
     if libinput.udev_assign_seat(&seat_name).is_err() {
@@ -1887,19 +2054,10 @@ fn count_drm_cursor_planes(drm_fd: &DrmDeviceFd, universal_planes: bool) -> usiz
 }
 
 fn discover_primary_drm_path() -> Result<PathBuf, CompositorError> {
-    if let Ok(udev) = UdevBackend::new("seat0") {
-        for (_, path) in udev.device_list() {
-            if DrmNode::from_path(path).is_ok_and(|n| n.ty() == NodeType::Primary) {
-                return Ok(path.to_path_buf());
-            }
-        }
-    }
-
-    for candidate in ["/dev/dri/card0", "/dev/dri/card1", "/dev/dri/card2"] {
-        let path = PathBuf::from(candidate);
-        if path.exists() {
-            return Ok(path);
-        }
+    let udev = UdevBackend::new("seat0").ok();
+    let candidates = collect_candidate_drm_paths(udev.as_ref());
+    if let Some(best) = candidates.into_iter().next() {
+        return Ok(best);
     }
 
     Err(CompositorError::BackendInit(
@@ -1931,7 +2089,7 @@ fn verify_gbm_egl_dmabuf_pipeline(
         GbmBufferFlags::RENDERING,
     ));
 
-    let (egl_display, mut renderer) = init_gbm_egl_renderer(&gbm_device)?;
+    let (egl_display, mut renderer) = init_gbm_egl_renderer(&gbm_device, Some(drm_path))?;
 
     let render_format_count = egl_display.dmabuf_render_formats().iter().count();
     let texture_format_count = egl_display.dmabuf_texture_formats().iter().count();
@@ -1972,23 +2130,67 @@ fn verify_gbm_egl_dmabuf_pipeline(
     Ok((render_format_count, texture_format_count, true))
 }
 
+fn drm_path_matches_target(device_path: &Path, target_path: &Path) -> bool {
+    if device_path == target_path {
+        return true;
+    }
+    match (fs::canonicalize(device_path), fs::canonicalize(target_path)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    }
+}
+
 /// Isolated wrapper around Smithay's `unsafe` `EGLDisplay::new` and `GlesRenderer::new` constructors.
 #[allow(unsafe_code)]
 fn init_gbm_egl_renderer(
     gbm_device: &GbmDevice<DrmDeviceFd>,
+    preferred_drm_path: Option<&Path>,
 ) -> Result<(EGLDisplay, GlesRenderer), CompositorError> {
+    let target_render_path = preferred_drm_path
+        .and_then(|p| DrmNode::from_path(p).ok())
+        .and_then(|n| n.node_with_type(NodeType::Render).and_then(Result::ok))
+        .and_then(|n| n.dev_path());
+
     // SAFETY: `GbmDevice<DrmDeviceFd>` is a valid, open GBM device backed by a ref-counted
     // `DrmDeviceFd` that outlives the `EGLDisplay` creation or is retained internally by Smithay.
+    // Bind EGL to the opened `GbmDevice` first so multi-GPU/simpledrm setups cannot hijack EGLDevice.
     let egl_display = unsafe {
-        if let Ok(mut devices) = EGLDevice::enumerate()
-            && let Some(egl_dev) = devices.find(|d| d.drm_device_path().is_ok())
-            && let Ok(display) = EGLDisplay::new(egl_dev)
-        {
-            display
-        } else {
-            EGLDisplay::new(gbm_device.clone()).map_err(|err| {
-                CompositorError::BackendInit(format!("EGLDisplay::new failed: {err}"))
-            })?
+        match EGLDisplay::new(gbm_device.clone()) {
+            Ok(display) => display,
+            Err(gbm_err) => {
+                let mut matched_display = None;
+                if let Ok(devices) = EGLDevice::enumerate() {
+                    let all_devices: Vec<_> = devices.collect();
+                    let ordered = all_devices.iter().filter(|dev| {
+                        let Ok(dev_path) = dev.drm_device_path() else {
+                            return false;
+                        };
+                        preferred_drm_path.is_some_and(|p| drm_path_matches_target(&dev_path, p))
+                            || target_render_path
+                                .as_deref()
+                                .is_some_and(|rp| drm_path_matches_target(&dev_path, rp))
+                    });
+                    for egl_dev in ordered {
+                        if let Ok(display) = EGLDisplay::new(egl_dev.clone()) {
+                            matched_display = Some(display);
+                            break;
+                        }
+                    }
+                    if matched_display.is_none() && preferred_drm_path.is_none() {
+                        for egl_dev in &all_devices {
+                            if egl_dev.drm_device_path().is_ok()
+                                && let Ok(display) = EGLDisplay::new(egl_dev.clone())
+                            {
+                                matched_display = Some(display);
+                                break;
+                            }
+                        }
+                    }
+                }
+                matched_display.ok_or_else(|| {
+                    CompositorError::BackendInit(format!("EGLDisplay::new failed: {gbm_err}"))
+                })?
+            }
         }
     };
 
@@ -2346,5 +2548,33 @@ mod tests {
         let f3_recolored = crate::shell_render::make_solid_element(geo, color_b);
         assert_eq!(f1_first.id(), f3_recolored.id());
         assert_ne!(f2_first.current_commit(), f3_recolored.current_commit());
+    }
+
+    #[test]
+    fn drm_candidate_ranking_prioritizes_hardware_render_nodes_before_simpledrm() {
+        let simple = PathBuf::from("/dev/dri/card0");
+        let headless_dgpu = PathBuf::from("/dev/dri/card2");
+        let primary_igpu = PathBuf::from("/dev/dri/card1");
+
+        let ranked = rank_drm_candidates(vec![
+            (simple.clone(), false, true),
+            (headless_dgpu.clone(), false, false),
+            (primary_igpu.clone(), true, false),
+        ]);
+        assert_eq!(ranked, vec![primary_igpu, headless_dgpu, simple]);
+    }
+
+    #[test]
+    fn software_drm_driver_and_parent_session_detection() {
+        assert!(is_software_drm_driver("simpledrm"));
+        assert!(is_software_drm_driver("simple-framebuffer"));
+        assert!(is_software_drm_driver("vgem"));
+        assert!(!is_software_drm_driver("i915"));
+        assert!(!is_software_drm_driver("amdgpu"));
+
+        assert!(!has_parent_graphical_session_in(None, None));
+        assert!(!has_parent_graphical_session_in(Some("  "), Some("")));
+        assert!(has_parent_graphical_session_in(Some("wayland-0"), None));
+        assert!(has_parent_graphical_session_in(None, Some(":0")));
     }
 }

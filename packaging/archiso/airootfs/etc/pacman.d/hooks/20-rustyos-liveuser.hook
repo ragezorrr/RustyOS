@@ -11,4 +11,5 @@ Depends = shadow
 Depends = seatd
 Depends = greetd
 Depends = networkmanager
-Exec = /usr/bin/sh -c 'id liveuser >/dev/null 2>&1 || /usr/bin/useradd -m -u 1000 -G wheel,audio,input,video,seat -p "" -s /usr/bin/bash liveuser; mkdir -p /home/liveuser/.config/rustyos /home/liveuser/Desktop; cp -an /etc/skel/. /home/liveuser/ || true; chown -R 1000:1000 /home/liveuser; systemctl enable greetd.service NetworkManager.service seatd.service'
+Depends = systemd
+Exec = /usr/bin/sh -c 'id liveuser >/dev/null 2>&1 || /usr/bin/useradd -m -u 1000 -G wheel,audio,input,video,seat -p "" -s /usr/bin/bash liveuser; mkdir -p /home/liveuser/.config/rustyos /home/liveuser/Desktop; cp -an /etc/skel/. /home/liveuser/ || true; chown -R 1000:1000 /home/liveuser; systemctl disable seatd.service >/dev/null 2>&1 || true; systemctl enable greetd.service NetworkManager.service'

@@ -1,6 +1,10 @@
 [terminal]
 vt = 1
 
-[default_session]
+[initial_session]
 command = "/usr/bin/rustyos-session --drm"
 user = "liveuser"
+
+[default_session]
+command = "/usr/local/bin/rustyos-greeter-fallback"
+user = "greeter"

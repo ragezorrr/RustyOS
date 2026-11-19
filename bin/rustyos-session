@@ -263,6 +263,88 @@ cleanup_session() {
     exit "$exit_code"
 }
 
+ensure_runtime_environment() {
+    if [ -z "${XDG_RUNTIME_DIR:-}" ]; then
+        XDG_RUNTIME_DIR="/run/user/$(id -u)"
+    fi
+    if [ ! -d "$XDG_RUNTIME_DIR" ]; then
+        mkdir -p "$XDG_RUNTIME_DIR" 2>/dev/null || true
+        chmod 0700 "$XDG_RUNTIME_DIR" 2>/dev/null || true
+    fi
+    if [ ! -d "$XDG_RUNTIME_DIR" ] || [ ! -w "$XDG_RUNTIME_DIR" ]; then
+        XDG_RUNTIME_DIR="/tmp/rustyos-runtime-$(id -u)"
+        mkdir -p "$XDG_RUNTIME_DIR"
+        chmod 0700 "$XDG_RUNTIME_DIR"
+    fi
+    export XDG_RUNTIME_DIR
+
+    if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] && [ -S "${XDG_RUNTIME_DIR}/bus" ]; then
+        DBUS_SESSION_BUS_ADDRESS="unix:path=${XDG_RUNTIME_DIR}/bus"
+        export DBUS_SESSION_BUS_ADDRESS
+    fi
+
+    if [ "$BACKEND_FLAG" = "--drm" ] || [ "$BACKEND_FLAG" = "--kms" ]; then
+        if [ -z "${LIBSEAT_BACKEND:-}" ] && [ -n "${XDG_SESSION_ID:-}" ] && [ -d /run/systemd/system ]; then
+            export LIBSEAT_BACKEND=logind
+        fi
+        : "${RUST_LOG:=info}"
+        export RUST_LOG
+    fi
+}
+
+run_drm_compositor() {
+    LOG_FILE="${XDG_RUNTIME_DIR}/rustyos-session.log"
+    LOG_FIFO="${XDG_RUNTIME_DIR}/rustyos-session.fifo.$$"
+    LATEST_ERR_LOG="/tmp/rustyos-session-last-error.log"
+
+    {
+        printf '=== RustyOS DRM/KMS session start (%s) ===\n' "$(date -Is 2>/dev/null || date)"
+        printf 'user=%s uid=%s XDG_SESSION_ID=%s XDG_RUNTIME_DIR=%s LIBSEAT_BACKEND=%s\n' \
+            "$(id -un)" "$(id -u)" "${XDG_SESSION_ID:-unset}" "$XDG_RUNTIME_DIR" "${LIBSEAT_BACKEND:-auto}"
+        ls -la /dev/dri/ 2>&1 || true
+    } >"$LOG_FILE" 2>&1 || true
+
+    rm -f "$LATEST_ERR_LOG" 2>/dev/null || true
+
+    if rm -f "$LOG_FIFO" && mkfifo "$LOG_FIFO" 2>/dev/null; then
+        tee -a "$LOG_FILE" <"$LOG_FIFO" >&2 &
+        TEE_PID=$!
+        set +e
+        if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] && command -v dbus-run-session >/dev/null 2>&1; then
+            dbus-run-session -- "$COMPOSITOR_BIN" "$BACKEND_FLAG" "$@" >"$LOG_FIFO" 2>&1
+        else
+            "$COMPOSITOR_BIN" "$BACKEND_FLAG" "$@" >"$LOG_FIFO" 2>&1
+        fi
+        drm_rc=$?
+        set -e
+        wait "$TEE_PID" >/dev/null 2>&1 || true
+        rm -f "$LOG_FIFO" 2>/dev/null || true
+    else
+        set +e
+        if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] && command -v dbus-run-session >/dev/null 2>&1; then
+            dbus-run-session -- "$COMPOSITOR_BIN" "$BACKEND_FLAG" "$@"
+        else
+            "$COMPOSITOR_BIN" "$BACKEND_FLAG" "$@"
+        fi
+        drm_rc=$?
+        set -e
+    fi
+
+    if [ "$drm_rc" -ne 0 ]; then
+        {
+            printf 'RustyOS DRM/KMS compositor exited with code %s.\n' "$drm_rc"
+            tail -n 40 "$LOG_FILE" 2>/dev/null || true
+        } >"$LATEST_ERR_LOG" 2>/dev/null || true
+        chmod 0644 "$LATEST_ERR_LOG" 2>/dev/null || true
+        printf 'Error: RustyOS compositor exited with code %s (see %s)\n' "$drm_rc" "$LOG_FILE" >&2
+    fi
+    return "$drm_rc"
+}
+
+if [ "$BACKEND_FLAG" != "--check" ] && [ "$BACKEND_FLAG" != "--drm-probe" ]; then
+    ensure_runtime_environment
+fi
+
 # Sync session desktop and toolkit variables into systemd/D-Bus user environment for standalone sessions.
 if [ "$BACKEND_FLAG" = "--drm" ] || [ "$BACKEND_FLAG" = "--kms" ]; then
     if command -v dbus-update-activation-environment >/dev/null 2>&1; then
@@ -299,31 +381,23 @@ if [ "${RUSTYOS_SKIP_OOBE:-0}" != "1" ] \
     OOBE_SPAWN_ARG="$INSTALLER_BIN --oobe"
 fi
 
+if [ -n "$OOBE_SPAWN_ARG" ]; then
+    set -- --spawn "$OOBE_SPAWN_ARG" "$@"
+fi
+
 if [ "${RUSTYOS_EXTERNAL_SHELL:-0}" = "1" ] \
     && [ "$BACKEND_FLAG" != "--check" ] \
     && [ "$BACKEND_FLAG" != "--drm-probe" ]; then
     if [ -n "$SHELL_BIN" ] && [ -x "$SHELL_BIN" ]; then
-        if [ "$BACKEND_FLAG" = "--drm" ] || [ "$BACKEND_FLAG" = "--kms" ]; then
-            "$COMPOSITOR_BIN" "$BACKEND_FLAG" --spawn "$SHELL_BIN --wayland" ${OOBE_SPAWN_ARG:+--spawn "$OOBE_SPAWN_ARG"} "$@"
-            exit $?
-        else
-            exec "$COMPOSITOR_BIN" "$BACKEND_FLAG" --spawn "$SHELL_BIN --wayland" ${OOBE_SPAWN_ARG:+--spawn "$OOBE_SPAWN_ARG"} "$@"
-        fi
+        set -- --spawn "$SHELL_BIN --wayland" "$@"
+    else
+        echo "Warning: RUSTYOS_EXTERNAL_SHELL=1 set, but rusty-shell binary not found; falling back to built-in compositor shell" >&2
     fi
-    echo "Warning: RUSTYOS_EXTERNAL_SHELL=1 set, but rusty-shell binary not found; falling back to built-in compositor shell" >&2
 fi
 
 if [ "$BACKEND_FLAG" = "--drm" ] || [ "$BACKEND_FLAG" = "--kms" ]; then
-    if [ -n "$OOBE_SPAWN_ARG" ]; then
-        "$COMPOSITOR_BIN" "$BACKEND_FLAG" --spawn "$OOBE_SPAWN_ARG" "$@"
-    else
-        "$COMPOSITOR_BIN" "$BACKEND_FLAG" "$@"
-    fi
+    run_drm_compositor "$@"
     exit $?
 else
-    if [ -n "$OOBE_SPAWN_ARG" ]; then
-        exec "$COMPOSITOR_BIN" "$BACKEND_FLAG" --spawn "$OOBE_SPAWN_ARG" "$@"
-    else
-        exec "$COMPOSITOR_BIN" "$BACKEND_FLAG" "$@"
-    fi
+    exec "$COMPOSITOR_BIN" "$BACKEND_FLAG" "$@"
 fi
