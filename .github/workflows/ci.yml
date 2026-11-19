@@ -69,7 +69,7 @@ jobs:
             git rust pkgconf gnupg \
             wayland libxkbcommon mesa libglvnd libinput systemd-libs seatd \
             dbus fontconfig adwaita-icon-theme xorg-xwayland pipewire \
-            xdg-desktop-portal polkit pacman-contrib desktop-file-utils libxml2
+            xdg-desktop-portal polkit pacman-contrib firefox desktop-file-utils libxml2
 
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -80,7 +80,7 @@ jobs:
         run: |
           sh -n bin/rustyos-session
           bash -n packaging/arch/PKGBUILD scripts/install.sh
-          desktop-file-validate packaging/applications/org.rustyos.files.desktop packaging/applications/org.rustyos.updater.desktop
+          desktop-file-validate packaging/applications/org.rustyos.files.desktop packaging/applications/org.rustyos.terminal.desktop packaging/applications/org.rustyos.updater.desktop
           xmllint --noout packaging/polkit/org.rustyos.updater.policy
 
       - name: Build isolated Arch package with makepkg
@@ -96,11 +96,14 @@ jobs:
             LOGDEST=/tmp/rustyos-pkg/log \
             makepkg -f --noconfirm --nocheck --noprogressbar"
           pacman -Qlp /tmp/rustyos-pkg/pkg/rustyos-git-*.pkg.tar.* | grep -F "/usr/bin/rusty-compositor"
+          pacman -Qlp /tmp/rustyos-pkg/pkg/rustyos-git-*.pkg.tar.* | grep -F "/usr/bin/rusty-shell"
           pacman -Qlp /tmp/rustyos-pkg/pkg/rustyos-git-*.pkg.tar.* | grep -F "/usr/bin/rusty-files"
+          pacman -Qlp /tmp/rustyos-pkg/pkg/rustyos-git-*.pkg.tar.* | grep -F "/usr/bin/rusty-terminal"
           pacman -Qlp /tmp/rustyos-pkg/pkg/rustyos-git-*.pkg.tar.* | grep -F "/usr/bin/rusty-updater"
           pacman -Qlp /tmp/rustyos-pkg/pkg/rustyos-git-*.pkg.tar.* | grep -F "/usr/lib/rustyos/rustyos-update-helper"
           pacman -Qlp /tmp/rustyos-pkg/pkg/rustyos-git-*.pkg.tar.* | grep -F "/usr/share/wayland-sessions/rustyos.desktop"
           pacman -Qlp /tmp/rustyos-pkg/pkg/rustyos-git-*.pkg.tar.* | grep -F "/usr/share/applications/org.rustyos.files.desktop"
+          pacman -Qlp /tmp/rustyos-pkg/pkg/rustyos-git-*.pkg.tar.* | grep -F "/usr/share/applications/org.rustyos.terminal.desktop"
           pacman -Qlp /tmp/rustyos-pkg/pkg/rustyos-git-*.pkg.tar.* | grep -F "/usr/share/applications/org.rustyos.updater.desktop"
           pacman -Qlp /tmp/rustyos-pkg/pkg/rustyos-git-*.pkg.tar.* | grep -F "/usr/share/polkit-1/actions/org.rustyos.updater.policy"
 
