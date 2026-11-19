@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
-# RustyOS System Installer & Recovery Backend (`RUSTYOS-115`, ADR-0065)
-# Safety: never modifies disks when `--dry-run` is active; refuses mounted/root disks.
+# RustyOS System Installer & Recovery Backend (`RUSTYOS-115` / `RUSTYOS-116`, ADR-0065 / ADR-0066)
+# Safety: never modifies disks when `--dry-run` is active; dual-boot mode never calls `sgdisk --zap-all`.
 set -euo pipefail
 
 DRY_RUN=0
 CONFIRM_ERASE=0
+CONFIRM_DUALBOOT=0
+INSTALL_MODE="whole-disk"
 TARGET_DISK=""
+ROOT_PART=""
+FREE_SPACE_SPEC=""
+EFI_PART=""
 HOSTNAME_VAL="rustyos"
 USERNAME_VAL="rusty"
 PASSWORD_STDIN=0
@@ -26,13 +31,19 @@ usage() {
 Usage: rustyos-install [OPTIONS]
 
 Modes:
-  --list-disks-json          Print block devices JSON via lsblk -Jpb
+  --list-disks-json          Print block devices & partitions JSON via lsblk -Jpb
   --rollback-help            Print rollback and recovery instructions
   --dry-run                  Validate inputs and print full plan without touching disks
 
 Install options:
-  --target-disk <dev>        Target whole block device (e.g. /dev/vda, /dev/nvme0n1)
-  --confirm-erase            Required when --dry-run is NOT set
+  --install-mode <mode>      whole-disk | dual-boot (default: whole-disk)
+  --target-disk <dev>        Target whole block device (for whole-disk mode)
+  --root-part <dev>          Target existing root partition (for dual-boot mode)
+  --free-space <disk:start:size>
+                             Carve partition(s) strictly inside unallocated bytes range
+  --efi-part <dev>           Existing EFI System Partition to reuse WITHOUT formatting
+  --confirm-erase            Required in real whole-disk mode (wipes entire disk)
+  --confirm-dualboot         Required in real dual-boot mode (preserves other partitions)
   --hostname <name>          Target hostname (default: rustyos)
   --username <user>          Primary sudo user name (default: rusty)
   --password-stdin           Read user password line from stdin (non-interactive)
@@ -69,10 +80,61 @@ emit_step() {
     printf 'STEP:%s:%s:%s\n' "$1" "$2" "$3"
 }
 
-validate_inputs() {
-    if [[ -z "${TARGET_DISK}" ]]; then
-        echo "Error: --target-disk is required" >&2
+is_valid_disk_path() {
+    [[ "$1" =~ ^/dev/(sd[a-z]+|vd[a-z]+|xvd[a-z]+|nvme[0-9]+n[0-9]+|mmcblk[0-9]+|loop[0-9]+)$ ]]
+}
+
+is_valid_part_path() {
+    [[ "$1" =~ ^/dev/(sd[a-z]+[0-9]+|vd[a-z]+[0-9]+|xvd[a-z]+[0-9]+|nvme[0-9]+n[0-9]+p[0-9]+|mmcblk[0-9]+p[0-9]+|loop[0-9]+p[0-9]+)$ ]]
+}
+
+FREE_DISK=""
+FREE_START_BYTES=0
+FREE_SIZE_BYTES=0
+
+parse_free_space_spec() {
+    local spec="$1"
+    IFS=':' read -r FREE_DISK FREE_START_BYTES FREE_SIZE_BYTES extra <<<"${spec}"
+    if [[ -n "${extra:-}" ]] || [[ -z "${FREE_DISK}" ]]; then
+        echo "Error: invalid --free-space '${spec}' (expected <disk>:<start_bytes>:<size_bytes>)" >&2
         exit 2
+    fi
+    if ! is_valid_disk_path "${FREE_DISK}"; then
+        echo "Error: unsafe disk path '${FREE_DISK}' in --free-space" >&2
+        exit 3
+    fi
+    if ! [[ "${FREE_START_BYTES}" =~ ^[0-9]+$ && "${FREE_SIZE_BYTES}" =~ ^[0-9]+$ ]]; then
+        echo "Error: --free-space byte offsets must be integers" >&2
+        exit 2
+    fi
+    if (( FREE_SIZE_BYTES < 12000000000 )); then
+        echo "Error: --free-space region must be at least 12 GB (got ${FREE_SIZE_BYTES} bytes)" >&2
+        exit 2
+    fi
+}
+
+validate_inputs() {
+    if ! [[ "${INSTALL_MODE}" =~ ^(whole-disk|dual-boot)$ ]]; then
+        echo "Error: invalid --install-mode '${INSTALL_MODE}' (expected whole-disk or dual-boot)" >&2
+        exit 2
+    fi
+    if [[ "${INSTALL_MODE}" == "whole-disk" ]]; then
+        if [[ -z "${TARGET_DISK}" ]]; then
+            echo "Error: --target-disk is required in whole-disk mode" >&2
+            exit 2
+        fi
+    else
+        if [[ -n "${ROOT_PART}" && -n "${FREE_SPACE_SPEC}" ]]; then
+            echo "Error: pass either --root-part OR --free-space in dual-boot mode, not both" >&2
+            exit 2
+        fi
+        if [[ -z "${ROOT_PART}" && -z "${FREE_SPACE_SPEC}" ]]; then
+            echo "Error: dual-boot mode requires --root-part or --free-space" >&2
+            exit 2
+        fi
+        if [[ -n "${FREE_SPACE_SPEC}" ]]; then
+            parse_free_space_spec "${FREE_SPACE_SPEC}"
+        fi
     fi
     if ! [[ "${HOSTNAME_VAL}" =~ ^[a-zA-Z0-9][a-zA-Z0-9-]{0,62}$ ]]; then
         echo "Error: invalid --hostname '${HOSTNAME_VAL}'" >&2
@@ -110,49 +172,134 @@ partition_suffix() {
     fi
 }
 
-check_target_disk_safe() {
+assert_unmounted_non_root() {
     local dev="$1"
-    if ! [[ "${dev}" =~ ^/dev/(sd[a-z]+|vd[a-z]+|xvd[a-z]+|nvme[0-9]+n[0-9]+|mmcblk[0-9]+|loop[0-9]+)$ ]]; then
-        echo "Error: unsupported or unsafe block device path '${dev}'" >&2
+    local mounted
+    mounted="$(lsblk -nr -o MOUNTPOINTS "${dev}" 2>/dev/null | grep -v '^$' || true)"
+    if [[ -n "${mounted}" ]]; then
+        echo "Error: target '${dev}' has active mountpoints (${mounted}); refusing" >&2
         exit 3
     fi
+    local root_src
+    root_src="$(findmnt -no SOURCE / 2>/dev/null || true)"
+    if [[ -n "${root_src}" && "${root_src}" == "${dev}"* ]]; then
+        echo "Error: '${dev}' backs the running root filesystem; refusing" >&2
+        exit 3
+    fi
+}
 
-    if [[ "${DRY_RUN}" -eq 0 ]]; then
-        if [[ ! -b "${dev}" ]]; then
-            echo "Error: block device '${dev}' does not exist" >&2
+check_targets_safe() {
+    if [[ "${INSTALL_MODE}" == "whole-disk" ]]; then
+        if ! is_valid_disk_path "${TARGET_DISK}"; then
+            echo "Error: unsupported or unsafe block device path '${TARGET_DISK}'" >&2
             exit 3
         fi
-        local mounted
-        mounted="$(lsblk -nr -o MOUNTPOINTS "${dev}" 2>/dev/null | grep -v '^$' || true)"
-        if [[ -n "${mounted}" ]]; then
-            echo "Error: target disk '${dev}' has active mountpoints (${mounted}); refusing to erase" >&2
+        if [[ "${DRY_RUN}" -eq 0 ]]; then
+            if [[ ! -b "${TARGET_DISK}" ]]; then
+                echo "Error: block device '${TARGET_DISK}' does not exist" >&2
+                exit 3
+            fi
+            assert_unmounted_non_root "${TARGET_DISK}"
+        fi
+        return 0
+    fi
+
+    if [[ -n "${ROOT_PART}" ]]; then
+        if ! is_valid_part_path "${ROOT_PART}"; then
+            echo "Error: invalid partition device path '${ROOT_PART}'" >&2
             exit 3
         fi
-        local root_src
-        root_src="$(findmnt -no SOURCE / 2>/dev/null || true)"
-        if [[ -n "${root_src}" && "${root_src}" == "${dev}"* ]]; then
-            echo "Error: '${dev}' backs the running root filesystem; refusing to erase" >&2
+        if [[ "${DRY_RUN}" -eq 0 ]]; then
+            if [[ ! -b "${ROOT_PART}" ]]; then
+                echo "Error: partition '${ROOT_PART}' does not exist" >&2
+                exit 3
+            fi
+            assert_unmounted_non_root "${ROOT_PART}"
+        fi
+    fi
+
+    if [[ -n "${FREE_DISK}" && "${DRY_RUN}" -eq 0 ]]; then
+        if [[ ! -b "${FREE_DISK}" ]]; then
+            echo "Error: disk '${FREE_DISK}' does not exist" >&2
             exit 3
+        fi
+    fi
+
+    if [[ -n "${EFI_PART}" ]]; then
+        if ! is_valid_part_path "${EFI_PART}"; then
+            echo "Error: invalid EFI partition path '${EFI_PART}'" >&2
+            exit 3
+        fi
+        if [[ "${DRY_RUN}" -eq 0 ]]; then
+            if [[ ! -b "${EFI_PART}" ]]; then
+                echo "Error: EFI partition '${EFI_PART}' does not exist" >&2
+                exit 3
+            fi
+            local efi_fs
+            efi_fs="$(lsblk -no FSTYPE "${EFI_PART}" 2>/dev/null || true)"
+            if [[ "${efi_fs}" != "vfat" ]]; then
+                echo "Error: EFI partition '${EFI_PART}' must be FAT32/vfat (found '${efi_fs}')" >&2
+                exit 3
+            fi
         fi
     fi
 }
 
+find_part_by_start_sector() {
+    local disk="$1"
+    local wanted_sec="$2"
+    local base_disk part_name start_file s
+    base_disk="$(basename "${disk}")"
+    for start_file in /sys/block/"${base_disk}"/*/start; do
+        [[ -r "${start_file}" ]] || continue
+        read -r s <"${start_file}"
+        if [[ "${s}" == "${wanted_sec}" ]]; then
+            part_name="$(basename "$(dirname "${start_file}")")"
+            printf '/dev/%s\n' "${part_name}"
+            return 0
+        fi
+    done
+    return 1
+}
+
 run_dry_plan() {
-    local efi_part root_part boot_pkg
-    efi_part="$(partition_suffix "${TARGET_DISK}" 1)"
-    root_part="$(partition_suffix "${TARGET_DISK}" 2)"
-    boot_pkg="efibootmgr"
+    local boot_pkg="efibootmgr"
     if [[ "${BOOTLOADER}" == "grub" ]]; then
-        boot_pkg="grub efibootmgr"
+        boot_pkg="grub efibootmgr os-prober"
     fi
 
-    emit_step 5 validate "Validated target=${TARGET_DISK}, user=${USERNAME_VAL}, host=${HOSTNAME_VAL}, bootloader=${BOOTLOADER}"
-    emit_step 15 partition "[dry-run] Would wipe GPT and create ${efi_part} (512M EFI FAT32) + ${root_part} (RustyOS ext4)"
-    emit_step 30 mount "[dry-run] Would mount ${root_part} -> ${MOUNT_ROOT} and ${efi_part} -> ${MOUNT_ROOT}/boot"
+    if [[ "${INSTALL_MODE}" == "whole-disk" ]]; then
+        local efi_part root_part
+        efi_part="$(partition_suffix "${TARGET_DISK}" 1)"
+        root_part="$(partition_suffix "${TARGET_DISK}" 2)"
+        emit_step 5 validate "Validated whole-disk target=${TARGET_DISK}, user=${USERNAME_VAL}, host=${HOSTNAME_VAL}, bootloader=${BOOTLOADER}"
+        emit_step 15 partition "[dry-run] Would wipe GPT and create ${efi_part} (512M EFI FAT32) + ${root_part} (RustyOS ext4)"
+        emit_step 30 mount "[dry-run] Would mount ${root_part} -> ${MOUNT_ROOT} and ${efi_part} -> ${MOUNT_ROOT}/boot"
+    else
+        if [[ -n "${ROOT_PART}" ]]; then
+            local efi_msg="${EFI_PART:-required EFI partition} (reused WITHOUT formatting)"
+            emit_step 5 validate "Validated dual-boot partition mode: root=${ROOT_PART}, efi=${efi_msg}, bootloader=${BOOTLOADER}"
+            emit_step 15 partition "[dry-run] Preserves partition table (no sgdisk --zap-all); formats ONLY ${ROOT_PART} as ext4"
+            emit_step 30 mount "[dry-run] Would mount ${ROOT_PART} -> ${MOUNT_ROOT} and reuse ${EFI_PART:-<efi>} -> ${MOUNT_ROOT}/boot"
+        else
+            local efi_note="reuses existing EFI ${EFI_PART} without formatting"
+            if [[ -z "${EFI_PART}" ]]; then
+                efi_note="creates dedicated 512M RUSTYOS_EFI inside free gap (existing ESP untouched)"
+            fi
+            emit_step 5 validate "Validated dual-boot free-space mode on ${FREE_DISK} (offset=${FREE_START_BYTES}, size=${FREE_SIZE_BYTES}), bootloader=${BOOTLOADER}"
+            emit_step 15 partition "[dry-run] Preserves existing partitions; carves RustyOS inside free gap (${efi_note})"
+            emit_step 30 mount "[dry-run] Would mount new RustyOS root -> ${MOUNT_ROOT} and EFI -> ${MOUNT_ROOT}/boot"
+        fi
+    fi
+
     emit_step 55 pacstrap "[dry-run] Would run pacstrap -K ${MOUNT_ROOT}: base linux linux-firmware networkmanager pipewire wireplumber seatd polkit mesa xorg-xwayland firefox greetd sudo ${boot_pkg} rustyos-git"
     emit_step 75 system "[dry-run] Would set timezone=${TIMEZONE_VAL}, locale=${LOCALE_VAL}, keymap=${KEYMAP_VAL}, hostname=${HOSTNAME_VAL}, user=${USERNAME_VAL}"
     emit_step 88 desktop "[dry-run] Would write /etc/greetd/config.toml (autologin=${AUTOLOGIN}) and ~/.config/rustyos/config.toml (theme=${APPEARANCE}, accent=${ACCENT_INDEX}, kb=${KB_LAYOUT}, oobe=${INSTALL_OOBE})"
-    emit_step 96 bootloader "[dry-run] Would install ${BOOTLOADER} onto ${TARGET_DISK} and generate initramfs"
+    if [[ "${INSTALL_MODE}" == "dual-boot" ]]; then
+        emit_step 96 bootloader "[dry-run] Would install ${BOOTLOADER} with dual-boot preservation (entries/rustyos.conf or os-prober) and initramfs"
+    else
+        emit_step 96 bootloader "[dry-run] Would install ${BOOTLOADER} onto ${TARGET_DISK} and generate initramfs"
+    fi
     emit_step 100 done "[dry-run] Installation plan verified cleanly (no disk writes performed)"
 }
 
@@ -161,49 +308,147 @@ install_system() {
         echo "Error: real installation requires root privileges (use pkexec / sudo, or pass --dry-run)" >&2
         exit 4
     fi
-    if [[ "${CONFIRM_ERASE}" -ne 1 ]]; then
+    if [[ "${INSTALL_MODE}" == "whole-disk" && "${CONFIRM_ERASE}" -ne 1 ]]; then
         echo "Error: pass --confirm-erase to confirm destructive partitioning of ${TARGET_DISK}" >&2
         exit 2
     fi
-    for tool in sgdisk mkfs.fat mkfs.ext4 pacstrap genfstab arch-chroot partprobe; do
+    if [[ "${INSTALL_MODE}" == "dual-boot" && "${CONFIRM_DUALBOOT}" -ne 1 ]]; then
+        echo "Error: pass --confirm-dualboot to confirm dual-boot partition installation" >&2
+        exit 2
+    fi
+    for tool in sgdisk blockdev mkfs.fat mkfs.ext4 pacstrap genfstab arch-chroot partprobe blkid; do
         if ! command -v "${tool}" >/dev/null 2>&1; then
             echo "Error: required installation tool '${tool}' not found in PATH" >&2
             exit 5
         fi
     done
 
-    local efi_part root_part boot_pkg
-    efi_part="$(partition_suffix "${TARGET_DISK}" 1)"
-    root_part="$(partition_suffix "${TARGET_DISK}" 2)"
-    boot_pkg="efibootmgr"
+    local efi_part root_part format_efi=0 boot_pkg="efibootmgr" boot_disk=""
     if [[ "${BOOTLOADER}" == "grub" ]]; then
-        boot_pkg="grub efibootmgr"
+        boot_pkg="grub efibootmgr os-prober"
     fi
 
     cleanup_mounts() {
         umount -R "${MOUNT_ROOT}" >/dev/null 2>&1 || true
     }
     trap cleanup_mounts EXIT
-
-    emit_step 5 validate "Checking hardware firmware and disk ${TARGET_DISK}"
     umount -R "${MOUNT_ROOT}" >/dev/null 2>&1 || true
     mkdir -p "${MOUNT_ROOT}"
 
-    emit_step 15 partition "Partitioning ${TARGET_DISK} (GPT: EFI 512 MiB + RustyOS root)"
-    sgdisk --zap-all "${TARGET_DISK}"
-    sgdisk -n 1:0:+512M -t 1:ef00 -c 1:RUSTYOS_EFI "${TARGET_DISK}"
-    sgdisk -n 2:0:0 -t 2:8300 -c 2:RUSTYOS_ROOT "${TARGET_DISK}"
-    partprobe "${TARGET_DISK}" || true
-    udevadm settle --timeout=10 || sleep 2
+    if [[ "${INSTALL_MODE}" == "whole-disk" ]]; then
+        boot_disk="${TARGET_DISK}"
+        efi_part="$(partition_suffix "${TARGET_DISK}" 1)"
+        root_part="$(partition_suffix "${TARGET_DISK}" 2)"
+        format_efi=1
 
-    emit_step 28 format "Formatting EFI (${efi_part}) and root (${root_part})"
-    mkfs.fat -F32 "${efi_part}"
-    mkfs.ext4 -F -L RUSTYOS "${root_part}"
+        emit_step 5 validate "Checking hardware firmware and disk ${TARGET_DISK}"
+        emit_step 15 partition "Partitioning ${TARGET_DISK} (GPT: EFI 512 MiB + RustyOS root)"
+        sgdisk --zap-all "${TARGET_DISK}"
+        sgdisk -n 1:0:+512M -t 1:ef00 -c 1:RUSTYOS_EFI "${TARGET_DISK}"
+        sgdisk -n 2:0:0 -t 2:8300 -c 2:RUSTYOS_ROOT "${TARGET_DISK}"
+        partprobe "${TARGET_DISK}" || true
+        udevadm settle --timeout=10 || sleep 2
+
+        emit_step 28 format "Formatting EFI (${efi_part}) and root (${root_part})"
+        mkfs.fat -F32 "${efi_part}"
+        mkfs.ext4 -F -L RUSTYOS "${root_part}"
+    else
+        emit_step 5 validate "Validating dual-boot layout (preserving existing OS partitions)"
+        if [[ -n "${ROOT_PART}" ]]; then
+            root_part="${ROOT_PART}"
+            boot_disk="$(lsblk -no PKNAME "${ROOT_PART}" | head -n1)"
+            [[ -n "${boot_disk}" ]] && boot_disk="/dev/${boot_disk}"
+            if [[ -z "${EFI_PART}" ]]; then
+                echo "Error: --efi-part is required when installing onto an existing --root-part in dual-boot mode" >&2
+                exit 2
+            fi
+            efi_part="${EFI_PART}"
+            format_efi=0
+            emit_step 28 format "Formatting ONLY target root partition ${root_part} (EFI ${efi_part} untouched)"
+            mkfs.ext4 -F -L RUSTYOS "${root_part}"
+        else
+            boot_disk="${FREE_DISK}"
+            local pttype sec_size align start_sec end_max_sec efi_sectors=0 cur_sec need_new_efi=0
+            pttype="$(blkid -s PTTYPE -o value "${FREE_DISK}" 2>/dev/null || true)"
+            if [[ "${pttype}" != "gpt" ]]; then
+                echo "Error: dual-boot free-space partitioning requires a GPT disk (found '${pttype:-unknown}')" >&2
+                exit 3
+            fi
+            sec_size="$(blockdev --getss "${FREE_DISK}")"
+            align="$((1048576 / sec_size))"
+            (( align < 1 )) && align=1
+            start_sec="$(( ((FREE_START_BYTES + sec_size - 1) / sec_size + align - 1) / align * align ))"
+            end_max_sec="$(( (FREE_START_BYTES + FREE_SIZE_BYTES) / sec_size - 1 ))"
+
+            if [[ -z "${EFI_PART}" ]]; then
+                need_new_efi=1
+            else
+                local esp_bytes
+                esp_bytes="$(blockdev --getsize64 "${EFI_PART}")"
+                if (( esp_bytes < 272629760 )); then
+                    need_new_efi=1
+                fi
+            fi
+
+            cur_sec="${start_sec}"
+            local efi_start_sec=0 root_start_sec=0
+            if [[ "${need_new_efi}" -eq 1 ]]; then
+                efi_sectors="$(( 536870912 / sec_size ))"
+                efi_start_sec="${cur_sec}"
+                local efi_end_sec="$(( cur_sec + efi_sectors - 1 ))"
+                cur_sec="$(( efi_end_sec + 1 ))"
+                (( cur_sec + align >= end_max_sec )) && {
+                    echo "Error: free space too small for 512M EFI + RustyOS root" >&2
+                    exit 3
+                }
+                root_start_sec="${cur_sec}"
+                emit_step 15 partition "Creating 512 MiB RUSTYOS_EFI + RUSTYOS_ROOT strictly inside unallocated gap"
+                sgdisk -n "0:${efi_start_sec}:${efi_end_sec}" -t 0:ef00 -c 0:RUSTYOS_EFI "${FREE_DISK}"
+                sgdisk -n "0:${root_start_sec}:${end_max_sec}" -t 0:8300 -c 0:RUSTYOS_ROOT "${FREE_DISK}"
+                format_efi=1
+            else
+                efi_part="${EFI_PART}"
+                root_start_sec="${cur_sec}"
+                format_efi=0
+                emit_step 15 partition "Creating RUSTYOS_ROOT inside unallocated gap (reusing EFI ${efi_part})"
+                sgdisk -n "0:${root_start_sec}:${end_max_sec}" -t 0:8300 -c 0:RUSTYOS_ROOT "${FREE_DISK}"
+            fi
+
+            partprobe "${FREE_DISK}" || true
+            udevadm settle --timeout=10 || sleep 2
+
+            if [[ "${need_new_efi}" -eq 1 ]]; then
+                efi_part="$(find_part_by_start_sector "${FREE_DISK}" "${efi_start_sec}")" || {
+                    echo "Error: unable to locate newly created EFI partition at sector ${efi_start_sec}" >&2
+                    exit 5
+                }
+            fi
+            root_part="$(find_part_by_start_sector "${FREE_DISK}" "${root_start_sec}")" || {
+                echo "Error: unable to locate newly created root partition at sector ${root_start_sec}" >&2
+                exit 5
+            }
+
+            emit_step 28 format "Formatting new RustyOS filesystem(s)"
+            if [[ "${format_efi}" -eq 1 ]]; then
+                mkfs.fat -F32 "${efi_part}"
+            fi
+            mkfs.ext4 -F -L RUSTYOS "${root_part}"
+        fi
+    fi
 
     emit_step 35 mount "Mounting target filesystems"
     mount "${root_part}" "${MOUNT_ROOT}"
     mkdir -p "${MOUNT_ROOT}/boot"
     mount "${efi_part}" "${MOUNT_ROOT}/boot"
+
+    if [[ "${INSTALL_MODE}" == "dual-boot" && "${format_efi}" -eq 0 ]]; then
+        local avail_esp
+        avail_esp="$(df -B1 --output=avail "${MOUNT_ROOT}/boot" | tail -n1 | tr -d ' ')"
+        if [[ -n "${avail_esp}" ]] && (( avail_esp < 125829120 )); then
+            echo "Error: shared EFI ${efi_part} has only ${avail_esp} bytes free (< 120 MiB needed for kernel/initramfs); use free-space mode to create a separate 512M EFI" >&2
+            exit 3
+        fi
+    fi
 
     local pacman_conf_arg=()
     if [[ -f /etc/pacman-rustyos-install.conf ]]; then
@@ -290,31 +535,39 @@ EOF
 
     emit_step 95 bootloader "Installing ${BOOTLOADER}"
     if [[ "${BOOTLOADER}" == "grub" ]]; then
+        if grep -q '^#GRUB_DISABLE_OS_PROBER=' "${MOUNT_ROOT}/etc/default/grub" 2>/dev/null; then
+            sed -i 's/^#GRUB_DISABLE_OS_PROBER=.*/GRUB_DISABLE_OS_PROBER=false/' "${MOUNT_ROOT}/etc/default/grub"
+        elif ! grep -q '^GRUB_DISABLE_OS_PROBER=' "${MOUNT_ROOT}/etc/default/grub" 2>/dev/null; then
+            printf '\nGRUB_DISABLE_OS_PROBER=false\n' >> "${MOUNT_ROOT}/etc/default/grub"
+        fi
         if [[ -d /sys/firmware/efi ]]; then
             arch-chroot "${MOUNT_ROOT}" grub-install --target=x86_64-efi --efi-directory=/boot --bootloader-id=RustyOS
         else
-            arch-chroot "${MOUNT_ROOT}" grub-install --target=i386-pc "${TARGET_DISK}"
+            arch-chroot "${MOUNT_ROOT}" grub-install --target=i386-pc "${boot_disk}"
         fi
         arch-chroot "${MOUNT_ROOT}" grub-mkconfig -o /boot/grub/grub.cfg
     else
         arch-chroot "${MOUNT_ROOT}" bootctl install
         local root_uuid
         root_uuid="$(blkid -s UUID -o value "${root_part}")"
-        cat <<'EOF' > "${MOUNT_ROOT}/boot/loader/loader.conf"
+        if [[ "${INSTALL_MODE}" == "whole-disk" || ! -f "${MOUNT_ROOT}/boot/loader/loader.conf" ]]; then
+            cat <<'EOF' > "${MOUNT_ROOT}/boot/loader/loader.conf"
 default rustyos.conf
-timeout 3
+timeout 4
 console-mode max
 editor no
 EOF
+        fi
+        mkdir -p "${MOUNT_ROOT}/boot/loader/entries"
         cat <<EOF > "${MOUNT_ROOT}/boot/loader/entries/rustyos.conf"
 title   RustyOS
 linux   /vmlinuz-linux
 initrd  /initramfs-linux.img
-options root=UUID=${root_uuid} rw quiet splash
+options root=UUID=${root_uuid} rw quiet
 EOF
     fi
 
-    emit_step 100 done "RustyOS installed cleanly on ${TARGET_DISK}; ready to reboot"
+    emit_step 100 done "RustyOS installation completed successfully"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -324,8 +577,8 @@ while [[ $# -gt 0 ]]; do
             exit 0
             ;;
         --list-disks-json)
-            lsblk -Jpb -o NAME,KNAME,MODEL,SIZE,TYPE,TRAN,RM,MOUNTPOINTS 2>/dev/null \
-                || lsblk -Jpb -o NAME,KNAME,MODEL,SIZE,TYPE,TRAN,RM,MOUNTPOINT
+            lsblk -Jpb -o NAME,KNAME,MODEL,SIZE,START,LOG-SEC,TYPE,TRAN,RM,FSTYPE,PARTTYPE,LABEL,PTTYPE,MOUNTPOINT,MOUNTPOINTS 2>/dev/null \
+                || lsblk -Jpb -o NAME,KNAME,MODEL,SIZE,TYPE,TRAN,RM,FSTYPE,LABEL,MOUNTPOINT
             exit 0
             ;;
         --rollback-help)
@@ -340,8 +593,28 @@ while [[ $# -gt 0 ]]; do
             CONFIRM_ERASE=1
             shift
             ;;
+        --confirm-dualboot)
+            CONFIRM_DUALBOOT=1
+            shift
+            ;;
+        --install-mode)
+            INSTALL_MODE="${2:-}"
+            shift 2
+            ;;
         --target-disk)
             TARGET_DISK="${2:-}"
+            shift 2
+            ;;
+        --root-part)
+            ROOT_PART="${2:-}"
+            shift 2
+            ;;
+        --free-space)
+            FREE_SPACE_SPEC="${2:-}"
+            shift 2
+            ;;
+        --efi-part)
+            EFI_PART="${2:-}"
             shift 2
             ;;
         --hostname)
@@ -401,7 +674,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 validate_inputs
-check_target_disk_safe "${TARGET_DISK}"
+check_targets_safe
 
 if [[ "${PASSWORD_STDIN}" -eq 1 ]]; then
     IFS= read -r PASSWORD_VAL || PASSWORD_VAL=""

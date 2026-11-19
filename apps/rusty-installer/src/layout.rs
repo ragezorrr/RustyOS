@@ -1,8 +1,8 @@
 //! Layout geometry and hit-testing for `rusty-installer` (`RUSTYOS-115`).
 
 use crate::state::{
-    BootloaderKind, InstallPhase, InstallStep, InstallerAppState, KEYBOARD_PRESETS,
-    LANGUAGE_OPTIONS, OobeStep, RunEnv, TextFieldId, ThemeChoice, WizardMode,
+    BootloaderKind, DiskInstallMode, InstallPhase, InstallStep, InstallerAppState,
+    KEYBOARD_PRESETS, LANGUAGE_OPTIONS, OobeStep, RunEnv, TextFieldId, ThemeChoice, WizardMode,
 };
 use rusty_services::file_manager::RUSTYOS_ACCENT_SWATCHES;
 
@@ -76,6 +76,7 @@ pub(crate) enum InstallerHit {
     BackButton,
     PrimaryButton,
     WelcomeCard(WelcomeAction),
+    SelectDiskMode(DiskInstallMode),
     SelectDisk(usize),
     RefreshDisks,
     SetBootloader(BootloaderKind),
@@ -139,6 +140,8 @@ pub(crate) enum StepContentLayout {
         status_rect: Rect,
     },
     SelectDisk {
+        mode_whole: Rect,
+        mode_dualboot: Rect,
         cards: Vec<DiskCardRect>,
         refresh_btn: Rect,
         boot_systemd: Rect,
@@ -333,22 +336,38 @@ fn compute_install_welcome(c: Rect) -> StepContentLayout {
 }
 
 fn compute_install_select_disk(app: &InstallerAppState, c: Rect) -> StepContentLayout {
-    let cards = app
-        .disks
-        .iter()
-        .enumerate()
-        .take(4)
-        .map(|(i, d)| DiskCardRect {
-            idx: i,
-            rect: Rect::new(c.x + 12, c.y + 52 + idx_i32(i) * 68, c.w - 24, 60),
-            selected: app.selected_disk_idx == Some(i),
-            selectable: d.is_selectable(),
-        })
-        .collect();
+    let cards: Vec<DiskCardRect> = match app.disk_mode {
+        DiskInstallMode::WholeDisk => app
+            .disks
+            .iter()
+            .enumerate()
+            .take(4)
+            .map(|(i, d)| DiskCardRect {
+                idx: i,
+                rect: Rect::new(c.x + 12, c.y + 82 + idx_i32(i) * 64, c.w - 24, 58),
+                selected: app.selected_disk_idx == Some(i),
+                selectable: d.is_selectable(),
+            })
+            .collect(),
+        DiskInstallMode::DualBoot => app
+            .dualboot_targets
+            .iter()
+            .enumerate()
+            .take(4)
+            .map(|(i, t)| DiskCardRect {
+                idx: i,
+                rect: Rect::new(c.x + 12, c.y + 82 + idx_i32(i) * 64, c.w - 24, 58),
+                selected: app.selected_dualboot_idx == Some(i),
+                selectable: t.selectable,
+            })
+            .collect(),
+    };
     let row_y = c.bottom() - 40;
     StepContentLayout::SelectDisk {
+        mode_whole: Rect::new(c.x + 12, c.y + 42, 166, 30),
+        mode_dualboot: Rect::new(c.x + 188, c.y + 42, 206, 30),
         cards,
-        refresh_btn: Rect::new(c.right() - 106, c.y + 14, 94, 28),
+        refresh_btn: Rect::new(c.right() - 106, c.y + 10, 94, 28),
         boot_systemd: Rect::new(c.x + 12, row_y, 162, 32),
         boot_grub: Rect::new(c.x + 184, row_y, 124, 32),
     }
@@ -417,17 +436,30 @@ fn compute_install_progress(app: &InstallerAppState, c: Rect) -> StepContentLayo
     let log_box = app
         .show_logs
         .then(|| Rect::new(c.x + 24, c.y + 196, c.w - 48, (c.h - 204).max(110)));
-    let disk_label = app.selected_disk().map_or_else(
-        || String::from("/dev/vda"),
-        |d| format!("{} ({})", d.model, d.path),
-    );
+    let target_line = match app.disk_mode {
+        DiskInstallMode::WholeDisk => app.selected_disk().map_or_else(
+            || String::from("Destination Drive: /dev/vda (Erase Entire Disk)"),
+            |d| format!("Erase Whole Disk:   {} ({})", d.model, d.path),
+        ),
+        DiskInstallMode::DualBoot => app.selected_dualboot().map_or_else(
+            || String::from("Dual-Boot Target:   (none)"),
+            |t| {
+                let efi_note = if let Some(esp) = &t.efi_part {
+                    format!("reuses EFI {esp}")
+                } else {
+                    String::from("dedicated 512M EFI")
+                };
+                format!("Dual-Boot Target:   {} ({efi_note})", t.title)
+            },
+        ),
+    };
     let theme_lbl = match app.theme_choice {
         ThemeChoice::Light => "Golden Gate Light",
         ThemeChoice::Dark => "Golden Gate Dark",
         ThemeChoice::Auto => "Golden Gate Auto",
     };
     let summary_lines = vec![
-        format!("Destination Drive: {disk_label}"),
+        target_line,
         format!(
             "Primary Account: {} ({}) on {}.local",
             app.account.full_name.trim(),
@@ -596,11 +628,19 @@ fn hit_content(content: &StepContentLayout, px: f64, py: f64) -> Option<Installe
             .find(|c| c.rect.contains_f64(px, py))
             .map(|c| InstallerHit::WelcomeCard(c.action)),
         StepContentLayout::SelectDisk {
+            mode_whole,
+            mode_dualboot,
             cards,
             refresh_btn,
             boot_systemd,
             boot_grub,
         } => {
+            if mode_whole.contains_f64(px, py) {
+                return Some(InstallerHit::SelectDiskMode(DiskInstallMode::WholeDisk));
+            }
+            if mode_dualboot.contains_f64(px, py) {
+                return Some(InstallerHit::SelectDiskMode(DiskInstallMode::DualBoot));
+            }
             if refresh_btn.contains_f64(px, py) {
                 return Some(InstallerHit::RefreshDisks);
             }
@@ -727,6 +767,26 @@ mod tests {
             Some(InstallerHit::PrimaryButton)
         );
         assert_eq!(hit_test(&l0, 22.0, 22.0), Some(InstallerHit::TrafficClose));
+
+        app.install_step = InstallStep::SelectDisk;
+        app.disk_mode = DiskInstallMode::DualBoot;
+        let l_disk = compute_layout(&app, 768, 500);
+        if let StepContentLayout::SelectDisk {
+            mode_dualboot,
+            cards,
+            ..
+        } = &l_disk.content
+        {
+            assert_eq!(
+                hit_test(
+                    &l_disk,
+                    f64::from(mode_dualboot.x + 10),
+                    f64::from(mode_dualboot.y + 10)
+                ),
+                Some(InstallerHit::SelectDiskMode(DiskInstallMode::DualBoot))
+            );
+            assert_ne!(cards.len(), 0);
+        }
 
         app.mode = WizardMode::Oobe;
         app.oobe_step = OobeStep::Appearance;

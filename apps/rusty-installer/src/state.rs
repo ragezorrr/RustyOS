@@ -16,7 +16,10 @@ use rusty_animation::{AnimatedValue, Easing};
 use rusty_services::NetworkService;
 use rusty_services::file_manager::{FilesThemeMode, UserFileLocations, clamp_accent_index};
 
-use crate::disks::{TargetDiskInfo, demo_target_disks, discover_target_disks};
+use crate::disks::{
+    DualBootKind, DualBootTargetInfo, TargetDiskInfo, collect_dualboot_targets, demo_target_disks,
+    discover_target_disks,
+};
 
 pub(crate) const LANGUAGE_OPTIONS: &[(&str, &str, &str)] = &[
     ("en_US.UTF-8", "English (United States)", "UTC"),
@@ -158,6 +161,13 @@ impl BootloaderKind {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum DiskInstallMode {
+    #[default]
+    WholeDisk,
+    DualBoot,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TextFieldId {
     FullName,
@@ -281,8 +291,11 @@ pub(crate) struct InstallerAppState {
     pub keyboard_idx: usize,
     pub bootloader: BootloaderKind,
 
+    pub disk_mode: DiskInstallMode,
     pub disks: Vec<TargetDiskInfo>,
     pub selected_disk_idx: Option<usize>,
+    pub dualboot_targets: Vec<DualBootTargetInfo>,
+    pub selected_dualboot_idx: Option<usize>,
     pub network: NetworkSummary,
     pub account: AccountDraft,
     pub caret: CaretState,
@@ -349,12 +362,15 @@ impl InstallerAppState {
             language_idx: 0,
             keyboard_idx: 0,
             bootloader: BootloaderKind::SystemdBoot,
+            disk_mode: DiskInstallMode::WholeDisk,
             disks: if is_demo {
                 demo_target_disks()
             } else {
                 Vec::new()
             },
             selected_disk_idx: None,
+            dualboot_targets: Vec::new(),
+            selected_dualboot_idx: None,
             network: NetworkSummary::default(),
             account: AccountDraft {
                 full_name: String::from("RustyOS User"),
@@ -383,7 +399,7 @@ impl InstallerAppState {
             event_rx,
             wake_ping: None,
         };
-        st.select_default_disk();
+        st.refresh_dualboot_and_defaults();
         st
     }
 
@@ -403,8 +419,16 @@ impl InstallerAppState {
         self.selected_disk_idx.and_then(|i| self.disks.get(i))
     }
 
-    fn select_default_disk(&mut self) {
+    #[must_use]
+    pub(crate) fn selected_dualboot(&self) -> Option<&DualBootTargetInfo> {
+        self.selected_dualboot_idx
+            .and_then(|i| self.dualboot_targets.get(i))
+    }
+
+    fn refresh_dualboot_and_defaults(&mut self) {
+        self.dualboot_targets = collect_dualboot_targets(&self.disks);
         self.selected_disk_idx = self.disks.iter().position(TargetDiskInfo::is_selectable);
+        self.selected_dualboot_idx = self.dualboot_targets.iter().position(|t| t.selectable);
     }
 
     pub(crate) fn spawn_disk_scan(&mut self) {
@@ -495,7 +519,7 @@ impl InstallerAppState {
             match ev {
                 WorkerEvent::DisksLoaded(list) => {
                     self.disks = list;
-                    self.select_default_disk();
+                    self.refresh_dualboot_and_defaults();
                 }
                 WorkerEvent::NetworkLoaded(summary) => self.network = summary,
                 WorkerEvent::InstallStep {
@@ -656,14 +680,26 @@ impl InstallerAppState {
         match self.install_step {
             InstallStep::Welcome => self.install_step = InstallStep::SelectDisk,
             InstallStep::SelectDisk => {
-                if !self
-                    .selected_disk()
-                    .is_some_and(TargetDiskInfo::is_selectable)
-                {
-                    self.form_error = Some(String::from(
-                        "Select an unmounted destination disk (>= 8 GB)",
-                    ));
-                    return;
+                match self.disk_mode {
+                    DiskInstallMode::WholeDisk => {
+                        if !self
+                            .selected_disk()
+                            .is_some_and(TargetDiskInfo::is_selectable)
+                        {
+                            self.form_error = Some(String::from(
+                                "Select an unmounted destination disk (>= 8 GB)",
+                            ));
+                            return;
+                        }
+                    }
+                    DiskInstallMode::DualBoot => {
+                        if !self.selected_dualboot().is_some_and(|t| t.selectable) {
+                            self.form_error = Some(String::from(
+                                "Select free space or an unmounted partition (>= 12 GB)",
+                            ));
+                            return;
+                        }
+                    }
                 }
                 self.caret.focused_field = Some(TextFieldId::FullName);
                 self.install_step = InstallStep::AccountStyle;
@@ -843,9 +879,6 @@ impl InstallerAppState {
 
     #[must_use]
     pub(crate) fn build_install_args(&self) -> Vec<String> {
-        let disk_path = self
-            .selected_disk()
-            .map_or_else(|| String::from("/dev/vda"), |d| d.path.clone());
         let (locale, _, tz) = LANGUAGE_OPTIONS[self.language_idx];
         let (kb_layout, _, _, keymap) = KEYBOARD_PRESETS[self.keyboard_idx];
         let appearance = match self.theme_choice {
@@ -853,9 +886,21 @@ impl InstallerAppState {
             ThemeChoice::Dark => "dark",
             ThemeChoice::Auto => "auto",
         };
-        let mut args = vec![
-            String::from("--target-disk"),
-            disk_path,
+        let mut args = match self.disk_mode {
+            DiskInstallMode::WholeDisk => {
+                let disk_path = self
+                    .selected_disk()
+                    .map_or_else(|| String::from("/dev/vda"), |d| d.path.clone());
+                vec![
+                    String::from("--install-mode"),
+                    String::from("whole-disk"),
+                    String::from("--target-disk"),
+                    disk_path,
+                ]
+            }
+            DiskInstallMode::DualBoot => self.dualboot_target_args(),
+        };
+        args.extend([
             String::from("--hostname"),
             self.account.hostname.trim().to_owned(),
             String::from("--username"),
@@ -878,14 +923,41 @@ impl InstallerAppState {
             String::from(if self.account.autologin { "1" } else { "0" }),
             String::from("--install-oobe"),
             String::from("1"),
-        ];
+        ]);
         if self.dry_run {
             args.push(String::from("--dry-run"));
         } else {
-            args.push(String::from("--confirm-erase"));
+            args.push(String::from(match self.disk_mode {
+                DiskInstallMode::WholeDisk => "--confirm-erase",
+                DiskInstallMode::DualBoot => "--confirm-dualboot",
+            }));
             args.push(String::from("--password-stdin"));
         }
         args
+    }
+
+    fn dualboot_target_args(&self) -> Vec<String> {
+        let mut out = vec![String::from("--install-mode"), String::from("dual-boot")];
+        if let Some(target) = self.selected_dualboot() {
+            match &target.kind {
+                DualBootKind::UnallocatedGap {
+                    start_bytes,
+                    size_bytes,
+                } => {
+                    out.push(String::from("--free-space"));
+                    out.push(format!("{}:{start_bytes}:{size_bytes}", target.disk_path));
+                }
+                DualBootKind::ExistingPartition { part_path, .. } => {
+                    out.push(String::from("--root-part"));
+                    out.push(part_path.clone());
+                }
+            }
+            if let Some(esp) = &target.efi_part {
+                out.push(String::from("--efi-part"));
+                out.push(esp.clone());
+            }
+        }
+        out
     }
 
     pub(crate) fn start_install_worker(&mut self, now: Instant) {
@@ -1404,5 +1476,56 @@ mod tests {
         assert!(st.install_error.is_none());
         assert_eq!(st.target_pct, 100);
         assert!(st.log_lines.iter().any(|l| l.contains("[done]")));
+    }
+
+    #[test]
+    fn dualboot_mode_builds_safe_args_and_runs_dry_backend() {
+        let script =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../scripts/rustyos-install.sh");
+        let opts = StartupOptions {
+            mode: WizardMode::Install,
+            env_kind: RunEnv::Demo,
+            dry_run: true,
+            install_script: Some(script),
+            ..Default::default()
+        };
+        let mut st = InstallerAppState::new(&opts);
+        let now = Instant::now();
+        st.go_next(now);
+        st.disk_mode = DiskInstallMode::DualBoot;
+        assert!(st.selected_dualboot().is_some());
+
+        let args = st.build_install_args();
+        assert!(
+            args.windows(2)
+                .any(|w| w == ["--install-mode", "dual-boot"])
+        );
+        assert!(
+            args.iter()
+                .any(|a| a == "--free-space" || a == "--root-part")
+        );
+        assert!(!args.iter().any(|a| a == "--confirm-erase"));
+
+        st.go_next(now);
+        assert_eq!(st.install_step, InstallStep::AccountStyle);
+        st.account.password = String::from("secret12");
+        st.account.confirm_password = String::from("secret12");
+        st.go_next(now);
+        assert_eq!(st.install_step, InstallStep::Installing);
+        st.go_next(now);
+        assert_eq!(st.phase, InstallPhase::Running);
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while st.phase == InstallPhase::Running && Instant::now() < deadline {
+            let _ = st.poll_workers(Instant::now());
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(st.phase, InstallPhase::Finished);
+        assert!(st.install_error.is_none());
+        assert!(
+            st.log_lines
+                .iter()
+                .any(|l| l.contains("Preserves existing"))
+        );
     }
 }

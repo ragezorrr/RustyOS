@@ -48,7 +48,9 @@ use crate::layout::{
 };
 use crate::liquid_glass::{GlassStyle, RustyosLiquidGlassManagerV1, RustyosSurfaceGlassV1};
 use crate::render::render_window_pixels;
-use crate::state::{InstallPhase, InstallerAppState, StartupOptions, WizardMode};
+use crate::state::{
+    DiskInstallMode, InstallPhase, InstallStep, InstallerAppState, StartupOptions, WizardMode,
+};
 
 const DEFAULT_WIDTH: u32 = 800;
 const DEFAULT_HEIGHT: u32 = 580;
@@ -162,6 +164,22 @@ impl InstallerClient {
             Keysym::Tab => self.app.cycle_focus(self.modifiers.shift),
             Keysym::ISO_Left_Tab => self.app.cycle_focus(true),
             Keysym::BackSpace => self.app.handle_backspace(),
+            Keysym::Left
+                if self.app.mode == WizardMode::Install
+                    && self.app.install_step == InstallStep::SelectDisk =>
+            {
+                self.app.disk_mode = DiskInstallMode::WholeDisk;
+                self.app.win.dirty = true;
+                self.layout_cache = None;
+            }
+            Keysym::Right
+                if self.app.mode == WizardMode::Install
+                    && self.app.install_step == InstallStep::SelectDisk =>
+            {
+                self.app.disk_mode = DiskInstallMode::DualBoot;
+                self.app.win.dirty = true;
+                self.layout_cache = None;
+            }
             Keysym::Return | Keysym::KP_Enter => {
                 self.app.go_next(Instant::now());
                 self.layout_cache = None;
@@ -236,19 +254,13 @@ impl InstallerClient {
                 WelcomeAction::RunDoctor => self.app.spawn_doctor_check(),
                 WelcomeAction::OpenTerminal => self.app.launch_terminal(),
             },
-            InstallerHit::SelectDisk(idx) => {
-                if self
-                    .app
-                    .disks
-                    .get(idx)
-                    .is_some_and(TargetDiskInfo::is_selectable)
-                {
-                    self.app.selected_disk_idx = Some(idx);
-                    self.app.form_error = None;
-                    self.app.win.dirty = true;
-                    self.layout_cache = None;
-                }
+            InstallerHit::SelectDiskMode(mode) => {
+                self.app.disk_mode = mode;
+                self.app.form_error = None;
+                self.app.win.dirty = true;
+                self.layout_cache = None;
             }
+            InstallerHit::SelectDisk(idx) => self.select_storage_target(idx),
             InstallerHit::RefreshDisks => self.app.spawn_disk_scan(),
             InstallerHit::SetBootloader(kind) => {
                 self.app.bootloader = kind;
@@ -294,6 +306,30 @@ impl InstallerClient {
                 self.app.win.dirty = true;
                 self.layout_cache = None;
             }
+        }
+    }
+
+    fn select_storage_target(&mut self, idx: usize) {
+        let selectable = match self.app.disk_mode {
+            DiskInstallMode::WholeDisk => self
+                .app
+                .disks
+                .get(idx)
+                .is_some_and(TargetDiskInfo::is_selectable),
+            DiskInstallMode::DualBoot => self
+                .app
+                .dualboot_targets
+                .get(idx)
+                .is_some_and(|t| t.selectable),
+        };
+        if selectable {
+            match self.app.disk_mode {
+                DiskInstallMode::WholeDisk => self.app.selected_disk_idx = Some(idx),
+                DiskInstallMode::DualBoot => self.app.selected_dualboot_idx = Some(idx),
+            }
+            self.app.form_error = None;
+            self.app.win.dirty = true;
+            self.layout_cache = None;
         }
     }
 

@@ -2012,6 +2012,23 @@ hardware/software context и низкие накладные расходы.
 - **Tests:** 300 unit-тестов workspace (`4` `rusty-animation`, `186` `rusty-compositor`, `16` `rusty-files`, `7` `rusty-installer`, `3` `rusty-ipc`, `44` `rusty-services`, `10` `rusty-settings`, `5` `rusty-shell`, `14` `rusty-terminal`, `4` `rusty-updater`, `7` `rusty-wm`). Ограничение локальной среды: отсутствие `mkarchiso` и `qemu-system-x86_64` — полная сборка Live ISO проверяется в `workflow_dispatch` job `arch-live-iso` либо локально на Arch через `packaging/archiso/build-iso.sh`.
 - **Risks:** Нет.
 
+### RUSTYOS-116 — Безопасный Dual-Boot режим в `rusty-installer`, `scripts/rustyos-install.sh` и `packaging/archiso`
+
+- **Status:** Done
+- **Goal:** Обеспечить безопасную установку RustyOS на один физический диск рядом с существующими ОС (EndeavourOS/Linux/Windows) в заранее выделенный root-раздел или неразмеченное свободное место (`Unallocated`) без `sgdisk --zap-all`, с бережным отношением к EFI и поддержкой `os-prober`.
+- **Dependencies:** `RUSTYOS-115`.
+- **Scope:**
+  - `apps/rusty-installer/src/disks.rs`: расширен разбор `lsblk -Jpb` (`children`, `START`, `LOG-SEC`, `FSTYPE`, `PARTTYPE`, `LABEL`, `PTTYPE`), добавлены `DiskPartitionInfo`, `UnallocatedRegionInfo`, `compute_unallocated_gaps` (работает без прав root) и `DualBootTargetInfo::collect_from_disks` (при малом ESP `< 260 MiB` для `UnallocatedGap` планируется отдельный `512 MiB` EFI; при ESP `>= 260 MiB` — переиспользование без форматирования);
+  - `apps/rusty-installer/src/{state.rs, layout.rs, render.rs, wayland.rs}`: добавлен `DiskInstallMode::{WholeDisk, DualBoot}` (`Erase Entire Disk` vs `Dual-Boot (Partition / Free)`), клавиатурное переключение `Left`/`Right`, единый `draw_storage_card`, `summary_lines` для Dual-Boot и формирование аргументов `--install-mode dual-boot` / `--root-part` / `--free-space` / `--efi-part` / `--confirm-dualboot`;
+  - `scripts/rustyos-install.sh`, `packaging/archiso/packages.x86_64`: реализован `--install-mode dual-boot` (без `sgdisk --zap-all`, точное создание GPT-разделов в свободном диапазоне через `sgdisk` + поиск `/sys/block/.../start`, проверка `>= 120 MiB` на shared EFI перед записью, запрет `mkfs.fat` на существующем ESP, включение `GRUB_DISABLE_OS_PROBER=false`, сохранение существующего `loader.conf` в `systemd-boot`) и добавлен `os-prober`;
+  - `docs/adr/0066-installer-dualboot-partitioning.md`, `ARCHITECTURE.md`, `DECISIONS.md` (`D-080`).
+- **Acceptance Criteria:**
+  - `--dry-run` подтверждает безопасный план как для `--root-part` + `--efi-part`, так и для `--free-space` (без `sgdisk --zap-all` и без форматирования существующего ESP);
+  - Живой `--winit` прогон на Nested Wayland (`--max-frames 90`, без EGL/shader/panic ошибок) и X11 (`winit_116_dualboot_demo.png`, `winit_116_dualboot_review.png`, а также read-only скан хостового NVMe `winit_116_dualboot_host_readonly.png` с блокировкой смонтированного `endeavouros` и подхватом `/dev/nvme0n1p1` + `/dev/nvme0n1p3`) подтверждают работу Dual-Boot UI;
+  - `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo build --workspace --bins`, `bash -n scripts/rustyos-install.sh` и все 302 unit-теста workspace проходят без ошибок.
+- **Tests:** 302 unit-теста workspace (`4` `rusty-animation`, `186` `rusty-compositor`, `16` `rusty-files`, `9` `rusty-installer`, `3` `rusty-ipc`, `44` `rusty-services`, `10` `rusty-settings`, `5` `rusty-shell`, `14` `rusty-terminal`, `4` `rusty-updater`, `7` `rusty-wm`).
+- **Risks:** Нет.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

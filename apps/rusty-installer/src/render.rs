@@ -16,14 +16,14 @@ use std::sync::OnceLock;
 use fontdue::{Font, FontSettings};
 use rusty_services::file_manager::accent_rgba_for_index;
 
-use crate::disks::TargetDiskInfo;
+use crate::disks::DualBootKind;
 use crate::layout::{
     CARD_CORNER_RADIUS, InstallerHit, InstallerLayout, PILL_CORNER_RADIUS, Rect, StepContentLayout,
     TextFieldRect, ThemeTileRect, WINDOW_CORNER_RADIUS, WelcomeAction,
 };
 use crate::state::{
-    BootloaderKind, InstallPhase, InstallerAppState, KEYBOARD_PRESETS, LANGUAGE_OPTIONS,
-    TextFieldId, ThemeChoice,
+    BootloaderKind, DiskInstallMode, InstallPhase, InstallerAppState, KEYBOARD_PRESETS,
+    LANGUAGE_OPTIONS, TextFieldId, ThemeChoice,
 };
 
 const INTER_REGULAR_BYTES: &[u8] = include_bytes!("../../../assets/fonts/Inter-Regular.ttf");
@@ -619,6 +619,8 @@ fn render_content(
             status_rect,
         } => render_welcome(c, app, *hero_emblem, cards, *status_rect, hover, pal),
         StepContentLayout::SelectDisk {
+            mode_whole,
+            mode_dualboot,
             cards,
             refresh_btn,
             boot_systemd,
@@ -627,10 +629,10 @@ fn render_content(
             c,
             app,
             layout.content_rect,
+            [*mode_whole, *mode_dualboot],
             cards,
             *refresh_btn,
-            *boot_systemd,
-            *boot_grub,
+            [*boot_systemd, *boot_grub],
             hover,
             pal,
         ),
@@ -871,17 +873,17 @@ fn render_select_disk(
     c: &mut Canvas<'_>,
     app: &InstallerAppState,
     area: Rect,
+    mode_btns: [Rect; 2],
     cards: &[crate::layout::DiskCardRect],
     refresh_btn: Rect,
-    boot_systemd: Rect,
-    boot_grub: Rect,
+    boot_btns: [Rect; 2],
     hover: Option<InstallerHit>,
     pal: &Palette,
 ) {
     c.draw_text(
         area.x + 12,
-        area.y + 28,
-        "Select the disk where you want to install RustyOS",
+        area.y + 26,
+        "Choose Installation Destination",
         18.0,
         true,
         pal.text_primary,
@@ -894,45 +896,142 @@ fn render_select_disk(
     c.fill_rounded_rect(refresh_btn, 14, rbg);
     c.draw_text_centered(refresh_btn, "Refresh", 12.5, true, pal.text_primary);
 
-    for card in cards {
-        if let Some(disk) = app.disks.get(card.idx) {
-            draw_disk_card(
-                c,
-                card.rect,
-                disk,
-                card.selected,
-                hover == Some(InstallerHit::SelectDisk(card.idx)),
-                pal,
-            );
-        }
-    }
+    draw_choice_pill(
+        c,
+        mode_btns[0],
+        "Erase Entire Disk",
+        app.disk_mode == DiskInstallMode::WholeDisk,
+        pal,
+    );
+    draw_choice_pill(
+        c,
+        mode_btns[1],
+        "Dual-Boot (Partition / Free)",
+        app.disk_mode == DiskInstallMode::DualBoot,
+        pal,
+    );
+    let hint = match app.disk_mode {
+        DiskInstallMode::WholeDisk => "Wipes all partitions on selected drive",
+        DiskInstallMode::DualBoot => "Preserves existing OS partitions and shared EFI",
+    };
+    c.draw_text_clipped(
+        mode_btns[1].right() + 12,
+        mode_btns[1].y + 19,
+        hint,
+        12.0,
+        false,
+        if app.disk_mode == DiskInstallMode::DualBoot {
+            pal.ok_green
+        } else {
+            pal.text_secondary
+        },
+        area.right() - 12,
+    );
+
+    render_storage_cards(c, app, cards, hover, pal);
 
     draw_choice_pill(
         c,
-        boot_systemd,
+        boot_btns[0],
         "systemd-boot (UEFI)",
         app.bootloader == BootloaderKind::SystemdBoot,
         pal,
     );
     draw_choice_pill(
         c,
-        boot_grub,
+        boot_btns[1],
         "GRUB (BIOS/UEFI)",
         app.bootloader == BootloaderKind::Grub,
         pal,
     );
 }
 
-#[allow(clippy::cast_precision_loss)]
-fn draw_disk_card(
+fn render_storage_cards(
+    c: &mut Canvas<'_>,
+    app: &InstallerAppState,
+    cards: &[crate::layout::DiskCardRect],
+    hover: Option<InstallerHit>,
+    pal: &Palette,
+) {
+    for card in cards {
+        let hovered = hover == Some(InstallerHit::SelectDisk(card.idx));
+        match app.disk_mode {
+            DiskInstallMode::WholeDisk => {
+                let Some(disk) = app.disks.get(card.idx) else {
+                    continue;
+                };
+                let meta = format!(
+                    "{}  •  {}  •  {}",
+                    disk.path,
+                    disk.size_label,
+                    disk.transport.to_ascii_uppercase()
+                );
+                let badge = if !disk.is_selectable() {
+                    if disk.mounted {
+                        "Protected (Mounted)"
+                    } else {
+                        "Too Small"
+                    }
+                } else if card.selected {
+                    "Selected Target"
+                } else {
+                    "Available"
+                };
+                draw_storage_card(
+                    c,
+                    card.rect,
+                    &disk.model,
+                    &meta,
+                    badge,
+                    disk.is_selectable(),
+                    card.selected,
+                    hovered,
+                    pal,
+                );
+            }
+            DiskInstallMode::DualBoot => {
+                let Some(target) = app.dualboot_targets.get(card.idx) else {
+                    continue;
+                };
+                let badge = if !target.selectable {
+                    target.badge_label
+                } else if card.selected {
+                    match target.kind {
+                        DualBootKind::UnallocatedGap { .. } => "Dual-Boot Free Gap",
+                        DualBootKind::ExistingPartition { .. } => "Dual-Boot Target",
+                    }
+                } else {
+                    target.badge_label
+                };
+                draw_storage_card(
+                    c,
+                    card.rect,
+                    &target.title,
+                    &target.subtitle,
+                    badge,
+                    target.selectable,
+                    card.selected,
+                    hovered,
+                    pal,
+                );
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments, clippy::cast_precision_loss)]
+fn draw_storage_card(
     c: &mut Canvas<'_>,
     r: Rect,
-    disk: &TargetDiskInfo,
+    title: &str,
+    subtitle: &str,
+    badge: &str,
+    selectable: bool,
     selected: bool,
     hovered: bool,
     pal: &Palette,
 ) {
-    let bg = if hovered && disk.is_selectable() {
+    let bg = if hovered && selectable {
         pal.card_hover
     } else {
         pal.card_bg
@@ -950,8 +1049,7 @@ fn draw_disk_card(
         border,
     );
 
-    // Silver brushed-aluminum macOS drive emblem on left
-    let icon = Rect::new(r.x + 14, r.y + 10, 42, 40);
+    let icon = Rect::new(r.x + 14, r.y + 9, 42, 40);
     c.fill_rounded_rect(icon, 9, [168, 174, 184, 255]);
     c.fill_rounded_rect(
         Rect::new(icon.x + 2, icon.y + 2, icon.w - 4, 24),
@@ -966,49 +1064,40 @@ fn draw_disk_card(
         led_color,
     );
 
-    let title_color = if disk.is_selectable() {
+    let title_color = if selectable {
         pal.text_primary
     } else {
         pal.text_muted
     };
-    c.draw_text(
+    let tag_rect = Rect::new(r.right() - 144, r.y + 17, 130, 24);
+    c.draw_text_clipped(
         icon.right() + 14,
-        r.y + 25,
-        &disk.model,
-        14.5,
+        r.y + 24,
+        title,
+        14.0,
         true,
         title_color,
+        tag_rect.x - 10,
     );
-    let meta = format!(
-        "{}  •  {}  •  {}",
-        disk.path,
-        disk.size_label,
-        disk.transport.to_ascii_uppercase()
-    );
-    c.draw_text(
+    c.draw_text_clipped(
         icon.right() + 14,
-        r.y + 45,
-        &meta,
-        12.0,
+        r.y + 44,
+        subtitle,
+        11.8,
         false,
         pal.text_secondary,
+        tag_rect.x - 10,
     );
 
-    let tag_rect = Rect::new(r.right() - 134, r.y + 18, 120, 24);
-    if !disk.is_selectable() {
+    if !selectable {
         c.fill_rounded_rect(tag_rect, 12, pal.pill_bg);
-        let msg = if disk.mounted {
-            "Protected (Mounted)"
-        } else {
-            "Too Small"
-        };
-        c.draw_text_centered(tag_rect, msg, 11.0, false, pal.text_muted);
+        c.draw_text_centered(tag_rect, badge, 11.0, false, pal.text_muted);
     } else if selected {
         c.fill_rounded_rect(tag_rect, 12, pal.accent_soft);
-        c.draw_text_centered(tag_rect, "Selected Target", 11.5, true, pal.accent);
+        c.draw_text_centered(tag_rect, badge, 11.5, true, pal.accent);
     } else {
         c.fill_rounded_rect(tag_rect, 12, pal.pill_bg);
-        c.draw_text_centered(tag_rect, "Available", 11.5, false, pal.text_secondary);
+        c.draw_text_centered(tag_rect, badge, 11.5, false, pal.text_secondary);
     }
 }
 

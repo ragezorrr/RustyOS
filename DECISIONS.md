@@ -895,6 +895,21 @@
                            PKGBUILD/install.sh/session,
                            автозапуск .oobe-pending и
                            профиль archiso на greetd
+
+   D-080                   Фаза 10 Безопасный Dual-Boot     accepted
+                           режим в rusty-installer и
+                           scripts/rustyos-install.sh
+                           (RUSTYOS-116, ADR-0066): режим
+                           --install-mode dual-boot с
+                           выбором --root-part или
+                           --free-space (по START/LOG-SEC
+                           из lsblk без root и без
+                           sgdisk --zap-all), защитой и
+                           переиспользованием EFI >= 260M
+                           без mkfs.fat либо отдельным
+                           512M EFI при малом ESP,
+                           сохранением loader.conf в
+                           systemd-boot и GRUB + os-prober
   -----------------------------------------------------------------------
 
 ## Открытые решения
