@@ -59,8 +59,14 @@ if [[ -n "${LOCAL_REPO_DIR}" ]]; then
     fi
     LOCAL_PKG_STAGE="${PROFILE_STAGE}/local-repo"
     mkdir -p "${LOCAL_PKG_STAGE}"
-    cp -f "${LOCAL_REPO_DIR}"/rustyos-git-*.pkg.tar.* "${LOCAL_PKG_STAGE}/"
-    repo-add "${LOCAL_PKG_STAGE}/rustyos-local.db.tar.zst" "${LOCAL_PKG_STAGE}"/rustyos-git-*.pkg.tar.zst
+    for pkg in "${LOCAL_REPO_DIR}"/rustyos-git-*.pkg.tar.*; do
+        [[ -e "${pkg}" ]] || continue
+        case "${pkg}" in
+            *-debug-*.pkg.tar.*|*.sig) continue ;;
+        esac
+        cp -f "${pkg}" "${LOCAL_PKG_STAGE}/"
+    done
+    repo-add "${LOCAL_PKG_STAGE}/rustyos-local.db.tar.zst" "${LOCAL_PKG_STAGE}"/rustyos-git-*.pkg.tar.*
     awk -v repo_path="${LOCAL_PKG_STAGE}" '
         /^\[rustyos\]/ {
             print "[rustyos-local]"
