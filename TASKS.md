@@ -1995,6 +1995,23 @@ hardware/software context и низкие накладные расходы.
 - **Tests:** 293 unit-теста workspace (`4` `rusty-animation`, `186` `rusty-compositor`, `16` `rusty-files`, `3` `rusty-ipc`, `44` `rusty-services`, `10` `rusty-settings`, `5` `rusty-shell`, `14` `rusty-terminal`, `4` `rusty-updater`, `7` `rusty-wm`).
 - **Risks:** Нет.
 
+### RUSTYOS-115 — Инсталлятор `rusty-installer`, OOBE Setup Assistant, профиль `archiso` Live ISO и доупаковка системных приложений
+
+- **Status:** Done
+- **Goal:** Доупаковать `rusty-settings` и `rusty-installer` в Arch `PKGBUILD`, `scripts/install.sh` и сессию `bin/rustyos-session`, создать нативное Wayland CSD-приложение `apps/rusty-installer` в стиле `macOS Tahoe / Golden Gate` (мастер установки на диск + первый запуск OOBE Setup Assistant), безопасный root/Polkit backend `scripts/rustyos-install.sh` и воспроизводимый профиль загрузочного Live ISO `packaging/archiso/` с автологином `greetd`.
+- **Dependencies:** `RUSTYOS-114`.
+- **Scope:**
+  - `Cargo.toml`, `apps/rusty-installer/{Cargo.toml, src/{main.rs, disks.rs, state.rs, layout.rs, render.rs, liquid_glass.rs, wayland.rs}}`: добавлен крейт `rusty-installer` (`org.rustyos.Installer`) без новых зависимостей в `Cargo.lock` с режимами `--install`/`--oobe`/`--live`/`--demo`/`--dry-run`/`--light`/`--dark`/`--accent`/`--no-glass`/`--install-script`, обнаружением дисков (`lsblk --json` с блокировкой смонтированных дисков), анимированным прогрессом (`AnimatedValue`), живой сменой `Light`/`Dark`/`Auto` + `[ui].accent_index` (`RELOAD_CONFIG`) и `rustyos_liquid_glass_v1`;
+  - `scripts/rustyos-install.sh`, `packaging/polkit/org.rustyos.installer.policy`: безопасный установщик Arch + RustyOS (`--list-disks-json`, `--rollback-help`, `--dry-run`, `--confirm-erase` + `--password-stdin`, потоковый вывод `STEP:<pct>:<stage>:<msg>`, `parted`/`mkfs`/`pacstrap`/`greetd`/`systemd-boot`/`GRUB`/`.oobe-pending`) и Polkit-правило для `/usr/lib/rustyos/rustyos-install`;
+  - `packaging/applications/org.rustyos.{settings,installer}.desktop`, `packaging/arch/PKGBUILD`, `scripts/install.sh`, `bin/rustyos-session`, `crates/rusty-compositor/src/launcher.rs`, `.github/workflows/ci.yml`: полная упаковка `rusty-settings` и `rusty-installer`, `--doctor` и `.oobe-pending` автозапуск в `rustyos-session` (отключаемый `RUSTYOS_SKIP_OOBE=1`), приоритет в `Launcher` и ручной job `arch-live-iso` в CI;
+  - `packaging/archiso/{profiledef.sh, packages.x86_64, pacman.conf, build-iso.sh, README.md, efiboot/, grub/, syslinux/, airootfs/}`: профиль загрузочного Live ISO (`liveuser`, `greetd` -> `rustyos-session --drm`, Polkit `49-rustyos-live.rules`, ярлык установки на рабочем столе);
+  - `docs/adr/0065-archiso-installer-and-oobe.md`, `ARCHITECTURE.md`, `DECISIONS.md` (`D-079`).
+- **Acceptance Criteria:**
+  - Живой `--winit` прогон на вложенном Wayland (`--max-frames 90`, ноль `EGL_BAD_SURFACE` / shader-ошибок / паник) и X11 (`Welcome` -> `SelectDisk` -> `Account & Appearance` -> `Installing` 100% симуляция + `OOBE Appearance` живое переключение на `Dark` и `Coral Red` с записью `config.toml` и перекраской композитора по `RELOAD_CONFIG`);
+  - Проверка синтаксиса скриптов (`bash -n`, `sh -n`), `--dry-run` `STEP:` вывода, `desktop-file-validate`, `xmllint`, YAML CI, а также `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo build --workspace --bins` и все 300 unit-тестов workspace проходят без ошибок.
+- **Tests:** 300 unit-тестов workspace (`4` `rusty-animation`, `186` `rusty-compositor`, `16` `rusty-files`, `7` `rusty-installer`, `3` `rusty-ipc`, `44` `rusty-services`, `10` `rusty-settings`, `5` `rusty-shell`, `14` `rusty-terminal`, `4` `rusty-updater`, `7` `rusty-wm`). Ограничение локальной среды: отсутствие `mkarchiso` и `qemu-system-x86_64` — полная сборка Live ISO проверяется в `workflow_dispatch` job `arch-live-iso` либо локально на Arch через `packaging/archiso/build-iso.sh`.
+- **Risks:** Нет.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

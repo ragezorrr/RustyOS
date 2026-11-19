@@ -47,8 +47,10 @@ find_rusty_bin() {
 COMPOSITOR_BIN="$(find_rusty_bin rusty-compositor)"
 SHELL_BIN="$(find_rusty_bin rusty-shell)"
 FILES_BIN="$(find_rusty_bin rusty-files)"
+SETTINGS_BIN="$(find_rusty_bin rusty-settings)"
 TERMINAL_BIN="$(find_rusty_bin rusty-terminal)"
 UPDATER_BIN="$(find_rusty_bin rusty-updater)"
+INSTALLER_BIN="$(find_rusty_bin rusty-installer)"
 PW_WORKER_BIN="$(find_rusty_bin rusty-pipewire-stream)"
 if [ -z "$PW_WORKER_BIN" ]; then
     for cand in \
@@ -99,8 +101,10 @@ run_doctor() {
         "rusty-compositor:$COMPOSITOR_BIN:req:build workspace or install package" \
         "rusty-shell:$SHELL_BIN:warn:only needed when RUSTYOS_EXTERNAL_SHELL=1" \
         "rusty-files:$FILES_BIN:req:build workspace or install package" \
+        "rusty-settings:$SETTINGS_BIN:req:build workspace or install package" \
         "rusty-terminal:$TERMINAL_BIN:req:build workspace or install package" \
         "rusty-updater:$UPDATER_BIN:req:build workspace or install package" \
+        "rusty-installer:$INSTALLER_BIN:warn:optional macOS-style OS installer & OOBE" \
         "rusty-pipewire-stream:$PW_WORKER_BIN:warn:optional ScreenCast PipeWire worker" \
         "rustyos-update-helper:$HELPER_BIN:warn:required at /usr/lib/rustyos/rustyos-update-helper for live pkexec upgrades"; do
         name="${spec%%:*}"
@@ -134,7 +138,10 @@ run_doctor() {
     for sys_asset in \
         "/usr/share/wayland-sessions/rustyos.desktop:${HOME:-/tmp}/.local/share/wayland-sessions/rustyos.desktop:wayland-session desktop" \
         "/usr/share/applications/org.rustyos.files.desktop:${HOME:-/tmp}/.local/share/applications/org.rustyos.files.desktop:rusty-files .desktop" \
+        "/usr/share/applications/org.rustyos.settings.desktop:${HOME:-/tmp}/.local/share/applications/org.rustyos.settings.desktop:rusty-settings .desktop" \
+        "/usr/share/applications/org.rustyos.terminal.desktop:${HOME:-/tmp}/.local/share/applications/org.rustyos.terminal.desktop:rusty-terminal .desktop" \
         "/usr/share/applications/org.rustyos.updater.desktop:${HOME:-/tmp}/.local/share/applications/org.rustyos.updater.desktop:rusty-updater .desktop" \
+        "/usr/share/applications/org.rustyos.installer.desktop:${HOME:-/tmp}/.local/share/applications/org.rustyos.installer.desktop:rusty-installer .desktop" \
         "/usr/share/xdg-desktop-portal/portals/rustyos.portal:${XDG_DATA_HOME:-${HOME:-/tmp}/.local/share}/xdg-desktop-portal/portals/rustyos.portal:XDG portal registration" \
         "/usr/lib/systemd/user/rustyos-session.target:${HOME:-/tmp}/.local/share/systemd/user/rustyos-session.target:systemd session target" \
         "/usr/lib/systemd/user/rustyos-session-shutdown.target:${HOME:-/tmp}/.local/share/systemd/user/rustyos-session-shutdown.target:systemd shutdown target"; do
@@ -281,23 +288,42 @@ if [ "$BACKEND_FLAG" = "--drm" ] || [ "$BACKEND_FLAG" = "--kms" ]; then
 fi
 
 echo "Starting RustyOS Desktop Session (Backend: $BACKEND_FLAG)..."
+OOBE_SPAWN_ARG=""
+OOBE_MARKER="${XDG_CONFIG_HOME:-$HOME/.config}/rustyos/.oobe-pending"
+if [ "${RUSTYOS_SKIP_OOBE:-0}" != "1" ] \
+    && [ "$BACKEND_FLAG" != "--check" ] \
+    && [ "$BACKEND_FLAG" != "--drm-probe" ] \
+    && [ -f "$OOBE_MARKER" ] \
+    && [ -n "$INSTALLER_BIN" ] \
+    && [ -x "$INSTALLER_BIN" ]; then
+    OOBE_SPAWN_ARG="$INSTALLER_BIN --oobe"
+fi
+
 if [ "${RUSTYOS_EXTERNAL_SHELL:-0}" = "1" ] \
     && [ "$BACKEND_FLAG" != "--check" ] \
     && [ "$BACKEND_FLAG" != "--drm-probe" ]; then
     if [ -n "$SHELL_BIN" ] && [ -x "$SHELL_BIN" ]; then
         if [ "$BACKEND_FLAG" = "--drm" ] || [ "$BACKEND_FLAG" = "--kms" ]; then
-            "$COMPOSITOR_BIN" "$BACKEND_FLAG" --spawn "$SHELL_BIN --wayland" "$@"
+            "$COMPOSITOR_BIN" "$BACKEND_FLAG" --spawn "$SHELL_BIN --wayland" ${OOBE_SPAWN_ARG:+--spawn "$OOBE_SPAWN_ARG"} "$@"
             exit $?
         else
-            exec "$COMPOSITOR_BIN" "$BACKEND_FLAG" --spawn "$SHELL_BIN --wayland" "$@"
+            exec "$COMPOSITOR_BIN" "$BACKEND_FLAG" --spawn "$SHELL_BIN --wayland" ${OOBE_SPAWN_ARG:+--spawn "$OOBE_SPAWN_ARG"} "$@"
         fi
     fi
     echo "Warning: RUSTYOS_EXTERNAL_SHELL=1 set, but rusty-shell binary not found; falling back to built-in compositor shell" >&2
 fi
 
 if [ "$BACKEND_FLAG" = "--drm" ] || [ "$BACKEND_FLAG" = "--kms" ]; then
-    "$COMPOSITOR_BIN" "$BACKEND_FLAG" "$@"
+    if [ -n "$OOBE_SPAWN_ARG" ]; then
+        "$COMPOSITOR_BIN" "$BACKEND_FLAG" --spawn "$OOBE_SPAWN_ARG" "$@"
+    else
+        "$COMPOSITOR_BIN" "$BACKEND_FLAG" "$@"
+    fi
     exit $?
 else
-    exec "$COMPOSITOR_BIN" "$BACKEND_FLAG" "$@"
+    if [ -n "$OOBE_SPAWN_ARG" ]; then
+        exec "$COMPOSITOR_BIN" "$BACKEND_FLAG" --spawn "$OOBE_SPAWN_ARG" "$@"
+    else
+        exec "$COMPOSITOR_BIN" "$BACKEND_FLAG" "$@"
+    fi
 fi

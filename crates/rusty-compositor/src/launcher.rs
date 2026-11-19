@@ -639,6 +639,7 @@ fn priority_rank(app: &LauncherApp) -> u8 {
         | "gnome-terminal" | "xfce4-terminal" => 4,
         "es2gears_wayland" | "glmark2-wayland" => 5,
         "rusty-settings" => 6,
+        "rusty-installer" => 7,
         _ => 10,
     }
 }
@@ -839,6 +840,21 @@ fn merge_builtin_fallbacks(catalog: &mut Vec<LauncherApp>) {
             ],
             badge: "Se".to_owned(),
             icon: Some("preferences-system".to_owned()),
+        },
+        LauncherApp {
+            id: "org.rustyos.installer".to_owned(),
+            name: "Install RustyOS".to_owned(),
+            subtitle: "Install RustyOS to disk or run Setup Assistant".to_owned(),
+            exec: "rusty-installer --install".to_owned(),
+            keywords: vec![
+                "install".to_owned(),
+                "installer".to_owned(),
+                "setup".to_owned(),
+                "oobe".to_owned(),
+                "disk".to_owned(),
+            ],
+            badge: "In".to_owned(),
+            icon: Some("system-software-install".to_owned()),
         },
         LauncherApp {
             id: "org.rustyos.gears".to_owned(),

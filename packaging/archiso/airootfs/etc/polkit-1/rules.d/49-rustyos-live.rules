@@ -1,0 +1,8 @@
+// Allow the live session user in `wheel` to run the installer helper cleanly.
+polkit.addRule(function(action, subject) {
+    if ((action.id === "org.rustyos.installer.apply" ||
+         action.id.indexOf("org.freedesktop.NetworkManager.") === 0) &&
+        subject.isInGroup("wheel")) {
+        return polkit.Result.YES;
+    }
+});

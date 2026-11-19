@@ -1702,6 +1702,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusty-installer"
+version = "0.1.0"
+dependencies = [
+ "fontdue",
+ "rusty-animation",
+ "rusty-services",
+ "smithay-client-toolkit",
+ "tracing",
+ "tracing-subscriber",
+ "wayland-client",
+ "wayland-scanner",
+]
+
+[[package]]
 name = "rusty-ipc"
 version = "0.1.0"
 

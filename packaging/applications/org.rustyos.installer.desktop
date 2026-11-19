@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=Install RustyOS
+Comment=Install RustyOS to a target drive or run first-boot setup
+Exec=rusty-installer --install
+Icon=system-software-install
+Terminal=false
+Type=Application
+Categories=System;
+StartupWMClass=org.rustyos.Installer
+Keywords=setup;oobe;disk;arch;rustyos;

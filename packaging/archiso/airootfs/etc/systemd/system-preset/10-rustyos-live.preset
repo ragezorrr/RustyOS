@@ -1,0 +1,4 @@
+enable NetworkManager.service
+enable seatd.service
+enable polkit.service
+enable greetd.service

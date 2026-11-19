@@ -5,6 +5,7 @@ on:
     branches: ["main"]
   pull_request:
     branches: ["main"]
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -79,9 +80,16 @@ jobs:
       - name: Validate shell scripts, desktop entries, and Polkit policy
         run: |
           sh -n bin/rustyos-session
-          bash -n packaging/arch/PKGBUILD scripts/install.sh
-          desktop-file-validate packaging/applications/org.rustyos.files.desktop packaging/applications/org.rustyos.terminal.desktop packaging/applications/org.rustyos.updater.desktop
-          xmllint --noout packaging/polkit/org.rustyos.updater.policy
+          bash -n packaging/arch/PKGBUILD scripts/install.sh scripts/rustyos-install.sh packaging/archiso/profiledef.sh packaging/archiso/build-iso.sh
+          desktop-file-validate \
+            packaging/applications/org.rustyos.files.desktop \
+            packaging/applications/org.rustyos.settings.desktop \
+            packaging/applications/org.rustyos.terminal.desktop \
+            packaging/applications/org.rustyos.updater.desktop \
+            packaging/applications/org.rustyos.installer.desktop \
+            packaging/archiso/airootfs/etc/skel/Desktop/install-rustyos.desktop
+          xmllint --noout packaging/polkit/org.rustyos.updater.policy packaging/polkit/org.rustyos.installer.policy
+          ./scripts/rustyos-install.sh --dry-run --target-disk /dev/vda --username rusty --hostname rustyos
 
       - name: Build isolated Arch package with makepkg
         run: |
@@ -98,14 +106,20 @@ jobs:
           pacman -Qlp /tmp/rustyos-pkg/pkg/rustyos-git-*.pkg.tar.* | grep -F "/usr/bin/rusty-compositor"
           pacman -Qlp /tmp/rustyos-pkg/pkg/rustyos-git-*.pkg.tar.* | grep -F "/usr/bin/rusty-shell"
           pacman -Qlp /tmp/rustyos-pkg/pkg/rustyos-git-*.pkg.tar.* | grep -F "/usr/bin/rusty-files"
+          pacman -Qlp /tmp/rustyos-pkg/pkg/rustyos-git-*.pkg.tar.* | grep -F "/usr/bin/rusty-settings"
           pacman -Qlp /tmp/rustyos-pkg/pkg/rustyos-git-*.pkg.tar.* | grep -F "/usr/bin/rusty-terminal"
           pacman -Qlp /tmp/rustyos-pkg/pkg/rustyos-git-*.pkg.tar.* | grep -F "/usr/bin/rusty-updater"
+          pacman -Qlp /tmp/rustyos-pkg/pkg/rustyos-git-*.pkg.tar.* | grep -F "/usr/bin/rusty-installer"
           pacman -Qlp /tmp/rustyos-pkg/pkg/rustyos-git-*.pkg.tar.* | grep -F "/usr/lib/rustyos/rustyos-update-helper"
+          pacman -Qlp /tmp/rustyos-pkg/pkg/rustyos-git-*.pkg.tar.* | grep -F "/usr/lib/rustyos/rustyos-install"
           pacman -Qlp /tmp/rustyos-pkg/pkg/rustyos-git-*.pkg.tar.* | grep -F "/usr/share/wayland-sessions/rustyos.desktop"
           pacman -Qlp /tmp/rustyos-pkg/pkg/rustyos-git-*.pkg.tar.* | grep -F "/usr/share/applications/org.rustyos.files.desktop"
+          pacman -Qlp /tmp/rustyos-pkg/pkg/rustyos-git-*.pkg.tar.* | grep -F "/usr/share/applications/org.rustyos.settings.desktop"
           pacman -Qlp /tmp/rustyos-pkg/pkg/rustyos-git-*.pkg.tar.* | grep -F "/usr/share/applications/org.rustyos.terminal.desktop"
           pacman -Qlp /tmp/rustyos-pkg/pkg/rustyos-git-*.pkg.tar.* | grep -F "/usr/share/applications/org.rustyos.updater.desktop"
+          pacman -Qlp /tmp/rustyos-pkg/pkg/rustyos-git-*.pkg.tar.* | grep -F "/usr/share/applications/org.rustyos.installer.desktop"
           pacman -Qlp /tmp/rustyos-pkg/pkg/rustyos-git-*.pkg.tar.* | grep -F "/usr/share/polkit-1/actions/org.rustyos.updater.policy"
+          pacman -Qlp /tmp/rustyos-pkg/pkg/rustyos-git-*.pkg.tar.* | grep -F "/usr/share/polkit-1/actions/org.rustyos.installer.policy"
 
       - name: Assemble Pacman repository and publish to gh-pages
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -186,4 +200,48 @@ jobs:
         with:
           name: rustyos-pacman-repo
           path: deploy/repo/
+          if-no-files-found: error
+
+  arch-live-iso:
+    name: Build Arch Live ISO (manual)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:base-devel
+      options: --privileged
+    steps:
+      - name: Install Arch ISO builder and package build dependencies
+        run: |
+          pacman -Syu --noconfirm \
+            git rust pkgconf archiso pacman-contrib \
+            wayland libxkbcommon mesa libglvnd libinput systemd-libs seatd \
+            dbus fontconfig adwaita-icon-theme xorg-xwayland pipewire \
+            xdg-desktop-portal polkit firefox
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build rustyos-git package and Live ISO
+        run: |
+          useradd -m builder
+          git config --global --add safe.directory "${GITHUB_WORKSPACE}"
+          mkdir -p /tmp/rustyos-pkg/{build,pkg,src,log} /tmp/rustyos-iso-out
+          chown -R builder:builder "${GITHUB_WORKSPACE}" /tmp/rustyos-pkg
+          su - builder -c "cd '${GITHUB_WORKSPACE}/packaging/arch' && \
+            BUILDDIR=/tmp/rustyos-pkg/build \
+            PKGDEST=/tmp/rustyos-pkg/pkg \
+            SRCDEST=/tmp/rustyos-pkg/src \
+            LOGDEST=/tmp/rustyos-pkg/log \
+            makepkg -f --noconfirm --nocheck --noprogressbar"
+          ./packaging/archiso/build-iso.sh \
+            --local-repo-dir /tmp/rustyos-pkg/pkg \
+            --out-dir /tmp/rustyos-iso-out
+
+      - name: Upload Live ISO artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rustyos-live-iso
+          path: /tmp/rustyos-iso-out/rustyos-live-*.iso
           if-no-files-found: error

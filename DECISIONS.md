@@ -878,6 +878,23 @@
                            макосный сквиркл с объединением
                            Dock-слота browser и зависимость
                            firefox в PKGBUILD
+
+   D-079                   Фаза 10 Инсталлятор             accepted
+                           apps/rusty-installer, OOBE
+                           Setup Assistant, безопасный
+                           helper scripts/rustyos-install.sh
+                           и Live ISO packaging/archiso/
+                           (RUSTYOS-115, ADR-0065):
+                           Wayland CSD-клиент на
+                           smithay-client-toolkit без
+                           новых зависимостей в Cargo.lock,
+                           режимы --install и --oobe,
+                           защита смонтированных дисков,
+                           Polkit org.rustyos.installer.apply,
+                           доупаковка rusty-settings в
+                           PKGBUILD/install.sh/session,
+                           автозапуск .oobe-pending и
+                           профиль archiso на greetd
   -----------------------------------------------------------------------
 
 ## Открытые решения

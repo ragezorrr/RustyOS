@@ -95,7 +95,7 @@ Event loop не должен блокироваться тяжёлыми опе�
   `connectivity`, `media`, `display_session`, `auth`, `logind`, `polkit`,
   `portal`, `file_manager`, `image_decode`.
 
-### Системные приложения (`apps/rusty-files`, `apps/rusty-settings`, `apps/rusty-updater`)
+### Системные приложения (`apps/rusty-files`, `apps/rusty-settings`, `apps/rusty-updater`, `apps/rusty-terminal`, `apps/rusty-installer`)
 
 - Самостоятельные Wayland CSD-клиенты на базе `smithay-client-toolkit` и
   `fontdue` в едином эталонном стиле окон (`14 px` скругления и тень
@@ -114,6 +114,11 @@ Event loop не должен блокироваться тяжёлыми опе�
   с карточками (`r = 12`) и пилюлями (`r = 10`) без рамок, списком обновлений
   Arch Linux и RustyOS (`checkupdates`), потоковым прогрессом/логом и
   запуском `pacman` через валидируемый Polkit-хелпер `rustyos-update-helper`.
+- `rusty-installer`: мастер установки системы и первый OOBE Setup Assistant
+  (`org.rustyos.Installer`, `--install`/`--oobe`/`--live`/`--demo`/`--dry-run`) с
+  карточками дисков, безопасным Polkit-бэкендом `scripts/rustyos-install.sh`,
+  потоковым прогрессом (`AnimatedValue`) и живой настройкой `Light`/`Dark`/`Auto` +
+  `[ui].accent_index` (`RELOAD_CONFIG`).
 
 ## 3. Текущая структура Cargo workspace и сессии
 
@@ -136,20 +141,24 @@ RustyOS/
 │       └── src/               # lib (ServiceRegistry), power, connectivity, media, display_session, auth, logind, polkit, portal, file_manager (types, listing, trash, operations, metadata), image_decode, updates
 ├── apps/
 │   ├── rusty-files/           # Самостоятельный Wayland-файловый менеджер (CSD, render: canvas, chrome, sidebar, views, dialogs, popup, mod; layout; state)
+│   ├── rusty-installer/       # Wayland CSD-установщик и OOBE Setup Assistant (disks, layout, liquid_glass, render, state, wayland)
 │   ├── rusty-settings/        # Самостоятельное Wayland CSD-окно System Settings (`882×600`, flat sidebar, scroll, TOML + `RELOAD_CONFIG`)
 │   ├── rusty-shell/           # Внешний процесс shell поверх Wayland layer-shell + IPC
+│   ├── rusty-terminal/        # Wayland-EGL GLES2 + wl_shm терминал в стиле Tahoe Clear Glass
 │   └── rusty-updater/         # Автономный GUI-клиент обновления Arch Linux и RustyOS (CSD, Этап B)
 ├── bin/
-│   └── rustyos-session        # Лаунчер пользовательской сессии
+│   └── rustyos-session        # Лаунчер пользовательской сессии (`--doctor`, `.oobe-pending` autolaunch)
 ├── packaging/
-│   ├── applications/          # org.rustyos.updater.desktop
+│   ├── applications/          # org.rustyos.{files,installer,settings,terminal,updater}.desktop
 │   ├── arch/PKGBUILD          # Arch Linux PKGBUILD (rustyos-git)
-│   ├── polkit/                # org.rustyos.updater.policy (rustyos-update-helper)
+│   ├── archiso/               # Загрузочный профиль Live ISO (`greetd`, `liveuser`, `build-iso.sh`)
+│   ├── polkit/                # org.rustyos.{installer,updater}.policy
 │   └── wayland-sessions/      # rustyos.desktop
 ├── scripts/
-│   └── install.sh
+│   ├── install.sh
+│   └── rustyos-install.sh     # Инсталлятор разметки/pacstrap/boot/GREETD с --dry-run и STEP:-выводом
 └── docs/
-    ├── adr/                   # ADR-0001 .. ADR-0058
+    ├── adr/                   # ADR-0001 .. ADR-0065
     ├── DEVELOPMENT_ENVIRONMENT.md
     ├── GETTING_STARTED.md
     └── HARDWARE_MATRIX.md
@@ -226,6 +235,9 @@ RustyOS/
     - `apps/rusty-terminal/src/{gpu_egl.rs, renderer_shm.rs, font.rs, theme.rs, liquid_glass.rs}`: `GpuRenderer` (`Wayland-EGL` + `GLES 2.0` 2-pass `RECT_PROG`/`TEXT_PROG` + `1024×1024` `ShelfPacker` атлас), CPU fallback `ShmFallbackRenderer` (`--no-gpu`), `FontSet` с процедурными `Box Drawing` / `Block Elements` / `Powerline` / UI-иконками, `TerminalTheme` (`Clear Light` / `Clear Dark` / `Opaque`, `ConfigWatcher`) и `rustyos_liquid_glass_v1` (`GlassStyle::Sidebar`, `r = 14`);
     - `apps/rusty-terminal/src/{vt.rs, pty.rs, state.rs, layout.rs, wayland.rs}`: `TerminalEngine` (UTF-8, `16`/`256`/TrueColor, `DECSTBM`, alt-screen, SGR mouse, `10 000`-строчный scrollback), `PtySession` (`rustix::pty` + `poll` + `calloop::ping`), вкладки, плавный скролл (`AnimatedValue`), поиск, clipboard (`DataDeviceManagerState`);
     - `crates/rusty-compositor/src/{launcher.rs, shell_render/dock.rs, state/shell_actions.rs, context_menu/actions.rs}` + `apps/rusty-shell/src/lib.rs`: приоритет `rusty-terminal` для `terminal` Dock/Launcher/Desktop (`launch_terminal_in_dir`) с fallback на внешние терминалы.
+  - Инсталлятор `rusty-installer`, OOBE Setup Assistant и Live ISO (`RUSTYOS-115`, `ADR-0065`, `D-079`):
+    - `apps/rusty-installer/src/{main.rs, disks.rs, state.rs, layout.rs, render.rs, liquid_glass.rs, wayland.rs}`: двухрежимный CSD-клиент (`--install` / `--oobe`, `--live`, `--demo`, `--dry-run`) с защитой смонтированных дисков, живой перекраской Golden Gate `Light`/`Dark`/`Auto` + `[ui].accent_index` (`RELOAD_CONFIG`) и потоковым прогрессом `STEP:<pct>:<stage>:<msg>`;
+    - `scripts/rustyos-install.sh` + `packaging/polkit/org.rustyos.installer.policy` + `bin/rustyos-session` (`--doctor`, `.oobe-pending`) + `packaging/arch/PKGBUILD` + `packaging/archiso/` (`profiledef.sh`, `greetd`, `packages.x86_64`, `build-iso.sh`).
 - **Эталонный стиль системных CSD-окон (`ADR-0055`, `ADR-0057`):**
   - Единые константы окон и теней (`crates/rusty-compositor/src/shell_render/tokens.rs`, `apps/rusty-{settings,files,updater}/src/layout.rs`): `WINDOW_RADIUS = 14`, `WINDOW_CORNER_RADIUS = 14`, `1 px` внешний контур (`[0, 0, 0, 24]` Light / `[255, 255, 255, 22]` Dark) строго **до** угловой маски (`apply_window_corner_mask` / `clip_rounded_corners`).
   - Единые `14 px` traffic lights (`Rect(14/36/58, 13, 14, 14)`, центры `(21/43/65, 20)`, `r = 7.0`, `#EE5A6A` / `#F4B63F` / `#3CC68A`, без квадратной рамки ореола, с hover-глифами).

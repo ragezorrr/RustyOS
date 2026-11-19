@@ -1,0 +1,15 @@
+[keyboard]
+layout = "us,ru"
+variant = ""
+options = "grp:alt_shift_toggle"
+
+[ui]
+theme = "light"
+theme_mode = "light"
+accent_index = 0
+glass_opacity = 0.78
+reduced_motion = false
+reduce_transparency = false
+
+[autostart]
+commands = ["rusty-installer --install --live"]
