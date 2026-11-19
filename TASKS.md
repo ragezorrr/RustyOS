@@ -1961,6 +1961,40 @@ hardware/software context и низкие накладные расходы.
 - **Tests:** 275 unit-тестов workspace (`4` `rusty-animation`, `183` `rusty-compositor`, `15` `rusty-files`, `3` `rusty-ipc`, `44` `rusty-services`, `10` `rusty-settings`, `5` `rusty-shell`, `4` `rusty-updater`, `7` `rusty-wm`).
 - **Risks:** Нет.
 
+### RUSTYOS-113 — GPU-ускоренный Wayland CSD-терминал `apps/rusty-terminal` (macOS Tahoe + Alacritty GLES2)
+
+- **Status:** Done
+- **Goal:** Создать собственный первый Wayland CSD-терминал `apps/rusty-terminal` (`app_id = "org.rustyos.Terminal"`) в стиле macOS Tahoe (`Clear Light` / `Clear Dark` через `rustyos_liquid_glass_v1` + непрозрачный fallback) и архитектуре Alacritty GLES2 с DMA-BUF zero-copy рендерингом и без добавления новых прямых внешних зависимостей.
+- **Dependencies:** `RUSTYOS-112`.
+- **Scope:**
+  - `Cargo.toml`, `apps/rusty-terminal/{Cargo.toml, build.rs, src/main.rs}`: добавлен крейт `rusty-terminal` на уже используемых в графе крейтах (`wayland-egl`, `gl_generator`, `smithay-client-toolkit` с фичей `xkbcommon` -> транзитивные `xkbcommon 0.7.0`/`memmap2 0.8.0` в `Cargo.lock`, `rustix`, `fontdue`, `rusty-animation`, `wayland-scanner`) с CLI (`--no-gpu`, `--working-directory`, `--title`, `-e`/`--`);
+  - `apps/rusty-terminal/src/{gpu_egl.rs, renderer_shm.rs, font.rs, theme.rs, liquid_glass.rs}`: Wayland-EGL + OpenGL ES 2.0 2-pass batched GPU-рендерер (`RECT_PROG` SDF скруглённых панелей/рамок/кругов/ячеек + `TEXT_PROG` с динамическим `1024×1024` `ShelfPacker` атласом и `glScissor`-отсечением сетки), автоматический `wl_shm` CPU fallback `ShmFallbackRenderer`, системные моноширинные шрифты + встроенный `Inter` + процедурные бесшовные `Box Drawing` / `Block Elements` / `Powerline` / UI-иконки заголовка, палитры Tahoe `Clear Dark` / `Clear Light` / `Opaque` с живым `ConfigWatcher` и `rustyos_liquid_glass_v1` (`GlassStyle::Sidebar`, `r = 14`);
+  - `apps/rusty-terminal/src/{vt.rs, pty.rs, state.rs, layout.rs, wayland.rs}`: потоковый UTF-8/VT100/`xterm-256color`/24-bit `TrueColor` движок (`DECSTBM`, `DECSCUSR` курсор `Bar`/`Block`/`Underline` с `2px` лучом по умолчанию, alternate screen `?47`/`?1047`/`?1049`, `DECCKM`, `?2004` bracketed paste, `?1004` focus reporting, SGR mouse `?1000`/`?1002`/`?1006`, `OSC 0/2/7`, `DSR`/`DA1`, `10 000`-строчный scrollback без ложного скролла при ресайзе/старте), отложенный старт PTY до первого `configure`, неблокирующий `rustix` PTY + фоновый `poll` поток + `calloop::ping`, вкладки (`Ctrl+Shift+T`/`W`), плавный анимированный скролл (`rusty_animation::AnimatedValue`), поиск по истории (`Ctrl+Shift+F`), масштабирование шрифта (`Ctrl++`/`-`/`0`), интерактивное перетаскивание (`xdg_toplevel.move` с корректной инициализацией `wl_seat` + double-click maximize), ресайз по краям, выделение (drag/word/line) и Wayland clipboard (`DataDeviceManagerState`);
+  - `crates/rusty-compositor/src/{launcher.rs, shell_render/dock.rs, state/shell_actions.rs, context_menu/actions.rs, input/pointer.rs}`, `apps/rusty-shell/src/lib.rs`: `rusty-terminal` подключён основным терминалом в `Dock`, `Launcher`, контекстном меню рабочего стола (`launch_terminal_in_dir` с `--working-directory`) и `rusty-shell` с сохранением fallback на `foot`/`kitty`/`alacritty`, а в `pointer.rs` выставляется `shell_redraw_needed` при интерактивном drag/resize;
+  - `docs/adr/0064-rusty-terminal-architecture.md`, `ARCHITECTURE.md`, `DECISIONS.md` (`D-077`).
+- **Acceptance Criteria:**
+  - Живой `--winit` прогон на вложенном Wayland и X11 (`Intel Mesa GLES`, `zwp_linux_dmabuf_v1`) подтверждает инициализацию `Wayland-EGL GLES2 GPU renderer`, отсутствие `EGL_BAD_SURFACE` / shader ошибок, корректное перетаскивание (`xdg_toplevel.move`) и ресайз (`xdg_toplevel.resize`), отсутствие ложного скроллбара на старте, тонкий `2px` bar-курсор, переключение `Clear Dark` / `Clear Light` / `Opaque` / вкладок / панели поиска и визуальный паритет `--no-gpu` `wl_shm` fallback;
+  - `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo build --workspace --bins` и все 290 unit-тестов workspace проходят без ошибок.
+- **Tests:** 290 unit-тестов workspace (`4` `rusty-animation`, `184` `rusty-compositor`, `15` `rusty-files`, `3` `rusty-ipc`, `44` `rusty-services`, `10` `rusty-settings`, `5` `rusty-shell`, `14` `rusty-terminal`, `4` `rusty-updater`, `7` `rusty-wm`).
+- **Risks:** Нет.
+
+### RUSTYOS-114 — Переработка иконок macOS 27 (Dock, папок Desktop/Home) с живыми акцентами `[ui].accent_index` и браузер Firefox по умолчанию
+
+- **Status:** Done
+- **Goal:** Обновить процедурные иконки `Dock`, рабочего стола (`BuiltinAppIcon::Folder`) и папок `apps/rusty-files` в стиле `macOS 27 Golden Gate` (`Light` и `Dark`) с живой реакцией на системный `[ui].accent_index` (`0..=6`), объединить слот браузера в `Dock` с `Firefox` по умолчанию (`framed_xdg_squircle_icon_element`) и добавить `firefox` в `packaging/arch/PKGBUILD`.
+- **Dependencies:** `RUSTYOS-113`.
+- **Scope:**
+  - `crates/rusty-services/src/file_manager/types.rs`, `apps/rusty-settings/src/state.rs`: вынесены общие константы палитры (`RUSTYOS_ACCENT_COUNT`, `RUSTYOS_ACCENT_SWATCHES`, `clamp_accent_index`, `accent_rgba_for_index`, `detect_system_accent_from_toml`, `UserFileLocations::detect_system_accent`, `find_ui_toml_value`), а `choose_accent` в `rusty-settings` вызывает `notify_compositor_reload()` для мгновенного обновления композитора через IPC `v1|RELOAD_CONFIG`;
+  - `crates/rusty-compositor/src/{config.rs, icon_art.rs, icons.rs, frame_composer.rs, shell_render/tokens.rs, shell_render/mod.rs, shell_render/desktop_canvas.rs, shell_render/chrome_shapes.rs, state/shell_actions.rs, state/tests.rs}`: добавлен `[ui].accent_index` (`UserConfig::ui_accent_index`, `set_active_accent_index`/`active_accent_index`, `ThemePalette::current_for_styled`), создан модуль `icon_art.rs` с 16-tap R2 процедурным рендерингом иконок `macOS 27` (`Folder`, `Downloads`, `Trash`, `TrashFull`, `Files`, `Overview`, `Terminal`, `Browser`, `Notes`, `Settings`, `Updater`, `RustySystem`, `WindowFallback`) в `Light`/`Dark` и поддержкой `[ui].accent_index`, добавлены `BuiltinAppIcon::Folder` для папок рабочего стола, `composite_xdg_in_squircle`/`framed_xdg_squircle_icon_element` и приоритет `128x128`/`256x256` в `find_icon_png_in_roots`, а `build_dock_tiles` объединяет `"firefox"` со слотом `"browser"` (`"Firefox"`) без дублирования плиток;
+  - `apps/rusty-files/src/{state/mod.rs, icons.rs, render/mod.rs, render/popup.rs, wayland.rs}`: живой парсинг и hot-reload `[ui].accent_index` (`poll_system_theme`, `palette_for_with_accent`, `IconSpriteKey::{SmallFolder, LargeFolder}`), обновление малых и крупных папок (`draw_large_golden_gate_folder` с гладким S-уступом и двойным тисненым глифом категории) и перенос акцента во всплывающие меню (`render_popup_surface_pixels_with_style`, `draw_popup_surface`);
+  - `packaging/arch/PKGBUILD`: добавлен пакет `'firefox'` в `depends`;
+  - `DECISIONS.md` (`D-078`).
+- **Acceptance Criteria:**
+  - Живой `--winit` прогон на вложенном Wayland и X11 (`Light Blue`, `rusty-files`, `Dark Blue`, живое переключение на `Coral Red` через клик в `rusty-settings` с `RELOAD_CONFIG` IPC и закрытием настроек) подтверждает одновременное обновление папок Desktop, `rusty-files`, иконок `Dock` (включая `Firefox` в сквиркле, `Finder`, `Apps`, `Terminal`, `Notes`, `Settings`, `Downloads`, `Trash`) без `EGL_BAD_SURFACE` и shader-ошибок;
+  - `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo build --workspace --bins` и все 293 unit-теста workspace проходят без ошибок.
+- **Tests:** 293 unit-теста workspace (`4` `rusty-animation`, `186` `rusty-compositor`, `16` `rusty-files`, `3` `rusty-ipc`, `44` `rusty-services`, `10` `rusty-settings`, `5` `rusty-shell`, `14` `rusty-terminal`, `4` `rusty-updater`, `7` `rusty-wm`).
+- **Risks:** Нет.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

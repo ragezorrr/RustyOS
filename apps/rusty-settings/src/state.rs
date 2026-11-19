@@ -8,18 +8,11 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant, SystemTime};
 
+use rusty_services::file_manager::RUSTYOS_ACCENT_SWATCHES;
 use rusty_services::{AudioService, NetworkService, NetworkStatus};
 
-/// Predefined accent color palette.
-pub(crate) const ACCENT_COLORS: [[u8; 4]; 7] = [
-    [0x33, 0x85, 0xFF, 0xFF], // Blue
-    [0xFF, 0x5C, 0x6D, 0xFF], // Coral Red
-    [0x35, 0xBF, 0x56, 0xFF], // Green
-    [0x82, 0x66, 0xFF, 0xFF], // Indigo
-    [0xCA, 0x64, 0xAC, 0xFF], // Pink
-    [0xFE, 0xA0, 0x42, 0xFF], // Orange
-    [0x4F, 0x59, 0x6B, 0xFF], // Graphite
-];
+/// Predefined accent color palette shared across RustyOS (`RUSTYOS-114`).
+pub(crate) const ACCENT_COLORS: [[u8; 4]; RUSTYOS_ACCENT_SWATCHES.len()] = RUSTYOS_ACCENT_SWATCHES;
 
 /// CLI startup overrides parsed by `main`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -731,6 +724,7 @@ impl SettingsAppState {
         let val = clamped.to_string();
         let _ = update_config_entries(&[("ui", "accent_index", &val)]);
         self.last_config_mtime = current_config_mtime();
+        notify_compositor_reload();
         self.mark_dirty(DamageScope::Full);
     }
 

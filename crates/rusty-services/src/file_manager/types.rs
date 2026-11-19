@@ -51,9 +51,62 @@ impl FilesThemeMode {
     }
 }
 
-/// Parses `[ui] theme` from a RustyOS `config.toml` content string if present (`RUSTYOS-067`).
+/// Number of built-in RustyOS accent presets (`RUSTYOS-114`).
+pub const RUSTYOS_ACCENT_COUNT: usize = 7;
+
+/// Swatch colors shown in `System Settings -> Appearance` for the 7 RustyOS accent presets.
+pub const RUSTYOS_ACCENT_SWATCHES: [[u8; 4]; RUSTYOS_ACCENT_COUNT] = [
+    [0x33, 0x85, 0xFF, 0xFF], // Blue
+    [0xFF, 0x5C, 0x6D, 0xFF], // Coral Red
+    [0x35, 0xBF, 0x56, 0xFF], // Green
+    [0x82, 0x66, 0xFF, 0xFF], // Indigo
+    [0xCA, 0x64, 0xAC, 0xFF], // Pink
+    [0xFE, 0xA0, 0x42, 0xFF], // Orange
+    [0x4F, 0x59, 0x6B, 0xFF], // Graphite
+];
+
+const ACCENT_LIGHT_RGBA: [[u8; 4]; RUSTYOS_ACCENT_COUNT] = [
+    [0, 122, 255, 255],  // Golden Gate Blue #007AFF
+    [255, 59, 48, 255],  // Coral Red #FF3B30
+    [40, 205, 65, 255],  // Emerald Green #28CD41
+    [94, 92, 230, 255],  // Indigo #5E5CE6
+    [212, 84, 166, 255], // Pink #D454A6
+    [255, 149, 0, 255],  // Orange #FF9500
+    [99, 105, 118, 255], // Graphite #636976
+];
+
+const ACCENT_DARK_RGBA: [[u8; 4]; RUSTYOS_ACCENT_COUNT] = [
+    [10, 132, 255, 255],  // Golden Gate Dark Blue #0A84FF
+    [255, 92, 109, 255],  // Coral Red
+    [53, 191, 86, 255],   // Green
+    [130, 102, 255, 255], // Indigo
+    [232, 104, 184, 255], // Pink
+    [254, 160, 66, 255],  // Orange
+    [122, 132, 148, 255], // Graphite
+];
+
+/// Clamps `[ui].accent_index` into the built-in palette bounds (`0..7`).
 #[must_use]
-pub fn detect_system_theme_from_toml(content: &str) -> Option<FilesThemeMode> {
+pub const fn clamp_accent_index(index: usize) -> usize {
+    if index >= RUSTYOS_ACCENT_COUNT {
+        RUSTYOS_ACCENT_COUNT - 1
+    } else {
+        index
+    }
+}
+
+/// Resolves theme-aware `[r, g, b, 255]` accent color for `index` (`RUSTYOS-114`).
+#[must_use]
+pub const fn accent_rgba_for_index(index: usize, is_dark: bool) -> [u8; 4] {
+    let idx = clamp_accent_index(index);
+    if is_dark {
+        ACCENT_DARK_RGBA[idx]
+    } else {
+        ACCENT_LIGHT_RGBA[idx]
+    }
+}
+
+fn find_ui_toml_value<'a>(content: &'a str, target_keys: &[&str]) -> Option<&'a str> {
     let mut in_ui = false;
     for raw_line in content.lines() {
         let line = strip_toml_comment(raw_line).trim();
@@ -61,18 +114,32 @@ pub fn detect_system_theme_from_toml(content: &str) -> Option<FilesThemeMode> {
             continue;
         }
         if line.starts_with('[') {
-            in_ui = line == "[ui]";
+            in_ui = line.eq_ignore_ascii_case("[ui]");
             continue;
         }
-        if in_ui && let Some((raw_k, raw_v)) = line.split_once('=') {
-            let key = raw_k.trim();
-            if key == "theme" || key == "appearance" {
-                let val = raw_v.trim().trim_matches('"').trim_matches('\'');
-                return FilesThemeMode::from_config_str(val);
-            }
+        if in_ui
+            && let Some((raw_k, raw_v)) = line.split_once('=')
+            && target_keys.contains(&raw_k.trim())
+        {
+            return Some(raw_v.trim().trim_matches('"').trim_matches('\''));
         }
     }
     None
+}
+
+/// Parses `[ui] theme` from a RustyOS `config.toml` content string if present (`RUSTYOS-067`).
+#[must_use]
+pub fn detect_system_theme_from_toml(content: &str) -> Option<FilesThemeMode> {
+    find_ui_toml_value(content, &["theme", "appearance"]).and_then(FilesThemeMode::from_config_str)
+}
+
+/// Parses `[ui] accent_index` from a RustyOS `config.toml` content string if present (`RUSTYOS-114`).
+#[must_use]
+pub fn detect_system_accent_from_toml(content: &str) -> Option<usize> {
+    find_ui_toml_value(content, &["accent_index"])?
+        .parse::<usize>()
+        .ok()
+        .map(clamp_accent_index)
 }
 
 /// Content view modes presented in the Golden Gate view switcher pill.
@@ -578,6 +645,14 @@ impl UserFileLocations {
         let path = self.config_dir.join("config.toml");
         let content = fs::read_to_string(path).ok()?;
         detect_system_theme_from_toml(&content)
+    }
+
+    /// Detects the active system `[ui].accent_index` from `~/.config/rustyos/config.toml` if present (`RUSTYOS-114`).
+    #[must_use]
+    pub fn detect_system_accent(&self) -> Option<usize> {
+        let path = self.config_dir.join("config.toml");
+        let content = fs::read_to_string(path).ok()?;
+        detect_system_accent_from_toml(&content)
     }
 }
 

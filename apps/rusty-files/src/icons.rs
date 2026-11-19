@@ -290,6 +290,7 @@ enum IconSpriteKey {
     SmallFolder {
         selected_blue: bool,
         is_dark: bool,
+        accent: [u8; 4],
     },
     SmallApp {
         selected_blue: bool,
@@ -302,6 +303,7 @@ enum IconSpriteKey {
         category: u8,
         tag: Option<FileTagColor>,
         is_dark: bool,
+        accent: [u8; 4],
         size_tenths: u16,
         qx: u8,
         qy: u8,
@@ -392,6 +394,7 @@ pub(crate) fn draw_entry_icon(
         FileEntryKind::Directory | FileEntryKind::MountPoint => IconSpriteKey::SmallFolder {
             selected_blue,
             is_dark: pal.is_dark,
+            accent: pal.accent,
         },
         FileEntryKind::Application => IconSpriteKey::SmallApp {
             selected_blue,
@@ -429,20 +432,9 @@ fn draw_entry_icon_uncached(
                     rgba(232, 243, 255, 245),
                     rgba(255, 255, 255, 255),
                 )
-            } else if pal.is_dark {
-                (
-                    rgba(44, 134, 228, 255),
-                    rgba(112, 192, 255, 255),
-                    rgba(52, 148, 244, 255),
-                    rgba(182, 226, 255, 215),
-                )
             } else {
-                (
-                    rgba(48, 138, 234, 255),
-                    rgba(114, 194, 255, 255),
-                    rgba(54, 148, 246, 255),
-                    rgba(176, 224, 255, 220),
-                )
+                let (b, t, bo, lip, _, _) = folder_palette_for(None, pal);
+                (b, t, bo, lip)
             };
             c.fill_poly_aa(
                 &[
@@ -544,6 +536,7 @@ pub(crate) fn draw_large_entry_artwork(
                 category,
                 tag: primary_tag,
                 is_dark: pal.is_dark,
+                accent: pal.accent,
                 size_tenths,
                 qx,
                 qy,
@@ -595,6 +588,157 @@ pub(crate) fn draw_large_entry_artwork(
     }
 }
 
+const FOLDER_AA_16: [(f32, f32); 16] = [
+    (0.125, 0.0625),
+    (0.375, 0.1875),
+    (0.625, 0.0625),
+    (0.875, 0.1875),
+    (0.0625, 0.375),
+    (0.3125, 0.3125),
+    (0.5625, 0.4375),
+    (0.8125, 0.3125),
+    (0.1875, 0.625),
+    (0.4375, 0.5625),
+    (0.6875, 0.6875),
+    (0.9375, 0.5625),
+    (0.0625, 0.875),
+    (0.3125, 0.9375),
+    (0.5625, 0.8125),
+    (0.8125, 0.9375),
+];
+
+#[inline]
+fn f_smoothstep(e0: f32, e1: f32, x: f32) -> f32 {
+    let t = ((x - e0) / (e1 - e0).max(1e-5)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+#[inline]
+#[allow(clippy::many_single_char_names)]
+fn f_sd_round_box(px: f32, py: f32, bx: f32, by: f32, bw: f32, bh: f32, radius: f32) -> f32 {
+    let hw = bw * 0.5;
+    let hh = bh * 0.5;
+    let rad = radius.min(hw).min(hh).max(0.0);
+    let qx = (px - (bx + hw)).abs() - (hw - rad);
+    let qy = (py - (by + hh)).abs() - (hh - rad);
+    qx.max(0.0).hypot(qy.max(0.0)) + qx.max(qy).min(0.0) - rad
+}
+
+#[inline]
+fn f_mix(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
+    let k = t.clamp(0.0, 1.0);
+    [
+        a[0] * (1.0 - k) + b[0] * k,
+        a[1] * (1.0 - k) + b[1] * k,
+        a[2] * (1.0 - k) + b[2] * k,
+    ]
+}
+
+#[inline]
+fn f_over(dst: [f32; 4], src: [f32; 4]) -> [f32; 4] {
+    let sa = src[3].clamp(0.0, 1.0);
+    let inv = 1.0 - sa;
+    [
+        src[0] * sa + dst[0] * inv,
+        src[1] * sa + dst[1] * inv,
+        src[2] * sa + dst[2] * inv,
+        (sa + dst[3] * inv).clamp(0.0, 1.0),
+    ]
+}
+
+#[inline]
+fn col_f3(c: [u8; 4]) -> [f32; 3] {
+    [f32::from(c[0]), f32::from(c[1]), f32::from(c[2])]
+}
+
+#[allow(clippy::too_many_arguments)]
+fn sample_folder_subpixel(
+    px: f32,
+    py: f32,
+    left: f32,
+    top: f32,
+    w: f32,
+    h: f32,
+    tab_h: f32,
+    rad: f32,
+    back_f: [f32; 3],
+    top_f: [f32; 3],
+    bot_f: [f32; 3],
+    lip_f: [f32; 3],
+    is_dark: bool,
+) -> [f32; 4] {
+    let front_top = top + tab_h + w * 0.036;
+    let front_h = h - (front_top - top);
+    let mut col = [0.0_f32; 4];
+
+    // 1. Soft diffused drop shadow underneath front pocket.
+    let sh_sd = f_sd_round_box(px, py, left, front_top + 1.8, w, front_h, rad + 1.0);
+    if sh_sd < 4.5 {
+        let a = (1.0 - ((sh_sd + 1.2).max(0.0) / 5.7))
+            .clamp(0.0, 1.0)
+            .powi(2);
+        col = f_over(col, [4.0, 6.0, 14.0, a * if is_dark { 0.42 } else { 0.20 }]);
+    }
+
+    // 2. Back plate with smooth S-shoulder curve (replaces flat polygon).
+    let shoulder = f_smoothstep(left + w * 0.31, left + w * 0.48, px);
+    let back_edge_top = top + (tab_h + w * 0.008) * shoulder;
+    let back_box = f_sd_round_box(px, py, left + 0.5, top, w - 1.0, h * 0.55, rad * 0.85);
+    let back_sd = back_box.max(back_edge_top - py);
+    let back_cov = (0.5 - back_sd).clamp(0.0, 1.0);
+    if back_cov > 0.0 {
+        let bt = ((py - top) / (tab_h + 6.0).max(1.0)).clamp(0.0, 1.0);
+        let b_rgb = f_mix(back_f, f_mix(back_f, top_f, 0.35), bt);
+        col = f_over(col, [b_rgb[0], b_rgb[1], b_rgb[2], back_cov]);
+        if back_sd > -1.2 && py < top + tab_h + 3.0 {
+            col = f_over(col, [255.0, 255.0, 255.0, back_cov * 0.20]);
+        }
+    }
+
+    // 3. Clean bright paper sheet peeking softly along fold seam.
+    let sheet_sd = f_sd_round_box(
+        px,
+        py,
+        left + w * 0.04,
+        top + tab_h + w * 0.012,
+        w * 0.92,
+        h * 0.30,
+        rad * 0.45,
+    );
+    let sheet_cov = (0.5 - sheet_sd).clamp(0.0, 1.0);
+    if sheet_cov > 0.0 {
+        col = f_over(col, [lip_f[0], lip_f[1], lip_f[2], sheet_cov * 0.96]);
+    }
+
+    // 4. Glossy volumetric front pocket with upper highlight, inner bevel & soft bottom vignette.
+    let front_sd = f_sd_round_box(px, py, left, front_top, w, front_h, rad);
+    let front_cov = (0.5 - front_sd).clamp(0.0, 1.0);
+    if front_cov > 0.0 {
+        let vt = ((py - front_top) / front_h.max(1.0)).clamp(0.0, 1.0);
+        let cx = left + w * 0.5;
+        let cy_g = front_top + front_h * 0.28;
+        let radial =
+            (((px - cx) / (w * 0.55)).hypot((py - cy_g) / (front_h * 0.72))).clamp(0.0, 1.0);
+        let mut fc = f_mix(top_f, bot_f, (vt * 0.84 + radial * 0.16).clamp(0.0, 1.0));
+        let top_lip = (1.0 - ((py - front_top).max(0.0) / 2.2)).clamp(0.0, 1.0);
+        fc = f_mix(fc, [250.0, 253.0, 255.0], top_lip * 0.40);
+        if front_sd > -1.2 {
+            if py < front_top + front_h * 0.5 {
+                fc = f_mix(fc, [255.0, 255.0, 255.0], 0.14);
+            } else {
+                fc = f_mix(fc, back_f, 0.22);
+            }
+        }
+        col = f_over(col, [fc[0], fc[1], fc[2], front_cov]);
+    }
+    col
+}
+
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
 fn draw_large_golden_gate_folder(
     c: &mut Canvas<'_>,
     cx: f32,
@@ -605,65 +749,77 @@ fn draw_large_golden_gate_folder(
     pal: &Palette,
 ) {
     let w = size;
-    let h = size * 0.78;
+    let h = size * 0.80;
     let left = (cx - w * 0.5).round();
     let top = (cy - h * 0.5).round();
-    let tab_w = w * 0.38;
-    let tab_h = h * 0.14;
-    let rad = (size * 0.09).clamp(3.0, 8.0);
+    let tab_h = h * 0.115;
+    let rad = (size * 0.085).clamp(3.0, 8.0);
 
-    let (back_col, top_col, bot_col, lip_col, rim_col, engrave_col) =
-        folder_palette_for(tag_tint, pal);
+    let (back_col, top_col, bot_col, lip_col, _, engrave_col) = folder_palette_for(tag_tint, pal);
+    let back_f = col_f3(back_col);
+    let top_f = col_f3(top_col);
+    let bot_f = col_f3(bot_col);
+    let lip_f = col_f3(lip_col);
 
-    // Subtle soft ambient drop shadow underneath folder body
-    c.fill_rounded_rect_f(
-        left + 1.0,
-        top + tab_h + 3.0,
-        w - 2.0,
-        h - tab_h,
-        rad,
-        rgba(0, 0, 0, if pal.is_dark { 58 } else { 28 }),
+    let sw = usize::try_from(c.w.max(1)).unwrap_or(1);
+    let sh = usize::try_from(c.h.max(1)).unwrap_or(1);
+    let mut folder_buf = vec![0_u8; sw * sh * 4];
+    let min_x = ((left - 6.0).floor() as i32).max(0);
+    let min_y = ((top - 4.0).floor() as i32).max(0);
+    let max_x = ((left + w + 6.0).ceil() as i32).min(c.w);
+    let max_y = ((top + h + 8.0).ceil() as i32).min(c.h);
+
+    for py in min_y..max_y {
+        for px in min_x..max_x {
+            let mut acc = [0.0_f32; 4];
+            for (sx, sy) in FOLDER_AA_16 {
+                let s = sample_folder_subpixel(
+                    px as f32 + sx,
+                    py as f32 + sy,
+                    left,
+                    top,
+                    w,
+                    h,
+                    tab_h,
+                    rad,
+                    back_f,
+                    top_f,
+                    bot_f,
+                    lip_f,
+                    pal.is_dark,
+                );
+                let sa = s[3];
+                acc[0] += s[2] * sa;
+                acc[1] += s[1] * sa;
+                acc[2] += s[0] * sa;
+                acc[3] += sa;
+            }
+            let idx = (py as usize * sw + px as usize) * 4;
+            if idx + 4 <= folder_buf.len() {
+                let inv = 1.0 / 16.0;
+                folder_buf[idx] = (acc[0] * inv).round().clamp(0.0, 255.0) as u8;
+                folder_buf[idx + 1] = (acc[1] * inv).round().clamp(0.0, 255.0) as u8;
+                folder_buf[idx + 2] = (acc[2] * inv).round().clamp(0.0, 255.0) as u8;
+                folder_buf[idx + 3] = (acc[3] * inv * 255.0).round().clamp(0.0, 255.0) as u8;
+            }
+        }
+    }
+    c.blit_premul_sprite(
+        0,
+        0,
+        i32::try_from(sw).unwrap_or(1),
+        i32::try_from(sh).unwrap_or(1),
+        &folder_buf,
     );
 
-    // Back folder flap with 4x4 RGSS beveled Golden Gate tab transition
-    let back_pts = [
-        (left + 2.0, top + tab_h + 4.0),
-        (left + 2.0, top + rad * 0.5),
-        (left + rad * 0.5, top),
-        (left + tab_w, top),
-        (left + tab_w + tab_h * 1.15, top + tab_h),
-        (left + w - rad * 0.5, top + tab_h),
-        (left + w, top + tab_h + rad * 0.5),
-        (left + w, top + h * 0.45),
-        (left, top + h * 0.45),
-    ];
-    c.fill_poly_aa(&back_pts, back_col);
-
-    // Subtle crisp paper sheet highlight peeking along the back/front seam
-    c.fill_rounded_rect_f(left + 3.0, top + tab_h + 1.5, w - 6.0, 4.0, 1.5, lip_col);
-
-    // Front folder body with Golden Gate vertical sky-blue (or tag-tinted) gradient
-    let front_top = top + tab_h + 3.0;
-    let front_h = h - tab_h - 3.0;
-    c.fill_rounded_rect_vgrad_f(left, front_top, w, front_h, rad, top_col, bot_col);
-    c.stroke_line_aa(
-        left + rad,
-        front_top + 0.8,
-        left + w - rad,
-        front_top + 0.8,
-        1.0,
-        rgba(255, 255, 255, 115),
-    );
-    c.stroke_rounded_rect_f(left, front_top, w, front_h, rad, 1.0, rim_col);
-
-    draw_folder_category_engraving(
-        c,
-        cx,
-        front_top + front_h * 0.52,
-        size * 0.36,
-        folder_name,
-        engrave_col,
-    );
+    // Dual-pass debossed category glyph stamped into the front pocket.
+    let front_top = top + tab_h + w * 0.036;
+    let front_h = h - (front_top - top);
+    let glyph_cy = front_top + front_h * 0.51;
+    let glyph_r = size * 0.35;
+    let hilite_engrave = rgba(255, 255, 255, 58);
+    draw_folder_category_engraving(c, cx, glyph_cy + 0.65, glyph_r, folder_name, hilite_engrave);
+    draw_folder_category_engraving(c, cx, glyph_cy, glyph_r, folder_name, engrave_col);
 }
 
 #[allow(clippy::type_complexity)]
@@ -683,27 +839,51 @@ fn folder_palette_for(
             back[0].saturating_sub(24),
             back[1].saturating_sub(24),
             back[2].saturating_sub(24),
-            125,
+            135,
+        );
+        return (back, top, bot, lip, rim, engrave);
+    }
+    let default_accent = rusty_services::file_manager::accent_rgba_for_index(0, pal.is_dark);
+    if pal.accent != default_accent {
+        let base = pal.accent;
+        let top = lerp_rgba(
+            base,
+            rgba(255, 255, 255, 255),
+            if pal.is_dark { 0.28 } else { 0.34 },
+        );
+        let bot = lerp_rgba(
+            base,
+            rgba(0, 0, 0, 255),
+            if pal.is_dark { 0.14 } else { 0.10 },
+        );
+        let back = lerp_rgba(base, rgba(0, 0, 0, 255), 0.24);
+        let lip = lerp_rgba(base, rgba(255, 255, 255, 255), 0.76);
+        let rim = rgba(back[0], back[1], back[2], 130);
+        let engrave = rgba(
+            back[0].saturating_sub(20),
+            back[1].saturating_sub(20),
+            back[2].saturating_sub(20),
+            128,
         );
         return (back, top, bot, lip, rim, engrave);
     }
     if pal.is_dark {
         (
-            rgba(46, 136, 228, 255),
-            rgba(118, 198, 255, 255),
-            rgba(56, 156, 244, 255),
-            rgba(218, 242, 255, 230),
-            rgba(72, 162, 248, 135),
-            rgba(26, 94, 172, 120),
+            rgba(38, 128, 224, 255),
+            rgba(116, 200, 255, 255),
+            rgba(44, 142, 240, 255),
+            rgba(222, 244, 255, 235),
+            rgba(64, 154, 242, 130),
+            rgba(20, 86, 162, 130),
         )
     } else {
         (
-            rgba(50, 142, 232, 255),
-            rgba(122, 202, 255, 255),
-            rgba(60, 162, 246, 255),
-            rgba(228, 245, 255, 235),
-            rgba(46, 132, 218, 115),
-            rgba(28, 98, 178, 110),
+            rgba(42, 134, 230, 255),
+            rgba(120, 204, 255, 255),
+            rgba(48, 150, 244, 255),
+            rgba(234, 248, 255, 240),
+            rgba(42, 126, 214, 115),
+            rgba(24, 92, 172, 122),
         )
     }
 }

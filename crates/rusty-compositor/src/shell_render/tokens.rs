@@ -42,6 +42,7 @@ thread_local! {
     static SOLID_ELEMENT_CACHE: RefCell<SolidElementCache> = RefCell::new(SolidElementCache::default());
     static ACTIVE_APPEARANCE: std::cell::Cell<crate::config::AppearanceMode> =
         const { std::cell::Cell::new(crate::config::AppearanceMode::Light) };
+    static ACTIVE_ACCENT_INDEX: std::cell::Cell<u8> = const { std::cell::Cell::new(0) };
 }
 
 /// Sets the active [`crate::config::AppearanceMode`] for the current render frame (`RUSTYOS-067`).
@@ -53,6 +54,18 @@ pub(crate) fn set_active_appearance(mode: crate::config::AppearanceMode) {
 #[must_use]
 pub(crate) fn active_appearance() -> crate::config::AppearanceMode {
     ACTIVE_APPEARANCE.with(std::cell::Cell::get)
+}
+
+/// Sets the active `[ui].accent_index` (`0..=6`) for the current render frame (`RUSTYOS-114`).
+pub(crate) fn set_active_accent_index(index: u8) {
+    let clamped = rusty_services::file_manager::clamp_accent_index(usize::from(index));
+    ACTIVE_ACCENT_INDEX.with(|cell| cell.set(u8::try_from(clamped).unwrap_or(0)));
+}
+
+/// Returns the active `[ui].accent_index` (`0..=6`) for the current render frame (`RUSTYOS-114`).
+#[must_use]
+pub(crate) fn active_accent_index() -> u8 {
+    ACTIVE_ACCENT_INDEX.with(std::cell::Cell::get)
 }
 
 /// Dynamic Golden Gate Light/Dark color palette (`RUSTYOS-067`).
@@ -114,10 +127,42 @@ impl ThemePalette {
         }
     }
 
-    /// Returns the active [`ThemePalette`] for the current thread's [`active_appearance`].
+    /// Returns the Golden Gate [`ThemePalette`] for `mode` and explicit `[ui].accent_index` (`RUSTYOS-114`).
+    #[must_use]
+    pub(crate) const fn current_for_styled(
+        mode: crate::config::AppearanceMode,
+        accent_index: u8,
+    ) -> Self {
+        let mut base = Self::current_for(mode);
+        let accent = rusty_services::file_manager::accent_rgba_for_index(
+            accent_index as usize,
+            base.is_dark,
+        );
+        let border_r = accent[0] / 2 + 127;
+        let border_g = accent[1] / 2 + 127;
+        let border_b = accent[2] / 2 + 127;
+        base.accent_rgba = accent;
+        base.accent_hover_fill = [
+            accent[0],
+            accent[1],
+            accent[2],
+            if base.is_dark { 234 } else { 238 },
+        ];
+        if accent_index != 0 {
+            base.accent_hover_border = [
+                border_r,
+                border_g,
+                border_b,
+                if base.is_dark { 145 } else { 160 },
+            ];
+        }
+        base
+    }
+
+    /// Returns the active [`ThemePalette`] for the current thread's [`active_appearance`] and [`active_accent_index`].
     #[must_use]
     pub(crate) fn active() -> Self {
-        Self::current_for(active_appearance())
+        Self::current_for_styled(active_appearance(), active_accent_index())
     }
 }
 

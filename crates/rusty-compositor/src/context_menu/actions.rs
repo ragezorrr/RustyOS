@@ -86,7 +86,8 @@ impl crate::state::RustyCompositorState {
                 self.open_settings();
             }
             ContextMenuAction::DesktopOpenTerminal => {
-                self.launch_dock_app_new_instance("terminal", false);
+                let desktop = crate::context_menu::desktop_menu::resolve_desktop_dir();
+                let _ = self.launch_terminal_in_dir(desktop.as_deref());
             }
             ContextMenuAction::DesktopMissionControl | ContextMenuAction::DockShowAllWindows => {
                 self.overview_active = false;

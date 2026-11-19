@@ -159,7 +159,7 @@ impl Default for AppLauncher {
                     id: "org.rustyos.terminal".to_owned(),
                     name: "Terminal".to_owned(),
                     keywords: vec!["shell".to_owned(), "console".to_owned(), "cli".to_owned()],
-                    exec: "foot".to_owned(),
+                    exec: "rusty-terminal".to_owned(),
                 },
                 LauncherEntry {
                     id: "org.rustyos.files".to_owned(),
@@ -393,7 +393,7 @@ impl Default for DesktopShell {
                 DockItem {
                     app_id: "org.rustyos.terminal".to_owned(),
                     title: "Terminal".to_owned(),
-                    exec: "foot".to_owned(),
+                    exec: "rusty-terminal".to_owned(),
                     pinned: true,
                     window_ids: Vec::new(),
                     focused: false,

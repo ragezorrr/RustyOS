@@ -13,7 +13,7 @@
 
 use rusty_services::file_manager::FilesThemeMode;
 
-use super::{Canvas, Palette, palette_for, rgba};
+use super::{Canvas, Palette, palette_for_with_accent, rgba};
 use crate::layout::{PopupCommand, PopupLayout, Rect};
 
 /// Concentric outer corner radius matching macOS 27 Golden Gate popovers (`13 px`).
@@ -87,6 +87,7 @@ pub(crate) fn render_popup_surface_pixels(
 /// Renders a standalone native `xdg_popup` surface buffer (`ARGB8888`); when
 /// `has_compositor_glass == true`, skips CPU shadow/opaque fill so the compositor
 /// `LiquidGlassElement` (`GlassPanelStyle::Popover`, `r = 13`) provides live blur and rim.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn render_popup_surface_pixels_with_glass(
     buf: &mut [u8],
     width: u32,
@@ -96,7 +97,31 @@ pub(crate) fn render_popup_surface_pixels_with_glass(
     theme: FilesThemeMode,
     has_compositor_glass: bool,
 ) {
-    let pal = palette_for(theme);
+    render_popup_surface_pixels_with_style(
+        buf,
+        width,
+        height,
+        popup,
+        hover_idx,
+        theme,
+        0,
+        has_compositor_glass,
+    );
+}
+
+/// Renders a standalone native `xdg_popup` surface buffer (`ARGB8888`) with `[ui].accent_index`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn render_popup_surface_pixels_with_style(
+    buf: &mut [u8],
+    width: u32,
+    height: u32,
+    popup: &PopupLayout,
+    hover_idx: Option<usize>,
+    theme: FilesThemeMode,
+    accent_index: usize,
+    has_compositor_glass: bool,
+) {
+    let pal = palette_for_with_accent(theme, accent_index);
     let mut c = Canvas::new(buf, width, height);
     c.clear();
     render_popup_with_chrome(&mut c, popup, hover_idx, &pal, !has_compositor_glass);
@@ -397,7 +422,7 @@ mod tests {
             FilesThemeMode::LightGoldenGate,
         );
 
-        let pal = palette_for(FilesThemeMode::LightGoldenGate);
+        let pal = palette_for_with_accent(FilesThemeMode::LightGoldenGate, 0);
         // Verify hover pill fill at row 0 mid-point inside left margin of pill (x = 8 + 10 = 18, y = 13 + 12 = 25)
         let pill_idx = ((25 * pw + 18) * 4) as usize;
         assert_eq!(buf[pill_idx + 2], pal.accent[0]); // R

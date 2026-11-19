@@ -125,6 +125,13 @@ pub(crate) const fn palette_for(theme: FilesThemeMode) -> Palette {
     }
 }
 
+/// Returns the theme palette adjusted to `[ui].accent_index` (`RUSTYOS-114`).
+pub(crate) const fn palette_for_with_accent(theme: FilesThemeMode, accent_index: usize) -> Palette {
+    let mut pal = palette_for(theme);
+    pal.accent = rusty_services::file_manager::accent_rgba_for_index(accent_index, pal.is_dark);
+    pal
+}
+
 /// Scales overlay scrollbar alpha factor `[0.0..=1.0]` for transient post-scroll fading (`RUSTYOS-071`).
 #[must_use]
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -159,7 +166,7 @@ pub(crate) fn render_window_pixels_with_popup(
     layout: &FilesLayout,
     include_inline_popup: bool,
 ) {
-    let pal = palette_for(state.theme);
+    let pal = palette_for_with_accent(state.theme, state.accent_index);
     let mut c = Canvas::new(buf, width, height);
     c.clear();
 
@@ -397,7 +404,7 @@ mod tests {
         state.set_search_query(String::from("read"));
         let search_layout = compute_layout(&state, w, h);
         render_window_pixels_with_popup(&mut buf, w, h, &state, &search_layout, false);
-        let pal = palette_for(state.theme);
+        let pal = palette_for_with_accent(state.theme, state.accent_index);
         let pill = search_layout.search_pill_rect;
         let caret_y = (pill.y + 12).cast_unsigned();
         let has_accent_caret = ((pill.x + 26)..pill.right() - 22).any(|px| {

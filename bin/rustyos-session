@@ -47,6 +47,7 @@ find_rusty_bin() {
 COMPOSITOR_BIN="$(find_rusty_bin rusty-compositor)"
 SHELL_BIN="$(find_rusty_bin rusty-shell)"
 FILES_BIN="$(find_rusty_bin rusty-files)"
+TERMINAL_BIN="$(find_rusty_bin rusty-terminal)"
 UPDATER_BIN="$(find_rusty_bin rusty-updater)"
 PW_WORKER_BIN="$(find_rusty_bin rusty-pipewire-stream)"
 if [ -z "$PW_WORKER_BIN" ]; then
@@ -98,6 +99,7 @@ run_doctor() {
         "rusty-compositor:$COMPOSITOR_BIN:req:build workspace or install package" \
         "rusty-shell:$SHELL_BIN:warn:only needed when RUSTYOS_EXTERNAL_SHELL=1" \
         "rusty-files:$FILES_BIN:req:build workspace or install package" \
+        "rusty-terminal:$TERMINAL_BIN:req:build workspace or install package" \
         "rusty-updater:$UPDATER_BIN:req:build workspace or install package" \
         "rusty-pipewire-stream:$PW_WORKER_BIN:warn:optional ScreenCast PipeWire worker" \
         "rustyos-update-helper:$HELPER_BIN:warn:required at /usr/lib/rustyos/rustyos-update-helper for live pkexec upgrades"; do

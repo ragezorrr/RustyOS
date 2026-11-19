@@ -4,6 +4,7 @@ members = [
     "apps/rusty-files",
     "apps/rusty-settings",
     "apps/rusty-shell",
+    "apps/rusty-terminal",
     "apps/rusty-updater",
     "crates/rusty-animation",
     "crates/rusty-compositor",

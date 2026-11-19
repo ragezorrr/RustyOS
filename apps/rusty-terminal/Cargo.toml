@@ -1,0 +1,26 @@
+[package]
+name = "rusty-terminal"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "RustyOS GPU-accelerated Wayland CSD terminal emulator (RUSTYOS-113)"
+
+[dependencies]
+fontdue.workspace = true
+libc = "0.2.191"
+rustix = { version = "1.1.6", features = ["fs", "process", "pty", "stdio", "termios"] }
+rusty-animation.workspace = true
+smithay-client-toolkit = { version = "0.19.2", default-features = false, features = ["calloop", "xkbcommon"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+wayland-client = "0.31.15"
+wayland-egl = "0.32.11"
+wayland-scanner.workspace = true
+
+[build-dependencies]
+gl_generator = "0.14.0"
+
+[lints]
+workspace = true

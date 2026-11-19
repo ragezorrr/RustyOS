@@ -397,7 +397,7 @@ pub fn render_desktop_canvas_elements(
         if item.is_dir {
             if let Some(icon_el) = shape_cache.icons.builtin_squircle_icon_element(
                 renderer,
-                crate::icons::BuiltinAppIcon::Files,
+                crate::icons::BuiltinAppIcon::Folder,
                 DESKTOP_ICON_SIZE,
                 icon_loc,
             ) {

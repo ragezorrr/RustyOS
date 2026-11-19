@@ -1580,3 +1580,57 @@ fn test_rustyos_liquid_glass_protocol_integration() -> Result<(), Box<dyn Error>
     assert!(compositor.active_liquid_glass_surfaces.is_empty());
     Ok(())
 }
+
+#[test]
+fn firefox_window_merges_into_pinned_browser_dock_slot() -> Result<(), Box<dyn Error>> {
+    use crate::shell_render::{DockHit, DockSection};
+
+    let display: Display<RustyCompositorState> = Display::new()?;
+    let event_loop: EventLoop<RustyCompositorState> = EventLoop::try_new()?;
+    let mut compositor = RustyCompositorState::new(
+        &display,
+        "rusty-test-firefox-dock".to_owned(),
+        event_loop.get_signal(),
+        event_loop.handle(),
+        (1280, 800).into(),
+    )?;
+    compositor
+        .launcher
+        .catalog
+        .push(crate::launcher::LauncherApp {
+            id: "firefox.desktop".to_owned(),
+            name: "Firefox".to_owned(),
+            subtitle: "Web Browser".to_owned(),
+            exec: "/bin/sh %U".to_owned(),
+            keywords: vec!["browser".to_owned()],
+            badge: "FF".to_owned(),
+            icon: Some("firefox".to_owned()),
+        });
+    compositor.recent_unpinned_apps.push(super::RecentDockApp {
+        app_key: "firefox".to_owned(),
+        label: "Firefox".to_owned(),
+        icon_name: Some("firefox".to_owned()),
+    });
+    let tiles = compositor.build_dock_tiles();
+    let pinned_browser = tiles
+        .iter()
+        .find(|t| t.section == DockSection::Pinned && t.hit == DockHit::PinnedBrowser)
+        .ok_or("missing pinned browser slot")?;
+    assert_eq!(pinned_browser.app_key, "browser");
+    assert_eq!(pinned_browser.label, "Firefox");
+    assert!(
+        !tiles
+            .iter()
+            .any(|t| t.section == DockSection::UnpinnedOrRecent && t.app_key == "firefox"),
+        "Firefox should merge into the pinned Browser Dock slot without duplicating"
+    );
+    assert_eq!(
+        crate::shell_render::canonical_dock_app_key(
+            Some("org.mozilla.firefox"),
+            "Mozilla Firefox",
+            rusty_wm::WindowId(1),
+        ),
+        "firefox"
+    );
+    Ok(())
+}

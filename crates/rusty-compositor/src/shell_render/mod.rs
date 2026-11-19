@@ -170,7 +170,8 @@ use dock::render_dock;
 use quick_settings::render_quick_settings_popover;
 use spotlight_overview::render_spotlight_modal;
 pub(crate) use tokens::{
-    active_appearance, begin_solid_element_frame, make_solid_element, set_active_appearance,
+    active_accent_index, active_appearance, begin_solid_element_frame, make_solid_element,
+    set_active_accent_index, set_active_appearance,
 };
 use top_bar::render_top_bar;
 

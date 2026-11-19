@@ -11,6 +11,7 @@ pub mod dbus_notifications;
 pub mod drm_backend;
 mod frame_composer;
 pub mod frame_timing;
+mod icon_art;
 pub mod icons;
 pub mod input;
 pub mod launcher;

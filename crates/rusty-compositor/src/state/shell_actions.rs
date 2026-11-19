@@ -1509,13 +1509,35 @@ impl RustyCompositorState {
             Vec::with_capacity(self.user_config.dock_pinned_apps.len() + records.len() + 4);
         let mut pinned_keys = std::collections::HashSet::new();
 
+        let explicit_firefox_pin = self
+            .user_config
+            .dock_pinned_apps
+            .iter()
+            .any(|k| k.trim().eq_ignore_ascii_case("firefox"));
+        let firefox_default = !explicit_firefox_pin
+            && (self
+                .launcher
+                .find_command_for_dock_key("browser")
+                .is_some_and(|cmd| cmd.to_ascii_lowercase().contains("firefox"))
+                || records.iter().any(|rec| rec.app_key == "firefox")
+                || self
+                    .recent_unpinned_apps
+                    .iter()
+                    .any(|rec| rec.app_key == "firefox"));
+
         for (pin_idx, raw_key) in self.user_config.dock_pinned_apps.iter().enumerate() {
             let key = raw_key.trim().to_ascii_lowercase();
             if key.is_empty() || !pinned_keys.insert(key.clone()) {
                 continue;
             }
-            let matching: Vec<&DockWindowRecord> =
-                records.iter().filter(|rec| rec.app_key == key).collect();
+            let merge_firefox = key == "browser" && firefox_default;
+            if merge_firefox {
+                pinned_keys.insert("firefox".to_owned());
+            }
+            let matching: Vec<&DockWindowRecord> = records
+                .iter()
+                .filter(|rec| rec.app_key == key || (merge_firefox && rec.app_key == "firefox"))
+                .collect();
             let representative_win = matching
                 .iter()
                 .find(|r| r.focused)
@@ -1535,9 +1557,14 @@ impl RustyCompositorState {
             let icon_name = matching
                 .iter()
                 .find_map(|r| r.icon_name.clone())
-                .or_else(|| self.launcher.icon_for_dock_key(&key));
+                .or_else(|| self.launcher.icon_for_dock_key(&key))
+                .or_else(|| merge_firefox.then(|| "firefox".to_owned()));
             let toplevel_icon = matching.iter().find_map(|r| r.toplevel_icon.clone());
-            let label = crate::shell_render::dock_label_for_key(&key);
+            let label = if merge_firefox {
+                "Firefox".to_owned()
+            } else {
+                crate::shell_render::dock_label_for_key(&key)
+            };
             tiles.push(crate::shell_render::DockAppTile {
                 section: crate::shell_render::DockSection::Pinned,
                 hit: crate::shell_render::dock_hit_for_pinned_key(&key, pin_idx),
@@ -1664,6 +1691,40 @@ impl RustyCompositorState {
         } else {
             self.toggle_launcher();
         }
+    }
+
+    pub fn launch_terminal_in_dir(&mut self, dir: Option<&std::path::Path>) -> bool {
+        self.close_dock_stack();
+        self.close_overview();
+        let ipc_path = rusty_ipc::default_ipc_socket_path(&self.socket_name);
+        if let Some(cmd) = self.launcher.find_command_for_dock_key("terminal") {
+            let launched = if let Some(cwd) = dir.and_then(|d| d.to_str())
+                && matches!(
+                    std::path::Path::new(&cmd)
+                        .file_name()
+                        .and_then(|n| n.to_str()),
+                    Some("rusty-terminal" | "foot" | "alacritty" | "kitty")
+                ) {
+                self.launcher
+                    .launch_program_with_args(
+                        &cmd,
+                        &["--working-directory", cwd],
+                        &self.socket_name,
+                        &ipc_path,
+                    )
+                    .is_ok()
+            } else {
+                self.launcher
+                    .launch_command(&cmd, &self.socket_name, &ipc_path)
+                    .is_ok()
+            };
+            if launched {
+                self.trigger_app_bounce("terminal", false);
+                return true;
+            }
+        }
+        self.toggle_launcher();
+        false
     }
 
     pub(in crate::state) fn launch_rusty_files(&mut self, args: &[&str]) -> bool {
@@ -2079,7 +2140,8 @@ impl RustyCompositorState {
             || cfg.keyboard_options != self.user_config.keyboard_options;
         let wallpaper_changed =
             cfg.wallpaper != self.user_config.wallpaper || cfg.wallpaper.is_some();
-        let appearance_changed = cfg.appearance != self.user_config.appearance;
+        let appearance_changed = cfg.appearance != self.user_config.appearance
+            || cfg.ui_accent_index != self.user_config.ui_accent_index;
         let dock_layout_changed = cfg.dock_position != self.user_config.dock_position
             || cfg.dock_icon_size != self.user_config.dock_icon_size
             || cfg.dock_auto_hide != self.user_config.dock_auto_hide;
@@ -2156,6 +2218,8 @@ impl RustyCompositorState {
 
         self.user_config = cfg;
         crate::shell_render::set_active_appearance(self.user_config.appearance);
+        crate::shell_render::set_active_accent_index(self.user_config.ui_accent_index);
+        crate::shell_render::set_active_accent_index(self.user_config.ui_accent_index);
         if updates_changed {
             self.updates_checker.reconfigure(
                 self.updates_enabled,
@@ -2386,6 +2450,7 @@ impl RustyCompositorState {
     fn toggle_appearance_setting(&mut self) {
         self.user_config.appearance = self.user_config.appearance.toggle();
         crate::shell_render::set_active_appearance(self.user_config.appearance);
+        crate::shell_render::set_active_accent_index(self.user_config.ui_accent_index);
         self.wallpaper_revision = self.wallpaper_revision.wrapping_add(1);
         let label = self.user_config.appearance.label();
         self.sync_and_save_user_config();

@@ -360,21 +360,28 @@ impl LauncherState {
 
     #[must_use]
     pub(crate) fn find_available_command(&self, preferred_bins: &[&str]) -> Option<String> {
-        for app in &self.catalog {
-            if app.exec.contains("--app-id=") {
-                continue;
+        self.find_available_command_with(preferred_bins, command_exists_on_path)
+    }
+
+    fn find_available_command_with<F>(&self, preferred_bins: &[&str], exists: F) -> Option<String>
+    where
+        F: Fn(&str) -> bool,
+    {
+        for &preferred in preferred_bins {
+            for app in &self.catalog {
+                if app.exec.contains("--app-id=") {
+                    continue;
+                }
+                let bin = exec_basename(&app.exec);
+                if bin.eq_ignore_ascii_case(preferred) && exists(&app.exec) {
+                    return Some(clean_desktop_exec(&app.exec));
+                }
             }
-            let bin = exec_basename(&app.exec);
-            if preferred_bins.iter().any(|p| p.eq_ignore_ascii_case(&bin))
-                && command_exists_on_path(&app.exec)
-            {
-                return Some(clean_desktop_exec(&app.exec));
+            if exists(preferred) {
+                return Some(preferred.to_owned());
             }
         }
-        preferred_bins
-            .iter()
-            .find(|bin| command_exists_on_path(bin))
-            .map(|bin| (*bin).to_owned())
+        None
     }
 
     /// Preferred executable candidates for canonical built-in Dock keys (`RUSTYOS-073`).
@@ -384,6 +391,7 @@ impl LauncherState {
         const SETTINGS: &[&str] = &["rusty-settings"];
         const UPDATER: &[&str] = &["rusty-updater"];
         const TERMINAL: &[&str] = &[
+            "rusty-terminal",
             "foot",
             "kitty",
             "alacritty",
@@ -416,7 +424,7 @@ impl LauncherState {
             "files" | "rusty-files" => Some(FILES),
             "settings" | "rusty-settings" | "system-settings" => Some(SETTINGS),
             "updater" | "rusty-updater" => Some(UPDATER),
-            "terminal" => Some(TERMINAL),
+            "terminal" | "rusty-terminal" => Some(TERMINAL),
             "browser" => Some(BROWSER),
             "notes" => Some(NOTES),
             "google-chrome" | "google-chrome-stable" | "chrome" => Some(CHROME),
@@ -623,13 +631,14 @@ fn match_score(app: &LauncherApp, needle: &str) -> u8 {
 fn priority_rank(app: &LauncherApp) -> u8 {
     let bin = exec_basename(&app.exec);
     match bin.as_str() {
-        "foot" | "kitty" | "alacritty" | "wezterm" | "ghostty" | "weston-terminal" | "konsole"
-        | "gnome-terminal" | "xfce4-terminal" => 0,
+        "rusty-terminal" => 0,
         "rusty-files" => 1,
         "rusty-updater" => 2,
         "firefox" | "chromium" | "google-chrome" | "google-chrome-stable" | "brave" => 3,
-        "es2gears_wayland" | "glmark2-wayland" => 4,
-        "rusty-settings" => 5,
+        "foot" | "kitty" | "alacritty" | "wezterm" | "ghostty" | "weston-terminal" | "konsole"
+        | "gnome-terminal" | "xfce4-terminal" => 4,
+        "es2gears_wayland" | "glmark2-wayland" => 5,
+        "rusty-settings" => 6,
         _ => 10,
     }
 }
@@ -782,9 +791,14 @@ fn merge_builtin_fallbacks(catalog: &mut Vec<LauncherApp>) {
         LauncherApp {
             id: "org.rustyos.terminal".to_owned(),
             name: "Terminal".to_owned(),
-            subtitle: "Command line shell (foot)".to_owned(),
-            exec: "foot".to_owned(),
-            keywords: vec!["shell".to_owned(), "console".to_owned(), "cli".to_owned()],
+            subtitle: "Command line shell (RustyOS GPU Terminal)".to_owned(),
+            exec: "rusty-terminal".to_owned(),
+            keywords: vec![
+                "terminal".to_owned(),
+                "shell".to_owned(),
+                "console".to_owned(),
+                "cli".to_owned(),
+            ],
             badge: ">_".to_owned(),
             icon: Some("utilities-terminal".to_owned()),
         },
@@ -1001,7 +1015,13 @@ fn make_badge(name: &str, exec: &str) -> String {
     let bin = exec_basename(exec);
     if matches!(
         bin.as_str(),
-        "foot" | "kitty" | "alacritty" | "wezterm" | "ghostty" | "weston-terminal"
+        "rusty-terminal"
+            | "foot"
+            | "kitty"
+            | "alacritty"
+            | "wezterm"
+            | "ghostty"
+            | "weston-terminal"
     ) {
         return ">_".to_owned();
     }
@@ -1079,7 +1099,7 @@ Exec=firefox --private-window
                 id: "2".to_owned(),
                 name: "Terminal".to_owned(),
                 subtitle: "Shell".to_owned(),
-                exec: "foot".to_owned(),
+                exec: "rusty-terminal".to_owned(),
                 keywords: vec!["console".to_owned()],
                 badge: ">_".to_owned(),
                 icon: Some("utilities-terminal".to_owned()),
@@ -1105,7 +1125,7 @@ Exec=firefox --private-window
         ]);
 
         assert_eq!(state.filtered_candidates().len(), 4);
-        assert_eq!(state.selected_exec().as_deref(), Some("foot"));
+        assert_eq!(state.selected_exec().as_deref(), Some("rusty-terminal"));
 
         state.move_selection(1);
         assert_eq!(state.selected_index, 1);
@@ -1189,5 +1209,50 @@ Exec=firefox --private-window
 
         let dock_icon = launcher.icon_for_dock_key("google-chrome");
         assert_eq!(dock_icon.as_deref(), Some("google-chrome"));
+    }
+
+    #[test]
+    fn terminal_dock_key_prefers_rusty_terminal_with_fallback() {
+        let bins = LauncherState::canonical_preferred_bins("terminal").unwrap_or(&[]);
+        assert_eq!(bins.first().copied(), Some("rusty-terminal"));
+        assert!(bins.contains(&"foot"));
+
+        // Even if third-party terminals sort alphabetically before "Terminal",
+        // `find_available_command_with` and Spotlight ranking must pick `rusty-terminal` first.
+        let launcher = LauncherState::with_catalog(vec![
+            LauncherApp {
+                id: "Alacritty.desktop".to_owned(),
+                name: "Alacritty".to_owned(),
+                subtitle: "Terminal".to_owned(),
+                exec: "/usr/bin/alacritty".to_owned(),
+                keywords: Vec::new(),
+                badge: ">_".to_owned(),
+                icon: Some("Alacritty".to_owned()),
+            },
+            LauncherApp {
+                id: "foot.desktop".to_owned(),
+                name: "Foot".to_owned(),
+                subtitle: "Wayland Terminal".to_owned(),
+                exec: "/usr/bin/foot".to_owned(),
+                keywords: Vec::new(),
+                badge: ">_".to_owned(),
+                icon: Some("foot".to_owned()),
+            },
+            LauncherApp {
+                id: "org.rustyos.terminal.desktop".to_owned(),
+                name: "Terminal".to_owned(),
+                subtitle: "RustyOS Terminal".to_owned(),
+                exec: "rusty-terminal".to_owned(),
+                keywords: vec!["terminal".to_owned()],
+                badge: ">_".to_owned(),
+                icon: Some("utilities-terminal".to_owned()),
+            },
+        ]);
+        assert_eq!(
+            launcher.catalog.first().map(|a| exec_basename(&a.exec)),
+            Some("rusty-terminal".to_owned())
+        );
+        let chosen = launcher.find_available_command_with(bins, |_| true);
+        assert_eq!(chosen.as_deref(), Some("rusty-terminal"));
     }
 }

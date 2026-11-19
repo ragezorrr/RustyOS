@@ -591,6 +591,8 @@ pub struct UserConfig {
     pub repeat_rate: i32,
     /// System UI theme (`Light` or `Dark`, default `Light`) (`RUSTYOS-067`).
     pub appearance: AppearanceMode,
+    /// System UI accent color index (`0..=6`, default `0` = Golden Gate Blue) (`RUSTYOS-114`).
+    pub ui_accent_index: u8,
     /// Prefer instant transitions (`reduced_motion`).
     pub reduced_motion: bool,
     /// Shell frosted glass opacity scalar (`0.35..=1.0`, default `0.78`) (`RUSTYOS-048`).
@@ -698,6 +700,7 @@ impl Default for UserConfig {
             repeat_delay: 200,
             repeat_rate: 25,
             appearance: AppearanceMode::Light,
+            ui_accent_index: 0,
             reduced_motion: false,
             glass_opacity: DEFAULT_GLASS_OPACITY,
             reduce_transparency: false,
@@ -1104,6 +1107,12 @@ impl UserConfig {
                     self.appearance = mode;
                 }
             }
+            "accent_index" => {
+                if let Ok(idx) = val.parse::<usize>() {
+                    let clamped = rusty_services::file_manager::clamp_accent_index(idx);
+                    self.ui_accent_index = u8::try_from(clamped).unwrap_or(0);
+                }
+            }
             "wallpaper" => {
                 if let Some(s) = parse_toml_string(val) {
                     self.wallpaper = expand_user_path(&s);
@@ -1223,6 +1232,7 @@ impl UserConfig {
 
         let _ = writeln!(out, "\n[ui]");
         let _ = writeln!(out, "theme = \"{}\"", self.appearance.as_str());
+        let _ = writeln!(out, "accent_index = {}", self.ui_accent_index);
         let _ = writeln!(out, "reduced_motion = {}", self.reduced_motion);
         let _ = writeln!(
             out,
@@ -1942,6 +1952,7 @@ mod tests {
             repeat_delay: 280,
             repeat_rate: 42,
             appearance: AppearanceMode::Dark,
+            ui_accent_index: 3,
             reduced_motion: true,
             glass_opacity: 0.62,
             reduce_transparency: true,

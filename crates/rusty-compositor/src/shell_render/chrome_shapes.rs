@@ -426,6 +426,16 @@ fn render_dock_tile_icon(
     draw_size: i32,
     icon_loc: Point<i32, smithay::utils::Logical>,
 ) -> Option<CompositorRenderElement> {
+    // Frame default third-party browser (Firefox) inside a cohesive macOS 27 squircle tile
+    // when its XDG PNG is available, falling back to our procedural Browser compass squircle.
+    if (tile.app_key == "browser" || tile.app_key == "firefox")
+        && let Some(icon_name) = tile.icon_name.as_deref()
+        && let Some(framed_el) = shape_cache
+            .icons
+            .framed_xdg_squircle_icon_element(renderer, icon_name, draw_size, icon_loc)
+    {
+        return Some(CompositorRenderElement::Memory(framed_el));
+    }
     if let Some(kind) = tile.builtin_icon {
         return shape_cache
             .icons

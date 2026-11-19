@@ -27,6 +27,7 @@ depends=(
   'xdg-desktop-portal'
   'polkit'
   'pacman-contrib'
+  'firefox'
 )
 makedepends=('rust' 'cargo' 'git' 'pkgconf')
 optdepends=(
@@ -111,6 +112,7 @@ package() {
   install -m755 "${target_dir}/rusty-compositor" "${pkgdir}/usr/bin/rusty-compositor"
   install -m755 "${target_dir}/rusty-shell" "${pkgdir}/usr/bin/rusty-shell"
   install -m755 "${target_dir}/rusty-files" "${pkgdir}/usr/bin/rusty-files"
+  install -m755 "${target_dir}/rusty-terminal" "${pkgdir}/usr/bin/rusty-terminal"
   install -m755 "${target_dir}/rusty-updater" "${pkgdir}/usr/bin/rusty-updater"
   install -m755 "${target_dir}/rustyos-update-helper" \
     "${pkgdir}/usr/lib/rustyos/rustyos-update-helper"
@@ -123,6 +125,8 @@ package() {
 
   install -m644 "${root}/packaging/applications/org.rustyos.files.desktop" \
     "${pkgdir}/usr/share/applications/org.rustyos.files.desktop"
+  install -m644 "${root}/packaging/applications/org.rustyos.terminal.desktop" \
+    "${pkgdir}/usr/share/applications/org.rustyos.terminal.desktop"
   install -m644 "${root}/packaging/applications/org.rustyos.updater.desktop" \
     "${pkgdir}/usr/share/applications/org.rustyos.updater.desktop"
   install -m644 "${root}/packaging/polkit/org.rustyos.updater.policy" \

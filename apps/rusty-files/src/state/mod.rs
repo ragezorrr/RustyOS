@@ -42,6 +42,7 @@ pub(crate) struct FilesAppState {
     pub active_sidebar: Option<SidebarLocation>,
     pub view_mode: FileViewMode,
     pub theme: FilesThemeMode,
+    pub accent_index: usize,
     pub(crate) theme_locked: bool,
     pub(crate) last_config_mtime: Option<SystemTime>,
     pub sort_field: FileSortField,
@@ -124,6 +125,7 @@ impl FilesAppState {
             .theme_override
             .or_else(|| locations.detect_system_theme())
             .unwrap_or(tags_config.theme);
+        let accent_index = locations.detect_system_accent().unwrap_or(0);
         let mut app = Self {
             sort_field: tags_config.sort_field,
             sort_order: tags_config.sort_order,
@@ -136,6 +138,7 @@ impl FilesAppState {
             sidebar_items,
             active_sidebar: None,
             theme,
+            accent_index,
             theme_locked: opts.theme_override.is_some(),
             last_config_mtime: rustyos_config_mtime(),
             search_active: false,
@@ -198,21 +201,25 @@ impl FilesAppState {
             transfer_rx,
         };
 
-        if opts.open_trash {
-            app.navigate_sidebar(SidebarLocation::Trash, false);
-        } else if opts.open_recents {
-            app.navigate_sidebar(SidebarLocation::Recents, false);
-        } else if let Some(path) = &opts.initial_path {
-            app.open_initial_path(path);
-        } else {
-            app.navigate_sidebar(SidebarLocation::Home, false);
-        }
-        app.tabs.push(app.snapshot_active_tab());
-        if opts.open_test_popup {
-            app.popup = Some(OpenPopupMenu::ActionsMenu);
-            app.dirty = true;
-        }
+        app.apply_startup_options(opts);
         app
+    }
+
+    fn apply_startup_options(&mut self, opts: &StartupOptions) {
+        if opts.open_trash {
+            self.navigate_sidebar(SidebarLocation::Trash, false);
+        } else if opts.open_recents {
+            self.navigate_sidebar(SidebarLocation::Recents, false);
+        } else if let Some(path) = &opts.initial_path {
+            self.open_initial_path(path);
+        } else {
+            self.navigate_sidebar(SidebarLocation::Home, false);
+        }
+        self.tabs.push(self.snapshot_active_tab());
+        if opts.open_test_popup {
+            self.popup = Some(OpenPopupMenu::ActionsMenu);
+            self.dirty = true;
+        }
     }
 
     /// True while event loop should stay alive.
@@ -226,18 +233,26 @@ impl FilesAppState {
         self.run_state = AppRunState::Exiting;
     }
 
-    /// Reloads system `Light` / `Dark` theme if `~/.config/rustyos/config.toml` changed on disk.
+    /// Reloads system `Light` / `Dark` theme and `[ui].accent_index` if `~/.config/rustyos/config.toml` changed.
     pub(crate) fn poll_system_theme(&mut self) -> bool {
-        if self.theme_locked {
-            return false;
-        }
         let mtime = rustyos_config_mtime();
         if mtime.is_some() && mtime != self.last_config_mtime {
             self.last_config_mtime = mtime;
-            if let Some(next) = self.locations.detect_system_theme()
+            let mut changed = false;
+            if !self.theme_locked
+                && let Some(next) = self.locations.detect_system_theme()
                 && next != self.theme
             {
                 self.theme = next;
+                changed = true;
+            }
+            if let Some(next_accent) = self.locations.detect_system_accent()
+                && next_accent != self.accent_index
+            {
+                self.accent_index = next_accent;
+                changed = true;
+            }
+            if changed {
                 self.dirty = true;
                 return true;
             }
@@ -716,6 +731,26 @@ mod tests {
         assert!(!state.caret_visible);
         state.reset_caret_blink();
         assert!(state.caret_visible);
+        Ok(())
+    }
+
+    #[test]
+    fn accent_config_parses_and_updates_palette() -> Result<(), Box<dyn std::error::Error>> {
+        let guard = TestHomeGuard::new("accent-sync")?;
+        let locs = guard.locations();
+        std::fs::create_dir_all(&locs.config_dir)?;
+        std::fs::write(
+            locs.config_dir.join("config.toml"),
+            "[ui]\ntheme = \"dark\"\naccent_index = 2\n",
+        )?;
+        let state = FilesAppState::new(locs, &StartupOptions::default());
+        assert_eq!(state.theme, FilesThemeMode::DarkPurpleGlass);
+        assert_eq!(state.accent_index, 2);
+        let pal = crate::render::palette_for_with_accent(state.theme, state.accent_index);
+        assert_eq!(
+            pal.accent,
+            rusty_services::file_manager::accent_rgba_for_index(2, true)
+        );
         Ok(())
     }
 }

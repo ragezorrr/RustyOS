@@ -54,11 +54,13 @@ if [ "${ACTION}" = "uninstall" ]; then
         "${BIN_DIR}/rusty-compositor" \
         "${BIN_DIR}/rusty-shell" \
         "${BIN_DIR}/rusty-files" \
+        "${BIN_DIR}/rusty-terminal" \
         "${BIN_DIR}/rusty-updater" \
         "${BIN_DIR}/rusty-pipewire-stream" \
         "${BIN_DIR}/rustyos-session" \
         "${LIB_DIR}/rustyos-update-helper" \
         "${APPS_DIR}/org.rustyos.files.desktop" \
+        "${APPS_DIR}/org.rustyos.terminal.desktop" \
         "${APPS_DIR}/org.rustyos.updater.desktop" \
         "${SESSIONS_DIR}/rustyos.desktop" \
         "${PORTALS_DIR}/rustyos.portal" \
@@ -94,6 +96,7 @@ echo "Installing binaries to ${BIN_DIR} and ${LIB_DIR}..."
 install -m 755 "${TARGET_DIR}/rusty-compositor" "${BIN_DIR}/rusty-compositor"
 install -m 755 "${TARGET_DIR}/rusty-shell" "${BIN_DIR}/rusty-shell"
 install -m 755 "${TARGET_DIR}/rusty-files" "${BIN_DIR}/rusty-files"
+install -m 755 "${TARGET_DIR}/rusty-terminal" "${BIN_DIR}/rusty-terminal"
 install -m 755 "${TARGET_DIR}/rusty-updater" "${BIN_DIR}/rusty-updater"
 install -m 755 "${TARGET_DIR}/rustyos-update-helper" "${LIB_DIR}/rustyos-update-helper"
 install -m 755 "${ROOT_DIR}/bin/rustyos-session" "${BIN_DIR}/rustyos-session"
@@ -104,6 +107,7 @@ fi
 
 echo "Installing desktop applications and portal backend configuration..."
 install -m 644 "${ROOT_DIR}/packaging/applications/org.rustyos.files.desktop" "${APPS_DIR}/org.rustyos.files.desktop"
+install -m 644 "${ROOT_DIR}/packaging/applications/org.rustyos.terminal.desktop" "${APPS_DIR}/org.rustyos.terminal.desktop"
 install -m 644 "${ROOT_DIR}/packaging/applications/org.rustyos.updater.desktop" "${APPS_DIR}/org.rustyos.updater.desktop"
 install -m 644 "${ROOT_DIR}/packaging/portals/rustyos.portal" "${PORTALS_DIR}/rustyos.portal"
 install -m 644 "${ROOT_DIR}/packaging/portals/rustyos-portals.conf" "${PORTALS_CONF_DIR}/rustyos-portals.conf"

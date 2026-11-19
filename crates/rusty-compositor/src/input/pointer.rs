@@ -213,6 +213,7 @@ impl RustyCompositorState {
                 );
                 let serial = SERIAL_COUNTER.next_serial();
                 self.sync_space_with_wm(serial);
+                self.shell_redraw_needed = true;
             }
             return;
         }
@@ -244,6 +245,7 @@ impl RustyCompositorState {
                 );
                 let serial = SERIAL_COUNTER.next_serial();
                 self.sync_space_with_wm(serial);
+                self.shell_redraw_needed = true;
             }
             return;
         }
@@ -347,10 +349,10 @@ impl RustyCompositorState {
         let button_state = event.state();
 
         if button_state == ButtonState::Released {
-            self.active_window_drag = None;
+            let ended_drag = self.active_window_drag.take().is_some();
             let ended_resize = self.active_window_resize.take().is_some();
             self.qs_slider_drag = None;
-            if ended_resize {
+            if ended_drag || ended_resize {
                 self.sync_space_with_wm(serial);
                 self.shell_redraw_needed = true;
             }

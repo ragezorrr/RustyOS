@@ -847,6 +847,37 @@
                            субпиксельный/плавный скролл,
                            сканлайн-заливки, SPRITE_CACHE и
                            точечный damage_buffer (ADR-0063)
+
+   D-077                   Фаза 8/10 GPU-ускоренный Wayland   accepted
+                           CSD-терминал apps/rusty-terminal
+                           (RUSTYOS-113): Wayland-EGL + GLES2
+                           2-pass batched renderer с
+                           1024x1024 GlyphAtlas (ShelfPacker)
+                           и wl_shm fallback без новых прямых
+                           внешних крейтов,
+                           rustyos_liquid_glass_v1 (Clear
+                           Light / Clear Dark / Opaque),
+                           rustix PTY + calloop::ping, свой
+                           UTF-8/256/TrueColor VT-движок,
+                           вкладки, плавный скролл, поиск,
+                           clipboard и интеграция в
+                           Dock/Launcher/Desktop (ADR-0064)
+
+   D-078                   Фаза 8/10 Переработка иконок      accepted
+                           macOS 27 (Dock и папки),
+                           синхронизация [ui].accent_index
+                           и браузер Firefox по умолчанию
+                           (RUSTYOS-114): процедурный
+                           16-tap R2 модуль icon_art.rs
+                           (Light/Dark + [ui].accent_index),
+                           единая палитра в rusty-services
+                           и живой ReloadConfig из
+                           rusty-settings, дебоссированные
+                           папки S-силуэта в rusty-files,
+                           обрамление XDG-иконки Firefox в
+                           макосный сквиркл с объединением
+                           Dock-слота browser и зависимость
+                           firefox в PKGBUILD
   -----------------------------------------------------------------------
 
 ## Открытые решения

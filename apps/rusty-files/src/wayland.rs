@@ -51,7 +51,7 @@ use crate::layout::{
     compute_popup_surface_spec, hit_test, scroll_area_at,
 };
 use crate::liquid_glass::{GlassStyle, RustyosLiquidGlassManagerV1, RustyosSurfaceGlassV1};
-use crate::render::{render_popup_surface_pixels_with_glass, render_window_pixels_with_popup};
+use crate::render::{render_popup_surface_pixels_with_style, render_window_pixels_with_popup};
 use crate::state::OpenPopupMenu;
 use crate::state::{FilesAppState, ScrollTargetArea, SearchScope, StartupOptions};
 use rusty_services::file_manager::UserFileLocations;
@@ -204,7 +204,7 @@ impl WaylandClientData {
             && ap.menu_key == menu
         {
             if ap.configured && ap.hover_idx != ap.last_rendered_hover {
-                draw_popup_surface(&mut self.pool, ap, self.app.theme)?;
+                draw_popup_surface(&mut self.pool, ap, self.app.theme, self.app.accent_index)?;
             }
             return Ok(());
         }
@@ -294,7 +294,12 @@ impl WaylandClientData {
                 if next_hover != ap.hover_idx {
                     ap.hover_idx = next_hover;
                     if ap.configured {
-                        let _ = draw_popup_surface(&mut self.pool, ap, self.app.theme);
+                        let _ = draw_popup_surface(
+                            &mut self.pool,
+                            ap,
+                            self.app.theme,
+                            self.app.accent_index,
+                        );
                     }
                 }
             }
@@ -302,7 +307,12 @@ impl WaylandClientData {
                 if ap.hover_idx.is_some() {
                     ap.hover_idx = None;
                     if ap.configured {
-                        let _ = draw_popup_surface(&mut self.pool, ap, self.app.theme);
+                        let _ = draw_popup_surface(
+                            &mut self.pool,
+                            ap,
+                            self.app.theme,
+                            self.app.accent_index,
+                        );
                     }
                 }
             }
@@ -949,6 +959,7 @@ fn draw_popup_surface(
     pool: &mut SlotPool,
     ap: &mut ActiveWaylandPopup,
     theme: rusty_services::file_manager::FilesThemeMode,
+    accent_index: usize,
 ) -> Result<(), WaylandAppError> {
     let (w, h) = (ap.configured_size.0.max(1), ap.configured_size.1.max(1));
     let idx = acquire_reusable_buffer(pool, &mut ap.buffers, w, h)?;
@@ -957,13 +968,14 @@ fn draw_popup_surface(
         WaylandAppError::ShmPool(String::from("Popup SHM slot unexpectedly busy"))
     })?;
 
-    render_popup_surface_pixels_with_glass(
+    render_popup_surface_pixels_with_style(
         canvas,
         w,
         h,
         &ap.spec.layout,
         ap.hover_idx,
         theme,
+        accent_index,
         ap.glass.is_some(),
     );
     ap.popup
@@ -1203,7 +1215,7 @@ impl PopupHandler for WaylandClientData {
             ap.configured_size = (w, h);
         }
         ap.configured = true;
-        let _ = draw_popup_surface(&mut self.pool, ap, self.app.theme);
+        let _ = draw_popup_surface(&mut self.pool, ap, self.app.theme, self.app.accent_index);
     }
 
     fn done(&mut self, _: &Connection, _: &QueueHandle<Self>, popup: &Popup) {

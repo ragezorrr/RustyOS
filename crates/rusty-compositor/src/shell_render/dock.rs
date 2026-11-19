@@ -159,6 +159,8 @@ const CANONICAL_DOCK_ALIASES: &[(&str, &[&str])] = &[
     (
         "terminal",
         &[
+            "rusty-terminal",
+            "org.rustyos.terminal",
             "foot",
             "kitty",
             "alacritty",
