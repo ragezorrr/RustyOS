@@ -49,6 +49,7 @@ use smithay::{
         calloop::{
             EventLoop, Interest, Mode, PostAction,
             generic::Generic,
+            ping::make_ping,
             timer::{TimeoutAction, Timer},
         },
         drm::{
@@ -746,7 +747,10 @@ impl DrmRuntime {
         if let Some(wait) = earliest_ready {
             return wait;
         }
-        if state.has_active_compositor_animations() || self.max_frames.is_some() {
+        if state.has_active_compositor_animations()
+            || self.max_frames.is_some()
+            || state.wm.focused_window().is_some()
+        {
             return self.fastest_refresh_interval();
         }
         Duration::from_millis(50)
@@ -1641,6 +1645,27 @@ fn try_run_native_drm_session_once(
         })
         .map_err(|err| CompositorError::EventLoop(err.to_string()))?;
 
+    let (ping, ping_source) = make_ping().map_err(|err| {
+        CompositorError::EventLoop(format!("failed to initialize event loop ping: {err}"))
+    })?;
+    state.loop_waker = Some(ping);
+
+    let rt_ping = Rc::clone(&runtime);
+    loop_handle
+        .insert_source(ping_source, move |_event, _metadata, app_state| {
+            let now = Instant::now();
+            let mut rt = rt_ping.borrow_mut();
+            let client_committed =
+                app_state.take_client_surface_committed() || app_state.take_syncobj_unblocked();
+            let delayed_ready = rt.has_ready_delayed_requeue(now);
+            if client_committed || delayed_ready {
+                rt.clear_requeue_delays();
+                rt.mark_all_dirty();
+                rt.render_ready_outputs(app_state, false);
+            }
+        })
+        .map_err(|err| CompositorError::EventLoop(err.to_string()))?;
+
     let rt_input = Rc::clone(&runtime);
     loop_handle
         .insert_source(libinput_backend, move |event, _metadata, app_state| {
@@ -1648,6 +1673,7 @@ fn try_run_native_drm_session_once(
                 event,
                 InputEvent::PointerMotion { .. } | InputEvent::PointerMotionAbsolute { .. }
             );
+            let is_keyboard = matches!(event, InputEvent::Keyboard { .. });
             let client_forwarded_only = is_client_forwarded_only_input(&event);
             let prev_ptr = app_state.pointer_location;
             app_state.process_input_event(event);
@@ -1660,6 +1686,7 @@ fn try_run_native_drm_session_once(
                 return;
             }
             let mut rt = rt_input.borrow_mut();
+            let has_focus = app_state.wm.focused_window().is_some();
             if is_pointer_motion
                 && app_state.active_window_drag.is_none()
                 && app_state.active_window_resize.is_none()
@@ -1678,6 +1705,9 @@ fn try_run_native_drm_session_once(
             ) {
                 rt.mark_all_dirty();
                 rt.render_ready_outputs(app_state, false);
+            } else if is_keyboard && has_focus {
+                rt.mark_all_dirty();
+                app_state.wake_event_loop();
             }
         })
         .map_err(|err| CompositorError::EventLoop(err.to_string()))?;
@@ -1846,10 +1876,10 @@ fn try_run_native_drm_session_once(
             let delayed_ready = rt_dispatch.borrow().has_ready_delayed_requeue(now);
             if client_committed || shell_dirty || active_comp_anim || delayed_ready {
                 let mut rt = rt_dispatch.borrow_mut();
-                if client_committed || active_comp_anim {
+                if client_committed || active_comp_anim || delayed_ready {
                     rt.clear_requeue_delays();
                 }
-                if client_committed || shell_dirty || active_comp_anim {
+                if client_committed || shell_dirty || active_comp_anim || delayed_ready {
                     rt.mark_all_dirty();
                 }
                 rt.render_ready_outputs(app_state, false);
@@ -2714,5 +2744,25 @@ mod tests {
             ),
             EmptyFrameCallbackAction::ScheduleAt(base + interval_144)
         );
+    }
+
+    #[test]
+    fn keyboard_focus_pacing_interval_selection() {
+        let idle_timeout = Duration::from_millis(50);
+        let fastest_refresh = Duration::from_micros(16_667);
+
+        let plan_timeout = |has_anim: bool, max_frames: bool, has_focus: bool| -> Duration {
+            if has_anim || max_frames || has_focus {
+                fastest_refresh
+            } else {
+                idle_timeout
+            }
+        };
+
+        assert_eq!(plan_timeout(false, false, false), Duration::from_millis(50));
+        assert_eq!(plan_timeout(true, false, false), fastest_refresh);
+        assert_eq!(plan_timeout(false, true, false), fastest_refresh);
+        assert_eq!(plan_timeout(false, false, true), fastest_refresh);
+        assert_eq!(plan_timeout(true, false, true), fastest_refresh);
     }
 }

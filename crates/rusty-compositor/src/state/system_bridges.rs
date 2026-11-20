@@ -44,6 +44,13 @@ impl RustyCompositorState {
         std::mem::take(&mut self.client_surface_committed)
     }
 
+    /// Pings the event loop waker if configured to break epoll sleep immediately (`RUSTYOS-121`).
+    pub(crate) fn wake_event_loop(&self) {
+        if let Some(ref waker) = self.loop_waker {
+            waker.ping();
+        }
+    }
+
     /// Resolves the active account username selected on the Lock Screen (`RUSTYOS-056`).
     #[must_use]
     pub fn selected_lock_username(&self) -> String {

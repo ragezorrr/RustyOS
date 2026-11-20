@@ -2094,6 +2094,24 @@ hardware/software context и низкие накладные расходы.
 - **Tests:** 315 unit-тестов workspace (`4` `rusty-animation`, `196` `rusty-compositor`, `16` `rusty-files`, `12` `rusty-installer`, `3` `rusty-ipc`, `44` `rusty-services`, `10` `rusty-settings`, `5` `rusty-shell`, `14` `rusty-terminal`, `4` `rusty-updater`, `7` `rusty-wm`).
 - **Risks:** Нет; при закрытом Control Center фоновый поток телеметрии практически не потребляет ресурсы CPU и батареи, а при кликах на ползунки и переключатели немедленно просыпается без задержки.
 
+### RUSTYOS-121 — Реактивный Calloop ping wake-up и keyboard focus pacing для плавного ввода в приложениях (`RUSTYOS-121 Вариант 1`)
+
+- **Status:** Done (`RUSTYOS-121 Вариант 1` — утверждённый объём выполнен)
+- **Goal:** Устранить задержку обновления экрана при клавиатурном вводе в текстовых полях приложений (Firefox URL/search bar, редакторы) без движения мыши, возникавшую из-за 50-мс спячки idle-таймера и отсутствия реактивного пробуждения event loop при коммитах буферов клиентом.
+- **Dependencies:** `RUSTYOS-120`.
+- **Scope:**
+  - `crates/rusty-compositor/src/state/mod.rs`, `system_bridges.rs`: добавлено поле `pub(crate) loop_waker: Option<Ping>` в `RustyCompositorState` и метод `pub(crate) fn wake_event_loop(&self)`, вызывающий мгновенный `ping()` для прерывания `epoll_wait`;
+  - `crates/rusty-compositor/src/state/wayland_handlers/core.rs`: вызов `self.wake_event_loop()` при `wl_surface.commit()` (`client_surface_committed = true`), гарантирующий немедленный рендеринг обновленного буфера клиента на ближайшем vblank без ожидания таймеров;
+  - `crates/rusty-compositor/src/drm_backend.rs`: регистрация источника `make_ping()` (`PingSource`) в `loop_handle`, перехват клавиатурного ввода в окне с фокусом (`is_keyboard && has_focus`) с немедленной пометкой dirty и пробуждением цикла, ограничение `next_timer_duration` частотой обновления дисплея (`fastest_refresh_interval()` ~16.6 мс при 60 Гц / 8.3 мс при 120 Гц вместо 50 мс) при наличии окна в фокусе, а также сброс задержки и пометка dirty при готовности `delayed_ready` в цикле диспетчеризации;
+  - `crates/rusty-compositor/src/winit_backend.rs`: регистрация ping waker для единообразного мгновенного пробуждения в nested Winit режиме;
+  - Unit-тесты: добавлены тесты `reactive_calloop_ping_waker_wakes_event_loop`, `focused_window_reports_active_focus_for_keyboard_pacing` и `keyboard_focus_pacing_interval_selection`.
+- **Acceptance Criteria:**
+  - `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace` (317 тестов, включая 3 новых теста на waker и focus pacing) проходят без ошибок;
+  - Живые `--winit` прогоны на Wayland и X11 (`--max-frames 60`) и `--drm-probe` проходят штатно с 0 пропущенными/опоздавшими кадрами;
+  - Поведение при вводе с клавиатуры в сфокусированном окне (Firefox) непрерывно синхронизируется с vblank дисплея без необходимости шевелить мышью.
+- **Tests:** 317 unit-тестов workspace (`4` `rusty-animation`, `199` `rusty-compositor`, `16` `rusty-files`, `12` `rusty-installer`, `3` `rusty-ipc`, `44` `rusty-services`, `10` `rusty-settings`, `5` `rusty-shell`, `14` `rusty-terminal`, `4` `rusty-updater`, `7` `rusty-wm`).
+- **Risks:** Нет; при отсутствии сфокусированных окон и анимаций композитор сохраняет энергоэффективный idle-режим с таймаутом 50 мс.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

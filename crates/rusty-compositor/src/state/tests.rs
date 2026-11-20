@@ -1634,3 +1634,71 @@ fn firefox_window_merges_into_pinned_browser_dock_slot() -> Result<(), Box<dyn E
     );
     Ok(())
 }
+
+#[test]
+fn reactive_calloop_ping_waker_wakes_event_loop() -> Result<(), Box<dyn Error>> {
+    let display: Display<RustyCompositorState> = Display::new()?;
+    let mut event_loop: EventLoop<RustyCompositorState> = EventLoop::try_new()?;
+    let mut compositor = RustyCompositorState::new(
+        &display,
+        "rusty-test-ping-waker".to_owned(),
+        event_loop.get_signal(),
+        event_loop.handle(),
+        (1280, 800).into(),
+    )?;
+
+    // Calling wake_event_loop with no loop_waker should not panic.
+    assert!(compositor.loop_waker.is_none());
+    compositor.wake_event_loop();
+
+    // Create a ping source and register it.
+    let (ping, ping_source) = smithay::reexports::calloop::ping::make_ping()?;
+    compositor.loop_waker = Some(ping);
+
+    let ping_fired = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let ping_fired_cb = Arc::clone(&ping_fired);
+    event_loop
+        .handle()
+        .insert_source(ping_source, move |_event, _metadata, _state| {
+            ping_fired_cb.store(true, std::sync::atomic::Ordering::SeqCst);
+        })
+        .map_err(|err| format!("insert ping source failed: {err}"))?;
+
+    // Wake the event loop via state method.
+    compositor.wake_event_loop();
+
+    // Dispatching the event loop should trigger the ping source immediately.
+    event_loop.dispatch(Some(std::time::Duration::from_millis(50)), &mut compositor)?;
+    assert!(ping_fired.load(std::sync::atomic::Ordering::SeqCst));
+
+    Ok(())
+}
+
+#[test]
+fn focused_window_reports_active_focus_for_keyboard_pacing() -> Result<(), Box<dyn Error>> {
+    let display: Display<RustyCompositorState> = Display::new()?;
+    let event_loop: EventLoop<RustyCompositorState> = EventLoop::try_new()?;
+    let mut compositor = RustyCompositorState::new(
+        &display,
+        "rusty-test-focus-pacing".to_owned(),
+        event_loop.get_signal(),
+        event_loop.handle(),
+        (1280, 800).into(),
+    )?;
+
+    // Initially no window has focus.
+    assert!(compositor.wm.focused_window().is_none());
+
+    // Create and map a mock window.
+    let win_id = compositor.wm.next_window_id();
+    let _ = compositor.wm.map_window(win_id, Some((800, 600)));
+
+    // Window now has focus.
+    assert_eq!(compositor.wm.focused_window(), Some(win_id));
+
+    // When window is unmapped (e.g. closed).
+    compositor.wm.unmap_window(win_id);
+    assert!(compositor.wm.focused_window().is_none());
+
+    Ok(())
+}

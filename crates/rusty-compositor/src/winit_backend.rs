@@ -15,6 +15,7 @@ use smithay::{
     reexports::{
         calloop::{
             EventLoop,
+            ping::make_ping,
             timer::{TimeoutAction, Timer},
         },
         wayland_protocols::wp::presentation_time::server::wp_presentation_feedback,
@@ -86,6 +87,14 @@ pub fn run_nested_winit(config: &CompositorConfig) -> Result<BootstrapReport, Co
             info!("Accepted new Wayland client connection");
             app_state.insert_client_stream(client_stream);
         })
+        .map_err(|err| CompositorError::EventLoop(err.to_string()))?;
+
+    let (ping, ping_source) = make_ping().map_err(|err| {
+        CompositorError::EventLoop(format!("failed to initialize event loop ping: {err}"))
+    })?;
+    state.loop_waker = Some(ping);
+    loop_handle
+        .insert_source(ping_source, move |_event, _metadata, _app_state| {})
         .map_err(|err| CompositorError::EventLoop(err.to_string()))?;
 
     // 2. Register Winit window/input event source.

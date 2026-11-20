@@ -27,7 +27,7 @@ use smithay::{
     },
     output::{Mode, Output, PhysicalProperties, Scale, Subpixel},
     reexports::{
-        calloop::{LoopHandle, LoopSignal},
+        calloop::{LoopHandle, LoopSignal, ping::Ping},
         wayland_server::{
             Display, DisplayHandle, Resource,
             backend::{ClientData, ClientId, DisconnectReason, ObjectId},
@@ -647,6 +647,8 @@ pub struct RustyCompositorState {
     pub shell_redraw_needed: bool,
     /// Signals DRM output scheduling that a Wayland client committed a new surface buffer.
     pub(crate) client_surface_committed: bool,
+    /// Optional ping handle used to wake the `calloop` event loop when clients commit or keyboard input arrives (`RUSTYOS-121`).
+    pub(crate) loop_waker: Option<Ping>,
     /// Count of active notifications held in compositor HUD queue (`RUSTYOS-009`/`010`/`024`).
     pub notification_count: u32,
     /// Active desktop notification queue rendered in Notification HUD & exposed via IPC (`RUSTYOS-024`).
@@ -1009,6 +1011,7 @@ impl RustyCompositorState {
             active_screencasts: Vec::new(),
             shell_redraw_needed: false,
             client_surface_committed: false,
+            loop_waker: None,
             notification_count: 0,
             notifications: Vec::new(),
             notification_history: Vec::new(),

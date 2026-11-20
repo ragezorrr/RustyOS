@@ -156,6 +156,7 @@ impl CompositorHandler for RustyCompositorState {
         self.commit_layer_surface(surface);
         self.shell_redraw_needed = true;
         self.client_surface_committed = true;
+        self.wake_event_loop();
     }
 }
 
