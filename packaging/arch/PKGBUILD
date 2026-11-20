@@ -42,6 +42,7 @@ optdepends=(
 )
 provides=('rustyos')
 conflicts=('rustyos')
+options=('!debug' '!lto')
 source=()
 sha256sums=()
 
@@ -81,6 +82,7 @@ build() {
   root="$(_repo_root)"
   export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
   export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${srcdir}/target}"
+  export RUSTYOS_PACKAGED_BUILD=1
   export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=${srcdir}=/usr/src/debug/${pkgname} --remap-path-prefix=${root}=/usr/src/debug/${pkgname}"
   cargo build --release --locked --workspace --manifest-path "${root}/Cargo.toml"
 }
@@ -90,6 +92,7 @@ check() {
   root="$(_repo_root)"
   export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
   export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${srcdir}/target}"
+  export RUSTYOS_PACKAGED_BUILD=1
   export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=${srcdir}=/usr/src/debug/${pkgname} --remap-path-prefix=${root}=/usr/src/debug/${pkgname}"
   cargo test --workspace --locked --manifest-path "${root}/Cargo.toml" -- --test-threads=1
 }

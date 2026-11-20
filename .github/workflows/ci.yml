@@ -104,11 +104,10 @@ jobs:
             LOGDEST=/tmp/rustyos-pkg/log \
             makepkg -f --noconfirm --nocheck --noprogressbar"
           pacman -Qlp /tmp/rustyos-pkg/pkg/rustyos-git-*.pkg.tar.* | grep -F "/usr/bin/rusty-compositor"
-          pacman -Qlp /tmp/rustyos-pkg/pkg/rustyos-git-*.pkg.tar.* | grep -F "/usr/bin/rusty-shell"
+          pacman -Qlp /tmp/rustyos-pkg/pkg/rustyos-git-*.pkg.tar.* | grep -F "/usr/bin/rustyos-session"
           pacman -Qlp /tmp/rustyos-pkg/pkg/rustyos-git-*.pkg.tar.* | grep -F "/usr/bin/rusty-files"
           pacman -Qlp /tmp/rustyos-pkg/pkg/rustyos-git-*.pkg.tar.* | grep -F "/usr/bin/rusty-settings"
           pacman -Qlp /tmp/rustyos-pkg/pkg/rustyos-git-*.pkg.tar.* | grep -F "/usr/bin/rusty-terminal"
-          pacman -Qlp /tmp/rustyos-pkg/pkg/rustyos-git-*.pkg.tar.* | grep -F "/usr/bin/rusty-updater"
           pacman -Qlp /tmp/rustyos-pkg/pkg/rustyos-git-*.pkg.tar.* | grep -F "/usr/bin/rusty-installer"
           pacman -Qlp /tmp/rustyos-pkg/pkg/rustyos-git-*.pkg.tar.* | grep -F "/usr/lib/rustyos/rustyos-update-helper"
           pacman -Qlp /tmp/rustyos-pkg/pkg/rustyos-git-*.pkg.tar.* | grep -F "/usr/lib/rustyos/rustyos-install"

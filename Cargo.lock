@@ -1766,7 +1766,6 @@ dependencies = [
  "gl_generator",
  "libc",
  "rusty-animation",
- "tracing",
  "wayland-client",
  "wayland-egl",
 ]

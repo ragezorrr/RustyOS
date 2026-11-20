@@ -10,7 +10,6 @@ authors.workspace = true
 fontdue.workspace = true
 libc.workspace = true
 rusty-animation.workspace = true
-tracing.workspace = true
 wayland-client.workspace = true
 wayland-egl.workspace = true
 

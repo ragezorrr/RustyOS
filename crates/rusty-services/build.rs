@@ -9,6 +9,7 @@ fn main() {
     println!("cargo:rerun-if-changed=c/rusty-pipewire-stream.c");
     println!("cargo:rerun-if-env-changed=PKG_CONFIG_PATH");
     println!("cargo:rerun-if-env-changed=CC");
+    println!("cargo:rerun-if-env-changed=RUSTYOS_PACKAGED_BUILD");
 
     let Ok(out_dir) = env::var("OUT_DIR") else {
         return;
@@ -57,10 +58,12 @@ fn main() {
 
     match cmd.status() {
         Ok(status) if status.success() => {
-            println!(
-                "cargo:rustc-env=RUSTY_PIPEWIRE_STREAM_BIN={}",
-                out_bin.display()
-            );
+            if env::var_os("RUSTYOS_PACKAGED_BUILD").is_none() {
+                println!(
+                    "cargo:rustc-env=RUSTY_PIPEWIRE_STREAM_BIN={}",
+                    out_bin.display()
+                );
+            }
         }
         Ok(status) => {
             println!("cargo:warning=failed to compile c/rusty-pipewire-stream.c (exit {status})");
