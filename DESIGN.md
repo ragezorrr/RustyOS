@@ -291,13 +291,14 @@ All compositor dropdowns, desktop context menus, and client application `xdg_pop
 
 ### Controls
 
-Buttons, switches, sliders, inputs and checkboxes must share consistent:
+Buttons, switches, sliders, text inputs, selectors, lists, scroll containers, dialogs, and checkboxes in system clients share the unified `crates/rusty-ui` toolkit (`RUSTYOS-130`, `ADR-0074`) with consistent:
 
-- Geometry.
-- Typography.
-- Colors.
-- Interaction states.
-- Focus behavior.
+- **Geometry & Tokens:** unified `Inter` metrics (`UiFontEngine`), `WINDOW_RADIUS = 14`, card/control radii (`8–12 px`), and `ThemePalette` (`Light` `#007AFF` / `Dark` `#0A84FF`).
+- **Focus & Keyboard Navigation (`FocusScope`):** deterministic `Tab`/`Shift+Tab` traversal with `110 ms` `EaseOutCubic` focus rings (`FocusScope::RING_DURATION`).
+- **Text Editing & Clipboard (`TextField`, `WaylandClipboardBridge`):** standard single-line text, password (`TextField::password`), and search (`TextField::search`) controls supporting caret navigation (`Left`/`Right`/`Home`/`End`, word hops with `Ctrl+Arrow`), double-click word / triple-click full selection, pointer drag selection, horizontal scrolling, optional clear pill, and `Ctrl+A/C/X/V` over non-blocking `wl_data_device` (`WaylandClipboardBridge`).
+- **Standard Controls & Overlays:** animated `ToggleSwitch::paint_animated` (`120 ms` `ToggleMotion`), `PushButton::paint_labeled`, `Checkbox`, `Slider`, `DropdownSelect`, `SegmentedTabs` with sliding selection pill, `SelectableList`, `ScrollView` with `ScrollMotion` and draggable scrollbar thumb, `DialogSheet`, and `ContextMenuSession`.
+- **Dual Presentation (`UiDrawList` + `GlesSurfaceRenderer` / CPU `UiCanvas`):** clients record declarative `UiDrawList`/`UiPainter` primitives executed on GPU via `GlesSurfaceRenderer` (Wayland-EGL + GLES 2.0 preserving translucent `WlRegion` Liquid Glass alpha) with deterministic CPU `UiCanvas` (`wl_shm`) fallback via `--no-gpu`, `RUSTYOS_NO_GPU=1`, or EGL initialization fallback.
+- **Reduced Motion:** all `rusty-animation`-backed control transitions (`ToggleMotion`, `HoverPressMotion`, `ScrollMotion`, focus fade) snap immediately when `reduced_motion = true`.
 
 ## 7. Motion and Accessibility
 
@@ -453,7 +454,7 @@ palettes (section 5.1); geometry, Liquid Glass clarity, and interactions target 
 ### 12.3 Windows, Finder (`rusty-files`), menus, Spotlight, Notifications, and OSD
 
 - Window chrome (`SSD` & unified `CSD`): `WINDOW_RADIUS = 14` continuous cubic squircle corners at both top and bottom (`ClippedSurfaceElement` clipping all non-fullscreen client surfaces in the compositor while keeping fullscreen clients unwrapped for Direct Scanout), theme-adaptive Light / Dark titlebars (`ssd_frame_colors`), top 1 px specular rim, centered fade+scale open/close animations (`180 ms` `EaseOutQuart` open / `160 ms` `EaseOutCubic` close, `0.93 <-> 1.0`), and a single-pass seamless analytical 3-lobe GLES Gaussian drop shadow (`WindowShadowPipeline` using wide, narrow, and soft attenuated `1.5 px` contact lobes — `contact = 0.28` `ActiveWindow` / `0.20` `InactiveWindow`, eliminating dark top/side perimeter outlines while preserving downward depth — with unified `squircleDistance` and 4x4 ordered dithering; CPU 9-slice & `UiCanvas::draw_elevation_shadow_with` fallbacks) (`generate_window_shadow_elements`, `RUSTYOS-075`, `RUSTYOS-126`, `RUSTYOS-128`, `RUSTYOS-129`).
-  System apps (`apps/rusty-settings`, `apps/rusty-files`, `apps/rusty-terminal`, `apps/rusty-installer`) share unified `crates/rusty-ui` tokens: `WINDOW_CORNER_RADIUS = 14`, `1 px` outer border clipped by the corner mask (`[0, 0, 0, 24]` Light / `[255, 255, 255, 22]` Dark), and unified `14 px` traffic lights (`#EE5A6A` / `#F4B63F` / `#3CC68A`, centers `(21, 20)`, `(43, 20)`, `(65, 20)`, dimmed via `inactive_color()` when unfocused):
+  System apps (`apps/rusty-settings`, `apps/rusty-files`, `apps/rusty-terminal`, `apps/rusty-installer`) share unified `crates/rusty-ui` tokens: `WINDOW_CORNER_RADIUS = 14`, `1 px` outer border clipped by the corner mask (`[0, 0, 0, 24]` Light / `[255, 255, 255, 22]` Dark), unified `14 px` traffic lights (`#EE5A6A` / `#F4B63F` / `#3CC68A`, centers `(21, 20)`, `(43, 20)`, `(65, 20)`, dimmed via `inactive_color()` when unfocused), shared `UiFontEngine` (`Inter`), toolkit controls (`TextField`, `FocusScope`, `ToggleSwitch`, `PushButton`, `WaylandClipboardBridge`), and dual `GlesSurfaceRenderer` (Wayland-EGL + GLES 2.0) / `wl_shm` CPU presentation (`RUSTYOS-130`, `ADR-0074`):
   - `rusty-settings` (`882×600`, `min_size = 640×500`): frosted Liquid Glass sidebar via `rustyos_liquid_glass_v1` (opaque `#ECEDF1`/`#262628` when `reduce_transparency = true`, `r = 10` active pill `#D9DADD`/`#3E3E41`), borderless cards (`#FFFFFF` / `#2C2C2D`, `r = 12`) on `#F5F6FA` / `#1C1C1D`, `Light`/`Dark`/`Auto` preview tiles, and vertical scrolling without dimming `TopBar` or `Dock`.
 - Titlebar traffic lights (`SSD`): `14 px` buttons (`TrafficLightKind::{Close, Minimize, Maximize}`)
   revealing `×`, `−`, `+` hover glyphs (`hovered_traffic_light_window`).

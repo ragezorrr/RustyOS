@@ -333,3 +333,248 @@ pub fn draw_menu_row(
         canvas.fill_rounded_rect(pill, HOVER_PILL_RADIUS as u32, hover_bg);
     }
 }
+
+/// Keyboard- and pointer-driven context menu host state (`RUSTYOS-130`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextMenuSession<T: Clone> {
+    pub layout: Option<MenuLayout>,
+    pub entries: Vec<MenuEntry<T>>,
+    pub hovered_idx: Option<usize>,
+    pub compositor_glass: bool,
+}
+
+impl<T: Clone> Default for ContextMenuSession<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<T: Clone> ContextMenuSession<T> {
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            layout: None,
+            entries: Vec::new(),
+            hovered_idx: None,
+            compositor_glass: false,
+        }
+    }
+
+    #[must_use]
+    pub const fn is_open(&self) -> bool {
+        self.layout.is_some()
+    }
+
+    pub fn open(
+        &mut self,
+        anchor_x: i32,
+        anchor_y: i32,
+        min_width: i32,
+        entries: Vec<MenuEntry<T>>,
+    ) {
+        let layout = MenuLayout::compute(anchor_x, anchor_y, min_width, &entries);
+        self.hovered_idx = None;
+        self.entries = entries;
+        self.layout = Some(layout);
+    }
+
+    pub fn open_clamped(
+        &mut self,
+        anchor_x: i32,
+        anchor_y: i32,
+        min_width: i32,
+        screen_w: i32,
+        screen_h: i32,
+        entries: Vec<MenuEntry<T>>,
+    ) {
+        let mut layout = MenuLayout::compute(anchor_x, anchor_y, min_width, &entries);
+        let clamped = layout.clamp_to_screen(screen_w, screen_h);
+        if clamped != layout.rect {
+            layout = MenuLayout::compute(clamped.x, clamped.y, min_width, &entries);
+        }
+        self.hovered_idx = None;
+        self.entries = entries;
+        self.layout = Some(layout);
+    }
+
+    pub fn close(&mut self) {
+        self.layout = None;
+        self.entries.clear();
+        self.hovered_idx = None;
+    }
+
+    pub fn on_pointer_move(&mut self, px: f64, py: f64) -> bool {
+        let next = self.layout.as_ref().and_then(|l| l.hit_test(px, py));
+        let changed = self.hovered_idx != next;
+        self.hovered_idx = next;
+        changed
+    }
+
+    /// Clicks an enabled menu item or dismisses when clicking outside; returns triggered payload.
+    pub fn on_pointer_down(&mut self, px: f64, py: f64) -> Option<T> {
+        let hit_idx = self.layout.as_ref()?.hit_test(px, py);
+        if let Some(idx) = hit_idx
+            && let Some(MenuEntry::Item(item)) = self.entries.get(idx)
+            && item.enabled
+        {
+            let payload = item.payload.clone();
+            self.close();
+            return Some(payload);
+        }
+        self.close();
+        None
+    }
+
+    /// Moves keyboard highlight to the previous (`-1`) or next (`+1`) enabled entry.
+    pub fn move_hover(&mut self, step: isize) -> Option<usize> {
+        let len = self.entries.len() as isize;
+        if len == 0 {
+            return None;
+        }
+        let start = self
+            .hovered_idx
+            .map_or(if step >= 0 { -1 } else { 0 }, |i| i as isize);
+        for offset in 1..=len {
+            let cand = ((start + step.signum() * offset).rem_euclid(len)) as usize;
+            if let Some(MenuEntry::Item(item)) = self.entries.get(cand)
+                && item.enabled
+            {
+                self.hovered_idx = Some(cand);
+                return Some(cand);
+            }
+        }
+        None
+    }
+
+    /// Activates the currently highlighted menu entry and closes the menu.
+    pub fn activate_hovered(&mut self) -> Option<T> {
+        let idx = self.hovered_idx?;
+        if let Some(MenuEntry::Item(item)) = self.entries.get(idx)
+            && item.enabled
+        {
+            let payload = item.payload.clone();
+            self.close();
+            return Some(payload);
+        }
+        None
+    }
+
+    pub fn paint(
+        &self,
+        painter: &mut crate::draw::UiPainter<'_>,
+        fonts: &mut crate::text::UiFontEngine,
+        pal: &ThemePalette,
+    ) {
+        if let Some(layout) = &self.layout {
+            paint_menu_with_painter(
+                painter,
+                fonts,
+                layout,
+                &self.entries,
+                self.hovered_idx,
+                pal,
+                self.compositor_glass,
+            );
+        }
+    }
+}
+
+/// Renders a menu card, dividers, concentric hover pill, and labels via [`crate::draw::UiPainter`].
+///
+/// When `compositor_glass` is `true`, the outer card background remains transparent (`wl_shm`)
+/// so the compositor supplies `GlassStyle::Popover` backdrop blur (`DESIGN.md` §6).
+pub fn paint_menu_with_painter<T: Clone>(
+    painter: &mut crate::draw::UiPainter<'_>,
+    fonts: &mut crate::text::UiFontEngine,
+    layout: &MenuLayout,
+    entries: &[MenuEntry<T>],
+    hovered_idx: Option<usize>,
+    pal: &ThemePalette,
+    compositor_glass: bool,
+) {
+    if !compositor_glass {
+        let bg = if pal.is_dark {
+            [0x2A, 0x2B, 0x2F, 242]
+        } else {
+            [0xF6, 0xF7, 0xFA, 244]
+        };
+        let border = if pal.is_dark {
+            [255, 255, 255, 24]
+        } else {
+            [0, 0, 0, 18]
+        };
+        painter.rounded_rect_styled(layout.rect, MENU_RADIUS as f32, bg, 1.0, border, true);
+    }
+
+    for (row_layout, entry) in layout.rows.iter().zip(entries.iter()) {
+        match entry {
+            MenuEntry::Separator => {
+                let sep_y = row_layout.rect.y + row_layout.rect.height as i32 / 2;
+                let sep_color = if pal.is_dark {
+                    [255, 255, 255, 18]
+                } else {
+                    [0, 0, 0, 14]
+                };
+                let left = row_layout.rect.x + 12;
+                let width = row_layout.rect.width.saturating_sub(24);
+                if width > 0 {
+                    painter.fill_rect(Rect::new(left, sep_y, width, 1), sep_color);
+                }
+            }
+            MenuEntry::Item(item) => {
+                let hovered = hovered_idx == Some(row_layout.index) && item.enabled;
+                if hovered {
+                    let pill = Rect::new(
+                        row_layout.rect.x,
+                        row_layout.rect.y + 1,
+                        row_layout.rect.width,
+                        row_layout.rect.height.saturating_sub(2),
+                    );
+                    let hover_col = if item.danger {
+                        [0xFF, 0x3B, 0x30, 232]
+                    } else if pal.is_dark {
+                        [pal.accent[0], pal.accent[1], pal.accent[2], 210]
+                    } else {
+                        [pal.accent[0], pal.accent[1], pal.accent[2], 230]
+                    };
+                    painter.fill_rounded_rect(pill, HOVER_PILL_RADIUS as f32, hover_col);
+                }
+
+                let text_col = if hovered {
+                    [255, 255, 255, 255]
+                } else if !item.enabled {
+                    pal.text_muted
+                } else if item.danger {
+                    [0xD7, 0x30, 0x3E, 255]
+                } else {
+                    pal.text_primary
+                };
+
+                let text_x =
+                    layout.rect.x as f32 + if layout.has_check_column { 28.0 } else { 14.0 };
+                let baseline = row_layout.rect.y as f32
+                    + f32::midpoint(row_layout.rect.height as f32, 13.0 * 0.72);
+
+                if item.checked {
+                    let cx = layout.rect.x as f32 + 14.0;
+                    let cy = row_layout.rect.y as f32 + row_layout.rect.height as f32 * 0.5;
+                    painter.draw_line(cx, cy, cx + 2.5, cy + 3.0, 1.5, text_col);
+                    painter.draw_line(cx + 2.5, cy + 3.0, cx + 7.0, cy - 3.0, 1.5, text_col);
+                }
+
+                painter.draw_text(item.text.clone(), text_x, baseline, 13.0, false, text_col);
+
+                if let Some(sc) = &item.shortcut {
+                    let sw = fonts.measure_width(sc, 12.0, false);
+                    let sx = layout.rect.right() as f32 - 14.0 - sw;
+                    let sc_col = if hovered {
+                        [255, 255, 255, 235]
+                    } else {
+                        pal.text_secondary
+                    };
+                    painter.draw_text(sc.clone(), sx, baseline, 12.0, false, sc_col);
+                }
+            }
+        }
+    }
+}

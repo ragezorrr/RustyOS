@@ -5,7 +5,9 @@ use crate::icons::{
     draw_share_glyph, draw_sort_pill_glyph, draw_tag_outline_glyph, draw_view_mode_icon,
 };
 use crate::layout::{FilesLayout, PathCrumbLayout, Rect, SearchScopeBarLayout, TabBarLayout};
-use crate::render::canvas::Canvas;
+use crate::render::canvas::{
+    Canvas, make_ui_canvas, to_ui_rect, ui_theme_palette, with_font_engine,
+};
 use crate::render::sidebar::draw_glass_pill;
 use crate::render::{Palette, rgba};
 use crate::state::{FilesAppState, SearchScope};
@@ -273,79 +275,45 @@ pub(crate) fn render_toolbar_search_pill(
 ) {
     let pill = layout.search_pill_rect;
     let wide = pill.w >= 72;
-    if state.search_active {
-        c.fill_rounded_rect(
-            Rect::new(pill.x - 1, pill.y - 1, pill.w + 2, pill.h + 2),
-            17,
-            rgba(pal.accent[0], pal.accent[1], pal.accent[2], 70),
-        );
-        c.fill_rounded_rect(pill, 16, pal.window_bg);
-        c.stroke_rounded_rect(pill, 16, pal.accent);
-    } else {
-        draw_glass_pill(c, pill, 16, pal);
-    }
     let show_text = state.search_active || !state.search_query.is_empty() || wide;
-    let icon_cx = if show_text {
-        pill.x as f32 + 14.5
-    } else {
-        pill.x as f32 + (pill.w as f32) * 0.5 - 0.5
-    };
-    let icon_col = if state.search_active {
-        pal.accent
-    } else if wide {
-        pal.text_secondary
-    } else {
-        pal.text_primary
-    };
-    draw_search_glyph(c, icon_cx, pill.y as f32 + 15.5, icon_col);
     if !show_text {
+        draw_glass_pill(c, pill, 16, pal);
+        let icon_cx = pill.x as f32 + (pill.w as f32) * 0.5 - 0.5;
+        draw_search_glyph(c, icon_cx, pill.y as f32 + 15.5, pal.text_primary);
         return;
     }
 
-    let input_clip = Rect::new(pill.x + 26, pill.y + 2, (pill.w - 48).max(10), 28);
-    let (fitted, col, text_x, caret_x) = if state.search_query.is_empty() {
-        (
-            if state.search_active {
-                String::from("Search...")
-            } else {
-                String::from("Search")
-            },
-            pal.text_muted,
-            input_clip.x + 3,
-            input_clip.x,
-        )
+    let mut sf = state.search_field.clone();
+    sf.rect = to_ui_rect(pill);
+    sf.corner_radius = 16.0;
+    sf.font_size = 12.5;
+    sf.padding_x = 26;
+    sf.clearable = true;
+    sf.search_style = true;
+    if sf.buffer.as_str() != state.search_query {
+        sf.buffer.set_text(&state.search_query);
+    }
+    sf.caret_blink.reset(std::time::Duration::ZERO);
+    let blink_ts = if state.caret_visible {
+        std::time::Duration::ZERO
     } else {
-        let fitted =
-            Canvas::fit_text_tail(&state.search_query, (input_clip.w - 4).max(10), 12.5, false);
-        let w = Canvas::measure_text(&fitted, 12.5, false);
-        let cx = (input_clip.x + w + 1).min(input_clip.right() - 2);
-        (fitted, pal.text_primary, input_clip.x, cx)
+        std::time::Duration::from_millis(600)
     };
-    c.draw_text(&fitted, text_x, pill.y + 8, 12.5, false, col, input_clip);
-    if state.search_active && state.caret_visible {
-        c.fill_rect(Rect::new(caret_x, pill.y + 8, 2, 16), pal.accent);
-    }
-    if !state.search_query.is_empty() {
-        let cx = layout.search_clear_rect.x as f32 + 9.0;
-        let cy = layout.search_clear_rect.y as f32 + 10.0;
-        c.fill_circle_f(cx, cy, 6.2, pal.pill_active);
-        c.stroke_line_aa(
-            cx - 2.3,
-            cy - 2.3,
-            cx + 2.3,
-            cy + 2.3,
-            1.25,
-            pal.text_secondary,
+    let ui_pal = ui_theme_palette(pal, state.accent_index);
+    let mut dl = rusty_ui::UiDrawList::new();
+    let mut uc = make_ui_canvas(c.buf, c.w, c.h);
+    with_font_engine(|fe| {
+        let mut painter = rusty_ui::UiPainter::new(&mut dl);
+        sf.paint(
+            &mut painter,
+            fe,
+            &ui_pal,
+            state.search_active,
+            1.0,
+            blink_ts,
         );
-        c.stroke_line_aa(
-            cx + 2.3,
-            cy - 2.3,
-            cx - 2.3,
-            cy + 2.3,
-            1.25,
-            pal.text_secondary,
-        );
-    }
+        rusty_ui::render_draw_list_to_canvas(&dl, &mut uc, fe);
+    });
 }
 
 pub(crate) fn render_search_scope_bar(

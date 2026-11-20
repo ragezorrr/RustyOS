@@ -22,6 +22,8 @@ authors = ["RustyOS Contributors"]
 
 [workspace.dependencies]
 fontdue = "0.9.5"
+gl_generator = "0.14.0"
+libc = "0.2.191"
 rusty-animation = { path = "crates/rusty-animation" }
 rusty-ipc = { path = "crates/rusty-ipc" }
 rusty-services = { path = "crates/rusty-services" }
@@ -41,6 +43,8 @@ smithay = { version = "0.7.0", default-features = false, features = [
 ] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+wayland-client = "0.31.15"
+wayland-egl = "0.32.11"
 wayland-scanner = "0.31.11"
 zbus = "5"
 

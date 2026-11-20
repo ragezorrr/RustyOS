@@ -22,6 +22,7 @@ where
             "--help" | "-h" => return Ok(None),
             "--light" => opts.theme_override = Some(ThemeChoice::Light),
             "--dark" => opts.theme_override = Some(ThemeChoice::Dark),
+            "--no-gpu" => opts.no_gpu = true,
             "--page" | "-m" => {
                 let Some(id) = iter.next() else {
                     return Err(String::from("--page requires a page identifier"));
@@ -43,7 +44,7 @@ fn main() -> ExitCode {
     let opts = match parse_args(env::args().skip(1)) {
         Ok(Some(o)) => o,
         Ok(None) => {
-            println!("Usage: rusty-settings [--light | --dark] [--page <id>]");
+            println!("Usage: rusty-settings [--light | --dark] [--page <id>] [--no-gpu]");
             return ExitCode::SUCCESS;
         }
         Err(msg) => {
@@ -68,10 +69,16 @@ mod tests {
     #[test]
     fn cli_parser_supports_theme_and_page_flags() {
         assert_eq!(
-            parse_args(["--light".to_owned(), "--page".to_owned(), "dock".to_owned()]),
+            parse_args([
+                "--light".to_owned(),
+                "--page".to_owned(),
+                "dock".to_owned(),
+                "--no-gpu".to_owned(),
+            ]),
             Ok(Some(StartupOptions {
                 theme_override: Some(ThemeChoice::Light),
                 initial_page: SettingsPage::DockDesktop,
+                no_gpu: true,
             }))
         );
         assert!(parse_args(["--page".to_owned()]).is_err());

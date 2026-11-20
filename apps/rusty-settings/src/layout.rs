@@ -188,7 +188,7 @@ pub(crate) struct DockPositionCardLayout {
 }
 
 /// Interactive click regions inside `rusty-settings`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SettingsHit {
     ResizeEdge(ResizeEdgeZone),
     WindowDrag,
@@ -206,6 +206,7 @@ pub(crate) enum SettingsHit {
     StepperPlus(RowControlId),
     PushPage(SettingsPage),
     DockPosTile(u8),
+    ScrollbarThumb,
 }
 
 #[derive(Debug, Clone)]
@@ -1541,6 +1542,12 @@ pub(crate) fn hit_test(layout: &SettingsLayout, px: f64, py: f64) -> Option<Sett
     if py < f64::from(HEADER_HEIGHT) {
         return Some(SettingsHit::WindowDrag);
     }
+    if let Some(thumb) = layout.page_scrollbar_thumb {
+        let expanded = Rect::new(thumb.x - 4, thumb.y, thumb.w + 8, thumb.h);
+        if expanded.contains_f64(px, py) {
+            return Some(SettingsHit::ScrollbarThumb);
+        }
+    }
     if let Some(app_layout) = &layout.appearance
         && let Some(hit) = hit_test_appearance(app_layout, px, py)
     {
@@ -1810,6 +1817,7 @@ mod tests {
         let app = SettingsAppState::new(&StartupOptions {
             initial_page: SettingsPage::SoftwareUpdate,
             theme_override: None,
+            ..StartupOptions::default()
         });
         assert_eq!(app.current_page, SettingsPage::SoftwareUpdate);
         let layout = compute_layout(&app, 882, 600);

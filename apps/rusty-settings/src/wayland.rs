@@ -1,17 +1,26 @@
 //! Wayland CSD (`xdg_toplevel`) event loop and input dispatch for `rusty-settings` (`RUSTYOS-103`).
 
 use std::fmt;
+use std::os::fd::OwnedFd;
+use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState, Region},
-    delegate_compositor, delegate_output, delegate_pointer, delegate_registry, delegate_seat,
-    delegate_shm, delegate_xdg_shell, delegate_xdg_window,
+    data_device_manager::{
+        DataDeviceManagerState, WritePipe,
+        data_device::{DataDevice, DataDeviceHandler},
+        data_offer::{DataOfferHandler, DragOffer},
+        data_source::DataSourceHandler,
+    },
+    delegate_compositor, delegate_data_device, delegate_keyboard, delegate_output,
+    delegate_pointer, delegate_registry, delegate_seat, delegate_shm, delegate_xdg_shell,
+    delegate_xdg_window,
     output::{OutputHandler, OutputState},
     reexports::{
-        calloop::{EventLoop, ping},
+        calloop::{EventLoop, LoopHandle, ping},
         calloop_wayland_source::WaylandSource,
         csd_frame::WindowState,
         protocols::xdg::shell::client::xdg_toplevel::ResizeEdge,
@@ -20,6 +29,7 @@ use smithay_client_toolkit::{
     registry_handlers,
     seat::{
         Capability, SeatHandler, SeatState,
+        keyboard::{KeyEvent, KeyboardHandler, Keysym, Modifiers},
         pointer::{AxisScroll, BTN_LEFT, PointerEvent, PointerEventKind, PointerHandler},
     },
     shell::{
@@ -35,18 +45,21 @@ use smithay_client_toolkit::{
     },
 };
 use wayland_client::{
-    Connection, Dispatch, QueueHandle, WEnum,
+    Connection, Dispatch, EventQueue, QueueHandle,
     backend::WaylandError,
     globals::registry_queue_init,
-    protocol::{wl_keyboard, wl_output, wl_pointer, wl_seat, wl_shm, wl_surface},
+    protocol::{
+        wl_data_device, wl_data_device_manager::DndAction, wl_data_source, wl_keyboard, wl_output,
+        wl_pointer, wl_seat, wl_shm, wl_surface,
+    },
 };
 
 use crate::layout::{
-    ResizeEdgeZone, SIDEBAR_WIDTH, SettingsHit, SettingsLayout, WINDOW_CORNER_RADIUS,
-    compute_layout, hit_test,
+    HEADER_HEIGHT, ResizeEdgeZone, SIDEBAR_WIDTH, SettingsHit, SettingsLayout,
+    WINDOW_CORNER_RADIUS, compute_layout, hit_test,
 };
 use crate::liquid_glass::{GlassStyle, RustyosLiquidGlassManagerV1, RustyosSurfaceGlassV1};
-use crate::render::render_window_pixels_with_glass;
+use crate::render::{render_window_pixels_with_glass, with_font_engine};
 use crate::state::{
     DamageScope, ServiceCommand, ServiceSnapshot, SettingsAppState, StartupOptions,
     execute_coalesced_service_batch,
@@ -108,31 +121,50 @@ impl From<WaylandError> for WaylandAppError {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RenderBackend {
+    Gpu,
+    Cpu,
+}
+
 #[allow(clippy::struct_excessive_bools)]
 struct SettingsClient {
+    conn: Connection,
     qh: QueueHandle<Self>,
+    loop_handle: LoopHandle<'static, Self>,
     registry_state: RegistryState,
     output_state: OutputState,
     seat_state: SeatState,
     compositor_state: CompositorState,
     shm: Shm,
+    data_device_manager: Option<DataDeviceManagerState>,
+    data_device: Option<DataDevice>,
+    clipboard: rusty_ui::WaylandClipboardBridge,
+    paste_ping: ping::Ping,
+    last_input_serial: u32,
     _glass_mgr: Option<RustyosLiquidGlassManagerV1>,
     window_glass: Option<RustyosSurfaceGlassV1>,
     last_glass_state: Option<(u32, u32, bool)>,
     pool: SlotPool,
     window: Option<Window>,
+    gles: Option<rusty_ui::GlesSurfaceRenderer>,
+    render_backend: RenderBackend,
+    cpu_backbuf: Vec<u8>,
+    frame_rev: u64,
     buffers: Vec<Buffer>,
     buffer_size: (u32, u32),
     frame_sent_at: Option<Instant>,
     seat: Option<wl_seat::WlSeat>,
     pointer: Option<wl_pointer::WlPointer>,
     keyboard: Option<wl_keyboard::WlKeyboard>,
-    mod_ctrl: bool,
-    mod_shift: bool,
+    modifiers: Modifiers,
     width: u32,
     height: u32,
     configured: bool,
     pointer_inside: bool,
+    pointer_pressed: bool,
+    scrollbar_drag: Option<(f64, i32)>,
+    click_streak: u8,
     pointer_pos: (f64, f64),
     hover_hit: Option<SettingsHit>,
     last_click_at: Option<Instant>,
@@ -145,6 +177,7 @@ struct SettingsClient {
 impl SettingsClient {
     fn layout(&mut self) -> SettingsLayout {
         let l = compute_layout(&self.app, self.width, self.height);
+        self.app.sync_toggles_from_layout(&l);
         self.layout_cache = Some(l.clone());
         l
     }
@@ -162,22 +195,157 @@ impl SettingsClient {
         }
     }
 
+    fn sync_clipboard_io(&mut self) {
+        if let Some(text) = self.clipboard.take_pending_copy()
+            && let (Some(ddm), Some(dd)) = (&self.data_device_manager, &self.data_device)
+        {
+            let source = ddm.create_copy_paste_source(&self.qh, rusty_ui::CLIPBOARD_MIME_TYPES);
+            source.set_selection(dd, self.last_input_serial);
+            self.clipboard.register_source(source.inner().clone(), text);
+        }
+        if self.clipboard.take_pending_paste_request()
+            && let Some(dd) = &self.data_device
+            && let Some(offer) = dd.data().selection_offer()
+        {
+            let mime = offer.with_mime_types(rusty_ui::WaylandClipboardBridge::pick_utf8_mime);
+            if let Some(mime) = mime
+                && let Ok(read_pipe) = offer.receive(mime)
+            {
+                let _ = self.conn.flush();
+                let wake = self.paste_ping.clone();
+                self.clipboard
+                    .spawn_receive_from_fd(OwnedFd::from(read_pipe), move || wake.ping());
+            }
+        }
+    }
+
+    fn handle_key(&mut self, keysym: Keysym, utf8: Option<&str>) {
+        if self.modifiers.ctrl && matches!(keysym, Keysym::f | Keysym::F) {
+            self.app.set_search_focused(true);
+            return;
+        }
+        if self.modifiers.ctrl && matches!(keysym, Keysym::q | Keysym::Q) {
+            self.app.request_quit();
+            return;
+        }
+        if self.app.search_focused
+            && let Some(ui_key) = map_keysym_to_ui(keysym, utf8)
+        {
+            let mods = rusty_ui::InputModifiers {
+                ctrl: self.modifiers.ctrl,
+                shift: self.modifiers.shift,
+                alt: self.modifiers.alt,
+            };
+            let handled = with_font_engine(|fe| {
+                self.app
+                    .handle_search_text_key(ui_key, mods, fe, &mut self.clipboard)
+            });
+            self.sync_clipboard_io();
+            if handled {
+                self.layout_cache = None;
+                self.flush_pending_service_commands();
+                return;
+            }
+        }
+        if !self.app.search_focused {
+            let layout = self.current_layout();
+            let page_step = (layout.page_viewport.h - 40).max(120);
+            let delta = match keysym {
+                Keysym::Up => -44,
+                Keysym::Down => 44,
+                Keysym::Page_Up => -page_step,
+                Keysym::Page_Down => page_step,
+                Keysym::Home => -layout.max_page_scroll,
+                Keysym::End => layout.max_page_scroll,
+                _ => 0,
+            };
+            if delta != 0
+                && self.app.scroll_smooth_by(
+                    false,
+                    f64::from(delta),
+                    layout.max_sidebar_scroll,
+                    layout.max_page_scroll,
+                    true,
+                )
+            {
+                self.layout_cache = None;
+            }
+        }
+    }
+
     fn execute_left_click(&mut self, px: f64, py: f64, serial: u32) {
+        self.last_input_serial = serial;
         let now = Instant::now();
-        let double_click = self
+        let multi = self
             .last_click_at
             .is_some_and(|t| now.saturating_duration_since(t) <= Duration::from_millis(380));
+        self.click_streak = if multi {
+            self.click_streak.saturating_add(1).min(3)
+        } else {
+            1
+        };
+        let double_click = self.click_streak == 2;
         self.last_click_at = Some(now);
 
         let layout = self.current_layout();
         let hit = hit_test(&layout, px, py);
         if !matches!(hit, Some(SettingsHit::SearchField)) && self.app.search_focused {
-            self.app.search_focused = false;
-            self.app.mark_dirty(DamageScope::Sidebar);
+            self.app.set_search_focused(false);
+        }
+        if hit.is_none() && self.handle_scrollbar_track_jump(&layout, px, py) {
+            return;
         }
         let Some(hit) = hit else {
             return;
         };
+        self.dispatch_hit(hit, &layout, px, py, serial, double_click);
+        self.flush_pending_service_commands();
+    }
+
+    #[allow(clippy::cast_possible_truncation)]
+    fn handle_scrollbar_track_jump(&mut self, layout: &SettingsLayout, px: f64, py: f64) -> bool {
+        if layout.max_page_scroll <= 0
+            || px < f64::from(layout.win_w - 11)
+            || py < f64::from(HEADER_HEIGHT)
+        {
+            return false;
+        }
+        let thumb_h = layout.page_scrollbar_thumb.map_or(28, |t| t.h);
+        let track_top = f64::from(HEADER_HEIGHT + 6);
+        let travel = f64::from((layout.win_h - HEADER_HEIGHT - 14 - thumb_h).max(1));
+        let rel = ((py - track_top - f64::from(thumb_h) * 0.5) / travel).clamp(0.0, 1.0);
+        let target_y = (rel * f64::from(layout.max_page_scroll)).round() as i32;
+        self.app
+            .set_page_scroll_immediate(target_y, layout.max_page_scroll);
+        self.layout_cache = None;
+        true
+    }
+
+    #[allow(clippy::cast_possible_truncation)]
+    fn update_scrollbar_drag(&mut self, py: f64) -> bool {
+        let Some((start_py, start_scroll)) = self.scrollbar_drag else {
+            return false;
+        };
+        let layout = self.current_layout();
+        let thumb_h = layout.page_scrollbar_thumb.map_or(28, |t| t.h);
+        let travel = (layout.win_h - HEADER_HEIGHT - 14 - thumb_h).max(1);
+        let delta_scroll = ((py - start_py) * f64::from(layout.max_page_scroll) / f64::from(travel))
+            .round() as i32;
+        self.app
+            .set_page_scroll_immediate(start_scroll + delta_scroll, layout.max_page_scroll);
+        self.layout_cache = None;
+        true
+    }
+
+    fn dispatch_hit(
+        &mut self,
+        hit: SettingsHit,
+        layout: &SettingsLayout,
+        px: f64,
+        py: f64,
+        serial: u32,
+        double_click: bool,
+    ) {
         match hit {
             SettingsHit::ResizeEdge(zone) => {
                 if let (Some(win), Some(seat)) = (&self.window, &self.seat) {
@@ -221,9 +389,30 @@ impl SettingsClient {
                 self.layout_cache = None;
             }
             SettingsHit::SearchField => {
-                self.app.search_focused = true;
-                self.app.caret_visible = true;
-                self.app.mark_dirty(DamageScope::Sidebar);
+                self.app.set_search_focused(true);
+                let sr = layout.search_rect;
+                self.app.search_field.rect = rusty_ui::Rect::new(
+                    sr.x,
+                    sr.y,
+                    u32::try_from(sr.w.max(1)).unwrap_or(1),
+                    u32::try_from(sr.h.max(1)).unwrap_or(1),
+                );
+                let click_n = self.click_streak;
+                let elapsed = self.app.epoch.elapsed();
+                let hit = with_font_engine(|fe| {
+                    self.app
+                        .search_field
+                        .on_pointer_down(px, py, click_n, elapsed, fe)
+                });
+                if matches!(hit, Some(rusty_ui::TextFieldHit::ClearButton)) {
+                    self.app.search_query.clear();
+                    self.app.reset_sidebar_scroll();
+                    self.layout_cache = None;
+                    self.app.mark_dirty(DamageScope::Full);
+                }
+            }
+            SettingsHit::ScrollbarThumb => {
+                self.scrollbar_drag = Some((py, self.app.page_scroll_y));
             }
             SettingsHit::SidebarItem(page) | SettingsHit::PushPage(page) => {
                 self.app.navigate_to(page);
@@ -247,9 +436,10 @@ impl SettingsClient {
             | SettingsHit::StepperPlus(id) => {
                 self.app.apply_row_action(id);
                 self.layout_cache = None;
+                let next_layout = self.current_layout();
+                self.app.sync_toggles_from_layout(&next_layout);
             }
         }
-        self.flush_pending_service_commands();
     }
 }
 
@@ -276,6 +466,9 @@ fn spawn_service_worker(wake: ping::Ping) -> (Sender<ServiceCommand>, Receiver<S
 
 fn tick_settings_frame(client: &mut SettingsClient, now: Instant) -> Result<(), WaylandAppError> {
     let _ = client.app.update_caret_blink(now);
+    if client.app.step_ui_animations(now) {
+        client.layout_cache = None;
+    }
     if client.app.poll_external_config_if_due(now) {
         client.layout_cache = None;
     }
@@ -314,44 +507,63 @@ pub(crate) fn run(opts: &StartupOptions) -> Result<(), WaylandAppError> {
     window.set_app_id("org.rustyos.Settings");
     window.set_min_size(Some((640, 500)));
 
-    let glass_mgr: Option<RustyosLiquidGlassManagerV1> = globals.bind(&qh, 1..=1, ()).ok();
-    let window_glass = glass_mgr.as_ref().map(|mgr| {
-        let g = mgr.get_surface_glass(window.wl_surface(), &qh, ());
-        g.set_corner_radius(u32::try_from(WINDOW_CORNER_RADIUS).unwrap_or(14));
-        g.set_style(GlassStyle::Sidebar);
-        g.commit();
-        g
-    });
-    window.commit();
+    let (glass_mgr, window_glass) = bind_settings_glass(&globals, &qh, &window);
 
     let (wake_ping, wake_source) =
         ping::make_ping().map_err(|e| WaylandAppError::EventLoop(e.to_string()))?;
+    let (paste_ping, paste_source) =
+        ping::make_ping().map_err(|e| WaylandAppError::EventLoop(e.to_string()))?;
     let (service_tx, service_rx) = spawn_service_worker(wake_ping);
 
+    let mut event_loop: EventLoop<'static, SettingsClient> =
+        EventLoop::try_new().map_err(|e| WaylandAppError::EventLoop(e.to_string()))?;
+    let loop_handle = event_loop.handle();
+    insert_settings_sources(&loop_handle, &conn, queue, wake_source, paste_source)?;
+
+    let no_gpu_env = std::env::var_os("RUSTYOS_NO_GPU").is_some_and(|v| v == "1");
+    let render_backend = if opts.no_gpu || no_gpu_env {
+        RenderBackend::Cpu
+    } else {
+        RenderBackend::Gpu
+    };
+
     let mut client = SettingsClient {
-        qh,
+        conn: conn.clone(),
+        qh: qh.clone(),
+        loop_handle,
         registry_state: RegistryState::new(&globals),
-        output_state: OutputState::new(&globals, &queue.handle()),
-        seat_state: SeatState::new(&globals, &queue.handle()),
+        output_state: OutputState::new(&globals, &qh),
+        seat_state: SeatState::new(&globals, &qh),
         compositor_state,
         shm,
+        data_device_manager: DataDeviceManagerState::bind(&globals, &qh).ok(),
+        data_device: None,
+        clipboard: rusty_ui::WaylandClipboardBridge::new(),
+        paste_ping,
+        last_input_serial: 0,
         _glass_mgr: glass_mgr,
         window_glass,
         last_glass_state: None,
         pool,
         window: Some(window),
+        gles: None,
+        render_backend,
+        cpu_backbuf: Vec::new(),
+        frame_rev: 0,
         buffers: Vec::new(),
         buffer_size: (DEFAULT_WIDTH, DEFAULT_HEIGHT),
         frame_sent_at: None,
         seat: None,
         pointer: None,
         keyboard: None,
-        mod_ctrl: false,
-        mod_shift: false,
+        modifiers: Modifiers::default(),
         width: DEFAULT_WIDTH,
         height: DEFAULT_HEIGHT,
         configured: false,
         pointer_inside: false,
+        pointer_pressed: false,
+        scrollbar_drag: None,
+        click_streak: 1,
         pointer_pos: (0.0, 0.0),
         hover_hit: None,
         last_click_at: None,
@@ -362,28 +574,12 @@ pub(crate) fn run(opts: &StartupOptions) -> Result<(), WaylandAppError> {
     };
     client.flush_pending_service_commands();
 
-    let mut event_loop: EventLoop<'static, SettingsClient> =
-        EventLoop::try_new().map_err(|e| WaylandAppError::EventLoop(e.to_string()))?;
-    WaylandSource::new(conn.clone(), queue)
-        .insert(event_loop.handle())
-        .map_err(|e| WaylandAppError::EventLoop(format!("{e:?}")))?;
-    event_loop
-        .handle()
-        .insert_source(wake_source, |(), (), client| {
-            while let Ok(snap) = client.service_rx.try_recv() {
-                if client.app.apply_service_snapshot(snap) {
-                    client.layout_cache = None;
-                }
-            }
-        })
-        .map_err(|e| WaylandAppError::EventLoop(format!("{e:?}")))?;
-
     while client.app.running {
         let now = Instant::now();
         tick_settings_frame(&mut client, now)?;
         conn.flush()?;
 
-        let timeout = if client.app.is_scroll_animating() {
+        let timeout = if client.app.is_ui_animating() {
             Some(Duration::from_millis(8))
         } else if client.app.updates_checking || client.app.updates_tx_phase.is_some() {
             Some(Duration::from_millis(50))
@@ -396,6 +592,58 @@ pub(crate) fn run(opts: &StartupOptions) -> Result<(), WaylandAppError> {
             .dispatch(timeout, &mut client)
             .map_err(|e| WaylandAppError::EventLoop(e.to_string()))?;
     }
+    Ok(())
+}
+
+fn bind_settings_glass(
+    globals: &wayland_client::globals::GlobalList,
+    qh: &QueueHandle<SettingsClient>,
+    window: &Window,
+) -> (
+    Option<RustyosLiquidGlassManagerV1>,
+    Option<RustyosSurfaceGlassV1>,
+) {
+    let glass_mgr: Option<RustyosLiquidGlassManagerV1> = globals.bind(qh, 1..=1, ()).ok();
+    let window_glass = glass_mgr.as_ref().map(|mgr| {
+        let g = mgr.get_surface_glass(window.wl_surface(), qh, ());
+        g.set_corner_radius(u32::try_from(WINDOW_CORNER_RADIUS).unwrap_or(14));
+        g.set_style(GlassStyle::Sidebar);
+        g.commit();
+        g
+    });
+    window.commit();
+    (glass_mgr, window_glass)
+}
+
+fn insert_settings_sources(
+    loop_handle: &LoopHandle<'static, SettingsClient>,
+    conn: &Connection,
+    queue: EventQueue<SettingsClient>,
+    wake_source: ping::PingSource,
+    paste_source: ping::PingSource,
+) -> Result<(), WaylandAppError> {
+    WaylandSource::new(conn.clone(), queue)
+        .insert(loop_handle.clone())
+        .map_err(|e| WaylandAppError::EventLoop(format!("{e:?}")))?;
+    loop_handle
+        .insert_source(wake_source, |(), (), client| {
+            while let Ok(snap) = client.service_rx.try_recv() {
+                if client.app.apply_service_snapshot(snap) {
+                    client.layout_cache = None;
+                }
+            }
+        })
+        .map_err(|e| WaylandAppError::EventLoop(format!("{e:?}")))?;
+    loop_handle
+        .insert_source(paste_source, |(), (), client| {
+            if let Some(pasted) = client.clipboard.poll_received_paste() {
+                let changed = with_font_engine(|fe| client.app.apply_search_paste(&pasted, fe));
+                if changed {
+                    client.layout_cache = None;
+                }
+            }
+        })
+        .map_err(|e| WaylandAppError::EventLoop(format!("{e:?}")))?;
     Ok(())
 }
 
@@ -451,6 +699,71 @@ fn damage_rect_for_scope(
 }
 
 #[allow(clippy::cast_possible_wrap)]
+fn try_draw_settings_gles(
+    client: &mut SettingsClient,
+    layout: &SettingsLayout,
+    w: u32,
+    h: u32,
+) -> bool {
+    if client.gles.is_none() {
+        return false;
+    }
+    let len = (w as usize) * (h as usize) * 4;
+    if client.cpu_backbuf.len() != len {
+        client.cpu_backbuf.resize(len, 0);
+    }
+    let sidebar_glass = client.window_glass.is_some() && !client.app.reduce_transparency;
+    render_window_pixels_with_glass(
+        &mut client.cpu_backbuf,
+        w,
+        h,
+        &client.app,
+        layout,
+        client.hover_hit.as_ref(),
+        sidebar_glass,
+    );
+    client.frame_rev = client.frame_rev.wrapping_add(1);
+    let rev = client.frame_rev;
+    let pixels: Arc<[u8]> = Arc::from(client.cpu_backbuf.as_slice());
+    let mut dl = rusty_ui::UiDrawList::new();
+    {
+        let mut painter = rusty_ui::UiPainter::new(&mut dl);
+        painter.draw_image(
+            rusty_ui::Rect::new(0, 0, w, h),
+            rev,
+            w,
+            h,
+            pixels,
+            rusty_ui::PixelFormat::Bgra8888,
+        );
+    }
+    if let Some(win) = &client.window {
+        win.set_window_geometry(0, 0, w, h);
+        win.wl_surface().frame(&client.qh, win.wl_surface().clone());
+    }
+    let wi = i32::try_from(w).unwrap_or(1);
+    let hi = i32::try_from(h).unwrap_or(1);
+    let res = if let Some(gles) = &mut client.gles {
+        with_font_engine(|fe| gles.render_draw_list(&dl, fe, wi, hi, [0, 0, 0, 0]))
+    } else {
+        Ok(())
+    };
+    match res {
+        Ok(()) => {
+            let _ = client.app.take_damage_scope();
+            client.frame_sent_at = Some(Instant::now());
+            true
+        }
+        Err(err) => {
+            tracing::warn!(%err, "rusty-settings GLES2 swap failed; falling back to wl_shm");
+            client.gles = None;
+            client.render_backend = RenderBackend::Cpu;
+            false
+        }
+    }
+}
+
+#[allow(clippy::cast_possible_wrap)]
 fn draw_frame(client: &mut SettingsClient) -> Result<(), WaylandAppError> {
     let mut layout = client.current_layout();
     let prev_page_scroll = client.app.page_scroll_y;
@@ -467,11 +780,17 @@ fn draw_frame(client: &mut SettingsClient) -> Result<(), WaylandAppError> {
         client.hover_hit = hit_test(&layout, client.pointer_pos.0, client.pointer_pos.1);
     }
 
+    if client.window.is_none() {
+        return Ok(());
+    }
+    let w = client.width.max(1);
+    let h = client.height.max(1);
+    if try_draw_settings_gles(client, &layout, w, h) {
+        return Ok(());
+    }
     let Some(win) = &client.window else {
         return Ok(());
     };
-    let w = client.width.max(1);
-    let h = client.height.max(1);
     if client.buffer_size != (w, h) {
         client.buffers.clear();
         client.buffer_size = (w, h);
@@ -531,7 +850,9 @@ delegate_output!(SettingsClient);
 delegate_compositor!(SettingsClient);
 delegate_shm!(SettingsClient);
 delegate_seat!(SettingsClient);
+delegate_keyboard!(SettingsClient);
 delegate_pointer!(SettingsClient);
+delegate_data_device!(SettingsClient);
 delegate_xdg_shell!(SettingsClient);
 delegate_xdg_window!(SettingsClient);
 
@@ -664,6 +985,25 @@ impl WindowHandler for SettingsClient {
                 DamageScope::Sidebar
             });
         }
+        if self.render_backend == RenderBackend::Gpu
+            && self.gles.is_none()
+            && let Some(win) = &self.window
+        {
+            match rusty_ui::GlesSurfaceRenderer::new(
+                self.conn.backend().display_ptr().cast(),
+                win.wl_surface(),
+                next_w.cast_signed(),
+                next_h.cast_signed(),
+            ) {
+                Ok(renderer) => {
+                    self.gles = Some(renderer);
+                }
+                Err(err) => {
+                    tracing::warn!(%err, "rusty-settings GLES2 unavailable; using CPU wl_shm fallback");
+                    self.render_backend = RenderBackend::Cpu;
+                }
+            }
+        }
         sync_settings_glass_region(self);
     }
 }
@@ -696,7 +1036,12 @@ impl SeatHandler for SettingsClient {
     fn seat_state(&mut self) -> &mut SeatState {
         &mut self.seat_state
     }
-    fn new_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, seat: wl_seat::WlSeat) {
+    fn new_seat(&mut self, _: &Connection, qh: &QueueHandle<Self>, seat: wl_seat::WlSeat) {
+        if self.data_device.is_none()
+            && let Some(ddm) = &self.data_device_manager
+        {
+            self.data_device = Some(ddm.get_data_device(qh, &seat));
+        }
         if self.seat.is_none() {
             self.seat = Some(seat);
         }
@@ -716,7 +1061,20 @@ impl SeatHandler for SettingsClient {
                 self.pointer = Some(ptr);
             }
         } else if capability == Capability::Keyboard && self.keyboard.is_none() {
-            self.keyboard = Some(seat.get_keyboard(qh, ()));
+            if self.seat.is_none() {
+                self.seat = Some(seat.clone());
+            }
+            if let Ok(kbd) = self.seat_state.get_keyboard_with_repeat(
+                qh,
+                &seat,
+                None,
+                self.loop_handle.clone(),
+                Box::new(|state, _kbd, ev| {
+                    state.handle_key(ev.keysym, ev.utf8.as_deref());
+                }),
+            ) {
+                self.keyboard = Some(kbd);
+            }
         }
     }
     fn remove_capability(
@@ -726,10 +1084,14 @@ impl SeatHandler for SettingsClient {
         _: wl_seat::WlSeat,
         capability: Capability,
     ) {
-        if capability == Capability::Pointer {
-            self.pointer = None;
-        } else if capability == Capability::Keyboard {
-            self.keyboard = None;
+        if capability == Capability::Pointer
+            && let Some(p) = self.pointer.take()
+        {
+            p.release();
+        } else if capability == Capability::Keyboard
+            && let Some(k) = self.keyboard.take()
+        {
+            k.release();
         }
     }
     fn remove_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat) {}
@@ -754,7 +1116,8 @@ const fn hit_damage_scope(hit: Option<&SettingsHit>) -> DamageScope {
             | SettingsHit::DockPosTile(_)
             | SettingsHit::Control(_)
             | SettingsHit::StepperMinus(_)
-            | SettingsHit::StepperPlus(_),
+            | SettingsHit::StepperPlus(_)
+            | SettingsHit::ScrollbarThumb,
         ) => DamageScope::Page,
     }
 }
@@ -772,6 +1135,17 @@ impl PointerHandler for SettingsClient {
             match ev.kind {
                 PointerEventKind::Enter { .. } | PointerEventKind::Motion { .. } => {
                     self.pointer_inside = true;
+                    if self.update_scrollbar_drag(ev.position.1) {
+                        continue;
+                    }
+                    if self.pointer_pressed && self.app.search_focused {
+                        let changed = with_font_engine(|fe| {
+                            self.app.search_field.on_pointer_move(ev.position.0, fe)
+                        });
+                        if changed {
+                            self.app.mark_dirty(DamageScope::Sidebar);
+                        }
+                    }
                     let layout = self.current_layout();
                     let next = hit_test(&layout, ev.position.0, ev.position.1);
                     if next != self.hover_hit {
@@ -797,7 +1171,15 @@ impl PointerHandler for SettingsClient {
                     serial,
                     ..
                 } => {
+                    self.pointer_pressed = true;
                     self.execute_left_click(ev.position.0, ev.position.1, serial);
+                }
+                PointerEventKind::Release {
+                    button: BTN_LEFT, ..
+                } => {
+                    self.pointer_pressed = false;
+                    self.scrollbar_drag = None;
+                    self.app.search_field.on_pointer_up();
                 }
                 PointerEventKind::Axis {
                     vertical, source, ..
@@ -840,93 +1222,187 @@ fn axis_scroll_delta_px(axis: AxisScroll, source: Option<wl_pointer::AxisSource>
     }
 }
 
-impl Dispatch<wl_keyboard::WlKeyboard, ()> for SettingsClient {
-    fn event(
-        state: &mut Self,
-        _: &wl_keyboard::WlKeyboard,
-        event: wl_keyboard::Event,
-        (): &(),
+impl KeyboardHandler for SettingsClient {
+    fn enter(
+        &mut self,
         _: &Connection,
         _: &QueueHandle<Self>,
+        _: &wl_keyboard::WlKeyboard,
+        _: &wl_surface::WlSurface,
+        _: u32,
+        _: &[u32],
+        _: &[Keysym],
     ) {
-        match event {
-            wl_keyboard::Event::Modifiers { mods_depressed, .. } => {
-                state.mod_shift = (mods_depressed & 1) != 0;
-                state.mod_ctrl = (mods_depressed & 4) != 0;
-            }
-            wl_keyboard::Event::Leave { .. } => {
-                state.mod_shift = false;
-                state.mod_ctrl = false;
-            }
-            wl_keyboard::Event::Key {
-                key,
-                state: WEnum::Value(wl_keyboard::KeyState::Pressed),
-                ..
-            } => {
-                if state.mod_ctrl && key == 33 {
-                    // Ctrl+F focuses Search
-                    state.app.search_focused = true;
-                    state.app.caret_visible = true;
-                    state.app.mark_dirty(DamageScope::Sidebar);
-                    return;
-                }
-                if state.mod_ctrl && key == 16 {
-                    state.app.request_quit();
-                    return;
-                }
-                let sym = evdev_key_to_sym(key, state.mod_shift);
-                if !sym.is_empty() && state.app.handle_search_key(sym) {
-                    state.layout_cache = None;
-                    state.flush_pending_service_commands();
-                    return;
-                }
-                if !state.app.search_focused {
-                    let layout = state.current_layout();
-                    let page_step = (layout.page_viewport.h - 40).max(120);
-                    let delta = match key {
-                        103 => -44,                     // Up
-                        108 => 44,                      // Down
-                        104 => -page_step,              // PageUp
-                        109 => page_step,               // PageDown
-                        102 => -layout.max_page_scroll, // Home
-                        107 => layout.max_page_scroll,  // End
-                        _ => 0,
-                    };
-                    if delta != 0
-                        && state.app.scroll_smooth_by(
-                            false,
-                            f64::from(delta),
-                            layout.max_sidebar_scroll,
-                            layout.max_page_scroll,
-                            true,
-                        )
-                    {
-                        state.layout_cache = None;
-                    }
-                }
-            }
-            _ => {}
-        }
+    }
+    fn leave(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_keyboard::WlKeyboard,
+        _: &wl_surface::WlSurface,
+        _: u32,
+    ) {
+        self.modifiers = Modifiers::default();
+    }
+    fn press_key(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_keyboard::WlKeyboard,
+        _: u32,
+        event: KeyEvent,
+    ) {
+        self.handle_key(event.keysym, event.utf8.as_deref());
+    }
+    fn release_key(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_keyboard::WlKeyboard,
+        _: u32,
+        _: KeyEvent,
+    ) {
+    }
+    fn update_modifiers(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_keyboard::WlKeyboard,
+        _: u32,
+        modifiers: Modifiers,
+        _: u32,
+    ) {
+        self.modifiers = modifiers;
     }
 }
 
-fn evdev_key_to_sym(code: u32, shift: bool) -> &'static str {
-    match code {
-        1 => "Escape",
-        14 => "BackSpace",
-        28 => "Return",
-        57 => " ",
-        16..=25 => ["q", "w", "e", "r", "t", "y", "u", "i", "o", "p"][(code - 16) as usize],
-        30..=38 => ["a", "s", "d", "f", "g", "h", "j", "k", "l"][(code - 30) as usize],
-        44..=50 => ["z", "x", "c", "v", "b", "n", "m"][(code - 44) as usize],
-        2..=11 => {
-            if shift {
-                ""
-            } else {
-                ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"][(code - 2) as usize]
-            }
-        }
-        12 => "-",
-        _ => "",
+impl DataDeviceHandler for SettingsClient {
+    fn enter(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_data_device::WlDataDevice,
+        _: f64,
+        _: f64,
+        _: &wl_surface::WlSurface,
+    ) {
+    }
+    fn leave(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_data_device::WlDataDevice) {}
+    fn motion(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_data_device::WlDataDevice,
+        _: f64,
+        _: f64,
+    ) {
+    }
+    fn selection(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_data_device::WlDataDevice,
+    ) {
+    }
+    fn drop_performed(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_data_device::WlDataDevice,
+    ) {
+    }
+}
+
+impl DataOfferHandler for SettingsClient {
+    fn source_actions(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &mut DragOffer,
+        _: DndAction,
+    ) {
+    }
+    fn selected_action(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &mut DragOffer,
+        _: DndAction,
+    ) {
+    }
+}
+
+impl DataSourceHandler for SettingsClient {
+    fn accept_mime(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_data_source::WlDataSource,
+        _: Option<String>,
+    ) {
+    }
+    fn send_request(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        source: &wl_data_source::WlDataSource,
+        mime: String,
+        write_pipe: WritePipe,
+    ) {
+        self.clipboard
+            .serve_send_request(source, &mime, OwnedFd::from(write_pipe));
+    }
+    fn cancelled(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        source: &wl_data_source::WlDataSource,
+    ) {
+        self.clipboard.remove_source(source);
+    }
+    fn dnd_dropped(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_data_source::WlDataSource,
+    ) {
+    }
+    fn dnd_finished(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_data_source::WlDataSource,
+    ) {
+    }
+    fn action(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_data_source::WlDataSource,
+        _: DndAction,
+    ) {
+    }
+}
+
+fn map_keysym_to_ui(keysym: Keysym, utf8: Option<&str>) -> Option<rusty_ui::TextInputKey> {
+    match keysym {
+        Keysym::Left => Some(rusty_ui::TextInputKey::Left),
+        Keysym::Right => Some(rusty_ui::TextInputKey::Right),
+        Keysym::Home => Some(rusty_ui::TextInputKey::Home),
+        Keysym::End => Some(rusty_ui::TextInputKey::End),
+        Keysym::BackSpace => Some(rusty_ui::TextInputKey::Backspace),
+        Keysym::Delete => Some(rusty_ui::TextInputKey::Delete),
+        Keysym::Return | Keysym::KP_Enter => Some(rusty_ui::TextInputKey::Enter),
+        Keysym::Escape => Some(rusty_ui::TextInputKey::Escape),
+        _ => utf8
+            .and_then(|s| s.chars().next())
+            .filter(|ch| !ch.is_control())
+            .map(rusty_ui::TextInputKey::Char)
+            .or_else(|| {
+                keysym
+                    .key_char()
+                    .filter(|ch| !ch.is_control())
+                    .map(rusty_ui::TextInputKey::Char)
+            }),
     }
 }

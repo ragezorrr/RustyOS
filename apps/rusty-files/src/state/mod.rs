@@ -76,6 +76,11 @@ pub(crate) struct FilesAppState {
     pub(crate) last_anim_tick: Option<Instant>,
     pub caret_visible: bool,
     pub(crate) last_caret_tick: Instant,
+    pub epoch: Instant,
+    pub search_field: rusty_ui::TextField,
+    pub rename_field: rusty_ui::TextField,
+    pub goto_field: rusty_ui::TextField,
+    pub focus: rusty_ui::FocusScope,
     pub back_stack: Vec<NavigationHistoryEntry>,
     pub forward_stack: Vec<NavigationHistoryEntry>,
     pub tabs: Vec<FileTabState>,
@@ -172,6 +177,11 @@ impl FilesAppState {
             last_anim_tick: None,
             caret_visible: true,
             last_caret_tick: Instant::now(),
+            epoch: Instant::now(),
+            search_field: rusty_ui::TextField::search(rusty_ui::Rect::new(0, 0, 180, 32), "Search"),
+            rename_field: Self::default_rename_field(),
+            goto_field: Self::default_goto_field(),
+            focus: rusty_ui::FocusScope::new(),
             back_stack: Vec::new(),
             forward_stack: Vec::new(),
             tabs: Vec::new(),
@@ -210,6 +220,22 @@ impl FilesAppState {
 
         app.apply_startup_options(opts);
         app
+    }
+
+    fn default_rename_field() -> rusty_ui::TextField {
+        let mut f = rusty_ui::TextField::new(rusty_ui::Rect::new(0, 0, 220, 26), "Name");
+        f.font_size = 12.5;
+        f.corner_radius = 6.0;
+        f.padding_x = 6;
+        f
+    }
+
+    fn default_goto_field() -> rusty_ui::TextField {
+        let mut f = rusty_ui::TextField::new(rusty_ui::Rect::new(0, 0, 380, 32), "~/");
+        f.font_size = 13.0;
+        f.corner_radius = 8.0;
+        f.padding_x = 10;
+        f
     }
 
     fn apply_startup_options(&mut self, opts: &StartupOptions) {
@@ -764,6 +790,63 @@ mod tests {
             pal.accent,
             rusty_services::file_manager::accent_rgba_for_index(2, true)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn unified_text_field_editing_and_clipboard_work_for_search_and_dialogs()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let guard = TestHomeGuard::new("text-field-clipboard")?;
+        let locs = guard.locations();
+        let mut state = FilesAppState::new(locs.clone(), &StartupOptions::default());
+        state.complete_pending_loads_sync();
+
+        let mut fe = rusty_ui::UiFontEngine::new();
+        let mut mem = rusty_ui::MemoryClipboard::new();
+        let ctrl = rusty_ui::InputModifiers {
+            ctrl: true,
+            shift: false,
+            alt: false,
+        };
+        state.search_active = true;
+        assert!(state.apply_focused_paste("report", &mut fe));
+        assert_eq!(state.search_query, "report");
+        assert!(state.handle_focused_text_key(
+            rusty_ui::TextInputKey::Char('a'),
+            ctrl,
+            &mut fe,
+            &mut mem
+        ));
+        assert!(state.handle_focused_text_key(
+            rusty_ui::TextInputKey::Char('c'),
+            ctrl,
+            &mut fe,
+            &mut mem
+        ));
+        assert_eq!(
+            rusty_ui::ClipboardSink::get_text(&mut mem).as_deref(),
+            Some("report")
+        );
+
+        state.open_go_to_folder();
+        assert!(state.handle_focused_text_key(
+            rusty_ui::TextInputKey::Char('a'),
+            ctrl,
+            &mut fe,
+            &mut mem
+        ));
+        assert!(state.apply_focused_paste("~/Documents", &mut fe));
+        assert_eq!(
+            state.go_to_folder.as_ref().map(|g| g.input.as_str()),
+            Some("~/Documents")
+        );
+        assert!(state.handle_focused_text_key(
+            rusty_ui::TextInputKey::Escape,
+            rusty_ui::InputModifiers::default(),
+            &mut fe,
+            &mut mem,
+        ));
+        assert!(state.go_to_folder.is_none());
         Ok(())
     }
 }

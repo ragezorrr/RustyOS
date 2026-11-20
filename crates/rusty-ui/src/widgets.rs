@@ -86,6 +86,59 @@ impl ToggleSwitch {
         // White knob
         canvas.draw_circle_aa(knob_cx, knob_cy, knob_r, [255, 255, 255, 255]);
     }
+
+    /// Paints the toggle switch through [`crate::draw::UiPainter`] at interpolated thumb `progress` (`0.0..=1.0`).
+    pub fn paint_animated(
+        &self,
+        painter: &mut crate::draw::UiPainter<'_>,
+        progress: f32,
+        pal: &ThemePalette,
+    ) {
+        let p = progress.clamp(0.0, 1.0);
+        let r = self.rect.height as f32 * 0.5;
+        let off_bg: [u8; 4] = if pal.is_dark {
+            match self.state {
+                WidgetState::Pressed => [0x30, 0x30, 0x33, 255],
+                WidgetState::Hover => [0x42, 0x42, 0x46, 255],
+                _ => [0x39, 0x39, 0x3D, 255],
+            }
+        } else {
+            match self.state {
+                WidgetState::Pressed => [0xD0, 0xD0, 0xD4, 255],
+                WidgetState::Hover => [0xDF, 0xE0, 0xE4, 255],
+                _ => [0xE9, 0xE9, 0xEB, 255],
+            }
+        };
+        let on_bg: [u8; 4] = match self.state {
+            WidgetState::Pressed => [
+                ((pal.accent[0] as u16 * 8) / 10) as u8,
+                ((pal.accent[1] as u16 * 8) / 10) as u8,
+                ((pal.accent[2] as u16 * 8) / 10) as u8,
+                pal.accent[3],
+            ],
+            WidgetState::Hover => [
+                ((pal.accent[0] as u16 * 9) / 10) as u8,
+                ((pal.accent[1] as u16 * 9) / 10) as u8,
+                ((pal.accent[2] as u16 * 9) / 10) as u8,
+                pal.accent[3],
+            ],
+            _ => pal.accent,
+        };
+        let bg = [
+            (off_bg[0] as f32 + (on_bg[0] as f32 - off_bg[0] as f32) * p).round() as u8,
+            (off_bg[1] as f32 + (on_bg[1] as f32 - off_bg[1] as f32) * p).round() as u8,
+            (off_bg[2] as f32 + (on_bg[2] as f32 - off_bg[2] as f32) * p).round() as u8,
+            255,
+        ];
+        painter.fill_rounded_rect(self.rect, r, bg);
+        let knob_r = (r - 2.0).max(4.0);
+        let x_off = self.rect.x as f32 + r;
+        let x_on = self.rect.right() as f32 - r;
+        let knob_cx = x_off + (x_on - x_off) * p;
+        let knob_cy = self.rect.y as f32 + r;
+        painter.fill_circle(knob_cx, knob_cy + 0.5, knob_r + 0.5, [0, 0, 0, 35]);
+        painter.fill_circle(knob_cx, knob_cy, knob_r, [255, 255, 255, 255]);
+    }
 }
 
 /// Visual style of a push button.
@@ -195,6 +248,102 @@ impl PushButton {
                 self.rect.bottom() as f32 - 0.5,
                 1.0,
                 border_col,
+            );
+        }
+    }
+
+    /// Paints the button background and centered label onto [`crate::draw::UiPainter`].
+    pub fn paint_labeled(
+        &self,
+        painter: &mut crate::draw::UiPainter<'_>,
+        fonts: &mut crate::text::UiFontEngine,
+        label: &str,
+        pal: &ThemePalette,
+        focused: bool,
+    ) {
+        let (bg, text_col) = match self.style {
+            ButtonStyle::Primary => (
+                match self.state {
+                    WidgetState::Pressed => [
+                        ((pal.accent[0] as u16 * 8) / 10) as u8,
+                        ((pal.accent[1] as u16 * 8) / 10) as u8,
+                        ((pal.accent[2] as u16 * 8) / 10) as u8,
+                        255,
+                    ],
+                    WidgetState::Hover => [
+                        ((pal.accent[0] as u16 * 9) / 10) as u8,
+                        ((pal.accent[1] as u16 * 9) / 10) as u8,
+                        ((pal.accent[2] as u16 * 9) / 10) as u8,
+                        255,
+                    ],
+                    WidgetState::Disabled => [pal.accent[0], pal.accent[1], pal.accent[2], 100],
+                    WidgetState::Normal => pal.accent,
+                },
+                [
+                    255,
+                    255,
+                    255,
+                    if self.state == WidgetState::Disabled {
+                        160
+                    } else {
+                        255
+                    },
+                ],
+            ),
+            ButtonStyle::Destructive => (
+                match self.state {
+                    WidgetState::Pressed => [0xCC, 0x2F, 0x26, 255],
+                    WidgetState::Hover => [0xE6, 0x35, 0x2B, 255],
+                    WidgetState::Disabled => [0xFF, 0x3B, 0x30, 100],
+                    WidgetState::Normal => [0xFF, 0x3B, 0x30, 255],
+                },
+                [
+                    255,
+                    255,
+                    255,
+                    if self.state == WidgetState::Disabled {
+                        160
+                    } else {
+                        255
+                    },
+                ],
+            ),
+            ButtonStyle::Secondary => {
+                let bg = if pal.is_dark {
+                    match self.state {
+                        WidgetState::Pressed => [0x38, 0x38, 0x3C, 255],
+                        WidgetState::Hover => [0x48, 0x48, 0x4C, 255],
+                        WidgetState::Disabled => [0x2C, 0x2C, 0x2E, 100],
+                        WidgetState::Normal => [0x3A, 0x3A, 0x3C, 255],
+                    }
+                } else {
+                    match self.state {
+                        WidgetState::Pressed => [0xD8, 0xD9, 0xDD, 255],
+                        WidgetState::Hover => [0xE4, 0xE5, 0xE9, 255],
+                        WidgetState::Disabled => [0xEA, 0xEB, 0xEF, 100],
+                        WidgetState::Normal => [0xEE, 0xEF, 0xF2, 255],
+                    }
+                };
+                let tc = if self.state == WidgetState::Disabled {
+                    pal.text_muted
+                } else {
+                    pal.text_primary
+                };
+                (bg, tc)
+            }
+        };
+        painter.fill_rounded_rect(self.rect, self.corner_radius, bg);
+        if focused {
+            painter.draw_focus_ring(self.rect, self.corner_radius, pal.accent, 1.0);
+        }
+        if !label.is_empty() {
+            painter.draw_text_centered(
+                fonts,
+                label.to_owned(),
+                self.rect,
+                13.0,
+                self.style != ButtonStyle::Secondary,
+                text_col,
             );
         }
     }

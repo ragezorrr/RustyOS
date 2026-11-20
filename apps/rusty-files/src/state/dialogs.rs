@@ -87,6 +87,12 @@ impl FilesAppState {
             |p| format_go_to_display(p, &self.locations),
         );
         let suggestions = suggest_go_to_paths(&seed, current_dir.as_deref(), &self.locations, 6);
+        self.goto_field.buffer.set_text(&seed);
+        self.focus.set_focus(
+            rusty_ui::WidgetId::from_tag("files.goto"),
+            self.epoch.elapsed(),
+            false,
+        );
         self.go_to_folder = Some(GoToFolderState {
             input: seed,
             suggestions,
@@ -140,6 +146,7 @@ impl FilesAppState {
         };
         if let Some(gt) = &mut self.go_to_folder {
             gt.input = path.display().to_string();
+            self.goto_field.buffer.set_text(&gt.input);
         }
         self.submit_go_to_folder();
     }
@@ -178,6 +185,12 @@ impl FilesAppState {
             return;
         }
         self.popup = None;
+        self.rename_field.buffer.set_text(&entry.name);
+        self.focus.set_focus(
+            rusty_ui::WidgetId::from_tag("files.rename"),
+            self.epoch.elapsed(),
+            false,
+        );
         self.inline_rename = Some(InlineRenameState {
             target_path: entry.path.clone(),
             col_idx,

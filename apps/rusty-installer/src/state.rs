@@ -200,6 +200,23 @@ impl TextFieldId {
     }
 
     #[must_use]
+    pub(crate) const fn idx(self) -> usize {
+        match self {
+            Self::FullName => 0,
+            Self::Username => 1,
+            Self::Hostname => 2,
+            Self::Password => 3,
+            Self::ConfirmPassword => 4,
+            Self::WifiPassword => 5,
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn widget_id(self) -> rusty_ui::WidgetId {
+        rusty_ui::WidgetId::new(100 + self.idx() as u64)
+    }
+
+    #[must_use]
     pub(crate) fn prev(self) -> Self {
         if self == Self::WifiPassword {
             return Self::WifiPassword;
@@ -215,6 +232,7 @@ pub(crate) struct StartupOptions {
     pub env_kind: RunEnv,
     pub dry_run: bool,
     pub no_glass: bool,
+    pub no_gpu: bool,
     pub theme_override: Option<FilesThemeMode>,
     pub accent_override: Option<usize>,
     pub install_script: Option<PathBuf>,
@@ -279,6 +297,34 @@ pub(crate) struct CaretState {
     pub last_blink: Instant,
 }
 
+fn build_installer_text_fields(
+    full_name: &str,
+    username: &str,
+    hostname: &str,
+    default_pw: &str,
+) -> [rusty_ui::TextField; 6] {
+    let mk = |init: &str, placeholder: &str, masked: bool| {
+        let mut f = if masked {
+            rusty_ui::TextField::password(rusty_ui::Rect::new(0, 0, 200, 32), placeholder)
+        } else {
+            rusty_ui::TextField::new(rusty_ui::Rect::new(0, 0, 200, 32), placeholder)
+        };
+        f.font_size = 13.5;
+        f.corner_radius = 9.0;
+        f.padding_x = 11;
+        f.buffer.set_text(init);
+        f
+    };
+    [
+        mk(full_name, "Full Name", false),
+        mk(username, "Account Name", false),
+        mk(hostname, "Computer Name", false),
+        mk(default_pw, "Password", true),
+        mk(default_pw, "Verify Password", true),
+        mk("", "Wi-Fi Password", true),
+    ]
+}
+
 #[derive(Debug)]
 pub(crate) enum WorkerEvent {
     DisksLoaded(Vec<TargetDiskInfo>),
@@ -333,6 +379,9 @@ pub(crate) struct InstallerAppState {
     pub wifi_password: String,
     pub account: AccountDraft,
     pub caret: CaretState,
+    pub fields: [rusty_ui::TextField; 6],
+    pub focus: rusty_ui::FocusScope,
+    pub epoch: Instant,
     pub form_error: Option<String>,
 
     pub install_error: Option<String>,
@@ -425,6 +474,9 @@ impl InstallerAppState {
                 visible: true,
                 last_blink: Instant::now(),
             },
+            fields: build_installer_text_fields("RustyOS User", "rusty", "rustyos", default_pw),
+            focus: rusty_ui::FocusScope::new(),
+            epoch: Instant::now(),
             form_error: None,
             install_error: None,
             started_at: Instant::now(),
@@ -569,16 +621,17 @@ impl InstallerAppState {
         };
         if self.selected_wifi_idx != Some(idx) {
             self.wifi_password.clear();
+            self.fields[TextFieldId::WifiPassword.idx()]
+                .buffer
+                .set_text("");
         }
         self.selected_wifi_idx = Some(idx);
         self.network.connect_error = None;
         self.form_error = None;
         if ap.secure && !ap.known && !ap.connected {
-            self.caret.focused_field = Some(TextFieldId::WifiPassword);
-            self.caret.visible = true;
-            self.caret.last_blink = Instant::now();
+            self.set_focused_field(Some(TextFieldId::WifiPassword));
         } else {
-            self.caret.focused_field = None;
+            self.set_focused_field(None);
         }
         self.win.dirty = true;
     }
@@ -594,7 +647,7 @@ impl InstallerAppState {
         };
         let needs_pw = ap.secure && !ap.known && self.wifi_password.is_empty();
         if needs_pw && !ap.connected {
-            self.caret.focused_field = Some(TextFieldId::WifiPassword);
+            self.set_focused_field(Some(TextFieldId::WifiPassword));
             self.network.connect_error = Some(format!(
                 "Enter the Wi-Fi password for '{}' and click Connect",
                 ap.ssid
@@ -622,7 +675,10 @@ impl InstallerAppState {
             summary.detail = format!("Connected to Wi-Fi '{}'", ap.ssid);
             self.network = summary;
             self.wifi_password.clear();
-            self.caret.focused_field = None;
+            self.fields[TextFieldId::WifiPassword.idx()]
+                .buffer
+                .set_text("");
+            self.set_focused_field(None);
             return;
         }
 
@@ -1044,14 +1100,39 @@ impl InstallerAppState {
         }
     }
 
-    pub(crate) fn active_field_mut(&mut self) -> Option<&mut String> {
-        match self.caret.focused_field? {
-            TextFieldId::FullName => Some(&mut self.account.full_name),
-            TextFieldId::Username => Some(&mut self.account.username),
-            TextFieldId::Hostname => Some(&mut self.account.hostname),
-            TextFieldId::Password => Some(&mut self.account.password),
-            TextFieldId::ConfirmPassword => Some(&mut self.account.confirm_password),
-            TextFieldId::WifiPassword => Some(&mut self.wifi_password),
+    pub(crate) fn set_focused_field(&mut self, field: Option<TextFieldId>) {
+        self.caret.focused_field = field;
+        self.caret.visible = true;
+        self.caret.last_blink = Instant::now();
+        let elapsed = self.epoch.elapsed();
+        match field {
+            Some(f) => {
+                self.focus.set_focus(f.widget_id(), elapsed, false);
+                self.fields[f.idx()].caret_blink.reset(elapsed);
+            }
+            None => self.focus.clear_focus(elapsed, false),
+        }
+        self.win.dirty = true;
+    }
+
+    pub(crate) fn sync_draft_from_field(&mut self, field: TextFieldId) {
+        let val = self.fields[field.idx()].buffer.as_str().to_owned();
+        match field {
+            TextFieldId::FullName => self.account.full_name = val,
+            TextFieldId::Username => {
+                self.account.username_edited = !val.is_empty();
+                self.account.username = val;
+            }
+            TextFieldId::Hostname => self.account.hostname = val,
+            TextFieldId::Password => self.account.password = val,
+            TextFieldId::ConfirmPassword => self.account.confirm_password = val,
+            TextFieldId::WifiPassword => self.wifi_password = val,
+        }
+        if field == TextFieldId::FullName && !self.account.username_edited {
+            self.account.username = slugify_username(&self.account.full_name);
+            self.fields[TextFieldId::Username.idx()]
+                .buffer
+                .set_text(self.account.username.clone());
         }
     }
 
@@ -1063,16 +1144,13 @@ impl InstallerAppState {
         if sanitized.is_empty() {
             return;
         }
-        if let Some(buf) = self.active_field_mut()
-            && buf.len() + sanitized.len() <= 96
-        {
-            buf.push_str(&sanitized);
+        if self.fields[field.idx()].buffer.as_str().len() + sanitized.len() <= 96 {
+            self.fields[field.idx()].buffer.insert_str(&sanitized);
+            self.fields[field.idx()]
+                .caret_blink
+                .reset(self.epoch.elapsed());
         }
-        if field == TextFieldId::Username {
-            self.account.username_edited = true;
-        } else if field == TextFieldId::FullName && !self.account.username_edited {
-            self.account.username = slugify_username(&self.account.full_name);
-        }
+        self.sync_draft_from_field(field);
         self.form_error = None;
         self.caret.visible = true;
         self.caret.last_blink = Instant::now();
@@ -1083,18 +1161,55 @@ impl InstallerAppState {
         let Some(field) = self.caret.focused_field else {
             return;
         };
-        if let Some(buf) = self.active_field_mut() {
-            buf.pop();
+        if self.fields[field.idx()].buffer.backspace(false) {
+            self.fields[field.idx()]
+                .caret_blink
+                .reset(self.epoch.elapsed());
         }
-        if field == TextFieldId::Username {
-            self.account.username_edited = !self.account.username.is_empty();
-        } else if field == TextFieldId::FullName && !self.account.username_edited {
-            self.account.username = slugify_username(&self.account.full_name);
-        }
+        self.sync_draft_from_field(field);
         self.form_error = None;
         self.caret.visible = true;
         self.caret.last_blink = Instant::now();
         self.win.dirty = true;
+    }
+
+    pub(crate) fn handle_text_key(
+        &mut self,
+        key: rusty_ui::TextInputKey,
+        mods: rusty_ui::InputModifiers,
+        fonts: &mut rusty_ui::UiFontEngine,
+        clipboard: &mut dyn rusty_ui::ClipboardSink,
+    ) -> rusty_ui::TextInputEvent {
+        let Some(field) = self.caret.focused_field else {
+            return rusty_ui::TextInputEvent::Ignored;
+        };
+        let now = self.epoch.elapsed();
+        let ev = self.fields[field.idx()].handle_key(key, mods, now, fonts, clipboard);
+        match ev {
+            rusty_ui::TextInputEvent::Changed => {
+                if self.fields[field.idx()].buffer.as_str().len() > 96 {
+                    let trimmed: String = self.fields[field.idx()]
+                        .buffer
+                        .as_str()
+                        .chars()
+                        .take(96)
+                        .collect();
+                    self.fields[field.idx()].buffer.set_text(trimmed);
+                }
+                self.sync_draft_from_field(field);
+                self.form_error = None;
+                self.caret.visible = true;
+                self.caret.last_blink = Instant::now();
+                self.win.dirty = true;
+            }
+            rusty_ui::TextInputEvent::CaretMoved => {
+                self.caret.visible = true;
+                self.caret.last_blink = Instant::now();
+                self.win.dirty = true;
+            }
+            _ => {}
+        }
+        ev
     }
 
     pub(crate) fn cycle_focus(&mut self, reverse: bool) {
@@ -1110,10 +1225,7 @@ impl InstallerAppState {
             Some(cur) => cur.next(),
             None => TextFieldId::FullName,
         };
-        self.caret.focused_field = Some(next);
-        self.caret.visible = true;
-        self.caret.last_blink = Instant::now();
-        self.win.dirty = true;
+        self.set_focused_field(Some(next));
     }
 
     #[must_use]

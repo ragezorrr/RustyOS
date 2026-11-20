@@ -2,16 +2,25 @@
 //! (`RUSTYOS-065`, ADR-0030).
 
 use std::fmt;
+use std::os::fd::OwnedFd;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use rusty_services::file_manager::ListingTarget;
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState, Region, Surface},
-    delegate_compositor, delegate_output, delegate_pointer, delegate_registry, delegate_seat,
-    delegate_shm, delegate_xdg_popup, delegate_xdg_shell, delegate_xdg_window,
+    data_device_manager::{
+        DataDeviceManagerState, WritePipe,
+        data_device::{DataDevice, DataDeviceHandler},
+        data_offer::{DataOfferHandler, DragOffer},
+        data_source::DataSourceHandler,
+    },
+    delegate_compositor, delegate_data_device, delegate_keyboard, delegate_output,
+    delegate_pointer, delegate_registry, delegate_seat, delegate_shm, delegate_xdg_popup,
+    delegate_xdg_shell, delegate_xdg_window,
     output::{OutputHandler, OutputState},
     reexports::{
-        calloop::EventLoop,
+        calloop::{EventLoop, LoopHandle, ping},
         calloop_wayland_source::WaylandSource,
         csd_frame::WindowState,
         protocols::xdg::shell::client::{
@@ -23,6 +32,7 @@ use smithay_client_toolkit::{
     registry_handlers,
     seat::{
         Capability, SeatHandler, SeatState,
+        keyboard::{KeyEvent, KeyboardHandler, Keysym, Modifiers},
         pointer::{
             AxisScroll, BTN_LEFT, BTN_RIGHT, PointerEvent, PointerEventKind, PointerHandler,
         },
@@ -41,10 +51,13 @@ use smithay_client_toolkit::{
     },
 };
 use wayland_client::{
-    Connection, Dispatch, QueueHandle, WEnum,
+    Connection, Dispatch, EventQueue, QueueHandle,
     backend::WaylandError,
     globals::registry_queue_init,
-    protocol::{wl_keyboard, wl_output, wl_pointer, wl_seat, wl_shm, wl_surface},
+    protocol::{
+        wl_data_device, wl_data_device_manager::DndAction, wl_data_source, wl_keyboard, wl_output,
+        wl_pointer, wl_seat, wl_shm, wl_surface,
+    },
 };
 
 use crate::layout::{
@@ -52,7 +65,10 @@ use crate::layout::{
     WINDOW_CORNER_RADIUS, compute_layout, compute_popup_surface_spec, hit_test, scroll_area_at,
 };
 use crate::liquid_glass::{GlassStyle, RustyosLiquidGlassManagerV1, RustyosSurfaceGlassV1};
-use crate::render::{render_popup_surface_pixels_with_style, render_window_pixels_with_options};
+use crate::render::{
+    canvas::with_font_engine, render_popup_surface_pixels_with_style,
+    render_window_pixels_with_options,
+};
 use crate::state::OpenPopupMenu;
 use crate::state::{FilesAppState, ScrollTargetArea, SearchScope, StartupOptions};
 use rusty_services::file_manager::UserFileLocations;
@@ -137,19 +153,37 @@ impl Drop for ActiveWaylandPopup {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RenderBackend {
+    Gpu,
+    Cpu,
+}
+
+#[allow(clippy::struct_excessive_bools)]
 struct WaylandClientData {
+    conn: Connection,
     qh: QueueHandle<Self>,
+    loop_handle: LoopHandle<'static, Self>,
     registry_state: RegistryState,
     output_state: OutputState,
     seat_state: SeatState,
     compositor_state: CompositorState,
     shm: Shm,
+    data_device_manager: Option<DataDeviceManagerState>,
+    data_device: Option<DataDevice>,
+    clipboard: rusty_ui::WaylandClipboardBridge,
+    paste_ping: ping::Ping,
+    last_input_serial: u32,
     xdg_shell: XdgShell,
     glass_manager: Option<RustyosLiquidGlassManagerV1>,
     window_glass: Option<RustyosSurfaceGlassV1>,
     last_glass_state: Option<(u32, u32, bool)>,
     pool: SlotPool,
     window: Option<Window>,
+    gles: Option<rusty_ui::GlesSurfaceRenderer>,
+    render_backend: RenderBackend,
+    cpu_backbuf: Vec<u8>,
+    frame_rev: u64,
     main_buffers: Vec<Buffer>,
     buffer_size: (u32, u32),
     frame_sent_at: Option<Instant>,
@@ -158,12 +192,13 @@ struct WaylandClientData {
     seat: Option<wl_seat::WlSeat>,
     pointer: Option<wl_pointer::WlPointer>,
     keyboard: Option<wl_keyboard::WlKeyboard>,
-    mod_shift: bool,
-    mod_ctrl: bool,
+    modifiers: Modifiers,
     width: u32,
     height: u32,
     configured: bool,
     pointer_pos: (f64, f64),
+    pointer_pressed: bool,
+    click_streak: u8,
     last_click: Option<(Instant, FilesHit)>,
     last_title: String,
     app: FilesAppState,
@@ -371,6 +406,7 @@ impl WaylandClientData {
     }
 
     fn execute_left_click(&mut self, px: f64, py: f64, serial: u32) {
+        self.last_input_serial = serial;
         self.popup_trigger_serial = Some(serial);
         let prev_popup = self.app.popup.clone();
         if prev_popup.is_some() {
@@ -383,14 +419,16 @@ impl WaylandClientData {
         };
 
         let now = Instant::now();
-        let double_click = self.last_click.as_ref().is_some_and(|(t, prev)| {
+        let multi = self.last_click.as_ref().is_some_and(|(t, prev)| {
             now.duration_since(*t) <= Duration::from_millis(400) && prev == &hit
         });
-        self.last_click = if double_click {
-            None
+        self.click_streak = if multi {
+            self.click_streak.saturating_add(1).min(3)
         } else {
-            Some((now, hit.clone()))
+            1
         };
+        let double_click = self.click_streak == 2;
+        self.last_click = Some((now, hit.clone()));
 
         match hit {
             FilesHit::ResizeEdge(zone) => {
@@ -410,7 +448,7 @@ impl WaylandClientData {
                 }
             }
             FilesHit::TrafficMaximize => self.toggle_maximize(),
-            other => self.handle_app_hit(other, double_click, &layout, px, prev_popup.as_ref()),
+            other => self.handle_app_hit(other, double_click, &layout, px, py, prev_popup.as_ref()),
         }
     }
 
@@ -433,6 +471,7 @@ impl WaylandClientData {
         double_click: bool,
         layout: &FilesLayout,
         px: f64,
+        py: f64,
         prev_popup: Option<&OpenPopupMenu>,
     ) {
         if !matches!(hit, FilesHit::InlineRenameBox) && self.app.inline_rename.is_some() {
@@ -463,7 +502,7 @@ impl WaylandClientData {
                     self.app.set_search_scope(SearchScope::ThisFolder);
                 } else {
                     self.app.search_active = true;
-                    self.app.reset_caret_blink();
+                    self.press_text_box(0, layout.search_pill_rect, px, py);
                 }
                 self.app.dirty = true;
             }
@@ -501,11 +540,18 @@ impl WaylandClientData {
             FilesHit::PreviewTrashOrRestore => self.app.action_move_selected_to_trash(),
             FilesHit::PreviewTag { path, color } => self.app.toggle_tag_on_path(&path, color),
             FilesHit::PopupItem(cmd) => self.execute_popup_command(cmd),
-            other => self.handle_stage_b_hit(other, double_click),
+            other => self.handle_stage_b_hit(other, double_click, layout, px, py),
         }
     }
 
-    fn handle_stage_b_hit(&mut self, hit: FilesHit, double_click: bool) {
+    fn handle_stage_b_hit(
+        &mut self,
+        hit: FilesHit,
+        double_click: bool,
+        layout: &FilesLayout,
+        px: f64,
+        py: f64,
+    ) {
         match hit {
             FilesHit::IconCell { idx } | FilesHit::GalleryThumb { idx } => {
                 self.app.select_entry(0, idx, double_click);
@@ -564,8 +610,21 @@ impl WaylandClientData {
                     gt.suggestions.clear();
                     gt.selected_suggestion = 0;
                     gt.error = None;
+                    self.app.goto_field.buffer.set_text("");
                     self.app.reset_caret_blink();
                     self.app.dirty = true;
+                }
+            }
+            FilesHit::GoToModalBody => {
+                if let Some(gt) = &layout.overlays.go_to_folder
+                    && gt.input_rect.contains_f64(px, py)
+                {
+                    self.press_text_box(1, gt.input_rect, px, py);
+                }
+            }
+            FilesHit::InlineRenameBox => {
+                if let Some(ir) = layout.overlays.inline_rename_rect {
+                    self.press_text_box(2, ir, px, py);
                 }
             }
             FilesHit::GoToSuggestion(idx) => self.app.pick_go_to_suggestion(idx),
@@ -573,6 +632,111 @@ impl WaylandClientData {
             FilesHit::ConflictDecision(decision) => self.app.resolve_transfer_conflict(decision),
             _ => {}
         }
+    }
+
+    fn press_text_box(&mut self, which: u8, rect: crate::layout::Rect, px: f64, py: f64) {
+        let ui_rect = rusty_ui::Rect::new(
+            rect.x,
+            rect.y,
+            u32::try_from(rect.w.max(1)).unwrap_or(1),
+            u32::try_from(rect.h.max(1)).unwrap_or(1),
+        );
+        self.app.sync_text_fields_from_strings();
+        let click_n = self.click_streak;
+        let elapsed = self.app.epoch.elapsed();
+        let tf = match which {
+            1 => &mut self.app.goto_field,
+            2 => &mut self.app.rename_field,
+            _ => &mut self.app.search_field,
+        };
+        tf.rect = ui_rect;
+        with_font_engine(|fe| {
+            let _ = tf.on_pointer_down(px, py, click_n, elapsed, fe);
+        });
+        self.app.reset_caret_blink();
+        self.app.dirty = true;
+    }
+
+    fn sync_clipboard_io(&mut self) {
+        if let Some(text) = self.clipboard.take_pending_copy()
+            && let (Some(ddm), Some(dd)) = (&self.data_device_manager, &self.data_device)
+        {
+            let source = ddm.create_copy_paste_source(&self.qh, rusty_ui::CLIPBOARD_MIME_TYPES);
+            source.set_selection(dd, self.last_input_serial);
+            self.clipboard.register_source(source.inner().clone(), text);
+        }
+        if self.clipboard.take_pending_paste_request()
+            && let Some(dd) = &self.data_device
+            && let Some(offer) = dd.data().selection_offer()
+        {
+            let mime = offer.with_mime_types(rusty_ui::WaylandClipboardBridge::pick_utf8_mime);
+            if let Some(mime) = mime
+                && let Ok(read_pipe) = offer.receive(mime)
+            {
+                let _ = self.conn.flush();
+                let wake = self.paste_ping.clone();
+                self.clipboard
+                    .spawn_receive_from_fd(OwnedFd::from(read_pipe), move || wake.ping());
+            }
+        }
+    }
+
+    fn handle_key(&mut self, keysym: Keysym, utf8: Option<&str>) {
+        if let Some(cached) = &self.layout_cache {
+            self.app.last_icon_grid_cols =
+                FilesAppState::icon_grid_columns_for_width(cached.content_rect.w);
+        }
+        if self.app.has_focused_text_input() {
+            let nav_gt = self.app.go_to_folder.is_some()
+                && matches!(
+                    keysym,
+                    Keysym::Up | Keysym::Down | Keysym::Tab | Keysym::ISO_Left_Tab
+                );
+            if !nav_gt && let Some(ui_key) = map_keysym_to_ui(keysym, utf8) {
+                let mods = rusty_ui::InputModifiers {
+                    ctrl: self.modifiers.ctrl,
+                    shift: self.modifiers.shift,
+                    alt: self.modifiers.alt,
+                };
+                let handled = with_font_engine(|fe| {
+                    self.app
+                        .handle_focused_text_key(ui_key, mods, fe, &mut self.clipboard)
+                });
+                self.sync_clipboard_io();
+                if handled {
+                    return;
+                }
+            }
+        }
+        let (key_name, ch_opt) = keysym_to_name_and_text(keysym, utf8);
+        let mut buf = [0_u8; 4];
+        let text_owned = utf8
+            .filter(|s| !s.is_empty() && s.chars().all(|c| !c.is_control()))
+            .map(str::to_owned)
+            .or_else(|| ch_opt.map(|ch| ch.encode_utf8(&mut buf).to_owned()));
+        self.app.handle_key_input(
+            key_name,
+            text_owned.as_deref(),
+            self.modifiers.ctrl,
+            self.modifiers.shift,
+        );
+    }
+
+    fn update_active_text_drag(&mut self, px: f64) -> bool {
+        if !self.pointer_pressed || !self.app.has_focused_text_input() {
+            return false;
+        }
+        with_font_engine(|fe| {
+            if self.app.inline_rename.is_some() {
+                self.app.rename_field.on_pointer_move(px, fe)
+            } else if self.app.go_to_folder.is_some() {
+                self.app.goto_field.on_pointer_move(px, fe)
+            } else if self.app.search_active {
+                self.app.search_field.on_pointer_move(px, fe)
+            } else {
+                false
+            }
+        })
     }
 
     fn execute_right_click(&mut self, px: f64, py: f64, serial: u32) {
@@ -721,7 +885,7 @@ impl WaylandClientData {
 
         let effective_h = if h_delta.abs() >= 0.01 {
             (h_delta, h_smooth)
-        } else if self.mod_shift && v_delta.abs() >= 0.01 {
+        } else if self.modifiers.shift && v_delta.abs() >= 0.01 {
             (v_delta, v_smooth)
         } else {
             (0.0, false)
@@ -737,7 +901,7 @@ impl WaylandClientData {
             if self.app.view_mode == rusty_services::file_manager::FileViewMode::Columns {
                 self.layout_cache = None;
             }
-            if self.mod_shift {
+            if self.modifiers.shift {
                 return;
             }
         }
@@ -830,19 +994,44 @@ pub(crate) fn run(options: &StartupOptions) -> Result<(), WaylandAppError> {
 
     window.commit();
 
+    let (paste_ping, paste_source) =
+        ping::make_ping().map_err(|e| WaylandAppError::EventLoop(e.to_string()))?;
+    let mut event_loop: EventLoop<'static, WaylandClientData> =
+        EventLoop::try_new().map_err(|e| WaylandAppError::EventLoop(e.to_string()))?;
+    let loop_handle = event_loop.handle();
+    insert_files_sources(&loop_handle, &conn, queue, paste_source)?;
+
+    let no_gpu_env = std::env::var_os("RUSTYOS_NO_GPU").is_some_and(|v| v == "1");
+    let render_backend = if options.no_gpu || no_gpu_env {
+        RenderBackend::Cpu
+    } else {
+        RenderBackend::Gpu
+    };
+
     let mut data = WaylandClientData {
-        qh,
+        conn: conn.clone(),
+        qh: qh.clone(),
+        loop_handle,
         registry_state: RegistryState::new(&globals),
-        output_state: OutputState::new(&globals, &queue.handle()),
-        seat_state: SeatState::new(&globals, &queue.handle()),
+        output_state: OutputState::new(&globals, &qh),
+        seat_state: SeatState::new(&globals, &qh),
         compositor_state,
         shm,
+        data_device_manager: DataDeviceManagerState::bind(&globals, &qh).ok(),
+        data_device: None,
+        clipboard: rusty_ui::WaylandClipboardBridge::new(),
+        paste_ping,
+        last_input_serial: 0,
         xdg_shell,
         glass_manager,
         window_glass,
         last_glass_state: None,
         pool,
         window: Some(window),
+        gles: None,
+        render_backend,
+        cpu_backbuf: Vec::new(),
+        frame_rev: 0,
         main_buffers: Vec::new(),
         buffer_size: (DEFAULT_WIDTH, DEFAULT_HEIGHT),
         frame_sent_at: None,
@@ -851,23 +1040,18 @@ pub(crate) fn run(options: &StartupOptions) -> Result<(), WaylandAppError> {
         seat: None,
         pointer: None,
         keyboard: None,
-        mod_shift: false,
-        mod_ctrl: false,
+        modifiers: Modifiers::default(),
         width: DEFAULT_WIDTH,
         height: DEFAULT_HEIGHT,
         configured: false,
         pointer_pos: (0.0, 0.0),
+        pointer_pressed: false,
+        click_streak: 1,
         last_click: None,
         last_title: initial_title,
         app,
         layout_cache: None,
     };
-
-    let mut event_loop: EventLoop<'static, WaylandClientData> =
-        EventLoop::try_new().map_err(|e| WaylandAppError::EventLoop(e.to_string()))?;
-    WaylandSource::new(conn.clone(), queue)
-        .insert(event_loop.handle())
-        .map_err(|e| WaylandAppError::EventLoop(format!("{e:?}")))?;
 
     while data.app.is_running() {
         let now = Instant::now();
@@ -953,13 +1137,78 @@ fn acquire_reusable_buffer(
 }
 
 #[allow(clippy::cast_possible_wrap)]
+fn try_draw_files_gles(data: &mut WaylandClientData, layout: &FilesLayout, w: u32, h: u32) -> bool {
+    if data.gles.is_none() {
+        return false;
+    }
+    let len = (w as usize) * (h as usize) * 4;
+    if data.cpu_backbuf.len() != len {
+        data.cpu_backbuf.resize(len, 0);
+    }
+    let sidebar_glass = data.window_glass.is_some() && !data.app.reduce_transparency;
+    render_window_pixels_with_options(
+        &mut data.cpu_backbuf,
+        w,
+        h,
+        &data.app,
+        layout,
+        false,
+        sidebar_glass,
+    );
+    data.frame_rev = data.frame_rev.wrapping_add(1);
+    let rev = data.frame_rev;
+    let pixels: Arc<[u8]> = Arc::from(data.cpu_backbuf.as_slice());
+    let mut dl = rusty_ui::UiDrawList::new();
+    {
+        let mut painter = rusty_ui::UiPainter::new(&mut dl);
+        painter.draw_image(
+            rusty_ui::Rect::new(0, 0, w, h),
+            rev,
+            w,
+            h,
+            pixels,
+            rusty_ui::PixelFormat::Bgra8888,
+        );
+    }
+    if let Some(win) = &data.window {
+        win.set_window_geometry(0, 0, w, h);
+        win.wl_surface().frame(&data.qh, win.wl_surface().clone());
+    }
+    let wi = i32::try_from(w).unwrap_or(1);
+    let hi = i32::try_from(h).unwrap_or(1);
+    let res = if let Some(gles) = &mut data.gles {
+        with_font_engine(|fe| gles.render_draw_list(&dl, fe, wi, hi, [0, 0, 0, 0]))
+    } else {
+        Ok(())
+    };
+    match res {
+        Ok(()) => {
+            data.frame_sent_at = Some(Instant::now());
+            true
+        }
+        Err(err) => {
+            tracing::warn!(%err, "rusty-files GLES2 swap failed; falling back to wl_shm");
+            data.gles = None;
+            data.render_backend = RenderBackend::Cpu;
+            false
+        }
+    }
+}
+
+#[allow(clippy::cast_possible_wrap)]
 fn draw_main_frame(data: &mut WaylandClientData) -> Result<(), WaylandAppError> {
     let layout = data.layout();
+    if data.window.is_none() {
+        return Ok(());
+    }
+    let w = data.width.max(1);
+    let h = data.height.max(1);
+    if try_draw_files_gles(data, &layout, w, h) {
+        return Ok(());
+    }
     let Some(win) = &data.window else {
         return Ok(());
     };
-    let w = data.width.max(1);
-    let h = data.height.max(1);
     if data.buffer_size != (w, h) {
         data.main_buffers.clear();
         data.buffer_size = (w, h);
@@ -1033,7 +1282,9 @@ delegate_output!(WaylandClientData);
 delegate_compositor!(WaylandClientData);
 delegate_shm!(WaylandClientData);
 delegate_seat!(WaylandClientData);
+delegate_keyboard!(WaylandClientData);
 delegate_pointer!(WaylandClientData);
+delegate_data_device!(WaylandClientData);
 delegate_xdg_shell!(WaylandClientData);
 delegate_xdg_window!(WaylandClientData);
 delegate_xdg_popup!(WaylandClientData);
@@ -1131,7 +1382,12 @@ impl SeatHandler for WaylandClientData {
     fn seat_state(&mut self) -> &mut SeatState {
         &mut self.seat_state
     }
-    fn new_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, seat: wl_seat::WlSeat) {
+    fn new_seat(&mut self, _: &Connection, qh: &QueueHandle<Self>, seat: wl_seat::WlSeat) {
+        if self.data_device.is_none()
+            && let Some(ddm) = &self.data_device_manager
+        {
+            self.data_device = Some(ddm.get_data_device(qh, &seat));
+        }
         if self.seat.is_none() {
             self.seat = Some(seat);
         }
@@ -1152,8 +1408,19 @@ impl SeatHandler for WaylandClientData {
         {
             self.pointer = Some(ptr);
         }
-        if cap == Capability::Keyboard && self.keyboard.is_none() {
-            self.keyboard = Some(seat.get_keyboard(qh, ()));
+        if cap == Capability::Keyboard
+            && self.keyboard.is_none()
+            && let Ok(kbd) = self.seat_state.get_keyboard_with_repeat(
+                qh,
+                &seat,
+                None,
+                self.loop_handle.clone(),
+                Box::new(|state, _kbd, ev| {
+                    state.handle_key(ev.keysym, ev.utf8.as_deref());
+                }),
+            )
+        {
+            self.keyboard = Some(kbd);
         }
     }
     fn remove_capability(
@@ -1210,6 +1477,25 @@ impl WindowHandler for WaylandClientData {
         let next_focused = configure.state.contains(WindowState::ACTIVATED);
         if self.app.focused != next_focused {
             self.app.focused = next_focused;
+        }
+        if self.render_backend == RenderBackend::Gpu
+            && self.gles.is_none()
+            && let Some(win) = &self.window
+        {
+            match rusty_ui::GlesSurfaceRenderer::new(
+                self.conn.backend().display_ptr().cast(),
+                win.wl_surface(),
+                new_w.cast_signed(),
+                new_h.cast_signed(),
+            ) {
+                Ok(renderer) => {
+                    self.gles = Some(renderer);
+                }
+                Err(err) => {
+                    tracing::warn!(%err, "rusty-files GLES2 unavailable; using CPU wl_shm fallback");
+                    self.render_backend = RenderBackend::Cpu;
+                }
+            }
         }
         self.configured = true;
         self.frame_sent_at = None;
@@ -1288,6 +1574,11 @@ impl PointerHandler for WaylandClientData {
                 self.app.dirty = true;
             }
             match ev.kind {
+                PointerEventKind::Motion { .. } => {
+                    if self.update_active_text_drag(px) {
+                        self.app.dirty = true;
+                    }
+                }
                 PointerEventKind::Leave { .. } => {
                     if self.app.traffic_hovered {
                         self.app.traffic_hovered = false;
@@ -1297,10 +1588,19 @@ impl PointerHandler for WaylandClientData {
                 PointerEventKind::Press { button, serial, .. } => {
                     let (px, py) = ev.position;
                     if button == BTN_LEFT {
+                        self.pointer_pressed = true;
                         self.execute_left_click(px, py, serial);
                     } else if button == BTN_RIGHT {
                         self.execute_right_click(px, py, serial);
                     }
+                }
+                PointerEventKind::Release {
+                    button: BTN_LEFT, ..
+                } => {
+                    self.pointer_pressed = false;
+                    self.app.search_field.on_pointer_up();
+                    self.app.rename_field.on_pointer_up();
+                    self.app.goto_field.on_pointer_up();
                 }
                 PointerEventKind::Axis {
                     horizontal,
@@ -1322,92 +1622,231 @@ impl PointerHandler for WaylandClientData {
     }
 }
 
-impl Dispatch<wl_keyboard::WlKeyboard, ()> for WaylandClientData {
-    fn event(
-        state: &mut Self,
-        _: &wl_keyboard::WlKeyboard,
-        event: wl_keyboard::Event,
-        (): &(),
+fn insert_files_sources(
+    loop_handle: &LoopHandle<'static, WaylandClientData>,
+    conn: &Connection,
+    queue: EventQueue<WaylandClientData>,
+    paste_source: ping::PingSource,
+) -> Result<(), WaylandAppError> {
+    WaylandSource::new(conn.clone(), queue)
+        .insert(loop_handle.clone())
+        .map_err(|e| WaylandAppError::EventLoop(format!("{e:?}")))?;
+    loop_handle
+        .insert_source(paste_source, |(), (), data| {
+            if let Some(pasted) = data.clipboard.poll_received_paste() {
+                let changed = with_font_engine(|fe| data.app.apply_focused_paste(&pasted, fe));
+                if changed {
+                    data.app.dirty = true;
+                }
+            }
+        })
+        .map_err(|e| WaylandAppError::EventLoop(format!("{e:?}")))?;
+    Ok(())
+}
+
+impl KeyboardHandler for WaylandClientData {
+    fn enter(
+        &mut self,
         _: &Connection,
         _: &QueueHandle<Self>,
+        _: &wl_keyboard::WlKeyboard,
+        _: &wl_surface::WlSurface,
+        _: u32,
+        _: &[u32],
+        _: &[Keysym],
     ) {
-        match event {
-            wl_keyboard::Event::Modifiers { mods_depressed, .. } => {
-                state.mod_shift = (mods_depressed & 1) != 0;
-                state.mod_ctrl = (mods_depressed & 4) != 0;
-            }
-            wl_keyboard::Event::Leave { .. } => {
-                state.mod_shift = false;
-                state.mod_ctrl = false;
-            }
-            wl_keyboard::Event::Key {
-                key,
-                state: WEnum::Value(wl_keyboard::KeyState::Pressed),
-                ..
-            } => {
-                if let Some(cached) = &state.layout_cache {
-                    state.app.last_icon_grid_cols =
-                        FilesAppState::icon_grid_columns_for_width(cached.content_rect.w);
-                }
-                let (key_name, utf8_opt) = decode_evdev_key(key, state.mod_shift);
-                let mut utf8_buf = [0_u8; 4];
-                let text = utf8_opt.map(|ch| ch.encode_utf8(&mut utf8_buf) as &str);
-                state
-                    .app
-                    .handle_key_input(key_name, text, state.mod_ctrl, state.mod_shift);
-            }
-            _ => {}
-        }
+    }
+    fn leave(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_keyboard::WlKeyboard,
+        _: &wl_surface::WlSurface,
+        _: u32,
+    ) {
+        self.modifiers = Modifiers::default();
+    }
+    fn press_key(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_keyboard::WlKeyboard,
+        _: u32,
+        event: KeyEvent,
+    ) {
+        self.handle_key(event.keysym, event.utf8.as_deref());
+    }
+    fn release_key(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_keyboard::WlKeyboard,
+        _: u32,
+        _: KeyEvent,
+    ) {
+    }
+    fn update_modifiers(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_keyboard::WlKeyboard,
+        _: u32,
+        modifiers: Modifiers,
+        _: u32,
+    ) {
+        self.modifiers = modifiers;
     }
 }
 
-const fn decode_evdev_key(evdev_code: u32, shift: bool) -> (&'static str, Option<char>) {
-    match evdev_code {
-        1 => ("Escape", None),
-        14 => ("BackSpace", None),
-        15 => ("Tab", None),
-        28 | 96 => ("Return", None),
-        57 => ("Space", Some(' ')),
-        60 => ("F2", None),
-        103 => ("Up", None),
-        105 => ("Left", None),
-        106 => ("Right", None),
-        108 => ("Down", None),
-        111 => ("Delete", None),
-        2..=11 => {
-            let digits = if shift {
-                ['!', '@', '#', '$', '%', '^', '&', '*', '(', ')']
-            } else {
-                ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0']
-            };
-            ("", Some(digits[(evdev_code - 2) as usize]))
-        }
-        12 => ("", Some(if shift { '_' } else { '-' })),
-        13 => ("", Some(if shift { '+' } else { '=' })),
-        16..=25 => {
-            let row = b"qwertyuiop";
-            let ch = row[(evdev_code - 16) as usize] as char;
-            ("", Some(if shift { ch.to_ascii_uppercase() } else { ch }))
-        }
-        26 => ("", Some(if shift { '{' } else { '[' })),
-        27 => ("", Some(if shift { '}' } else { ']' })),
-        30..=38 => {
-            let row = b"asdfghjkl";
-            let ch = row[(evdev_code - 30) as usize] as char;
-            ("", Some(if shift { ch.to_ascii_uppercase() } else { ch }))
-        }
-        39 => ("", Some(if shift { ':' } else { ';' })),
-        40 => ("", Some(if shift { '"' } else { '\'' })),
-        41 => ("", Some(if shift { '~' } else { '`' })),
-        43 => ("", Some(if shift { '|' } else { '\\' })),
-        44..=50 => {
-            let row = b"zxcvbnm";
-            let ch = row[(evdev_code - 44) as usize] as char;
-            ("", Some(if shift { ch.to_ascii_uppercase() } else { ch }))
-        }
-        51 => ("", Some(if shift { '<' } else { ',' })),
-        52 => ("", Some(if shift { '>' } else { '.' })),
-        53 => ("", Some(if shift { '?' } else { '/' })),
-        _ => ("", None),
+impl DataDeviceHandler for WaylandClientData {
+    fn enter(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_data_device::WlDataDevice,
+        _: f64,
+        _: f64,
+        _: &wl_surface::WlSurface,
+    ) {
     }
+    fn leave(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_data_device::WlDataDevice) {}
+    fn motion(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_data_device::WlDataDevice,
+        _: f64,
+        _: f64,
+    ) {
+    }
+    fn selection(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_data_device::WlDataDevice,
+    ) {
+    }
+    fn drop_performed(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_data_device::WlDataDevice,
+    ) {
+    }
+}
+
+impl DataOfferHandler for WaylandClientData {
+    fn source_actions(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &mut DragOffer,
+        _: DndAction,
+    ) {
+    }
+    fn selected_action(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &mut DragOffer,
+        _: DndAction,
+    ) {
+    }
+}
+
+impl DataSourceHandler for WaylandClientData {
+    fn accept_mime(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_data_source::WlDataSource,
+        _: Option<String>,
+    ) {
+    }
+    fn send_request(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        source: &wl_data_source::WlDataSource,
+        mime: String,
+        write_pipe: WritePipe,
+    ) {
+        self.clipboard
+            .serve_send_request(source, &mime, OwnedFd::from(write_pipe));
+    }
+    fn cancelled(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        source: &wl_data_source::WlDataSource,
+    ) {
+        self.clipboard.remove_source(source);
+    }
+    fn dnd_dropped(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_data_source::WlDataSource,
+    ) {
+    }
+    fn dnd_finished(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_data_source::WlDataSource,
+    ) {
+    }
+    fn action(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_data_source::WlDataSource,
+        _: DndAction,
+    ) {
+    }
+}
+
+fn map_keysym_to_ui(keysym: Keysym, utf8: Option<&str>) -> Option<rusty_ui::TextInputKey> {
+    match keysym {
+        Keysym::Left => Some(rusty_ui::TextInputKey::Left),
+        Keysym::Right => Some(rusty_ui::TextInputKey::Right),
+        Keysym::Home => Some(rusty_ui::TextInputKey::Home),
+        Keysym::End => Some(rusty_ui::TextInputKey::End),
+        Keysym::BackSpace => Some(rusty_ui::TextInputKey::Backspace),
+        Keysym::Delete => Some(rusty_ui::TextInputKey::Delete),
+        Keysym::Return | Keysym::KP_Enter => Some(rusty_ui::TextInputKey::Enter),
+        Keysym::Escape => Some(rusty_ui::TextInputKey::Escape),
+        _ => utf8
+            .and_then(|s| s.chars().next())
+            .filter(|ch| !ch.is_control())
+            .map(rusty_ui::TextInputKey::Char)
+            .or_else(|| {
+                keysym
+                    .key_char()
+                    .filter(|ch| !ch.is_control())
+                    .map(rusty_ui::TextInputKey::Char)
+            }),
+    }
+}
+
+fn keysym_to_name_and_text(keysym: Keysym, utf8: Option<&str>) -> (&'static str, Option<char>) {
+    let name = match keysym {
+        Keysym::Escape => "Escape",
+        Keysym::BackSpace => "BackSpace",
+        Keysym::Tab | Keysym::ISO_Left_Tab => "Tab",
+        Keysym::Return | Keysym::KP_Enter => "Return",
+        Keysym::space => "Space",
+        Keysym::F2 => "F2",
+        Keysym::Up => "Up",
+        Keysym::Down => "Down",
+        Keysym::Left => "Left",
+        Keysym::Right => "Right",
+        Keysym::Delete => "Delete",
+        _ => "",
+    };
+    let ch = utf8
+        .and_then(|s| s.chars().next())
+        .filter(|c| !c.is_control())
+        .or_else(|| keysym.key_char().filter(|c| !c.is_control()));
+    (name, ch)
 }

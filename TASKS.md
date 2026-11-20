@@ -2272,6 +2272,24 @@ hardware/software context и низкие накладные расходы.
 - **Tests:** 324 пройденных unit-теста workspace (`4` `rusty-animation`, `202` `rusty-compositor`, `17` `rusty-files`, `13` `rusty-installer`, `3` `rusty-ipc`, `43` `rusty-services` + `1` пропущенный D-Bus BlueZ тест, `12` `rusty-settings`, `15` `rusty-terminal`, `8` `rusty-ui`, `7` `rusty-wm`).
 - **Risks:** Нет; `bounds_and_offsets` окон не изменились, Direct Scanout не затронут.
 
+### RUSTYOS-130 — Полноценный клиентский UI-тулкит `crates/rusty-ui`, dual GLES 2.0 / CPU рендерер и миграция системных приложений (`RUSTYOS-130 Вариант 1`)
+
+- **Status:** Done (`RUSTYOS-130 Вариант 1` — утверждённый объём выполнен)
+- **Goal:** Превратить `crates/rusty-ui` в единый клиентский UI-тулкит с клавиатурным фокусом, выделением/копированием текста (`wl_data_device`), стандартными контролами и анимациями (`rusty-animation` + `reduced_motion`), добавить аппаратный `Wayland-EGL + GLES 2.0` презентер поверх `UiDrawList` с CPU `wl_shm` fallback и перевести `rusty-installer`, `rusty-settings` и `rusty-files` на общий тулкит и `UiFontEngine`.
+- **Dependencies:** `RUSTYOS-113`, `RUSTYOS-128`, `RUSTYOS-129`.
+- **Scope:**
+  - `Cargo.toml`, `crates/rusty-ui/{Cargo.toml,build.rs,src/*}`: добавлены `text.rs` (`UiFontEngine`), `motion.rs` (`ToggleMotion`, `HoverPressMotion`, `ScrollMotion`, `CaretBlink`), `focus.rs` (`WidgetId`, `FocusScope`), `clipboard.rs` (`WaylandClipboardBridge`, `MemoryClipboard`, `ClipboardSink`), `draw.rs` (`UiDrawList`, `UiPainter`, `render_draw_list_to_canvas`), `gpu_gles.rs` (`GlesSurfaceRenderer` на `gl_generator` EGL 1.5 / GLES 2.0 + `wayland-egl`, изолированный `#![allow(unsafe_code)]`), `text_input.rs` (`TextField`/`TextBuffer`), `scroll.rs` (`ScrollView`), `controls.rs` (`DropdownSelect`, `SegmentedTabs`, `Checkbox`, `Slider`), `list.rs` (`SelectableList`), `dialog.rs` (`DialogSheet`), `ContextMenuSession`/`paint_menu_with_painter`, `ToggleSwitch::paint_animated`, `PushButton::paint_labeled`;
+  - `apps/rusty-installer`: удалена прямая зависимость `fontdue`, добавлен `--no-gpu`, формы переведены на `TextField` + `FocusScope` + `DataDevice`/`WaylandClipboardBridge` + `UiFontEngine` + `GlesSurfaceRenderer` с `wl_shm` fallback;
+  - `apps/rusty-settings`: удалена прямая зависимость `fontdue`, добавлены `--no-gpu`, `xkbcommon` `KeyboardHandler`, поиск на `TextField::search` + `WaylandClipboardBridge`, анимации тумблеров `ToggleSwitch::paint_animated`, перетаскивание ползунка скроллбара, `UiFontEngine` и `GlesSurfaceRenderer` с сохранением прозрачности сайдбара `WlRegion` и `wl_shm` fallback;
+  - `apps/rusty-files`: удалена прямая зависимость `fontdue`, добавлены `--no-gpu`, `xkbcommon` `KeyboardHandler`, `TextField` + `WaylandClipboardBridge` для поиска/inline-переименования/Go to Folder, `PushButton::paint_labeled` в диалоге конфликта, единый `UiFontEngine` и `GlesSurfaceRenderer` с сохранением прозрачного `wl_shm` для `xdg_popup`;
+  - Документация: обновлены `DESIGN.md`, `ARCHITECTURE.md` (§7), создан `docs/adr/0074-rusty-ui-client-toolkit-and-gles-renderer.md`, добавлена запись `D-088` в `DECISIONS.md`.
+- **Acceptance Criteria:**
+  - Все 6 GLSL ES 1.00 шейдеров в `crates/rusty-ui/src/gpu_gles.rs` валидируются `/usr/bin/glslangValidator` (`rc=0`);
+  - `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --offline -- -D warnings`, `--drm-probe` и unit-тесты workspace (за исключением предсуществующего D-Bus теста BlueZ в sandbox) проходят без ошибок и предупреждений;
+  - Живые `--winit` прогоны на Wayland (Light `rusty-files` + `rusty-settings`, Light `rusty-settings`, Light `rusty-installer --oobe --demo`, Light CPU fallback `RUSTYOS_NO_GPU=1`) и X11 (Dark `rusty-files` + `rusty-settings`) проходят без EGL/GLES фолбэков в GPU-режиме и подтверждены визуальным осмотром PNG-скриншотов.
+- **Tests:** 332 пройденных unit-теста workspace (`4` `rusty-animation`, `202` `rusty-compositor`, `18` `rusty-files`, `13` `rusty-installer`, `3` `rusty-ipc`, `43` `rusty-services` + `1` пропущенный D-Bus BlueZ тест, `13` `rusty-settings`, `15` `rusty-terminal`, `14` `rusty-ui`, `7` `rusty-wm`).
+- **Risks:** Нет; `xdg_popup` меню сохраняют прозрачные `wl_shm`-буферы, весь `unsafe` FFI изолирован в `crates/rusty-ui/src/gpu_gles.rs` с автоматическим CPU `wl_shm` fallback.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

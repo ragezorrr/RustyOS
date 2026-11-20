@@ -25,6 +25,7 @@ pub(crate) const ACCENT_COLORS: [[u8; 4]; RUSTYOS_ACCENT_SWATCHES.len()] = RUSTY
 pub(crate) struct StartupOptions {
     pub(crate) theme_override: Option<ThemeChoice>,
     pub(crate) initial_page: SettingsPage,
+    pub(crate) no_gpu: bool,
 }
 
 /// Appearance mode tiles (`Light`, `Dark`, `Auto`).
@@ -308,6 +309,11 @@ pub(crate) struct SettingsAppState {
     pub(crate) search_query: String,
     pub(crate) caret_visible: bool,
     last_caret_blink: Instant,
+    pub(crate) epoch: Instant,
+    pub(crate) search_field: rusty_ui::TextField,
+    pub(crate) focus: rusty_ui::FocusScope,
+    pub(crate) focus_search_id: rusty_ui::WidgetId,
+    toggle_anims: Vec<(RowControlId, rusty_ui::ToggleMotion)>,
 
     // Persistent config.toml preferences
     pub(crate) reduce_transparency: bool,
@@ -383,6 +389,11 @@ impl SettingsAppState {
     }
 
     fn defaults_with_page(initial_page: SettingsPage) -> Self {
+        let epoch = Instant::now();
+        let focus_search_id = rusty_ui::WidgetId::from_tag("settings.search");
+        let mut focus = rusty_ui::FocusScope::new();
+        focus.begin_frame();
+        focus.register(focus_search_id);
         Self {
             running: true,
             dirty: true,
@@ -408,7 +419,15 @@ impl SettingsAppState {
             search_focused: false,
             search_query: String::new(),
             caret_visible: true,
-            last_caret_blink: Instant::now(),
+            last_caret_blink: epoch,
+            epoch,
+            search_field: rusty_ui::TextField::search(
+                rusty_ui::Rect::new(12, 48, 204, 28),
+                "Search",
+            ),
+            focus,
+            focus_search_id,
+            toggle_anims: Vec::new(),
             reduce_transparency: false,
             reduced_motion: false,
             glass_opacity: 1.0,
@@ -640,7 +659,7 @@ impl SettingsAppState {
         }
     }
 
-    fn reset_sidebar_scroll(&mut self) {
+    pub(crate) fn reset_sidebar_scroll(&mut self) {
         self.sidebar_scroll_y = 0;
         self.sidebar_scroll_f = 0.0;
         self.sidebar_scroll_target = 0.0;
@@ -821,6 +840,14 @@ impl SettingsAppState {
         self.page_scroll_y = self.page_scroll_y.clamp(0, max_page_scroll.max(0));
     }
 
+    pub(crate) fn set_page_scroll_immediate(&mut self, y: i32, max_page_scroll: i32) {
+        let clamped = y.clamp(0, max_page_scroll.max(0));
+        self.page_scroll_y = clamped;
+        self.page_scroll_f = f64::from(clamped);
+        self.page_scroll_target = f64::from(clamped);
+        self.mark_dirty(DamageScope::Page);
+    }
+
     #[must_use]
     pub(crate) fn visible_sidebar_pages(&self) -> Vec<SettingsPage> {
         let needle = self.search_query.trim().to_ascii_lowercase();
@@ -887,49 +914,117 @@ impl SettingsAppState {
         self.mark_dirty(DamageScope::Full);
     }
 
-    pub(crate) fn update_caret_blink(&mut self, now: Instant) -> bool {
+    pub(crate) fn set_search_focused(&mut self, focused: bool) {
+        self.sync_search_field_from_query();
+        let elapsed = self.epoch.elapsed();
+        self.search_focused = focused;
+        self.caret_visible = focused;
+        self.search_field.caret_blink.reset(elapsed);
+        if focused {
+            self.focus
+                .set_focus(self.focus_search_id, elapsed, self.reduced_motion);
+        } else {
+            self.focus.clear_focus(elapsed, self.reduced_motion);
+        }
+        self.mark_dirty(DamageScope::Sidebar);
+    }
+
+    pub(crate) fn sync_search_field_from_query(&mut self) {
+        if self.search_field.buffer.as_str() != self.search_query {
+            self.search_field.buffer.set_text(&self.search_query);
+        }
+    }
+
+    pub(crate) fn update_caret_blink(&mut self, _now: Instant) -> bool {
         if !self.search_focused {
             self.caret_visible = false;
             return false;
         }
-        if now.saturating_duration_since(self.last_caret_blink) >= Duration::from_millis(530) {
-            self.caret_visible = !self.caret_visible;
-            self.last_caret_blink = now;
+        let next = self
+            .search_field
+            .caret_blink
+            .is_visible(self.epoch.elapsed());
+        if next != self.caret_visible {
+            self.caret_visible = next;
+            self.last_caret_blink = Instant::now();
             self.mark_dirty(DamageScope::Caret);
             return true;
         }
         false
     }
 
-    #[must_use]
-    pub(crate) fn handle_search_key(&mut self, sym: &str) -> bool {
+    pub(crate) fn apply_search_paste(
+        &mut self,
+        text: &str,
+        fonts: &mut rusty_ui::UiFontEngine,
+    ) -> bool {
+        if !self.search_focused || text.is_empty() {
+            return false;
+        }
+        self.sync_search_field_from_query();
+        let mut mem = rusty_ui::MemoryClipboard::new();
+        rusty_ui::ClipboardSink::set_text(&mut mem, text);
+        let handled = self.search_field.handle_key(
+            rusty_ui::TextInputKey::Char('v'),
+            rusty_ui::InputModifiers {
+                ctrl: true,
+                shift: false,
+                alt: false,
+            },
+            self.epoch.elapsed(),
+            fonts,
+            &mut mem,
+        );
+        self.finish_search_input_event(handled)
+    }
+
+    pub(crate) fn handle_search_text_key(
+        &mut self,
+        key: rusty_ui::TextInputKey,
+        mods: rusty_ui::InputModifiers,
+        fonts: &mut rusty_ui::UiFontEngine,
+        clipboard: &mut dyn rusty_ui::ClipboardSink,
+    ) -> bool {
         if !self.search_focused {
             return false;
         }
+        self.sync_search_field_from_query();
+        let ev = self
+            .search_field
+            .handle_key(key, mods, self.epoch.elapsed(), fonts, clipboard);
+        self.finish_search_input_event(ev)
+    }
+
+    fn finish_search_input_event(&mut self, ev: rusty_ui::TextInputEvent) -> bool {
         let mut navigated = false;
-        match sym {
-            "Escape" => {
+        match ev {
+            rusty_ui::TextInputEvent::Ignored => return false,
+            rusty_ui::TextInputEvent::Cancelled => {
                 if self.search_query.is_empty() {
-                    self.search_focused = false;
-                } else {
-                    self.search_query.clear();
+                    self.set_search_focused(false);
+                    return true;
                 }
+                self.search_field.buffer.set_text("");
+                self.search_query.clear();
             }
-            "BackSpace" => {
-                self.search_query.pop();
-            }
-            "Return" => {
+            rusty_ui::TextInputEvent::Submitted => {
                 if let Some(first) = self.visible_sidebar_pages().first().copied() {
                     self.navigate_to(first);
                     navigated = true;
                 }
             }
-            other if other.len() == 1 => {
-                if self.search_query.len() < 32 {
-                    self.search_query.push_str(other);
+            rusty_ui::TextInputEvent::Changed => {
+                let s = self.search_field.buffer.as_str();
+                let mut trimmed = String::new();
+                for ch in s.chars().take(32) {
+                    trimmed.push(ch);
                 }
+                if trimmed.len() != s.len() {
+                    self.search_field.buffer.set_text(&trimmed);
+                }
+                self.search_query = trimmed;
             }
-            _ => return false,
+            rusty_ui::TextInputEvent::CaretMoved => {}
         }
         self.caret_visible = true;
         self.reset_sidebar_scroll();
@@ -940,6 +1035,69 @@ impl SettingsAppState {
             DamageScope::Sidebar
         });
         true
+    }
+
+    pub(crate) fn sync_toggles_from_layout(&mut self, layout: &crate::layout::SettingsLayout) {
+        let elapsed = self.epoch.elapsed();
+        for sec in &layout.sections {
+            for row in &sec.rows {
+                let (action, active) = match &row.control {
+                    crate::layout::CardRowControl::Switch { action, active }
+                    | crate::layout::CardRowControl::WifiHeaderSwitch { action, active, .. }
+                    | crate::layout::CardRowControl::NotificationHeader {
+                        action, active, ..
+                    }
+                    | crate::layout::CardRowControl::NotificationAppRow {
+                        action, active, ..
+                    } => (*action, *active),
+                    _ => continue,
+                };
+                if let Some((_, m)) = self.toggle_anims.iter_mut().find(|(id, _)| *id == action) {
+                    m.set_active(active, elapsed, self.reduced_motion);
+                } else {
+                    self.toggle_anims
+                        .push((action, rusty_ui::ToggleMotion::new(active)));
+                }
+            }
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn switch_progress(&self, action: RowControlId, active: bool) -> f32 {
+        self.toggle_anims
+            .iter()
+            .find(|(id, _)| *id == action)
+            .map_or(if active { 1.0 } else { 0.0 }, |(_, m)| m.progress())
+    }
+
+    pub(crate) fn step_ui_animations(&mut self, _now: Instant) -> bool {
+        let elapsed = self.epoch.elapsed();
+        let mut changed = DamageScope::None;
+        if self.focus.tick(elapsed) {
+            changed = changed.merge(DamageScope::Sidebar);
+        }
+        let mut page_anim = false;
+        for (_, m) in &mut self.toggle_anims {
+            if m.tick(elapsed) {
+                page_anim = true;
+            }
+        }
+        if page_anim {
+            changed = changed.merge(DamageScope::Page);
+        }
+        if changed != DamageScope::None {
+            self.mark_dirty(changed);
+            return true;
+        }
+        false
+    }
+
+    #[must_use]
+    pub(crate) fn is_ui_animating(&self) -> bool {
+        let a = self.focus.ring_alpha();
+        self.is_scroll_animating()
+            || (a > 0.01 && a < 0.99)
+            || self.toggle_anims.iter().any(|(_, m)| m.is_active())
     }
 
     fn try_apply_service_action(&mut self, action: RowControlId) -> bool {
@@ -1773,5 +1931,48 @@ mod tests {
         let refresh_only =
             coalesce_service_commands(vec![ServiceCommand::Refresh, ServiceCommand::Refresh]);
         assert_eq!(refresh_only, vec![ServiceCommand::Refresh]);
+    }
+
+    #[test]
+    fn search_field_editing_clipboard_and_toggle_animations_work() {
+        let mut st = SettingsAppState::defaults_with_page(SettingsPage::Appearance);
+        let mut fe = rusty_ui::UiFontEngine::new();
+        let mut mem = rusty_ui::MemoryClipboard::new();
+        st.set_search_focused(true);
+        assert!(st.apply_search_paste("display", &mut fe));
+        assert_eq!(st.search_query, "display");
+        let ctrl = rusty_ui::InputModifiers {
+            ctrl: true,
+            shift: false,
+            alt: false,
+        };
+        assert!(st.handle_search_text_key(
+            rusty_ui::TextInputKey::Char('a'),
+            ctrl,
+            &mut fe,
+            &mut mem
+        ));
+        assert!(st.handle_search_text_key(
+            rusty_ui::TextInputKey::Char('c'),
+            ctrl,
+            &mut fe,
+            &mut mem
+        ));
+        assert_eq!(
+            rusty_ui::ClipboardSink::get_text(&mut mem).as_deref(),
+            Some("display")
+        );
+
+        st.navigate_to(SettingsPage::DockDesktop);
+        let l1 = crate::layout::compute_layout(&st, 882, 600);
+        st.sync_toggles_from_layout(&l1);
+        let p0 = st.switch_progress(RowControlId::DockAutoHideToggle, st.dock_auto_hide);
+        st.dock_auto_hide = !st.dock_auto_hide;
+        let l2 = crate::layout::compute_layout(&st, 882, 600);
+        st.sync_toggles_from_layout(&l2);
+        std::thread::sleep(Duration::from_millis(20));
+        let _ = st.step_ui_animations(Instant::now());
+        let p1 = st.switch_progress(RowControlId::DockAutoHideToggle, st.dock_auto_hide);
+        assert!((p1 - p0).abs() > 0.01);
     }
 }

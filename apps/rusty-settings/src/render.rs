@@ -7,54 +7,38 @@
 )]
 
 use std::cell::RefCell;
-use std::collections::HashMap;
-use std::sync::OnceLock;
-
-use fontdue::{Font, FontSettings};
 
 use crate::layout::{
     AppearanceCardsLayout, CARD_CORNER_RADIUS, CardRowControl, CardRowLayout, CardSectionLayout,
     DockPositionCardLayout, NotificationAppKind, Rect, ServiceBadgeKind, SettingsHit,
     SettingsLayout, WINDOW_CORNER_RADIUS, choice_rect, stepper_rects, switch_rect,
 };
-use crate::state::{ACCENT_COLORS, SettingsAppState, SettingsPage, ThemeChoice};
-
-const INTER_REGULAR_BYTES: &[u8] = include_bytes!("../../../assets/fonts/Inter-Regular.ttf");
-const INTER_SEMIBOLD_BYTES: &[u8] = include_bytes!("../../../assets/fonts/Inter-SemiBold.ttf");
-
-fn regular_font() -> Option<&'static Font> {
-    static FONT: OnceLock<Option<Font>> = OnceLock::new();
-    FONT.get_or_init(|| Font::from_bytes(INTER_REGULAR_BYTES, FontSettings::default()).ok())
-        .as_ref()
-}
-
-fn semibold_font() -> Option<&'static Font> {
-    static FONT: OnceLock<Option<Font>> = OnceLock::new();
-    FONT.get_or_init(|| Font::from_bytes(INTER_SEMIBOLD_BYTES, FontSettings::default()).ok())
-        .as_ref()
-        .or_else(regular_font)
-}
-
-#[derive(Clone, Copy, Hash, PartialEq, Eq)]
-struct GlyphKey {
-    ch: char,
-    bold: bool,
-    tenths_px: u16,
-}
-
-struct CachedGlyph {
-    xmin: i32,
-    ymin: i32,
-    width: usize,
-    height: usize,
-    advance: i32,
-    bitmap: Vec<u8>,
-}
+use crate::state::{ACCENT_COLORS, RowControlId, SettingsAppState, SettingsPage, ThemeChoice};
 
 thread_local! {
-    static GLYPH_CACHE: RefCell<HashMap<GlyphKey, CachedGlyph>> =
-        RefCell::new(HashMap::with_capacity(256));
+    static FONT_ENGINE: RefCell<rusty_ui::UiFontEngine> =
+        RefCell::new(rusty_ui::UiFontEngine::new());
     static SPRITE_CACHE: RefCell<Vec<(SpriteKey, Vec<u8>)>> = RefCell::new(Vec::with_capacity(32));
+}
+
+pub(crate) fn with_font_engine<R>(f: impl FnOnce(&mut rusty_ui::UiFontEngine) -> R) -> R {
+    FONT_ENGINE.with(|cell| f(&mut cell.borrow_mut()))
+}
+
+fn to_ui_rect(r: Rect) -> rusty_ui::Rect {
+    rusty_ui::Rect::new(r.x, r.y, r.w.max(0) as u32, r.h.max(0) as u32)
+}
+
+fn make_ui_canvas(buf: &mut [u8], w: i32, h: i32) -> rusty_ui::UiCanvas<'_> {
+    let uw = w.max(0) as u32;
+    let uh = h.max(0) as u32;
+    rusty_ui::UiCanvas::new(
+        buf,
+        uw,
+        uh,
+        (uw as usize) * 4,
+        rusty_ui::PixelFormat::Bgra8888,
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,41 +82,6 @@ fn blit_cached_sprite(
     });
 }
 
-#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-fn with_cached_glyph<R>(
-    ch: char,
-    size_px: f32,
-    bold: bool,
-    f: impl FnOnce(&CachedGlyph) -> R,
-) -> Option<R> {
-    let tenths_px = (size_px * 10.0).round().clamp(10.0, 2000.0) as u16;
-    let key = GlyphKey {
-        ch,
-        bold,
-        tenths_px,
-    };
-    GLYPH_CACHE.with(|cell| {
-        let mut map = cell.borrow_mut();
-        if let std::collections::hash_map::Entry::Vacant(entry) = map.entry(key) {
-            let font = if bold {
-                semibold_font()
-            } else {
-                regular_font()
-            }?;
-            let (metrics, bitmap) = font.rasterize(ch, size_px);
-            entry.insert(CachedGlyph {
-                xmin: metrics.xmin,
-                ymin: metrics.ymin,
-                width: metrics.width,
-                height: metrics.height,
-                advance: metrics.advance_width.round() as i32,
-                bitmap,
-            });
-        }
-        map.get(&key).map(f)
-    })
-}
-
 #[derive(Clone, Copy)]
 struct Palette {
     is_dark: bool,
@@ -141,11 +90,9 @@ struct Palette {
     page_bg: [u8; 4],
     card_bg: [u8; 4],
     row_separator: [u8; 4],
-    search_bg: [u8; 4],
     sidebar_active: [u8; 4],
     sidebar_hover: [u8; 4],
     control_bg: [u8; 4],
-    switch_off: [u8; 4],
     accent: [u8; 4],
     text_primary: [u8; 4],
     text_secondary: [u8; 4],
@@ -163,11 +110,9 @@ fn palette_for(app: &SettingsAppState) -> Palette {
             page_bg: [28, 28, 29, 255],
             card_bg: [44, 44, 45, 255],
             row_separator: [60, 60, 62, 255],
-            search_bg: [50, 50, 52, 255],
             sidebar_active: [62, 62, 65, 255],
             sidebar_hover: [52, 52, 55, 255],
             control_bg: [60, 60, 64, 255],
-            switch_off: [72, 72, 76, 255],
             accent,
             text_primary: [255, 255, 255, 255],
             text_secondary: [186, 186, 194, 255],
@@ -182,11 +127,9 @@ fn palette_for(app: &SettingsAppState) -> Palette {
             page_bg: [245, 246, 250, 255],
             card_bg: [255, 255, 255, 255],
             row_separator: [235, 236, 242, 255],
-            search_bg: [255, 255, 255, 255],
             sidebar_active: [217, 218, 221, 255],
             sidebar_hover: [226, 227, 231, 255],
             control_bg: [242, 244, 248, 255],
-            switch_off: [212, 214, 220, 255],
             accent,
             text_primary: [50, 50, 56, 255],
             text_secondary: [100, 100, 110, 255],
@@ -604,23 +547,13 @@ impl<'a> Canvas<'a> {
         }
     }
 
-    #[allow(
-        clippy::cast_possible_truncation,
-        clippy::cast_precision_loss,
-        clippy::cast_sign_loss
-    )]
+    #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
     fn measure_text(&self, text: &str, size_px: f32, bold: bool) -> i32 {
         let _ = self.w;
-        text.chars()
-            .filter_map(|ch| with_cached_glyph(ch, size_px, bold, |g| g.advance))
-            .sum()
+        with_font_engine(|fe| fe.measure_width(text, size_px, bold).round() as i32)
     }
 
-    #[allow(
-        clippy::cast_possible_truncation,
-        clippy::cast_possible_wrap,
-        clippy::cast_precision_loss
-    )]
+    #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
     fn draw_text(&mut self, text: &str, x: i32, y: i32, size_px: f32, bold: bool, color: [u8; 4]) {
         if let Some(clip) = self.clip
             && (y >= clip.bottom() || y + size_px.ceil() as i32 + 4 <= clip.y || x >= clip.right())
@@ -628,25 +561,20 @@ impl<'a> Canvas<'a> {
             return;
         }
         let baseline = y + (size_px * 0.84).round() as i32;
-        let mut pen_x = x;
-        for ch in text.chars() {
-            let Some(adv) = with_cached_glyph(ch, size_px, bold, |g| {
-                let gx = pen_x + g.xmin;
-                let gy = baseline - g.ymin - g.height as i32;
-                for row in 0..g.height {
-                    for col in 0..g.width {
-                        let cov = g.bitmap[row * g.width + col];
-                        if cov > 0 {
-                            self.blend_px(gx + col as i32, gy + row as i32, color, cov);
-                        }
-                    }
-                }
-                g.advance
-            }) else {
-                continue;
-            };
-            pen_x += adv;
-        }
+        let clip_ui = self.clip.map(to_ui_rect);
+        let mut uc = make_ui_canvas(self.buf, self.w, self.h);
+        with_font_engine(|fe| {
+            fe.draw_text_on_canvas(
+                &mut uc,
+                text,
+                x as f32,
+                baseline as f32,
+                size_px,
+                bold,
+                color,
+                clip_ui,
+            );
+        });
     }
 
     fn draw_text_centered(
@@ -741,20 +669,21 @@ pub(crate) fn render_window_pixels_with_glass(
     // 3. Scrollable right page content clipped cleanly below header, then header + scrollbar thumb.
     c.clip = Some(layout.page_viewport);
     if let Some(app_cards) = &layout.appearance {
-        render_appearance_page(&mut c, app_cards, &pal);
+        render_appearance_page(&mut c, app, app_cards, hover, &pal);
     } else if let Some(dp) = &layout.dock_positions {
         render_dock_positions_card(&mut c, dp, &pal);
     }
     for sec in &layout.sections {
-        render_card_section(&mut c, sec, &pal);
+        render_card_section(&mut c, app, sec, hover, &pal);
     }
     c.clip = None;
     render_page_header(&mut c, app, layout, &pal);
     if let Some(thumb) = layout.page_scrollbar_thumb {
+        let hovered = matches!(hover, Some(SettingsHit::ScrollbarThumb));
         let thumb_col = if pal.is_dark {
-            [255, 255, 255, 92]
+            [255, 255, 255, if hovered { 128 } else { 92 }]
         } else {
-            [0, 0, 0, 68]
+            [0, 0, 0, if hovered { 104 } else { 68 }]
         };
         c.fill_rounded_rect(thumb, 2, thumb_col);
     }
@@ -816,49 +745,29 @@ fn render_sidebar_traffic_and_search(
         }
     }
 
-    // Circular Search capsule without border when unfocused
-    c.fill_rounded_rect(layout.search_rect, 14, pal.search_bg);
-    if app.search_focused {
-        let focus_col = [pal.accent[0], pal.accent[1], pal.accent[2], 140];
-        c.stroke_rounded_rect(layout.search_rect, 14.0, 1.5, focus_col);
+    // Circular Search capsule powered by unified `rusty_ui::TextField` (`RUSTYOS-130`)
+    let mut sf = app.search_field.clone();
+    sf.rect = to_ui_rect(layout.search_rect);
+    if sf.buffer.as_str() != app.search_query {
+        sf.buffer.set_text(&app.search_query);
     }
-    draw_search_loupe(
-        c,
-        (layout.search_rect.x + 15) as f32,
-        (layout.search_rect.y + 14) as f32,
-        pal.text_muted,
-    );
-    if app.search_query.is_empty() {
-        c.draw_text(
-            "Search",
-            layout.search_rect.x + 28,
-            layout.search_rect.y + 7,
-            12.0,
-            false,
-            pal.text_muted,
+    let ui_pal = rusty_ui::ThemePalette::new(pal.is_dark, app.accent_index);
+    let focus_alpha = app.focus.ring_alpha();
+    let elapsed = app.epoch.elapsed();
+    let mut dl = rusty_ui::UiDrawList::new();
+    with_font_engine(|fe| {
+        let mut painter = rusty_ui::UiPainter::new(&mut dl);
+        sf.paint(
+            &mut painter,
+            fe,
+            &ui_pal,
+            app.search_focused,
+            focus_alpha,
+            elapsed,
         );
-    } else {
-        c.draw_text(
-            &app.search_query,
-            layout.search_rect.x + 28,
-            layout.search_rect.y + 7,
-            12.0,
-            false,
-            pal.text_primary,
-        );
-    }
-    if app.search_focused && app.caret_visible {
-        let tw = c.measure_text(&app.search_query, 12.0, false);
-        c.fill_rect(
-            Rect::new(
-                layout.search_rect.x + 28 + tw + 1,
-                layout.search_rect.y + 7,
-                1,
-                14,
-            ),
-            pal.accent,
-        );
-    }
+        let mut uc = make_ui_canvas(c.buf, c.w, c.h);
+        rusty_ui::render_draw_list_to_canvas(&dl, &mut uc, fe);
+    });
 }
 
 fn render_sidebar(
@@ -967,7 +876,13 @@ fn render_page_header(
     );
 }
 
-fn render_appearance_page(c: &mut Canvas<'_>, app: &AppearanceCardsLayout, pal: &Palette) {
+fn render_appearance_page(
+    c: &mut Canvas<'_>,
+    state: &SettingsAppState,
+    app: &AppearanceCardsLayout,
+    hover: Option<&SettingsHit>,
+    pal: &Palette,
+) {
     c.draw_text(
         "Appearance",
         app.mode_label_rect.x,
@@ -1022,7 +937,7 @@ fn render_appearance_page(c: &mut Canvas<'_>, app: &AppearanceCardsLayout, pal: 
 
     c.fill_rounded_rect(app.links_card_rect, CARD_CORNER_RADIUS, pal.card_bg);
     for (idx, row) in app.links.iter().enumerate() {
-        render_card_row(c, row, pal);
+        render_card_row(c, state, row, hover, pal);
         if idx + 1 < app.links.len() {
             c.fill_rect(
                 Rect::new(row.rect.x + 16, row.rect.bottom() - 1, row.rect.w - 32, 1),
@@ -1166,7 +1081,13 @@ fn render_dock_positions_card(c: &mut Canvas<'_>, dp: &DockPositionCardLayout, p
     }
 }
 
-fn render_card_section(c: &mut Canvas<'_>, sec: &CardSectionLayout, pal: &Palette) {
+fn render_card_section(
+    c: &mut Canvas<'_>,
+    app: &SettingsAppState,
+    sec: &CardSectionLayout,
+    hover: Option<&SettingsHit>,
+    pal: &Palette,
+) {
     if let Some((title, rect)) = &sec.section_label
         && !c.is_clipped_out(*rect)
     {
@@ -1180,7 +1101,7 @@ fn render_card_section(c: &mut Canvas<'_>, sec: &CardSectionLayout, pal: &Palett
         if c.is_clipped_out(row.rect) {
             continue;
         }
-        render_card_row(c, row, pal);
+        render_card_row(c, app, row, hover, pal);
         if idx + 1 < sec.rows.len() {
             c.fill_rect(
                 Rect::new(row.rect.x + 16, row.rect.bottom() - 1, row.rect.w - 32, 1),
@@ -1214,7 +1135,13 @@ fn render_notif_badge(c: &mut Canvas<'_>, rect: Rect, tint: [u8; 4], kind: Notif
     );
 }
 
-fn render_network_service_row(c: &mut Canvas<'_>, row: &CardRowLayout, pal: &Palette) -> bool {
+fn render_network_service_row(
+    c: &mut Canvas<'_>,
+    app: &SettingsAppState,
+    row: &CardRowLayout,
+    hover: Option<&SettingsHit>,
+    pal: &Palette,
+) -> bool {
     match &row.control {
         CardRowControl::ServiceStatus {
             badge_tint,
@@ -1255,7 +1182,9 @@ fn render_network_service_row(c: &mut Canvas<'_>, row: &CardRowLayout, pal: &Pal
             true
         }
         CardRowControl::WifiHeaderSwitch {
-            subtitle, active, ..
+            subtitle,
+            action,
+            active,
         } => {
             let icon_rect = Rect::new(row.rect.x + 16, row.rect.y + 15, 32, 32);
             render_service_badge(
@@ -1281,7 +1210,7 @@ fn render_network_service_row(c: &mut Canvas<'_>, row: &CardRowLayout, pal: &Pal
                 false,
                 pal.text_secondary,
             );
-            draw_toggle_switch(c, switch_rect(row.rect), *active, pal);
+            draw_toggle_switch(c, switch_rect(row.rect), *action, *active, app, hover, pal);
             true
         }
         CardRowControl::WifiNetwork {
@@ -1293,18 +1222,22 @@ fn render_network_service_row(c: &mut Canvas<'_>, row: &CardRowLayout, pal: &Pal
             render_wifi_ap_row(c, row, pal, *connected, *secure, *signal_percent);
             true
         }
-        _ => render_notification_settings_row(c, row, pal),
+        _ => render_notification_settings_row(c, app, row, hover, pal),
     }
 }
 
 fn render_notification_settings_row(
     c: &mut Canvas<'_>,
+    app: &SettingsAppState,
     row: &CardRowLayout,
+    hover: Option<&SettingsHit>,
     pal: &Palette,
 ) -> bool {
     match &row.control {
         CardRowControl::NotificationHeader {
-            subtitle, active, ..
+            subtitle,
+            action,
+            active,
         } => {
             let icon_rect = Rect::new(row.rect.x + 16, row.rect.y + 16, 32, 32);
             render_notif_badge(
@@ -1330,7 +1263,7 @@ fn render_notification_settings_row(
                 false,
                 pal.text_secondary,
             );
-            draw_toggle_switch(c, switch_rect(row.rect), *active, pal);
+            draw_toggle_switch(c, switch_rect(row.rect), *action, *active, app, hover, pal);
             true
         }
         CardRowControl::NotificationAppRow {
@@ -1338,7 +1271,7 @@ fn render_notification_settings_row(
             badge_tint,
             subtitle,
             active,
-            ..
+            action,
         } => {
             let icon_rect = Rect::new(row.rect.x + 16, row.rect.y + 10, 32, 32);
             render_notif_badge(c, icon_rect, *badge_tint, *app_kind);
@@ -1359,7 +1292,7 @@ fn render_notification_settings_row(
                 false,
                 pal.text_secondary,
             );
-            draw_toggle_switch(c, switch_rect(row.rect), *active, pal);
+            draw_toggle_switch(c, switch_rect(row.rect), *action, *active, app, hover, pal);
             true
         }
         _ => false,
@@ -1465,8 +1398,14 @@ fn render_wifi_ap_row(
     }
 }
 
-fn render_card_row(c: &mut Canvas<'_>, row: &CardRowLayout, pal: &Palette) {
-    if render_network_service_row(c, row, pal) {
+fn render_card_row(
+    c: &mut Canvas<'_>,
+    app: &SettingsAppState,
+    row: &CardRowLayout,
+    hover: Option<&SettingsHit>,
+    pal: &Palette,
+) {
+    if render_network_service_row(c, app, row, hover, pal) {
         return;
     }
 
@@ -1491,8 +1430,8 @@ fn render_card_row(c: &mut Canvas<'_>, row: &CardRowLayout, pal: &Palette) {
     );
 
     match &row.control {
-        CardRowControl::Switch { active, .. } => {
-            draw_toggle_switch(c, switch_rect(row.rect), *active, pal);
+        CardRowControl::Switch { action, active } => {
+            draw_toggle_switch(c, switch_rect(row.rect), *action, *active, app, hover, pal);
         }
         CardRowControl::Stepper { value, .. } => {
             let (minus, val_rect, plus) = stepper_rects(row.rect);
@@ -1536,14 +1475,36 @@ fn render_card_row(c: &mut Canvas<'_>, row: &CardRowLayout, pal: &Palette) {
     }
 }
 
-fn draw_toggle_switch(c: &mut Canvas<'_>, tr: Rect, active: bool, pal: &Palette) {
-    c.fill_rounded_rect(tr, 10, if active { pal.accent } else { pal.switch_off });
-    let knob_cx = if active {
-        tr.right() as f32 - 10.0
-    } else {
-        tr.x as f32 + 10.0
-    };
-    c.fill_circle(knob_cx, tr.y as f32 + 10.0, 8.0, [255, 255, 255, 255]);
+fn draw_toggle_switch(
+    c: &mut Canvas<'_>,
+    tr: Rect,
+    action: RowControlId,
+    active: bool,
+    app: &SettingsAppState,
+    hover: Option<&SettingsHit>,
+    pal: &Palette,
+) {
+    let mut sw = rusty_ui::ToggleSwitch::new(to_ui_rect(tr), active);
+    if matches!(hover, Some(SettingsHit::Control(id)) if *id == action) {
+        sw.state = rusty_ui::WidgetState::Hover;
+    }
+    let progress = app.switch_progress(action, active);
+    let ui_pal = rusty_ui::ThemePalette::new(pal.is_dark, app.accent_index);
+    let mut dl = rusty_ui::UiDrawList::new();
+    {
+        let mut painter = rusty_ui::UiPainter::new(&mut dl);
+        if let Some(clip) = c.clip {
+            painter.push_clip(to_ui_rect(clip));
+        }
+        sw.paint_animated(&mut painter, progress, &ui_pal);
+        if c.clip.is_some() {
+            painter.pop_clip();
+        }
+    }
+    let mut uc = make_ui_canvas(c.buf, c.w, c.h);
+    with_font_engine(|fe| {
+        rusty_ui::render_draw_list_to_canvas(&dl, &mut uc, fe);
+    });
 }
 
 fn draw_service_badge_glyph(c: &mut Canvas<'_>, rect: Rect, kind: ServiceBadgeKind) {
@@ -1719,11 +1680,6 @@ fn draw_wifi_arc(c: &mut Canvas<'_>, cx: f32, cy: f32, r: f32, col: [u8; 4]) {
             }
         }
     }
-}
-
-fn draw_search_loupe(c: &mut Canvas<'_>, cx: f32, cy: f32, col: [u8; 4]) {
-    c.stroke_rounded_rect(Rect::new(cx as i32 - 5, cy as i32 - 5, 9, 9), 4.5, 1.3, col);
-    c.draw_segment(cx + 2.0, cy + 2.0, cx + 5.0, cy + 5.0, 0.75, col);
 }
 
 fn draw_chevron(c: &mut Canvas<'_>, cx: f32, cy: f32, left: bool, col: [u8; 4]) {

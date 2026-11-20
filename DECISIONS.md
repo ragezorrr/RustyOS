@@ -1001,6 +1001,26 @@
                            обновлённые токены
                            popover_text_disabled и
                            popover_separator (0.055/0.07)
+
+    D-088                  Фаза 7/8/10 Клиентский          accepted
+                           UI-тулкит rusty-ui и dual
+                           GLES 2.0 / CPU презентер
+                           (RUSTYOS-130, ADR-0074):
+                           полноценные контролы (FocusScope,
+                           TextField/PasswordField/SearchField,
+                           WaylandClipboardBridge,
+                           DropdownSelect, SegmentedTabs,
+                           SelectableList, ScrollView,
+                           DialogSheet, ContextMenuSession,
+                           ToggleMotion/ScrollMotion с
+                           reduced_motion), единый UiDrawList
+                           + GlesSurfaceRenderer (Wayland-EGL +
+                           GLES 2.0 с изоляцией unsafe FFI в
+                           crates/rusty-ui/src/gpu_gles.rs и
+                           CPU wl_shm fallback), перевод
+                           rusty-installer, rusty-settings и
+                           rusty-files на единый тулкит и
+                           Shared UiFontEngine без fontdue-дублей
   -----------------------------------------------------------------------
 
 ## Открытые решения

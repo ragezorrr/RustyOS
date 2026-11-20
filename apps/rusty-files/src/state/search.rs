@@ -14,6 +14,7 @@ use super::*;
 impl FilesAppState {
     pub(crate) fn set_search_query(&mut self, query: String) {
         self.search_query = query;
+        self.search_field.buffer.set_text(&self.search_query);
         self.refresh_search_results();
         self.reset_caret_blink();
         self.dirty = true;

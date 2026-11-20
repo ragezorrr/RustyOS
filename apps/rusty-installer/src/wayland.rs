@@ -2,12 +2,21 @@
 //! for `rusty-installer` (`RUSTYOS-115`, ADR-0065).
 
 use std::fmt;
+use std::os::fd::OwnedFd;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
-    delegate_compositor, delegate_keyboard, delegate_output, delegate_pointer, delegate_registry,
-    delegate_seat, delegate_shm, delegate_xdg_shell, delegate_xdg_window,
+    data_device_manager::{
+        DataDeviceManagerState, WritePipe,
+        data_device::{DataDevice, DataDeviceHandler},
+        data_offer::{DataOfferHandler, DragOffer},
+        data_source::DataSourceHandler,
+    },
+    delegate_compositor, delegate_data_device, delegate_keyboard, delegate_output,
+    delegate_pointer, delegate_registry, delegate_seat, delegate_shm, delegate_xdg_shell,
+    delegate_xdg_window,
     output::{OutputHandler, OutputState},
     reexports::{
         calloop::{EventLoop, LoopHandle, ping},
@@ -35,10 +44,13 @@ use smithay_client_toolkit::{
     },
 };
 use wayland_client::{
-    Connection, Dispatch, QueueHandle,
+    Connection, Dispatch, EventQueue, QueueHandle,
     backend::WaylandError,
     globals::registry_queue_init,
-    protocol::{wl_keyboard, wl_output, wl_pointer, wl_seat, wl_shm, wl_surface},
+    protocol::{
+        wl_data_device, wl_data_device_manager::DndAction, wl_data_source, wl_keyboard, wl_output,
+        wl_pointer, wl_seat, wl_shm, wl_surface,
+    },
 };
 
 use crate::disks::TargetDiskInfo;
@@ -47,9 +59,10 @@ use crate::layout::{
     WelcomeAction, compute_layout, hit_test,
 };
 use crate::liquid_glass::{GlassStyle, RustyosLiquidGlassManagerV1, RustyosSurfaceGlassV1};
-use crate::render::render_window_pixels;
+use crate::render::{render_window_pixels, with_font_engine};
 use crate::state::{
-    DiskInstallMode, InstallPhase, InstallStep, InstallerAppState, StartupOptions, WizardMode,
+    DiskInstallMode, InstallPhase, InstallStep, InstallerAppState, StartupOptions, TextFieldId,
+    WizardMode,
 };
 
 const DEFAULT_WIDTH: u32 = 800;
@@ -109,6 +122,7 @@ impl From<WaylandError> for WaylandAppError {
 }
 
 struct InstallerClient {
+    conn: Connection,
     qh: QueueHandle<Self>,
     loop_handle: LoopHandle<'static, Self>,
     registry_state: RegistryState,
@@ -116,10 +130,18 @@ struct InstallerClient {
     seat_state: SeatState,
     shm: Shm,
     pool: SlotPool,
+    data_device_manager: Option<DataDeviceManagerState>,
+    data_device: Option<DataDevice>,
+    clipboard: rusty_ui::WaylandClipboardBridge,
+    paste_ping: ping::Ping,
+    last_input_serial: u32,
     window: Option<Window>,
+    gles: Option<rusty_ui::GlesSurfaceRenderer>,
+    use_gpu: bool,
+    cpu_backbuf: Vec<u8>,
+    frame_rev: u64,
     _glass_mgr: Option<RustyosLiquidGlassManagerV1>,
-    _window_glass: Option<RustyosSurfaceGlassV1>,
-    has_glass: bool,
+    window_glass: Option<RustyosSurfaceGlassV1>,
     buffers: Vec<Buffer>,
     buffer_size: (u32, u32),
     frame_sent_at: Option<Instant>,
@@ -131,6 +153,8 @@ struct InstallerClient {
     height: u32,
     configured: bool,
     pointer_pos: (f64, f64),
+    pointer_pressed: bool,
+    click_streak: u8,
     last_click_at: Option<Instant>,
     hover_hit: Option<InstallerHit>,
     app: InstallerAppState,
@@ -138,6 +162,10 @@ struct InstallerClient {
 }
 
 impl InstallerClient {
+    const fn has_glass(&self) -> bool {
+        self.window_glass.is_some()
+    }
+
     fn layout(&mut self) -> InstallerLayout {
         let l = compute_layout(&self.app, self.width, self.height);
         self.layout_cache = Some(l.clone());
@@ -156,10 +184,43 @@ impl InstallerClient {
             self.app.win.running = false;
             return;
         }
+        if self.app.caret.focused_field.is_some()
+            && let Some(ui_key) = map_keysym_to_ui(keysym, utf8)
+        {
+            let mods = rusty_ui::InputModifiers {
+                ctrl: self.modifiers.ctrl,
+                shift: self.modifiers.shift,
+                alt: self.modifiers.alt,
+            };
+            let ev = with_font_engine(|fe| {
+                self.app
+                    .handle_text_key(ui_key, mods, fe, &mut self.clipboard)
+            });
+            self.sync_clipboard_io();
+            match ev {
+                rusty_ui::TextInputEvent::Cancelled => {
+                    self.app.set_focused_field(None);
+                    return;
+                }
+                rusty_ui::TextInputEvent::Submitted => {
+                    if self.app.caret.focused_field == Some(crate::state::TextFieldId::WifiPassword)
+                    {
+                        self.app.connect_selected_wifi();
+                    } else {
+                        self.app.go_next(Instant::now());
+                    }
+                    self.layout_cache = None;
+                    return;
+                }
+                rusty_ui::TextInputEvent::Changed | rusty_ui::TextInputEvent::CaretMoved => {
+                    return;
+                }
+                rusty_ui::TextInputEvent::Ignored => {}
+            }
+        }
         match keysym {
             Keysym::Escape if self.app.caret.focused_field.is_some() => {
-                self.app.caret.focused_field = None;
-                self.app.win.dirty = true;
+                self.app.set_focused_field(None);
             }
             Keysym::Tab => self.app.cycle_focus(self.modifiers.shift),
             Keysym::ISO_Left_Tab => self.app.cycle_focus(true),
@@ -199,29 +260,67 @@ impl InstallerClient {
         }
     }
 
+    fn sync_clipboard_io(&mut self) {
+        if let Some(text) = self.clipboard.take_pending_copy()
+            && let (Some(ddm), Some(dd)) = (&self.data_device_manager, &self.data_device)
+        {
+            let source = ddm.create_copy_paste_source(&self.qh, rusty_ui::CLIPBOARD_MIME_TYPES);
+            source.set_selection(dd, self.last_input_serial);
+            self.clipboard.register_source(source.inner().clone(), text);
+        }
+        if self.clipboard.take_pending_paste_request()
+            && let Some(dd) = &self.data_device
+            && let Some(offer) = dd.data().selection_offer()
+        {
+            let mime = offer.with_mime_types(rusty_ui::WaylandClipboardBridge::pick_utf8_mime);
+            if let Some(mime) = mime
+                && let Ok(read_pipe) = offer.receive(mime)
+            {
+                let _ = self.conn.flush();
+                let wake = self.paste_ping.clone();
+                self.clipboard
+                    .spawn_receive_from_fd(OwnedFd::from(read_pipe), move || wake.ping());
+            }
+        }
+    }
+
     fn execute_left_click(&mut self, px: f64, py: f64, serial: u32) {
+        self.last_input_serial = serial;
         let now = Instant::now();
-        let double_click = self
+        let multi = self
             .last_click_at
             .is_some_and(|t| now.saturating_duration_since(t) <= Duration::from_millis(380));
+        self.click_streak = if multi {
+            self.click_streak.saturating_add(1).min(3)
+        } else {
+            1
+        };
+        let double_click = self.click_streak == 2;
         self.last_click_at = Some(now);
 
         let layout = self.current_layout();
         let Some(hit) = hit_test(&layout, px, py) else {
-            if self.app.caret.focused_field.take().is_some() {
-                self.app.win.dirty = true;
+            if self.app.caret.focused_field.is_some() {
+                self.app.set_focused_field(None);
             }
             return;
         };
 
         if !matches!(hit, InstallerHit::FocusField(_)) && self.app.caret.focused_field.is_some() {
-            self.app.caret.focused_field = None;
-            self.app.win.dirty = true;
+            self.app.set_focused_field(None);
         }
-        self.dispatch_hit(hit, serial, double_click, now);
+        self.dispatch_hit(hit, px, py, serial, double_click, now);
     }
 
-    fn dispatch_hit(&mut self, hit: InstallerHit, serial: u32, double_click: bool, now: Instant) {
+    fn dispatch_hit(
+        &mut self,
+        hit: InstallerHit,
+        px: f64,
+        py: f64,
+        serial: u32,
+        double_click: bool,
+        now: Instant,
+    ) {
         match hit {
             InstallerHit::ResizeEdge(zone) => {
                 if let (Some(win), Some(seat)) = (&self.window, &self.seat) {
@@ -250,11 +349,11 @@ impl InstallerClient {
                 self.app.go_next(now);
                 self.layout_cache = None;
             }
-            other => self.dispatch_content_hit(other, now),
+            other => self.dispatch_content_hit(other, px, py, now),
         }
     }
 
-    fn dispatch_content_hit(&mut self, hit: InstallerHit, now: Instant) {
+    fn dispatch_content_hit(&mut self, hit: InstallerHit, px: f64, py: f64, now: Instant) {
         match hit {
             InstallerHit::WelcomeCard(action) => match action {
                 WelcomeAction::InstallToDisk => {
@@ -306,12 +405,7 @@ impl InstallerClient {
                 self.app.connect_selected_wifi();
                 self.layout_cache = None;
             }
-            InstallerHit::FocusField(field) => {
-                self.app.caret.focused_field = Some(field);
-                self.app.caret.visible = true;
-                self.app.caret.last_blink = now;
-                self.app.win.dirty = true;
-            }
+            InstallerHit::FocusField(field) => self.focus_and_press_field(field, px, py),
             InstallerHit::ToggleAutologin => {
                 self.app.account.autologin = !self.app.account.autologin;
                 self.app.win.dirty = true;
@@ -338,6 +432,37 @@ impl InstallerClient {
             | InstallerHit::TrafficMaximize
             | InstallerHit::BackButton
             | InstallerHit::PrimaryButton => {}
+        }
+    }
+
+    fn focus_and_press_field(&mut self, field: TextFieldId, px: f64, py: f64) {
+        self.app.set_focused_field(Some(field));
+        let layout = self.current_layout();
+        let rect = match &layout.content {
+            crate::layout::StepContentLayout::AccountAndStyle { fields, .. }
+            | crate::layout::StepContentLayout::OobeAccount { fields, .. } => {
+                fields.iter().find(|f| f.id == field).map(|f| f.rect)
+            }
+            crate::layout::StepContentLayout::Network { password_field, .. } => password_field
+                .as_ref()
+                .filter(|f| f.id == field)
+                .map(|f| f.rect),
+            _ => None,
+        };
+        if let Some(fr_rect) = rect {
+            let ui_rect = rusty_ui::Rect::new(
+                fr_rect.x,
+                fr_rect.y,
+                u32::try_from(fr_rect.w.max(1)).unwrap_or(1),
+                u32::try_from(fr_rect.h.max(1)).unwrap_or(1),
+            );
+            let click_n = self.click_streak;
+            let elapsed = self.app.epoch.elapsed();
+            let tf = &mut self.app.fields[field.idx()];
+            tf.rect = ui_rect;
+            with_font_engine(|fe| {
+                let _ = tf.on_pointer_down(px, py, click_n, elapsed, fe);
+            });
         }
     }
 
@@ -455,10 +580,11 @@ fn setup_client(
         g.commit();
         g
     });
-    let has_glass = window_glass.is_some();
     window.commit();
 
     let (wake_ping, wake_source) =
+        ping::make_ping().map_err(|e| WaylandAppError::EventLoop(e.to_string()))?;
+    let (paste_ping, paste_source) =
         ping::make_ping().map_err(|e| WaylandAppError::EventLoop(e.to_string()))?;
     let mut app = InstallerAppState::new(opts);
     app.set_wake_ping(move || wake_ping.ping());
@@ -467,18 +593,14 @@ fn setup_client(
     let event_loop: EventLoop<'static, InstallerClient> =
         EventLoop::try_new().map_err(|e| WaylandAppError::EventLoop(e.to_string()))?;
     let loop_handle = event_loop.handle();
-    WaylandSource::new(conn.clone(), queue)
-        .insert(loop_handle.clone())
-        .map_err(|e| WaylandAppError::EventLoop(format!("{e:?}")))?;
-    loop_handle
-        .insert_source(wake_source, |(), (), client| {
-            if client.app.poll_workers(Instant::now()) {
-                client.layout_cache = None;
-            }
-        })
-        .map_err(|e| WaylandAppError::EventLoop(format!("{e:?}")))?;
+    insert_event_sources(&loop_handle, &conn, queue, wake_source, paste_source)?;
+
+    let no_gpu_env = std::env::var_os("RUSTYOS_NO_GPU").is_some_and(|v| v == "1");
+    let use_gpu = !opts.no_gpu && !no_gpu_env;
+    let data_device_manager = DataDeviceManagerState::bind(&globals, &qh).ok();
 
     let client = InstallerClient {
+        conn: conn.clone(),
         qh: qh.clone(),
         loop_handle: loop_handle.clone(),
         registry_state: RegistryState::new(&globals),
@@ -486,10 +608,18 @@ fn setup_client(
         seat_state: SeatState::new(&globals, &qh),
         shm,
         pool,
+        data_device_manager,
+        data_device: None,
+        clipboard: rusty_ui::WaylandClipboardBridge::new(),
+        paste_ping,
+        last_input_serial: 0,
         window: Some(window),
+        gles: None,
+        use_gpu,
+        cpu_backbuf: Vec::new(),
+        frame_rev: 0,
         _glass_mgr: glass_mgr,
-        _window_glass: window_glass,
-        has_glass,
+        window_glass,
         buffers: Vec::new(),
         buffer_size: (DEFAULT_WIDTH, DEFAULT_HEIGHT),
         frame_sent_at: None,
@@ -501,6 +631,8 @@ fn setup_client(
         height: DEFAULT_HEIGHT,
         configured: false,
         pointer_pos: (0.0, 0.0),
+        pointer_pressed: false,
+        click_streak: 1,
         last_click_at: None,
         hover_hit: None,
         app,
@@ -509,14 +641,111 @@ fn setup_client(
     Ok((conn, client, event_loop))
 }
 
-#[allow(clippy::cast_possible_wrap)]
+fn insert_event_sources(
+    loop_handle: &LoopHandle<'static, InstallerClient>,
+    conn: &Connection,
+    queue: EventQueue<InstallerClient>,
+    wake_source: ping::PingSource,
+    paste_source: ping::PingSource,
+) -> Result<(), WaylandAppError> {
+    WaylandSource::new(conn.clone(), queue)
+        .insert(loop_handle.clone())
+        .map_err(|e| WaylandAppError::EventLoop(format!("{e:?}")))?;
+    loop_handle
+        .insert_source(wake_source, |(), (), client| {
+            if client.app.poll_workers(Instant::now()) {
+                client.layout_cache = None;
+            }
+        })
+        .map_err(|e| WaylandAppError::EventLoop(format!("{e:?}")))?;
+    loop_handle
+        .insert_source(paste_source, |(), (), client| {
+            if let Some(pasted) = client.clipboard.poll_received_paste() {
+                client.app.handle_text_input(&pasted);
+            }
+        })
+        .map_err(|e| WaylandAppError::EventLoop(format!("{e:?}")))?;
+    Ok(())
+}
+
+fn try_draw_frame_gles(
+    client: &mut InstallerClient,
+    layout: &InstallerLayout,
+    w: u32,
+    h: u32,
+) -> bool {
+    if client.gles.is_none() {
+        return false;
+    }
+    let len = (w as usize) * (h as usize) * 4;
+    if client.cpu_backbuf.len() != len {
+        client.cpu_backbuf.resize(len, 0);
+    }
+    let has_glass = client.has_glass();
+    render_window_pixels(
+        &mut client.cpu_backbuf,
+        w,
+        h,
+        &client.app,
+        layout,
+        client.hover_hit,
+        has_glass,
+    );
+    client.frame_rev = client.frame_rev.wrapping_add(1);
+    let rev = client.frame_rev;
+    let pixels: Arc<[u8]> = Arc::from(client.cpu_backbuf.as_slice());
+    let mut dl = rusty_ui::UiDrawList::new();
+    {
+        let mut painter = rusty_ui::UiPainter::new(&mut dl);
+        painter.draw_image(
+            rusty_ui::Rect::new(0, 0, w, h),
+            rev,
+            w,
+            h,
+            pixels,
+            rusty_ui::PixelFormat::Bgra8888,
+        );
+    }
+    if let Some(win) = &client.window {
+        win.set_window_geometry(0, 0, w, h);
+        win.wl_surface().frame(&client.qh, win.wl_surface().clone());
+    }
+    let wi = i32::try_from(w).unwrap_or(1);
+    let hi = i32::try_from(h).unwrap_or(1);
+    let gles_res = if let Some(gles) = &mut client.gles {
+        with_font_engine(|fe| gles.render_draw_list(&dl, fe, wi, hi, [0, 0, 0, 0]))
+    } else {
+        Ok(())
+    };
+    match gles_res {
+        Ok(()) => {
+            client.frame_sent_at = Some(Instant::now());
+            true
+        }
+        Err(err) => {
+            tracing::warn!(%err, "rusty-installer GLES2 swap failed; falling back to wl_shm");
+            client.gles = None;
+            client.use_gpu = false;
+            false
+        }
+    }
+}
+
 fn draw_frame(client: &mut InstallerClient) -> Result<(), WaylandAppError> {
     let layout = client.current_layout();
+    let w = client.width.max(1);
+    let h = client.height.max(1);
+    if client.window.is_none() {
+        return Ok(());
+    }
+    if try_draw_frame_gles(client, &layout, w, h) {
+        return Ok(());
+    }
+
+    let has_glass = client.has_glass();
     let Some(win) = &client.window else {
         return Ok(());
     };
-    let w = client.width.max(1);
-    let h = client.height.max(1);
     if client.buffer_size != (w, h) {
         client.buffers.clear();
         client.buffer_size = (w, h);
@@ -550,7 +779,7 @@ fn draw_frame(client: &mut InstallerClient) -> Result<(), WaylandAppError> {
         &client.app,
         &layout,
         client.hover_hit,
-        client.has_glass,
+        has_glass,
     );
     win.set_window_geometry(0, 0, w, h);
     buf_ref
@@ -587,6 +816,7 @@ delegate_registry!(InstallerClient);
 delegate_output!(InstallerClient);
 delegate_compositor!(InstallerClient);
 delegate_shm!(InstallerClient);
+delegate_data_device!(InstallerClient);
 delegate_seat!(InstallerClient);
 delegate_pointer!(InstallerClient);
 delegate_keyboard!(InstallerClient);
@@ -712,6 +942,25 @@ impl WindowHandler for InstallerClient {
         }
         self.app.win.maximized = configure.state.contains(WindowState::MAXIMIZED);
         self.app.win.focused = configure.state.contains(WindowState::ACTIVATED);
+        if self.use_gpu
+            && self.gles.is_none()
+            && let Some(win) = &self.window
+        {
+            match rusty_ui::GlesSurfaceRenderer::new(
+                self.conn.backend().display_ptr().cast(),
+                win.wl_surface(),
+                clamped_w.cast_signed(),
+                clamped_h.cast_signed(),
+            ) {
+                Ok(renderer) => {
+                    self.gles = Some(renderer);
+                }
+                Err(err) => {
+                    tracing::warn!(%err, "rusty-installer GLES2 unavailable; using CPU wl_shm fallback");
+                    self.use_gpu = false;
+                }
+            }
+        }
         self.configured = true;
         self.app.win.dirty = true;
     }
@@ -721,7 +970,12 @@ impl SeatHandler for InstallerClient {
     fn seat_state(&mut self) -> &mut SeatState {
         &mut self.seat_state
     }
-    fn new_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, seat: wl_seat::WlSeat) {
+    fn new_seat(&mut self, _: &Connection, qh: &QueueHandle<Self>, seat: wl_seat::WlSeat) {
+        if self.data_device.is_none()
+            && let Some(ddm) = &self.data_device_manager
+        {
+            self.data_device = Some(ddm.get_data_device(qh, &seat));
+        }
         if self.seat.is_none() {
             self.seat = Some(seat);
         }
@@ -841,6 +1095,16 @@ impl PointerHandler for InstallerClient {
             self.pointer_pos = ev.position;
             match ev.kind {
                 PointerEventKind::Enter { .. } | PointerEventKind::Motion { .. } => {
+                    if self.pointer_pressed
+                        && let Some(field) = self.app.caret.focused_field
+                    {
+                        let changed = with_font_engine(|fe| {
+                            self.app.fields[field.idx()].on_pointer_move(ev.position.0, fe)
+                        });
+                        if changed {
+                            self.app.win.dirty = true;
+                        }
+                    }
                     let layout = self.current_layout();
                     let next = hit_test(&layout, ev.position.0, ev.position.1);
                     if next != self.hover_hit {
@@ -858,10 +1122,150 @@ impl PointerHandler for InstallerClient {
                     serial,
                     ..
                 } => {
+                    self.pointer_pressed = true;
                     self.execute_left_click(ev.position.0, ev.position.1, serial);
+                }
+                PointerEventKind::Release {
+                    button: BTN_LEFT, ..
+                } => {
+                    self.pointer_pressed = false;
+                    if let Some(field) = self.app.caret.focused_field {
+                        self.app.fields[field.idx()].on_pointer_up();
+                    }
                 }
                 _ => {}
             }
         }
+    }
+}
+
+impl DataDeviceHandler for InstallerClient {
+    fn enter(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_data_device::WlDataDevice,
+        _: f64,
+        _: f64,
+        _: &wl_surface::WlSurface,
+    ) {
+    }
+    fn leave(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_data_device::WlDataDevice) {}
+    fn motion(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_data_device::WlDataDevice,
+        _: f64,
+        _: f64,
+    ) {
+    }
+    fn selection(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_data_device::WlDataDevice,
+    ) {
+    }
+    fn drop_performed(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_data_device::WlDataDevice,
+    ) {
+    }
+}
+
+impl DataOfferHandler for InstallerClient {
+    fn source_actions(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &mut DragOffer,
+        _: DndAction,
+    ) {
+    }
+    fn selected_action(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &mut DragOffer,
+        _: DndAction,
+    ) {
+    }
+}
+
+impl DataSourceHandler for InstallerClient {
+    fn accept_mime(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_data_source::WlDataSource,
+        _: Option<String>,
+    ) {
+    }
+    fn send_request(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        source: &wl_data_source::WlDataSource,
+        mime: String,
+        write_pipe: WritePipe,
+    ) {
+        self.clipboard
+            .serve_send_request(source, &mime, OwnedFd::from(write_pipe));
+    }
+    fn cancelled(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        source: &wl_data_source::WlDataSource,
+    ) {
+        self.clipboard.remove_source(source);
+    }
+    fn dnd_dropped(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_data_source::WlDataSource,
+    ) {
+    }
+    fn dnd_finished(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_data_source::WlDataSource,
+    ) {
+    }
+    fn action(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        _: &wl_data_source::WlDataSource,
+        _: DndAction,
+    ) {
+    }
+}
+
+fn map_keysym_to_ui(keysym: Keysym, utf8: Option<&str>) -> Option<rusty_ui::TextInputKey> {
+    match keysym {
+        Keysym::Left => Some(rusty_ui::TextInputKey::Left),
+        Keysym::Right => Some(rusty_ui::TextInputKey::Right),
+        Keysym::Home => Some(rusty_ui::TextInputKey::Home),
+        Keysym::End => Some(rusty_ui::TextInputKey::End),
+        Keysym::BackSpace => Some(rusty_ui::TextInputKey::Backspace),
+        Keysym::Delete => Some(rusty_ui::TextInputKey::Delete),
+        Keysym::Return | Keysym::KP_Enter => Some(rusty_ui::TextInputKey::Enter),
+        Keysym::Escape => Some(rusty_ui::TextInputKey::Escape),
+        _ => utf8
+            .and_then(|s| s.chars().next())
+            .filter(|ch| !ch.is_control())
+            .map(rusty_ui::TextInputKey::Char)
+            .or_else(|| {
+                keysym
+                    .key_char()
+                    .filter(|ch| !ch.is_control())
+                    .map(rusty_ui::TextInputKey::Char)
+            }),
     }
 }

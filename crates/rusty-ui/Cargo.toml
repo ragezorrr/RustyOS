@@ -8,6 +8,14 @@ authors.workspace = true
 
 [dependencies]
 fontdue.workspace = true
+libc.workspace = true
+rusty-animation.workspace = true
+tracing.workspace = true
+wayland-client.workspace = true
+wayland-egl.workspace = true
+
+[build-dependencies]
+gl_generator.workspace = true
 
 [lints]
 workspace = true

@@ -631,6 +631,172 @@ impl FilesAppState {
             .max(Duration::from_millis(10))
     }
 
+    pub(crate) fn sync_text_fields_from_strings(&mut self) {
+        if self.search_field.buffer.as_str() != self.search_query {
+            self.search_field.buffer.set_text(&self.search_query);
+        }
+        if let Some(rn) = &self.inline_rename
+            && self.rename_field.buffer.as_str() != rn.draft
+        {
+            self.rename_field.buffer.set_text(&rn.draft);
+        }
+        if let Some(gt) = &self.go_to_folder
+            && self.goto_field.buffer.as_str() != gt.input
+        {
+            self.goto_field.buffer.set_text(&gt.input);
+        }
+    }
+
+    pub(crate) fn apply_focused_paste(
+        &mut self,
+        text: &str,
+        fonts: &mut rusty_ui::UiFontEngine,
+    ) -> bool {
+        if !self.has_focused_text_input() || text.is_empty() {
+            return false;
+        }
+        let mut mem = rusty_ui::MemoryClipboard::new();
+        rusty_ui::ClipboardSink::set_text(&mut mem, text);
+        self.handle_focused_text_key(
+            rusty_ui::TextInputKey::Char('v'),
+            rusty_ui::InputModifiers {
+                ctrl: true,
+                shift: false,
+                alt: false,
+            },
+            fonts,
+            &mut mem,
+        )
+    }
+
+    pub(crate) fn handle_focused_text_key(
+        &mut self,
+        key: rusty_ui::TextInputKey,
+        mods: rusty_ui::InputModifiers,
+        fonts: &mut rusty_ui::UiFontEngine,
+        clipboard: &mut dyn rusty_ui::ClipboardSink,
+    ) -> bool {
+        if !self.has_focused_text_input() {
+            return false;
+        }
+        if mods.ctrl
+            && let rusty_ui::TextInputKey::Char(ch) = key
+            && !matches!(ch.to_ascii_lowercase(), 'a' | 'c' | 'x' | 'v')
+        {
+            return false;
+        }
+        self.sync_text_fields_from_strings();
+        let now = self.epoch.elapsed();
+
+        if self.inline_rename.is_some() {
+            return self.process_rename_text_key(key, mods, now, fonts, clipboard);
+        }
+        if self.go_to_folder.is_some() {
+            return self.process_goto_text_key(key, mods, now, fonts, clipboard);
+        }
+        if self.search_active {
+            if matches!(key, rusty_ui::TextInputKey::Enter) {
+                return false;
+            }
+            let ev = self
+                .search_field
+                .handle_key(key, mods, now, fonts, clipboard);
+            match ev {
+                rusty_ui::TextInputEvent::Ignored => return false,
+                rusty_ui::TextInputEvent::Cancelled => {
+                    if self.search_query.is_empty() {
+                        self.search_active = false;
+                        self.set_search_scope(SearchScope::ThisFolder);
+                    } else {
+                        self.set_search_query(String::new());
+                    }
+                    self.dirty = true;
+                    return true;
+                }
+                rusty_ui::TextInputEvent::Changed => {
+                    self.search_query = self.search_field.buffer.as_str().to_owned();
+                    self.refresh_search_results();
+                }
+                rusty_ui::TextInputEvent::CaretMoved | rusty_ui::TextInputEvent::Submitted => {}
+            }
+            self.reset_caret_blink();
+            self.dirty = true;
+            return true;
+        }
+        false
+    }
+
+    fn process_rename_text_key(
+        &mut self,
+        key: rusty_ui::TextInputKey,
+        mods: rusty_ui::InputModifiers,
+        now: Duration,
+        fonts: &mut rusty_ui::UiFontEngine,
+        clipboard: &mut dyn rusty_ui::ClipboardSink,
+    ) -> bool {
+        let ev = self
+            .rename_field
+            .handle_key(key, mods, now, fonts, clipboard);
+        match ev {
+            rusty_ui::TextInputEvent::Ignored => return false,
+            rusty_ui::TextInputEvent::Cancelled => {
+                self.inline_rename = None;
+                self.dirty = true;
+            }
+            rusty_ui::TextInputEvent::Submitted => self.commit_inline_rename(),
+            rusty_ui::TextInputEvent::Changed => {
+                if let Some(rn) = &mut self.inline_rename {
+                    self.rename_field.buffer.as_str().clone_into(&mut rn.draft);
+                    rn.error = None;
+                }
+                self.reset_caret_blink();
+                self.dirty = true;
+            }
+            rusty_ui::TextInputEvent::CaretMoved => {
+                self.reset_caret_blink();
+                self.dirty = true;
+            }
+        }
+        true
+    }
+
+    fn process_goto_text_key(
+        &mut self,
+        key: rusty_ui::TextInputKey,
+        mods: rusty_ui::InputModifiers,
+        now: Duration,
+        fonts: &mut rusty_ui::UiFontEngine,
+        clipboard: &mut dyn rusty_ui::ClipboardSink,
+    ) -> bool {
+        let ev = self.goto_field.handle_key(key, mods, now, fonts, clipboard);
+        match ev {
+            rusty_ui::TextInputEvent::Ignored => return false,
+            rusty_ui::TextInputEvent::Cancelled => {
+                self.go_to_folder = None;
+                self.dirty = true;
+            }
+            rusty_ui::TextInputEvent::Submitted => self.submit_go_to_folder(),
+            rusty_ui::TextInputEvent::Changed => {
+                let current_dir = self.active_writable_directory();
+                let next_str = self.goto_field.buffer.as_str().to_owned();
+                if let Some(gt) = &mut self.go_to_folder {
+                    gt.input = next_str;
+                    gt.error = None;
+                    gt.suggestions =
+                        suggest_go_to_paths(&gt.input, current_dir.as_deref(), &self.locations, 6);
+                    gt.selected_suggestion = 0;
+                }
+                self.reset_caret_blink();
+                self.dirty = true;
+            }
+            rusty_ui::TextInputEvent::CaretMoved => {
+                self.reset_caret_blink();
+                self.dirty = true;
+            }
+        }
+        true
+    }
+
     pub(crate) fn update_caret_blink(&mut self, now: Instant) -> bool {
         if !self.has_focused_text_input() {
             if !self.caret_visible {

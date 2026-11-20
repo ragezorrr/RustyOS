@@ -29,6 +29,7 @@ where
             "--light" => opts.theme_override = Some(FilesThemeMode::Light),
             "--dark" => opts.theme_override = Some(FilesThemeMode::Dark),
             "--open-popup" => opts.open_test_popup = true,
+            "--no-gpu" => opts.no_gpu = true,
             "--path" => {
                 let Some(dir) = iter.next() else {
                     return Err(String::from("--path requires a directory argument"));
@@ -53,7 +54,9 @@ fn main() -> ExitCode {
     let opts = match parse_args(env::args().skip(1)) {
         Ok(Some(o)) => o,
         Ok(None) => {
-            println!("Usage: rusty-files [--path <dir>] [--trash] [--recents] [--light | --dark]");
+            println!(
+                "Usage: rusty-files [--path <dir>] [--trash] [--recents] [--light | --dark] [--no-gpu]"
+            );
             return ExitCode::SUCCESS;
         }
         Err(msg) => {
@@ -85,6 +88,7 @@ mod tests {
                 open_recents: false,
                 theme_override: Some(FilesThemeMode::Dark),
                 open_test_popup: false,
+                no_gpu: false,
             }))
         );
         assert_eq!(
@@ -99,16 +103,18 @@ mod tests {
                 open_recents: false,
                 theme_override: Some(FilesThemeMode::Light),
                 open_test_popup: false,
+                no_gpu: false,
             }))
         );
         assert_eq!(
-            parse_args(["--open-popup".to_owned()]),
+            parse_args(["--open-popup".to_owned(), "--no-gpu".to_owned()]),
             Ok(Some(StartupOptions {
                 initial_path: None,
                 open_trash: false,
                 open_recents: false,
                 theme_override: None,
                 open_test_popup: true,
+                no_gpu: true,
             }))
         );
         assert!(parse_args(["--path".to_owned()]).is_err());

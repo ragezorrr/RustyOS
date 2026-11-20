@@ -367,12 +367,14 @@ pub(crate) enum TransferWorkerMsg {
 
 /// Startup options parsed from CLI flags.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[allow(clippy::struct_excessive_bools)]
 pub(crate) struct StartupOptions {
     pub initial_path: Option<PathBuf>,
     pub open_trash: bool,
     pub open_recents: bool,
     pub theme_override: Option<FilesThemeMode>,
     pub open_test_popup: bool,
+    pub no_gpu: bool,
 }
 
 /// Window maximize state requested by compositor or traffic-light toggle.

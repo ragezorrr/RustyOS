@@ -7,7 +7,9 @@ use crate::layout::{
     ConflictDialogLayout, FilesLayout, GetInfoLayout, GoToFolderLayout, QuickLookLayout, Rect,
     TransferDialogLayout,
 };
-use crate::render::canvas::Canvas;
+use crate::render::canvas::{
+    Canvas, make_ui_canvas, to_ui_rect, ui_theme_palette, with_font_engine,
+};
 use crate::render::views::{
     draw_aspect_fitted_preview, draw_framed_thumbnail, render_text_preview_card,
 };
@@ -56,32 +58,31 @@ pub(crate) fn render_inline_rename_editor(
             26,
         )
     });
-    c.fill_rounded_rect(box_rect, 6, pal.window_bg);
-    let border = if rn.error.is_some() {
-        rgba(235, 55, 48, 255)
-    } else {
-        pal.accent
-    };
-    c.stroke_rounded_rect(box_rect, 6, border);
-    let fitted = Canvas::fit_text(&rn.draft, box_rect.w - 14, 12.5, false);
-    c.draw_text(
-        &fitted,
-        box_rect.x + 6,
-        box_rect.y + 5,
-        12.5,
-        false,
-        pal.text_primary,
-        box_rect,
-    );
-    if state.caret_visible {
-        let caret_x = box_rect.x + 6 + Canvas::measure_text(&fitted, 12.5, false);
-        if caret_x < box_rect.right() - 4 {
-            c.fill_rect(
-                Rect::new(caret_x, box_rect.y + 4, 2, box_rect.h - 8),
-                pal.accent,
-            );
-        }
+    let mut rf = state.rename_field.clone();
+    rf.rect = to_ui_rect(box_rect);
+    rf.corner_radius = 6.0;
+    rf.font_size = 12.5;
+    rf.padding_x = 6;
+    if rf.buffer.as_str() != rn.draft {
+        rf.buffer.set_text(&rn.draft);
     }
+    rf.caret_blink.reset(std::time::Duration::ZERO);
+    let blink_ts = if state.caret_visible {
+        std::time::Duration::ZERO
+    } else {
+        std::time::Duration::from_millis(600)
+    };
+    let mut ui_pal = ui_theme_palette(pal, state.accent_index);
+    if rn.error.is_some() {
+        ui_pal.accent = rgba(235, 55, 48, 255);
+    }
+    let mut dl = rusty_ui::UiDrawList::new();
+    let mut uc = make_ui_canvas(c.buf, c.w, c.h);
+    with_font_engine(|fe| {
+        let mut painter = rusty_ui::UiPainter::new(&mut dl);
+        rf.paint(&mut painter, fe, &ui_pal, true, 1.0, blink_ts);
+        rusty_ui::render_draw_list_to_canvas(&dl, &mut uc, fe);
+    });
 }
 
 pub(crate) fn render_quick_look_overlay(
@@ -499,25 +500,31 @@ pub(crate) fn render_go_to_folder_sheet(
     draw_modal_shadow_and_frame(c, gt_layout.modal_rect, 12, pal);
 
     c.with_clip(gt_layout.modal_rect, |c| {
-        c.fill_rounded_rect(gt_layout.input_rect, 8, pal.row_alt);
-        c.stroke_rounded_rect(gt_layout.input_rect, 8, pal.accent);
-        let fitted = Canvas::fit_text(&gt.input, gt_layout.input_rect.w - 36, 13.0, false);
-        c.draw_text(
-            &fitted,
-            gt_layout.input_rect.x + 10,
-            gt_layout.input_rect.y + 8,
-            13.0,
-            false,
-            pal.text_primary,
-            gt_layout.input_rect,
-        );
-        if state.caret_visible {
-            let caret_x = gt_layout.input_rect.x + 10 + Canvas::measure_text(&fitted, 13.0, false);
-            c.fill_rect(
-                Rect::new(caret_x, gt_layout.input_rect.y + 6, 2, 18),
-                pal.accent,
-            );
+        let mut gf = state.goto_field.clone();
+        gf.rect = to_ui_rect(gt_layout.input_rect);
+        gf.corner_radius = 8.0;
+        gf.font_size = 13.0;
+        gf.padding_x = 10;
+        gf.clearable = false;
+        if gf.buffer.as_str() != gt.input {
+            gf.buffer.set_text(&gt.input);
         }
+        gf.caret_blink.reset(std::time::Duration::ZERO);
+        let blink_ts = if state.caret_visible {
+            std::time::Duration::ZERO
+        } else {
+            std::time::Duration::from_millis(600)
+        };
+        let ui_pal = ui_theme_palette(pal, state.accent_index);
+        let mut dl = rusty_ui::UiDrawList::new();
+        let mut uc = make_ui_canvas(c.buf, c.w, c.h);
+        with_font_engine(|fe| {
+            let mut painter = rusty_ui::UiPainter::new(&mut dl);
+            painter.push_clip(to_ui_rect(gt_layout.modal_rect));
+            gf.paint(&mut painter, fe, &ui_pal, true, 1.0, blink_ts);
+            painter.pop_clip();
+            rusty_ui::render_draw_list_to_canvas(&dl, &mut uc, fe);
+        });
 
         #[allow(clippy::cast_precision_loss)]
         {
@@ -737,32 +744,48 @@ pub(crate) fn render_conflict_dialog(
             cf_layout.modal_rect,
         );
 
+        let ui_pal = ui_theme_palette(pal, state.accent_index);
         let btns = [
-            (cf_layout.keep_both_rect, "Keep Both", false),
-            (cf_layout.skip_rect, "Skip", false),
-            (cf_layout.stop_rect, "Stop", false),
-            (cf_layout.replace_rect, "Replace", true),
+            (
+                cf_layout.keep_both_rect,
+                "Keep Both",
+                rusty_ui::ButtonStyle::Secondary,
+            ),
+            (
+                cf_layout.skip_rect,
+                "Skip",
+                rusty_ui::ButtonStyle::Secondary,
+            ),
+            (
+                cf_layout.stop_rect,
+                "Stop",
+                rusty_ui::ButtonStyle::Secondary,
+            ),
+            (
+                cf_layout.replace_rect,
+                "Replace",
+                rusty_ui::ButtonStyle::Primary,
+            ),
         ];
-        for (rect, label, primary) in btns {
-            c.fill_rounded_rect(rect, 7, if primary { pal.accent } else { pal.pill_bg });
-            if !primary {
-                c.stroke_rounded_rect(rect, 7, pal.pill_border);
+        let mut dl = rusty_ui::UiDrawList::new();
+        let mut uc = make_ui_canvas(c.buf, c.w, c.h);
+        with_font_engine(|fe| {
+            let mut painter = rusty_ui::UiPainter::new(&mut dl);
+            painter.push_clip(to_ui_rect(cf_layout.modal_rect));
+            for (rect, label, style) in btns {
+                let btn =
+                    rusty_ui::PushButton::new(to_ui_rect(rect), style).with_corner_radius(7.0);
+                btn.paint_labeled(
+                    &mut painter,
+                    fe,
+                    label,
+                    &ui_pal,
+                    style == rusty_ui::ButtonStyle::Primary,
+                );
             }
-            let tw = Canvas::measure_text(label, 12.0, primary);
-            c.draw_text(
-                label,
-                rect.x + (rect.w - tw) / 2,
-                rect.y + 6,
-                12.0,
-                primary,
-                if primary {
-                    pal.accent_text
-                } else {
-                    pal.text_primary
-                },
-                rect,
-            );
-        }
+            painter.pop_clip();
+            rusty_ui::render_draw_list_to_canvas(&dl, &mut uc, fe);
+        });
     });
 }
 

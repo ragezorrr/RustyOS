@@ -10,10 +10,7 @@
 )]
 
 use std::cell::RefCell;
-use std::collections::HashMap;
-use std::sync::OnceLock;
 
-use fontdue::{Font, FontSettings};
 use rusty_services::file_manager::accent_rgba_for_index;
 
 use crate::disks::DualBootKind;
@@ -26,76 +23,13 @@ use crate::state::{
     LANGUAGE_OPTIONS, TextFieldId, ThemeChoice, WizardMode,
 };
 
-const INTER_REGULAR_BYTES: &[u8] = include_bytes!("../../../assets/fonts/Inter-Regular.ttf");
-const INTER_SEMIBOLD_BYTES: &[u8] = include_bytes!("../../../assets/fonts/Inter-SemiBold.ttf");
-
-fn regular_font() -> Option<&'static Font> {
-    static FONT: OnceLock<Option<Font>> = OnceLock::new();
-    FONT.get_or_init(|| Font::from_bytes(INTER_REGULAR_BYTES, FontSettings::default()).ok())
-        .as_ref()
-}
-
-fn semibold_font() -> Option<&'static Font> {
-    static FONT: OnceLock<Option<Font>> = OnceLock::new();
-    FONT.get_or_init(|| Font::from_bytes(INTER_SEMIBOLD_BYTES, FontSettings::default()).ok())
-        .as_ref()
-        .or_else(regular_font)
-}
-
-#[derive(Clone, Copy, Hash, PartialEq, Eq)]
-struct GlyphKey {
-    ch: char,
-    bold: bool,
-    tenths_px: u16,
-}
-
-struct CachedGlyph {
-    xmin: i32,
-    ymin: i32,
-    width: usize,
-    height: usize,
-    advance: i32,
-    bitmap: Vec<u8>,
-}
-
 thread_local! {
-    static GLYPH_CACHE: RefCell<HashMap<GlyphKey, CachedGlyph>> =
-        RefCell::new(HashMap::with_capacity(256));
+    static FONT_ENGINE: RefCell<rusty_ui::UiFontEngine> =
+        RefCell::new(rusty_ui::UiFontEngine::new());
 }
 
-#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-fn with_cached_glyph<R>(
-    ch: char,
-    size_px: f32,
-    bold: bool,
-    f: impl FnOnce(&CachedGlyph) -> R,
-) -> Option<R> {
-    let tenths_px = (size_px * 10.0).round().clamp(10.0, 2000.0) as u16;
-    let key = GlyphKey {
-        ch,
-        bold,
-        tenths_px,
-    };
-    GLYPH_CACHE.with(|cell| {
-        let mut map = cell.borrow_mut();
-        if let std::collections::hash_map::Entry::Vacant(entry) = map.entry(key) {
-            let font = if bold {
-                semibold_font()
-            } else {
-                regular_font()
-            }?;
-            let (metrics, bitmap) = font.rasterize(ch, size_px);
-            entry.insert(CachedGlyph {
-                xmin: metrics.xmin,
-                ymin: metrics.ymin,
-                width: metrics.width,
-                height: metrics.height,
-                advance: metrics.advance_width.round() as i32,
-                bitmap,
-            });
-        }
-        map.get(&key).map(f)
-    })
+pub(crate) fn with_font_engine<R>(f: impl FnOnce(&mut rusty_ui::UiFontEngine) -> R) -> R {
+    FONT_ENGINE.with(|cell| f(&mut cell.borrow_mut()))
 }
 
 pub(crate) struct Palette {
@@ -332,9 +266,7 @@ impl<'a> Canvas<'a> {
 
     fn text_width(&self, text: &str, size_px: f32, bold: bool) -> i32 {
         let _ = self.w;
-        text.chars()
-            .map(|ch| with_cached_glyph(ch, size_px, bold, |g| g.advance).unwrap_or(6))
-            .sum()
+        with_font_engine(|fe| fe.measure_width(text, size_px, bold).round() as i32)
     }
 
     fn draw_text(
@@ -364,32 +296,31 @@ impl<'a> Canvas<'a> {
         color: [u8; 4],
         max_x: i32,
     ) {
-        let mut pen_x = x;
-        for ch in text.chars() {
-            let adv = with_cached_glyph(ch, size_px, bold, |g| {
-                let gx0 = pen_x + g.xmin;
-                let gy0 = y_baseline - g.ymin - (g.height as i32);
-                for row in 0..g.height {
-                    let py = gy0 + row as i32;
-                    for col in 0..g.width {
-                        let px = gx0 + col as i32;
-                        if px >= max_x {
-                            continue;
-                        }
-                        let cov = g.bitmap[row * g.width + col];
-                        if cov > 0 {
-                            self.blend_px(px, py, color, cov);
-                        }
-                    }
-                }
-                g.advance
-            })
-            .unwrap_or(6);
-            pen_x += adv;
-            if pen_x >= max_x {
-                break;
-            }
+        let clip_w = (max_x - x).max(0) as u32;
+        if clip_w == 0 || text.is_empty() {
+            return;
         }
+        let stride = (self.w.max(1) as usize) * 4;
+        let mut ui_canvas = rusty_ui::UiCanvas::new(
+            self.buf,
+            self.w.max(1) as u32,
+            self.h.max(1) as u32,
+            stride,
+            rusty_ui::PixelFormat::Bgra8888,
+        );
+        let clip = rusty_ui::Rect::new(x, 0, clip_w, self.h.max(1) as u32);
+        with_font_engine(|fe| {
+            fe.draw_text_on_canvas(
+                &mut ui_canvas,
+                text,
+                x as f32,
+                y_baseline as f32,
+                size_px,
+                bold,
+                color,
+                Some(clip),
+            );
+        });
     }
 
     fn draw_text_centered(
@@ -1897,13 +1828,14 @@ fn draw_text_field(
         pal.text_secondary,
     );
     let focused = app.caret.focused_field == Some(field.id);
-    c.fill_rounded_rect(field.rect, 9, pal.field_bg);
-    c.stroke_rounded_rect(
-        field.rect,
-        9,
-        if focused { 2.0 } else { 1.0 },
-        if focused { pal.accent } else { pal.card_border },
+    let mut ui_field = app.fields[field.id.idx()].clone();
+    ui_field.rect = rusty_ui::Rect::new(
+        field.rect.x,
+        field.rect.y,
+        field.rect.w.max(1) as u32,
+        field.rect.h.max(1) as u32,
     );
+    ui_field.masked = field.masked;
     let raw = match field.id {
         TextFieldId::FullName => app.account.full_name.as_str(),
         TextFieldId::Username => app.account.username.as_str(),
@@ -1912,31 +1844,37 @@ fn draw_text_field(
         TextFieldId::ConfirmPassword => app.account.confirm_password.as_str(),
         TextFieldId::WifiPassword => app.wifi_password.as_str(),
     };
-    let display = if field.masked {
-        "•".repeat(raw.chars().count())
-    } else {
-        raw.to_owned()
-    };
-    let tx = field.rect.x + 11;
-    let ty = field.rect.y + 22;
-    c.draw_text_clipped(
-        tx,
-        ty,
-        &display,
-        13.5,
-        false,
-        pal.text_primary,
-        field.rect.right() - 10,
-    );
-    if focused && app.caret.visible {
-        let tw = c.text_width(&display, 13.5, false);
-        let cx = (tx + tw).min(field.rect.right() - 8);
-        c.fill_rounded_rect(
-            Rect::new(cx, field.rect.y + 7, 2, field.rect.h - 14),
-            1,
-            pal.accent,
-        );
+    if ui_field.buffer.as_str() != raw {
+        ui_field.buffer.set_text(raw);
     }
+
+    let ui_pal = rusty_ui::ThemePalette::new(pal.dark, app.accent_index);
+    let mut dl = rusty_ui::UiDrawList::new();
+    let stride = (c.w.max(1) as usize) * 4;
+    let mut ui_canvas = rusty_ui::UiCanvas::new(
+        c.buf,
+        c.w.max(1) as u32,
+        c.h.max(1) as u32,
+        stride,
+        rusty_ui::PixelFormat::Bgra8888,
+    );
+    with_font_engine(|fe| {
+        let mut painter = rusty_ui::UiPainter::new(&mut dl);
+        let alpha = if app.focus.ring_alpha() > 0.01 {
+            app.focus.ring_alpha()
+        } else {
+            1.0
+        };
+        ui_field.paint(
+            &mut painter,
+            fe,
+            &ui_pal,
+            focused,
+            alpha,
+            app.epoch.elapsed(),
+        );
+        rusty_ui::render_draw_list_to_canvas(&dl, &mut ui_canvas, fe);
+    });
 }
 
 #[allow(clippy::cast_precision_loss)]

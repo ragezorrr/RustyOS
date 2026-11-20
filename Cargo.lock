@@ -1692,7 +1692,6 @@ dependencies = [
 name = "rusty-files"
 version = "0.1.0"
 dependencies = [
- "fontdue",
  "rusty-animation",
  "rusty-services",
  "rusty-ui",
@@ -1707,7 +1706,6 @@ dependencies = [
 name = "rusty-installer"
 version = "0.1.0"
 dependencies = [
- "fontdue",
  "rusty-animation",
  "rusty-services",
  "rusty-ui",
@@ -1733,7 +1731,6 @@ dependencies = [
 name = "rusty-settings"
 version = "0.1.0"
 dependencies = [
- "fontdue",
  "rusty-services",
  "rusty-ui",
  "smithay-client-toolkit",
@@ -1766,6 +1763,12 @@ name = "rusty-ui"
 version = "0.1.0"
 dependencies = [
  "fontdue",
+ "gl_generator",
+ "libc",
+ "rusty-animation",
+ "tracing",
+ "wayland-client",
+ "wayland-egl",
 ]
 
 [[package]]

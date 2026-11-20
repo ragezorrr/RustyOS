@@ -33,6 +33,7 @@ where
             "--demo" => opts.env_kind = RunEnv::Demo,
             "--dry-run" => opts.dry_run = true,
             "--no-glass" => opts.no_glass = true,
+            "--no-gpu" => opts.no_gpu = true,
             "--light" => opts.theme_override = Some(FilesThemeMode::Light),
             "--dark" => opts.theme_override = Some(FilesThemeMode::Dark),
             "--accent" => {
@@ -66,7 +67,7 @@ fn main() -> ExitCode {
         Ok(Some(o)) => o,
         Ok(None) => {
             println!(
-                "Usage: rusty-installer [--install | --oobe] [--live] [--demo] [--dry-run] [--light | --dark] [--accent <0..6>] [--no-glass] [--install-script <path>]"
+                "Usage: rusty-installer [--install | --oobe] [--live] [--demo] [--dry-run] [--light | --dark] [--accent <0..6>] [--no-glass] [--no-gpu] [--install-script <path>]"
             );
             return ExitCode::SUCCESS;
         }
@@ -108,7 +109,7 @@ mod tests {
                 no_glass: true,
                 theme_override: Some(FilesThemeMode::Dark),
                 accent_override: Some(2),
-                install_script: None,
+                ..Default::default()
             }))
         );
         assert!(parse_args(["--accent".to_owned()]).is_err());

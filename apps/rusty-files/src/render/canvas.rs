@@ -1,16 +1,11 @@
-//! Pure CPU 2D canvas, Fontdue Inter glyph rasterization, and SDF anti-aliased drawing.
+//! Pure CPU 2D canvas, shared `rusty-ui` Inter font engine, and SDF anti-aliased drawing.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
-use std::sync::OnceLock;
 
-use fontdue::{Font, FontSettings};
 use rusty_services::file_manager::DecodedPreviewImage;
 
 use crate::layout::Rect;
-
-const INTER_REGULAR_BYTES: &[u8] = include_bytes!("../../../../assets/fonts/Inter-Regular.ttf");
-const INTER_SEMIBOLD_BYTES: &[u8] = include_bytes!("../../../../assets/fonts/Inter-SemiBold.ttf");
+use crate::render::Palette;
 
 /// 4x4 rotated-grid supersampling offsets in `[0.0, 1.0)` for polygon anti-aliasing.
 const RGSS_16: [(f32, f32); 16] = [
@@ -32,77 +27,43 @@ const RGSS_16: [(f32, f32); 16] = [
     (0.8125, 0.9375),
 ];
 
-pub(crate) fn regular_font() -> Option<&'static Font> {
-    static FONT: OnceLock<Option<Font>> = OnceLock::new();
-    FONT.get_or_init(|| Font::from_bytes(INTER_REGULAR_BYTES, FontSettings::default()).ok())
-        .as_ref()
-}
-
-pub(crate) fn semibold_font() -> Option<&'static Font> {
-    static FONT: OnceLock<Option<Font>> = OnceLock::new();
-    FONT.get_or_init(|| Font::from_bytes(INTER_SEMIBOLD_BYTES, FontSettings::default()).ok())
-        .as_ref()
-        .or_else(regular_font)
-}
-
-#[derive(Clone, Copy, Hash, PartialEq, Eq)]
-struct GlyphKey {
-    ch: char,
-    bold: bool,
-    tenths_px: u16,
-}
-
-struct CachedGlyph {
-    xmin: i32,
-    ymin: i32,
-    width: usize,
-    height: usize,
-    advance: i32,
-    bitmap: Vec<u8>,
-}
-
 thread_local! {
-    static GLYPH_CACHE: RefCell<HashMap<GlyphKey, CachedGlyph>> =
-        RefCell::new(HashMap::with_capacity(512));
+    static FONT_ENGINE: RefCell<rusty_ui::UiFontEngine> =
+        RefCell::new(rusty_ui::UiFontEngine::new());
 }
 
-#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-fn with_cached_glyph<R>(
-    ch: char,
-    size_px: f32,
-    bold: bool,
-    f: impl FnOnce(&CachedGlyph) -> R,
-) -> Option<R> {
-    let tenths_px = (size_px * 10.0).round().clamp(10.0, 2000.0) as u16;
-    let key = GlyphKey {
-        ch,
-        bold,
-        tenths_px,
-    };
-    GLYPH_CACHE.with(|cell| {
-        let mut map = cell.borrow_mut();
-        if map.len() > 4096 {
-            map.clear();
-        }
-        if let std::collections::hash_map::Entry::Vacant(entry) = map.entry(key) {
-            let font = if bold {
-                semibold_font()
-            } else {
-                regular_font()
-            }?;
-            let (metrics, bitmap) = font.rasterize(ch, f32::from(tenths_px) / 10.0);
-            let cached = CachedGlyph {
-                xmin: metrics.xmin,
-                ymin: metrics.ymin,
-                width: metrics.width,
-                height: metrics.height,
-                advance: (metrics.advance_width.round() as i32).max(1),
-                bitmap,
-            };
-            entry.insert(cached);
-        }
-        map.get(&key).map(f)
-    })
+pub(crate) fn with_font_engine<R>(f: impl FnOnce(&mut rusty_ui::UiFontEngine) -> R) -> R {
+    FONT_ENGINE.with(|cell| f(&mut cell.borrow_mut()))
+}
+
+pub(crate) fn to_ui_rect(r: Rect) -> rusty_ui::Rect {
+    rusty_ui::Rect::new(
+        r.x,
+        r.y,
+        r.w.max(0).cast_unsigned(),
+        r.h.max(0).cast_unsigned(),
+    )
+}
+
+pub(crate) fn make_ui_canvas(buf: &mut [u8], w: i32, h: i32) -> rusty_ui::UiCanvas<'_> {
+    let uw = w.max(0).cast_unsigned();
+    let uh = h.max(0).cast_unsigned();
+    rusty_ui::UiCanvas::new(
+        buf,
+        uw,
+        uh,
+        (uw as usize) * 4,
+        rusty_ui::PixelFormat::Bgra8888,
+    )
+}
+
+pub(crate) fn ui_theme_palette(pal: &Palette, accent_index: usize) -> rusty_ui::ThemePalette {
+    let mut ui_pal = rusty_ui::ThemePalette::new(pal.is_dark, accent_index);
+    ui_pal.accent = pal.accent;
+    ui_pal.text_primary = pal.text_primary;
+    ui_pal.text_secondary = pal.text_secondary;
+    ui_pal.text_muted = pal.text_muted;
+    ui_pal
 }
 
 pub(crate) struct Canvas<'a> {
@@ -846,8 +807,7 @@ impl<'a> Canvas<'a> {
     #[allow(
         clippy::too_many_arguments,
         clippy::cast_possible_truncation,
-        clippy::cast_possible_wrap,
-        clippy::cast_sign_loss
+        clippy::cast_precision_loss
     )]
     pub(crate) fn draw_text(
         &mut self,
@@ -869,93 +829,26 @@ impl<'a> Canvas<'a> {
         if eff.w <= 0 || eff.h <= 0 || y >= eff.bottom() {
             return;
         }
-        let mut cursor_x = x;
         let baseline_y = y + (size_px * 0.82).round() as i32;
-
-        for ch in text.chars() {
-            if cursor_x >= eff.right() {
-                break;
-            }
-            let adv = with_cached_glyph(ch, size_px, bold, |g| {
-                let gx0 = cursor_x + g.xmin;
-                let gy0 = baseline_y - g.ymin - g.height as i32;
-                let x_start = gx0.max(eff.x);
-                let x_end = (gx0 + g.width as i32).min(eff.right());
-                let y_start = gy0.max(eff.y);
-                let y_end = (gy0 + g.height as i32).min(eff.bottom());
-
-                if x_start < x_end && y_start < y_end {
-                    let col_start = (x_start - gx0) as usize;
-                    let span = (x_end - x_start) as usize;
-                    let dst_x0 = (x_start as usize) * 4;
-                    let dst_x1 = dst_x0 + span * 4;
-                    let dst_stride = (self.w as usize) * 4;
-                    let ca = u16::from(color[3]);
-                    let cr = u16::from(color[0]);
-                    let cg = u16::from(color[1]);
-                    let cb = u16::from(color[2]);
-                    for py in y_start..y_end {
-                        let row = (py - gy0) as usize;
-                        let src_off = row * g.width + col_start;
-                        let dst_off = (py as usize) * dst_stride;
-                        if src_off + span > g.bitmap.len() || dst_off + dst_x1 > self.buf.len() {
-                            continue;
-                        }
-                        let cov_row = &g.bitmap[src_off..src_off + span];
-                        let dst_row = &mut self.buf[dst_off + dst_x0..dst_off + dst_x1];
-                        for (dp, &cov) in dst_row.as_chunks_mut::<4>().0.iter_mut().zip(cov_row) {
-                            if cov == 0 {
-                                continue;
-                            }
-                            let a_t = ca * u16::from(cov);
-                            let alpha = (a_t + 1 + (a_t >> 8)) >> 8;
-                            if alpha == 0 {
-                                continue;
-                            }
-                            if alpha == 255 {
-                                *dp = [color[2], color[1], color[0], 255];
-                                continue;
-                            }
-                            let inv = 255 - alpha;
-                            let blue_s = cb * alpha;
-                            let green_s = cg * alpha;
-                            let red_s = cr * alpha;
-                            let blue_d = u16::from(dp[0]) * inv;
-                            let green_d = u16::from(dp[1]) * inv;
-                            let red_d = u16::from(dp[2]) * inv;
-                            let alpha_d = u16::from(dp[3]) * inv;
-                            dp[0] = (((blue_s + 1 + (blue_s >> 8)) >> 8)
-                                + ((blue_d + 1 + (blue_d >> 8)) >> 8))
-                                .min(255) as u8;
-                            dp[1] = (((green_s + 1 + (green_s >> 8)) >> 8)
-                                + ((green_d + 1 + (green_d >> 8)) >> 8))
-                                .min(255) as u8;
-                            dp[2] = (((red_s + 1 + (red_s >> 8)) >> 8)
-                                + ((red_d + 1 + (red_d >> 8)) >> 8))
-                                .min(255) as u8;
-                            dp[3] = (alpha + ((alpha_d + 1 + (alpha_d >> 8)) >> 8)).min(255) as u8;
-                        }
-                    }
-                }
-                g.advance
-            });
-            let Some(step) = adv else {
-                return;
-            };
-            cursor_x += step;
-        }
+        let clip_ui = to_ui_rect(eff);
+        let mut uc = make_ui_canvas(self.buf, self.w, self.h);
+        with_font_engine(|fe| {
+            fe.draw_text_on_canvas(
+                &mut uc,
+                text,
+                x as f32,
+                baseline_y as f32,
+                size_px,
+                bold,
+                color,
+                Some(clip_ui),
+            );
+        });
     }
 
+    #[allow(clippy::cast_possible_truncation)]
     pub(crate) fn measure_text(text: &str, size_px: f32, bold: bool) -> i32 {
-        let mut total = 0_i32;
-        for ch in text.chars() {
-            if let Some(adv) = with_cached_glyph(ch, size_px, bold, |g| g.advance) {
-                total += adv;
-            } else {
-                return i32::try_from(text.len()).unwrap_or(0) * 7;
-            }
-        }
-        total
+        with_font_engine(|fe| fe.measure_width(text, size_px, bold).round() as i32)
     }
 
     pub(crate) fn fit_text(text: &str, max_w: i32, size_px: f32, bold: bool) -> String {
@@ -980,36 +873,6 @@ impl<'a> Canvas<'a> {
             acc += cw;
         }
         out.push_str(ellipsis);
-        out
-    }
-
-    /// Fits the trailing end of `text` within `max_w` (prepending `...`) for active text inputs.
-    pub(crate) fn fit_text_tail(text: &str, max_w: i32, size_px: f32, bold: bool) -> String {
-        if max_w <= 10 {
-            return String::new();
-        }
-        if Self::measure_text(text, size_px, bold) <= max_w {
-            return text.to_owned();
-        }
-        let ellipsis = "...";
-        let ell_w = Self::measure_text(ellipsis, size_px, bold);
-        let mut kept: Vec<char> = Vec::new();
-        let mut acc = 0;
-        for ch in text.chars().rev() {
-            let mut single = [0_u8; 4];
-            let s = ch.encode_utf8(&mut single);
-            let cw = Self::measure_text(s, size_px, bold);
-            if acc + cw + ell_w > max_w {
-                break;
-            }
-            kept.push(ch);
-            acc += cw;
-        }
-        kept.reverse();
-        let mut out = String::from(ellipsis);
-        for ch in kept {
-            out.push(ch);
-        }
         out
     }
 }
