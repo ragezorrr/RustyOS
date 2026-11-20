@@ -888,7 +888,7 @@ fn macos27_top_bar_dynamic_left_right_and_menu_popover_hit_testing() {
     assert!(
         sys_items
             .iter()
-            .any(|(l, a)| *l == "Sleep" && *a == TopBarMenuAction::Sleep)
+            .any(|(l, a)| (*l == "Suspend" || *l == "Sleep") && *a == TopBarMenuAction::Sleep)
     );
     assert!(
         sys_items
@@ -1663,6 +1663,18 @@ fn context_menu_keyboard_navigation_skips_separators_and_handles_submenus() {
 #[test]
 fn app_aware_topbar_classification_and_layout_hides_go_for_non_files() {
     assert_eq!(
+        classify_top_bar_app(None, ""),
+        ("Desktop".to_owned(), TopBarAppProfile::Desktop)
+    );
+    assert_eq!(
+        classify_top_bar_app(Some("org.rustyos.Desktop"), ""),
+        ("Desktop".to_owned(), TopBarAppProfile::Desktop)
+    );
+    assert_eq!(
+        check_top_bar_menu_click_for_profile(TopBarAppProfile::Desktop, "Desktop", 60.0, 12.0),
+        Some(TopBarMenuHit::ActiveApp)
+    );
+    assert_eq!(
         classify_top_bar_app(Some("org.rustyos.Files"), "Downloads"),
         ("Files".to_owned(), TopBarAppProfile::Files)
     );
@@ -1756,15 +1768,43 @@ fn app_aware_topbar_dropdowns_and_popover_hit_testing_match_profile() {
         "Firefox",
         TopBarMenuHit::ActiveApp,
     );
-    assert!(ff_app_labels.iter().any(|l| l == "About Firefox"));
-    assert!(ff_app_labels.iter().any(|l| l == "Minimize Firefox"));
-    assert!(ff_app_labels.iter().any(|l| l == "Quit Firefox"));
-    assert!(ff_app_labels.iter().any(|l| l == "Force Quit Firefox"));
-    assert!(!ff_app_labels.iter().any(|l| l == "Empty Trash..."));
+    assert_eq!(ff_app_labels, vec!["Hide Firefox", "Hide Others", "Quit"]);
 
     let files_app_labels = labels_of(TopBarAppProfile::Files, "Files", TopBarMenuHit::ActiveApp);
-    assert!(files_app_labels.iter().any(|l| l == "About Files"));
-    assert!(files_app_labels.iter().any(|l| l == "Empty Trash..."));
+    assert_eq!(files_app_labels, vec!["Hide Files", "Hide Others", "Quit"]);
+
+    let desktop_app_entries = resolve_top_bar_menu_entries(
+        TopBarAppProfile::Desktop,
+        "Desktop",
+        TopBarMenuHit::ActiveApp,
+    );
+    assert_eq!(
+        desktop_app_entries,
+        vec![
+            ResolvedTopBarMenuItem::Item {
+                label: std::borrow::Cow::Owned("Hide Desktop".to_owned()),
+                icon: None,
+                shortcut: None,
+                action: TopBarMenuAction::HideActiveApp,
+                enabled: false,
+            },
+            ResolvedTopBarMenuItem::Item {
+                label: std::borrow::Cow::Borrowed("Hide Others"),
+                icon: None,
+                shortcut: None,
+                action: TopBarMenuAction::HideOtherApps,
+                enabled: true,
+            },
+            ResolvedTopBarMenuItem::Separator,
+            ResolvedTopBarMenuItem::Item {
+                label: std::borrow::Cow::Borrowed("Quit"),
+                icon: None,
+                shortcut: None,
+                action: TopBarMenuAction::QuitActiveApp,
+                enabled: false,
+            },
+        ]
+    );
 
     let ff_file_labels = labels_of(TopBarAppProfile::Browser, "Firefox", TopBarMenuHit::File);
     assert!(ff_file_labels.iter().any(|l| l == "New Tab"));
@@ -1801,6 +1841,118 @@ fn app_aware_topbar_dropdowns_and_popover_hit_testing_match_profile() {
         ),
         TopBarMenuPopoverClick::Action(TopBarMenuAction::AppShortcut(AppShortcutAction::NewTab))
     );
+}
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn desktop_active_app_and_system_menu_structure_matches_reference() {
+    // 1. Desktop Profile menu entries: Hide Desktop (disabled), Hide Others (enabled), Separator, Quit (disabled)
+    let desktop_entries = resolve_top_bar_menu_entries(
+        TopBarAppProfile::Desktop,
+        "Desktop",
+        TopBarMenuHit::ActiveApp,
+    );
+    assert_eq!(desktop_entries.len(), 4);
+    assert!(matches!(
+        &desktop_entries[0],
+        ResolvedTopBarMenuItem::Item {
+            label,
+            enabled: false,
+            action: TopBarMenuAction::HideActiveApp,
+            ..
+        } if *label == "Hide Desktop"
+    ));
+    assert!(matches!(
+        &desktop_entries[1],
+        ResolvedTopBarMenuItem::Item {
+            label,
+            enabled: true,
+            action: TopBarMenuAction::HideOtherApps,
+            ..
+        } if *label == "Hide Others"
+    ));
+    assert!(matches!(
+        desktop_entries[2],
+        ResolvedTopBarMenuItem::Separator
+    ));
+    assert!(matches!(
+        &desktop_entries[3],
+        ResolvedTopBarMenuItem::Item {
+            label,
+            enabled: false,
+            action: TopBarMenuAction::QuitActiveApp,
+            ..
+        } if *label == "Quit"
+    ));
+
+    // 2. Hit-testing popover click respects `enabled` flag
+    let (dx, dy, _dw, _dh) = top_bar_menu_popover_rect_for_profile(
+        TopBarAppProfile::Desktop,
+        "Desktop",
+        TopBarMenuHit::ActiveApp,
+    );
+    // Row 0: Hide Desktop (disabled -> Inside, no action)
+    assert_eq!(
+        check_top_bar_menu_popover_click_for_profile(
+            TopBarAppProfile::Desktop,
+            "Desktop",
+            TopBarMenuHit::ActiveApp,
+            f64::from(dx + 20),
+            f64::from(dy + MENU_POPOVER_PAD_Y + 8),
+        ),
+        TopBarMenuPopoverClick::Inside
+    );
+    // Row 1: Hide Others (enabled -> triggers Action)
+    assert_eq!(
+        check_top_bar_menu_popover_click_for_profile(
+            TopBarAppProfile::Desktop,
+            "Desktop",
+            TopBarMenuHit::ActiveApp,
+            f64::from(dx + 20),
+            f64::from(dy + MENU_POPOVER_PAD_Y + MENU_ITEM_HEIGHT + 8),
+        ),
+        TopBarMenuPopoverClick::Action(TopBarMenuAction::HideOtherApps)
+    );
+    // Row 3: Quit (disabled -> Inside, no action)
+    assert_eq!(
+        check_top_bar_menu_popover_click_for_profile(
+            TopBarAppProfile::Desktop,
+            "Desktop",
+            TopBarMenuHit::ActiveApp,
+            f64::from(dx + 20),
+            f64::from(dy + MENU_POPOVER_PAD_Y + 2 * MENU_ITEM_HEIGHT + MENU_SEPARATOR_HEIGHT + 8),
+        ),
+        TopBarMenuPopoverClick::Inside
+    );
+
+    // 3. System logo menu has About RustyOS, System Settings..., session actions
+    let system_entries = resolve_top_bar_menu_entries(
+        TopBarAppProfile::Desktop,
+        "Desktop",
+        TopBarMenuHit::SystemLogo,
+    );
+    let system_labels: Vec<&str> = system_entries
+        .iter()
+        .filter_map(|e| match e {
+            ResolvedTopBarMenuItem::Item { label, .. } => Some(&**label),
+            ResolvedTopBarMenuItem::Separator => None,
+        })
+        .collect();
+    assert_eq!(
+        system_labels,
+        vec![
+            "About RustyOS",
+            "System Settings...",
+            "Suspend",
+            "Restart...",
+            "Shut Down...",
+            "Lock Screen",
+            "Log Out...",
+        ]
+    );
+
+    // 4. Desktop has no Go menu
+    assert!(!TopBarAppProfile::Desktop.has_go_menu());
 }
 
 #[test]

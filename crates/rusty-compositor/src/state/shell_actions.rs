@@ -571,9 +571,27 @@ impl RustyCompositorState {
             TopBarMenuAction::ToggleFullscreenFocused => {
                 self.apply_wm_action(WmAction::ToggleFullscreen, serial);
             }
-            TopBarMenuAction::MinimizeFocused => {
-                if let Some(focused) = self.wm.focused_window() {
+            TopBarMenuAction::MinimizeFocused | TopBarMenuAction::HideActiveApp => {
+                if let Some(focused) = self
+                    .focused_top_bar_window_id()
+                    .or_else(|| self.wm.focused_window())
+                {
                     self.minimize_window(focused, serial);
+                }
+            }
+            TopBarMenuAction::HideOtherApps => {
+                let focused = self
+                    .focused_top_bar_window_id()
+                    .or_else(|| self.wm.focused_window());
+                let to_minimize: Vec<_> = self
+                    .wm
+                    .visible_windows()
+                    .into_iter()
+                    .filter(|w| Some(w.id) != focused && !self.is_window_minimized(w.id))
+                    .map(|w| w.id)
+                    .collect();
+                for win_id in to_minimize {
+                    self.minimize_window(win_id, serial);
                 }
             }
             TopBarMenuAction::CloseFocused => {
@@ -619,6 +637,11 @@ impl RustyCompositorState {
                 _ => "Running in RustyOS Wayland".to_owned(),
             };
             (format!("About {app_name}"), detail)
+        } else if profile == crate::shell_render::TopBarAppProfile::Desktop {
+            (
+                "About Desktop".to_owned(),
+                "RustyOS Desktop Workspace".to_owned(),
+            )
         } else if profile == crate::shell_render::TopBarAppProfile::Files {
             (
                 "About Files".to_owned(),
@@ -1202,8 +1225,8 @@ impl RustyCompositorState {
     pub fn active_top_bar_app_context(&self) -> (String, crate::shell_render::TopBarAppProfile) {
         let Some(win_id) = self.focused_top_bar_window_id() else {
             return (
-                "Files".to_owned(),
-                crate::shell_render::TopBarAppProfile::Files,
+                "Desktop".to_owned(),
+                crate::shell_render::TopBarAppProfile::Desktop,
             );
         };
         let app_id = self.window_app_id(win_id);

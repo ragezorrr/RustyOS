@@ -1291,8 +1291,8 @@ fn top_bar_active_app_context_and_about_action_default_to_files() -> Result<(), 
     assert_eq!(
         compositor.active_top_bar_app_context(),
         (
-            "Files".to_owned(),
-            crate::shell_render::TopBarAppProfile::Files
+            "Desktop".to_owned(),
+            crate::shell_render::TopBarAppProfile::Desktop
         )
     );
     let serial = smithay::utils::SERIAL_COUNTER.next_serial();
@@ -1304,7 +1304,7 @@ fn top_bar_active_app_context_and_about_action_default_to_files() -> Result<(), 
         compositor
             .notifications
             .iter()
-            .any(|n| n.title == "About Files")
+            .any(|n| n.title == "About Desktop")
     );
     Ok(())
 }

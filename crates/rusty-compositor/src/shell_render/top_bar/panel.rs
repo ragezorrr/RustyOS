@@ -148,8 +148,8 @@ impl Default for TopBarTelemetry<'static> {
             notification_count: 0,
             kbd_layout: "EN",
             tray_items: &[],
-            active_app_name: "Files",
-            app_profile: TopBarAppProfile::Files,
+            active_app_name: "Desktop",
+            app_profile: TopBarAppProfile::Desktop,
             active_menu: None,
             menu_hover_row: None,
             glass_opacity: crate::config::DEFAULT_GLASS_OPACITY,
@@ -193,10 +193,19 @@ pub(crate) fn measure_menu_box_width(label: &str) -> i32 {
         .max(26)
 }
 
+fn default_profile_for_app_name(active_app_name: &str) -> TopBarAppProfile {
+    if active_app_name.eq_ignore_ascii_case("desktop") {
+        TopBarAppProfile::Desktop
+    } else {
+        TopBarAppProfile::Files
+    }
+}
+
 /// Computes `TopBar` left-side x coordinates (`macOS` Menu Bar rhythm: `Logo  App  File  Edit  View  Go  Window  Help`) (`RUSTYOS-048`/`049`).
 #[must_use]
 pub fn compute_top_bar_left_layout(active_app_name: &str) -> TopBarLeftLayout {
-    compute_top_bar_left_layout_for_profile(TopBarAppProfile::Files, active_app_name, false)
+    let profile = default_profile_for_app_name(active_app_name);
+    compute_top_bar_left_layout_for_profile(profile, active_app_name, false)
 }
 
 /// Computes `TopBar` left-side layout with explicit workspace-strip visibility (`RUSTYOS-049`, `RUSTYOS-067`).
@@ -205,11 +214,8 @@ pub fn compute_top_bar_left_layout_with_options(
     active_app_name: &str,
     show_workspaces: bool,
 ) -> TopBarLeftLayout {
-    compute_top_bar_left_layout_for_profile(
-        TopBarAppProfile::Files,
-        active_app_name,
-        show_workspaces,
-    )
+    let profile = default_profile_for_app_name(active_app_name);
+    compute_top_bar_left_layout_for_profile(profile, active_app_name, show_workspaces)
 }
 
 /// Computes `TopBar` left-side layout adapted to `profile` (e.g., hiding `Go` outside `Files`) (`RUSTYOS-068`).
@@ -587,13 +593,8 @@ pub fn check_top_bar_layout_click_with_options(
     x: f64,
     y: f64,
 ) -> bool {
-    check_top_bar_layout_click_for_profile(
-        TopBarAppProfile::Files,
-        active_app_name,
-        show_workspaces,
-        x,
-        y,
-    )
+    let profile = default_profile_for_app_name(active_app_name);
+    check_top_bar_layout_click_for_profile(profile, active_app_name, show_workspaces, x, y)
 }
 
 /// Profile-aware hit-test for the optional `TopBar` Layout badge (`RUSTYOS-068`).
@@ -632,13 +633,8 @@ pub fn check_top_bar_workspace_click_with_options(
     x: f64,
     y: f64,
 ) -> Option<u8> {
-    check_top_bar_workspace_click_for_profile(
-        TopBarAppProfile::Files,
-        active_app_name,
-        show_workspaces,
-        x,
-        y,
-    )
+    let profile = default_profile_for_app_name(active_app_name);
+    check_top_bar_workspace_click_for_profile(profile, active_app_name, show_workspaces, x, y)
 }
 
 /// Profile-aware hit-test for the optional `TopBar` workspaces area (`RUSTYOS-068`).

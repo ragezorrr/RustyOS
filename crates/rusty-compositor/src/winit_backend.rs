@@ -124,6 +124,25 @@ pub fn run_nested_winit(config: &CompositorConfig) -> Result<BootstrapReport, Co
                     inject_bench_pointer_step(app_state, rendered_frames);
                 }
 
+                if let Ok(menu_test) = std::env::var("RUSTYOS_TEST_CAPTURE_MENU") {
+                    if rendered_frames == 5 {
+                        if menu_test == "desktop" {
+                            app_state.active_top_bar_menu =
+                                Some(crate::shell_render::TopBarMenuHit::ActiveApp);
+                            app_state.top_bar_menu_hover_row = Some(1);
+                        } else if menu_test == "system" {
+                            app_state.active_top_bar_menu =
+                                Some(crate::shell_render::TopBarMenuHit::SystemLogo);
+                            app_state.top_bar_menu_hover_row = Some(0);
+                        }
+                        app_state.pending_screenshot =
+                            Some(crate::screenshot::ScreenshotRequest::FullScreen);
+                        app_state.shell_redraw_needed = true;
+                    } else if rendered_frames >= 12 {
+                        app_state.request_shutdown();
+                    }
+                }
+
                 sync_winit_window_cursor(
                     &backend,
                     &app_state.cursor_status,

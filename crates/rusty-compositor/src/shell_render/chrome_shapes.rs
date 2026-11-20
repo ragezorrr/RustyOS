@@ -155,6 +155,11 @@ fn build_chrome_shapes(
             TopBarMenuHit::Window => (left_layout.win_x - 2, left_layout.win_w + 4),
             TopBarMenuHit::Help => (left_layout.help_x - 2, left_layout.help_w + 4),
         };
+        let plate_bg = if pal.is_dark {
+            [255, 255, 255, 51]
+        } else {
+            [0, 0, 0, 26]
+        };
         push_rounded_glass_box(
             &mut out,
             shape_cache,
@@ -163,8 +168,8 @@ fn build_chrome_shapes(
                 Point::from((anchor_x, TOP_BAR_ITEM_Y)),
                 Size::from((anchor_w, TOP_BAR_ITEM_H)),
             ),
-            6,
-            [255, 255, 255, 42],
+            8,
+            plate_bg,
             None,
         );
         let (mx, my, mw, mh) =
@@ -177,11 +182,13 @@ fn build_chrome_shapes(
                 .enumerate()
         {
             match entry {
-                ResolvedTopBarMenuItem::Item { icon, .. } => {
-                    let hovered = top_telemetry.menu_hover_row == Some(entry_idx);
+                ResolvedTopBarMenuItem::Item { icon, enabled, .. } => {
+                    let hovered = top_telemetry.menu_hover_row == Some(entry_idx) && enabled;
                     if let Some(glyph) = icon {
                         let icon_tint = if hovered {
                             [255, 255, 255, 255]
+                        } else if !enabled {
+                            pal.popover_text_disabled
                         } else {
                             pal.popover_icon
                         };
@@ -196,6 +203,21 @@ fn build_chrome_shapes(
                         }
                     }
                     if hovered {
+                        let hover_bg = if pal.is_dark {
+                            [
+                                pal.accent_rgba[0],
+                                pal.accent_rgba[1],
+                                pal.accent_rgba[2],
+                                210,
+                            ]
+                        } else {
+                            [
+                                pal.accent_rgba[0],
+                                pal.accent_rgba[1],
+                                pal.accent_rgba[2],
+                                230,
+                            ]
+                        };
                         push_rounded_glass_box(
                             &mut out,
                             shape_cache,
@@ -205,7 +227,7 @@ fn build_chrome_shapes(
                                 Size::from((mw - 10, MENU_ITEM_HEIGHT - 2)),
                             ),
                             rusty_ui::menu::HOVER_PILL_RADIUS,
-                            pal.accent_rgba,
+                            hover_bg,
                             None,
                         );
                     }
@@ -213,7 +235,7 @@ fn build_chrome_shapes(
                 }
                 ResolvedTopBarMenuItem::Separator => {
                     out.push(CompositorRenderElement::Solid(make_solid_element(
-                        Rectangle::new(Point::from((mx + 12, row_y + 4)), Size::from((mw - 24, 1))),
+                        Rectangle::new(Point::from((mx + 12, row_y + 5)), Size::from((mw - 24, 1))),
                         pal.popover_separator,
                     )));
                     row_y += MENU_SEPARATOR_HEIGHT;

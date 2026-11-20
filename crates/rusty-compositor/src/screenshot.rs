@@ -294,7 +294,10 @@ fn save_screenshot_sync(
     wayland_socket: &str,
 ) -> Result<PathBuf, String> {
     let png_bytes = encode_png_rgba(width, height, rgba)?;
-    let path = default_screenshot_path();
+    let custom_dest = std::env::var("RUSTYOS_SCREENSHOT_DEST")
+        .ok()
+        .map(PathBuf::from);
+    let path = custom_dest.clone().unwrap_or_else(default_screenshot_path);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .map_err(|err| format!("failed to create {}: {err}", parent.display()))?;
@@ -302,7 +305,9 @@ fn save_screenshot_sync(
     fs::write(&path, &png_bytes)
         .map_err(|err| format!("failed to write {}: {err}", path.display()))?;
 
-    copy_png_to_clipboard(&png_bytes, wayland_socket);
+    if custom_dest.is_none() {
+        copy_png_to_clipboard(&png_bytes, wayland_socket);
+    }
     Ok(path)
 }
 

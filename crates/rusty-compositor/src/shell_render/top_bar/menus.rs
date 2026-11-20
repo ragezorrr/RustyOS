@@ -98,6 +98,10 @@ pub enum TopBarMenuAction {
     ToggleMaximizeFocused,
     /// Minimize focused window.
     MinimizeFocused,
+    /// Hide active application window (`RUSTYOS-127`).
+    HideActiveApp,
+    /// Hide all other windows in the active workspace (`RUSTYOS-127`).
+    HideOtherApps,
     /// Show "About <ActiveApp>" notification/banner (`RUSTYOS-068`).
     AboutActiveApp,
     /// Toggle fullscreen on the focused window (`RUSTYOS-068`).
@@ -125,6 +129,8 @@ pub enum TopBarMenuEntry {
         shortcut: Option<&'static str>,
         /// Target compositor / WM action.
         action: TopBarMenuAction,
+        /// Whether the item is interactive (enabled) or greyed out (disabled) (`RUSTYOS-127`).
+        enabled: bool,
     },
     /// Horizontal hairline separator between logical groups.
     Separator,
@@ -147,105 +153,76 @@ pub(crate) const MENU_SYSTEM: &[TopBarMenuEntry] = &[
         icon: Some(crate::surfaces::UiGlyphKind::Info),
         shortcut: None,
         action: TopBarMenuAction::AboutRustyOs,
+        enabled: true,
     },
-    TopBarMenuEntry::Separator,
     TopBarMenuEntry::Item {
         label: "System Settings...",
         icon: Some(crate::surfaces::UiGlyphKind::ControlCenter),
-        shortcut: Some("⌘,"),
-        action: TopBarMenuAction::OpenSettings,
-    },
-    TopBarMenuEntry::Item {
-        label: "Check for Updates...",
-        icon: Some(crate::surfaces::UiGlyphKind::Updates { available: false }),
         shortcut: None,
-        action: TopBarMenuAction::CheckForUpdates,
-    },
-    TopBarMenuEntry::Item {
-        label: "Reload Config",
-        icon: Some(crate::surfaces::UiGlyphKind::Refresh),
-        shortcut: Some("⇧⌘R"),
-        action: TopBarMenuAction::ReloadConfig,
+        action: TopBarMenuAction::OpenSettings,
+        enabled: true,
     },
     TopBarMenuEntry::Separator,
     TopBarMenuEntry::Item {
-        label: "Workspace Overview",
-        icon: None,
-        shortcut: Some("⌘⇥"),
-        action: TopBarMenuAction::OpenOverview,
-    },
-    TopBarMenuEntry::Item {
-        label: "Control Center",
-        icon: None,
-        shortcut: Some("⌥S"),
-        action: TopBarMenuAction::OpenControlCenter,
-    },
-    TopBarMenuEntry::Separator,
-    TopBarMenuEntry::Item {
-        label: "Lock Screen",
-        icon: None,
-        shortcut: Some("⌘L"),
-        action: TopBarMenuAction::LockSession,
-    },
-    TopBarMenuEntry::Item {
-        label: "Sleep",
+        label: "Suspend",
         icon: None,
         shortcut: None,
         action: TopBarMenuAction::Sleep,
+        enabled: true,
     },
     TopBarMenuEntry::Item {
         label: "Restart...",
         icon: None,
         shortcut: None,
         action: TopBarMenuAction::Restart,
+        enabled: true,
     },
     TopBarMenuEntry::Item {
         label: "Shut Down...",
         icon: None,
         shortcut: None,
         action: TopBarMenuAction::ShutDown,
+        enabled: true,
     },
     TopBarMenuEntry::Separator,
     TopBarMenuEntry::Item {
+        label: "Lock Screen",
+        icon: None,
+        shortcut: None,
+        action: TopBarMenuAction::LockSession,
+        enabled: true,
+    },
+    TopBarMenuEntry::Item {
         label: "Log Out...",
         icon: None,
-        shortcut: Some("⇧⌘Q"),
+        shortcut: None,
         action: TopBarMenuAction::LogOut,
+        enabled: true,
     },
 ];
 
 pub(crate) const MENU_ACTIVE_APP: &[TopBarMenuEntry] = &[
     TopBarMenuEntry::Item {
-        label: "About Files",
+        label: "Hide Files",
         icon: None,
         shortcut: None,
-        action: TopBarMenuAction::AboutRustyOs,
+        action: TopBarMenuAction::HideActiveApp,
+        enabled: true,
+    },
+    TopBarMenuEntry::Item {
+        label: "Hide Others",
+        icon: None,
+        shortcut: None,
+        action: TopBarMenuAction::HideOtherApps,
+        enabled: true,
     },
     TopBarMenuEntry::Separator,
     TopBarMenuEntry::Item {
-        label: "System Settings...",
-        icon: Some(crate::surfaces::UiGlyphKind::ControlCenter),
-        shortcut: Some("⌘,"),
-        action: TopBarMenuAction::OpenSettings,
-    },
-    TopBarMenuEntry::Item {
-        label: "Empty Trash...",
-        icon: Some(crate::surfaces::UiGlyphKind::Trash),
-        shortcut: Some("⇧⌘⌫"),
-        action: TopBarMenuAction::EmptyTrash,
-    },
-    TopBarMenuEntry::Separator,
-    TopBarMenuEntry::Item {
-        label: "Minimize Window",
+        label: "Quit",
         icon: None,
-        shortcut: Some("⌥H"),
-        action: TopBarMenuAction::MinimizeFocused,
-    },
-    TopBarMenuEntry::Item {
-        label: "Close Window",
-        icon: None,
-        shortcut: Some("⌥W"),
-        action: TopBarMenuAction::CloseFocused,
+        shortcut: None,
+        action: TopBarMenuAction::QuitActiveApp,
+        enabled: true,
     },
 ];
 
@@ -255,18 +232,21 @@ pub(crate) const MENU_FILE: &[TopBarMenuEntry] = &[
         icon: Some(crate::surfaces::UiGlyphKind::Folder),
         shortcut: Some("⌘N"),
         action: TopBarMenuAction::OpenFiles,
+        enabled: true,
     },
     TopBarMenuEntry::Item {
         label: "New Desktop Folder",
         icon: Some(crate::surfaces::UiGlyphKind::Folder),
         shortcut: Some("⇧⌘N"),
         action: TopBarMenuAction::NewDesktopFolder,
+        enabled: true,
     },
     TopBarMenuEntry::Item {
         label: "New Terminal",
         icon: Some(crate::surfaces::UiGlyphKind::TerminalPrompt),
         shortcut: Some("⌥⏎"),
         action: TopBarMenuAction::NewTerminal,
+        enabled: true,
     },
     TopBarMenuEntry::Separator,
     TopBarMenuEntry::Item {
@@ -274,6 +254,7 @@ pub(crate) const MENU_FILE: &[TopBarMenuEntry] = &[
         icon: Some(crate::surfaces::UiGlyphKind::Search),
         shortcut: Some("⌘Space"),
         action: TopBarMenuAction::OpenSpotlight,
+        enabled: true,
     },
     TopBarMenuEntry::Separator,
     TopBarMenuEntry::Item {
@@ -281,6 +262,7 @@ pub(crate) const MENU_FILE: &[TopBarMenuEntry] = &[
         icon: None,
         shortcut: Some("⌥W"),
         action: TopBarMenuAction::CloseFocused,
+        enabled: true,
     },
 ];
 
@@ -290,6 +272,7 @@ pub(crate) const MENU_EDIT: &[TopBarMenuEntry] = &[
         icon: Some(crate::surfaces::UiGlyphKind::LayoutSplit),
         shortcut: Some("⌥L"),
         action: TopBarMenuAction::ToggleLayout,
+        enabled: true,
     },
     TopBarMenuEntry::Separator,
     TopBarMenuEntry::Item {
@@ -297,12 +280,14 @@ pub(crate) const MENU_EDIT: &[TopBarMenuEntry] = &[
         icon: None,
         shortcut: Some("⌥R"),
         action: TopBarMenuAction::ToggleReducedMotion,
+        enabled: true,
     },
     TopBarMenuEntry::Item {
         label: "Toggle Opaque Panels",
         icon: None,
         shortcut: None,
         action: TopBarMenuAction::ToggleReduceTransparency,
+        enabled: true,
     },
 ];
 
@@ -312,12 +297,14 @@ pub(crate) const MENU_VIEW: &[TopBarMenuEntry] = &[
         icon: None,
         shortcut: Some("⌘⇥"),
         action: TopBarMenuAction::OpenOverview,
+        enabled: true,
     },
     TopBarMenuEntry::Item {
         label: "Control Center",
         icon: None,
         shortcut: Some("⌥S"),
         action: TopBarMenuAction::OpenControlCenter,
+        enabled: true,
     },
     TopBarMenuEntry::Separator,
     TopBarMenuEntry::Item {
@@ -325,6 +312,7 @@ pub(crate) const MENU_VIEW: &[TopBarMenuEntry] = &[
         icon: None,
         shortcut: None,
         action: TopBarMenuAction::RefreshMetrics,
+        enabled: true,
     },
 ];
 
@@ -334,36 +322,42 @@ pub(crate) const MENU_GO: &[TopBarMenuEntry] = &[
         icon: Some(crate::surfaces::UiGlyphKind::Search),
         shortcut: Some("⇧⌘F"),
         action: TopBarMenuAction::GoRecents,
+        enabled: true,
     },
     TopBarMenuEntry::Item {
         label: "Desktop",
         icon: Some(crate::surfaces::UiGlyphKind::Folder),
         shortcut: Some("⇧⌘D"),
         action: TopBarMenuAction::GoDesktop,
+        enabled: true,
     },
     TopBarMenuEntry::Item {
         label: "Documents",
         icon: Some(crate::surfaces::UiGlyphKind::Folder),
         shortcut: Some("⇧⌘O"),
         action: TopBarMenuAction::GoDocuments,
+        enabled: true,
     },
     TopBarMenuEntry::Item {
         label: "Downloads",
         icon: Some(crate::surfaces::UiGlyphKind::Folder),
         shortcut: Some("⌥⌘L"),
         action: TopBarMenuAction::GoDownloads,
+        enabled: true,
     },
     TopBarMenuEntry::Item {
         label: "Home",
         icon: Some(crate::surfaces::UiGlyphKind::Folder),
         shortcut: Some("⇧⌘H"),
         action: TopBarMenuAction::GoHome,
+        enabled: true,
     },
     TopBarMenuEntry::Item {
         label: "Trash",
         icon: Some(crate::surfaces::UiGlyphKind::Trash),
         shortcut: Some("⇧⌘⌫"),
         action: TopBarMenuAction::GoTrash,
+        enabled: true,
     },
     TopBarMenuEntry::Separator,
     TopBarMenuEntry::Item {
@@ -371,18 +365,21 @@ pub(crate) const MENU_GO: &[TopBarMenuEntry] = &[
         icon: None,
         shortcut: Some("⌘▲"),
         action: TopBarMenuAction::OpenOverview,
+        enabled: true,
     },
     TopBarMenuEntry::Item {
         label: "Next Workspace",
         icon: None,
         shortcut: Some("⌘]"),
         action: TopBarMenuAction::NextWorkspace,
+        enabled: true,
     },
     TopBarMenuEntry::Item {
         label: "Previous Workspace",
         icon: None,
         shortcut: Some("⌘["),
         action: TopBarMenuAction::PrevWorkspace,
+        enabled: true,
     },
 ];
 
@@ -392,6 +389,7 @@ pub(crate) const MENU_WINDOW: &[TopBarMenuEntry] = &[
         icon: None,
         shortcut: Some("⌥J"),
         action: TopBarMenuAction::FocusNextWindow,
+        enabled: true,
     },
     TopBarMenuEntry::Separator,
     TopBarMenuEntry::Item {
@@ -399,18 +397,21 @@ pub(crate) const MENU_WINDOW: &[TopBarMenuEntry] = &[
         icon: None,
         shortcut: Some("⌥M"),
         action: TopBarMenuAction::ToggleMaximizeFocused,
+        enabled: true,
     },
     TopBarMenuEntry::Item {
         label: "Minimize Window",
         icon: None,
         shortcut: Some("⌥H"),
         action: TopBarMenuAction::MinimizeFocused,
+        enabled: true,
     },
     TopBarMenuEntry::Item {
         label: "Toggle Float / Tile",
         icon: None,
         shortcut: Some("⌥L"),
         action: TopBarMenuAction::ToggleLayout,
+        enabled: true,
     },
     TopBarMenuEntry::Separator,
     TopBarMenuEntry::Item {
@@ -418,6 +419,7 @@ pub(crate) const MENU_WINDOW: &[TopBarMenuEntry] = &[
         icon: None,
         shortcut: Some("⌥W"),
         action: TopBarMenuAction::CloseFocused,
+        enabled: true,
     },
 ];
 
@@ -427,12 +429,14 @@ pub(crate) const MENU_HELP: &[TopBarMenuEntry] = &[
         icon: Some(crate::surfaces::UiGlyphKind::Info),
         shortcut: None,
         action: TopBarMenuAction::AboutRustyOs,
+        enabled: true,
     },
     TopBarMenuEntry::Item {
         label: "Keyboard Shortcuts",
         icon: Some(crate::surfaces::UiGlyphKind::Shortcuts),
         shortcut: None,
         action: TopBarMenuAction::ShowShortcuts,
+        enabled: true,
     },
     TopBarMenuEntry::Separator,
     TopBarMenuEntry::Item {
@@ -440,6 +444,7 @@ pub(crate) const MENU_HELP: &[TopBarMenuEntry] = &[
         icon: None,
         shortcut: None,
         action: TopBarMenuAction::RefreshMetrics,
+        enabled: true,
     },
 ];
 
@@ -467,22 +472,16 @@ pub const fn top_bar_menu_items(
         TopBarMenuHit::SystemLogo => &[
             ("About RustyOS", TopBarMenuAction::AboutRustyOs),
             ("System Settings...", TopBarMenuAction::OpenSettings),
-            ("Check for Updates...", TopBarMenuAction::CheckForUpdates),
-            ("Reload Config", TopBarMenuAction::ReloadConfig),
-            ("Workspace Overview", TopBarMenuAction::OpenOverview),
-            ("Control Center", TopBarMenuAction::OpenControlCenter),
-            ("Lock Screen", TopBarMenuAction::LockSession),
-            ("Sleep", TopBarMenuAction::Sleep),
+            ("Suspend", TopBarMenuAction::Sleep),
             ("Restart...", TopBarMenuAction::Restart),
             ("Shut Down...", TopBarMenuAction::ShutDown),
+            ("Lock Screen", TopBarMenuAction::LockSession),
             ("Log Out...", TopBarMenuAction::LogOut),
         ],
         TopBarMenuHit::ActiveApp => &[
-            ("About Files", TopBarMenuAction::AboutRustyOs),
-            ("System Settings...", TopBarMenuAction::OpenSettings),
-            ("Empty Trash...", TopBarMenuAction::EmptyTrash),
-            ("Minimize Window", TopBarMenuAction::MinimizeFocused),
-            ("Close Window", TopBarMenuAction::CloseFocused),
+            ("Hide", TopBarMenuAction::HideActiveApp),
+            ("Hide Others", TopBarMenuAction::HideOtherApps),
+            ("Quit", TopBarMenuAction::QuitActiveApp),
         ],
         TopBarMenuHit::File => &[
             ("New Files Window", TopBarMenuAction::OpenFiles),
@@ -546,7 +545,12 @@ pub fn top_bar_menu_popover_rect(
     active_app_name: &str,
     menu: TopBarMenuHit,
 ) -> (i32, i32, i32, i32) {
-    top_bar_menu_popover_rect_for_profile(TopBarAppProfile::Files, active_app_name, menu)
+    let profile = if active_app_name.eq_ignore_ascii_case("desktop") {
+        TopBarAppProfile::Desktop
+    } else {
+        TopBarAppProfile::Files
+    };
+    top_bar_menu_popover_rect_for_profile(profile, active_app_name, menu)
 }
 
 /// Computes the glass dropdown popover rectangle adapted to `profile` and `active_app_name` (`RUSTYOS-068`).
@@ -620,11 +624,16 @@ pub(crate) fn top_bar_menu_entry_at_for_profile(
     let mut cursor_y = py + MENU_POPOVER_PAD_Y;
     for (entry_idx, entry) in entries.into_iter().enumerate() {
         match entry {
-            ResolvedTopBarMenuItem::Item { action, .. } => {
+            ResolvedTopBarMenuItem::Item {
+                action, enabled, ..
+            } => {
                 let top = f64::from(cursor_y);
                 let bot = f64::from(cursor_y + MENU_ITEM_HEIGHT);
                 if y >= top && y < bot {
-                    return Some((entry_idx, action));
+                    if enabled {
+                        return Some((entry_idx, action));
+                    }
+                    return None;
                 }
                 cursor_y += MENU_ITEM_HEIGHT;
             }
@@ -715,7 +724,7 @@ pub fn check_top_bar_menu_popover_hover_row_for_profile(
 /// Hit-tests `(x, y)` against the `TopBar` Left Menu (`Logo`, `App`, `File`, `Edit`, `View`, `Go`, `Window`, `Help`) (`RUSTYOS-038`/`049`).
 #[must_use]
 pub fn check_top_bar_menu_click(x: f64, y: f64) -> Option<TopBarMenuHit> {
-    check_top_bar_menu_click_for_profile(TopBarAppProfile::Files, "Files", x, y)
+    check_top_bar_menu_click_for_profile(TopBarAppProfile::Desktop, "Desktop", x, y)
 }
 
 /// Active-app-width-aware hit-test for the `TopBar` Left Menu (`RUSTYOS-048`/`049`/`067`).
@@ -725,7 +734,12 @@ pub fn check_top_bar_menu_click_for_app(
     x: f64,
     y: f64,
 ) -> Option<TopBarMenuHit> {
-    check_top_bar_menu_click_for_profile(TopBarAppProfile::Files, active_app_name, x, y)
+    let profile = if active_app_name.eq_ignore_ascii_case("desktop") {
+        TopBarAppProfile::Desktop
+    } else {
+        TopBarAppProfile::Files
+    };
+    check_top_bar_menu_click_for_profile(profile, active_app_name, x, y)
 }
 
 /// Profile-aware hit-test for `TopBar` Left Menu items (omits `Go` outside `Files`) (`RUSTYOS-068`).

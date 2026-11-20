@@ -1766,14 +1766,23 @@ pub(crate) fn process_pending_screenshot(
     renderer: &mut GlesRenderer,
     render_list: &[CompositorRenderElement],
     state: &mut RustyCompositorState,
-    _size: smithay::utils::Size<i32, smithay::utils::Physical>,
+    fallback_size: smithay::utils::Size<i32, smithay::utils::Physical>,
 ) {
     let Some(req) = state.pending_screenshot.take() else {
         return;
     };
     let primary = state.output_map.primary();
-    let output_scale = primary.scale;
-    let capture_size = primary.transformed_physical_size();
+    let output_scale = if primary.scale > 0.1 {
+        primary.scale
+    } else {
+        1.0
+    };
+    let primary_size = primary.transformed_physical_size();
+    let capture_size = if primary_size.w > 0 && primary_size.h > 0 {
+        primary_size
+    } else {
+        fallback_size
+    };
     let crop = match req {
         crate::screenshot::ScreenshotRequest::FullScreen => None,
         crate::screenshot::ScreenshotRequest::FocusedWindow => state
@@ -1790,13 +1799,19 @@ pub(crate) fn process_pending_screenshot(
         crop,
     ) {
         Ok((width, height, rgba)) => {
-            crate::screenshot::spawn_save_screenshot(
-                width,
-                height,
-                rgba,
-                state.socket_name.clone(),
-                &state.screenshot_results,
-            );
+            if let Ok(dest) = std::env::var("RUSTYOS_SCREENSHOT_DEST") {
+                if let Ok(bytes) = crate::screenshot::encode_png_rgba(width, height, &rgba) {
+                    let _ = std::fs::write(&dest, bytes);
+                }
+            } else {
+                crate::screenshot::spawn_save_screenshot(
+                    width,
+                    height,
+                    rgba,
+                    state.socket_name.clone(),
+                    &state.screenshot_results,
+                );
+            }
         }
         Err(err) => {
             warn!(error = %err, "Failed to capture compositor screenshot");

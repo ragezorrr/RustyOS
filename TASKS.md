@@ -2219,6 +2219,24 @@ hardware/software context и низкие накладные расходы.
 - **Tests:** 323 unit-теста workspace (`4` `rusty-animation`, `199` `rusty-compositor`, `17` `rusty-files`, `13` `rusty-installer`, `3` `rusty-ipc`, `44` `rusty-services`, `11` `rusty-settings`, `5` `rusty-shell`, `15` `rusty-terminal`, `8` `rusty-ui`, `7` `rusty-wm`).
 - **Risks:** Нет; аналитический расчет долей строго эквивалентен эталону и проверен в тестах.
 
+### RUSTYOS-127 — Сквозное приведение меню TopBar и стилей popover к эталонной архитектуре (`RUSTYOS-127 Вариант 1`)
+
+- **Status:** Done (`RUSTYOS-127 Вариант 1` — утверждённый объём выполнен)
+- **Goal:** Привести левое меню `TopBar` (`SystemLogo` и `ActiveApp`), состояние рабочего стола по умолчанию (`Desktop`, скрытие `Go`), плашку открытого пункта (`8 px`) и рендер/логику `enabled` пунктов выпадающего меню (`14 px` popover, `9 px` акцентная ховер-пилюля) в точное соответствие эталону.
+- **Dependencies:** `RUSTYOS-125`, `RUSTYOS-126`.
+- **Scope:**
+  - `crates/rusty-compositor/src/shell_render/top_bar_menus.rs`, `top_bar/panel.rs`, `top_bar/menus.rs`: добавлен `TopBarAppProfile::Desktop` по умолчанию, `TopBarMenuEntry::Item::enabled`, жизненный цикл `Hide {App}` / `Hide Others` / `Quit`, очищенное `MENU_SYSTEM`, `default_profile_for_app_name`;
+  - `crates/rusty-compositor/src/state/shell_actions.rs`, `input/shell_pointer.rs`: добавлены `HideActiveApp` и `HideOtherApps`, профиль `"Desktop"` при отсутствии сфокусированного окна, фильтрация неактивных пунктов при клике и наведении;
+  - `crates/rusty-compositor/src/shell_render/chrome_shapes.rs`, `text_pass.rs`: плашка `8 px` в `TopBar`, отключение ховера и тусклый цвет текста/иконок для `!enabled`, концентрическая акцентная пилюля `9 px` (`alpha = 230` Light / `210` Dark);
+  - `crates/rusty-compositor/src/frame_composer.rs`, `screenshot.rs`, `winit_backend.rs`: fallback-размер в `process_pending_screenshot`, `RUSTYOS_SCREENSHOT_DEST` и `RUSTYOS_TEST_CAPTURE_MENU` для живых `--winit` снимков;
+  - `crates/rusty-compositor/src/shell_render/tests.rs`, `state/tests.rs`: тест `desktop_active_app_and_system_menu_structure_matches_reference` и адаптация тестов `TopBar`;
+  - Документация: `ADR-0071` (`docs/adr/0071-topbar-menu-architecture-and-popover-fidelity.md`), запись `D-085` в `DECISIONS.md`.
+- **Acceptance Criteria:**
+  - `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace` (325 пройденных unit-тестов) завершаются чисто;
+  - Живая визуальная проверка `--winit` подтверждает совпадение `TopBar` (`Desktop` / `SystemLogo`) и выпадающих меню с эталоном.
+- **Tests:** 325 unit-тестов workspace (включая `200` в `rusty-compositor`; `1` предсуществующий тест `rusty-services::tests::networkmanager_and_bluetooth_formatters_handle_all_states` требует BlueZ D-Bus в sandbox).
+- **Risks:** Нет.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

@@ -383,11 +383,14 @@ pub(super) fn append_chrome_text(
                     label,
                     icon,
                     shortcut,
+                    enabled,
                     ..
                 } => {
-                    let hovered = top_telemetry.menu_hover_row == Some(entry_idx);
+                    let hovered = top_telemetry.menu_hover_row == Some(entry_idx) && enabled;
                     let fg = if hovered {
                         [255, 255, 255, 255]
+                    } else if !enabled {
+                        pal.popover_text_disabled
                     } else {
                         pal.popover_text_primary
                     };

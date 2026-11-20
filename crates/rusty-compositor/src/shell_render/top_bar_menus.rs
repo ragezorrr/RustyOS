@@ -9,8 +9,10 @@ use crate::surfaces::UiGlyphKind;
 /// Functional application category driving `TopBar` menu categories and shortcuts (`RUSTYOS-068`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum TopBarAppProfile {
-    /// Built-in `rusty-files` / RustyOS desktop workspace mode (`Go` menu visible).
+    /// Desktop workspace mode when no client window is focused.
     #[default]
+    Desktop,
+    /// Built-in `rusty-files` file manager window (`Go` menu visible).
     Files,
     /// Web browsers (`Firefox`, `Chromium`, `Chrome`, `Brave`, `Vivaldi`, `Epiphany`, `Falkon`, `LibreWolf`, `Zen`).
     Browser,
@@ -65,6 +67,7 @@ pub enum ResolvedTopBarMenuItem {
         icon: Option<UiGlyphKind>,
         shortcut: Option<&'static str>,
         action: TopBarMenuAction,
+        enabled: bool,
     },
     Separator,
 }
@@ -77,11 +80,13 @@ impl From<&TopBarMenuEntry> for ResolvedTopBarMenuItem {
                 icon,
                 shortcut,
                 action,
+                enabled,
             } => Self::Item {
                 label: Cow::Borrowed(label),
                 icon: *icon,
                 shortcut: *shortcut,
                 action: *action,
+                enabled: *enabled,
             },
             TopBarMenuEntry::Separator => Self::Separator,
         }
@@ -297,12 +302,20 @@ pub fn classify_top_bar_app(app_id: Option<&str>, title: &str) -> (String, TopBa
     let title_trimmed = title.trim();
     let title_lower = title_trimmed.to_ascii_lowercase();
 
-    if id_lower.is_empty()
-        && (title_trimmed.is_empty()
-            || title_lower == "files"
-            || title_lower.starts_with("files —")
-            || title_lower.starts_with("files -")
-            || title_lower == "rusty-files")
+    if id_lower == "org.rustyos.desktop" || id_lower == "desktop" || title_lower == "desktop" {
+        return ("Desktop".to_owned(), TopBarAppProfile::Desktop);
+    }
+
+    if id_lower.is_empty() && title_trimmed.is_empty() {
+        return ("Desktop".to_owned(), TopBarAppProfile::Desktop);
+    }
+
+    if id_lower == "org.rustyos.files"
+        || id_lower == "rusty-files"
+        || title_lower == "files"
+        || title_lower.starts_with("files —")
+        || title_lower.starts_with("files -")
+        || (id_lower.is_empty() && title_lower == "rusty-files")
     {
         return ("Files".to_owned(), TopBarAppProfile::Files);
     }
@@ -371,6 +384,7 @@ const fn item(
         icon,
         shortcut,
         action,
+        enabled: true,
     }
 }
 
@@ -379,63 +393,47 @@ fn build_active_app_menu(
     active_app_name: &str,
 ) -> Vec<ResolvedTopBarMenuItem> {
     let app = if active_app_name.trim().is_empty() {
-        "Files"
+        "Desktop"
     } else {
         active_app_name.trim()
     };
-    let mut entries = vec![
+    let is_desktop = matches!(profile, TopBarAppProfile::Desktop)
+        || app.eq_ignore_ascii_case("desktop")
+        || (matches!(profile, TopBarAppProfile::GenericApp) && active_app_name.trim().is_empty());
+    vec![
         ResolvedTopBarMenuItem::Item {
-            label: Cow::Owned(format!("About {app}")),
+            label: Cow::Owned(format!("Hide {app}")),
             icon: None,
             shortcut: None,
-            action: TopBarMenuAction::AboutActiveApp,
-        },
-        ResolvedTopBarMenuItem::Separator,
-        item(
-            "System Settings...",
-            Some(UiGlyphKind::ControlCenter),
-            Some("⌘,"),
-            TopBarMenuAction::OpenSettings,
-        ),
-    ];
-    if matches!(profile, TopBarAppProfile::Files) {
-        entries.push(item(
-            "Empty Trash...",
-            Some(UiGlyphKind::Trash),
-            Some("⇧⌘⌫"),
-            TopBarMenuAction::EmptyTrash,
-        ));
-    }
-    entries.extend([
-        ResolvedTopBarMenuItem::Separator,
-        ResolvedTopBarMenuItem::Item {
-            label: Cow::Owned(format!("Minimize {app}")),
-            icon: None,
-            shortcut: Some("⌘H"),
-            action: TopBarMenuAction::MinimizeFocused,
+            action: TopBarMenuAction::HideActiveApp,
+            enabled: !is_desktop,
         },
         ResolvedTopBarMenuItem::Item {
-            label: Cow::Owned(format!("Quit {app}")),
+            label: Cow::Borrowed("Hide Others"),
             icon: None,
-            shortcut: Some("⌘Q"),
+            shortcut: None,
+            action: TopBarMenuAction::HideOtherApps,
+            enabled: true,
+        },
+        ResolvedTopBarMenuItem::Separator,
+        ResolvedTopBarMenuItem::Item {
+            label: Cow::Borrowed("Quit"),
+            icon: None,
+            shortcut: None,
             action: TopBarMenuAction::QuitActiveApp,
+            enabled: !is_desktop,
         },
-        ResolvedTopBarMenuItem::Item {
-            label: Cow::Owned(format!("Force Quit {app}")),
-            icon: None,
-            shortcut: Some("⌥⌘Q"),
-            action: TopBarMenuAction::ForceQuitActiveApp,
-        },
-    ]);
-    entries
+    ]
 }
 
 fn build_file_menu(profile: TopBarAppProfile) -> Vec<ResolvedTopBarMenuItem> {
     match profile {
-        TopBarAppProfile::Files => top_bar_menu_entries(TopBarMenuHit::File)
-            .iter()
-            .map(ResolvedTopBarMenuItem::from)
-            .collect(),
+        TopBarAppProfile::Desktop | TopBarAppProfile::Files => {
+            top_bar_menu_entries(TopBarMenuHit::File)
+                .iter()
+                .map(ResolvedTopBarMenuItem::from)
+                .collect()
+        }
         TopBarAppProfile::Browser => build_browser_file_menu(),
         TopBarAppProfile::Terminal => build_terminal_file_menu(),
         TopBarAppProfile::Editor => build_doc_file_menu("New File", "Close Editor", true),
@@ -561,10 +559,12 @@ fn build_doc_file_menu(
 
 fn build_edit_menu(profile: TopBarAppProfile) -> Vec<ResolvedTopBarMenuItem> {
     match profile {
-        TopBarAppProfile::Files => top_bar_menu_entries(TopBarMenuHit::Edit)
-            .iter()
-            .map(ResolvedTopBarMenuItem::from)
-            .collect(),
+        TopBarAppProfile::Desktop | TopBarAppProfile::Files => {
+            top_bar_menu_entries(TopBarMenuHit::Edit)
+                .iter()
+                .map(ResolvedTopBarMenuItem::from)
+                .collect()
+        }
         TopBarAppProfile::Terminal => vec![
             item(
                 "Copy",
@@ -644,10 +644,12 @@ fn build_edit_menu(profile: TopBarAppProfile) -> Vec<ResolvedTopBarMenuItem> {
 
 fn build_view_menu(profile: TopBarAppProfile) -> Vec<ResolvedTopBarMenuItem> {
     match profile {
-        TopBarAppProfile::Files => top_bar_menu_entries(TopBarMenuHit::View)
-            .iter()
-            .map(ResolvedTopBarMenuItem::from)
-            .collect(),
+        TopBarAppProfile::Desktop | TopBarAppProfile::Files => {
+            top_bar_menu_entries(TopBarMenuHit::View)
+                .iter()
+                .map(ResolvedTopBarMenuItem::from)
+                .collect()
+        }
         TopBarAppProfile::Browser => vec![
             item(
                 "Reload Page",
