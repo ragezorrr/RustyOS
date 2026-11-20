@@ -782,9 +782,9 @@ fn layout_list_view(state: &FilesAppState, content_rect: Rect) -> ListAreaLayout
 }
 
 fn measure_popup_height(entries: &[PopupRowSpec]) -> i32 {
-    let row_h = 24_i32;
-    let sep_h = 9_i32;
-    let mut total_h = 10_i32;
+    let row_h = rusty_ui::menu::ROW_HEIGHT;
+    let sep_h = rusty_ui::menu::SEPARATOR_HEIGHT;
+    let mut total_h = rusty_ui::menu::VERTICAL_CONTENT_MARGIN * 2;
     for (_, _, _, cmd) in entries {
         total_h += if cmd.is_some() { row_h } else { sep_h };
     }
@@ -798,11 +798,11 @@ fn build_popup_items(
     total_h: i32,
     entries: Vec<PopupRowSpec>,
 ) -> PopupLayout {
-    let row_h = 24_i32;
-    let sep_h = 9_i32;
+    let row_h = rusty_ui::menu::ROW_HEIGHT;
+    let sep_h = rusty_ui::menu::SEPARATOR_HEIGHT;
     let rect = Rect::new(x, y, menu_w, total_h);
     let mut items = Vec::with_capacity(entries.len());
-    let mut cy = y + 5;
+    let mut cy = y + rusty_ui::menu::VERTICAL_CONTENT_MARGIN;
     for (label, checked, swatch_rgb, command) in entries {
         let h = if command.is_some() { row_h } else { sep_h };
         items.push(PopupItemLayout {

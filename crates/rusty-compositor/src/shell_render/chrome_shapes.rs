@@ -203,7 +203,7 @@ fn build_chrome_shapes(
                                 Point::from((mx + 5, row_y + 1)),
                                 Size::from((mw - 10, MENU_ITEM_HEIGHT - 2)),
                             ),
-                            7,
+                            rusty_ui::menu::HOVER_PILL_RADIUS,
                             pal.accent_rgba,
                             None,
                         );

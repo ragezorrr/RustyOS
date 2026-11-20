@@ -16,14 +16,14 @@ use rusty_services::file_manager::FilesThemeMode;
 use super::{Canvas, Palette, palette_for_with_accent, rgba};
 use crate::layout::{PopupCommand, PopupLayout, Rect};
 
-/// Concentric outer corner radius matching macOS 27 Golden Gate popovers (`13 px`).
-pub(crate) const MENU_POPOVER_RADIUS: i32 = 13;
+/// Concentric outer corner radius matching system popovers (`14 px`).
+pub(crate) const MENU_POPOVER_RADIUS: i32 = rusty_ui::menu::MENU_RADIUS;
 
-/// Concentric corner radius for the floating hover pill (`7 px` inside `5 px` padding).
-pub(crate) const HOVER_PILL_RADIUS: i32 = 7;
+/// Concentric corner radius for the floating hover pill (`9 px` inside `5 px` padding).
+pub(crate) const HOVER_PILL_RADIUS: i32 = rusty_ui::menu::HOVER_PILL_RADIUS;
 
 /// Horizontal inset for the floating hover pill (`5 px`).
-pub(crate) const HOVER_PILL_INSET_H: i32 = 5;
+pub(crate) const HOVER_PILL_INSET_H: i32 = rusty_ui::menu::CONTENT_MARGIN;
 
 /// Vertical inset for the floating hover pill (`1 px`).
 pub(crate) const HOVER_PILL_INSET_V: i32 = 1;
@@ -149,7 +149,7 @@ fn render_popup_chrome(c: &mut Canvas<'_>, r: Rect, pal: &Palette) {
 
     c.fill_rounded_rect(r, MENU_POPOVER_RADIUS, pal.popover_bg);
 
-    // CutefishOS directional inner 1px hairline (top 100%, bottom 35%, no side glare)
+    // System directional inner 1px hairline (top 100%, bottom 35%, no side glare)
     let bot_rim_alpha = (u16::from(pal.popover_rim[3]) * 35 / 100) as u8;
     let bot_rim = rgba(
         pal.popover_rim[0],
@@ -187,7 +187,7 @@ pub(crate) fn render_popup(
     render_popup_with_chrome(c, popup, hover_idx, pal, true);
 }
 
-/// Renders a `CutefishOS`-calibrated Liquid Glass popup/context menu.
+/// Renders a Liquid Glass popup/context menu.
 #[allow(clippy::cast_precision_loss)]
 fn render_popup_with_chrome(
     c: &mut Canvas<'_>,

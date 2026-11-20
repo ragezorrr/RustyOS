@@ -18,7 +18,7 @@ use super::top_bar::{MENU_ITEM_HEIGHT, MENU_POPOVER_PAD_Y, MENU_SEPARATOR_HEIGHT
 
 const CONTEXT_MENU_MIN_WIDTH: i32 = 216;
 const CONTEXT_MENU_MAX_WIDTH: i32 = 296;
-const SUBMENU_GAP_PX: i32 = 4;
+const SUBMENU_OVERLAP: i32 = rusty_ui::menu::SUBMENU_OVERLAP;
 
 /// Executable leaf or submenu action triggered from a compositor context menu (`RUSTYOS-064`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -439,11 +439,11 @@ pub fn compute_context_menu_layout(
         .and_then(|(parent_idx, sub_entries)| {
             let parent_row = primary_rows.get(parent_idx)?;
             let (sw, sh) = measure_panel_size(sub_entries);
-            let right_x = primary_rect.loc.x + primary_rect.size.w + SUBMENU_GAP_PX;
+            let right_x = primary_rect.loc.x + primary_rect.size.w - SUBMENU_OVERLAP;
             let sub_x = if right_x + sw <= screen_size.w - 8 {
                 right_x
             } else {
-                primary_rect.loc.x - sw - SUBMENU_GAP_PX
+                primary_rect.loc.x - sw + SUBMENU_OVERLAP
             };
             let sub_y = parent_row.loc.y - MENU_POPOVER_PAD_Y;
             let sub_rect =
@@ -866,7 +866,7 @@ fn render_panel_row_shapes(
                 Point::from((mx + 5, row_y + 1)),
                 Size::from((mw - 10, MENU_ITEM_HEIGHT - 2)),
             ),
-            7,
+            rusty_ui::menu::HOVER_PILL_RADIUS,
             pal.accent_rgba,
             None,
         );

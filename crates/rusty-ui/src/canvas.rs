@@ -335,6 +335,58 @@ impl<'a> UiCanvas<'a> {
         }
     }
 
+    /// Alias for `fast_rounded_rect`.
+    #[inline]
+    pub fn fill_rounded_rect(&mut self, rect: Rect, radius: u32, color: [u8; 4]) {
+        self.fast_rounded_rect(rect, radius as f32, color);
+    }
+
+    /// Strokes a 1px border around a rounded rectangle.
+    pub fn stroke_rounded_rect(&mut self, rect: Rect, radius: u32, color: [u8; 4]) {
+        let r = (radius as f32)
+            .min(rect.width as f32 / 2.0)
+            .min(rect.height as f32 / 2.0);
+        let rx0 = rect.x as f32 + r;
+        let rx1 = rect.right() as f32 - r;
+        let ry0 = rect.y as f32 + r;
+        let ry1 = rect.bottom() as f32 - r;
+
+        // Top and bottom straight lines
+        self.stroke_line_aa(
+            rx0,
+            rect.y as f32 + 0.5,
+            rx1,
+            rect.y as f32 + 0.5,
+            1.0,
+            color,
+        );
+        self.stroke_line_aa(
+            rx0,
+            rect.bottom() as f32 - 0.5,
+            rx1,
+            rect.bottom() as f32 - 0.5,
+            1.0,
+            color,
+        );
+        // Left and right straight lines
+        self.stroke_line_aa(
+            rect.x as f32 + 0.5,
+            ry0,
+            rect.x as f32 + 0.5,
+            ry1,
+            1.0,
+            color,
+        );
+        self.stroke_line_aa(
+            rect.right() as f32 - 0.5,
+            ry0,
+            rect.right() as f32 - 0.5,
+            ry1,
+            1.0,
+            color,
+        );
+    }
+
     /// Renders standard traffic lights with active/inactive colors, pressed state, and hover vector microglyphs.
     pub fn draw_traffic_lights(
         &mut self,

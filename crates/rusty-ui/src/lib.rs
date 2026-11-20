@@ -14,10 +14,12 @@
 
 pub mod canvas;
 pub mod geometry;
+pub mod menu;
 pub mod theme;
 pub mod traffic_lights;
 pub mod widgets;
 pub mod window_frame;
+pub mod window_header;
 
 pub use canvas::{PixelFormat, UiCanvas};
 pub use geometry::{
@@ -25,12 +27,19 @@ pub use geometry::{
     TRAFFIC_LIGHT_DIAMETER, TRAFFIC_LIGHT_GAP, TRAFFIC_LIGHT_MARGIN_LEFT, TRAFFIC_LIGHT_RADIUS,
     TRAFFIC_LIGHT_STEP, WINDOW_RADIUS,
 };
+pub use menu::{
+    MenuEntry, MenuItem, MenuLayout, MenuRowLayout, draw_menu_background, draw_menu_row,
+};
 pub use theme::{ACCENT_PALETTE, ThemeMode, ThemePalette, TrafficLightKind};
 pub use traffic_lights::{GlyphSegment, TrafficLightButtons, glyph_segments};
 pub use widgets::{
     ButtonStyle, GroupCard, PushButton, SearchField, SearchFieldHit, ToggleSwitch, WidgetState,
 };
 pub use window_frame::{WindowFrame, WindowHitTarget};
+pub use window_header::{
+    ACTIVE_WINDOW_BLUR_OPACITY, CSD_TITLEBAR_HEIGHT, DIALOG_HEADER_HEIGHT,
+    INACTIVE_WINDOW_BLUR_OPACITY, WindowHeader, WindowHeaderConfig,
+};
 
 #[cfg(test)]
 mod tests {
@@ -170,5 +179,53 @@ mod tests {
             Some(SearchFieldHit::Clear)
         );
         search.draw(&mut canvas, &pal);
+    }
+
+    #[test]
+    fn menu_layout_and_window_header() {
+        let entries = vec![
+            MenuEntry::Item(MenuItem::new("New File", 1).with_shortcut("⌘N")),
+            MenuEntry::Item(MenuItem::new("Open...", 2).with_checked(true)),
+            MenuEntry::Separator,
+            MenuEntry::Item(MenuItem::new("Delete", 3).with_danger(true)),
+        ];
+
+        let layout = MenuLayout::compute(100, 100, 180, &entries);
+        assert_eq!(layout.rect.width, 180);
+        // 5 + 26 + 26 + 12 + 26 + 5 = 100
+        assert_eq!(layout.rect.height, 100);
+        assert!(layout.has_check_column);
+        assert_eq!(layout.rows.len(), 4);
+        assert!(!layout.rows[0].is_separator);
+        assert!(layout.rows[2].is_separator);
+        assert_eq!(layout.hit_test(120.0, 115.0), Some(0)); // First item
+        assert_eq!(layout.hit_test(120.0, 140.0), Some(1)); // Second item
+        assert_eq!(layout.hit_test(120.0, 160.0), None); // Separator
+        assert_eq!(layout.hit_test(120.0, 175.0), Some(3)); // Delete item
+
+        let (sub_x, sub_y) = layout.cascade_submenu_anchor(0);
+        assert_eq!(sub_x, 100 + 180 - 2);
+        assert_eq!(sub_y, 100);
+
+        let mut buf = vec![0u8; 300 * 300 * 4];
+        let mut canvas = UiCanvas::new(&mut buf, 300, 300, 300 * 4, PixelFormat::Bgra8888);
+        let pal = ThemePalette::new(false, 0);
+
+        draw_menu_background(&mut canvas, layout.rect, &pal, true);
+        for row in &layout.rows {
+            draw_menu_row(&mut canvas, row, row.index == 0, &pal);
+        }
+
+        let mut header = WindowHeader::new("RustyOS App");
+        assert_eq!(header.config.height, 40);
+        assert!(header.leading_inset() > 70.0);
+        assert_eq!(
+            header.on_pointer_down(21.0, 20.0, 800),
+            WindowHitTarget::TrafficLight(TrafficLightKind::Close)
+        );
+        assert_eq!(
+            header.on_pointer_down(200.0, 20.0, 800),
+            WindowHitTarget::TitlebarDrag
+        );
     }
 }

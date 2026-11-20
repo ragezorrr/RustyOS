@@ -7,8 +7,8 @@ use crate::shell_render::top_bar_menus::{
 
 use super::panel::compute_top_bar_left_layout_for_profile;
 
-/// Corner radius for concentric Menu Bar and context menu popovers (`DESIGN.md` §12.3, ADR-0058).
-pub const MENU_POPOVER_RADIUS: i32 = 13;
+/// Corner radius for concentric Menu Bar and context menu popovers (`DESIGN.md` §12.3, ADR-0058, ADR-0069).
+pub const MENU_POPOVER_RADIUS: i32 = rusty_ui::menu::MENU_RADIUS;
 
 /// Interactive click target inside the `TopBar` Left Menu area (`RUSTYOS-038`/`049`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -536,9 +536,9 @@ pub const fn top_bar_menu_items(
     }
 }
 
-pub(crate) const MENU_POPOVER_PAD_Y: i32 = 5;
-pub(crate) const MENU_ITEM_HEIGHT: i32 = 24;
-pub(crate) const MENU_SEPARATOR_HEIGHT: i32 = 9;
+pub(crate) const MENU_POPOVER_PAD_Y: i32 = rusty_ui::menu::VERTICAL_CONTENT_MARGIN;
+pub(crate) const MENU_ITEM_HEIGHT: i32 = rusty_ui::menu::ROW_HEIGHT;
+pub(crate) const MENU_SEPARATOR_HEIGHT: i32 = rusty_ui::menu::SEPARATOR_HEIGHT;
 
 /// Computes the glass dropdown popover rectangle anchored beneath `menu` (`RUSTYOS-048`/`051`).
 #[must_use]

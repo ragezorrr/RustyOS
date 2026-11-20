@@ -2174,6 +2174,27 @@ hardware/software context и низкие накладные расходы.
 - **Tests:** 321 unit-тест workspace (`4` `rusty-animation`, `199` `rusty-compositor`, `17` `rusty-files`, `13` `rusty-installer`, `3` `rusty-ipc`, `44` `rusty-services`, `11` `rusty-settings`, `5` `rusty-shell`, `15` `rusty-terminal`, `6` `rusty-ui`, `7` `rusty-wm`).
 - **Risks:** Нет; все расчеты координат светофоров строго идентичны эталонным размерам, проверенным в тестах.
 
+### RUSTYOS-125 — Создание модулей menu и window_header в crates/rusty-ui, унификация стиля контекстных меню и оконных заголовков (`RUSTYOS-125 Вариант 2`)
+
+- **Status:** Done (`RUSTYOS-125 Вариант 2` — утверждённый объём выполнен)
+- **Goal:** Реализовать модули `crates/rusty-ui::menu` и `crates/rusty-ui::window_header` с эталонными метриками контекстных меню (высота строки 26 px, разделитель 12 px, внешний радиус 14 px, внутренний радиус плашки ховера 9 px, перекрытие каскадных подменю 2 px) и оконных заголовков (высота CSD 40 px, SSD 28 px, диалоги 42 px, радиус скругления 14 px, прозрачность размытия 0.85/0.92, параметры drag & double click), а также сквозное применение обновленного стиля контекстных меню в `rusty-compositor` и `rusty-files`.
+- **Dependencies:** `RUSTYOS-123`, `RUSTYOS-124`.
+- **Scope:**
+  - `crates/rusty-ui/src/menu.rs`: реализованы константы меню (`ROW_HEIGHT = 26`, `SEPARATOR_HEIGHT = 12`, `MIN_MENU_WIDTH = 158`, `CONTENT_MARGIN = 5`, `VERTICAL_CONTENT_MARGIN = 5`, `MENU_RADIUS = 14`, `HOVER_PILL_RADIUS = 9`, `SUBMENU_OVERLAP = 2`), структуры `MenuItem<T>`, `MenuEntry<T>`, `MenuRowLayout`, `MenuLayout` (`compute`, `hit_test`, `clamp_to_screen`, `cascade_submenu_anchor`), а также функции отрисовки `draw_menu_background` и `draw_menu_row` на холсте `UiCanvas`;
+  - `crates/rusty-ui/src/window_header.rs`: реализованы константы (`CSD_TITLEBAR_HEIGHT = 40`, `SSD_TITLEBAR_HEIGHT = 28`, `DIALOG_HEADER_HEIGHT = 42`, `WINDOW_RADIUS = 14`, `ACTIVE_WINDOW_BLUR_OPACITY = 0.85`, `INACTIVE_WINDOW_BLUR_OPACITY = 0.92`, `DOUBLE_CLICK_TIMEOUT_MS = 400`, `DRAG_START_DISTANCE = 8.0`), структуры `WindowHeaderConfig` и контроллер `WindowHeader` с поддержкой отступа светофоров `leading_inset` и обработки событий мыши;
+  - `crates/rusty-ui/src/canvas.rs`: добавлены методы `fill_rounded_rect` и `stroke_rounded_rect`;
+  - `crates/rusty-ui/src/lib.rs`: экспорт модулей `menu` и `window_header`, всесторонний unit-тест `menu_layout_and_window_header`;
+  - `crates/rusty-compositor`: обновлены константы контекстных меню, меню верхней панели, поповера Wi-Fi и шейпов хромирования (`MENU_POPOVER_RADIUS = 14`, `MENU_ITEM_HEIGHT = 26`, `MENU_SEPARATOR_HEIGHT = 12`, `HOVER_PILL_RADIUS = 9`), внедрено перекрытие подменю `SUBMENU_OVERLAP = 2 px` для надежного диагонального транзита курсора, обновлен тест `context_menu_cascade_submenu_hover_flip_and_hit_testing`;
+  - `apps/rusty-files`: в `layout.rs` и `render/popup.rs` внедрены метрики `rusty_ui::menu::ROW_HEIGHT` (26 px), `SEPARATOR_HEIGHT` (12 px), `VERTICAL_CONTENT_MARGIN` (5 px), `MENU_POPOVER_RADIUS` (14 px), `HOVER_PILL_RADIUS` (9 px);
+  - Документация: `ADR-0069` (`docs/adr/0069-unified-window-header-and-context-menu-style.md`), запись `D-083` в `DECISIONS.md`.
+- **Acceptance Criteria:**
+  - `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace` (322 unit-теста) проходят без единой ошибки и предупреждения;
+  - `cargo run -p rusty-compositor -- --drm-probe` завершается штатно;
+  - Живой `--winit` прогон композитора стартует и работает стабильно;
+  - Полное согласование метрик контекстных меню и заголовков окон между общим крейтом `rusty-ui`, оболочкой композитора и приложениями.
+- **Tests:** 322 unit-теста workspace (`4` `rusty-animation`, `199` `rusty-compositor`, `17` `rusty-files`, `13` `rusty-installer`, `3` `rusty-ipc`, `44` `rusty-services`, `11` `rusty-settings`, `5` `rusty-shell`, `15` `rusty-terminal`, `7` `rusty-ui`, `7` `rusty-wm`).
+- **Risks:** Нет; изменения геометрии меню и оконных заголовков строго концентричны и полностью покрыты автоматическими тестами.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

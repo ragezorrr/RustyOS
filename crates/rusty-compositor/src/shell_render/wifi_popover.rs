@@ -16,7 +16,7 @@ use super::tokens::{
 const WIFI_POPOVER_WIDTH: i32 = 280;
 const HOVER_PILL_INSET_H: i32 = 5;
 const HOVER_PILL_INSET_V: i32 = 1;
-const HOVER_PILL_RADIUS: i32 = 7;
+const HOVER_PILL_RADIUS: i32 = rusty_ui::menu::HOVER_PILL_RADIUS;
 const MAX_KNOWN_ROWS: usize = 4;
 const MAX_OTHER_ROWS: usize = 6;
 

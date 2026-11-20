@@ -250,8 +250,8 @@ pub const DOCK_UTILITY_COUNT: usize = 2;
 /// SSD window frame & glass popover corner radius in logical pixels (`DESIGN.md` §12.3).
 pub const WINDOW_RADIUS: i32 = 14;
 
-/// Liquid Glass context/dropdown menu corner radius in logical pixels (`DESIGN.md` §12.3, ADR-0058).
-pub(super) const MENU_POPOVER_RADIUS: i32 = 13;
+/// Liquid Glass context/dropdown menu corner radius in logical pixels (`DESIGN.md` §12.3, ADR-0058, ADR-0069).
+pub(super) const MENU_POPOVER_RADIUS: i32 = rusty_ui::menu::MENU_RADIUS;
 
 /// `TopBar` Left Menu metrics (`macOS` Menu Bar layout with `Inter` 13 px) (`RUSTYOS-038`/`049`).
 pub const TOP_BAR_LOGO_X: i32 = 12;

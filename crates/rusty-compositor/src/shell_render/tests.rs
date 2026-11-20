@@ -1552,7 +1552,10 @@ fn context_menu_cascade_submenu_hover_flip_and_hit_testing() -> Result<(), &'sta
 
     let with_sub = compute_context_menu_layout(primary_size, &state, true);
     let (sub_rect, sub_rows) = with_sub.submenu.ok_or("expected expanded submenu layout")?;
-    assert!(sub_rect.loc.x + sub_rect.size.w <= with_sub.primary_rect.loc.x);
+    assert!(
+        sub_rect.loc.x + sub_rect.size.w
+            <= with_sub.primary_rect.loc.x + rusty_ui::menu::SUBMENU_OVERLAP
+    );
     let child2 = sub_rows[1];
     assert_eq!(
         hit_test_context_menu(
