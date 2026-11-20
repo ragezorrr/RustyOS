@@ -2080,6 +2080,7 @@ impl RustyCompositorState {
             || cfg.dock_auto_hide != self.user_config.dock_auto_hide;
         let updates_changed = cfg.updates_enabled != self.updates_enabled
             || cfg.updates_interval_minutes != self.user_config.updates_interval_minutes;
+        let power_mode_changed = cfg.power_low_power_mode != self.user_config.power_low_power_mode;
 
         self.animations.set_reduced_motion(cfg.reduced_motion);
         self.glass_opacity = crate::config::clamp_glass_opacity(cfg.glass_opacity);
@@ -2092,32 +2093,7 @@ impl RustyCompositorState {
         self.updates_enabled = cfg.updates_enabled;
         self.clock_24h = cfg.clock_24h;
 
-        let output_snapshots: Vec<_> = self
-            .output_map
-            .entries()
-            .iter()
-            .map(|entry| {
-                (
-                    entry.id,
-                    entry.name.clone(),
-                    entry.physical_size,
-                    entry.refresh_milli_hz,
-                    entry.scale,
-                    entry.rotation,
-                )
-            })
-            .collect();
-        for (id, name, phys_size, refresh_milli_hz, cur_scale, cur_rot) in output_snapshots {
-            let target_scale = cfg.scale_for_output(&name);
-            if (target_scale - cur_scale).abs() > 1e-4 {
-                self.update_output_geometry(id, phys_size, target_scale, refresh_milli_hz);
-            }
-            let target_rot = cfg.rotation_for_output(&name, self.rotation_override);
-            if target_rot != cur_rot {
-                let use_winit_flip = name.eq_ignore_ascii_case("winit-0");
-                self.set_output_rotation(id, target_rot, use_winit_flip);
-            }
-        }
+        self.sync_output_configs(&cfg);
 
         let keyboard = self.keyboard.clone();
         if repeat_changed {
@@ -2149,6 +2125,14 @@ impl RustyCompositorState {
         }
 
         self.user_config = cfg;
+        if power_mode_changed {
+            let pwr = self.telemetry.snapshot().power;
+            let profile = self
+                .user_config
+                .power_low_power_mode
+                .desired_profile(pwr.ac_online, pwr.has_battery);
+            self.telemetry.set_power_profile(profile);
+        }
         crate::shell_render::set_active_appearance(self.user_config.appearance);
         crate::shell_render::set_active_accent_index(self.user_config.ui_accent_index);
         if updates_changed {
@@ -2166,6 +2150,35 @@ impl RustyCompositorState {
             self.refresh_keyboard_layout_label();
         }
         self.shell_redraw_needed = true;
+    }
+
+    fn sync_output_configs(&mut self, cfg: &crate::config::UserConfig) {
+        let output_snapshots: Vec<_> = self
+            .output_map
+            .entries()
+            .iter()
+            .map(|entry| {
+                (
+                    entry.id,
+                    entry.name.clone(),
+                    entry.physical_size,
+                    entry.refresh_milli_hz,
+                    entry.scale,
+                    entry.rotation,
+                )
+            })
+            .collect();
+        for (id, name, phys_size, refresh_milli_hz, cur_scale, cur_rot) in output_snapshots {
+            let target_scale = cfg.scale_for_output(&name);
+            if (target_scale - cur_scale).abs() > 1e-4 {
+                self.update_output_geometry(id, phys_size, target_scale, refresh_milli_hz);
+            }
+            let target_rot = cfg.rotation_for_output(&name, self.rotation_override);
+            if target_rot != cur_rot {
+                let use_winit_flip = name.eq_ignore_ascii_case("winit-0");
+                self.set_output_rotation(id, target_rot, use_winit_flip);
+            }
+        }
     }
 
     /// Reloads [`Self::config_path`] from disk and applies it live (`RUSTYOS-061`).

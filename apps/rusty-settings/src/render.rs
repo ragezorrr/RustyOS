@@ -11,7 +11,9 @@ use std::cell::RefCell;
 use crate::layout::{
     AppearanceCardsLayout, CARD_CORNER_RADIUS, CardRowControl, CardRowLayout, CardSectionLayout,
     DockPositionCardLayout, NotificationAppKind, Rect, ServiceBadgeKind, SettingsHit,
-    SettingsLayout, WINDOW_CORNER_RADIUS, choice_rect, stepper_rects, switch_rect,
+    SettingsLayout, WINDOW_CORNER_RADIUS, about_more_info_rect, battery_tabs_inner_rect,
+    bt_device_action_rects, choice_rect, dropdown_trigger_rect, shortcut_pill_rect, stepper_rects,
+    switch_rect,
 };
 use crate::state::{ACCENT_COLORS, RowControlId, SettingsAppState, SettingsPage, ThemeChoice};
 
@@ -688,6 +690,8 @@ pub(crate) fn render_window_pixels_with_glass(
         c.fill_rounded_rect(thumb, 2, thumb_col);
     }
 
+    render_floating_overlays(&mut c, app, layout, &pal);
+
     // 4. 1px hairline border clipped cleanly by anti-aliased outer rounded corners (radius = 14px).
     c.stroke_rounded_rect(
         Rect::new(0, 0, layout.win_w, layout.win_h),
@@ -1186,32 +1190,28 @@ fn render_network_service_row(
             action,
             active,
         } => {
-            let icon_rect = Rect::new(row.rect.x + 16, row.rect.y + 15, 32, 32);
-            render_service_badge(
+            render_header_switch_row(
                 c,
-                icon_rect,
+                app,
+                row,
+                hover,
+                pal,
                 [0x00, 0x7A, 0xFF, 0xFF],
                 ServiceBadgeKind::Wifi,
-            );
-            let tx = icon_rect.right() + 12;
-            c.draw_text(
-                &row.label,
-                tx,
-                row.rect.y + 12,
-                13.5,
-                true,
-                pal.text_primary,
-            );
-            c.draw_text(
                 subtitle,
-                tx,
-                row.rect.y + 32,
-                11.0,
-                false,
-                pal.text_secondary,
+                *action,
+                *active,
             );
-            draw_toggle_switch(c, switch_rect(row.rect), *action, *active, app, hover, pal);
             true
+        }
+        CardRowControl::ServiceHeaderSwitch { .. }
+        | CardRowControl::BluetoothDeviceRow { .. }
+        | CardRowControl::DropdownTrigger { .. }
+        | CardRowControl::BatterySegmentedTabs
+        | CardRowControl::AboutHeroCard { .. }
+        | CardRowControl::UserProfileCard { .. }
+        | CardRowControl::ShortcutBinding { .. } => {
+            render_rusty_ui_card_row(c, app, row, hover, pal)
         }
         CardRowControl::WifiNetwork {
             connected,
@@ -1224,6 +1224,158 @@ fn render_network_service_row(
         }
         _ => render_notification_settings_row(c, app, row, hover, pal),
     }
+}
+
+fn render_rusty_ui_card_row(
+    c: &mut Canvas<'_>,
+    app: &SettingsAppState,
+    row: &CardRowLayout,
+    hover: Option<&SettingsHit>,
+    pal: &Palette,
+) -> bool {
+    match &row.control {
+        CardRowControl::ServiceHeaderSwitch {
+            badge_tint,
+            badge_kind,
+            subtitle,
+            action,
+            active,
+        } => {
+            render_header_switch_row(
+                c,
+                app,
+                row,
+                hover,
+                pal,
+                *badge_tint,
+                *badge_kind,
+                subtitle,
+                *action,
+                *active,
+            );
+            true
+        }
+        CardRowControl::BluetoothDeviceRow {
+            subtitle,
+            connected,
+            paired,
+            action,
+            info_action,
+        } => {
+            render_bluetooth_device_row(
+                c,
+                app,
+                row,
+                hover,
+                pal,
+                subtitle,
+                *connected,
+                *paired,
+                *action,
+                *info_action,
+            );
+            true
+        }
+        CardRowControl::DropdownTrigger { .. } => {
+            c.draw_text(
+                &row.label,
+                row.rect.x + 16,
+                row.rect.y + (row.rect.h - 14) / 2,
+                12.5,
+                false,
+                pal.text_primary,
+            );
+            let mut synced = app.low_power_dropdown.clone();
+            synced.rect = to_ui_rect(dropdown_trigger_rect(row.rect));
+            synced.hovered_trigger = matches!(hover, Some(SettingsHit::LowPowerDropdownTrigger));
+            paint_with_ui_painter(c, app, pal, |painter, fe, ui_pal| {
+                synced.paint_trigger(painter, fe, ui_pal, synced.open, 0.9);
+            });
+            true
+        }
+        CardRowControl::BatterySegmentedTabs => {
+            let mut synced = app.battery_tab.clone();
+            synced.rect = to_ui_rect(battery_tabs_inner_rect(row.rect));
+            paint_with_ui_painter(c, app, pal, |painter, fe, ui_pal| {
+                synced.paint(painter, fe, ui_pal, false, 0.0);
+            });
+            true
+        }
+        CardRowControl::AboutHeroCard { subtitle, action } => {
+            render_about_hero_row(c, app, row, hover, pal, subtitle, *action);
+            true
+        }
+        CardRowControl::UserProfileCard {
+            initials,
+            subtitle,
+            badge_tint,
+        } => {
+            render_user_profile_card(c, row, pal, initials, subtitle, *badge_tint);
+            true
+        }
+        CardRowControl::ShortcutBinding { combo, action } => {
+            render_shortcut_binding_row(c, row, hover, pal, combo, *action);
+            true
+        }
+        _ => false,
+    }
+}
+
+fn render_user_profile_card(
+    c: &mut Canvas<'_>,
+    row: &CardRowLayout,
+    pal: &Palette,
+    initials: &str,
+    subtitle: &str,
+    badge_tint: [u8; 4],
+) {
+    let avatar_r = Rect::new(row.rect.x + 16, row.rect.y + 11, 40, 40);
+    c.fill_rounded_rect(avatar_r, 20, badge_tint);
+    c.draw_text_centered(initials, avatar_r, 15.0, true, [255, 255, 255, 255]);
+    let tx = avatar_r.right() + 14;
+    c.draw_text(
+        &row.label,
+        tx,
+        row.rect.y + 13,
+        13.5,
+        true,
+        pal.text_primary,
+    );
+    c.draw_text(
+        subtitle,
+        tx,
+        row.rect.y + 34,
+        11.5,
+        false,
+        pal.text_secondary,
+    );
+}
+
+fn render_shortcut_binding_row(
+    c: &mut Canvas<'_>,
+    row: &CardRowLayout,
+    hover: Option<&SettingsHit>,
+    pal: &Palette,
+    combo: &str,
+    action: RowControlId,
+) {
+    c.draw_text(
+        &row.label,
+        row.rect.x + 16,
+        row.rect.y + (row.rect.h - 14) / 2,
+        12.5,
+        false,
+        pal.text_primary,
+    );
+    let pill = shortcut_pill_rect(row.rect);
+    let hovered = matches!(hover, Some(SettingsHit::Control(id)) if *id == action);
+    let bg = if hovered {
+        pal.sidebar_active
+    } else {
+        pal.control_bg
+    };
+    c.fill_rounded_rect(pill, 8, bg);
+    c.draw_text_centered(combo, pill, 11.5, true, pal.text_primary);
 }
 
 fn render_notification_settings_row(
@@ -1469,10 +1621,235 @@ fn render_card_row(
         }
         CardRowControl::ServiceStatus { .. }
         | CardRowControl::WifiHeaderSwitch { .. }
+        | CardRowControl::ServiceHeaderSwitch { .. }
+        | CardRowControl::BluetoothDeviceRow { .. }
+        | CardRowControl::DropdownTrigger { .. }
+        | CardRowControl::BatterySegmentedTabs
+        | CardRowControl::AboutHeroCard { .. }
+        | CardRowControl::UserProfileCard { .. }
+        | CardRowControl::ShortcutBinding { .. }
         | CardRowControl::WifiNetwork { .. }
         | CardRowControl::NotificationHeader { .. }
         | CardRowControl::NotificationAppRow { .. } => {}
     }
+}
+
+fn paint_with_ui_painter(
+    c: &mut Canvas<'_>,
+    app: &SettingsAppState,
+    pal: &Palette,
+    paint_fn: impl FnOnce(
+        &mut rusty_ui::UiPainter<'_>,
+        &mut rusty_ui::UiFontEngine,
+        &rusty_ui::ThemePalette,
+    ),
+) {
+    let ui_pal = rusty_ui::ThemePalette::new(pal.is_dark, app.accent_index);
+    let mut dl = rusty_ui::UiDrawList::new();
+    with_font_engine(|fe| {
+        {
+            let mut painter = rusty_ui::UiPainter::new(&mut dl);
+            if let Some(clip) = c.clip {
+                painter.push_clip(to_ui_rect(clip));
+            }
+            paint_fn(&mut painter, fe, &ui_pal);
+            if c.clip.is_some() {
+                painter.pop_clip();
+            }
+        }
+        let mut uc = make_ui_canvas(c.buf, c.w, c.h);
+        rusty_ui::render_draw_list_to_canvas(&dl, &mut uc, fe);
+    });
+}
+
+fn render_floating_overlays(
+    c: &mut Canvas<'_>,
+    app: &SettingsAppState,
+    layout: &SettingsLayout,
+    pal: &Palette,
+) {
+    let has_dropdown = app.current_page == SettingsPage::Battery
+        && app.low_power_dropdown.open
+        && layout.low_power_dropdown_rect.is_some();
+    if !has_dropdown && app.active_modal.is_none() {
+        return;
+    }
+    let elapsed = app.epoch.elapsed();
+    let dd_rect = layout.low_power_dropdown_rect;
+    paint_with_ui_painter(c, app, pal, |painter, fe, ui_pal| {
+        if has_dropdown && let Some(dr) = dd_rect {
+            let mut synced = app.low_power_dropdown.clone();
+            synced.rect = to_ui_rect(dr);
+            synced.paint_popup(painter, fe, ui_pal);
+        }
+        if let Some(modal) = &app.active_modal {
+            let mut sheet = modal.sheet().clone();
+            let _ = sheet.sync_input_rect(layout.win_w as u32, layout.win_h as u32);
+            sheet.paint(
+                painter,
+                fe,
+                layout.win_w as u32,
+                layout.win_h as u32,
+                ui_pal,
+                elapsed,
+            );
+        }
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_header_switch_row(
+    c: &mut Canvas<'_>,
+    app: &SettingsAppState,
+    row: &CardRowLayout,
+    hover: Option<&SettingsHit>,
+    pal: &Palette,
+    badge_tint: [u8; 4],
+    badge_kind: ServiceBadgeKind,
+    subtitle: &str,
+    action: RowControlId,
+    active: bool,
+) {
+    let icon_rect = Rect::new(row.rect.x + 16, row.rect.y + 15, 32, 32);
+    render_service_badge(c, icon_rect, badge_tint, badge_kind);
+    let tx = icon_rect.right() + 12;
+    c.draw_text(
+        &row.label,
+        tx,
+        row.rect.y + 12,
+        13.5,
+        true,
+        pal.text_primary,
+    );
+    c.draw_text(
+        subtitle,
+        tx,
+        row.rect.y + 32,
+        11.0,
+        false,
+        pal.text_secondary,
+    );
+    draw_toggle_switch(c, switch_rect(row.rect), action, active, app, hover, pal);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_bluetooth_device_row(
+    c: &mut Canvas<'_>,
+    app: &SettingsAppState,
+    row: &CardRowLayout,
+    hover: Option<&SettingsHit>,
+    pal: &Palette,
+    subtitle: &str,
+    connected: bool,
+    paired: bool,
+    action: RowControlId,
+    info_action: RowControlId,
+) {
+    let mid_y = row.rect.y as f32 + row.rect.h as f32 * 0.5;
+    let dot_col = if connected {
+        [40, 205, 65, 255]
+    } else {
+        pal.text_disabled
+    };
+    c.fill_circle(row.rect.x as f32 + 22.0, mid_y, 3.8, dot_col);
+    c.draw_text(
+        &row.label,
+        row.rect.x + 36,
+        row.rect.y + 9,
+        13.0,
+        connected,
+        pal.text_primary,
+    );
+    c.draw_text(
+        subtitle,
+        row.rect.x + 36,
+        row.rect.y + 27,
+        11.0,
+        false,
+        pal.text_secondary,
+    );
+
+    let (act_r, info_r) = bt_device_action_rects(row.rect);
+    let act_lbl = if connected {
+        "Disconnect"
+    } else if paired {
+        "Connect"
+    } else {
+        "Pair"
+    };
+    let mut btn = rusty_ui::PushButton::new(to_ui_rect(act_r), rusty_ui::ButtonStyle::Secondary);
+    if matches!(hover, Some(SettingsHit::Control(id)) if *id == action) {
+        btn.state = rusty_ui::WidgetState::Hover;
+    }
+    paint_with_ui_painter(c, app, pal, |painter, fe, ui_pal| {
+        btn.paint_labeled(painter, fe, act_lbl, ui_pal, false);
+    });
+
+    let info_hovered = matches!(hover, Some(SettingsHit::Control(id)) if *id == info_action);
+    let info_col = if info_hovered {
+        pal.accent
+    } else {
+        pal.text_muted
+    };
+    let icx = info_r.x as f32 + info_r.w as f32 * 0.5;
+    let icy = info_r.y as f32 + info_r.h as f32 * 0.5;
+    c.stroke_rounded_rect(
+        Rect::new(info_r.x + 2, info_r.y + 2, info_r.w - 4, info_r.h - 4),
+        9.0,
+        1.2,
+        info_col,
+    );
+    c.draw_text_centered(
+        "i",
+        Rect::new(icx as i32 - 6, icy as i32 - 7, 12, 14),
+        11.0,
+        true,
+        info_col,
+    );
+}
+
+fn render_about_hero_row(
+    c: &mut Canvas<'_>,
+    app: &SettingsAppState,
+    row: &CardRowLayout,
+    hover: Option<&SettingsHit>,
+    pal: &Palette,
+    subtitle: &str,
+    action: RowControlId,
+) {
+    let badge_r = Rect::new(row.rect.x + 18, row.rect.y + 21, 40, 40);
+    render_service_badge(
+        c,
+        badge_r,
+        [0x00, 0x7A, 0xFF, 0xFF],
+        ServiceBadgeKind::About,
+    );
+    let tx = badge_r.right() + 14;
+    c.draw_text(
+        &row.label,
+        tx,
+        row.rect.y + 20,
+        15.0,
+        true,
+        pal.text_primary,
+    );
+    c.draw_text(
+        subtitle,
+        tx,
+        row.rect.y + 42,
+        12.0,
+        false,
+        pal.text_secondary,
+    );
+
+    let btn_r = about_more_info_rect(row.rect);
+    let mut btn = rusty_ui::PushButton::new(to_ui_rect(btn_r), rusty_ui::ButtonStyle::Secondary);
+    if matches!(hover, Some(SettingsHit::Control(id)) if *id == action) {
+        btn.state = rusty_ui::WidgetState::Hover;
+    }
+    paint_with_ui_painter(c, app, pal, |painter, fe, ui_pal| {
+        btn.paint_labeled(painter, fe, "More Info...", ui_pal, false);
+    });
 }
 
 fn draw_toggle_switch(
@@ -1533,7 +1910,40 @@ fn draw_service_badge_glyph(c: &mut Canvas<'_>, rect: Rect, kind: ServiceBadgeKi
             c.draw_segment(cx - 3.0, cy + 2.5, cx + 3.0, cy + 2.5, 0.85, w);
             c.draw_segment(cx - 3.2, cy + 2.5, cx - 1.0, cy + 4.5, 0.85, w);
         }
+        ServiceBadgeKind::Bluetooth => draw_bluetooth_glyph(c, cx, cy, 7.0, w),
+        ServiceBadgeKind::Battery => {
+            c.stroke_rounded_rect(Rect::new(rect.x + 6, rect.y + 10, 18, 12), 2.5, 1.3, w);
+            c.fill_rounded_rect(Rect::new(rect.x + 25, rect.y + 13, 2, 6), 1, w);
+            c.fill_rounded_rect(Rect::new(rect.x + 9, rect.y + 13, 12, 6), 1, w);
+        }
+        ServiceBadgeKind::About => {
+            c.stroke_rounded_rect(Rect::new(rect.x + 7, rect.y + 8, 26, 18), 3.0, 1.4, w);
+            c.draw_segment(cx, cy + 5.0, cx, cy + 9.0, 1.3, w);
+            c.draw_segment(cx - 5.5, cy + 9.0, cx + 5.5, cy + 9.0, 1.2, w);
+        }
     }
+}
+
+fn draw_bluetooth_glyph(c: &mut Canvas<'_>, cx: f32, cy: f32, h: f32, w: [u8; 4]) {
+    c.draw_segment(cx, cy - h, cx, cy + h, 1.1, w);
+    c.draw_segment(cx, cy - h, cx + h * 0.55, cy - h * 0.45, 1.1, w);
+    c.draw_segment(
+        cx + h * 0.55,
+        cy - h * 0.45,
+        cx - h * 0.55,
+        cy + h * 0.45,
+        1.1,
+        w,
+    );
+    c.draw_segment(cx, cy + h, cx + h * 0.55, cy + h * 0.45, 1.1, w);
+    c.draw_segment(
+        cx + h * 0.55,
+        cy + h * 0.45,
+        cx - h * 0.55,
+        cy - h * 0.45,
+        1.1,
+        w,
+    );
 }
 
 fn draw_lock_icon(c: &mut Canvas<'_>, cx: f32, cy: f32, col: [u8; 4]) {
@@ -1574,6 +1984,11 @@ fn draw_sidebar_glyph(c: &mut Canvas<'_>, rect: Rect, page: SettingsPage) {
             draw_wifi_arc(c, cx, cy + 4.2, 4.0, w);
             draw_wifi_arc(c, cx, cy + 4.2, 6.8, w);
         }
+        SettingsPage::Bluetooth
+        | SettingsPage::Battery
+        | SettingsPage::About
+        | SettingsPage::Users
+        | SettingsPage::Shortcuts => draw_extra_sidebar_glyph(c, rect, page),
         SettingsPage::Network => {
             c.stroke_rounded_rect(Rect::new(rect.x + 5, rect.y + 5, 14, 14), 7.0, 1.3, w);
             c.stroke_rounded_rect(Rect::new(rect.x + 9, rect.y + 5, 6, 14), 3.0, 1.1, w);
@@ -1656,6 +2071,38 @@ fn draw_sidebar_glyph(c: &mut Canvas<'_>, rect: Rect, page: SettingsPage) {
                 c.fill_rounded_rect(Rect::new(cx as i32 + dx, cy as i32 + dy, 4, 4), 1, w);
             }
         }
+    }
+}
+
+fn draw_extra_sidebar_glyph(c: &mut Canvas<'_>, rect: Rect, page: SettingsPage) {
+    let cx = rect.x as f32 + rect.w as f32 * 0.5;
+    let cy = rect.y as f32 + rect.h as f32 * 0.5;
+    let w = [255, 255, 255, 255];
+    match page {
+        SettingsPage::Bluetooth => draw_bluetooth_glyph(c, cx, cy, 5.8, w),
+        SettingsPage::Battery => {
+            c.stroke_rounded_rect(Rect::new(rect.x + 5, rect.y + 8, 12, 8), 2.0, 1.1, w);
+            c.fill_rounded_rect(Rect::new(rect.x + 18, rect.y + 10, 2, 4), 1, w);
+            c.fill_rounded_rect(Rect::new(rect.x + 7, rect.y + 10, 8, 4), 1, w);
+        }
+        SettingsPage::About => {
+            c.stroke_rounded_rect(Rect::new(rect.x + 5, rect.y + 5, 14, 14), 7.0, 1.2, w);
+            c.fill_circle(cx, cy - 3.2, 1.1, w);
+            c.draw_segment(cx, cy - 0.5, cx, cy + 4.0, 1.2, w);
+        }
+        SettingsPage::Users => {
+            c.fill_circle(cx - 1.5, cy - 2.4, 2.3, w);
+            c.stroke_rounded_rect(Rect::new(rect.x + 6, cy as i32 + 1, 9, 5), 2.5, 1.1, w);
+            c.fill_circle(cx + 3.8, cy - 1.5, 1.7, w);
+        }
+        SettingsPage::Shortcuts => {
+            c.stroke_rounded_rect(Rect::new(rect.x + 6, rect.y + 6, 4, 4), 1.5, 1.0, w);
+            c.stroke_rounded_rect(Rect::new(rect.x + 14, rect.y + 6, 4, 4), 1.5, 1.0, w);
+            c.stroke_rounded_rect(Rect::new(rect.x + 6, rect.y + 14, 4, 4), 1.5, 1.0, w);
+            c.stroke_rounded_rect(Rect::new(rect.x + 14, rect.y + 14, 4, 4), 1.5, 1.0, w);
+            c.stroke_rounded_rect(Rect::new(rect.x + 9, rect.y + 9, 6, 6), 0.5, 1.0, w);
+        }
+        _ => {}
     }
 }
 

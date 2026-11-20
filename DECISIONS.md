@@ -1021,6 +1021,25 @@
                            rusty-installer, rusty-settings и
                            rusty-files на единый тулкит и
                            Shared UiFontEngine без fontdue-дублей
+
+    D-089                  Фаза 8/10 Системные            accepted
+                           настройки Bluetooth,
+                           Battery/Power, About, Users и
+                           Shortcuts (RUSTYOS-131,
+                           ADR-0075): расширение
+                           rusty-services (BluetoothService
+                           устройства/scan/pair/connect/
+                           remove по org.bluez + mac-guard,
+                           PowerService детали/профили
+                           питания с фильтром scope=Device,
+                           UserService::query_current_user_details),
+                           обратно-совместимые [power] и
+                           [shortcuts] в config.toml +
+                           RELOAD_CONFIG и idle auto-lock,
+                           новые разделы rusty-settings на
+                           DropdownSelect / SegmentedTabs /
+                           DialogSheet и read-only Users
+                           (AccountsService/Polkit отдельно)
   -----------------------------------------------------------------------
 
 ## Открытые решения

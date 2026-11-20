@@ -1,6 +1,6 @@
 //! Geometry layout and pointer hit-testing for `rusty-settings` (`RUSTYOS-103`).
 
-use crate::state::{RowControlId, SettingsAppState, SettingsPage, ThemeChoice};
+use crate::state::{RowControlId, SHORTCUT_DEFS, SettingsAppState, SettingsPage, ThemeChoice};
 
 #[allow(clippy::cast_possible_wrap)]
 pub(crate) const WINDOW_CORNER_RADIUS: i32 = rusty_ui::WINDOW_RADIUS as i32;
@@ -78,6 +78,9 @@ pub(crate) enum ServiceBadgeKind {
     Wifi,
     Ethernet,
     Firewall,
+    Bluetooth,
+    Battery,
+    About,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -120,6 +123,37 @@ pub(crate) enum CardRowControl {
         subtitle: String,
         action: RowControlId,
         active: bool,
+    },
+    ServiceHeaderSwitch {
+        badge_tint: [u8; 4],
+        badge_kind: ServiceBadgeKind,
+        subtitle: String,
+        action: RowControlId,
+        active: bool,
+    },
+    BluetoothDeviceRow {
+        subtitle: String,
+        connected: bool,
+        paired: bool,
+        action: RowControlId,
+        info_action: RowControlId,
+    },
+    DropdownTrigger {
+        value: String,
+    },
+    BatterySegmentedTabs,
+    AboutHeroCard {
+        subtitle: String,
+        action: RowControlId,
+    },
+    UserProfileCard {
+        initials: String,
+        subtitle: String,
+        badge_tint: [u8; 4],
+    },
+    ShortcutBinding {
+        combo: String,
+        action: RowControlId,
     },
     WifiNetwork {
         connected: bool,
@@ -206,6 +240,8 @@ pub(crate) enum SettingsHit {
     StepperPlus(RowControlId),
     PushPage(SettingsPage),
     DockPosTile(u8),
+    BatteryTab(usize),
+    LowPowerDropdownTrigger,
     ScrollbarThumb,
 }
 
@@ -231,6 +267,7 @@ pub(crate) struct SettingsLayout {
     pub appearance: Option<AppearanceCardsLayout>,
     pub dock_positions: Option<DockPositionCardLayout>,
     pub sections: Vec<CardSectionLayout>,
+    pub low_power_dropdown_rect: Option<Rect>,
     pub max_page_scroll: i32,
     pub page_scrollbar_thumb: Option<Rect>,
 }
@@ -310,6 +347,7 @@ pub(crate) fn compute_layout(app: &SettingsAppState, width: u32, height: u32) ->
         );
     }
     let page_scrollbar_thumb = compute_scrollbar_thumb(win_w, win_h, p_scroll, max_page_scroll);
+    let low_power_dropdown_rect = extract_dropdown_rect(&sections);
 
     SettingsLayout {
         win_w,
@@ -332,9 +370,21 @@ pub(crate) fn compute_layout(app: &SettingsAppState, width: u32, height: u32) ->
         appearance,
         dock_positions,
         sections,
+        low_power_dropdown_rect,
         max_page_scroll,
         page_scrollbar_thumb,
     }
+}
+
+fn extract_dropdown_rect(sections: &[CardSectionLayout]) -> Option<Rect> {
+    for sec in sections {
+        for row in &sec.rows {
+            if matches!(row.control, CardRowControl::DropdownTrigger { .. }) {
+                return Some(dropdown_trigger_rect(row.rect));
+            }
+        }
+    }
+    None
 }
 
 #[allow(clippy::cast_possible_truncation)]
@@ -666,11 +716,18 @@ fn build_standard_page_sections(
         | SettingsPage::Notifications
         | SettingsPage::SoftwareUpdate
         | SettingsPage::Wifi
-        | SettingsPage::Network => {
+        | SettingsPage::Bluetooth
+        | SettingsPage::Network
+        | SettingsPage::About
+        | SettingsPage::Battery
+        | SettingsPage::Users => {
             build_system_page_sections(app, page, content_x, &mut cur_y, content_w)
         }
         SettingsPage::Display | SettingsPage::Sound | SettingsPage::Keyboard => {
             build_hardware_page_sections(app, page, content_x, &mut cur_y, content_w)
+        }
+        SettingsPage::Shortcuts => {
+            build_shortcuts_page_sections(app, content_x, &mut cur_y, content_w)
         }
         SettingsPage::Mouse
         | SettingsPage::Touchpad
@@ -721,9 +778,518 @@ fn build_system_page_sections(
             build_software_update_sections(app, content_x, cur_y, content_w)
         }
         SettingsPage::Wifi => build_wifi_page_sections(app, content_x, cur_y, content_w),
+        SettingsPage::Bluetooth => build_bluetooth_page_sections(app, content_x, cur_y, content_w),
         SettingsPage::Network => build_network_page_sections(app, content_x, cur_y, content_w),
+        SettingsPage::About => build_about_page_sections(app, content_x, cur_y, content_w),
+        SettingsPage::Battery => build_battery_page_sections(app, content_x, cur_y, content_w),
+        SettingsPage::Users => build_users_page_sections(app, content_x, cur_y, content_w),
         _ => Vec::new(),
     }
+}
+
+fn build_bluetooth_page_sections(
+    app: &SettingsAppState,
+    content_x: i32,
+    cur_y: &mut i32,
+    content_w: i32,
+) -> Vec<CardSectionLayout> {
+    let mut sections = Vec::new();
+    let subtitle = if !app.bluetooth_status_hint.is_empty() {
+        app.bluetooth_status_hint.clone()
+    } else if !app.bluetooth.status.available {
+        String::from("No Bluetooth hardware adapter detected.")
+    } else if app.bluetooth.status.powered {
+        let host = app
+            .bluetooth
+            .adapter_name
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&app.about_info.hostname);
+        format!("Discoverable as \"{host}\"")
+    } else {
+        String::from("Turn on Bluetooth to connect headphones, mice, and keyboards.")
+    };
+
+    let mut header_rows = vec![RowSpec {
+        label: String::from("Bluetooth"),
+        height: 62,
+        control: CardRowControl::ServiceHeaderSwitch {
+            badge_tint: [0x00, 0x7A, 0xFF, 0xFF],
+            badge_kind: ServiceBadgeKind::Bluetooth,
+            subtitle,
+            action: RowControlId::BluetoothPoweredToggle,
+            active: app.bluetooth.status.powered,
+        },
+    }];
+    if app.bluetooth.status.available && app.bluetooth.status.powered {
+        header_rows.push(row_choice(
+            if app.bluetooth.discovering {
+                "Scanning for Nearby Devices..."
+            } else {
+                "Nearby Discovery"
+            },
+            RowControlId::BluetoothScanToggle,
+            String::from(if app.bluetooth.discovering {
+                "Stop Scan"
+            } else {
+                "Scan"
+            }),
+        ));
+    }
+    sections.push(place_card_section(
+        None,
+        content_x,
+        cur_y,
+        content_w,
+        header_rows,
+    ));
+
+    append_bluetooth_device_sections(app, content_x, cur_y, content_w, &mut sections);
+    sections
+}
+
+fn append_bluetooth_device_sections(
+    app: &SettingsAppState,
+    content_x: i32,
+    cur_y: &mut i32,
+    content_w: i32,
+    sections: &mut Vec<CardSectionLayout>,
+) {
+    let mut my_rows = Vec::new();
+    let mut nearby_rows = Vec::new();
+    for (idx, dev) in app.bluetooth.devices.iter().enumerate() {
+        let sub = if dev.connected {
+            dev.battery_percent.map_or_else(
+                || String::from("Connected"),
+                |pct| format!("Connected · {pct}%"),
+            )
+        } else if dev.paired {
+            String::from("Not Connected")
+        } else {
+            dev.address.clone()
+        };
+        let row = RowSpec {
+            label: dev.name.clone(),
+            height: 50,
+            control: CardRowControl::BluetoothDeviceRow {
+                subtitle: sub,
+                connected: dev.connected,
+                paired: dev.paired,
+                action: RowControlId::BluetoothActionIndex(idx),
+                info_action: RowControlId::BluetoothInfoIndex(idx),
+            },
+        };
+        if dev.paired || dev.connected {
+            my_rows.push(row);
+        } else {
+            nearby_rows.push(row);
+        }
+    }
+
+    if my_rows.is_empty() {
+        my_rows.push(row_info(
+            "Paired Devices",
+            String::from(if app.bluetooth.status.available {
+                "None"
+            } else {
+                "Adapter Unavailable"
+            }),
+        ));
+    }
+    sections.push(place_card_section(
+        Some("My Devices"),
+        content_x,
+        cur_y,
+        content_w,
+        my_rows,
+    ));
+
+    if app.bluetooth.status.powered {
+        if nearby_rows.is_empty() {
+            nearby_rows.push(row_info(
+                "Nearby Devices",
+                String::from(if app.bluetooth.discovering {
+                    "Searching..."
+                } else {
+                    "Click Scan to discover devices"
+                }),
+            ));
+        }
+        sections.push(place_card_section(
+            Some("Nearby Devices"),
+            content_x,
+            cur_y,
+            content_w,
+            nearby_rows,
+        ));
+    }
+}
+
+fn build_battery_page_sections(
+    app: &SettingsAppState,
+    content_x: i32,
+    cur_y: &mut i32,
+    content_w: i32,
+) -> Vec<CardSectionLayout> {
+    let mut sections = Vec::new();
+    let st = &app.power.status;
+    let power_sub = if st.has_battery {
+        let verb = match st.state {
+            rusty_services::BatteryState::Charging => "Charging",
+            rusty_services::BatteryState::Discharging => "On Battery",
+            rusty_services::BatteryState::Full => "Fully Charged",
+            rusty_services::BatteryState::Unknown => "Battery Detected",
+        };
+        format!("{}% · {verb}", st.percentage)
+    } else {
+        String::from("AC Power · No Hardware Battery Detected")
+    };
+
+    let mut top_rows = vec![
+        RowSpec {
+            label: String::from("Battery & Power"),
+            height: 58,
+            control: CardRowControl::ServiceStatus {
+                badge_tint: [0x34, 0xC7, 0x59, 0xFF],
+                badge_kind: ServiceBadgeKind::Battery,
+                subtitle: power_sub,
+                dot_rgba: if st.ac_online {
+                    [40, 205, 65, 255]
+                } else {
+                    [245, 166, 35, 255]
+                },
+                target: None,
+            },
+        },
+        RowSpec {
+            label: String::from("Low Power Mode"),
+            height: 44,
+            control: CardRowControl::DropdownTrigger {
+                value: app.low_power_dropdown.selected_label().to_owned(),
+            },
+        },
+        row_choice(
+            "Battery Health",
+            RowControlId::BatteryDetailsOpen,
+            format!("{} (i)", app.power.condition.label()),
+        ),
+    ];
+    if !app.power.available_profiles.is_empty()
+        && let Some(active) = app.power.active_profile
+    {
+        top_rows.push(row_choice(
+            "System Power Profile",
+            RowControlId::PowerProfileCycle,
+            active.label().to_owned(),
+        ));
+    }
+    sections.push(place_card_section(
+        None, content_x, cur_y, content_w, top_rows,
+    ));
+    sections.push(build_battery_details_section(
+        app, content_x, cur_y, content_w,
+    ));
+    sections
+}
+
+fn build_battery_details_section(
+    app: &SettingsAppState,
+    content_x: i32,
+    cur_y: &mut i32,
+    content_w: i32,
+) -> CardSectionLayout {
+    let st = &app.power.status;
+    let mut detail_rows = vec![RowSpec {
+        label: String::new(),
+        height: 44,
+        control: CardRowControl::BatterySegmentedTabs,
+    }];
+    if app.battery_tab.selected == 0 {
+        detail_rows.push(row_info(
+            "Power Source",
+            String::from(if st.ac_online {
+                "Power Adapter (AC)"
+            } else {
+                "Battery"
+            }),
+        ));
+        if st.has_battery {
+            detail_rows.push(row_info("Charge Level", format!("{}%", st.percentage)));
+        }
+        if let Some(mins) = app.power.time_remaining_minutes {
+            let h = mins / 60;
+            let m = mins % 60;
+            detail_rows.push(row_info("Time Estimate", format!("{h}h {m:02}m")));
+        }
+        if let Some(watts) = app.power.power_watts {
+            detail_rows.push(row_info("Power Rate", format!("{watts:.1} W")));
+        }
+        if let Some(model) = &app.power.model_name {
+            detail_rows.push(row_info("Battery Model", model.clone()));
+        }
+    } else {
+        let cap_str = app
+            .power
+            .health_percent
+            .map_or_else(|| String::from("N/A"), |p| format!("{p}%"));
+        detail_rows.push(row_info("Maximum Capacity", cap_str));
+        if let Some(cycles) = app.power.cycle_count {
+            detail_rows.push(row_info("Cycle Count", cycles.to_string()));
+        }
+        let sleep_lbl = if app.power_display_sleep_minutes == 0 {
+            String::from("Never")
+        } else {
+            format!("{} min", app.power_display_sleep_minutes)
+        };
+        detail_rows.push(row_choice(
+            "Turn Display Off on Inactivity",
+            RowControlId::PowerDisplaySleepCycle,
+            sleep_lbl,
+        ));
+        let lock_lbl = if app.power_auto_lock_minutes == 0 {
+            String::from("Off")
+        } else {
+            format!("{} min", app.power_auto_lock_minutes)
+        };
+        detail_rows.push(row_choice(
+            "Auto-Lock Screen After",
+            RowControlId::PowerAutoLockCycle,
+            lock_lbl,
+        ));
+        detail_rows.push(row_switch(
+            "Slightly Dim Display on Battery",
+            RowControlId::PowerDimOnBatteryToggle,
+            app.power_dim_on_battery,
+        ));
+        detail_rows.push(row_switch(
+            "Lock Screen on Sleep",
+            RowControlId::LockSleepToggle,
+            app.lock_on_sleep,
+        ));
+        detail_rows.push(row_choice(
+            "Additional Power Settings",
+            RowControlId::PowerOptionsOpen,
+            String::from("Options..."),
+        ));
+    }
+
+    place_card_section(
+        Some("Energy & Health"),
+        content_x,
+        cur_y,
+        content_w,
+        detail_rows,
+    )
+}
+
+fn build_about_page_sections(
+    app: &SettingsAppState,
+    content_x: i32,
+    cur_y: &mut i32,
+    content_w: i32,
+) -> Vec<CardSectionLayout> {
+    let about = &app.about_info;
+    let mut sections = Vec::new();
+    sections.push(place_card_section(
+        None,
+        content_x,
+        cur_y,
+        content_w,
+        vec![RowSpec {
+            label: about.hostname.clone(),
+            height: 82,
+            control: CardRowControl::AboutHeroCard {
+                subtitle: format!("{} ({})", about.os_name, about.architecture),
+                action: RowControlId::AboutMoreInfoOpen,
+            },
+        }],
+    ));
+    sections.push(place_card_section(
+        Some("Hardware & Software"),
+        content_x,
+        cur_y,
+        content_w,
+        vec![
+            row_info("Processor", about.cpu.clone()),
+            row_info("Memory", about.memory.clone()),
+            row_info("Graphics", about.graphics.clone()),
+            row_info("Startup Disk", about.startup_disk.clone()),
+            row_info("Kernel", about.kernel.clone()),
+            row_info("Compositor", String::from("RustyOS Wayland (Smithay)")),
+        ],
+    ));
+    sections.push(place_card_section(
+        Some("Related"),
+        content_x,
+        cur_y,
+        content_w,
+        vec![
+            RowSpec {
+                label: String::from("Software Update"),
+                height: 44,
+                control: CardRowControl::Navigation {
+                    target: SettingsPage::SoftwareUpdate,
+                    leading: Some(SettingsPage::SoftwareUpdate),
+                },
+            },
+            RowSpec {
+                label: String::from("Displays"),
+                height: 44,
+                control: CardRowControl::Navigation {
+                    target: SettingsPage::Display,
+                    leading: Some(SettingsPage::Display),
+                },
+            },
+        ],
+    ));
+    sections
+}
+
+fn build_users_page_sections(
+    app: &SettingsAppState,
+    content_x: i32,
+    cur_y: &mut i32,
+    content_w: i32,
+) -> Vec<CardSectionLayout> {
+    let mut sections = Vec::new();
+    let details = app.user_details.as_ref();
+    let username = details.map_or("user", |d| d.username.as_str());
+    let display_name = details.map_or(username, |d| d.display_name.as_str());
+    let role = if details.is_some_and(|d| d.is_admin) {
+        "Administrator"
+    } else {
+        "Standard User"
+    };
+    let initials: String = display_name
+        .split_whitespace()
+        .filter_map(|w| w.chars().next())
+        .take(2)
+        .collect::<String>()
+        .to_uppercase();
+    let initials = if initials.is_empty() {
+        String::from("U")
+    } else {
+        initials
+    };
+
+    sections.push(place_card_section(
+        Some("Current Account"),
+        content_x,
+        cur_y,
+        content_w,
+        vec![RowSpec {
+            label: display_name.to_owned(),
+            height: 62,
+            control: CardRowControl::UserProfileCard {
+                initials,
+                subtitle: format!("@{username} · {role}"),
+                badge_tint: [0x00, 0x7A, 0xFF, 0xFF],
+            },
+        }],
+    ));
+
+    if let Some(det) = details {
+        let groups_str = if det.groups.is_empty() {
+            String::from("None")
+        } else {
+            let joined = det.groups.join(", ");
+            if joined.len() > 38 {
+                format!("{} groups ({})", det.groups.len(), det.groups[0])
+            } else {
+                joined
+            }
+        };
+        sections.push(place_card_section(
+            Some("Account Details"),
+            content_x,
+            cur_y,
+            content_w,
+            vec![
+                row_info("Username", det.username.clone()),
+                row_info("Account Role", String::from(role)),
+                row_info("User / Group ID", format!("{} : {}", det.uid, det.gid)),
+                row_info("Home Directory", det.home_dir.clone()),
+                row_info("Login Shell", det.shell.clone()),
+                row_info("Session", det.session_type.clone()),
+                row_info("Groups", groups_str),
+            ],
+        ));
+    }
+
+    let mut local_rows: Vec<RowSpec> = app
+        .all_users
+        .iter()
+        .map(|u| {
+            row_info_string(
+                u.display_name.clone(),
+                format!("@{} (UID {})", u.username, u.uid),
+            )
+        })
+        .collect();
+    local_rows.push(row_info(
+        "Manage Users",
+        String::from("Read-only (AccountsService & Polkit separate)"),
+    ));
+    sections.push(place_card_section(
+        Some("Local Users"),
+        content_x,
+        cur_y,
+        content_w,
+        local_rows,
+    ));
+    sections
+}
+
+fn build_shortcuts_page_sections(
+    app: &SettingsAppState,
+    content_x: i32,
+    cur_y: &mut i32,
+    content_w: i32,
+) -> Vec<CardSectionLayout> {
+    let mut system_rows = Vec::new();
+    let mut wm_rows = Vec::new();
+    for (idx, def) in SHORTCUT_DEFS.iter().enumerate() {
+        let row = RowSpec {
+            label: def.label.to_owned(),
+            height: 44,
+            control: CardRowControl::ShortcutBinding {
+                combo: app.shortcuts[idx].clone(),
+                action: RowControlId::ShortcutEditIndex(idx),
+            },
+        };
+        if def.category == "System & Shell" {
+            system_rows.push(row);
+        } else {
+            wm_rows.push(row);
+        }
+    }
+    vec![
+        place_card_section(
+            Some("System & Shell"),
+            content_x,
+            cur_y,
+            content_w,
+            system_rows,
+        ),
+        place_card_section(
+            Some("Windows & Tiling"),
+            content_x,
+            cur_y,
+            content_w,
+            wm_rows,
+        ),
+        place_card_section(
+            Some("Defaults"),
+            content_x,
+            cur_y,
+            content_w,
+            vec![row_choice(
+                "Restore Default Keybindings",
+                RowControlId::ShortcutsResetDefaults,
+                String::from("Reset Defaults"),
+            )],
+        ),
+    ]
 }
 
 fn build_notifications_page_sections(
@@ -1215,6 +1781,14 @@ fn build_hardware_page_sections(
                     RowControlId::RepeatDelayUp,
                     format!("{} ms", app.repeat_delay),
                 ),
+                RowSpec {
+                    label: String::from("Keyboard Shortcuts..."),
+                    height: 44,
+                    control: CardRowControl::Navigation {
+                        target: SettingsPage::Shortcuts,
+                        leading: Some(SettingsPage::Shortcuts),
+                    },
+                },
             ],
         )],
         _ => Vec::new(),
@@ -1510,6 +2084,34 @@ pub(crate) fn stepper_rects(row: Rect) -> (Rect, Rect, Rect) {
 }
 
 #[must_use]
+pub(crate) fn dropdown_trigger_rect(row: Rect) -> Rect {
+    Rect::new(row.right() - 16 - 176, row.y + (row.h - 26) / 2, 176, 26)
+}
+
+#[must_use]
+pub(crate) fn battery_tabs_inner_rect(row: Rect) -> Rect {
+    let w = (row.w - 32).clamp(180, 320);
+    Rect::new(row.x + (row.w - w) / 2, row.y + (row.h - 28) / 2, w, 28)
+}
+
+#[must_use]
+pub(crate) fn bt_device_action_rects(row: Rect) -> (Rect, Rect) {
+    let info_r = Rect::new(row.right() - 16 - 22, row.y + (row.h - 22) / 2, 22, 22);
+    let action_r = Rect::new(info_r.x - 10 - 92, row.y + (row.h - 24) / 2, 92, 24);
+    (action_r, info_r)
+}
+
+#[must_use]
+pub(crate) fn about_more_info_rect(row: Rect) -> Rect {
+    Rect::new(row.right() - 16 - 104, row.y + (row.h - 28) / 2, 104, 28)
+}
+
+#[must_use]
+pub(crate) fn shortcut_pill_rect(row: Rect) -> Rect {
+    Rect::new(row.right() - 16 - 144, row.y + (row.h - 26) / 2, 144, 26)
+}
+
+#[must_use]
 pub(crate) fn hit_test(layout: &SettingsLayout, px: f64, py: f64) -> Option<SettingsHit> {
     if let Some(edge) = hit_test_resize_edge(layout.win_w, layout.win_h, px, py) {
         return Some(SettingsHit::ResizeEdge(edge));
@@ -1601,8 +2203,44 @@ fn hit_test_row(row: &CardRowLayout, px: f64, py: f64) -> Option<SettingsHit> {
         }
         CardRowControl::Switch { action, .. }
         | CardRowControl::WifiHeaderSwitch { action, .. }
+        | CardRowControl::ServiceHeaderSwitch { action, .. }
         | CardRowControl::NotificationHeader { action, .. } => {
             if switch_rect(row.rect).contains_f64(px, py) || row.rect.contains_f64(px, py) {
+                return Some(SettingsHit::Control(*action));
+            }
+        }
+        CardRowControl::BluetoothDeviceRow {
+            action,
+            info_action,
+            ..
+        } => {
+            let (act_r, info_r) = bt_device_action_rects(row.rect);
+            if info_r.contains_f64(px, py) {
+                return Some(SettingsHit::Control(*info_action));
+            }
+            if act_r.contains_f64(px, py) || row.rect.contains_f64(px, py) {
+                return Some(SettingsHit::Control(*action));
+            }
+        }
+        CardRowControl::DropdownTrigger { .. } => {
+            if dropdown_trigger_rect(row.rect).contains_f64(px, py) {
+                return Some(SettingsHit::LowPowerDropdownTrigger);
+            }
+        }
+        CardRowControl::BatterySegmentedTabs => {
+            let tabs_r = battery_tabs_inner_rect(row.rect);
+            if tabs_r.contains_f64(px, py) {
+                let idx = usize::from(px >= f64::from(tabs_r.x + tabs_r.w / 2));
+                return Some(SettingsHit::BatteryTab(idx));
+            }
+        }
+        CardRowControl::AboutHeroCard { action, .. } => {
+            if about_more_info_rect(row.rect).contains_f64(px, py) {
+                return Some(SettingsHit::Control(*action));
+            }
+        }
+        CardRowControl::ShortcutBinding { action, .. } => {
+            if shortcut_pill_rect(row.rect).contains_f64(px, py) || row.rect.contains_f64(px, py) {
                 return Some(SettingsHit::Control(*action));
             }
         }
@@ -1629,7 +2267,9 @@ fn hit_test_row(row: &CardRowLayout, px: f64, py: f64) -> Option<SettingsHit> {
                 return Some(SettingsHit::PushPage(*target));
             }
         }
-        CardRowControl::ServiceStatus { target: None, .. } | CardRowControl::Info { .. } => {}
+        CardRowControl::ServiceStatus { target: None, .. }
+        | CardRowControl::Info { .. }
+        | CardRowControl::UserProfileCard { .. } => {}
     }
     None
 }
@@ -1665,7 +2305,7 @@ mod tests {
         let mut app = SettingsAppState::new(&StartupOptions::default());
         let l = compute_layout(&app, 882, 600);
         assert_eq!(l.sidebar_rect.w, 230);
-        assert_eq!(l.sidebar_items.len(), 12);
+        assert_eq!(l.sidebar_items.len(), 17);
         assert!(l.max_page_scroll > 0);
         assert!(l.page_scrollbar_thumb.is_some());
         assert_eq!(hit_test(&l, 20.0, 20.0), Some(SettingsHit::TrafficClose));
@@ -1829,5 +2469,72 @@ mod tests {
                 .map(|(s, _)| s.as_str()),
             Some("Software Update")
         );
+    }
+
+    #[test]
+    fn new_settings_pages_build_sections_and_hit_targets() {
+        let mut app = SettingsAppState::new(&StartupOptions::default());
+
+        app.current_page = SettingsPage::Bluetooth;
+        app.bluetooth = rusty_services::BluetoothSnapshot {
+            status: rusty_services::BluetoothStatus {
+                available: true,
+                powered: true,
+                connected_device: Some(String::from("AirPods")),
+                status_label: String::from("BT: AirPods"),
+            },
+            discovering: false,
+            adapter_name: Some(String::from("rustyos-host")),
+            adapter_address: None,
+            devices: vec![rusty_services::BluetoothDevice {
+                address: String::from("11:22:33:44:55:66"),
+                name: String::from("AirPods"),
+                icon: String::from("audio-headset"),
+                paired: true,
+                connected: true,
+                trusted: true,
+                battery_percent: Some(80),
+            }],
+        };
+        let bluetooth_layout = compute_layout(&app, 882, 600);
+        assert!(bluetooth_layout.sections.len() >= 3);
+        let dev_row = &bluetooth_layout.sections[1].rows[0];
+        let (act_r, info_r) = bt_device_action_rects(dev_row.rect);
+        assert_eq!(
+            hit_test(
+                &bluetooth_layout,
+                f64::from(act_r.x + 12),
+                f64::from(act_r.y + 8)
+            ),
+            Some(SettingsHit::Control(RowControlId::BluetoothActionIndex(0)))
+        );
+        assert_eq!(
+            hit_test(
+                &bluetooth_layout,
+                f64::from(info_r.x + 8),
+                f64::from(info_r.y + 8)
+            ),
+            Some(SettingsHit::Control(RowControlId::BluetoothInfoIndex(0)))
+        );
+
+        app.current_page = SettingsPage::Battery;
+        let power_layout = compute_layout(&app, 882, 600);
+        assert!(power_layout.low_power_dropdown_rect.is_some());
+        if let Some(dd) = power_layout.low_power_dropdown_rect {
+            assert_eq!(
+                hit_test(&power_layout, f64::from(dd.x + 10), f64::from(dd.y + 10)),
+                Some(SettingsHit::LowPowerDropdownTrigger)
+            );
+        }
+
+        for pg in [
+            SettingsPage::About,
+            SettingsPage::Users,
+            SettingsPage::Shortcuts,
+        ] {
+            app.current_page = pg;
+            let l = compute_layout(&app, 882, 600);
+            assert_ne!(l.sections.len(), 0);
+        }
     }
 }

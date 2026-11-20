@@ -2290,6 +2290,22 @@ hardware/software context и низкие накладные расходы.
 - **Tests:** 332 пройденных unit-теста workspace (`4` `rusty-animation`, `202` `rusty-compositor`, `18` `rusty-files`, `13` `rusty-installer`, `3` `rusty-ipc`, `43` `rusty-services` + `1` пропущенный D-Bus BlueZ тест, `13` `rusty-settings`, `15` `rusty-terminal`, `14` `rusty-ui`, `7` `rusty-wm`).
 - **Risks:** Нет; `xdg_popup` меню сохраняют прозрачные `wl_shm`-буферы, весь `unsafe` FFI изолирован в `crates/rusty-ui/src/gpu_gles.rs` с автоматическим CPU `wl_shm` fallback.
 
+### RUSTYOS-131 — Settings: Bluetooth, Battery & Power, About, Users (read-only) и Shortcuts
+- **Status:** Done
+- **Goal:** Расширить `crates/rusty-services`, конфиг композитора `crates/rusty-compositor` и `apps/rusty-settings` системными разделами `Bluetooth`, `Battery`, `About`, `Users` (read-only) и `Shortcuts` в визуальной согласованности с референсами `Light & Dark` на базе контролов `crates/rusty-ui`.
+- **Dependencies:** `RUSTYOS-130`, `ADR-0075`, `D-089`.
+- **Scope:**
+  - `crates/rusty-services`: `BluetoothService` (`org.bluez` D-Bus ObjectManager + MAC-validated `bluetoothctl` fallback: список/сканирование/pair/connect/disconnect/remove), расширенный `PowerService` (battery condition/cycles/wattage/remaining-time, фильтр `is_system_battery` для исключения `scope=Device` / `hidpp_*` периферийных батарей, переключение `PowerProfile` через `power-profiles-daemon` с graceful fallback), `UserService::query_current_user_details` (read-only `CurrentUserDetails` + группы).
+  - `crates/rusty-compositor`: обратно-совместимые секции `[power]` (`low_power_mode`, `display_sleep_minutes`, `auto_lock_minutes`, `dim_on_battery`) и `[shortcuts]` (`ShortcutBindings`, 17 шорткатов композитора с legacy fallback-алиасами `Alt+Space`, `Alt+E`, `Ctrl+Alt+L`, `Alt+Q`) в `UserConfig`, live reload через `RELOAD_CONFIG` + `TelemetryCmd::SetPowerProfile` и `check_idle_auto_lock`.
+  - `apps/rusty-settings`: разделы `SettingsPage::{Bluetooth, Battery, About, Users, Shortcuts}` (17 пунктов боковой панели + ссылка из `Keyboard`), `DropdownSelect`, `SegmentedTabs`, `DialogSheet`, `TextField`, `WaylandClipboardBridge`, `ToggleSwitch::paint_animated`, `PushButton::paint_labeled`.
+  - Документация: `docs/adr/0075-settings-bluetooth-power-about-users-shortcuts.md`, `DECISIONS.md` (`D-089`), `ARCHITECTURE.md` §7, `DESIGN.md` §12.3.
+- **Acceptance Criteria:**
+  - Все 5 новых разделов открываются, отображаются в `Light & Dark`, корректно обрабатывают фоновые команды сервисов, валидацию/сохранение `[power]` и `[shortcuts]` через `config.toml` + `RELOAD_CONFIG`.
+  - `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --offline -- -D warnings`, `--check` и `--drm-probe` проходят без ошибок.
+  - Проведён живой `--winit` прогон на Wayland (`Bluetooth`, `About`, `Users`, `Shortcuts`) и X11 (`Battery` повторно после правки `is_system_battery`) без EGL/shader ошибок и с визуальной проверкой PNG-скриншотов.
+- **Tests:** 340 пройденных unit-тестов workspace (`4` `rusty_animation`, `204` `rusty_compositor`, `18` `rusty_files`, `13` `rusty_installer`, `3` `rusty_ipc`, `47` `rusty_services`, `15` `rusty_settings`, `15` `rusty_terminal`, `14` `rusty_ui`, `7` `rusty_wm`; 2 ignored doc-теста в сгенерированных `egl_bindings.rs`/`gl_bindings.rs`).
+- **Risks:** На машинах без `org.bluez` / `power-profiles-daemon` соответствующие действия переходят в информативный graceful fallback; редактирование/создание пользователей (`Users`) остаётся read-only до отдельной задачи на `org.freedesktop.Accounts` + Polkit.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

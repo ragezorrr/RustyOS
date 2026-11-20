@@ -15,7 +15,10 @@ use rusty_services::updates::{
     UpdateCheckState, UpdateStatusSnapshot, UpdateTransactionHandle, UpdateTxEvent, UpdateTxPhase,
     check_all_pending_updates,
 };
-use rusty_services::{AudioService, NetworkService, NetworkStatus};
+use rusty_services::{
+    AudioService, BluetoothService, BluetoothSnapshot, CurrentUserDetails, NetworkService,
+    NetworkStatus, PowerDetails, PowerProfile, PowerService, UserAccount, UserService,
+};
 
 /// Predefined accent color palette shared across RustyOS (`RUSTYOS-114`).
 pub(crate) const ACCENT_COLORS: [[u8; 4]; RUSTYOS_ACCENT_SWATCHES.len()] = RUSTYOS_ACCENT_SWATCHES;
@@ -41,7 +44,11 @@ pub(crate) enum ThemeChoice {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum SettingsPage {
     Wifi,
+    Bluetooth,
     Network,
+    About,
+    Battery,
+    Users,
     #[default]
     Appearance,
     Wallpaper,
@@ -51,6 +58,7 @@ pub(crate) enum SettingsPage {
     Display,
     Sound,
     Keyboard,
+    Shortcuts,
     Mouse,
     Touchpad,
     Fonts,
@@ -59,17 +67,22 @@ pub(crate) enum SettingsPage {
 }
 
 impl SettingsPage {
-    pub(crate) const SIDEBAR: [Self; 12] = [
+    pub(crate) const SIDEBAR: [Self; 17] = [
         Self::Wifi,
+        Self::Bluetooth,
         Self::Network,
+        Self::About,
+        Self::Battery,
+        Self::Users,
+        Self::SoftwareUpdate,
         Self::Appearance,
         Self::Wallpaper,
         Self::DockDesktop,
         Self::Notifications,
-        Self::SoftwareUpdate,
         Self::Display,
         Self::Sound,
         Self::Keyboard,
+        Self::Shortcuts,
         Self::Mouse,
         Self::Touchpad,
     ];
@@ -78,7 +91,11 @@ impl SettingsPage {
     pub(crate) fn from_cli_id(id: &str) -> Self {
         match id.trim().to_ascii_lowercase().as_str() {
             "wifi" | "wlan" => Self::Wifi,
+            "bluetooth" | "bt" => Self::Bluetooth,
             "network" => Self::Network,
+            "about" | "general" | "info" | "system" => Self::About,
+            "battery" | "power" | "energy" => Self::Battery,
+            "users" | "user" | "accounts" => Self::Users,
             "updates" | "update" | "softwareupdate" | "software-update" => Self::SoftwareUpdate,
             "wallpaper" | "background" => Self::Wallpaper,
             "dock" | "desktop" => Self::DockDesktop,
@@ -86,6 +103,7 @@ impl SettingsPage {
             "display" | "displays" => Self::Display,
             "sound" | "audio" => Self::Sound,
             "keyboard" => Self::Keyboard,
+            "shortcuts" | "shortcut" | "hotkeys" | "keybindings" => Self::Shortcuts,
             "mouse" => Self::Mouse,
             "touchpad" | "trackpad" => Self::Touchpad,
             "fonts" => Self::Fonts,
@@ -99,7 +117,11 @@ impl SettingsPage {
     pub(crate) const fn title(self) -> &'static str {
         match self {
             Self::Wifi => "Wi-Fi",
+            Self::Bluetooth => "Bluetooth",
             Self::Network => "Network",
+            Self::About => "About",
+            Self::Battery => "Battery",
+            Self::Users => "Users",
             Self::Appearance => "Appearance",
             Self::Wallpaper => "Wallpaper",
             Self::DockDesktop => "Dock & Desktop",
@@ -108,6 +130,7 @@ impl SettingsPage {
             Self::Display => "Display",
             Self::Sound => "Sound",
             Self::Keyboard => "Keyboard",
+            Self::Shortcuts => "Shortcuts",
             Self::Mouse => "Mouse",
             Self::Touchpad => "Touchpad",
             Self::Fonts => "Fonts",
@@ -119,14 +142,17 @@ impl SettingsPage {
     #[must_use]
     pub(crate) const fn category(self) -> Option<&'static str> {
         match self {
-            Self::Wifi | Self::Network => Some("Network"),
+            Self::Wifi | Self::Bluetooth | Self::Network => Some("Network"),
+            Self::About | Self::Battery | Self::Users | Self::SoftwareUpdate => Some("System"),
             Self::Appearance | Self::Wallpaper | Self::DockDesktop | Self::Notifications => {
                 Some("Desktop")
             }
-            Self::SoftwareUpdate => Some("System"),
-            Self::Display | Self::Sound | Self::Keyboard | Self::Mouse | Self::Touchpad => {
-                Some("Devices")
-            }
+            Self::Display
+            | Self::Sound
+            | Self::Keyboard
+            | Self::Shortcuts
+            | Self::Mouse
+            | Self::Touchpad => Some("Devices"),
             Self::Fonts | Self::IconTheme | Self::CursorStyle => None,
         }
     }
@@ -142,19 +168,20 @@ impl SettingsPage {
     #[must_use]
     pub(crate) const fn icon_tint(self) -> [u8; 4] {
         match self {
-            Self::Wifi | Self::Network => [0x00, 0x67, 0xFF, 0xFF],
+            Self::Wifi | Self::Network | Self::Bluetooth | Self::Users => [0x00, 0x7A, 0xFF, 0xFF],
+            Self::About => [0x8E, 0x8E, 0x93, 0xFF],
+            Self::Battery | Self::IconTheme => [0x34, 0xC7, 0x59, 0xFF],
             Self::Appearance => [0x03, 0xB4, 0xCB, 0xFF],
             Self::Wallpaper => [0x34, 0xB4, 0xA7, 0xFF],
-            Self::DockDesktop => [0x85, 0x85, 0xFC, 0xFF],
+            Self::DockDesktop => [0x58, 0x56, 0xD6, 0xFF],
             Self::Notifications => [0xFF, 0x3B, 0x30, 0xFF],
-            Self::SoftwareUpdate => [0x00, 0x7A, 0xFF, 0xFF],
+            Self::SoftwareUpdate | Self::Display => [0x00, 0x87, 0xED, 0xFF],
             Self::Sound => [0xF1, 0x68, 0x84, 0xFF],
-            Self::Display => [0x00, 0x87, 0xED, 0xFF],
             Self::Keyboard => [0x5E, 0x6A, 0xD2, 0xFF],
+            Self::Shortcuts => [0x63, 0x63, 0x66, 0xFF],
             Self::Mouse | Self::CursorStyle => [0x33, 0x85, 0xFF, 0xFF],
             Self::Touchpad => [0x99, 0x99, 0x99, 0xFF],
             Self::Fonts => [0xFE, 0x84, 0x33, 0xFF],
-            Self::IconTheme => [0x2E, 0xC3, 0x47, 0xFF],
         }
     }
 
@@ -162,7 +189,11 @@ impl SettingsPage {
     pub(crate) const fn keywords(self) -> &'static str {
         match self {
             Self::Wifi => "wireless wlan network internet password",
+            Self::Bluetooth => "bluetooth wireless headset audio mouse keyboard pair devices",
             Self::Network => "vpn proxy ethernet tethering internet",
+            Self::About => "about hardware system cpu memory gpu disk kernel os version host",
+            Self::Battery => "battery power charging low power energy sleep health cycles",
+            Self::Users => "user account profile groups uid admin home shell login",
             Self::Appearance => "theme dark light auto accent color",
             Self::Wallpaper => "background picture desktop image wallpaper",
             Self::DockDesktop => "dock position size auto hide glass effect transparency motion",
@@ -171,6 +202,7 @@ impl SettingsPage {
             Self::Display => "monitor screen scale hidpi refresh rate vrr rotation",
             Self::Sound => "audio volume speakers mute microphone",
             Self::Keyboard => "input layout shortcut repeat rate delay",
+            Self::Shortcuts => "shortcuts hotkeys keybindings launcher overview lock snap window",
             Self::Mouse => "pointer speed acceleration cursor",
             Self::Touchpad => "trackpad tap click natural scrolling",
             Self::Fonts => "font inter ui monospace size",
@@ -231,6 +263,19 @@ pub(crate) enum RowControlId {
     NotifAppToggle(usize),
     UpdatesCheckNow,
     UpdatesInstallNow,
+    BluetoothPoweredToggle,
+    BluetoothScanToggle,
+    BluetoothActionIndex(usize),
+    BluetoothInfoIndex(usize),
+    PowerProfileCycle,
+    PowerDisplaySleepCycle,
+    PowerAutoLockCycle,
+    PowerDimOnBatteryToggle,
+    PowerOptionsOpen,
+    BatteryDetailsOpen,
+    AboutMoreInfoOpen,
+    ShortcutEditIndex(usize),
+    ShortcutsResetDefaults,
 }
 
 /// Coalesced UI damage scope for partial `wl_surface::damage_buffer` updates (`RUSTYOS-112`).
@@ -262,15 +307,198 @@ impl DamageScope {
     }
 }
 
-/// Snapshot of live NetworkManager and audio service status (`RUSTYOS-112`).
+/// Read-only hardware and operating-system info displayed in `About` (`RUSTYOS-131`).
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SystemAboutInfo {
+    pub(crate) hostname: String,
+    pub(crate) os_name: String,
+    pub(crate) kernel: String,
+    pub(crate) architecture: String,
+    pub(crate) cpu: String,
+    pub(crate) memory: String,
+    pub(crate) graphics: String,
+    pub(crate) startup_disk: String,
+}
+
+impl Default for SystemAboutInfo {
+    fn default() -> Self {
+        Self {
+            hostname: String::from("rustyos"),
+            os_name: String::from("RustyOS Linux"),
+            kernel: String::from("Linux"),
+            architecture: String::from(std::env::consts::ARCH),
+            cpu: String::from("Processor"),
+            memory: String::from("Unknown"),
+            graphics: String::from("GPU"),
+            startup_disk: String::from("/"),
+        }
+    }
+}
+
+/// Customizable `[shortcuts]` metadata catalog matching compositor `ShortcutBindings` (`RUSTYOS-131`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ShortcutDef {
+    pub(crate) key: &'static str,
+    pub(crate) label: &'static str,
+    pub(crate) category: &'static str,
+    pub(crate) default_combo: &'static str,
+}
+
+pub(crate) const SHORTCUT_DEFS: [ShortcutDef; 17] = [
+    ShortcutDef {
+        key: "launcher",
+        label: "Open Spotlight Launcher",
+        category: "System & Shell",
+        default_combo: "Super+Space",
+    },
+    ShortcutDef {
+        key: "overview",
+        label: "Workspace Overview",
+        category: "System & Shell",
+        default_combo: "Super+Tab",
+    },
+    ShortcutDef {
+        key: "lock_screen",
+        label: "Lock Screen",
+        category: "System & Shell",
+        default_combo: "Super+L",
+    },
+    ShortcutDef {
+        key: "settings",
+        label: "System Settings",
+        category: "System & Shell",
+        default_combo: "Super+Comma",
+    },
+    ShortcutDef {
+        key: "quick_settings",
+        label: "Control Center",
+        category: "System & Shell",
+        default_combo: "Alt+S",
+    },
+    ShortcutDef {
+        key: "reload_config",
+        label: "Reload Configuration",
+        category: "System & Shell",
+        default_combo: "Super+Shift+R",
+    },
+    ShortcutDef {
+        key: "reduced_motion",
+        label: "Toggle Reduced Motion",
+        category: "System & Shell",
+        default_combo: "Alt+R",
+    },
+    ShortcutDef {
+        key: "toggle_notifications",
+        label: "Send Test Notification",
+        category: "System & Shell",
+        default_combo: "Alt+N",
+    },
+    ShortcutDef {
+        key: "clear_notifications",
+        label: "Clear Notifications",
+        category: "System & Shell",
+        default_combo: "Alt+Shift+N",
+    },
+    ShortcutDef {
+        key: "close_window",
+        label: "Close Focused Window",
+        category: "Windows & Tiling",
+        default_combo: "Alt+W",
+    },
+    ShortcutDef {
+        key: "toggle_maximize",
+        label: "Maximize / Restore Window",
+        category: "Windows & Tiling",
+        default_combo: "Alt+M",
+    },
+    ShortcutDef {
+        key: "toggle_fullscreen",
+        label: "Toggle Fullscreen",
+        category: "Windows & Tiling",
+        default_combo: "Alt+F",
+    },
+    ShortcutDef {
+        key: "minimize_window",
+        label: "Minimize Window to Dock",
+        category: "Windows & Tiling",
+        default_combo: "Alt+H",
+    },
+    ShortcutDef {
+        key: "snap_left",
+        label: "Tile Window Left Half",
+        category: "Windows & Tiling",
+        default_combo: "Alt+Left",
+    },
+    ShortcutDef {
+        key: "snap_right",
+        label: "Tile Window Right Half",
+        category: "Windows & Tiling",
+        default_combo: "Alt+Right",
+    },
+    ShortcutDef {
+        key: "snap_center",
+        label: "Center Window",
+        category: "Windows & Tiling",
+        default_combo: "Alt+C",
+    },
+    ShortcutDef {
+        key: "switch_layout",
+        label: "Switch Floating / Tiling Layout",
+        category: "Windows & Tiling",
+        default_combo: "Alt+L",
+    },
+];
+
+/// Active modal dialog sheet hosted inside `rusty-settings` (`RUSTYOS-131`).
+#[derive(Debug, Clone)]
+pub(crate) enum SettingsModal {
+    BluetoothDeviceInfo {
+        address: String,
+        paired: bool,
+        connected: bool,
+        sheet: rusty_ui::DialogSheet,
+    },
+    InfoSheet {
+        sheet: rusty_ui::DialogSheet,
+    },
+    ShortcutEdit {
+        index: usize,
+        conflict_index: Option<usize>,
+        validated_combo: Option<String>,
+        sheet: rusty_ui::DialogSheet,
+    },
+}
+
+impl SettingsModal {
+    #[must_use]
+    pub(crate) const fn sheet(&self) -> &rusty_ui::DialogSheet {
+        match self {
+            Self::BluetoothDeviceInfo { sheet, .. }
+            | Self::InfoSheet { sheet }
+            | Self::ShortcutEdit { sheet, .. } => sheet,
+        }
+    }
+
+    pub(crate) fn sheet_mut(&mut self) -> &mut rusty_ui::DialogSheet {
+        match self {
+            Self::BluetoothDeviceInfo { sheet, .. }
+            | Self::InfoSheet { sheet }
+            | Self::ShortcutEdit { sheet, .. } => sheet,
+        }
+    }
+}
+
+/// Snapshot of live NetworkManager, BlueZ, power, and audio service status (`RUSTYOS-112`, `RUSTYOS-131`).
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ServiceSnapshot {
     pub(crate) network: NetworkStatus,
+    pub(crate) bluetooth: BluetoothSnapshot,
+    pub(crate) power: PowerDetails,
     pub(crate) volume_percent: u8,
     pub(crate) muted: bool,
 }
 
-/// Asynchronous service command executed off the Wayland GUI thread (`RUSTYOS-112`).
+/// Asynchronous service command executed off the Wayland GUI thread (`RUSTYOS-112`, `RUSTYOS-131`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ServiceCommand {
     Refresh,
@@ -278,6 +506,13 @@ pub(crate) enum ServiceCommand {
     ToggleMute,
     SetWifiEnabled(bool),
     ConnectWifi(String),
+    SetBluetoothPowered(bool),
+    SetBluetoothDiscovering(bool),
+    ConnectBluetooth(String),
+    DisconnectBluetooth(String),
+    PairBluetooth(String),
+    RemoveBluetooth(String),
+    SetPowerProfile(PowerProfile),
 }
 
 /// Mutable state backing the System Settings window.
@@ -351,10 +586,27 @@ pub(crate) struct SettingsAppState {
     pub(crate) lock_on_sleep: bool,
     pub(crate) enable_polkit_agent: bool,
     pub(crate) cursor_theme: String,
+    pub(crate) power_low_power_mode: String,
+    pub(crate) power_display_sleep_minutes: u32,
+    pub(crate) power_auto_lock_minutes: u32,
+    pub(crate) power_dim_on_battery: bool,
+    pub(crate) shortcuts: [String; SHORTCUT_DEFS.len()],
 
-    // Live hardware/service readouts
+    // Interactive rusty-ui stateful widgets & modals (`RUSTYOS-131`)
+    pub(crate) battery_tab: rusty_ui::SegmentedTabs,
+    pub(crate) battery_tab_animating: bool,
+    pub(crate) low_power_dropdown: rusty_ui::DropdownSelect,
+    pub(crate) active_modal: Option<SettingsModal>,
+
+    // Live hardware/service & system readouts
     pub(crate) network_status: String,
     pub(crate) network: NetworkStatus,
+    pub(crate) bluetooth: BluetoothSnapshot,
+    pub(crate) bluetooth_status_hint: String,
+    pub(crate) power: PowerDetails,
+    pub(crate) about_info: SystemAboutInfo,
+    pub(crate) user_details: Option<CurrentUserDetails>,
+    pub(crate) all_users: Vec<UserAccount>,
     pub(crate) volume_percent: u8,
     pub(crate) muted: bool,
     pending_service_cmds: Vec<ServiceCommand>,
@@ -382,6 +634,9 @@ impl SettingsAppState {
             state.theme_locked = true;
         }
         state.pending_service_cmds.push(ServiceCommand::Refresh);
+        if matches!(opts.initial_page, SettingsPage::About | SettingsPage::Users) {
+            state.refresh_static_system_info();
+        }
         if opts.initial_page == SettingsPage::SoftwareUpdate {
             state.check_updates_now();
         }
@@ -390,10 +645,8 @@ impl SettingsAppState {
 
     fn defaults_with_page(initial_page: SettingsPage) -> Self {
         let epoch = Instant::now();
-        let focus_search_id = rusty_ui::WidgetId::from_tag("settings.search");
-        let mut focus = rusty_ui::FocusScope::new();
-        focus.begin_frame();
-        focus.register(focus_search_id);
+        let (focus, focus_search_id, search_field) = default_search_controls();
+        let shortcuts = std::array::from_fn(|i| SHORTCUT_DEFS[i].default_combo.to_owned());
         Self {
             running: true,
             dirty: true,
@@ -421,10 +674,7 @@ impl SettingsAppState {
             caret_visible: true,
             last_caret_blink: epoch,
             epoch,
-            search_field: rusty_ui::TextField::search(
-                rusty_ui::Rect::new(12, 48, 204, 28),
-                "Search",
-            ),
+            search_field,
             focus,
             focus_search_id,
             toggle_anims: Vec::new(),
@@ -463,8 +713,23 @@ impl SettingsAppState {
             lock_on_sleep: true,
             enable_polkit_agent: true,
             cursor_theme: String::from("Adwaita"),
+            power_low_power_mode: String::from("never"),
+            power_display_sleep_minutes: 10,
+            power_auto_lock_minutes: 0,
+            power_dim_on_battery: true,
+            shortcuts,
+            battery_tab: default_battery_tab(),
+            battery_tab_animating: false,
+            low_power_dropdown: default_low_power_dropdown(),
+            active_modal: None,
             network_status: String::from("Checking..."),
             network: NetworkStatus::default(),
+            bluetooth: BluetoothSnapshot::default(),
+            bluetooth_status_hint: String::new(),
+            power: PowerDetails::default(),
+            about_info: SystemAboutInfo::default(),
+            user_details: None,
+            all_users: Vec::new(),
             volume_percent: 65,
             muted: false,
             pending_service_cmds: Vec::new(),
@@ -521,16 +786,30 @@ impl SettingsAppState {
     }
 
     fn queue_service_refresh_for_page(&mut self, page: SettingsPage) {
+        self.low_power_dropdown.open = false;
         if matches!(
             page,
-            SettingsPage::Wifi | SettingsPage::Network | SettingsPage::Sound
+            SettingsPage::Wifi
+                | SettingsPage::Network
+                | SettingsPage::Sound
+                | SettingsPage::Bluetooth
+                | SettingsPage::Battery
         ) {
             self.pending_service_cmds.push(ServiceCommand::Refresh);
+        } else if matches!(page, SettingsPage::About | SettingsPage::Users) {
+            self.refresh_static_system_info();
         } else if page == SettingsPage::SoftwareUpdate
             && self.updates_snapshot.state == UpdateCheckState::Idle
         {
             self.check_updates_now();
         }
+    }
+
+    pub(crate) fn refresh_static_system_info(&mut self) {
+        self.about_info = gather_system_about_info();
+        let svc = UserService::new();
+        self.user_details = Some(svc.query_current_user_details());
+        self.all_users = svc.query_users();
     }
 
     pub(crate) fn check_updates_now(&mut self) {
@@ -870,6 +1149,8 @@ impl SettingsAppState {
         let clamped_vol = snap.volume_percent.clamp(0, 100);
         let changed = self.network_status != snap.network.status_label
             || self.network != snap.network
+            || self.bluetooth != snap.bluetooth
+            || self.power != snap.power
             || self.volume_percent != clamped_vol
             || self.muted != snap.muted;
         if !changed {
@@ -877,6 +1158,9 @@ impl SettingsAppState {
         }
         self.network_status.clone_from(&snap.network.status_label);
         self.network = snap.network;
+        self.bluetooth = snap.bluetooth;
+        self.bluetooth_status_hint.clear();
+        self.power = snap.power;
         self.volume_percent = clamped_vol;
         self.muted = snap.muted;
         self.mark_dirty(DamageScope::Page);
@@ -1076,7 +1360,9 @@ impl SettingsAppState {
         if self.focus.tick(elapsed) {
             changed = changed.merge(DamageScope::Sidebar);
         }
-        let mut page_anim = false;
+        let tab_active = self.battery_tab.tick(elapsed);
+        self.battery_tab_animating = tab_active;
+        let mut page_anim = tab_active;
         for (_, m) in &mut self.toggle_anims {
             if m.tick(elapsed) {
                 page_anim = true;
@@ -1096,6 +1382,7 @@ impl SettingsAppState {
     pub(crate) fn is_ui_animating(&self) -> bool {
         let a = self.focus.ring_alpha();
         self.is_scroll_animating()
+            || self.battery_tab_animating
             || (a > 0.01 && a < 0.99)
             || self.toggle_anims.iter().any(|(_, m)| m.is_active())
     }
@@ -1135,6 +1422,44 @@ impl SettingsAppState {
             RowControlId::NetworkRefresh => {
                 self.network_status = String::from("Refreshing...");
                 self.pending_service_cmds.push(ServiceCommand::Refresh);
+            }
+            RowControlId::BluetoothPoweredToggle => {
+                let next = !self.bluetooth.status.powered;
+                self.bluetooth.status.powered = next;
+                if !next {
+                    self.bluetooth.discovering = false;
+                }
+                self.bluetooth_status_hint = String::from(if next {
+                    "Turning on..."
+                } else {
+                    "Turning off..."
+                });
+                self.pending_service_cmds
+                    .push(ServiceCommand::SetBluetoothPowered(next));
+            }
+            RowControlId::BluetoothScanToggle => {
+                let next = !self.bluetooth.discovering;
+                self.bluetooth.discovering = next;
+                self.bluetooth_status_hint = String::from(if next {
+                    "Scanning for devices..."
+                } else {
+                    "Stopping scan..."
+                });
+                self.pending_service_cmds
+                    .push(ServiceCommand::SetBluetoothDiscovering(next));
+            }
+            RowControlId::BluetoothActionIndex(idx) => {
+                self.trigger_bluetooth_device_action(idx);
+            }
+            RowControlId::PowerProfileCycle => {
+                let next = match self.power.active_profile {
+                    Some(PowerProfile::Balanced) | None => PowerProfile::Performance,
+                    Some(PowerProfile::Performance) => PowerProfile::LowPower,
+                    Some(PowerProfile::LowPower) => PowerProfile::Balanced,
+                };
+                self.power.active_profile = Some(next);
+                self.pending_service_cmds
+                    .push(ServiceCommand::SetPowerProfile(next));
             }
             _ => return false,
         }
@@ -1422,8 +1747,386 @@ impl SettingsAppState {
                     *enabled = !*enabled;
                 }
             }
+            RowControlId::PowerDisplaySleepCycle => {
+                self.power_display_sleep_minutes = match self.power_display_sleep_minutes {
+                    2 => 5,
+                    5 => 10,
+                    10 => 15,
+                    15 => 30,
+                    30 => 60,
+                    60 => 0,
+                    _ => 2,
+                };
+                let v = self.power_display_sleep_minutes.to_string();
+                let _ = update_config_entries(&[("power", "display_sleep_minutes", &v)]);
+            }
+            RowControlId::PowerAutoLockCycle => {
+                self.power_auto_lock_minutes = match self.power_auto_lock_minutes {
+                    0 => 1,
+                    1 => 5,
+                    5 => 15,
+                    15 => 30,
+                    _ => 0,
+                };
+                let v = self.power_auto_lock_minutes.to_string();
+                let _ = update_config_entries(&[("power", "auto_lock_minutes", &v)]);
+            }
+            RowControlId::PowerDimOnBatteryToggle => {
+                self.power_dim_on_battery = !self.power_dim_on_battery;
+                let v = bool_str(self.power_dim_on_battery);
+                let _ = update_config_entries(&[("power", "dim_on_battery", v)]);
+            }
+            RowControlId::ShortcutsResetDefaults => {
+                self.shortcuts = std::array::from_fn(|i| SHORTCUT_DEFS[i].default_combo.to_owned());
+                let pairs: Vec<(&str, &str, &str)> = SHORTCUT_DEFS
+                    .iter()
+                    .map(|d| ("shortcuts", d.key, d.default_combo))
+                    .collect();
+                let _ = update_config_entries(&pairs);
+            }
+            RowControlId::BluetoothInfoIndex(idx) => self.open_bluetooth_info_modal(idx),
+            RowControlId::PowerOptionsOpen | RowControlId::BatteryDetailsOpen => {
+                self.open_battery_details_modal();
+            }
+            RowControlId::AboutMoreInfoOpen => self.open_about_more_info_modal(),
+            RowControlId::ShortcutEditIndex(idx) => self.open_shortcut_edit_modal(idx),
             _ => {}
         }
+    }
+
+    pub(crate) fn select_battery_tab(&mut self, index: usize) {
+        let elapsed = self.epoch.elapsed();
+        if self.battery_tab.select(index, elapsed, self.reduced_motion) {
+            self.battery_tab_animating = !self.reduced_motion;
+            self.mark_dirty(DamageScope::Page);
+        }
+    }
+
+    pub(crate) fn select_low_power_mode(&mut self, index: usize) {
+        let mode_str = match index {
+            1 => "battery",
+            2 => "always",
+            3 => "ac",
+            _ => "never",
+        };
+        self.low_power_dropdown.selected = index.min(3);
+        self.low_power_dropdown.open = false;
+        self.power_low_power_mode = String::from(mode_str);
+        let _ = update_config_entries(&[("power", "low_power_mode", mode_str)]);
+        self.last_config_mtime = current_config_mtime();
+        notify_compositor_reload();
+
+        let desired = match mode_str {
+            "always" => PowerProfile::LowPower,
+            "battery" if self.power.status.has_battery && !self.power.status.ac_online => {
+                PowerProfile::LowPower
+            }
+            "ac" if self.power.status.ac_online || !self.power.status.has_battery => {
+                PowerProfile::LowPower
+            }
+            _ => PowerProfile::Balanced,
+        };
+        if !self.power.available_profiles.is_empty() {
+            self.power.active_profile = Some(desired);
+            self.pending_service_cmds
+                .push(ServiceCommand::SetPowerProfile(desired));
+        }
+        self.mark_dirty(DamageScope::Page);
+    }
+
+    fn trigger_bluetooth_device_action(&mut self, idx: usize) {
+        let Some(dev) = self.bluetooth.devices.get(idx).cloned() else {
+            return;
+        };
+        if dev.connected {
+            self.bluetooth_status_hint = format!("Disconnecting {}...", dev.name);
+            self.pending_service_cmds
+                .push(ServiceCommand::DisconnectBluetooth(dev.address));
+        } else if dev.paired {
+            self.bluetooth_status_hint = format!("Connecting {}...", dev.name);
+            self.pending_service_cmds
+                .push(ServiceCommand::ConnectBluetooth(dev.address));
+        } else {
+            self.bluetooth_status_hint = format!("Pairing {}...", dev.name);
+            self.pending_service_cmds
+                .push(ServiceCommand::PairBluetooth(dev.address));
+        }
+    }
+
+    fn open_bluetooth_info_modal(&mut self, idx: usize) {
+        let Some(dev) = self.bluetooth.devices.get(idx).cloned() else {
+            return;
+        };
+        let mut msg = format!("MAC: {}", dev.address);
+        if dev.paired {
+            msg.push_str(" · Paired");
+        }
+        if dev.connected {
+            msg.push_str(" · Connected");
+        }
+        if let Some(pct) = dev.battery_percent {
+            use std::fmt::Write as _;
+            let _ = write!(msg, " · Battery {pct}%");
+        }
+        let mut sheet = rusty_ui::DialogSheet::confirm(
+            dev.name,
+            msg,
+            if dev.paired { "Forget" } else { "Pair" },
+        )
+        .with_destructive(dev.paired);
+        sheet.cancel_label = Some(String::from("Close"));
+        sheet.width = 400;
+        self.active_modal = Some(SettingsModal::BluetoothDeviceInfo {
+            address: dev.address,
+            paired: dev.paired,
+            connected: dev.connected,
+            sheet,
+        });
+        self.mark_dirty(DamageScope::Full);
+    }
+
+    fn open_battery_details_modal(&mut self) {
+        let cond = self.power.condition.label();
+        let cap = self
+            .power
+            .health_percent
+            .map_or_else(|| String::from("N/A"), |p| format!("{p}%"));
+        let cycles = self
+            .power
+            .cycle_count
+            .map_or_else(|| String::from("N/A"), |c| c.to_string());
+        let msg = format!(
+            "Condition: {cond} · Max Capacity: {cap} · Cycles: {cycles} · Sleep {} min",
+            self.power_display_sleep_minutes
+        );
+        let mut sheet = rusty_ui::DialogSheet::confirm("Battery & Power Options", msg, "Done");
+        sheet.cancel_label = None;
+        sheet.width = 440;
+        self.active_modal = Some(SettingsModal::InfoSheet { sheet });
+        self.mark_dirty(DamageScope::Full);
+    }
+
+    fn open_about_more_info_modal(&mut self) {
+        let msg = format!(
+            "{} · {} ({}) · {}",
+            self.about_info.os_name,
+            self.about_info.kernel,
+            self.about_info.architecture,
+            self.about_info.cpu
+        );
+        let mut sheet = rusty_ui::DialogSheet::confirm("About This System", msg, "Done");
+        sheet.cancel_label = None;
+        sheet.width = 460;
+        self.active_modal = Some(SettingsModal::InfoSheet { sheet });
+        self.mark_dirty(DamageScope::Full);
+    }
+
+    fn open_shortcut_edit_modal(&mut self, index: usize) {
+        let Some(def) = SHORTCUT_DEFS.get(index) else {
+            return;
+        };
+        let current = self.shortcuts[index].clone();
+        let mut sheet = rusty_ui::DialogSheet::prompt(
+            format!("Shortcut: {}", def.label),
+            format!(
+                "Default: {} · Type Super/Alt/Ctrl/Shift + Key",
+                def.default_combo
+            ),
+            "Save",
+            "e.g. Super+Space",
+            current.clone(),
+        );
+        sheet.width = 420;
+        let mut modal = SettingsModal::ShortcutEdit {
+            index,
+            conflict_index: None,
+            validated_combo: Some(current),
+            sheet,
+        };
+        self.refresh_shortcut_modal_validation(&mut modal);
+        self.active_modal = Some(modal);
+        self.mark_dirty(DamageScope::Full);
+    }
+
+    fn refresh_shortcut_modal_validation(&self, modal: &mut SettingsModal) {
+        let SettingsModal::ShortcutEdit {
+            index,
+            conflict_index,
+            validated_combo,
+            sheet,
+        } = modal
+        else {
+            return;
+        };
+        let raw = sheet.input.as_ref().map_or("", |tf| tf.buffer.as_str());
+        match validate_shortcut_input(raw) {
+            Ok(canon) => {
+                let conflict = self
+                    .shortcuts
+                    .iter()
+                    .enumerate()
+                    .find(|(i, s)| *i != *index && s.eq_ignore_ascii_case(&canon))
+                    .map(|(i, _)| i);
+                *conflict_index = conflict;
+                *validated_combo = Some(canon.clone());
+                if let Some(ci) = conflict {
+                    sheet.message = format!(
+                        "Conflicts with \"{}\" · Save swaps both",
+                        SHORTCUT_DEFS[ci].label
+                    );
+                } else {
+                    sheet.message = format!(
+                        "Valid: {canon} · Default: {}",
+                        SHORTCUT_DEFS[*index].default_combo
+                    );
+                }
+            }
+            Err(err) => {
+                *conflict_index = None;
+                *validated_combo = None;
+                sheet.message = err.to_owned();
+            }
+        }
+    }
+
+    pub(crate) fn dismiss_active_modal(&mut self) {
+        if self.active_modal.take().is_some() {
+            self.mark_dirty(DamageScope::Full);
+        }
+    }
+
+    pub(crate) fn confirm_active_modal(&mut self) {
+        let Some(modal) = self.active_modal.take() else {
+            return;
+        };
+        match modal {
+            SettingsModal::BluetoothDeviceInfo {
+                address,
+                paired,
+                connected,
+                ..
+            } => {
+                let _ = connected;
+                let cmd = if paired {
+                    ServiceCommand::RemoveBluetooth(address)
+                } else {
+                    ServiceCommand::PairBluetooth(address)
+                };
+                self.pending_service_cmds.push(cmd);
+            }
+            SettingsModal::InfoSheet { .. } => {}
+            SettingsModal::ShortcutEdit {
+                index,
+                conflict_index,
+                validated_combo,
+                sheet,
+            } => {
+                let Some(canon) = validated_combo else {
+                    let mut restored = SettingsModal::ShortcutEdit {
+                        index,
+                        conflict_index,
+                        validated_combo: None,
+                        sheet,
+                    };
+                    self.refresh_shortcut_modal_validation(&mut restored);
+                    self.active_modal = Some(restored);
+                    self.mark_dirty(DamageScope::Full);
+                    return;
+                };
+                let old_combo = self.shortcuts[index].clone();
+                self.shortcuts[index].clone_from(&canon);
+                if let Some(ci) = conflict_index {
+                    self.shortcuts[ci].clone_from(&old_combo);
+                    let _ = update_config_entries(&[
+                        ("shortcuts", SHORTCUT_DEFS[index].key, &canon),
+                        ("shortcuts", SHORTCUT_DEFS[ci].key, &old_combo),
+                    ]);
+                } else {
+                    let _ =
+                        update_config_entries(&[("shortcuts", SHORTCUT_DEFS[index].key, &canon)]);
+                }
+                self.last_config_mtime = current_config_mtime();
+                notify_compositor_reload();
+            }
+        }
+        self.mark_dirty(DamageScope::Full);
+    }
+
+    pub(crate) fn handle_modal_text_key(
+        &mut self,
+        key: rusty_ui::TextInputKey,
+        mods: rusty_ui::InputModifiers,
+        fonts: &mut rusty_ui::UiFontEngine,
+        clipboard: &mut dyn rusty_ui::ClipboardSink,
+    ) -> bool {
+        if key == rusty_ui::TextInputKey::Escape {
+            self.dismiss_active_modal();
+            return true;
+        }
+        let Some(mut modal) = self.active_modal.take() else {
+            return false;
+        };
+        let elapsed = self.epoch.elapsed();
+        let ev = if let Some(tf) = modal.sheet_mut().input.as_mut() {
+            tf.handle_key(key, mods, elapsed, fonts, clipboard)
+        } else if key == rusty_ui::TextInputKey::Enter {
+            rusty_ui::TextInputEvent::Submitted
+        } else {
+            rusty_ui::TextInputEvent::Ignored
+        };
+
+        match ev {
+            rusty_ui::TextInputEvent::Submitted => {
+                self.active_modal = Some(modal);
+                self.confirm_active_modal();
+                return true;
+            }
+            rusty_ui::TextInputEvent::Cancelled => {
+                self.mark_dirty(DamageScope::Full);
+                return true;
+            }
+            rusty_ui::TextInputEvent::Changed => {
+                self.refresh_shortcut_modal_validation(&mut modal);
+            }
+            rusty_ui::TextInputEvent::CaretMoved | rusty_ui::TextInputEvent::Ignored => {}
+        }
+        self.active_modal = Some(modal);
+        self.mark_dirty(DamageScope::Full);
+        true
+    }
+
+    pub(crate) fn handle_modal_paste(
+        &mut self,
+        text: &str,
+        fonts: &mut rusty_ui::UiFontEngine,
+    ) -> bool {
+        if text.is_empty() {
+            return false;
+        }
+        let Some(mut modal) = self.active_modal.take() else {
+            return false;
+        };
+        if let Some(tf) = modal.sheet_mut().input.as_mut() {
+            let mut mem = rusty_ui::MemoryClipboard::new();
+            rusty_ui::ClipboardSink::set_text(&mut mem, text);
+            let _ = tf.handle_key(
+                rusty_ui::TextInputKey::Char('v'),
+                rusty_ui::InputModifiers {
+                    ctrl: true,
+                    shift: false,
+                    alt: false,
+                },
+                self.epoch.elapsed(),
+                fonts,
+                &mut mem,
+            );
+            self.refresh_shortcut_modal_validation(&mut modal);
+            self.active_modal = Some(modal);
+            self.mark_dirty(DamageScope::Full);
+            return true;
+        }
+        self.active_modal = Some(modal);
+        false
     }
 
     pub(crate) fn poll_external_config_if_due(&mut self, now: Instant) -> bool {
@@ -1571,6 +2274,34 @@ impl SettingsAppState {
             }
             ("security", "lock_on_sleep") => self.lock_on_sleep = parse_bool(val),
             ("security", "enable_polkit_agent") => self.enable_polkit_agent = parse_bool(val),
+            ("power", "low_power_mode") => {
+                let (idx, norm) = match val.trim().to_ascii_lowercase().as_str() {
+                    "battery" | "only_on_battery" | "on_battery" => (1, "battery"),
+                    "always" | "on" => (2, "always"),
+                    "ac" | "adapter" | "only_on_ac" | "only_on_adapter" => (3, "ac"),
+                    _ => (0, "never"),
+                };
+                self.power_low_power_mode = String::from(norm);
+                self.low_power_dropdown.selected = idx;
+            }
+            ("power", "display_sleep_minutes") => {
+                if let Ok(v) = val.parse::<u32>() {
+                    self.power_display_sleep_minutes = v.min(180);
+                }
+            }
+            ("power", "auto_lock_minutes") => {
+                if let Ok(v) = val.parse::<u32>() {
+                    self.power_auto_lock_minutes = v.min(120);
+                }
+            }
+            ("power", "dim_on_battery") => self.power_dim_on_battery = parse_bool(val),
+            ("shortcuts", key) => {
+                if let Some(idx) = SHORTCUT_DEFS.iter().position(|d| d.key == key)
+                    && let Ok(canon) = validate_shortcut_input(val)
+                {
+                    self.shortcuts[idx] = canon;
+                }
+            }
             _ => {}
         }
     }
@@ -1771,13 +2502,17 @@ fn step_scroll_axis(
     false
 }
 
-/// Queries live NetworkManager and audio status (`RUSTYOS-112`).
+/// Queries live NetworkManager, BlueZ, power, and audio status (`RUSTYOS-112`, `RUSTYOS-131`).
 #[must_use]
 pub(crate) fn query_service_snapshot() -> ServiceSnapshot {
     let network = NetworkService::new().query_status();
+    let bluetooth = BluetoothService::new().query_snapshot();
+    let power = PowerService::new().query_details();
     let audio = AudioService::new().query_status();
     ServiceSnapshot {
         network,
+        bluetooth,
+        power,
         volume_percent: audio.volume_percent.clamp(0, 100),
         muted: audio.muted,
     }
@@ -1791,6 +2526,10 @@ pub(crate) fn coalesce_service_commands(cmds: Vec<ServiceCommand>) -> Vec<Servic
     let mut toggle_mute = false;
     let mut set_wifi = None;
     let mut connect_ssid = None;
+    let mut bt_power = None;
+    let mut bt_discover = None;
+    let mut bt_device_op: Option<ServiceCommand> = None;
+    let mut power_profile = None;
 
     for cmd in cmds {
         match cmd {
@@ -1804,6 +2543,19 @@ pub(crate) fn coalesce_service_commands(cmds: Vec<ServiceCommand>) -> Vec<Servic
                 }
             }
             ServiceCommand::ConnectWifi(ssid) => connect_ssid = Some(ssid),
+            ServiceCommand::SetBluetoothPowered(en) => {
+                bt_power = Some(en);
+                if !en {
+                    bt_discover = None;
+                    bt_device_op = None;
+                }
+            }
+            ServiceCommand::SetBluetoothDiscovering(en) => bt_discover = Some(en),
+            op @ (ServiceCommand::ConnectBluetooth(_)
+            | ServiceCommand::DisconnectBluetooth(_)
+            | ServiceCommand::PairBluetooth(_)
+            | ServiceCommand::RemoveBluetooth(_)) => bt_device_op = Some(op),
+            ServiceCommand::SetPowerProfile(p) => power_profile = Some(p),
         }
     }
 
@@ -1813,6 +2565,18 @@ pub(crate) fn coalesce_service_commands(cmds: Vec<ServiceCommand>) -> Vec<Servic
     }
     if let Some(ssid) = connect_ssid {
         out.push(ServiceCommand::ConnectWifi(ssid));
+    }
+    if let Some(en) = bt_power {
+        out.push(ServiceCommand::SetBluetoothPowered(en));
+    }
+    if let Some(op) = bt_device_op {
+        out.push(op);
+    }
+    if let Some(en) = bt_discover {
+        out.push(ServiceCommand::SetBluetoothDiscovering(en));
+    }
+    if let Some(p) = power_profile {
+        out.push(ServiceCommand::SetPowerProfile(p));
     }
     if let Some(v) = set_volume {
         out.push(ServiceCommand::SetVolume(v));
@@ -1826,9 +2590,10 @@ pub(crate) fn coalesce_service_commands(cmds: Vec<ServiceCommand>) -> Vec<Servic
     out
 }
 
-/// Executes a coalesced batch of service commands and queries fresh snapshot (`RUSTYOS-112`).
+/// Executes a coalesced batch of service commands and queries fresh snapshot (`RUSTYOS-112`, `RUSTYOS-131`).
 #[must_use]
 pub(crate) fn execute_coalesced_service_batch(cmds: Vec<ServiceCommand>) -> ServiceSnapshot {
+    let bt = BluetoothService::new();
     for cmd in coalesce_service_commands(cmds) {
         match cmd {
             ServiceCommand::Refresh => {}
@@ -1844,9 +2609,280 @@ pub(crate) fn execute_coalesced_service_batch(cmds: Vec<ServiceCommand>) -> Serv
             ServiceCommand::ConnectWifi(ssid) => {
                 let _ = NetworkService::new().connect_wifi(&ssid);
             }
+            ServiceCommand::SetBluetoothPowered(en) => {
+                let _ = bt.set_powered(en);
+            }
+            ServiceCommand::SetBluetoothDiscovering(en) => {
+                let _ = bt.set_discovering(en);
+            }
+            ServiceCommand::ConnectBluetooth(addr) => {
+                let _ = bt.connect_device(&addr);
+            }
+            ServiceCommand::DisconnectBluetooth(addr) => {
+                let _ = bt.disconnect_device(&addr);
+            }
+            ServiceCommand::PairBluetooth(addr) => {
+                let _ = bt.pair_device(&addr);
+            }
+            ServiceCommand::RemoveBluetooth(addr) => {
+                let _ = bt.remove_device(&addr);
+            }
+            ServiceCommand::SetPowerProfile(profile) => {
+                let _ = PowerService::new().set_power_profile(profile);
+            }
         }
     }
     query_service_snapshot()
+}
+
+fn default_search_controls() -> (
+    rusty_ui::FocusScope,
+    rusty_ui::WidgetId,
+    rusty_ui::TextField,
+) {
+    let focus_search_id = rusty_ui::WidgetId::from_tag("settings.search");
+    let mut focus = rusty_ui::FocusScope::new();
+    focus.begin_frame();
+    focus.register(focus_search_id);
+    let search_field = rusty_ui::TextField::search(rusty_ui::Rect::new(12, 48, 204, 28), "Search");
+    (focus, focus_search_id, search_field)
+}
+
+fn default_battery_tab() -> rusty_ui::SegmentedTabs {
+    rusty_ui::SegmentedTabs::new(
+        rusty_ui::Rect::new(0, 0, 260, 28),
+        vec![
+            String::from("Usage & Supply"),
+            String::from("Health & Power"),
+        ],
+        0,
+    )
+}
+
+fn default_low_power_dropdown() -> rusty_ui::DropdownSelect {
+    rusty_ui::DropdownSelect::new(
+        rusty_ui::Rect::new(0, 0, 176, 26),
+        vec![
+            String::from("Never"),
+            String::from("Only on Battery"),
+            String::from("Always"),
+            String::from("Only on Power Adapter"),
+        ],
+        0,
+    )
+}
+
+fn validate_shortcut_input(raw: &str) -> Result<String, &'static str> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("Enter modifiers and key (e.g. Super+Space)");
+    }
+    let mut ctrl = false;
+    let mut alt = false;
+    let mut shift = false;
+    let mut logo = false;
+    let mut key_name: Option<String> = None;
+
+    for token in trimmed.split('+').map(str::trim).filter(|t| !t.is_empty()) {
+        match token.to_ascii_lowercase().as_str() {
+            "ctrl" | "control" => ctrl = true,
+            "alt" | "opt" | "option" => alt = true,
+            "shift" => shift = true,
+            "super" | "logo" | "meta" | "win" | "cmd" => logo = true,
+            other => {
+                if key_name.is_some() {
+                    return Err("Specify only one primary key after modifiers");
+                }
+                key_name = Some(normalize_shortcut_key_token(other)?);
+            }
+        }
+    }
+
+    let key = key_name.ok_or("Missing primary key (e.g. Space, W, Left)")?;
+    let is_fn_or_print = key == "Print"
+        || (key.starts_with('F') && key[1..].parse::<u8>().is_ok_and(|n| (1..=12).contains(&n)));
+    if !ctrl && !alt && !logo && !is_fn_or_print {
+        return Err("Include Ctrl, Alt, or Super modifier");
+    }
+    if (ctrl && alt && key == "BackSpace")
+        || (ctrl && alt && key.starts_with('F') && key[1..].parse::<u8>().is_ok_and(|n| n <= 12))
+        || key == "Escape"
+    {
+        return Err("Reserved compositor/VT safety shortcut");
+    }
+
+    let mut parts = Vec::with_capacity(5);
+    if ctrl {
+        parts.push("Ctrl".to_owned());
+    }
+    if logo {
+        parts.push("Super".to_owned());
+    }
+    if alt {
+        parts.push("Alt".to_owned());
+    }
+    if shift {
+        parts.push("Shift".to_owned());
+    }
+    parts.push(key);
+    Ok(parts.join("+"))
+}
+
+fn normalize_shortcut_key_token(lower: &str) -> Result<String, &'static str> {
+    let out = match lower {
+        "space" => String::from("Space"),
+        "tab" => String::from("Tab"),
+        "comma" | "," => String::from("Comma"),
+        "period" | "." => String::from("Period"),
+        "slash" | "/" => String::from("Slash"),
+        "left" => String::from("Left"),
+        "right" => String::from("Right"),
+        "up" => String::from("Up"),
+        "down" => String::from("Down"),
+        "return" | "enter" => String::from("Return"),
+        "backspace" => String::from("BackSpace"),
+        "delete" | "del" => String::from("Delete"),
+        "escape" | "esc" => String::from("Escape"),
+        "print" => String::from("Print"),
+        fn_key
+            if fn_key.starts_with('f')
+                && fn_key[1..]
+                    .parse::<u8>()
+                    .is_ok_and(|n| (1..=12).contains(&n)) =>
+        {
+            fn_key.to_ascii_uppercase()
+        }
+        single if single.len() == 1 => {
+            let b = single.as_bytes()[0];
+            if b.is_ascii_alphanumeric() {
+                (b as char).to_ascii_uppercase().to_string()
+            } else {
+                return Err("Unsupported key token; use A-Z, 0-9, Space, Tab, Left/Right, F1-F12");
+            }
+        }
+        _ => return Err("Unsupported key token; use A-Z, 0-9, Space, Tab, Comma, Left/Right"),
+    };
+    Ok(out)
+}
+
+#[must_use]
+pub(crate) fn gather_system_about_info() -> SystemAboutInfo {
+    let mut info = SystemAboutInfo::default();
+    if let Ok(h) = fs::read_to_string("/proc/sys/kernel/hostname")
+        && !h.trim().is_empty()
+    {
+        h.trim().clone_into(&mut info.hostname);
+    }
+    if let Ok(os_rel) = fs::read_to_string("/etc/os-release") {
+        for line in os_rel.lines() {
+            if let Some(rest) = line.strip_prefix("PRETTY_NAME=") {
+                rest.trim().trim_matches('"').clone_into(&mut info.os_name);
+                break;
+            }
+        }
+    }
+    let ostype =
+        fs::read_to_string("/proc/sys/kernel/ostype").unwrap_or_else(|_| String::from("Linux"));
+    let osrel = fs::read_to_string("/proc/sys/kernel/osrelease").unwrap_or_default();
+    let k = format!("{} {}", ostype.trim(), osrel.trim())
+        .trim()
+        .to_owned();
+    if !k.is_empty() {
+        info.kernel = k;
+    }
+
+    if let Ok(cpuinfo) = fs::read_to_string("/proc/cpuinfo") {
+        for line in cpuinfo.lines() {
+            if let Some((_, val)) = line.split_once(':')
+                && (line.starts_with("model name") || line.starts_with("Hardware"))
+                && !val.trim().is_empty()
+            {
+                val.trim().clone_into(&mut info.cpu);
+                break;
+            }
+        }
+    }
+
+    if let Ok(meminfo) = fs::read_to_string("/proc/meminfo") {
+        for line in meminfo.lines() {
+            if let Some(rest) = line.strip_prefix("MemTotal:") {
+                let kib = rest
+                    .split_whitespace()
+                    .next()
+                    .and_then(|n| n.parse::<u64>().ok())
+                    .unwrap_or(0);
+                if kib > 0 {
+                    #[allow(clippy::cast_precision_loss)]
+                    let gib = kib as f64 / (1024.0 * 1024.0);
+                    info.memory = format!("{gib:.1} GiB RAM");
+                }
+                break;
+            }
+        }
+    }
+
+    if let Some(gpu) = detect_drm_gpu_label() {
+        info.graphics = gpu;
+    }
+    if let Some(disk) = detect_root_disk_summary() {
+        info.startup_disk = disk;
+    }
+    info
+}
+
+fn detect_drm_gpu_label() -> Option<String> {
+    let entries = fs::read_dir("/sys/class/drm").ok()?;
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !name.starts_with("card") || name.contains('-') {
+            continue;
+        }
+        let dev_dir = entry.path().join("device");
+        let vendor = fs::read_to_string(dev_dir.join("vendor")).unwrap_or_default();
+        let vendor_trimmed = vendor.trim().to_ascii_lowercase();
+        let label = match vendor_trimmed.as_str() {
+            "0x1002" => "AMD Radeon Graphics",
+            "0x8086" => "Intel Integrated Graphics",
+            "0x10de" => "NVIDIA Graphics",
+            "0x1af4" => "VirtIO GPU",
+            "0x1234" => "QEMU Standard VGA",
+            "0x15ad" => "VMware SVGA",
+            _ => "",
+        };
+        if !label.is_empty() {
+            return Some(label.to_owned());
+        }
+        if let Ok(uevent) = fs::read_to_string(dev_dir.join("uevent")) {
+            for line in uevent.lines() {
+                if let Some(drv) = line.strip_prefix("DRIVER=")
+                    && !drv.trim().is_empty()
+                {
+                    return Some(drv.trim().to_owned());
+                }
+            }
+        }
+    }
+    None
+}
+
+fn detect_root_disk_summary() -> Option<String> {
+    let out = Command::new("df").args(["-Pk", "/"]).output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let line = text.lines().nth(1)?;
+    let cols: Vec<&str> = line.split_whitespace().collect();
+    if cols.len() < 4 {
+        return None;
+    }
+    let total_kib = cols[1].parse::<u64>().ok()?;
+    let avail_kib = cols[3].parse::<u64>().ok()?;
+    #[allow(clippy::cast_precision_loss)]
+    let total_gb = total_kib as f64 / (1024.0 * 1024.0);
+    #[allow(clippy::cast_precision_loss)]
+    let avail_gb = avail_kib as f64 / (1024.0 * 1024.0);
+    Some(format!("{avail_gb:.1} GiB free of {total_gb:.1} GiB"))
 }
 
 #[cfg(test)]
@@ -1871,7 +2907,11 @@ mod tests {
         st.search_query = String::from("network");
         assert_eq!(
             st.visible_sidebar_pages(),
-            vec![SettingsPage::Wifi, SettingsPage::Network]
+            vec![
+                SettingsPage::Wifi,
+                SettingsPage::Bluetooth,
+                SettingsPage::Network
+            ]
         );
     }
 
@@ -1974,5 +3014,30 @@ mod tests {
         let _ = st.step_ui_animations(Instant::now());
         let p1 = st.switch_progress(RowControlId::DockAutoHideToggle, st.dock_auto_hide);
         assert!((p1 - p0).abs() > 0.01);
+    }
+
+    #[test]
+    fn shortcut_validation_and_power_config_parsing_work() {
+        assert_eq!(
+            validate_shortcut_input(" super + shift + r "),
+            Ok(String::from("Super+Shift+R"))
+        );
+        assert_eq!(validate_shortcut_input("alt+w"), Ok(String::from("Alt+W")));
+        assert!(validate_shortcut_input("w").is_err());
+        assert!(validate_shortcut_input("ctrl+alt+backspace").is_err());
+
+        let mut st = SettingsAppState::defaults_with_page(SettingsPage::Battery);
+        st.apply_toml_kv("power", "low_power_mode", "battery");
+        st.apply_toml_kv("power", "display_sleep_minutes", "15");
+        st.apply_toml_kv("power", "auto_lock_minutes", "5");
+        st.apply_toml_kv("power", "dim_on_battery", "false");
+        assert_eq!(st.power_low_power_mode, "battery");
+        assert_eq!(st.low_power_dropdown.selected, 1);
+        assert_eq!(st.power_display_sleep_minutes, 15);
+        assert_eq!(st.power_auto_lock_minutes, 5);
+        assert!(!st.power_dim_on_battery);
+
+        st.apply_toml_kv("shortcuts", "launcher", "ctrl+space");
+        assert_eq!(st.shortcuts[0], "Ctrl+Space");
     }
 }

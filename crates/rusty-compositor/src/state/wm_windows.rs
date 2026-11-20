@@ -1550,6 +1550,8 @@ impl RustyCompositorState {
             }
         }
 
+        self.check_idle_auto_lock();
+
         if !self.animations.has_active_animations() {
             return;
         }
@@ -1575,6 +1577,20 @@ impl RustyCompositorState {
                 let content_origin = (origin.0, origin.1 + titlebar_h);
                 self.space.map_element(window, content_origin, is_focused);
             }
+        }
+    }
+
+    fn check_idle_auto_lock(&mut self) {
+        if self.user_config.power_auto_lock_minutes == 0
+            || self.is_session_locked()
+            || self.idle_notifier_state.is_inhibited()
+        {
+            return;
+        }
+        let idle_limit =
+            Duration::from_secs(u64::from(self.user_config.power_auto_lock_minutes) * 60);
+        if self.last_user_activity.elapsed() >= idle_limit {
+            self.set_screen_locked(true, smithay::utils::SERIAL_COUNTER.next_serial());
         }
     }
 

@@ -229,7 +229,7 @@ pub fn local_clock_short_datetime() -> String {
     local_clock_short_datetime_fmt(false)
 }
 
-/// Human user account summary displayed on the Lock Screen (`RUSTYOS-054`).
+/// Human user account summary displayed on the Lock Screen and Users Settings (`RUSTYOS-054`, `RUSTYOS-131`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UserAccount {
     /// UNIX login username.
@@ -242,10 +242,36 @@ pub struct UserAccount {
     pub avatar_path: Option<String>,
 }
 
-/// Read-only user account discovery service reading `/etc/passwd` and avatar hints (`RUSTYOS-054`).
+/// Read-only detailed account profile for the active desktop user (`RUSTYOS-131`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CurrentUserDetails {
+    /// Login username (`$USER` or `/etc/passwd` match).
+    pub username: String,
+    /// Friendly display name.
+    pub display_name: String,
+    /// Primary UNIX user ID.
+    pub uid: u32,
+    /// Primary UNIX group ID.
+    pub gid: u32,
+    /// Configured home directory path.
+    pub home_dir: String,
+    /// Login shell path.
+    pub shell: String,
+    /// True if member of `wheel`, `sudo`, `adm`, or `uid == 0`.
+    pub is_admin: bool,
+    /// Supplementary + primary group names resolved from `/etc/group`.
+    pub groups: Vec<String>,
+    /// Optional resolved avatar file path.
+    pub avatar_path: Option<String>,
+    /// Session runtime kind (`Wayland`, `X11`, `TTY`, etc.).
+    pub session_type: String,
+}
+
+/// Read-only user account discovery service reading `/etc/passwd`, `/etc/group`, and avatar hints (`RUSTYOS-054`, `RUSTYOS-131`).
 #[derive(Debug, Default, Clone)]
 pub struct UserService {
     passwd_path: String,
+    group_path: String,
     accounts_icons_dir: String,
 }
 
@@ -255,7 +281,105 @@ impl UserService {
     pub fn new() -> Self {
         Self {
             passwd_path: "/etc/passwd".to_owned(),
+            group_path: "/etc/group".to_owned(),
             accounts_icons_dir: "/var/lib/AccountsService/icons".to_owned(),
+        }
+    }
+
+    /// Queries detailed read-only metadata for the currently active user (`RUSTYOS-131`).
+    #[must_use]
+    pub fn query_current_user_details(&self) -> CurrentUserDetails {
+        let username = std::env::var("USER")
+            .ok()
+            .map(|u| u.trim().to_owned())
+            .filter(|u| !u.is_empty())
+            .unwrap_or_else(|| "user".to_owned());
+        let passwd_raw = fs::read_to_string(&self.passwd_path).unwrap_or_default();
+        let group_raw = fs::read_to_string(&self.group_path).unwrap_or_default();
+        let home_env = std::env::var("HOME").ok();
+        let session_raw =
+            std::env::var("XDG_SESSION_TYPE").unwrap_or_else(|_| "wayland".to_owned());
+        Self::parse_current_user_details(
+            &username,
+            &passwd_raw,
+            &group_raw,
+            home_env.as_deref(),
+            &self.accounts_icons_dir,
+            &session_raw,
+        )
+    }
+
+    /// Pure parser constructing [`CurrentUserDetails`] from `/etc/passwd` + `/etc/group` text (`RUSTYOS-131`).
+    #[must_use]
+    pub fn parse_current_user_details(
+        username: &str,
+        passwd_contents: &str,
+        group_contents: &str,
+        home_env: Option<&str>,
+        accounts_icons_dir: &str,
+        session_type_raw: &str,
+    ) -> CurrentUserDetails {
+        let mut display_name = username.to_owned();
+        let mut uid = 1000_u32;
+        let mut gid = 1000_u32;
+        let mut home_dir = home_env.unwrap_or("/home/user").to_owned();
+        let mut shell = String::from("/bin/bash");
+
+        for line in passwd_contents.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            let parts: Vec<&str> = trimmed.split(':').collect();
+            if parts.len() >= 7 && parts[0].trim() == username {
+                let gecos = parts[4].split(',').next().unwrap_or_default().trim();
+                if !gecos.is_empty() {
+                    gecos.clone_into(&mut display_name);
+                }
+                uid = parts[2].trim().parse::<u32>().unwrap_or(1000);
+                gid = parts[3].trim().parse::<u32>().unwrap_or(1000);
+                let raw_home = parts[5].trim();
+                if !raw_home.is_empty() {
+                    raw_home.clone_into(&mut home_dir);
+                }
+                let raw_shell = parts[6].trim();
+                if !raw_shell.is_empty() {
+                    raw_shell.clone_into(&mut shell);
+                }
+                break;
+            }
+        }
+
+        let groups = parse_etc_group_for_user(group_contents, username, gid);
+        let is_admin = uid == 0
+            || groups
+                .iter()
+                .any(|g| matches!(g.as_str(), "wheel" | "sudo" | "adm"));
+        let avatar_path = resolve_user_avatar_path(
+            username,
+            Some(username),
+            Some(home_dir.as_str()),
+            accounts_icons_dir,
+        );
+        let session_type = match session_type_raw.trim().to_ascii_lowercase().as_str() {
+            "wayland" => String::from("Wayland"),
+            "x11" => String::from("X11"),
+            "tty" => String::from("TTY"),
+            other if !other.is_empty() => other.to_owned(),
+            _ => String::from("Wayland"),
+        };
+
+        CurrentUserDetails {
+            username: username.to_owned(),
+            display_name,
+            uid,
+            gid,
+            home_dir,
+            shell,
+            is_admin,
+            groups,
+            avatar_path,
+            session_type,
         }
     }
 
@@ -343,6 +467,38 @@ pub fn parse_passwd_users(passwd_contents: &str, current_user: Option<&str>) -> 
     }
     users.truncate(4);
     users
+}
+
+/// Parses `/etc/group` entries returning all groups matching `username` or `primary_gid` (`RUSTYOS-131`).
+#[must_use]
+pub fn parse_etc_group_for_user(
+    group_contents: &str,
+    username: &str,
+    primary_gid: u32,
+) -> Vec<String> {
+    let mut groups = Vec::new();
+    for line in group_contents.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let parts: Vec<&str> = trimmed.split(':').collect();
+        if parts.len() < 4 {
+            continue;
+        }
+        let gname = parts[0].trim();
+        if gname.is_empty() {
+            continue;
+        }
+        let gid_match = parts[2].trim().parse::<u32>().ok() == Some(primary_gid);
+        let member_match = parts[3]
+            .split(',')
+            .any(|m| !m.trim().is_empty() && m.trim() == username);
+        if (gid_match || member_match) && !groups.iter().any(|g| g == gname) {
+            groups.push(gname.to_owned());
+        }
+    }
+    groups
 }
 
 fn resolve_user_avatar_path(

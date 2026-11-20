@@ -716,6 +716,8 @@ pub struct RustyCompositorState {
     pub touchpad_swipe: TouchpadSwipeState,
     /// Optional CLI `--rotate` override applied across outputs (`RUSTYOS-055`).
     pub rotation_override: Option<crate::config::DisplayRotation>,
+    /// Monotonic timestamp of the latest pointer/keyboard/touch user activity (`RUSTYOS-131`).
+    pub last_user_activity: Instant,
     toplevel_icons: HashMap<ObjectId, ToplevelIconEntry>,
     next_toplevel_icon_rev: u64,
     next_notification_id: u64,
@@ -1048,6 +1050,7 @@ impl RustyCompositorState {
             window_toplevel_icons: HashMap::new(),
             touchpad_swipe: TouchpadSwipeState::default(),
             rotation_override: None,
+            last_user_activity: Instant::now(),
             toplevel_icons: HashMap::new(),
             next_toplevel_icon_rev: 0,
             next_notification_id: 0,
@@ -1544,6 +1547,7 @@ impl RustyCompositorState {
     /// Notifies `ext_idle_notify_v1` subscribers of seat user activity while honoring live
     /// `zwp_idle_inhibit_manager_v1` surface inhibitors (`RUSTYOS-045`).
     pub fn notify_user_activity(&mut self) {
+        self.last_user_activity = Instant::now();
         self.idle_inhibitor_surfaces.retain(IsAlive::alive);
         self.idle_notifier_state
             .set_is_inhibited(!self.idle_inhibitor_surfaces.is_empty());

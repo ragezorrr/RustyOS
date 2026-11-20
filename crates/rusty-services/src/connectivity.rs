@@ -92,6 +92,40 @@ impl Default for BluetoothStatus {
     }
 }
 
+/// Discovered or paired Bluetooth device metadata (`RUSTYOS-131`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BluetoothDevice {
+    /// Canonical uppercase MAC address (`AA:BB:CC:DD:EE:FF`).
+    pub address: String,
+    /// Human-readable device alias or fallback MAC address.
+    pub name: String,
+    /// `FreeDesktop` icon class hint (e.g. `"audio-headset"`, `"input-keyboard"`).
+    pub icon: String,
+    /// True if the device is paired/bonded with this adapter.
+    pub paired: bool,
+    /// True if an active connection exists to this device.
+    pub connected: bool,
+    /// True if the device is marked trusted by BlueZ.
+    pub trusted: bool,
+    /// Optional device battery percentage (`org.bluez.Battery1`, `0..=100`).
+    pub battery_percent: Option<u8>,
+}
+
+/// Extended Bluetooth adapter and device snapshot for System Settings (`RUSTYOS-131`).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct BluetoothSnapshot {
+    /// Adapter summary compatible with Quick Settings / `TopBar` telemetry.
+    pub status: BluetoothStatus,
+    /// Adapter display name/alias if present.
+    pub adapter_name: Option<String>,
+    /// Adapter hardware MAC address if present.
+    pub adapter_address: Option<String>,
+    /// True if the primary adapter is actively scanning for nearby devices.
+    pub discovering: bool,
+    /// Sorted list of known/discovered devices (connected first, then paired, then name).
+    pub devices: Vec<BluetoothDevice>,
+}
+
 /// Network service inspecting Linux network devices and NetworkManager.
 #[derive(Debug, Default, Clone)]
 pub struct NetworkService;
@@ -717,10 +751,22 @@ impl BluetoothService {
     /// Queries the primary Bluetooth adapter and connected device status.
     #[must_use]
     pub fn query_status(&self) -> BluetoothStatus {
-        if let Some(dbus_bt) = query_bluez_via_dbus() {
-            return dbus_bt;
+        self.query_snapshot().status
+    }
+
+    /// Queries detailed Bluetooth adapter state, discovery status, and devices (`RUSTYOS-131`).
+    #[must_use]
+    pub fn query_snapshot(&self) -> BluetoothSnapshot {
+        if let Some(snap) = query_bluez_snapshot_via_dbus() {
+            return snap;
         }
-        query_bluetooth_fallback()
+        query_bluetooth_snapshot_fallback()
+    }
+
+    /// Returns paired and discovered Bluetooth devices sorted by connection state (`RUSTYOS-131`).
+    #[must_use]
+    pub fn list_devices(&self) -> Vec<BluetoothDevice> {
+        self.query_snapshot().devices
     }
 
     /// Enables or disables Bluetooth adapter power via `BlueZ` D-Bus or `bluetoothctl`.
@@ -733,11 +779,139 @@ impl BluetoothService {
             return false;
         }
         let arg = if powered { "on" } else { "off" };
-        Command::new("bluetoothctl")
-            .args(["--timeout", "2", "power", arg])
-            .status()
-            .is_ok_and(|s| s.success())
+        run_bluetoothctl(&["--timeout", "2", "power", arg])
     }
+
+    /// Starts or stops nearby Bluetooth discovery (`RUSTYOS-131`).
+    #[must_use]
+    pub fn set_discovering(&self, discovering: bool) -> bool {
+        let method = if discovering {
+            "StartDiscovery"
+        } else {
+            "StopDiscovery"
+        };
+        if call_bluez_adapter_method(method) {
+            return true;
+        }
+        if matches!(bluez_dbus_has_owner(), Some(false)) {
+            return false;
+        }
+        let arg = if discovering { "on" } else { "off" };
+        run_bluetoothctl(&["--timeout", "3", "scan", arg])
+    }
+
+    /// Connects to the Bluetooth device identified by `address` (`RUSTYOS-131`).
+    #[must_use]
+    pub fn connect_device(&self, address: &str) -> bool {
+        self.run_device_action(address, "Connect", "connect", "6")
+    }
+
+    /// Disconnects the Bluetooth device identified by `address` (`RUSTYOS-131`).
+    #[must_use]
+    pub fn disconnect_device(&self, address: &str) -> bool {
+        self.run_device_action(address, "Disconnect", "disconnect", "4")
+    }
+
+    /// Pairs with the Bluetooth device identified by `address` (`RUSTYOS-131`).
+    #[must_use]
+    pub fn pair_device(&self, address: &str) -> bool {
+        self.run_device_action(address, "Pair", "pair", "8")
+    }
+
+    /// Removes/forgets the Bluetooth device identified by `address` (`RUSTYOS-131`).
+    #[must_use]
+    pub fn remove_device(&self, address: &str) -> bool {
+        let Some(mac) = normalize_bt_address(address) else {
+            return false;
+        };
+        if remove_bluez_device_via_dbus(&mac) {
+            return true;
+        }
+        if matches!(bluez_dbus_has_owner(), Some(false)) {
+            return false;
+        }
+        run_bluetoothctl(&["--timeout", "4", "remove", &mac])
+    }
+
+    fn run_device_action(
+        &self,
+        address: &str,
+        dbus_method: &str,
+        cli_verb: &str,
+        cli_timeout: &str,
+    ) -> bool {
+        let _ = self;
+        let Some(mac) = normalize_bt_address(address) else {
+            return false;
+        };
+        if call_bluez_device_method(&mac, dbus_method) {
+            return true;
+        }
+        if matches!(bluez_dbus_has_owner(), Some(false)) {
+            return false;
+        }
+        run_bluetoothctl(&["--timeout", cli_timeout, cli_verb, &mac])
+    }
+}
+
+/// Validates and normalizes a `XX:XX:XX:XX:XX:XX` Bluetooth MAC address (`RUSTYOS-131`).
+#[must_use]
+pub fn normalize_bt_address(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    let mut parts = trimmed.split(':');
+    let mut normalized = Vec::with_capacity(6);
+    for _ in 0..6 {
+        let oct = parts.next()?;
+        if oct.len() != 2 || !oct.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
+        }
+        normalized.push(oct.to_ascii_uppercase());
+    }
+    if parts.next().is_some() {
+        return None;
+    }
+    Some(normalized.join(":"))
+}
+
+/// Parses `bluetoothctl devices` output lines (`Device AA:BB:CC:DD:EE:FF Name`) (`RUSTYOS-131`).
+#[must_use]
+pub fn parse_bluetoothctl_devices(output: &str) -> Vec<BluetoothDevice> {
+    let mut devices = Vec::new();
+    for line in output.lines() {
+        let trimmed = line.trim();
+        let Some(rest) = trimmed.strip_prefix("Device ") else {
+            continue;
+        };
+        let mut split = rest.splitn(2, char::is_whitespace);
+        let Some(raw_mac) = split.next() else {
+            continue;
+        };
+        let Some(address) = normalize_bt_address(raw_mac) else {
+            continue;
+        };
+        let name = split
+            .next()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&address)
+            .to_owned();
+        if devices
+            .iter()
+            .any(|d: &BluetoothDevice| d.address == address)
+        {
+            continue;
+        }
+        devices.push(BluetoothDevice {
+            address,
+            name,
+            icon: String::new(),
+            paired: false,
+            connected: false,
+            trusted: false,
+            battery_percent: None,
+        });
+    }
+    devices
 }
 
 /// Formats a [`BluetoothStatus`] summary from adapter/device metadata (`RUSTYOS-027`).
@@ -759,7 +933,12 @@ pub fn format_bluetooth_label(
     }
 }
 
-fn query_bluez_via_dbus() -> Option<BluetoothStatus> {
+type BluezManagedObjects = HashMap<
+    zbus::zvariant::OwnedObjectPath,
+    HashMap<zbus::names::OwnedInterfaceName, HashMap<String, zbus::zvariant::OwnedValue>>,
+>;
+
+fn bluez_managed_objects() -> Option<(zbus::blocking::Connection, BluezManagedObjects)> {
     let conn = zbus::blocking::Connection::system().ok()?;
     let om = zbus::blocking::fdo::ObjectManagerProxy::builder(&conn)
         .destination("org.bluez")
@@ -769,71 +948,211 @@ fn query_bluez_via_dbus() -> Option<BluetoothStatus> {
         .build()
         .ok()?;
     let objects = om.get_managed_objects().ok()?;
+    Some((conn, objects))
+}
+
+fn prop_bool(props: &HashMap<String, zbus::zvariant::OwnedValue>, key: &str) -> bool {
+    matches!(props.get(key).map(|v| &**v), Some(Value::Bool(true)))
+}
+
+fn prop_str(props: &HashMap<String, zbus::zvariant::OwnedValue>, key: &str) -> Option<String> {
+    props.get(key).and_then(|v| match &**v {
+        Value::Str(s) => Some(s.as_str().trim().to_owned()).filter(|t| !t.is_empty()),
+        _ => None,
+    })
+}
+
+fn prop_u8(props: &HashMap<String, zbus::zvariant::OwnedValue>, key: &str) -> Option<u8> {
+    props.get(key).and_then(|v| match &**v {
+        Value::U8(b) => Some((*b).min(100)),
+        _ => None,
+    })
+}
+
+fn query_bluez_snapshot_via_dbus() -> Option<BluetoothSnapshot> {
+    let (_, objects) = bluez_managed_objects()?;
 
     let mut available = false;
     let mut powered = false;
-    let mut connected_device: Option<String> = None;
+    let mut discovering = false;
+    let mut adapter_name = None;
+    let mut adapter_address = None;
+    let mut battery_by_path: HashMap<String, u8> = HashMap::new();
+    let mut devices = Vec::new();
 
-    for ifaces in objects.values() {
+    for (path, ifaces) in &objects {
+        if let Some(bat_props) = ifaces
+            .iter()
+            .find_map(|(k, v)| (k.as_str() == "org.bluez.Battery1").then_some(v))
+            && let Some(pct) = prop_u8(bat_props, "Percentage")
+        {
+            battery_by_path.insert(path.as_str().to_owned(), pct);
+        }
+    }
+
+    for (path, ifaces) in &objects {
         for (iface_name, props) in ifaces {
             if iface_name.as_str() == "org.bluez.Adapter1" {
                 available = true;
-                if matches!(props.get("Powered").map(|v| &**v), Some(Value::Bool(true))) {
+                if prop_bool(props, "Powered") {
                     powered = true;
                 }
-            } else if iface_name.as_str() == "org.bluez.Device1"
-                && connected_device.is_none()
-                && matches!(
-                    props.get("Connected").map(|v| &**v),
-                    Some(Value::Bool(true))
-                )
-            {
-                connected_device = props
-                    .get("Alias")
-                    .or_else(|| props.get("Name"))
-                    .and_then(|v| match &**v {
-                        Value::Str(s) => Some(s.as_str().to_owned()),
-                        _ => None,
-                    })
-                    .filter(|s| !s.trim().is_empty());
+                if prop_bool(props, "Discovering") {
+                    discovering = true;
+                }
+                if adapter_name.is_none() {
+                    adapter_name = prop_str(props, "Alias").or_else(|| prop_str(props, "Name"));
+                }
+                if adapter_address.is_none() {
+                    adapter_address = prop_str(props, "Address");
+                }
+            } else if iface_name.as_str() == "org.bluez.Device1" {
+                let Some(raw_addr) = prop_str(props, "Address") else {
+                    continue;
+                };
+                let Some(address) = normalize_bt_address(&raw_addr) else {
+                    continue;
+                };
+                let name = prop_str(props, "Alias")
+                    .or_else(|| prop_str(props, "Name"))
+                    .unwrap_or_else(|| address.clone());
+                let icon = prop_str(props, "Icon").unwrap_or_default();
+                let paired = prop_bool(props, "Paired");
+                let connected = prop_bool(props, "Connected");
+                let trusted = prop_bool(props, "Trusted");
+                let battery_percent = battery_by_path.get(path.as_str()).copied();
+                devices.push(BluetoothDevice {
+                    address,
+                    name,
+                    icon,
+                    paired,
+                    connected,
+                    trusted,
+                    battery_percent,
+                });
             }
         }
     }
 
+    sort_bluetooth_devices(&mut devices);
+    let connected_device = devices.iter().find(|d| d.connected).map(|d| d.name.clone());
     let status_label = format_bluetooth_label(available, powered, connected_device.as_deref());
-    Some(BluetoothStatus {
-        available,
-        powered,
-        connected_device,
-        status_label,
+
+    Some(BluetoothSnapshot {
+        status: BluetoothStatus {
+            available,
+            powered,
+            connected_device,
+            status_label,
+        },
+        adapter_name,
+        adapter_address,
+        discovering,
+        devices,
     })
 }
 
-fn set_bluez_powered_via_dbus(powered: bool) -> bool {
-    let Ok(conn) = zbus::blocking::Connection::system() else {
-        return false;
-    };
-    let Ok(om_builder) = zbus::blocking::fdo::ObjectManagerProxy::builder(&conn)
-        .destination("org.bluez")
-        .and_then(|b| b.path("/"))
-    else {
-        return false;
-    };
-    let Ok(om) = om_builder.build() else {
-        return false;
-    };
-    let Ok(objects) = om.get_managed_objects() else {
-        return false;
-    };
-    let Some(adapter_path) = objects.into_iter().find_map(|(path, ifaces)| {
+fn sort_bluetooth_devices(devices: &mut [BluetoothDevice]) {
+    devices.sort_by(|a, b| {
+        b.connected
+            .cmp(&a.connected)
+            .then_with(|| b.paired.cmp(&a.paired))
+            .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+            .then_with(|| a.address.cmp(&b.address))
+    });
+}
+
+fn find_adapter_path(objects: &BluezManagedObjects) -> Option<zbus::zvariant::OwnedObjectPath> {
+    objects.iter().find_map(|(path, ifaces)| {
         ifaces
             .keys()
             .any(|k| k.as_str() == "org.bluez.Adapter1")
-            .then_some(path)
-    }) else {
+            .then(|| path.clone())
+    })
+}
+
+fn find_device_path(
+    objects: &BluezManagedObjects,
+    mac: &str,
+) -> Option<zbus::zvariant::OwnedObjectPath> {
+    objects.iter().find_map(|(path, ifaces)| {
+        let dev_props = ifaces
+            .iter()
+            .find_map(|(k, v)| (k.as_str() == "org.bluez.Device1").then_some(v))?;
+        let addr = prop_str(dev_props, "Address")?;
+        (normalize_bt_address(&addr).as_deref() == Some(mac)).then(|| path.clone())
+    })
+}
+
+fn call_bluez_adapter_method(method: &str) -> bool {
+    let Some((conn, objects)) = bluez_managed_objects() else {
         return false;
     };
+    let Some(adapter_path) = find_adapter_path(&objects) else {
+        return false;
+    };
+    conn.call_method(
+        Some("org.bluez"),
+        adapter_path.as_str(),
+        Some("org.bluez.Adapter1"),
+        method,
+        &(),
+    )
+    .is_ok()
+}
 
+fn call_bluez_device_method(mac: &str, method: &str) -> bool {
+    let Some((conn, objects)) = bluez_managed_objects() else {
+        return false;
+    };
+    let Some(dev_path) = find_device_path(&objects, mac) else {
+        return false;
+    };
+    conn.call_method(
+        Some("org.bluez"),
+        dev_path.as_str(),
+        Some("org.bluez.Device1"),
+        method,
+        &(),
+    )
+    .is_ok()
+}
+
+fn remove_bluez_device_via_dbus(mac: &str) -> bool {
+    let Some((conn, objects)) = bluez_managed_objects() else {
+        return false;
+    };
+    let Some(adapter_path) = find_adapter_path(&objects) else {
+        return false;
+    };
+    let Some(dev_path) = find_device_path(&objects, mac) else {
+        return false;
+    };
+    let obj_path: zbus::zvariant::ObjectPath<'_> = dev_path.as_ref();
+    conn.call_method(
+        Some("org.bluez"),
+        adapter_path.as_str(),
+        Some("org.bluez.Adapter1"),
+        "RemoveDevice",
+        &(obj_path,),
+    )
+    .is_ok()
+}
+
+fn run_bluetoothctl(args: &[&str]) -> bool {
+    Command::new("bluetoothctl")
+        .args(args)
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+fn set_bluez_powered_via_dbus(powered: bool) -> bool {
+    let Some((conn, objects)) = bluez_managed_objects() else {
+        return false;
+    };
+    let Some(adapter_path) = find_adapter_path(&objects) else {
+        return false;
+    };
     let Ok(iface_name) = zbus::names::InterfaceName::from_static_str("org.bluez.Adapter1") else {
         return false;
     };
@@ -858,16 +1177,19 @@ fn bluez_dbus_has_owner() -> Option<bool> {
     dbus.name_has_owner(bus_name).ok()
 }
 
-fn query_bluetooth_fallback() -> BluetoothStatus {
+fn query_bluetooth_snapshot_fallback() -> BluetoothSnapshot {
     let sysfs_present = fs::read_dir("/sys/class/bluetooth").is_ok_and(|mut d| d.next().is_some());
-    let mut status = BluetoothStatus {
-        available: sysfs_present,
-        powered: false,
-        connected_device: None,
-        status_label: format_bluetooth_label(sysfs_present, false, None),
+    let mut snap = BluetoothSnapshot {
+        status: BluetoothStatus {
+            available: sysfs_present,
+            powered: false,
+            connected_device: None,
+            status_label: format_bluetooth_label(sysfs_present, false, None),
+        },
+        ..BluetoothSnapshot::default()
     };
     if matches!(bluez_dbus_has_owner(), Some(false)) {
-        return status;
+        return snap;
     }
     if let Ok(output) = Command::new("bluetoothctl")
         .args(["--timeout", "1", "show"])
@@ -878,11 +1200,26 @@ fn query_bluetooth_fallback() -> BluetoothStatus {
         for line in text.lines() {
             let trimmed = line.trim();
             if let Some(rest) = trimmed.strip_prefix("Powered:") {
-                status.available = true;
-                status.powered = rest.trim().eq_ignore_ascii_case("yes");
+                snap.status.available = true;
+                snap.status.powered = rest.trim().eq_ignore_ascii_case("yes");
+            } else if let Some(rest) = trimmed.strip_prefix("Discovering:") {
+                snap.discovering = rest.trim().eq_ignore_ascii_case("yes");
+            } else if let Some(rest) = trimmed.strip_prefix("Alias:") {
+                let name = rest.trim();
+                if !name.is_empty() {
+                    snap.adapter_name = Some(name.to_owned());
+                }
             }
         }
-        status.status_label = format_bluetooth_label(status.available, status.powered, None);
+        if let Ok(devs_out) = Command::new("bluetoothctl")
+            .args(["--timeout", "1", "devices"])
+            .output()
+            && devs_out.status.success()
+        {
+            snap.devices = parse_bluetoothctl_devices(&String::from_utf8_lossy(&devs_out.stdout));
+        }
+        snap.status.status_label =
+            format_bluetooth_label(snap.status.available, snap.status.powered, None);
     }
-    status
+    snap
 }

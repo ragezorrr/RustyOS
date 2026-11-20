@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use rusty_services::{
     AudioStatus, BluetoothStatus, BrightnessStatus, MediaAction, MediaStatus, NetworkStatus,
-    PowerStatus, ServiceRegistry, SessionAction, UserAccount, local_clock_hhmm,
+    PowerProfile, PowerStatus, ServiceRegistry, SessionAction, UserAccount, local_clock_hhmm,
     local_clock_lock_date, local_clock_lock_hhmm, local_clock_short_datetime_fmt,
 };
 
@@ -78,6 +78,7 @@ enum TelemetryCmd {
     SetVolume(u8),
     ToggleMute,
     SetBluetoothPowered(bool),
+    SetPowerProfile(PowerProfile),
     SetWifiEnabled(bool),
     ConnectWifi(String),
     SetBrightness(u8),
@@ -412,6 +413,11 @@ impl SystemMetricsHandle {
         self.push_cmd(TelemetryCmd::Session(action));
     }
 
+    /// Requests switching the active `power-profiles-daemon` power profile asynchronously (`RUSTYOS-131`).
+    pub fn set_power_profile(&self, profile: PowerProfile) {
+        self.push_cmd(TelemetryCmd::SetPowerProfile(profile));
+    }
+
     fn push_cmd(&self, cmd: TelemetryCmd) {
         if let Ok(mut q) = self.shared.queue.lock() {
             q.push_back(cmd);
@@ -482,6 +488,9 @@ fn telemetry_worker_loop(shared: &SharedState) {
                 }
                 TelemetryCmd::SetBluetoothPowered(enabled) => {
                     let _ = services.bluetooth.set_powered(enabled);
+                }
+                TelemetryCmd::SetPowerProfile(profile) => {
+                    let _ = services.power.set_power_profile(profile);
                 }
                 TelemetryCmd::SetWifiEnabled(enabled) => {
                     let _ = services.network.set_wifi_enabled(enabled);

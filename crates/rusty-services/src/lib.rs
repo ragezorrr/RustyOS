@@ -40,21 +40,25 @@ mod media;
 mod power;
 
 pub use connectivity::{
-    BluetoothService, BluetoothStatus, NetworkService, NetworkStatus, WifiAccessPoint,
-    format_bluetooth_label, format_nm_network_status, format_nm_network_status_with_signal,
+    BluetoothDevice, BluetoothService, BluetoothSnapshot, BluetoothStatus, NetworkService,
+    NetworkStatus, WifiAccessPoint, format_bluetooth_label, format_nm_network_status,
+    format_nm_network_status_with_signal, normalize_bt_address, parse_bluetoothctl_devices,
     parse_nmcli_wifi_list, parse_proc_net_wireless_signal, wifi_signal_bars,
 };
 pub use display_session::{
-    BrightnessService, BrightnessStatus, SessionAction, SessionService, UserAccount, UserService,
-    calc_backlight_percent, calc_backlight_raw, local_clock_hhmm, local_clock_lock_date,
-    local_clock_lock_hhmm, local_clock_short_datetime, local_clock_short_datetime_fmt,
-    parse_passwd_users,
+    BrightnessService, BrightnessStatus, CurrentUserDetails, SessionAction, SessionService,
+    UserAccount, UserService, calc_backlight_percent, calc_backlight_raw, local_clock_hhmm,
+    local_clock_lock_date, local_clock_lock_hhmm, local_clock_short_datetime,
+    local_clock_short_datetime_fmt, parse_etc_group_for_user, parse_passwd_users,
 };
 pub use media::{
     AudioService, AudioStatus, MediaAction, MediaService, MediaStatus, format_wpctl_volume,
     parse_playerctl_status_line,
 };
-pub use power::{BatteryState, PowerService, PowerStatus};
+pub use power::{
+    BatteryCondition, BatteryState, PowerDetails, PowerProfile, PowerService, PowerStatus,
+    parse_powerprofilesctl_list,
+};
 pub use updates::{
     PackageUpdateItem, UpdateCheckState, UpdateCheckerHandle, UpdateStatusSnapshot,
     is_rustyos_package, package_requires_restart, parse_checkupdates_output,
@@ -336,5 +340,117 @@ svc:x:1002:1002:Disabled Account:/home/svc:/usr/bin/false
         assert!(lock_12.contains(':') && !lock_12.contains("AM") && !lock_12.contains("PM"));
         let lock_24 = local_clock_lock_hhmm(true);
         assert!(lock_24.len() == 5 && lock_24.contains(':'));
+    }
+
+    #[test]
+    fn bluetooth_mac_validation_and_device_parser_reject_invalid_input() {
+        assert_eq!(
+            normalize_bt_address(" aa:bb:cc:11:22:ff "),
+            Some("AA:BB:CC:11:22:FF".to_owned())
+        );
+        assert_eq!(normalize_bt_address("invalid;rm -rf"), None);
+        assert_eq!(normalize_bt_address("AA:BB:CC:DD:EE"), None);
+
+        let raw = "\
+Device 11:22:33:44:55:66 AirPods Pro
+Device bad-mac Broken Device
+Device aa:bb:cc:dd:ee:ff MX Master 3S
+Device 11:22:33:44:55:66 Duplicate Name
+";
+        let list = parse_bluetoothctl_devices(raw);
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].address, "11:22:33:44:55:66");
+        assert_eq!(list[0].name, "AirPods Pro");
+        assert_eq!(list[1].address, "AA:BB:CC:DD:EE:FF");
+        assert_eq!(list[1].name, "MX Master 3S");
+
+        let bt = BluetoothService::new();
+        assert!(!bt.connect_device("not-a-mac"));
+        assert!(!bt.remove_device("not-a-mac"));
+    }
+
+    #[test]
+    fn power_service_parses_health_cycles_and_profile_output() {
+        let base = std::env::temp_dir().join(format!("rustyos_power_det_{}", std::process::id()));
+        let bat = base.join("BAT0");
+        let ac = base.join("AC");
+        let _ = fs::create_dir_all(&bat);
+        let _ = fs::create_dir_all(&ac);
+        let _ = fs::write(ac.join("type"), "Mains\n");
+        let _ = fs::write(ac.join("online"), "0\n");
+        let _ = fs::write(bat.join("type"), "Battery\n");
+        let _ = fs::write(bat.join("status"), "Discharging\n");
+        let _ = fs::write(bat.join("capacity"), "62\n");
+        let _ = fs::write(bat.join("energy_full_design"), "50000000\n");
+        let _ = fs::write(bat.join("energy_full"), "44000000\n");
+        let _ = fs::write(bat.join("energy_now"), "22000000\n");
+        let _ = fs::write(bat.join("power_now"), "11000000\n");
+        let _ = fs::write(bat.join("cycle_count"), "142\n");
+        let _ = fs::write(bat.join("model_name"), "RustyCell-50\n");
+        let _ = fs::write(bat.join("technology"), "Li-poly\n");
+        let hid = base.join("hidpp_battery_0");
+        let _ = fs::create_dir_all(&hid);
+        let _ = fs::write(hid.join("type"), "Battery\n");
+        let _ = fs::write(hid.join("scope"), "Device\n");
+        let _ = fs::write(hid.join("status"), "Full\n");
+        let _ = fs::write(hid.join("capacity"), "95\n");
+
+        let svc = PowerService {
+            base_path: base.to_string_lossy().into_owned(),
+        };
+        let det = svc.query_sysfs_details();
+        assert!(det.status.has_battery);
+        assert_eq!(det.status.percentage, 62);
+        assert_eq!(det.health_percent, Some(88));
+        assert_eq!(det.cycle_count, Some(142));
+        assert_eq!(det.condition, BatteryCondition::Normal);
+        assert_eq!(det.time_remaining_minutes, Some(120));
+        assert!(det.power_watts.is_some_and(|w| (w - 11.0).abs() < 0.01));
+        assert_eq!(det.model_name.as_deref(), Some("RustyCell-50"));
+        assert_eq!(det.technology.as_deref(), Some("Li-poly"));
+
+        let prof_out = "\
+  performance:
+* balanced:
+  power-saver:
+";
+        let (active, avail) = parse_powerprofilesctl_list(prof_out);
+        assert_eq!(active, Some(PowerProfile::Balanced));
+        assert_eq!(
+            avail,
+            vec![
+                PowerProfile::Performance,
+                PowerProfile::Balanced,
+                PowerProfile::LowPower
+            ]
+        );
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn current_user_details_parses_passwd_groups_and_admin_role() {
+        let passwd = "alice:x:1000:1000:Alice Example,:/home/alice:/bin/zsh\n";
+        let groups = "\
+wheel:x:998:alice
+alice:x:1000:
+video:x:986:alice,bob
+";
+        let det = UserService::parse_current_user_details(
+            "alice",
+            passwd,
+            groups,
+            None,
+            "/nonexistent",
+            "wayland",
+        );
+        assert_eq!(det.username, "alice");
+        assert_eq!(det.display_name, "Alice Example");
+        assert_eq!(det.uid, 1000);
+        assert_eq!(det.gid, 1000);
+        assert_eq!(det.shell, "/bin/zsh");
+        assert!(det.is_admin);
+        assert_eq!(det.groups, vec!["wheel", "alice", "video"]);
+        assert_eq!(det.session_type, "Wayland");
     }
 }

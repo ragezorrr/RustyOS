@@ -1703,3 +1703,40 @@ fn client_forwarded_typing_does_not_mark_shell_redraw_while_launcher_typing_does
 
     Ok(())
 }
+
+#[test]
+fn custom_shortcuts_override_defaults_in_match_shortcut_with_config() {
+    let custom = crate::config::ShortcutBindings {
+        launcher: String::from("Ctrl+Space"),
+        close_window: String::from("Super+Q"),
+        ..Default::default()
+    };
+
+    let ctrl_space = ModifiersState {
+        ctrl: true,
+        ..ModifiersState::default()
+    };
+    assert_eq!(
+        keyboard::match_shortcut_with_config(ctrl_space, Keysym::space, &custom),
+        Some(KeyIntercept::ToggleLauncher)
+    );
+
+    // Old default Alt+Space no longer launches once customized away.
+    let alt_space = ModifiersState {
+        alt: true,
+        ..ModifiersState::default()
+    };
+    assert_eq!(
+        keyboard::match_shortcut_with_config(alt_space, Keysym::space, &custom),
+        None
+    );
+
+    let super_q = ModifiersState {
+        logo: true,
+        ..ModifiersState::default()
+    };
+    assert_eq!(
+        keyboard::match_shortcut_with_config(super_q, Keysym::Q, &custom),
+        Some(KeyIntercept::Wm(WmAction::CloseFocused))
+    );
+}

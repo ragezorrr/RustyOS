@@ -61,7 +61,7 @@ use crate::layout::{
 use crate::liquid_glass::{GlassStyle, RustyosLiquidGlassManagerV1, RustyosSurfaceGlassV1};
 use crate::render::{render_window_pixels_with_glass, with_font_engine};
 use crate::state::{
-    DamageScope, ServiceCommand, ServiceSnapshot, SettingsAppState, StartupOptions,
+    DamageScope, ServiceCommand, ServiceSnapshot, SettingsAppState, SettingsPage, StartupOptions,
     execute_coalesced_service_batch,
 };
 
@@ -220,12 +220,51 @@ impl SettingsClient {
     }
 
     fn handle_key(&mut self, keysym: Keysym, utf8: Option<&str>) {
-        if self.modifiers.ctrl && matches!(keysym, Keysym::f | Keysym::F) {
-            self.app.set_search_focused(true);
-            return;
-        }
         if self.modifiers.ctrl && matches!(keysym, Keysym::q | Keysym::Q) {
             self.app.request_quit();
+            return;
+        }
+        if self.app.active_modal.is_some() {
+            if let Some(ui_key) = map_keysym_to_ui(keysym, utf8) {
+                let mods = rusty_ui::InputModifiers {
+                    ctrl: self.modifiers.ctrl,
+                    shift: self.modifiers.shift,
+                    alt: self.modifiers.alt,
+                };
+                if with_font_engine(|fe| {
+                    self.app
+                        .handle_modal_text_key(ui_key, mods, fe, &mut self.clipboard)
+                }) {
+                    self.sync_clipboard_io();
+                    self.layout_cache = None;
+                    self.flush_pending_service_commands();
+                }
+            }
+            return;
+        }
+        if self.app.current_page == SettingsPage::Battery && self.app.low_power_dropdown.open {
+            let ctrl_key = match keysym {
+                Keysym::Up => Some(rusty_ui::ControlKey::Up),
+                Keysym::Down => Some(rusty_ui::ControlKey::Down),
+                Keysym::Home => Some(rusty_ui::ControlKey::Home),
+                Keysym::End => Some(rusty_ui::ControlKey::End),
+                Keysym::Return | Keysym::KP_Enter => Some(rusty_ui::ControlKey::Enter),
+                Keysym::Escape => Some(rusty_ui::ControlKey::Escape),
+                _ => None,
+            };
+            if let Some(ck) = ctrl_key {
+                if let Some(idx) = self.app.low_power_dropdown.handle_key(ck) {
+                    self.app.select_low_power_mode(idx);
+                    self.flush_pending_service_commands();
+                } else {
+                    self.app.mark_dirty(DamageScope::Page);
+                }
+                self.layout_cache = None;
+                return;
+            }
+        }
+        if self.modifiers.ctrl && matches!(keysym, Keysym::f | Keysym::F) {
+            self.app.set_search_focused(true);
             return;
         }
         if self.app.search_focused
@@ -288,6 +327,37 @@ impl SettingsClient {
         self.last_click_at = Some(now);
 
         let layout = self.current_layout();
+        if self.app.active_modal.is_some() {
+            self.handle_modal_left_press(px, py, double_click);
+            return;
+        }
+        if self.app.current_page == SettingsPage::Battery
+            && self.app.low_power_dropdown.open
+            && let Some(dd_rect) = layout.low_power_dropdown_rect
+        {
+            self.app.low_power_dropdown.rect = rusty_ui::Rect::new(
+                dd_rect.x,
+                dd_rect.y,
+                u32::try_from(dd_rect.w.max(1)).unwrap_or(1),
+                u32::try_from(dd_rect.h.max(1)).unwrap_or(1),
+            );
+            let picked = self.app.low_power_dropdown.on_pointer_down(px, py);
+            if let Some(idx) = picked {
+                self.app.select_low_power_mode(idx);
+                self.flush_pending_service_commands();
+                self.layout_cache = None;
+                return;
+            }
+            if self.app.low_power_dropdown.open {
+                self.app.mark_dirty(DamageScope::Page);
+                return;
+            }
+            self.app.mark_dirty(DamageScope::Page);
+            self.layout_cache = None;
+            if dd_rect.contains_f64(px, py) {
+                return;
+            }
+        }
         let hit = hit_test(&layout, px, py);
         if !matches!(hit, Some(SettingsHit::SearchField)) && self.app.search_focused {
             self.app.set_search_focused(false);
@@ -380,6 +450,18 @@ impl SettingsClient {
                     }
                 }
             }
+            other => self.dispatch_content_hit(other, layout, px, py),
+        }
+    }
+
+    fn dispatch_content_hit(
+        &mut self,
+        hit: SettingsHit,
+        layout: &SettingsLayout,
+        px: f64,
+        py: f64,
+    ) {
+        match hit {
             SettingsHit::NavBack => {
                 self.app.go_back();
                 self.layout_cache = None;
@@ -431,6 +513,22 @@ impl SettingsClient {
                     .apply_row_action(crate::state::RowControlId::DockPositionSet(idx));
                 self.layout_cache = None;
             }
+            SettingsHit::BatteryTab(idx) => {
+                self.app.select_battery_tab(idx);
+                self.layout_cache = None;
+            }
+            SettingsHit::LowPowerDropdownTrigger => {
+                if let Some(dd_rect) = layout.low_power_dropdown_rect {
+                    self.app.low_power_dropdown.rect = rusty_ui::Rect::new(
+                        dd_rect.x,
+                        dd_rect.y,
+                        u32::try_from(dd_rect.w.max(1)).unwrap_or(1),
+                        u32::try_from(dd_rect.h.max(1)).unwrap_or(1),
+                    );
+                }
+                let _ = self.app.low_power_dropdown.on_pointer_down(px, py);
+                self.app.mark_dirty(DamageScope::Page);
+            }
             SettingsHit::Control(id)
             | SettingsHit::StepperMinus(id)
             | SettingsHit::StepperPlus(id) => {
@@ -439,6 +537,30 @@ impl SettingsClient {
                 let next_layout = self.current_layout();
                 self.app.sync_toggles_from_layout(&next_layout);
             }
+            SettingsHit::ResizeEdge(_)
+            | SettingsHit::WindowDrag
+            | SettingsHit::TrafficClose
+            | SettingsHit::TrafficMinimize
+            | SettingsHit::TrafficMaximize => {}
+        }
+    }
+
+    fn handle_modal_left_press(&mut self, px: f64, py: f64, _double_click: bool) {
+        let w = self.width.max(1);
+        let h = self.height.max(1);
+        let streak = self.click_streak;
+        let elapsed = self.app.epoch.elapsed();
+        if let Some(modal) = &mut self.app.active_modal {
+            let sheet = modal.sheet_mut();
+            let layout = sheet.sync_input_rect(w, h);
+            if let (Some(tf), Some(ir)) = (&mut sheet.input, layout.input_rect)
+                && ir.contains_f64(px, py)
+            {
+                let _ = with_font_engine(|fe| tf.on_pointer_down(px, py, streak, elapsed, fe));
+            } else {
+                let _ = sheet.on_pointer_down(px, py, w, h);
+            }
+            self.app.mark_dirty(DamageScope::Full);
         }
     }
 }
@@ -637,7 +759,13 @@ fn insert_settings_sources(
     loop_handle
         .insert_source(paste_source, |(), (), client| {
             if let Some(pasted) = client.clipboard.poll_received_paste() {
-                let changed = with_font_engine(|fe| client.app.apply_search_paste(&pasted, fe));
+                let changed = with_font_engine(|fe| {
+                    if client.app.active_modal.is_some() {
+                        client.app.handle_modal_paste(&pasted, fe)
+                    } else {
+                        client.app.apply_search_paste(&pasted, fe)
+                    }
+                });
                 if changed {
                     client.layout_cache = None;
                 }
@@ -1114,6 +1242,8 @@ const fn hit_damage_scope(hit: Option<&SettingsHit>) -> DamageScope {
             | SettingsHit::SelectAccent(_)
             | SettingsHit::PushPage(_)
             | SettingsHit::DockPosTile(_)
+            | SettingsHit::BatteryTab(_)
+            | SettingsHit::LowPowerDropdownTrigger
             | SettingsHit::Control(_)
             | SettingsHit::StepperMinus(_)
             | SettingsHit::StepperPlus(_)
@@ -1135,27 +1265,12 @@ impl PointerHandler for SettingsClient {
             match ev.kind {
                 PointerEventKind::Enter { .. } | PointerEventKind::Motion { .. } => {
                     self.pointer_inside = true;
-                    if self.update_scrollbar_drag(ev.position.1) {
+                    if self.handle_modal_pointer_motion(ev.position.0, ev.position.1)
+                        || self.update_scrollbar_drag(ev.position.1)
+                    {
                         continue;
                     }
-                    if self.pointer_pressed && self.app.search_focused {
-                        let changed = with_font_engine(|fe| {
-                            self.app.search_field.on_pointer_move(ev.position.0, fe)
-                        });
-                        if changed {
-                            self.app.mark_dirty(DamageScope::Sidebar);
-                        }
-                    }
-                    let layout = self.current_layout();
-                    let next = hit_test(&layout, ev.position.0, ev.position.1);
-                    if next != self.hover_hit {
-                        let scope = hit_damage_scope(self.hover_hit.as_ref())
-                            .merge(hit_damage_scope(next.as_ref()));
-                        self.hover_hit = next;
-                        if scope != DamageScope::None {
-                            self.app.mark_dirty(scope);
-                        }
-                    }
+                    self.handle_page_pointer_motion(ev.position.0, ev.position.1);
                 }
                 PointerEventKind::Leave { .. } => {
                     self.pointer_inside = false;
@@ -1180,6 +1295,7 @@ impl PointerHandler for SettingsClient {
                     self.pointer_pressed = false;
                     self.scrollbar_drag = None;
                     self.app.search_field.on_pointer_up();
+                    self.handle_modal_left_release(ev.position.0, ev.position.1);
                 }
                 PointerEventKind::Axis {
                     vertical, source, ..
@@ -1201,6 +1317,90 @@ impl PointerHandler for SettingsClient {
                 }
                 PointerEventKind::Press { .. } | PointerEventKind::Release { .. } => {}
             }
+        }
+    }
+}
+
+impl SettingsClient {
+    fn handle_modal_pointer_motion(&mut self, px: f64, py: f64) -> bool {
+        if self.app.active_modal.is_none() {
+            return false;
+        }
+        let w = self.width.max(1);
+        let h = self.height.max(1);
+        let pressed = self.pointer_pressed;
+        if let Some(modal) = &mut self.app.active_modal {
+            let sheet = modal.sheet_mut();
+            let mut changed = sheet.on_pointer_move(px, py, w, h);
+            if pressed && let Some(tf) = &mut sheet.input {
+                changed |= with_font_engine(|fe| tf.on_pointer_move(px, fe));
+            }
+            if changed {
+                self.app.mark_dirty(DamageScope::Full);
+            }
+        }
+        true
+    }
+
+    fn handle_page_pointer_motion(&mut self, px: f64, py: f64) {
+        if self.pointer_pressed && self.app.search_focused {
+            let changed = with_font_engine(|fe| self.app.search_field.on_pointer_move(px, fe));
+            if changed {
+                self.app.mark_dirty(DamageScope::Sidebar);
+            }
+        }
+        let layout = self.current_layout();
+        if self.app.current_page == SettingsPage::Battery
+            && self.app.low_power_dropdown.open
+            && let Some(dd_rect) = layout.low_power_dropdown_rect
+        {
+            self.app.low_power_dropdown.rect = rusty_ui::Rect::new(
+                dd_rect.x,
+                dd_rect.y,
+                u32::try_from(dd_rect.w.max(1)).unwrap_or(1),
+                u32::try_from(dd_rect.h.max(1)).unwrap_or(1),
+            );
+            if self.app.low_power_dropdown.on_pointer_move(px, py) {
+                self.app.mark_dirty(DamageScope::Page);
+            }
+        }
+        let next = hit_test(&layout, px, py);
+        if next != self.hover_hit {
+            let scope =
+                hit_damage_scope(self.hover_hit.as_ref()).merge(hit_damage_scope(next.as_ref()));
+            self.hover_hit = next;
+            if scope != DamageScope::None {
+                self.app.mark_dirty(scope);
+            }
+        }
+    }
+
+    fn handle_modal_left_release(&mut self, px: f64, py: f64) {
+        if self.app.active_modal.is_none() {
+            return;
+        }
+        let w = self.width.max(1);
+        let h = self.height.max(1);
+        let act = if let Some(modal) = &mut self.app.active_modal {
+            let sheet = modal.sheet_mut();
+            if let Some(tf) = &mut sheet.input {
+                tf.on_pointer_up();
+            }
+            sheet.on_pointer_up(px, py, w, h)
+        } else {
+            None
+        };
+        match act {
+            Some(rusty_ui::DialogAction::Confirm) => {
+                self.app.confirm_active_modal();
+                self.layout_cache = None;
+                self.flush_pending_service_commands();
+            }
+            Some(rusty_ui::DialogAction::Cancel) => {
+                self.app.dismiss_active_modal();
+                self.layout_cache = None;
+            }
+            None => self.app.mark_dirty(DamageScope::Full),
         }
     }
 }

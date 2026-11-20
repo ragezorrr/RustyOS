@@ -9,6 +9,7 @@ use smithay::{
 };
 use tracing::info;
 
+use crate::config::{ShortcutBindings, parse_shortcut_combo};
 use crate::state::RustyCompositorState;
 
 use super::{KeyIntercept, PortalKeyAction, SecurityKeyAction};
@@ -594,7 +595,7 @@ pub(super) fn classify_keyboard_input(
             return FilterResult::Intercept(KeyIntercept::DesktopMoveSelectedToTrash);
         }
     }
-    if let Some(action) = match_shortcut(modifiers, sym) {
+    if let Some(action) = match_shortcut_with_config(modifiers, sym, &state.user_config.shortcuts) {
         FilterResult::Intercept(action)
     } else {
         FilterResult::Forward
@@ -707,50 +708,129 @@ pub(super) fn match_launcher_key(
     KeyIntercept::LauncherConsume
 }
 
-/// Maps keyboard modifiers and keysyms to compositor / window manager actions.
+/// Maps keyboard modifiers and keysyms using default [`ShortcutBindings`].
+#[cfg(test)]
 pub(super) fn match_shortcut(modifiers: ModifiersState, sym: Keysym) -> Option<KeyIntercept> {
+    match_shortcut_with_config(modifiers, sym, &ShortcutBindings::default())
+}
+
+/// Maps keyboard modifiers and keysyms against configurable `[shortcuts]` and built-in WM bindings (`RUSTYOS-131`).
+pub(super) fn match_shortcut_with_config(
+    modifiers: ModifiersState,
+    sym: Keysym,
+    shortcuts: &ShortcutBindings,
+) -> Option<KeyIntercept> {
     if sym.raw() == Keysym::Escape.raw()
         || (modifiers.ctrl && modifiers.alt && sym.raw() == Keysym::BackSpace.raw())
     {
         return Some(KeyIntercept::ExitCompositor);
     }
-
-    // Super + Space or Alt + Space activates macOS-style Spotlight application launcher
-    if (modifiers.logo || modifiers.alt) && sym.raw() == Keysym::space.raw() {
-        return Some(KeyIntercept::ToggleLauncher);
-    }
-
-    // Super + Tab toggles Workspace Overview (`RUSTYOS-023`)
-    if modifiers.logo && sym.raw() == Keysym::Tab.raw() {
-        return Some(KeyIntercept::ToggleOverview);
-    }
-
-    // Super + L or Ctrl + Alt + L engages session Lock Screen (`RUSTYOS-025`)
-    if (modifiers.logo || (modifiers.ctrl && modifiers.alt)) && matches!(sym, Keysym::l | Keysym::L)
-    {
-        return Some(KeyIntercept::LockScreen);
-    }
-    if modifiers.logo
-        && !modifiers.shift
-        && !modifiers.alt
-        && !modifiers.ctrl
-        && sym.raw() == Keysym::comma.raw()
-    {
-        return Some(KeyIntercept::ToggleSettings);
-    }
-    if modifiers.logo
-        && modifiers.shift
-        && !modifiers.alt
-        && !modifiers.ctrl
-        && matches!(sym, Keysym::r | Keysym::R)
-    {
-        return Some(KeyIntercept::ReloadConfig);
-    }
-
     if let Some(hw) = match_hardware_shortcut(modifiers, sym) {
         return Some(hw);
     }
+    if let Some(configured) = match_configured_shortcut(modifiers, sym, shortcuts) {
+        return Some(configured);
+    }
+    match_builtin_wm_shortcut(modifiers, sym)
+}
 
+fn match_configured_shortcut(
+    modifiers: ModifiersState,
+    sym: Keysym,
+    shortcuts: &ShortcutBindings,
+) -> Option<KeyIntercept> {
+    let bindings: [(&str, KeyIntercept); 17] = [
+        (&shortcuts.launcher, KeyIntercept::ToggleLauncher),
+        (&shortcuts.overview, KeyIntercept::ToggleOverview),
+        (&shortcuts.lock_screen, KeyIntercept::LockScreen),
+        (&shortcuts.settings, KeyIntercept::ToggleSettings),
+        (&shortcuts.reload_config, KeyIntercept::ReloadConfig),
+        (&shortcuts.quick_settings, KeyIntercept::ToggleQuickSettings),
+        (
+            &shortcuts.close_window,
+            KeyIntercept::Wm(WmAction::CloseFocused),
+        ),
+        (
+            &shortcuts.toggle_maximize,
+            KeyIntercept::Wm(WmAction::ToggleMaximizeFocused),
+        ),
+        (
+            &shortcuts.toggle_fullscreen,
+            KeyIntercept::Wm(WmAction::ToggleFullscreen),
+        ),
+        (&shortcuts.minimize_window, KeyIntercept::MinimizeFocused),
+        (
+            &shortcuts.snap_left,
+            KeyIntercept::Wm(WmAction::SnapFocused(SnapTarget::LeftHalf)),
+        ),
+        (
+            &shortcuts.snap_right,
+            KeyIntercept::Wm(WmAction::SnapFocused(SnapTarget::RightHalf)),
+        ),
+        (
+            &shortcuts.snap_center,
+            KeyIntercept::Wm(WmAction::SnapFocused(SnapTarget::Center)),
+        ),
+        (
+            &shortcuts.switch_layout,
+            KeyIntercept::Wm(WmAction::ToggleLayoutMode),
+        ),
+        (&shortcuts.reduced_motion, KeyIntercept::ToggleReducedMotion),
+        (
+            &shortcuts.toggle_notifications,
+            KeyIntercept::TriggerNotification,
+        ),
+        (
+            &shortcuts.clear_notifications,
+            KeyIntercept::ClearNotifications,
+        ),
+    ];
+
+    for (raw, intercept) in bindings {
+        if let Some(combo) = parse_shortcut_combo(raw)
+            && combo.matches(modifiers, sym)
+        {
+            return Some(intercept);
+        }
+    }
+
+    let defaults = ShortcutBindings::default();
+    if shortcuts.launcher == defaults.launcher
+        && modifiers.alt
+        && !modifiers.ctrl
+        && !modifiers.logo
+        && sym.raw() == Keysym::space.raw()
+    {
+        return Some(KeyIntercept::ToggleLauncher);
+    }
+    if shortcuts.overview == defaults.overview
+        && modifiers.alt
+        && !modifiers.ctrl
+        && !modifiers.logo
+        && matches!(sym, Keysym::e | Keysym::E)
+    {
+        return Some(KeyIntercept::ToggleOverview);
+    }
+    if shortcuts.lock_screen == defaults.lock_screen
+        && modifiers.ctrl
+        && modifiers.alt
+        && !modifiers.logo
+        && matches!(sym, Keysym::l | Keysym::L)
+    {
+        return Some(KeyIntercept::LockScreen);
+    }
+    if shortcuts.close_window == defaults.close_window
+        && modifiers.alt
+        && !modifiers.ctrl
+        && !modifiers.logo
+        && matches!(sym, Keysym::q | Keysym::Q)
+    {
+        return Some(KeyIntercept::Wm(WmAction::CloseFocused));
+    }
+    None
+}
+
+fn match_builtin_wm_shortcut(modifiers: ModifiersState, sym: Keysym) -> Option<KeyIntercept> {
     if !modifiers.alt {
         return None;
     }
@@ -765,47 +845,19 @@ pub(super) fn match_shortcut(modifiers: ModifiersState, sym: Keysym) -> Option<K
     }
 
     match sym {
-        Keysym::Tab => {
-            if modifiers.shift {
-                Some(KeyIntercept::SwitcherStep(-1))
-            } else {
-                Some(KeyIntercept::SwitcherStep(1))
-            }
-        }
+        Keysym::Tab => Some(KeyIntercept::SwitcherStep(if modifiers.shift {
+            -1
+        } else {
+            1
+        })),
         Keysym::ISO_Left_Tab => Some(KeyIntercept::SwitcherStep(-1)),
-        Keysym::j | Keysym::J => {
-            if modifiers.shift {
-                Some(KeyIntercept::Wm(WmAction::FocusPrev))
-            } else {
-                Some(KeyIntercept::Wm(WmAction::FocusNext))
-            }
-        }
+        Keysym::j | Keysym::J => Some(KeyIntercept::Wm(if modifiers.shift {
+            WmAction::FocusPrev
+        } else {
+            WmAction::FocusNext
+        })),
         Keysym::k | Keysym::K => Some(KeyIntercept::Wm(WmAction::FocusPrev)),
-        Keysym::w | Keysym::W | Keysym::q | Keysym::Q => {
-            Some(KeyIntercept::Wm(WmAction::CloseFocused))
-        }
-        Keysym::l | Keysym::L => Some(KeyIntercept::Wm(WmAction::ToggleLayoutMode)),
-        Keysym::m | Keysym::M => Some(KeyIntercept::Wm(WmAction::ToggleMaximizeFocused)),
-        Keysym::f | Keysym::F => Some(KeyIntercept::Wm(WmAction::ToggleFullscreen)),
-        Keysym::Left => Some(KeyIntercept::Wm(WmAction::SnapFocused(
-            SnapTarget::LeftHalf,
-        ))),
-        Keysym::Right => Some(KeyIntercept::Wm(WmAction::SnapFocused(
-            SnapTarget::RightHalf,
-        ))),
-        Keysym::c | Keysym::C => Some(KeyIntercept::Wm(WmAction::SnapFocused(SnapTarget::Center))),
         Keysym::o | Keysym::O => Some(KeyIntercept::Wm(WmAction::MoveFocusedToNextOutput)),
-        Keysym::r | Keysym::R => Some(KeyIntercept::ToggleReducedMotion),
-        Keysym::s | Keysym::S => Some(KeyIntercept::ToggleQuickSettings),
-        Keysym::e | Keysym::E => Some(KeyIntercept::ToggleOverview),
-        Keysym::h | Keysym::H => Some(KeyIntercept::MinimizeFocused),
-        Keysym::n | Keysym::N => {
-            if modifiers.shift {
-                Some(KeyIntercept::ClearNotifications)
-            } else {
-                Some(KeyIntercept::TriggerNotification)
-            }
-        }
         _ => None,
     }
 }
