@@ -127,6 +127,12 @@ impl CompositorHandler for RustyCompositorState {
                     }
                 }
             }
+        } else if let Some(parent_win) = self.window_bindings.iter().find_map(|(_, w)| {
+            WaylandFocus::wl_surface(w)
+                .is_some_and(|ws| Self::surface_in_tree(&ws, surface))
+                .then(|| w.clone())
+        }) {
+            parent_win.on_commit();
         }
 
         if let Some(PopupKind::Xdg(xdg)) = self.popups.find_popup(surface) {

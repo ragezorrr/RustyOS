@@ -276,6 +276,8 @@ struct DrmOutputState {
     hw_cursor_enabled: bool,
     last_frame_hw_cursor: bool,
     frame_start: Option<Instant>,
+    last_frame_callback_at: Option<Instant>,
+    empty_frame_callback_deadline: Option<Instant>,
     pending_presentation_feedback: Option<OutputPresentationFeedback>,
     vblank_seq: u64,
 }
@@ -410,6 +412,8 @@ fn build_drm_output_state(
         hw_cursor_enabled,
         last_frame_hw_cursor: false,
         frame_start: None,
+        last_frame_callback_at: None,
+        empty_frame_callback_deadline: None,
         pending_presentation_feedback: None,
         vblank_seq: 0,
     })
@@ -431,6 +435,7 @@ impl DrmOutputState {
             self.vblank_pending = false;
             self.vblank_queued_at = None;
             self.requeue_delay_until = None;
+            self.empty_frame_callback_deadline = None;
             if let Some(mut stale) = self.pending_presentation_feedback.take() {
                 stale.discarded();
             }
@@ -493,6 +498,28 @@ impl DrmOutputState {
                     if state.ext_session_locked {
                         state.confirm_pending_session_lock();
                     }
+                    let now = Instant::now();
+                    let has_pending = state.output_has_pending_frame_callbacks(target_output);
+                    match plan_empty_frame_callback_action(
+                        now,
+                        self.last_frame_callback_at,
+                        self.vrefresh,
+                        has_pending,
+                    ) {
+                        EmptyFrameCallbackAction::None => {
+                            self.empty_frame_callback_deadline = None;
+                        }
+                        EmptyFrameCallbackAction::SendNow => {
+                            let elapsed = state.elapsed();
+                            state.send_output_frame_callbacks(target_output, elapsed);
+                            let _ = state.display_handle.flush_clients();
+                            self.last_frame_callback_at = Some(now);
+                            self.empty_frame_callback_deadline = None;
+                        }
+                        EmptyFrameCallbackAction::ScheduleAt(deadline) => {
+                            self.empty_frame_callback_deadline = Some(deadline);
+                        }
+                    }
                     return;
                 }
                 if result.needs_sync()
@@ -518,6 +545,7 @@ impl DrmOutputState {
                     self.vblank_queued_at = Some(Instant::now());
                     self.needs_redraw = false;
                     self.requeue_delay_until = None;
+                    self.empty_frame_callback_deadline = None;
                     self.frame_start = Some(render_start);
                     self.last_frame_direct_scanout = direct_scanout;
                     self.last_frame_hw_cursor = hw_cursor;
@@ -569,6 +597,31 @@ pub(crate) fn vblank_client_grace_duration(vrefresh_hz: u32) -> Duration {
     Duration::from_micros(grace_us)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EmptyFrameCallbackAction {
+    None,
+    SendNow,
+    ScheduleAt(Instant),
+}
+
+fn plan_empty_frame_callback_action(
+    now: Instant,
+    last_sent_at: Option<Instant>,
+    vrefresh_hz: u32,
+    has_pending_callbacks: bool,
+) -> EmptyFrameCallbackAction {
+    if !has_pending_callbacks {
+        return EmptyFrameCallbackAction::None;
+    }
+    let interval = Duration::from_micros(mode_refresh_interval_us(vrefresh_hz));
+    let due_at = last_sent_at.map_or(now, |prev| prev + interval);
+    if now >= due_at {
+        EmptyFrameCallbackAction::SendNow
+    } else {
+        EmptyFrameCallbackAction::ScheduleAt(due_at)
+    }
+}
+
 fn is_client_forwarded_only_input<B: smithay::backend::input::InputBackend>(
     event: &InputEvent<B>,
 ) -> bool {
@@ -613,21 +666,79 @@ impl DrmRuntime {
         })
     }
 
+    fn has_due_empty_frame_callbacks(&self, now: Instant) -> bool {
+        self.outputs.values().any(|out| {
+            !out.vblank_pending
+                && out
+                    .empty_frame_callback_deadline
+                    .is_some_and(|deadline| now >= deadline)
+        })
+    }
+
+    fn flush_due_empty_frame_callbacks(&mut self, state: &mut RustyCompositorState) {
+        if !state.running || self.paused {
+            return;
+        }
+        let now = Instant::now();
+        let crtcs = self.output_order.clone();
+        let mut flushed_any = false;
+        for crtc in crtcs {
+            let Some(output_id) = self.outputs.get_mut(&crtc).and_then(|out| {
+                if !out.vblank_pending
+                    && out
+                        .empty_frame_callback_deadline
+                        .is_some_and(|deadline| now >= deadline)
+                {
+                    out.empty_frame_callback_deadline = None;
+                    out.last_frame_callback_at = Some(now);
+                    Some(out.output_id)
+                } else {
+                    None
+                }
+            }) else {
+                continue;
+            };
+            let target_output = state
+                .output_map
+                .get(output_id)
+                .map_or_else(|| state.output.clone(), |entry| entry.output.clone());
+            if state.output_has_pending_frame_callbacks(&target_output) {
+                let elapsed = state.elapsed();
+                state.send_output_frame_callbacks(&target_output, elapsed);
+                flushed_any = true;
+            }
+        }
+        if flushed_any {
+            state.space.refresh();
+            state.popups.cleanup();
+            state.cleanup_ime_popups();
+            let _ = state.display_handle.flush_clients();
+        }
+    }
+
     fn next_timer_duration(&self, state: &RustyCompositorState) -> Duration {
         let now = Instant::now();
         let mut earliest_ready: Option<Duration> = None;
         for out in self.outputs.values() {
-            if out.vblank_pending || !out.needs_redraw {
+            if out.vblank_pending {
                 continue;
             }
-            let wait = out
-                .requeue_delay_until
-                .map_or(Duration::from_micros(250), |deadline| {
-                    deadline
-                        .saturating_duration_since(now)
-                        .max(Duration::from_micros(250))
-                });
-            earliest_ready = Some(earliest_ready.map_or(wait, |prev| prev.min(wait)));
+            if out.needs_redraw {
+                let wait = out
+                    .requeue_delay_until
+                    .map_or(Duration::from_micros(250), |deadline| {
+                        deadline
+                            .saturating_duration_since(now)
+                            .max(Duration::from_micros(250))
+                    });
+                earliest_ready = Some(earliest_ready.map_or(wait, |prev| prev.min(wait)));
+            }
+            if let Some(deadline) = out.empty_frame_callback_deadline {
+                let wait = deadline
+                    .saturating_duration_since(now)
+                    .max(Duration::from_micros(250));
+                earliest_ready = Some(earliest_ready.map_or(wait, |prev| prev.min(wait)));
+            }
         }
         if let Some(wait) = earliest_ready {
             return wait;
@@ -678,6 +789,7 @@ impl DrmRuntime {
         if !state.running || self.paused {
             return;
         }
+        self.flush_due_empty_frame_callbacks(state);
         if force_timer {
             state.expire_notifications();
             if state.take_shell_redraw_needed()
@@ -840,6 +952,10 @@ impl DrmRuntime {
             state.confirm_pending_session_lock();
         }
         state.send_output_frame_callbacks(&target_output, elapsed);
+        if let Some(out) = self.outputs.get_mut(&crtc) {
+            out.last_frame_callback_at = Some(present_done);
+            out.empty_frame_callback_deadline = None;
+        }
         state.space.refresh();
         state.popups.cleanup();
         state.cleanup_ime_popups();
@@ -1595,6 +1711,7 @@ fn try_run_native_drm_session_once(
                         out.vblank_pending = false;
                         out.vblank_queued_at = None;
                         out.requeue_delay_until = None;
+                        out.empty_frame_callback_deadline = None;
                         out.frame_start = None;
                     }
                     app_state.active_window_drag = None;
@@ -1628,6 +1745,7 @@ fn try_run_native_drm_session_once(
                         out.vblank_pending = false;
                         out.vblank_queued_at = None;
                         out.requeue_delay_until = None;
+                        out.empty_frame_callback_deadline = None;
                         out.needs_redraw = true;
                     }
                     rt.paused = false;
@@ -1709,13 +1827,17 @@ fn try_run_native_drm_session_once(
                 ipc_server.as_mut(),
                 app_state,
             );
+            let now = Instant::now();
+            if rt_dispatch.borrow().has_due_empty_frame_callbacks(now) {
+                rt_dispatch
+                    .borrow_mut()
+                    .flush_due_empty_frame_callbacks(app_state);
+            }
             let client_committed =
                 app_state.take_client_surface_committed() || app_state.take_syncobj_unblocked();
             let shell_dirty = app_state.take_shell_redraw_needed();
             let active_comp_anim = app_state.has_active_compositor_animations();
-            let delayed_ready = rt_dispatch
-                .borrow()
-                .has_ready_delayed_requeue(Instant::now());
+            let delayed_ready = rt_dispatch.borrow().has_ready_delayed_requeue(now);
             if client_committed || shell_dirty || active_comp_anim || delayed_ready {
                 let mut rt = rt_dispatch.borrow_mut();
                 if client_committed || active_comp_anim {
@@ -2552,5 +2674,39 @@ mod tests {
         assert!(should_immediate_full_redraw_after_input(
             false, false, false
         ));
+    }
+
+    #[test]
+    fn empty_drm_frame_schedules_or_delivers_pending_frame_callbacks() {
+        let base = Instant::now();
+        assert_eq!(
+            plan_empty_frame_callback_action(base, Some(base), 60, false),
+            EmptyFrameCallbackAction::None
+        );
+        assert_eq!(
+            plan_empty_frame_callback_action(base, None, 60, true),
+            EmptyFrameCallbackAction::SendNow
+        );
+
+        let interval_60 = Duration::from_micros(mode_refresh_interval_us(60));
+        assert_eq!(
+            plan_empty_frame_callback_action(base + Duration::from_millis(2), Some(base), 60, true),
+            EmptyFrameCallbackAction::ScheduleAt(base + interval_60)
+        );
+        assert_eq!(
+            plan_empty_frame_callback_action(base + interval_60, Some(base), 60, true),
+            EmptyFrameCallbackAction::SendNow
+        );
+
+        let interval_144 = Duration::from_micros(mode_refresh_interval_us(144));
+        assert_eq!(
+            plan_empty_frame_callback_action(
+                base + Duration::from_millis(2),
+                Some(base),
+                144,
+                true
+            ),
+            EmptyFrameCallbackAction::ScheduleAt(base + interval_144)
+        );
     }
 }
