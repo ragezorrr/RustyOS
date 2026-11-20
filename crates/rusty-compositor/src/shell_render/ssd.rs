@@ -87,15 +87,14 @@ pub fn check_window_frame_hit(
         let rel_y = y - ry;
 
         // 1. Traffic-light buttons take priority inside SSD titlebars only.
-        if win.has_ssd && (5.0..=23.0).contains(&rel_y) {
-            if (12.0..=28.0).contains(&rel_x) {
-                return Some(SsdHit::Close(win.id));
-            }
-            if (34.0..=50.0).contains(&rel_x) {
-                return Some(SsdHit::Minimize(win.id));
-            }
-            if (56.0..=72.0).contains(&rel_x) {
-                return Some(SsdHit::Maximize(win.id));
+        if win.has_ssd {
+            let ssd_tl = rusty_ui::TrafficLightButtons::default_ssd();
+            if let Some(kind) = ssd_tl.hit_test(rel_x, rel_y) {
+                return match kind {
+                    rusty_ui::TrafficLightKind::Close => Some(SsdHit::Close(win.id)),
+                    rusty_ui::TrafficLightKind::Minimize => Some(SsdHit::Minimize(win.id)),
+                    rusty_ui::TrafficLightKind::Maximize => Some(SsdHit::Maximize(win.id)),
+                };
             }
         }
 
@@ -210,9 +209,9 @@ pub fn generate_window_ssd_elements(
         divider_color,
     ));
 
-    // 3. macOS-style traffic light buttons (Close, Minimize, Maximize)
-    let btn_y = y + 7;
-    let btn_size = 14;
+    // 3. Traffic light buttons (Close, Minimize, Maximize)
+    let ssd_tl = rusty_ui::TrafficLightButtons::default_ssd();
+    let btn_size = i32::try_from(ssd_tl.close_rect.width).unwrap_or(14);
     let close_color = if is_focused {
         COLOR_DANGER
     } else {
@@ -231,21 +230,21 @@ pub fn generate_window_ssd_elements(
 
     elements.push(make_solid_element(
         Rectangle::new(
-            Point::from((x + 14, btn_y)),
+            Point::from((x + ssd_tl.close_rect.x, y + ssd_tl.close_rect.y)),
             Size::from((btn_size, btn_size)),
         ),
         close_color,
     ));
     elements.push(make_solid_element(
         Rectangle::new(
-            Point::from((x + 36, btn_y)),
+            Point::from((x + ssd_tl.minimize_rect.x, y + ssd_tl.minimize_rect.y)),
             Size::from((btn_size, btn_size)),
         ),
         min_color,
     ));
     elements.push(make_solid_element(
         Rectangle::new(
-            Point::from((x + 58, btn_y)),
+            Point::from((x + ssd_tl.maximize_rect.x, y + ssd_tl.maximize_rect.y)),
             Size::from((btn_size, btn_size)),
         ),
         max_color,
@@ -383,12 +382,13 @@ pub fn generate_window_ssd_composite_elements_with_hover(
     }
 
     // 4x4 SSAA gel-lit traffic lights with hover glyphs (`Close`, `Minimize`, `Maximize`)
-    let btn_y = y + 7;
-    let btn_d = 14;
+    let ssd_tl = rusty_ui::TrafficLightButtons::default_ssd();
+    let btn_y = y + ssd_tl.close_rect.y;
+    let btn_d = i32::try_from(ssd_tl.close_rect.width).unwrap_or(14);
     for (bx, kind) in [
-        (x + 14, TrafficLightKind::Close),
-        (x + 36, TrafficLightKind::Minimize),
-        (x + 58, TrafficLightKind::Maximize),
+        (x + ssd_tl.close_rect.x, TrafficLightKind::Close),
+        (x + ssd_tl.minimize_rect.x, TrafficLightKind::Minimize),
+        (x + ssd_tl.maximize_rect.x, TrafficLightKind::Maximize),
     ] {
         if let Some(el) = shape_cache.traffic_light_element(
             renderer,

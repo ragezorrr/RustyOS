@@ -923,6 +923,18 @@
                            полное удаление apps/rusty-updater
                            и перевод вызовов оболочки и
                            desktop-файла на rusty-settings
+
+    D-082                  Фаза 10 Сквозное подключение   accepted
+                           crates/rusty-ui и модуль
+                           виджетов (RUSTYOS-124, ADR-0068):
+                           добавление модуля widgets (ToggleSwitch,
+                           PushButton, GroupCard, SearchField);
+                           подключение rusty-ui во все приложения
+                           (rusty-files, rusty-terminal,
+                           rusty-installer) и Server-Side
+                           Decorations композитора;
+                           устранение локального дублирования
+                           геометрии светофоров и микроглифов
   -----------------------------------------------------------------------
 
 ## Открытые решения

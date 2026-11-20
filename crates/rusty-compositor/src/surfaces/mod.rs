@@ -97,13 +97,8 @@ pub enum GlassPanelStyle {
     NotificationCard,
 }
 
-/// Interactive macOS-style window traffic light button kind (`RUSTYOS-051`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum TrafficLightKind {
-    Close,
-    Minimize,
-    Maximize,
-}
+/// Interactive macOS-style window traffic light button kind (`RUSTYOS-051`), re-exported from `rusty-ui`.
+pub use rusty_ui::TrafficLightKind;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct GlassPanelKey {

@@ -249,15 +249,15 @@ impl ShmFallbackRenderer {
             app.hover,
             Some(HitTarget::CloseButton | HitTarget::MinimizeButton | HitTarget::MaximizeButton)
         );
-        for (rect, focused_c, glyph) in [
-            (layout.close_rect, [0xEE, 0x5A, 0x6A, 255], 'x'),
-            (layout.minimize_rect, [0xF4, 0xB6, 0x3F, 255], '-'),
-            (layout.maximize_rect, [0x3C, 0xC6, 0x8A, 255], '+'),
+        for (rect, kind) in [
+            (layout.close_rect, rusty_ui::TrafficLightKind::Close),
+            (layout.minimize_rect, rusty_ui::TrafficLightKind::Minimize),
+            (layout.maximize_rect, rusty_ui::TrafficLightKind::Maximize),
         ] {
             let c = if app.focused {
-                focused_c
+                kind.active_color()
             } else {
-                [110, 114, 122, 255]
+                rusty_ui::TrafficLightKind::inactive_color()
             };
             fill_rounded_rect_premul(
                 canvas,
@@ -272,7 +272,7 @@ impl ShmFallbackRenderer {
             if tl_hovered {
                 let cx = rect.x as f32 + 7.0;
                 let cy = rect.y as f32 + 7.0;
-                draw_traffic_glyph(canvas, stride_px, cx, cy, glyph);
+                draw_traffic_glyph(canvas, stride_px, cx, cy, kind);
             }
         }
 
@@ -670,10 +670,20 @@ fn blend_pixel_premul(canvas: &mut [u8], stride_px: i32, x: i32, y: i32, rgba: [
     canvas[off + 3] = (a + da * inv / 255).min(255) as u8;
 }
 
-fn draw_traffic_glyph(canvas: &mut [u8], stride_px: i32, cx: f32, cy: f32, kind: char) {
-    let ink = [0, 0, 0, 150];
-    let mut draw_seg = |x0: f32, y0: f32, x1: f32, y1: f32| {
+fn draw_traffic_glyph(
+    canvas: &mut [u8],
+    stride_px: i32,
+    cx: f32,
+    cy: f32,
+    kind: rusty_ui::TrafficLightKind,
+) {
+    let ink = rusty_ui::TrafficLightKind::glyph_ink();
+    for seg in rusty_ui::glyph_segments(kind) {
         let steps = 14;
+        let x0 = cx + seg.dx0;
+        let y0 = cy + seg.dy0;
+        let x1 = cx + seg.dx1;
+        let y1 = cy + seg.dy1;
         for i in 0..=steps {
             #[allow(clippy::cast_precision_loss)]
             let t = i as f32 / steps as f32;
@@ -683,20 +693,6 @@ fn draw_traffic_glyph(canvas: &mut [u8], stride_px: i32, cx: f32, cy: f32, kind:
             let py = (y0 + (y1 - y0) * t).round() as i32;
             blend_pixel_premul(canvas, stride_px, px, py, ink);
         }
-    };
-    match kind {
-        'x' => {
-            draw_seg(cx - 2.6, cy - 2.6, cx + 2.6, cy + 2.6);
-            draw_seg(cx + 2.6, cy - 2.6, cx - 2.6, cy + 2.6);
-        }
-        '-' => {
-            draw_seg(cx - 3.2, cy, cx + 3.2, cy);
-        }
-        '+' => {
-            draw_seg(cx - 3.0, cy, cx + 3.0, cy);
-            draw_seg(cx, cy - 3.0, cx, cy + 3.0);
-        }
-        _ => {}
     }
 }
 

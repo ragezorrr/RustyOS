@@ -30,7 +30,7 @@ impl ThemeMode {
 }
 
 /// The three window-control buttons in a window titlebar.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TrafficLightKind {
     Close,
     Minimize,

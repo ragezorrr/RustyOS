@@ -226,9 +226,11 @@ pub(crate) struct InstallerLayout {
 pub(crate) fn compute_layout(app: &InstallerAppState, width: u32, height: u32) -> InstallerLayout {
     let win_w = i32::try_from(width).unwrap_or(800).max(MIN_WIDTH);
     let win_h = i32::try_from(height).unwrap_or(580).max(MIN_HEIGHT);
-    let traffic_close = Rect::new(14, 13, 14, 14);
-    let traffic_min = Rect::new(36, 13, 14, 14);
-    let traffic_max = Rect::new(58, 13, 14, 14);
+    let tl = rusty_ui::TrafficLightButtons::default_csd();
+    let btn_d = i32::try_from(tl.close_rect.width).unwrap_or(14);
+    let traffic_close = Rect::new(tl.close_rect.x, tl.close_rect.y, btn_d, btn_d);
+    let traffic_min = Rect::new(tl.minimize_rect.x, tl.minimize_rect.y, btn_d, btn_d);
+    let traffic_max = Rect::new(tl.maximize_rect.x, tl.maximize_rect.y, btn_d, btn_d);
     let header_rect = Rect::new(0, 0, win_w, HEADER_HEIGHT);
     let content_rect = Rect::new(
         36,

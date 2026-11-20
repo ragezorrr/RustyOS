@@ -496,17 +496,18 @@ fn render_header(
                 | InstallerHit::TrafficMaximize
         )
     );
+    let tl = rusty_ui::TrafficLightButtons::default_csd();
     let lights = [
-        (&layout.traffic_close, [0xEE, 0x5A, 0x6A, 255], 'x'),
-        (&layout.traffic_min, [0xF4, 0xB6, 0x3F, 255], '-'),
-        (&layout.traffic_max, [0x3C, 0xC6, 0x8A, 255], '+'),
+        (&layout.traffic_close, rusty_ui::TrafficLightKind::Close),
+        (&layout.traffic_min, rusty_ui::TrafficLightKind::Minimize),
+        (&layout.traffic_max, rusty_ui::TrafficLightKind::Maximize),
     ];
-    for (rect, col, glyph) in lights {
+    for (rect, kind) in lights {
         let cx = rect.x as f32 + 7.0;
-        let cy = rect.y as f32 + 7.0;
-        c.fill_circle(cx, cy, 7.0, col);
+        let cy = tl.center_y;
+        c.fill_circle(cx, cy, 7.0, kind.active_color());
         if tl_hovered {
-            draw_traffic_glyph(c, cx, cy, glyph);
+            draw_traffic_glyph(c, cx, cy, kind);
         }
     }
 
@@ -557,19 +558,17 @@ fn render_header(
     );
 }
 
-fn draw_traffic_glyph(c: &mut Canvas<'_>, cx: f32, cy: f32, kind: char) {
-    let ink = [0, 0, 0, 150];
-    match kind {
-        'x' => {
-            c.draw_line(cx - 2.6, cy - 2.6, cx + 2.6, cy + 2.6, 0.7, ink);
-            c.draw_line(cx + 2.6, cy - 2.6, cx - 2.6, cy + 2.6, 0.7, ink);
-        }
-        '-' => c.draw_line(cx - 3.2, cy, cx + 3.2, cy, 0.75, ink),
-        '+' => {
-            c.draw_line(cx - 3.0, cy, cx + 3.0, cy, 0.75, ink);
-            c.draw_line(cx, cy - 3.0, cx, cy + 3.0, 0.75, ink);
-        }
-        _ => {}
+fn draw_traffic_glyph(c: &mut Canvas<'_>, cx: f32, cy: f32, kind: rusty_ui::TrafficLightKind) {
+    let ink = rusty_ui::TrafficLightKind::glyph_ink();
+    for seg in rusty_ui::glyph_segments(kind) {
+        c.draw_line(
+            cx + seg.dx0,
+            cy + seg.dy0,
+            cx + seg.dx1,
+            cy + seg.dy1,
+            0.75,
+            ink,
+        );
     }
 }
 

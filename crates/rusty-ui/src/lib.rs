@@ -16,6 +16,7 @@ pub mod canvas;
 pub mod geometry;
 pub mod theme;
 pub mod traffic_lights;
+pub mod widgets;
 pub mod window_frame;
 
 pub use canvas::{PixelFormat, UiCanvas};
@@ -26,6 +27,9 @@ pub use geometry::{
 };
 pub use theme::{ACCENT_PALETTE, ThemeMode, ThemePalette, TrafficLightKind};
 pub use traffic_lights::{GlyphSegment, TrafficLightButtons, glyph_segments};
+pub use widgets::{
+    ButtonStyle, GroupCard, PushButton, SearchField, SearchFieldHit, ToggleSwitch, WidgetState,
+};
 pub use window_frame::{WindowFrame, WindowHitTarget};
 
 #[cfg(test)]
@@ -132,5 +136,39 @@ mod tests {
         let toggled = frame.check_double_click_maximize(201.0, 21.0, 800);
         assert!(toggled);
         assert!(frame.is_maximized);
+    }
+
+    #[test]
+    fn widgets_toggle_switch_and_buttons() {
+        let sw_rect = Rect::new(100, 100, 38, 20);
+        let toggle = ToggleSwitch::new(sw_rect, true);
+        assert!(toggle.is_hovered(110.0, 110.0));
+        assert!(!toggle.is_hovered(90.0, 110.0));
+
+        let btn_rect = Rect::new(50, 50, 80, 30);
+        let btn = PushButton::new(btn_rect, ButtonStyle::Primary);
+        assert!(btn.is_hovered(60.0, 60.0));
+        assert_eq!(btn.style, ButtonStyle::Primary);
+
+        let mut buf = vec![0u8; 200 * 200 * 4];
+        let mut canvas = UiCanvas::new(&mut buf, 200, 200, 200 * 4, PixelFormat::Bgra8888);
+        let pal = ThemePalette::new(false, 0);
+
+        toggle.draw(&mut canvas, &pal);
+        btn.draw(&mut canvas, &pal);
+
+        let card = GroupCard::new(Rect::new(10, 10, 180, 100));
+        card.draw(&mut canvas, &pal);
+        card.draw_row_divider(&mut canvas, 50, 16, &pal);
+
+        let mut search = SearchField::new(Rect::new(20, 20, 160, 28));
+        search.has_text = true;
+        assert_eq!(search.hit_test(30.0, 30.0), Some(SearchFieldHit::Input));
+        let clear_r = search.clear_btn_rect();
+        assert_eq!(
+            search.hit_test(f64::from(clear_r.x + 2), f64::from(clear_r.y + 2)),
+            Some(SearchFieldHit::Clear)
+        );
+        search.draw(&mut canvas, &pal);
     }
 }

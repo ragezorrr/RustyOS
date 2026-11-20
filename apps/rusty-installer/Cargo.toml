@@ -11,6 +11,7 @@ description = "RustyOS macOS-style OS installer & OOBE Setup Assistant (Wayland 
 fontdue.workspace = true
 rusty-animation.workspace = true
 rusty-services.workspace = true
+rusty-ui.workspace = true
 smithay-client-toolkit = { version = "0.19.2", default-features = false, features = ["calloop", "xkbcommon"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true

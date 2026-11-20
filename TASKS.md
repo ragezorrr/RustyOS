@@ -2152,6 +2152,28 @@ hardware/software context и низкие накладные расходы.
 - **Tests:** 317 unit-тестов workspace (`4` `rusty-animation`, `199` `rusty-compositor`, `16` `rusty-files`, `12` `rusty-installer`, `3` `rusty-ipc`, `44` `rusty-services`, `11` `rusty-settings`, `5` `rusty-shell`, `15` `rusty-terminal`, `5` `rusty-ui`, `7` `rusty-wm`).
 - **Risks:** Нет; фоновая проверка обновлений и транзакции используют проверенные низкоуровневые сервисы `rusty-services` без блокировки цикла Wayland.
 
+### RUSTYOS-124 — Сквозное подключение crates/rusty-ui во все приложения и SSD, добавление модуля widgets (`RUSTYOS-124 Вариант 2`)
+
+- **Status:** Done (`RUSTYOS-124 Вариант 2` — утверждённый объём выполнен)
+- **Goal:** Реализовать модуль базовых виджетов в `crates/rusty-ui::widgets` (`ToggleSwitch`, `PushButton`, `GroupCard`, `SearchField`) и выполнить сквозную миграцию всех приложений рабочего пространства (`apps/rusty-files`, `apps/rusty-terminal`, `apps/rusty-installer`) и Server-Side Decorations (`crates/rusty-compositor`) на общий крейт `rusty-ui`.
+- **Dependencies:** `RUSTYOS-123`.
+- **Scope:**
+  - `crates/rusty-ui/src/widgets.rs`: реализованы интерактивные структуры `WidgetState` (`Normal`, `Hover`, `Pressed`, `Disabled`), `ToggleSwitch` (38×20 px со сглаженным ползунком и AA-тенями), `PushButton` (`Primary`, `Secondary`, `Destructive`), `GroupCard` (скругление 12 px, фон `pal.card_bg`, разделители строк `draw_row_divider`), `SearchField` (поле поиска 8 px с векторной лупой, кольцом фокуса и кнопкой очистки `SearchFieldHit`);
+  - `crates/rusty-ui/src/theme.rs`: добавлен дерайв `Hash` для `TrafficLightKind`;
+  - `crates/rusty-ui/src/lib.rs`: экспорт модуля `widgets`, добавлены unit-тесты переключателей, кнопок, карточек и поиска;
+  - `apps/rusty-files`: подключен `rusty-ui.workspace = true`, заменены жестко закодированные прямоугольники светофоров на `TrafficLightButtons::default_csd()`, отрисовка микроглифов переведена на `TrafficLightKind` и `glyph_segments()`;
+  - `apps/rusty-terminal`: подключен `rusty-ui.workspace = true`, компоновка заголовка переведена на `TrafficLightButtons::default_csd()`, микроглифы в SHM- и EGL-пайплайнах используют `TrafficLightKind` и `glyph_segments()`;
+  - `apps/rusty-installer`: подключен `rusty-ui.workspace = true`, компоновка заголовка переведена на `TrafficLightButtons::default_csd()`, микроглифы унифицированы;
+  - `crates/rusty-compositor`: подключен `rusty-ui.workspace = true`, в `surfaces/mod.rs` реэкспортирован `TrafficLightKind` из `rusty_ui`, в `shell_render/ssd.rs` хит-тест `check_window_frame_hit` и генерация элементов SSD переведены на `TrafficLightButtons::default_ssd()`;
+  - Документация: `ADR-0068` (`docs/adr/0068-unified-ui-widgets-and-app-migration.md`), запись `D-082` в `DECISIONS.md`.
+- **Acceptance Criteria:**
+  - `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace` (321 unit-тест) проходят без ошибок и предупреждений;
+  - `cargo run -p rusty-compositor -- --drm-probe` завершается штатно;
+  - Живой `--winit` прогон композитора стартует и отрисовывает рабочий стол стабильно;
+  - Полное устранение дублирования логики геометрии светофоров и микроглифов во всех приложениях и серверных декорациях.
+- **Tests:** 321 unit-тест workspace (`4` `rusty-animation`, `199` `rusty-compositor`, `17` `rusty-files`, `13` `rusty-installer`, `3` `rusty-ipc`, `44` `rusty-services`, `11` `rusty-settings`, `5` `rusty-shell`, `15` `rusty-terminal`, `6` `rusty-ui`, `7` `rusty-wm`).
+- **Risks:** Нет; все расчеты координат светофоров строго идентичны эталонным размерам, проверенным в тестах.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

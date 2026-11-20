@@ -115,9 +115,11 @@ impl TerminalLayout {
         let h = win_h.max(MIN_HEIGHT);
 
         let header_rect = Rect::new(0, 0, w, HEADER_HEIGHT);
-        let close_rect = Rect::new(14, 13, 14, 14);
-        let minimize_rect = Rect::new(36, 13, 14, 14);
-        let maximize_rect = Rect::new(58, 13, 14, 14);
+        let tl = rusty_ui::TrafficLightButtons::default_csd();
+        let btn_d = i32::try_from(tl.close_rect.width).unwrap_or(14);
+        let close_rect = Rect::new(tl.close_rect.x, tl.close_rect.y, btn_d, btn_d);
+        let minimize_rect = Rect::new(tl.minimize_rect.x, tl.minimize_rect.y, btn_d, btn_d);
+        let maximize_rect = Rect::new(tl.maximize_rect.x, tl.maximize_rect.y, btn_d, btn_d);
 
         let btn_w = 28;
         let btn_h = 26;

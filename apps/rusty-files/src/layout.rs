@@ -321,6 +321,7 @@ struct ListAreaLayout {
 
 /// Computes pixel-accurate layout for `state` at `(surface_w, surface_h)`.
 #[must_use]
+#[allow(clippy::too_many_lines)]
 pub(crate) fn compute_layout(state: &FilesAppState, surface_w: u32, surface_h: u32) -> FilesLayout {
     let width = i32::try_from(surface_w).unwrap_or(1060).max(480);
     let height = i32::try_from(surface_h).unwrap_or(660).max(360);
@@ -332,9 +333,11 @@ pub(crate) fn compute_layout(state: &FilesAppState, surface_w: u32, surface_h: u
         SIDEBAR_WIDTH - 1,
         (sidebar_rect.bottom() - 6 - 50).max(40),
     );
-    let traffic_close = Rect::new(14, 13, 14, 14);
-    let traffic_min = Rect::new(36, 13, 14, 14);
-    let traffic_max = Rect::new(58, 13, 14, 14);
+    let tl = rusty_ui::TrafficLightButtons::default_csd();
+    let btn_d = i32::try_from(tl.close_rect.width).unwrap_or(14);
+    let traffic_close = Rect::new(tl.close_rect.x, tl.close_rect.y, btn_d, btn_d);
+    let traffic_min = Rect::new(tl.minimize_rect.x, tl.minimize_rect.y, btn_d, btn_d);
+    let traffic_max = Rect::new(tl.maximize_rect.x, tl.maximize_rect.y, btn_d, btn_d);
 
     let sidebar_rows = layout_sidebar_rows(state, sidebar_rect, sidebar_clip_rect);
     let toolbar_x = sidebar_rect.right() + 12;

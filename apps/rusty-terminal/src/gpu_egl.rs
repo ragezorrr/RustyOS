@@ -814,67 +814,35 @@ impl GpuRenderer {
             )
         );
         if tl_hovered {
-            let ink = [0, 0, 0, 150];
-            let close_cx = layout.close_rect.x as f32 + 7.0;
-            let close_cy = layout.close_rect.y as f32 + 7.0;
-            for (dx, dy) in [
-                (-2.6, -2.6),
-                (-1.3, -1.3),
-                (0.0, 0.0),
-                (1.3, 1.3),
-                (2.6, 2.6),
-                (-2.6, 2.6),
-                (-1.3, 1.3),
-                (1.3, -1.3),
-                (2.6, -2.6),
+            let ink = rusty_ui::TrafficLightKind::glyph_ink();
+            for (cx, cy, kind) in [
+                (
+                    layout.close_rect.x as f32 + 7.0,
+                    layout.close_rect.y as f32 + 7.0,
+                    rusty_ui::TrafficLightKind::Close,
+                ),
+                (
+                    layout.minimize_rect.x as f32 + 7.0,
+                    layout.minimize_rect.y as f32 + 7.0,
+                    rusty_ui::TrafficLightKind::Minimize,
+                ),
+                (
+                    layout.maximize_rect.x as f32 + 7.0,
+                    layout.maximize_rect.y as f32 + 7.0,
+                    rusty_ui::TrafficLightKind::Maximize,
+                ),
             ] {
-                self.push_rect_f(
-                    close_cx + dx - 0.5,
-                    close_cy + dy - 0.5,
-                    1.1,
-                    1.1,
-                    0.2,
-                    0.0,
-                    ink,
-                    [0, 0, 0, 0],
-                );
+                for seg in rusty_ui::glyph_segments(kind) {
+                    let steps = 6;
+                    for i in 0..=steps {
+                        #[allow(clippy::cast_precision_loss)]
+                        let t = i as f32 / steps as f32;
+                        let x = cx + seg.dx0 + (seg.dx1 - seg.dx0) * t;
+                        let y = cy + seg.dy0 + (seg.dy1 - seg.dy0) * t;
+                        self.push_rect_f(x - 0.5, y - 0.5, 1.1, 1.1, 0.2, 0.0, ink, [0, 0, 0, 0]);
+                    }
+                }
             }
-
-            let min_cx = layout.minimize_rect.x as f32 + 7.0;
-            let min_cy = layout.minimize_rect.y as f32 + 7.0;
-            self.push_rect_f(
-                min_cx - 3.2,
-                min_cy - 0.5,
-                6.4,
-                1.0,
-                0.4,
-                0.0,
-                ink,
-                [0, 0, 0, 0],
-            );
-
-            let max_cx = layout.maximize_rect.x as f32 + 7.0;
-            let max_cy = layout.maximize_rect.y as f32 + 7.0;
-            self.push_rect_f(
-                max_cx - 3.0,
-                max_cy - 0.5,
-                6.0,
-                1.0,
-                0.4,
-                0.0,
-                ink,
-                [0, 0, 0, 0],
-            );
-            self.push_rect_f(
-                max_cx - 0.5,
-                max_cy - 3.0,
-                1.0,
-                6.0,
-                0.4,
-                0.0,
-                ink,
-                [0, 0, 0, 0],
-            );
         }
 
         for (idx, tab_l) in layout.tab_rects.iter().enumerate() {
