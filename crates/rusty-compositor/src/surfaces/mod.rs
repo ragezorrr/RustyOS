@@ -575,6 +575,12 @@ impl UiShapeCache {
         self.window_minimize.has_snapshot(window_id)
     }
 
+    /// Returns `true` if any minimize snapshot textures exist (`RUSTYOS-120`).
+    #[must_use]
+    pub(crate) fn has_any_minimize_snapshots(&self) -> bool {
+        self.window_minimize.has_any_snapshots()
+    }
+
     /// Retains only minimize/restore snapshot textures matching `keep`.
     pub(crate) fn retain_minimize_snapshots(&mut self, keep: impl FnMut(u64) -> bool) {
         self.window_minimize.retain_snapshots(keep);

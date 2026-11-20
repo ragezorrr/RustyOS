@@ -18,7 +18,8 @@ use rusty_services::{
     local_clock_lock_date, local_clock_lock_hhmm, local_clock_short_datetime_fmt,
 };
 
-const POLL_INTERVAL: Duration = Duration::from_secs(3);
+const POLL_INTERVAL_ACTIVE: Duration = Duration::from_secs(3);
+const POLL_INTERVAL_IDLE: Duration = Duration::from_secs(12);
 
 /// Snapshot of system hardware and service status rendered in `TopBar` and `QuickSettings`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,6 +90,7 @@ struct SharedState {
     queue: Mutex<VecDeque<TelemetryCmd>>,
     cvar: Condvar,
     stop: AtomicBool,
+    active_ui: AtomicBool,
 }
 
 /// Non-blocking handle to live system telemetry and async audio controls.
@@ -101,6 +103,7 @@ impl fmt::Debug for SystemMetricsHandle {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SystemMetricsHandle")
             .field("has_worker", &self.worker.is_some())
+            .field("active_ui", &self.is_active_ui())
             .finish_non_exhaustive()
     }
 }
@@ -134,12 +137,13 @@ impl SystemMetricsHandle {
                 queue: Mutex::new(VecDeque::new()),
                 cvar: Condvar::new(),
                 stop: AtomicBool::new(false),
+                active_ui: AtomicBool::new(false),
             }),
             worker: None,
         }
     }
 
-    /// Spawns a background poller thread refreshing `Power`, `Network`, `Audio`, and clock every 3s.
+    /// Spawns a background poller thread refreshing `Power`, `Network`, `Audio`, and clock every 3s (active) or 12s (idle).
     #[must_use]
     pub fn start_background() -> Self {
         let shared = Arc::new(SharedState {
@@ -147,6 +151,7 @@ impl SystemMetricsHandle {
             queue: Mutex::new(VecDeque::new()),
             cvar: Condvar::new(),
             stop: AtomicBool::new(false),
+            active_ui: AtomicBool::new(false),
         });
 
         let thread_shared = Arc::clone(&shared);
@@ -176,6 +181,21 @@ impl SystemMetricsHandle {
     /// Schedules an immediate non-blocking background refresh of all services.
     pub fn request_refresh(&self) {
         self.push_cmd(TelemetryCmd::RefreshNow);
+    }
+
+    /// Marks whether live telemetry popovers (Control Center, Wi-Fi popover) are open (`RUSTYOS-120`).
+    /// When active, polling runs every 3s. When closed, polling relaxes to 12s to save CPU and battery.
+    pub fn set_active_ui(&self, active: bool) {
+        let was_active = self.shared.active_ui.swap(active, Ordering::Relaxed);
+        if active && !was_active {
+            self.shared.cvar.notify_all();
+        }
+    }
+
+    /// Returns whether the UI poller is in active (frequent) mode.
+    #[must_use]
+    pub fn is_active_ui(&self) -> bool {
+        self.shared.active_ui.load(Ordering::Relaxed)
     }
 
     /// Adjusts master output volume by `delta` (-100..=100) optimistically and dispatches asynchronously.
@@ -431,7 +451,12 @@ fn telemetry_worker_loop(shared: &SharedState) {
         let mut cmds = Vec::new();
         if let Ok(mut guard) = shared.queue.lock() {
             if guard.is_empty() {
-                if let Ok((new_guard, _)) = shared.cvar.wait_timeout(guard, POLL_INTERVAL) {
+                let interval = if shared.active_ui.load(Ordering::Relaxed) {
+                    POLL_INTERVAL_ACTIVE
+                } else {
+                    POLL_INTERVAL_IDLE
+                };
+                if let Ok((new_guard, _)) = shared.cvar.wait_timeout(guard, interval) {
                     guard = new_guard;
                 } else {
                     continue;
@@ -574,5 +599,11 @@ mod tests {
         let arc3 = handle.snapshot_arc();
         assert!(!Arc::ptr_eq(&arc1, &arc3));
         assert_eq!(arc3.audio.volume_percent, 60);
+
+        assert!(!handle.is_active_ui());
+        handle.set_active_ui(true);
+        assert!(handle.is_active_ui());
+        handle.set_active_ui(false);
+        assert!(!handle.is_active_ui());
     }
 }

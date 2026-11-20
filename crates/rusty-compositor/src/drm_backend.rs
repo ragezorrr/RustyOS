@@ -276,6 +276,7 @@ struct DrmOutputState {
     hw_cursor_enabled: bool,
     last_frame_hw_cursor: bool,
     frame_start: Option<Instant>,
+    frame_cpu_done: Option<Instant>,
     last_frame_callback_at: Option<Instant>,
     empty_frame_callback_deadline: Option<Instant>,
     pending_presentation_feedback: Option<OutputPresentationFeedback>,
@@ -412,6 +413,7 @@ fn build_drm_output_state(
         hw_cursor_enabled,
         last_frame_hw_cursor: false,
         frame_start: None,
+        frame_cpu_done: None,
         last_frame_callback_at: None,
         empty_frame_callback_deadline: None,
         pending_presentation_feedback: None,
@@ -547,6 +549,7 @@ impl DrmOutputState {
                     self.requeue_delay_until = None;
                     self.empty_frame_callback_deadline = None;
                     self.frame_start = Some(render_start);
+                    self.frame_cpu_done = Some(Instant::now());
                     self.last_frame_direct_scanout = direct_scanout;
                     self.last_frame_hw_cursor = hw_cursor;
                     if let Some(mut stale) = self.pending_presentation_feedback.take() {
@@ -917,8 +920,10 @@ impl DrmRuntime {
 
         let present_done = Instant::now();
         let frame_start = out.frame_start.take().unwrap_or(present_done);
-        state.frame_timing.record_frame(
+        let cpu_done = out.frame_cpu_done.take().unwrap_or(frame_start);
+        state.frame_timing.record_frame_detailed(
             frame_start,
+            cpu_done,
             present_done,
             1,
             out.total_output_pixels,
@@ -1713,6 +1718,7 @@ fn try_run_native_drm_session_once(
                         out.requeue_delay_until = None;
                         out.empty_frame_callback_deadline = None;
                         out.frame_start = None;
+                        out.frame_cpu_done = None;
                     }
                     app_state.active_window_drag = None;
                     app_state.active_window_resize = None;

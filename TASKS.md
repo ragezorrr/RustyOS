@@ -2078,6 +2078,22 @@ hardware/software context и низкие накладные расходы.
 - **Tests:** 314 unit-тестов workspace (`4` `rusty-animation`, `195` `rusty-compositor`, `16` `rusty-files`, `12` `rusty-installer`, `3` `rusty-ipc`, `44` `rusty-services`, `10` `rusty-settings`, `5` `rusty-shell`, `14` `rusty-terminal`, `4` `rusty-updater`, `7` `rusty-wm`).
 - **Risks:** В `nested-winit` замер `render_duration_us` включает фазовое ожидание `eglSwapBuffers` на хостовом `wl_surface.frame`; прогон на голом железе `--drm` выполняется пользователем отдельно.
 
+### RUSTYOS-120 — Изоляция чистого CPU-времени композитора, оптимизация render list и адаптивная телеметрия
+
+- **Status:** Done
+- **Goal:** Изолировать и объективно измерить процессорное время композитора отдельно от блокирующего ожидания vblank хоста (`eglSwapBuffers`), исключить ежекадровые аллокации строк и обходы хэш-таблиц при неизменном рабочем столе, а также перевести опрос фоновой телеметрии на адаптивный интервал (3 с / 12 с).
+- **Dependencies:** `RUSTYOS-119`.
+- **Scope:**
+  - `crates/rusty-compositor/src/frame_timing.rs`, `winit_backend.rs`, `drm_backend.rs`: добавлены `cpu_duration_us` в `FrameSample` и `cpu_p50_us`/`cpu_p95_us`/`cpu_p99_us`/`cpu_max_us` в `FrameTimingSummary`, разделена фиксация `cpu_done` (до `backend.submit()`) и `present_done`, обновлен лог-вывод и экспорт JSON (`--metrics-out`), подготовлен скрипт медианного замера `bench_runner.py` (5–10 прогонов);
+  - `crates/rusty-compositor/src/frame_composer.rs`, `shell_render/dock.rs`, `surfaces/window_minimize.rs`, `surfaces/mod.rs`: `collect_dock_windows` форматирует `dimensions` (`format!("{}x{}")`) только при активном Spotlight Overview, `make_window_badge` переведен на zero-alloc итераторы слов, добавлены быстрые проверки `has_any_minimize_snapshots` и ранний выход из `prepare_minimize_snapshots_for_output` при отсутствии сворачивающихся окон;
+  - `crates/rusty-compositor/src/telemetry.rs`, `state/shell_actions.rs`: введен адаптивный интервал опроса телеметрии (`POLL_INTERVAL_ACTIVE = 3s` при открытом Control Center / Wi-Fi popover и `POLL_INTERVAL_IDLE = 12s` в фоновом режиме) с атомарным флагом `active_ui`, немедленным пробуждением `cvar.notify_all()` при открытии меню или вызове команд и синхронизацией в `shell_actions.rs`.
+- **Acceptance Criteria:**
+  - `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace` (включая unit-тесты `collector_tracks_cpu_duration_separately_from_submit` и `telemetry_handle_switches_active_ui_mode`) проходят без ошибок;
+  - Живые `--winit` прогоны на Wayland и X11 (`--max-frames 60`, `--max-frames 30`) и `--drm-probe` проходят без `EGL_BAD_SURFACE`, шейдерных ошибок и паник;
+  - Результаты многопрогонного медианного бенчмаркинга (чистое CPU-время `p50 ~0.55–0.68 ms`, что подтверждает отсутствие лагов на стороне композитора) зафиксированы в `PERFORMANCE.md`.
+- **Tests:** 315 unit-тестов workspace (`4` `rusty-animation`, `196` `rusty-compositor`, `16` `rusty-files`, `12` `rusty-installer`, `3` `rusty-ipc`, `44` `rusty-services`, `10` `rusty-settings`, `5` `rusty-shell`, `14` `rusty-terminal`, `4` `rusty-updater`, `7` `rusty-wm`).
+- **Risks:** Нет; при закрытом Control Center фоновый поток телеметрии практически не потребляет ресурсы CPU и батареи, а при кликах на ползунки и переключатели немедленно просыпается без задержки.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

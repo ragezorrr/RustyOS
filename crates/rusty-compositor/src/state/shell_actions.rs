@@ -234,6 +234,7 @@ impl RustyCompositorState {
         self.close_launcher();
         self.close_overview();
         self.close_settings();
+        self.sync_telemetry_active_ui();
         self.telemetry.request_refresh();
         self.shell_redraw_needed = true;
     }
@@ -243,6 +244,7 @@ impl RustyCompositorState {
         if self.wifi_popover_open || self.wifi_popover_hover.is_some() {
             self.wifi_popover_open = false;
             self.wifi_popover_hover = None;
+            self.sync_telemetry_active_ui();
             self.shell_redraw_needed = true;
         }
     }
@@ -787,7 +789,13 @@ impl RustyCompositorState {
         );
     }
 
+    pub(in crate::state) fn sync_telemetry_active_ui(&self) {
+        let active = self.quick_settings_active || self.wifi_popover_open;
+        self.telemetry.set_active_ui(active);
+    }
+
     pub(in crate::state) fn retarget_quick_settings_anim(&mut self) {
+        self.sync_telemetry_active_ui();
         let now = self.elapsed();
         let tokens = MotionTokens::default();
         self.quick_settings_anim.retarget(

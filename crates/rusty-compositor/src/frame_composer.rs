@@ -400,6 +400,7 @@ fn collect_dock_windows(
     state: &RustyCompositorState,
     visible_windows: &[(rusty_wm::WindowId, rusty_wm::Rect)],
     focused_win: Option<rusty_wm::WindowId>,
+    include_dimensions: bool,
 ) -> Vec<DockWindowEntry> {
     let mut dock_windows: Vec<DockWindowEntry> = visible_windows
         .iter()
@@ -416,7 +417,11 @@ fn collect_dock_windows(
                 badge,
                 icon_name,
                 toplevel_icon,
-                dimensions: format!("{}x{}", rect.width, rect.height),
+                dimensions: if include_dimensions {
+                    format!("{}x{}", rect.width, rect.height)
+                } else {
+                    String::new()
+                },
                 focused: !minimized && focused_win == Some(win_id),
                 minimized,
             }
@@ -842,6 +847,9 @@ fn prune_inactive_minimize_snapshots(
     shape_cache: &mut crate::surfaces::UiShapeCache,
 ) {
     let _ = visible_windows;
+    if !shape_cache.has_any_minimize_snapshots() {
+        return;
+    }
     shape_cache.retain_minimize_snapshots(|win_id_u64| {
         let win_id = rusty_wm::WindowId(win_id_u64);
         state.is_window_minimized(win_id)
@@ -862,6 +870,9 @@ fn prepare_minimize_snapshots_for_output(
     output_windows: &[(rusty_wm::WindowId, rusty_wm::Rect)],
     output_scale: f64,
 ) {
+    if state.minimize_anims.is_empty() {
+        return;
+    }
     for idx in 0..state.minimize_anims.len() {
         let anim = &state.minimize_anims[idx];
         if !output_windows.iter().any(|(id, _)| *id == anim.win_id) {
@@ -1409,7 +1420,14 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
                 .collect()
         };
 
-        let dock_windows = collect_dock_windows(state, &visible_windows, focused_win);
+        let launcher_progress = state.launcher_anim.current();
+        let show_launcher = state.launcher_active || launcher_progress > 0.01;
+        let qs_progress = state.quick_settings_anim.current();
+        let show_qs = !show_launcher && (state.quick_settings_active || qs_progress > 0.01);
+        let ov_progress = state.overview_anim.current();
+        let show_ov = !show_launcher && !show_qs && (state.overview_active || ov_progress > 0.01);
+
+        let dock_windows = collect_dock_windows(state, &visible_windows, focused_win, show_ov);
         let dock_tiles = state.build_dock_tiles();
         let dock_bounces = state.dock_bounce_offsets();
         let dock_view = state.dock_view_state(
@@ -1445,8 +1463,6 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
             })
         });
 
-        let launcher_progress = state.launcher_anim.current();
-        let show_launcher = state.launcher_active || launcher_progress > 0.01;
         let (win_start, visible_items) = if show_launcher {
             state.launcher.visible_window(5)
         } else {
@@ -1465,8 +1481,6 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
             progress: launcher_progress,
         });
 
-        let qs_progress = state.quick_settings_anim.current();
-        let show_qs = !show_launcher && (state.quick_settings_active || qs_progress > 0.01);
         let qs_view = show_qs.then(|| QuickSettingsRenderState {
             layout_mode: layout_str,
             reduced_motion: state.animations.reduced_motion(),
@@ -1498,8 +1512,6 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
             reduce_transparency: state.reduce_transparency,
         });
 
-        let ov_progress = state.overview_anim.current();
-        let show_ov = !show_launcher && !show_qs && (state.overview_active || ov_progress > 0.01);
         let overview_spaces = if show_ov {
             state.overview_workspace_spaces()
         } else {

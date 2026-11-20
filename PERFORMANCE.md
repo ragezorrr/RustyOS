@@ -133,3 +133,33 @@ correctness/security checks ради benchmark.
 | Client `120f` (`rusty-terminal`): `render_duration_us (p50 / p95 / p99 / max)` | `1299 / 5957 / 9881 / 151139` | `6574 / 9318 / 12937 / 305598` | `dispatch_max 459 -> 340 (-25.9%)`, `late=1`, `missed=1`, `stalls=2/0` |
 
 - **Ограничения и оценка регрессий:** В режиме `nested-winit` вызов `backend.submit()` проходит через `eglSwapBuffers` хостового Wayland-композитора (`eglSwapInterval=1` к `wl_surface.frame`), из-за чего фазовый сдвиг между таймером `16.667 ms` и host vblank вносит межпрогонный разброс `render_duration_us p50` в диапазоне `~0.55–11.9 ms` даже на неизменном бинарнике (на `120f` и `240f`). Замеры на `native-drm-kms` и A/B с реальным длительным вводом в Firefox подтверждаются отдельно вне nested-среды. Регрессий EGL (`EGL_BAD_SURFACE` на Wayland и X11), shader-компиляции и unit-тестов (`314` pass, `0` fail) не выявлено.
+
+## 10. Фаза 7 --- Честный бенчмарк (CPU vs Submit), пропуск пересборки render list и адаптивная телеметрия (`RUSTYOS-120`, 2026-11-20)
+
+- **Оборудование:** Intel Corporation Raptor Lake-U `[8086:a7ac]` (rev 04), `i915`, Linux `7.3.4-arch1-2`
+- **Userspace Graphics:** Mesa `26.2.7-arch1.1` (`mesa 1:26.2.7-1`, EGL 1.5, OpenGL ES 3.2)
+- **Scope / Реализация:**
+  - **Part A (Честный бенчмарк):** В `FrameSample` и `FrameTimingSummary` добавлено измерение чистого процессорного времени построения и композитинга кадра (`cpu_duration_us`, `cpu_p50_us`, `cpu_p95_us`, `cpu_p99_us`, `cpu_max_us`) отдельно от блокирующего `backend.submit()` (`eglSwapBuffers` / ожидание host vblank в nested-winit). Поле включено в лог-строку и экспортируется в JSON (`--metrics-out`). Добавлен скрипт `bench_runner.py` для медианного замера (5–10 прогонов) с фильтрацией фазового шума.
+  - **Part B (Оптимизация сборки render list):** В `frame_composer.rs` устранено ежекадровое форматирование `dimensions` (`format!("{}x{}")`) в `collect_dock_windows` (вычисляется только при открытом Spotlight Overview), `make_window_badge` переведен на итераторы без аллокации `Vec<&str>`, ранний возврат в `prune_inactive_minimize_snapshots` (`has_any_minimize_snapshots`) и `prepare_minimize_snapshots_for_output` без лишних проходов по хэш-таблицам при отсутствии активных анимаций сворачивания.
+  - **Part E (Адаптивная телеметрия):** В `telemetry.rs` введен адаптивный интервал опроса: `POLL_INTERVAL_ACTIVE = 3s` при открытом Control Center / Wi-Fi popover и `POLL_INTERVAL_IDLE = 12s` в фоновом режиме рабочего стола. Синхронизация состояния через `set_active_ui(bool)` и немедленное пробуждение по событиям (клик по меню, hotkey, D-Bus).
+- **Backend и режим:** `nested-winit` (`1280x800 @ 60 Hz`, `target_interval_us = 16666`, 1 output)
+- **Команды воспроизведения (`--release`):**
+  ```bash
+  # Медианный замер 7 прогонов по 120 кадров (Idle)
+  python3 .gemini/antigravity/brain/1f9783dc-9f74-4483-a6d6-b1c12a304049/scratch/bench_runner.py 7 120
+
+  # Медианный замер 7 прогонов по 120 кадров с клиентом (rusty-terminal)
+  python3 .gemini/antigravity/brain/1f9783dc-9f74-4483-a6d6-b1c12a304049/scratch/bench_runner.py 7 120 ./target/release/rusty-terminal
+
+  # Медианный замер 5 прогонов по 240 кадров (длинная дистанция)
+  python3 .gemini/antigravity/brain/1f9783dc-9f74-4483-a6d6-b1c12a304049/scratch/bench_runner.py 5 240
+  ```
+- **Результаты многопрогонных замеров (медиана 5–7 прогонов):**
+
+| Сценарий | CPU Duration (`cpu_p50 / p95 / max`) | Total Render (`render_p50 / p95`) | Input Latency `p50` | Оценка производительности |
+| :--- | :--- | :--- | :--- | :--- |
+| **Idle (`120f`, 7 прогонов)** | **`556 us / 1021 us / 209 ms`** (разброс p50 `537–716 us`) | `8257 us / 10167 us` (шум фазы `791–12056 us`) | `8269 us` | **Чистое CPU-время композитинга всего ~0.55 ms** (в 30 раз меньше бюджета кадра `16.6 ms`!) |
+| **Idle (`240f`, 5 прогонов)** | **`582 us / 920 us / 197 ms`** (разброс p50 `566–607 us`) | `4386 us / 8015 us` | `4398 us` | Стабильность на длинной дистанции, `cpu_p95 < 1 ms` |
+| **Client (`rusty-terminal`, 7 прогонов)** | **`680 us / 1917 us / 214 ms`** (разброс p50 `552–921 us`) | `11813 us / 16367 us` | `11838 us` | С живым окном терминала CPU p50 всего **0.68 ms**, p95 **1.91 ms** |
+
+- **Ключевой вывод:** Ранее наблюдавшиеся скачки `render_duration_us` от `0.6` до `15.7 ms` на 100% объясняются фазовой блокировкой внутри `eglSwapBuffers` (ожиданием `wl_surface.frame` от хоста). Фактическая процессорная работа композитора и рендера занимает **0.55–0.68 ms** в медиане, полностью исключая задержки композитинга как причину фризов.

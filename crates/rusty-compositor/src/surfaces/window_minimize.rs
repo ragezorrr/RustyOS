@@ -317,6 +317,12 @@ impl WindowMinimizePipeline {
         self.snapshots.contains_key(&window_id)
     }
 
+    /// Returns `true` if any GPU window minimize snapshot is currently cached (`RUSTYOS-120`).
+    #[must_use]
+    pub(crate) fn has_any_snapshots(&self) -> bool {
+        !self.snapshots.is_empty()
+    }
+
     /// Retains only cached GPU snapshots matching `keep` (`RUSTYOS-073`).
     pub(crate) fn retain_snapshots(&mut self, mut keep: impl FnMut(u64) -> bool) {
         self.snapshots.retain(|&win_id, _| keep(win_id));

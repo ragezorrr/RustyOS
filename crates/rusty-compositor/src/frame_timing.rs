@@ -17,6 +17,8 @@ pub struct FrameSample {
     pub frame_index: u64,
     /// Duration spent binding, rendering, flushing, and submitting the frame (microseconds).
     pub render_duration_us: u64,
+    /// Duration spent solely on CPU compositing and rendering commands before blocking submission (microseconds) (`RUSTYOS-120`).
+    pub cpu_duration_us: u64,
     /// Elapsed interval since the previous frame submission completed (microseconds).
     /// `None` for the very first recorded frame.
     pub interval_us: Option<u64>,
@@ -78,6 +80,14 @@ pub struct FrameTimingSummary {
     pub render_p99_us: u64,
     /// Maximum frame render duration in microseconds.
     pub render_max_us: u64,
+    /// 50th percentile (median) CPU frame composition duration in microseconds (`RUSTYOS-120`).
+    pub cpu_p50_us: u64,
+    /// 95th percentile CPU frame composition duration in microseconds (`RUSTYOS-120`).
+    pub cpu_p95_us: u64,
+    /// 99th percentile CPU frame composition duration in microseconds (`RUSTYOS-120`).
+    pub cpu_p99_us: u64,
+    /// Maximum CPU frame composition duration in microseconds (`RUSTYOS-120`).
+    pub cpu_max_us: u64,
     /// Number of frames that presented a new input event.
     pub input_samples: usize,
     /// 50th percentile input-to-present latency in microseconds.
@@ -103,7 +113,7 @@ impl FrameTimingSummary {
     #[must_use]
     pub fn to_log_line(&self) -> String {
         format!(
-            "frames={} target_us={} interval_us(p50/p95/p99/max)={}/{}/{}/{} render_us(p50/p95/p99/max)={}/{}/{}/{} input_us(n={}:p50/p95/max)={}/{}/{} dispatch_us(p95/max)={}/{} damage_permille(avg/p95/zero)={}/{}/{} late={} missed={} stalls={}/{} scanout={} hw_cursor={}",
+            "frames={} target_us={} interval_us(p50/p95/p99/max)={}/{}/{}/{} render_us(p50/p95/p99/max)={}/{}/{}/{} cpu_us(p50/p95/p99/max)={}/{}/{}/{} input_us(n={}:p50/p95/max)={}/{}/{} dispatch_us(p95/max)={}/{} damage_permille(avg/p95/zero)={}/{}/{} late={} missed={} stalls={}/{} scanout={} hw_cursor={}",
             self.total_frames,
             self.target_interval_us,
             self.interval_p50_us,
@@ -114,6 +124,10 @@ impl FrameTimingSummary {
             self.render_p95_us,
             self.render_p99_us,
             self.render_max_us,
+            self.cpu_p50_us,
+            self.cpu_p95_us,
+            self.cpu_p99_us,
+            self.cpu_max_us,
             self.input_samples,
             self.input_p50_us,
             self.input_p95_us,
@@ -186,6 +200,12 @@ impl FrameTimingSummary {
         let _ = writeln!(out, "    \"p95\": {},", self.render_p95_us);
         let _ = writeln!(out, "    \"p99\": {},", self.render_p99_us);
         let _ = writeln!(out, "    \"max\": {}", self.render_max_us);
+        let _ = writeln!(out, "  }},");
+        let _ = writeln!(out, "  \"cpu_duration_us\": {{");
+        let _ = writeln!(out, "    \"p50\": {},", self.cpu_p50_us);
+        let _ = writeln!(out, "    \"p95\": {},", self.cpu_p95_us);
+        let _ = writeln!(out, "    \"p99\": {},", self.cpu_p99_us);
+        let _ = writeln!(out, "    \"max\": {}", self.cpu_max_us);
         let _ = writeln!(out, "  }},");
         let _ = writeln!(out, "  \"input_to_present_us\": {{");
         let _ = writeln!(out, "    \"samples\": {},", self.input_samples);
@@ -315,7 +335,28 @@ impl FrameTimingCollector {
         damaged_pixels: u64,
         total_output_pixels: u64,
     ) -> FrameSample {
+        self.record_frame_detailed(
+            render_start,
+            present_done,
+            present_done,
+            damage_rects,
+            damaged_pixels,
+            total_output_pixels,
+        )
+    }
+
+    /// Records a completed frame distinguishing CPU render/composition duration from blocking buffer submission (`RUSTYOS-120`).
+    pub fn record_frame_detailed(
+        &mut self,
+        render_start: Instant,
+        cpu_done: Instant,
+        present_done: Instant,
+        damage_rects: u32,
+        damaged_pixels: u64,
+        total_output_pixels: u64,
+    ) -> FrameSample {
         let render_duration = present_done.saturating_duration_since(render_start);
+        let cpu_duration = cpu_done.saturating_duration_since(render_start);
         let interval = self
             .last_present_instant
             .map(|prev| present_done.saturating_duration_since(prev));
@@ -328,8 +369,9 @@ impl FrameTimingCollector {
 
         let ratio_permille = compute_damage_permille(damaged_pixels, total_output_pixels);
 
-        self.record_durations_ext(
+        self.record_durations_detailed(
             render_duration,
+            cpu_duration,
             interval,
             damage_rects,
             ratio_permille,
@@ -345,7 +387,8 @@ impl FrameTimingCollector {
         damage_rects: u32,
     ) -> FrameSample {
         let default_permille = if damage_rects == 0 { 0 } else { 1000 };
-        self.record_durations_ext(
+        self.record_durations_detailed(
+            render_duration,
             render_duration,
             interval,
             damage_rects,
@@ -363,9 +406,30 @@ impl FrameTimingCollector {
         damage_ratio_permille: u16,
         input_latency: Option<Duration>,
     ) -> FrameSample {
+        self.record_durations_detailed(
+            render_duration,
+            render_duration,
+            interval,
+            damage_rects,
+            damage_ratio_permille,
+            input_latency,
+        )
+    }
+
+    /// Records a frame with explicit CPU and total render durations (`RUSTYOS-120`).
+    pub fn record_durations_detailed(
+        &mut self,
+        render_duration: Duration,
+        cpu_duration: Duration,
+        interval: Option<Duration>,
+        damage_rects: u32,
+        damage_ratio_permille: u16,
+        input_latency: Option<Duration>,
+    ) -> FrameSample {
         self.total_frames = self.total_frames.saturating_add(1);
 
         let render_duration_us = u64::try_from(render_duration.as_micros()).unwrap_or(u64::MAX);
+        let cpu_duration_us = u64::try_from(cpu_duration.as_micros()).unwrap_or(u64::MAX);
         let interval_us = interval.map(|d| u64::try_from(d.as_micros()).unwrap_or(u64::MAX));
         let input_to_present_us =
             input_latency.map(|d| u64::try_from(d.as_micros()).unwrap_or(u64::MAX));
@@ -390,6 +454,7 @@ impl FrameTimingCollector {
         let sample = FrameSample {
             frame_index: self.total_frames,
             render_duration_us,
+            cpu_duration_us,
             interval_us,
             damage_rects,
             damage_ratio_permille: damage_ratio_permille.min(1000),
@@ -436,6 +501,14 @@ impl FrameTimingCollector {
         percentile_sorted(&intervals, 50)
     }
 
+    /// Computes only the median CPU frame composition duration in microseconds (`RUSTYOS-120`).
+    #[must_use]
+    pub fn cpu_p50_us(&self) -> u64 {
+        let mut cpus: Vec<u64> = self.samples.iter().map(|s| s.cpu_duration_us).collect();
+        cpus.sort_unstable();
+        percentile_sorted(&cpus, 50)
+    }
+
     /// Computes percentile statistics (`p50`, `p95`, `p99`, `max`) over the retained window.
     #[must_use]
     pub fn summary(&self) -> FrameTimingSummary {
@@ -444,6 +517,9 @@ impl FrameTimingCollector {
 
         let mut renders: Vec<u64> = self.samples.iter().map(|s| s.render_duration_us).collect();
         renders.sort_unstable();
+
+        let mut cpus: Vec<u64> = self.samples.iter().map(|s| s.cpu_duration_us).collect();
+        cpus.sort_unstable();
 
         let mut inputs: Vec<u64> = self
             .samples
@@ -495,6 +571,10 @@ impl FrameTimingCollector {
             render_p95_us: percentile_sorted(&renders, 95),
             render_p99_us: percentile_sorted(&renders, 99),
             render_max_us: renders.last().copied().unwrap_or(0),
+            cpu_p50_us: percentile_sorted(&cpus, 50),
+            cpu_p95_us: percentile_sorted(&cpus, 95),
+            cpu_p99_us: percentile_sorted(&cpus, 99),
+            cpu_max_us: cpus.last().copied().unwrap_or(0),
             input_samples: inputs.len(),
             input_p50_us: percentile_sorted(&inputs, 50),
             input_p95_us: percentile_sorted(&inputs, 95),
@@ -659,5 +739,30 @@ mod tests {
         let json = summary.to_json("native-drm-kms", (1920, 1080));
         assert!(json.contains("\"direct_scanout_frames\": 2"));
         assert!(json.contains("\"hw_cursor_frames\": 2"));
+    }
+
+    #[test]
+    fn collector_tracks_cpu_duration_separately_from_submit() {
+        let mut collector = FrameTimingCollector::new(16, 60_000);
+        let base = Instant::now();
+        let render_start = base;
+        let cpu_done = base + Duration::from_micros(450);
+        let present_done = base + Duration::from_millis(16);
+
+        let sample =
+            collector.record_frame_detailed(render_start, cpu_done, present_done, 1, 100, 1000);
+        assert_eq!(sample.cpu_duration_us, 450);
+        assert_eq!(sample.render_duration_us, 16_000);
+
+        let summary = collector.summary();
+        assert_eq!(summary.cpu_p50_us, 450);
+        assert_eq!(summary.render_p50_us, 16_000);
+        assert_eq!(collector.cpu_p50_us(), 450);
+
+        let log_line = summary.to_log_line();
+        assert!(log_line.contains("cpu_us(p50/p95/p99/max)=450/450/450/450"));
+
+        let json = summary.to_json("nested-winit", (1280, 800));
+        assert!(json.contains("\"cpu_duration_us\": {"));
     }
 }

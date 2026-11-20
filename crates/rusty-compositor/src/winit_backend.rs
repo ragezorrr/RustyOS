@@ -369,6 +369,7 @@ fn render_winit_frame(
     state.popups.cleanup();
     state.cleanup_ime_popups();
 
+    let cpu_done = Instant::now();
     let submit_slice = tracked_damage.as_deref();
     backend
         .submit(submit_slice)
@@ -383,8 +384,9 @@ fn render_winit_frame(
     let _ = state.display_handle.flush_clients();
 
     let present_done = Instant::now();
-    state.frame_timing.record_frame(
+    state.frame_timing.record_frame_detailed(
         render_start,
+        cpu_done,
         present_done,
         damage_rects,
         damaged_pixels,

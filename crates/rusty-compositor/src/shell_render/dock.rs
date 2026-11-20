@@ -99,16 +99,15 @@ pub fn make_window_badge(title: &str) -> String {
     if trimmed.is_empty() {
         return "Wn".to_owned();
     }
-    let words: Vec<&str> = trimmed
+    let mut words = trimmed
         .split(|c: char| !c.is_alphanumeric())
-        .filter(|w| !w.is_empty())
-        .collect();
-    if words.len() >= 2 {
-        let mut badge = String::new();
-        if let Some(c1) = words[0].chars().next() {
+        .filter(|w| !w.is_empty());
+    if let (Some(w1), Some(w2)) = (words.next(), words.next()) {
+        let mut badge = String::with_capacity(4);
+        if let Some(c1) = w1.chars().next() {
             badge.push(c1.to_ascii_uppercase());
         }
-        if let Some(c2) = words[1].chars().next() {
+        if let Some(c2) = w2.chars().next() {
             badge.push(c2.to_ascii_uppercase());
         }
         if !badge.is_empty() {
