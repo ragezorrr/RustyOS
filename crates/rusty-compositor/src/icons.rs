@@ -138,14 +138,39 @@ pub enum BuiltinAppIcon {
     },
 }
 
+const ICON_CACHE_BUFFER_PRUNE_THRESHOLD: usize = 256;
+const ICON_CACHE_SHM_PRUNE_THRESHOLD: usize = 128;
+const ICON_CACHE_MAX_AGE_FRAMES: u64 = 1800;
+
+#[derive(Debug)]
+struct AgedIconEntry<T> {
+    value: T,
+    last_frame: u64,
+}
+
+fn prune_aged_icon_map<V>(
+    map: &mut HashMap<IconCacheKey, AgedIconEntry<V>>,
+    frame: u64,
+    threshold: usize,
+    max_age: u64,
+) {
+    if map.len() > threshold
+        && (map.len() > threshold.saturating_mul(2) || frame.is_multiple_of(64))
+    {
+        let cutoff = frame.saturating_sub(max_age);
+        map.retain(|_, entry| entry.last_frame >= cutoff);
+    }
+}
+
 /// CPU-decoded & Wayland SHM GPU-cached application & tray icon store (`RUSTYOS-033`, `RUSTYOS-047`).
 #[derive(Debug, Default)]
 pub struct IconCache {
     search_roots: Option<Vec<PathBuf>>,
     resolved_paths: HashMap<String, Option<PathBuf>>,
-    buffers: HashMap<IconCacheKey, Option<MemoryRenderBuffer>>,
-    shm_textures: HashMap<IconCacheKey, Option<CachedShmTexture>>,
+    buffers: HashMap<IconCacheKey, AgedIconEntry<Option<MemoryRenderBuffer>>>,
+    shm_textures: HashMap<IconCacheKey, AgedIconEntry<Option<CachedShmTexture>>>,
     builtin_squircles: HashMap<(BuiltinAppIcon, u16, bool, u8), MemoryRenderBuffer>,
+    frame_counter: u64,
 }
 
 impl IconCache {
@@ -153,6 +178,28 @@ impl IconCache {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Advances the frame counter and prunes stale cached icon buffers and SHM textures (`RUSTYOS-119`).
+    pub fn begin_frame(&mut self) {
+        self.frame_counter = self.frame_counter.saturating_add(1);
+        prune_aged_icon_map(
+            &mut self.buffers,
+            self.frame_counter,
+            ICON_CACHE_BUFFER_PRUNE_THRESHOLD,
+            ICON_CACHE_MAX_AGE_FRAMES,
+        );
+        prune_aged_icon_map(
+            &mut self.shm_textures,
+            self.frame_counter,
+            ICON_CACHE_SHM_PRUNE_THRESHOLD,
+            ICON_CACHE_MAX_AGE_FRAMES,
+        );
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cached_buffer_count(&self) -> usize {
+        self.buffers.len()
     }
 
     /// Returns `true` if any window icon source (`xdg_toplevel_icon_v1` SHM/name or XDG fallback)
@@ -258,6 +305,7 @@ impl IconCache {
             size_px: size_u16,
             fingerprint: shm_icon.revision,
         };
+        let frame = self.frame_counter;
         if !self.shm_textures.contains_key(&key) {
             self.shm_textures
                 .retain(|k, _| k.source_key != source_key || k.fingerprint == shm_icon.revision);
@@ -291,9 +339,17 @@ impl IconCache {
                     );
                     Some(CachedShmTexture { buffer, src_size })
                 });
-            self.shm_textures.insert(key.clone(), imported);
+            self.shm_textures.insert(
+                key.clone(),
+                AgedIconEntry {
+                    value: imported,
+                    last_frame: frame,
+                },
+            );
         }
-        self.shm_textures.get(&key).and_then(Option::as_ref)
+        let entry = self.shm_textures.get_mut(&key)?;
+        entry.last_frame = frame;
+        entry.value.as_ref()
     }
 
     /// Returns `true` if `icon_name` resolves to a decodable PNG icon cached/loadable at `size_px`.
@@ -320,13 +376,7 @@ impl IconCache {
         if icon_name.trim().is_empty() || size_px <= 0 {
             return None;
         }
-        self.ensure_named_buffer(icon_name, size_u16);
-        let key = IconCacheKey {
-            source_key: format!("name:{icon_name}"),
-            size_px: size_u16,
-            fingerprint: 0,
-        };
-        let buf = self.buffers.get(&key)?.as_ref()?;
+        let buf = self.ensure_named_buffer(icon_name, size_u16)?;
         element_from_icon_buffer(renderer, buf, size_px, loc)
     }
 
@@ -343,17 +393,23 @@ impl IconCache {
         if size_px <= 0 {
             return None;
         }
+        let frame = self.frame_counter;
         let key = IconCacheKey {
             source_key: format!("pixmap:{sni_key}"),
             size_px: size_u16,
             fingerprint: pixmap.fingerprint,
         };
-        let buf_opt = self.buffers.entry(key).or_insert_with(|| {
+        let entry = self.buffers.entry(key).or_insert_with(|| {
             let dst = usize::from(size_u16);
-            let bgra = argb32_be_to_premul_bgra(pixmap.width, pixmap.height, &pixmap.argb_be, dst)?;
-            Some(upload_bgra_buffer(size_px, &bgra))
+            let value = argb32_be_to_premul_bgra(pixmap.width, pixmap.height, &pixmap.argb_be, dst)
+                .map(|bgra| upload_bgra_buffer(size_px, &bgra));
+            AgedIconEntry {
+                value,
+                last_frame: frame,
+            }
         });
-        let buf = buf_opt.as_ref()?;
+        entry.last_frame = frame;
+        let buf = entry.value.as_ref()?;
         element_from_icon_buffer(renderer, buf, size_px, loc)
     }
 
@@ -362,6 +418,7 @@ impl IconCache {
         icon_name: &str,
         size_u16: u16,
     ) -> Option<&MemoryRenderBuffer> {
+        let frame = self.frame_counter;
         let key = IconCacheKey {
             source_key: format!("name:{icon_name}"),
             size_px: size_u16,
@@ -374,9 +431,17 @@ impl IconCache {
                 let dev_px = i32::try_from(dev_size).ok()?;
                 Some(upload_bgra_buffer_scaled(dev_px, scale, &bgra))
             });
-            self.buffers.insert(key.clone(), buf);
+            self.buffers.insert(
+                key.clone(),
+                AgedIconEntry {
+                    value: buf,
+                    last_frame: frame,
+                },
+            );
         }
-        self.buffers.get(&key).and_then(Option::as_ref)
+        let entry = self.buffers.get_mut(&key)?;
+        entry.last_frame = frame;
+        entry.value.as_ref()
     }
 
     fn resolve_icon_path(&mut self, icon_name: &str) -> Option<PathBuf> {
@@ -414,32 +479,42 @@ impl IconCache {
         );
         let accent_idx = crate::shell_render::active_accent_index();
         let fp = (u64::from(is_dark) << 8) | u64::from(accent_idx);
+        let frame = self.frame_counter;
         let key = IconCacheKey {
             source_key: format!("framed_name:{icon_name}"),
             size_px: size_u16,
             fingerprint: fp,
         };
-        if !self.buffers.contains_key(&key) {
-            let buf = self.resolve_icon_path(icon_name).and_then(|path| {
-                let meta = fs::metadata(&path).ok()?;
-                if usize::try_from(meta.len()).unwrap_or(usize::MAX) > MAX_PNG_FILE_BYTES {
-                    return None;
-                }
-                let bytes = fs::read(path).ok()?;
-                let (w, h, rgba) = decode_png_rgba(&bytes)?;
-                let scale = crate::surfaces::GLYPH_BUFFER_SCALE;
-                let dev_px = i32::from(size_u16) * scale;
-                let dev_usize = usize::try_from(dev_px).ok()?;
-                let (_, inner_dim) = crate::icon_art::squircle_logo_box(dev_usize);
-                let logo_bgra = scale_rgba_to_premul_bgra(w, h, &rgba, inner_dim)?;
-                let bgra = crate::icon_art::composite_xdg_in_squircle(
-                    dev_px, &logo_bgra, inner_dim, is_dark, accent_idx,
-                );
-                Some(upload_bgra_buffer_scaled(dev_px, scale, &bgra))
-            });
-            self.buffers.insert(key.clone(), buf);
+        if let Some(entry) = self.buffers.get_mut(&key) {
+            entry.last_frame = frame;
+            let buf = entry.value.as_ref()?;
+            return element_from_icon_buffer(renderer, buf, size_px, loc);
         }
-        let buf = self.buffers.get(&key)?.as_ref()?;
+        let buf = self.resolve_icon_path(icon_name).and_then(|path| {
+            let meta = fs::metadata(&path).ok()?;
+            if usize::try_from(meta.len()).unwrap_or(usize::MAX) > MAX_PNG_FILE_BYTES {
+                return None;
+            }
+            let bytes = fs::read(path).ok()?;
+            let (w, h, rgba) = decode_png_rgba(&bytes)?;
+            let scale = crate::surfaces::GLYPH_BUFFER_SCALE;
+            let dev_px = i32::from(size_u16) * scale;
+            let dev_usize = usize::try_from(dev_px).ok()?;
+            let (_, inner_dim) = crate::icon_art::squircle_logo_box(dev_usize);
+            let logo_bgra = scale_rgba_to_premul_bgra(w, h, &rgba, inner_dim)?;
+            let bgra = crate::icon_art::composite_xdg_in_squircle(
+                dev_px, &logo_bgra, inner_dim, is_dark, accent_idx,
+            );
+            Some(upload_bgra_buffer_scaled(dev_px, scale, &bgra))
+        });
+        self.buffers.insert(
+            key.clone(),
+            AgedIconEntry {
+                value: buf,
+                last_frame: frame,
+            },
+        );
+        let buf = self.buffers.get(&key)?.value.as_ref()?;
         element_from_icon_buffer(renderer, buf, size_px, loc)
     }
 
@@ -958,5 +1033,47 @@ mod tests {
             framed[3], 0,
             "framed XDG squircle corner must stay transparent"
         );
+    }
+
+    #[test]
+    fn icon_cache_evicts_stale_entries_while_keeping_active_icons() {
+        let mut cache = IconCache::new();
+        let active_key = IconCacheKey {
+            source_key: "name:active-app".to_owned(),
+            size_px: 48,
+            fingerprint: 0,
+        };
+        cache.buffers.insert(
+            active_key.clone(),
+            AgedIconEntry {
+                value: None,
+                last_frame: 0,
+            },
+        );
+        for i in 0..270 {
+            cache.buffers.insert(
+                IconCacheKey {
+                    source_key: format!("name:stale-app-{i}"),
+                    size_px: 48,
+                    fingerprint: 0,
+                },
+                AgedIconEntry {
+                    value: None,
+                    last_frame: 0,
+                },
+            );
+        }
+        assert_eq!(cache.cached_buffer_count(), 271);
+
+        for f in 1..=1920 {
+            cache.begin_frame();
+            if f == 1500
+                && let Some(entry) = cache.buffers.get_mut(&active_key)
+            {
+                entry.last_frame = cache.frame_counter;
+            }
+        }
+        assert_eq!(cache.cached_buffer_count(), 1);
+        assert!(cache.buffers.contains_key(&active_key));
     }
 }

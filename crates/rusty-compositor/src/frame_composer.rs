@@ -1090,6 +1090,7 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
     crate::shell_render::set_active_appearance(state.user_config.appearance);
     crate::shell_render::set_active_accent_index(state.user_config.ui_accent_index);
     crate::shell_render::begin_solid_element_frame(output_entry.id.0);
+    text_cache.begin_frame();
     shape_cache.begin_shadow_frame(output_entry.id.0);
     shape_cache.clear_active_liquid_glass_backdrop();
     let output_loc = output_entry.location;
@@ -1184,8 +1185,7 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
 
     shape_cache.sync_wallpaper_revision(state.wallpaper_revision);
 
-    let tel = state.telemetry.snapshot();
-    let timing = state.frame_timing.summary();
+    let tel = state.telemetry.snapshot_arc();
     let lock_progress = state.lock_screen_anim.current();
     if state.screen_locked || lock_progress > 0.01 {
         let lock_view = state.lock_screen_render_state(&tel, lock_progress);
@@ -1467,7 +1467,7 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
 
         let qs_progress = state.quick_settings_anim.current();
         let show_qs = !show_launcher && (state.quick_settings_active || qs_progress > 0.01);
-        let qs_view = show_qs.then_some(QuickSettingsRenderState {
+        let qs_view = show_qs.then(|| QuickSettingsRenderState {
             layout_mode: layout_str,
             reduced_motion: state.animations.reduced_motion(),
             network_label: &tel.network.status_label,
@@ -1491,7 +1491,7 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
             media_playing: tel.media.playing,
             media_title: &tel.media.title,
             focus_mode: state.focus_mode,
-            frame_p50_us: timing.interval_p50_us,
+            frame_p50_us: state.frame_timing.interval_p50_us(),
             window_count,
             progress: qs_progress,
             glass_opacity: state.glass_opacity,

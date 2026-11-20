@@ -49,12 +49,17 @@ pub enum FontWeight {
     Bold,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct LabelKey {
-    text: String,
+const TEXT_CACHE_PRUNE_THRESHOLD: usize = 256;
+const TEXT_CACHE_HARD_CAP: usize = 512;
+const TEXT_CACHE_MAX_AGE_FRAMES: u64 = 1800;
+
+#[derive(Debug)]
+struct CachedLabelVariant {
     size_tenths: u16,
     color: [u8; 4],
     weight: FontWeight,
+    buffer: MemoryRenderBuffer,
+    last_frame: u64,
 }
 
 struct LoadedFonts {
@@ -97,15 +102,18 @@ pub fn measure_ui_text_width(text: &str, size_px: f32, weight: FontWeight) -> i3
 /// GPU-backed label texture cache powered by `fontdue` and bundled `Inter`.
 pub struct TextCache {
     fonts: &'static LoadedFonts,
-    buffers: HashMap<LabelKey, (MemoryRenderBuffer, Size<i32, Logical>)>,
+    buffers: HashMap<String, Vec<CachedLabelVariant>>,
+    frame_counter: u64,
 }
 
 impl fmt::Debug for TextCache {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let variant_count: usize = self.buffers.values().map(Vec::len).sum();
         f.debug_struct("TextCache")
             .field("font_loaded", &self.fonts.regular.is_some())
             .field("bold_font_loaded", &self.fonts.bold.is_some())
-            .field("cached_labels", &self.buffers.len())
+            .field("cached_labels", &variant_count)
+            .field("frame_counter", &self.frame_counter)
             .finish()
     }
 }
@@ -123,7 +131,30 @@ impl TextCache {
         Self {
             fonts: shared_fonts(),
             buffers: HashMap::new(),
+            frame_counter: 0,
         }
+    }
+
+    /// Advances the cache frame generation and prunes stale glyph buffers (`RUSTYOS-119`).
+    pub fn begin_frame(&mut self) {
+        self.frame_counter = self.frame_counter.saturating_add(1);
+        let total: usize = self.buffers.values().map(Vec::len).sum();
+        if total <= TEXT_CACHE_PRUNE_THRESHOLD {
+            return;
+        }
+        if total > TEXT_CACHE_HARD_CAP || self.frame_counter.is_multiple_of(64) {
+            let cutoff = self.frame_counter.saturating_sub(TEXT_CACHE_MAX_AGE_FRAMES);
+            self.buffers.retain(|_, variants| {
+                variants.retain(|v| v.last_frame >= cutoff);
+                !variants.is_empty()
+            });
+        }
+    }
+
+    /// Returns total cached label variants across strings (used in tests/telemetry).
+    #[must_use]
+    pub fn cached_variant_count(&self) -> usize {
+        self.buffers.values().map(Vec::len).sum()
     }
 
     /// Returns `true` if a TrueType/OpenType font was successfully loaded.
@@ -196,38 +227,60 @@ impl TextCache {
         rgba: [u8; 4],
         loc: Point<i32, Logical>,
     ) -> Option<MemoryRenderBufferRenderElement<GlesRenderer>> {
-        let font = self.font_for_weight(weight)?;
         if text.is_empty() {
             return None;
         }
-
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let size_tenths = (size_px.max(1.0) * 10.0).round() as u16;
-        let key = LabelKey {
-            text: text.to_owned(),
-            size_tenths,
-            color: rgba,
-            weight,
-        };
-
-        if !self.buffers.contains_key(&key) {
-            let metric_font = self.fonts.regular.as_ref().unwrap_or(font);
-            let (buf, size) = rasterize_label_buffer(font, metric_font, text, size_px, rgba)?;
-            self.buffers.insert(key.clone(), (buf, size));
+        let size_tenths = size_tenths_key(size_px);
+        let frame = self.frame_counter;
+        if let Some(vars) = self.buffers.get_mut(text)
+            && let Some(v) = vars
+                .iter_mut()
+                .find(|v| v.size_tenths == size_tenths && v.color == rgba && v.weight == weight)
+        {
+            v.last_frame = frame;
+            return element_from_label_buffer(renderer, &v.buffer, loc);
         }
 
-        let (buf, _size) = self.buffers.get(&key)?;
-        let phys_loc = loc.to_physical_precise_round(1.0);
-        MemoryRenderBufferRenderElement::from_buffer(
-            renderer,
-            phys_loc,
-            buf,
-            None,
-            None,
-            None,
-            Kind::Unspecified,
-        )
-        .ok()
+        let buf = self.rasterize_and_cache_label(text, weight, size_px, rgba)?;
+        element_from_label_buffer(renderer, buf, loc)
+    }
+
+    fn rasterize_and_cache_label(
+        &mut self,
+        text: &str,
+        weight: FontWeight,
+        size_px: f32,
+        rgba: [u8; 4],
+    ) -> Option<&MemoryRenderBuffer> {
+        let font = self.font_for_weight(weight)?;
+        let metric_font = self.fonts.regular.as_ref().unwrap_or(font);
+        let (buffer, _size) = rasterize_label_buffer(font, metric_font, text, size_px, rgba)?;
+        let frame = self.frame_counter;
+        let vars = self.buffers.entry(text.to_owned()).or_default();
+        vars.push(CachedLabelVariant {
+            size_tenths: size_tenths_key(size_px),
+            color: rgba,
+            weight,
+            buffer,
+            last_frame: frame,
+        });
+        vars.last().map(|v| &v.buffer)
+    }
+
+    #[cfg(test)]
+    fn cache_or_touch_for_test(&mut self, text: &str, size_px: f32, rgba: [u8; 4]) -> bool {
+        let size_tenths = size_tenths_key(size_px);
+        let frame = self.frame_counter;
+        if let Some(vars) = self.buffers.get_mut(text)
+            && let Some(v) = vars.iter_mut().find(|v| {
+                v.size_tenths == size_tenths && v.color == rgba && v.weight == FontWeight::Regular
+            })
+        {
+            v.last_frame = frame;
+            return true;
+        }
+        self.rasterize_and_cache_label(text, FontWeight::Regular, size_px, rgba)
+            .is_some()
     }
 
     /// Renders `text` centered inside `bounds` (logical rectangle) using [`FontWeight::Regular`].
@@ -416,6 +469,29 @@ fn rasterize_label_buffer(
     Some((mem_buf, Size::from((width, height))))
 }
 
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn size_tenths_key(size_px: f32) -> u16 {
+    (size_px.max(1.0) * 10.0).round() as u16
+}
+
+fn element_from_label_buffer(
+    renderer: &mut GlesRenderer,
+    buffer: &MemoryRenderBuffer,
+    loc: Point<i32, Logical>,
+) -> Option<MemoryRenderBufferRenderElement<GlesRenderer>> {
+    let phys_loc = loc.to_physical_precise_round(1.0);
+    MemoryRenderBufferRenderElement::from_buffer(
+        renderer,
+        phys_loc,
+        buffer,
+        None,
+        None,
+        None,
+        Kind::Unspecified,
+    )
+    .ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -431,5 +507,26 @@ mod tests {
         assert_eq!(h_reg, h_bold);
         assert!(h_reg >= 13);
         assert!(measure_ui_text_width("File", 13.0, FontWeight::Regular) > 10);
+    }
+
+    #[test]
+    fn text_cache_evicts_stale_labels_while_keeping_active_entries() {
+        let mut cache = TextCache::new();
+        let white = [255, 255, 255, 255];
+        assert!(cache.cache_or_touch_for_test("Active Dock Label", 13.0, white));
+        for i in 0..300 {
+            let s = format!("stale-label-{i}");
+            assert!(cache.cache_or_touch_for_test(&s, 13.0, white));
+        }
+        assert_eq!(cache.cached_variant_count(), 301);
+
+        for f in 1..=1920 {
+            cache.begin_frame();
+            if f == 1500 {
+                assert!(cache.cache_or_touch_for_test("Active Dock Label", 13.0, white));
+            }
+        }
+        assert_eq!(cache.cached_variant_count(), 1);
+        assert!(cache.buffers.contains_key("Active Dock Label"));
     }
 }

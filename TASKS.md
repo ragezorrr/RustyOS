@@ -2061,6 +2061,23 @@ hardware/software context и низкие накладные расходы.
 - **Tests:** 309 unit-тестов workspace (`4` `rusty-animation`, `190` `rusty-compositor`, `16` `rusty-files`, `12` `rusty-installer`, `3` `rusty-ipc`, `44` `rusty-services`, `10` `rusty-settings`, `5` `rusty-shell`, `14` `rusty-terminal`, `4` `rusty-updater`, `7` `rusty-wm`).
 - **Risks:** Сборка `yay-bin` в целевой системе зависит от доступности `aur.archlinux.org` и GitHub во время установки; при сетевом сбое установка системы продолжается с предупреждением без фатальной ошибки.
 
+### RUSTYOS-119 — Оптимизация release-профиля, hot path композитора и age-eviction кэшей (`RUSTYOS-119 Вариант 1`)
+
+- **Status:** Done (`RUSTYOS-119 Вариант 1` — утверждённый объём выполнен)
+- **Goal:** Уменьшить размер и накладные расходы release-бинарника, убрать лишние ежекадровые аллокации/сортировки и FBO-переключения в композиторе при неизменных backdrop/telemetry/UI, а также ограничить рост GPU/RAM-кэшей (`TextCache`, `UiShapeCache`, `IconCache`) через age-based eviction.
+- **Dependencies:** `RUSTYOS-118`.
+- **Scope:**
+  - `Cargo.toml`: добавлен `[profile.release]` (`lto = "thin"`, `codegen-units = 1`, `strip = "symbols"`);
+  - `crates/rusty-compositor/src/telemetry.rs`, `frame_timing.rs`, `frame_composer.rs`: перевод `SharedState::latest` на `Arc<SystemTelemetry>` (`snapshot_arc()` с нулевым клонированием на чтении кадра), ленивый `interval_p50_us()` вместо ежекадрового `frame_timing.summary()` (5 сортировок до 4096 элементов) при закрытом Control Center;
+  - `crates/rusty-compositor/src/surfaces/liquid_glass.rs`: `BackdropElemSig` (`Id`, `CommitCounter`, geometry, `src`, `transform`, `alpha`) и `backdrop_signature_matches` для быстрого пропуска `run_backdrop_blur_passes` и offscreen `scene_tex` FBO bind без лишних аллокаций;
+  - `crates/rusty-compositor/src/text.rs`, `surfaces/mod.rs`, `icons.rs`: zero-alloc lookup по `&str` в `TextCache::buffers`, объединение `ensure_named_buffer` lookup в `IconCache` и age-based eviction по `frame_counter` для `TextCache`, `UiShapeCache` (`glyphs`, `glass_panels` без полного сброса Dock/TopBar, `avatars`) и `IconCache` (`buffers`, `shm_textures`).
+- **Acceptance Criteria:**
+  - `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace` (включая 5 новых unit-тестов на `snapshot_arc`, `interval_p50_us`, `backdrop_signature_matches` и age-eviction) проходят без ошибок;
+  - Живые `--winit` прогоны на `Wayland` и `X11` + `--drm-probe` проходят без `EGL_BAD_SURFACE` и shader-ошибок;
+  - Замеры `--release` до/после (размер бинарника `23M -> 15M` и прогоны `120f`/`240f` `--bench-input`) зафиксированы в `PERFORMANCE.md`.
+- **Tests:** 314 unit-тестов workspace (`4` `rusty-animation`, `195` `rusty-compositor`, `16` `rusty-files`, `12` `rusty-installer`, `3` `rusty-ipc`, `44` `rusty-services`, `10` `rusty-settings`, `5` `rusty-shell`, `14` `rusty-terminal`, `4` `rusty-updater`, `7` `rusty-wm`).
+- **Risks:** В `nested-winit` замер `render_duration_us` включает фазовое ожидание `eglSwapBuffers` на хостовом `wl_surface.frame`; прогон на голом железе `--drm` выполняется пользователем отдельно.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

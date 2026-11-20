@@ -248,6 +248,32 @@ struct CachedWallpaper {
     fallback_buffer_dark: Option<MemoryRenderBuffer>,
 }
 
+const SHAPE_GLYPH_PRUNE_THRESHOLD: usize = 256;
+const SHAPE_GLASS_PRUNE_THRESHOLD: usize = 48;
+const SHAPE_AVATAR_PRUNE_THRESHOLD: usize = 32;
+const SHAPE_CACHE_MAX_AGE_FRAMES: u64 = 1800;
+const SHAPE_GLASS_MAX_AGE_FRAMES: u64 = 900;
+
+#[derive(Debug)]
+struct AgedShapeEntry<T> {
+    value: T,
+    last_frame: u64,
+}
+
+fn prune_aged_shape_map<K, V>(
+    map: &mut HashMap<K, AgedShapeEntry<V>>,
+    frame: u64,
+    threshold: usize,
+    max_age: u64,
+) {
+    if map.len() > threshold
+        && (map.len() > threshold.saturating_mul(2) || frame.is_multiple_of(64))
+    {
+        let cutoff = frame.saturating_sub(max_age);
+        map.retain(|_, entry| entry.last_frame >= cutoff);
+    }
+}
+
 /// CPU-rasterized, GPU-cached cache of SDF rounded corners, circles, shadow patches, cursors, glyphs, and wallpaper.
 #[derive(Debug, Default)]
 pub struct UiShapeCache {
@@ -255,17 +281,18 @@ pub struct UiShapeCache {
     corners: HashMap<CornerKey, (MemoryRenderBuffer, Size<i32, Logical>)>,
     shadow_corners: HashMap<ShadowCornerKey, (MemoryRenderBuffer, Size<i32, Logical>)>,
     shadow_edges: HashMap<ShadowEdgeKey, MemoryRenderBuffer>,
-    glyphs: HashMap<GlyphKey, MemoryRenderBuffer>,
-    glass_panels: HashMap<GlassPanelKey, MemoryRenderBuffer>,
+    glyphs: HashMap<GlyphKey, AgedShapeEntry<MemoryRenderBuffer>>,
+    glass_panels: HashMap<GlassPanelKey, AgedShapeEntry<MemoryRenderBuffer>>,
     traffic_lights: HashMap<TrafficLightKey, MemoryRenderBuffer>,
     dock_icon_shadows: HashMap<u16, MemoryRenderBuffer>,
-    avatars: HashMap<AvatarKey, MemoryRenderBuffer>,
+    avatars: HashMap<AvatarKey, AgedShapeEntry<MemoryRenderBuffer>>,
     wallpaper: CachedWallpaper,
     cursor_arrow: Option<MemoryRenderBuffer>,
     xcursors: HashMap<(Option<String>, &'static str, u32), Option<CachedCursor>>,
     liquid_glass: liquid_glass::LiquidGlassPipeline,
     window_minimize: window_minimize::WindowMinimizePipeline,
     window_shadow: window_shadow::WindowShadowPipeline,
+    frame_counter: u64,
     /// Decoded & GPU-cached application and tray icon textures (`RUSTYOS-033`).
     pub icons: crate::icons::IconCache,
 }
@@ -438,9 +465,29 @@ impl UiShapeCache {
         .ok()
     }
 
-    /// Advances the shadow slot generation at the start of each output frame (`RUSTYOS-075`).
+    /// Advances frame generation and prunes stale cached surface, icon, and shadow entries (`RUSTYOS-075`, `RUSTYOS-119`).
     pub(crate) fn begin_shadow_frame(&mut self, output_id: u32) {
+        self.frame_counter = self.frame_counter.saturating_add(1);
         self.window_shadow.begin_frame(output_id);
+        self.icons.begin_frame();
+        prune_aged_shape_map(
+            &mut self.glyphs,
+            self.frame_counter,
+            SHAPE_GLYPH_PRUNE_THRESHOLD,
+            SHAPE_CACHE_MAX_AGE_FRAMES,
+        );
+        prune_aged_shape_map(
+            &mut self.glass_panels,
+            self.frame_counter,
+            SHAPE_GLASS_PRUNE_THRESHOLD,
+            SHAPE_GLASS_MAX_AGE_FRAMES,
+        );
+        prune_aged_shape_map(
+            &mut self.avatars,
+            self.frame_counter,
+            SHAPE_AVATAR_PRUNE_THRESHOLD,
+            SHAPE_CACHE_MAX_AGE_FRAMES,
+        );
     }
 
     /// Builds a hardware-accelerated seamless Golden Gate drop shadow element for a mapped window (`RUSTYOS-075`, `RUSTYOS-080`).
@@ -718,27 +765,55 @@ impl UiShapeCache {
             reduce_transparency,
             is_dark,
         };
-        if !self.glass_panels.contains_key(&key) {
-            if self.glass_panels.len() >= 48 {
-                self.glass_panels.clear();
-            }
-            let clamped_glass = f32::from(glass_pct) / 100.0;
-            let buf = rasterize_rgba_rect(width, height, |px, py| {
-                sample_glass_panel_pixel_themed(
-                    px,
-                    py,
-                    width,
-                    height,
-                    i32::from(r_u16),
-                    clamped_glass,
-                    reduce_transparency,
-                    style,
-                    is_dark,
-                )
-            });
-            self.glass_panels.insert(key, buf);
+        let frame = self.frame_counter;
+        if let Some(entry) = self.glass_panels.get_mut(&key) {
+            entry.last_frame = frame;
+            return MemoryRenderBufferRenderElement::from_buffer(
+                renderer,
+                loc.to_f64().to_physical(1.0),
+                &entry.value,
+                None,
+                None,
+                None,
+                Kind::Unspecified,
+            )
+            .ok();
         }
-        let buf = self.glass_panels.get(&key)?;
+        if self.glass_panels.len() >= SHAPE_GLASS_PRUNE_THRESHOLD {
+            let cutoff = frame.saturating_sub(SHAPE_GLASS_MAX_AGE_FRAMES);
+            self.glass_panels.retain(|_, e| e.last_frame >= cutoff);
+            if self.glass_panels.len() >= SHAPE_GLASS_PRUNE_THRESHOLD
+                && let Some(oldest_key) = self
+                    .glass_panels
+                    .iter()
+                    .min_by_key(|(_, e)| e.last_frame)
+                    .map(|(k, _)| *k)
+            {
+                self.glass_panels.remove(&oldest_key);
+            }
+        }
+        let clamped_glass = f32::from(glass_pct) / 100.0;
+        let buf = rasterize_rgba_rect(width, height, |px, py| {
+            sample_glass_panel_pixel_themed(
+                px,
+                py,
+                width,
+                height,
+                i32::from(r_u16),
+                clamped_glass,
+                reduce_transparency,
+                style,
+                is_dark,
+            )
+        });
+        self.glass_panels.insert(
+            key,
+            AgedShapeEntry {
+                value: buf,
+                last_frame: frame,
+            },
+        );
+        let buf = &self.glass_panels.get(&key)?.value;
         MemoryRenderBufferRenderElement::from_buffer(
             renderer,
             loc.to_f64().to_physical(1.0),
@@ -937,28 +1012,46 @@ impl UiShapeCache {
             seed,
             selected,
         };
-        if !self.avatars.contains_key(&key) {
-            let d_usize = usize::try_from(diameter).ok()?;
-            let loaded = avatar_path
-                .and_then(|p| crate::icons::load_circular_avatar_bgra(p, d_usize))
-                .map(|bgra| {
-                    MemoryRenderBuffer::from_slice(
-                        &bgra,
-                        Fourcc::Argb8888,
-                        (diameter, diameter),
-                        1,
-                        Transform::Normal,
-                        None,
-                    )
-                });
-            let buf = loaded.unwrap_or_else(|| {
-                rasterize_rgba_rect(diameter, diameter, |px, py| {
-                    sample_fallback_avatar_pixel(px, py, diameter, seed, selected)
-                })
-            });
-            self.avatars.insert(key.clone(), buf);
+        let frame = self.frame_counter;
+        if let Some(entry) = self.avatars.get_mut(&key) {
+            entry.last_frame = frame;
+            return MemoryRenderBufferRenderElement::from_buffer(
+                renderer,
+                loc.to_f64().to_physical(1.0),
+                &entry.value,
+                None,
+                None,
+                None,
+                Kind::Unspecified,
+            )
+            .ok();
         }
-        let buf = self.avatars.get(&key)?;
+        let d_usize = usize::try_from(diameter).ok()?;
+        let loaded = avatar_path
+            .and_then(|p| crate::icons::load_circular_avatar_bgra(p, d_usize))
+            .map(|bgra| {
+                MemoryRenderBuffer::from_slice(
+                    &bgra,
+                    Fourcc::Argb8888,
+                    (diameter, diameter),
+                    1,
+                    Transform::Normal,
+                    None,
+                )
+            });
+        let buf = loaded.unwrap_or_else(|| {
+            rasterize_rgba_rect(diameter, diameter, |px, py| {
+                sample_fallback_avatar_pixel(px, py, diameter, seed, selected)
+            })
+        });
+        self.avatars.insert(
+            key.clone(),
+            AgedShapeEntry {
+                value: buf,
+                last_frame: frame,
+            },
+        );
+        let buf = &self.avatars.get(&key)?.value;
         MemoryRenderBufferRenderElement::from_buffer(
             renderer,
             loc.to_f64().to_physical(1.0),
@@ -1126,13 +1219,16 @@ impl UiShapeCache {
             height_px: h_u16,
             tint_rgba,
         };
-        let buf = self.glyphs.entry(key).or_insert_with(|| {
-            rasterize_ui_glyph_buffer_rect(kind, width_px, height_px, tint_rgba)
+        let frame = self.frame_counter;
+        let entry = self.glyphs.entry(key).or_insert_with(|| AgedShapeEntry {
+            value: rasterize_ui_glyph_buffer_rect(kind, width_px, height_px, tint_rgba),
+            last_frame: frame,
         });
+        entry.last_frame = frame;
         MemoryRenderBufferRenderElement::from_buffer(
             renderer,
             loc.to_f64().to_physical(1.0),
-            buf,
+            &entry.value,
             None,
             Some(Rectangle::<f64, Logical>::from_size(Size::from((
                 f64::from(width_px),

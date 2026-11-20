@@ -428,6 +428,14 @@ impl FrameTimingCollector {
         }
     }
 
+    /// Computes only the median inter-frame interval in microseconds (`RUSTYOS-119`).
+    #[must_use]
+    pub fn interval_p50_us(&self) -> u64 {
+        let mut intervals: Vec<u64> = self.samples.iter().filter_map(|s| s.interval_us).collect();
+        intervals.sort_unstable();
+        percentile_sorted(&intervals, 50)
+    }
+
     /// Computes percentile statistics (`p50`, `p95`, `p99`, `max`) over the retained window.
     #[must_use]
     pub fn summary(&self) -> FrameTimingSummary {
@@ -642,6 +650,7 @@ mod tests {
         collector.record_hw_cursor(true);
 
         let summary = collector.summary();
+        assert_eq!(collector.interval_p50_us(), summary.interval_p50_us);
         assert_eq!(summary.total_frames, 3);
         assert_eq!(summary.direct_scanout_frames, 2);
         assert_eq!(summary.hw_cursor_frames, 2);

@@ -349,9 +349,8 @@ fn render_winit_frame(
                 .min(total_output_pixels);
             tracked_damage = Some(rects.clone());
         } else {
-            // Offscreen backdrop blur / capture passes bind texture FBOs and leave EGL surfaceless;
-            // re-make the window surface current so `backend.submit()` and next-frame `buffer_age()`
-            // never hit `EGL_BAD_SURFACE` when `OutputDamageTracker` skips rendering.
+            // Offscreen backdrop blur / capture passes or zero-damage swapchain sync need an active
+            // window surface frame before `backend.submit()` / next-frame `buffer_age()`.
             let frame = renderer
                 .render(&mut framebuffer, size, Transform::Normal)
                 .map_err(|err| err.to_string())?;

@@ -107,3 +107,29 @@ correctness/security checks ради benchmark.
 | `event_loop_dispatch_us (p50 / p95 / p99 / max)` | `196 / 1232 / 1473 / 2746` | `197 / 1145 / 1392 / 1631` | 0 dispatch stalls (`< 8.33 ms`) |
 | `interval_us (p50 / p95 / p99 / max)` | `16956 / 18112 / 18727 / 29813` | `17023 / 18529 / 18882 / 21108` | **max interval -29.2% (`late_frames: 1 -> 0`)** |
 | `late / missed / stalls (render/dispatch)` | `1 / 0 / 0 / 0` | `0 / 0 / 0 / 0` | Ни одного пропущенного или позднего кадра |
+
+## 9. Фаза 6 --- Release Profile, Zero-Alloc Hot Paths, Backdrop Skip & Bounded Age-Eviction (`RUSTYOS-119`, 2026-11-20)
+
+- **Оборудование:** Intel Corporation Raptor Lake-U `[8086:a7ac]` (rev 04), `i915`, Linux `7.3.4-arch1-2`
+- **Userspace Graphics:** Mesa `26.2.7-arch1.1` (`mesa 1:26.2.7-1`, EGL 1.5, OpenGL ES 3.2)
+- **Commit / Scope:** базовый `82a92f9` -> `RUSTYOS-119` (`[profile.release]` в `Cargo.toml`, lazy `interval_p50_us()` + `snapshot_arc()` в `frame_composer.rs`/`frame_timing.rs`/`telemetry.rs`, `backdrop_signature_matches` skip в `liquid_glass.rs`, zero-alloc key lookup + age-eviction в `TextCache`/`UiShapeCache`/`IconCache`)
+- **Backend и режим:** `nested-winit` (`1280x800 @ 60 Hz`, `target_interval_us = 16666`, 1 output)
+- **Команды воспроизведения (`--release`):**
+  ```bash
+  cargo build --release -p rusty-compositor --bin rusty-compositor
+  target/release/rusty-compositor --winit --max-frames 120 --bench-input --metrics-out /tmp/rustyos-119-idle.json
+  target/release/rusty-compositor --winit --max-frames 120 --bench-input --spawn ./target/debug/rusty-terminal --metrics-out /tmp/rustyos-119-client.json
+  target/release/rusty-compositor --winit --max-frames 240 --bench-input --metrics-out /tmp/rustyos-119-idle240.json
+  ```
+- **Сравнение (`Before 82a92f9` vs `After RUSTYOS-119`):**
+
+| Метрика | Before (`82a92f9`, `--release`) | After (`RUSTYOS-119`, `--release`) | Изменение |
+| :--- | :--- | :--- | :--- |
+| Размер бинарника `rusty-compositor` | `23M` (`unstripped`) | `15M` (`15,121,208 bytes`, `lto=thin`, `codegen-units=1`, `strip=symbols`) | **~-35% (`-8M`)** |
+| Idle `120f`: `render_duration_us (p50 / p95 / p99 / max)` | `2499 / 6510 / 17320 / 168758` | `1402 / 7693 / 10886 / 155421` | **p50 -43.9%, p99 -37.1%, render_stalls 3 -> 1** |
+| Idle `120f`: `input_to_present_us (p50 / p95 / p99 / max)` | `2546 / 10182 / 17336 / 185256` | `1425 / 7700 / 11145 / 171905` | **p50 -44.0%, p95 -24.4%, p99 -35.7%** |
+| Idle `120f`: `damage_ratio_avg / zero_damage_frames` | `33 / 116` | `25 / 117` | **avg -24.2%**, `late=0`, `missed=0`, `dispatch_stalls=0` |
+| Idle `240f` (After): `render_us / input_us (p50 / p95 / p99)` | --- | `1191 / 4707 / 6905` / `1207 / 4717 / 6913` | `dispatch_us (p50/p95/max)=53/92/252`, `late=0`, `missed=0`, `stalls=1/0` |
+| Client `120f` (`rusty-terminal`): `render_duration_us (p50 / p95 / p99 / max)` | `1299 / 5957 / 9881 / 151139` | `6574 / 9318 / 12937 / 305598` | `dispatch_max 459 -> 340 (-25.9%)`, `late=1`, `missed=1`, `stalls=2/0` |
+
+- **Ограничения и оценка регрессий:** В режиме `nested-winit` вызов `backend.submit()` проходит через `eglSwapBuffers` хостового Wayland-композитора (`eglSwapInterval=1` к `wl_surface.frame`), из-за чего фазовый сдвиг между таймером `16.667 ms` и host vblank вносит межпрогонный разброс `render_duration_us p50` в диапазоне `~0.55–11.9 ms` даже на неизменном бинарнике (на `120f` и `240f`). Замеры на `native-drm-kms` и A/B с реальным длительным вводом в Firefox подтверждаются отдельно вне nested-среды. Регрессий EGL (`EGL_BAD_SURFACE` на Wayland и X11), shader-компиляции и unit-тестов (`314` pass, `0` fail) не выявлено.

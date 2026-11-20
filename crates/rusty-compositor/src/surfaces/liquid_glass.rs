@@ -622,6 +622,56 @@ impl std::fmt::Debug for GlassShaderPrograms {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BackdropElemSig {
+    id: Id,
+    commit: CommitCounter,
+    geo: Rectangle<i32, Physical>,
+    src_bits: [u64; 4],
+    transform: Transform,
+    alpha_bits: u32,
+}
+
+fn backdrop_sig_from_element(el: &CompositorRenderElement, scale: Scale<f64>) -> BackdropElemSig {
+    let src = el.src();
+    BackdropElemSig {
+        id: el.id().clone(),
+        commit: el.current_commit(),
+        geo: el.geometry(scale),
+        src_bits: [
+            src.loc.x.to_bits(),
+            src.loc.y.to_bits(),
+            src.size.w.to_bits(),
+            src.size.h.to_bits(),
+        ],
+        transform: el.transform(),
+        alpha_bits: el.alpha().to_bits(),
+    }
+}
+
+fn backdrop_signature_matches(
+    cached: &[BackdropElemSig],
+    elements: &[CompositorRenderElement],
+    scale: Scale<f64>,
+) -> bool {
+    cached.len() == elements.len()
+        && cached.iter().zip(elements).all(|(prev, cur)| {
+            let src = cur.src();
+            prev.id == *cur.id()
+                && prev.commit == cur.current_commit()
+                && prev.geo == cur.geometry(scale)
+                && prev.src_bits
+                    == [
+                        src.loc.x.to_bits(),
+                        src.loc.y.to_bits(),
+                        src.size.w.to_bits(),
+                        src.size.h.to_bits(),
+                    ]
+                && prev.transform == cur.transform()
+                && prev.alpha_bits == cur.alpha().to_bits()
+        })
+}
+
 struct OutputGlassBuffers {
     phys_size: Size<i32, Physical>,
     scale_milli: i64,
@@ -634,6 +684,8 @@ struct OutputGlassBuffers {
     scene_tracker: OutputDamageTracker,
     has_valid_scene: bool,
     has_valid_blur: bool,
+    has_valid_sig: bool,
+    last_backdrop_sig: Vec<BackdropElemSig>,
     blur_damage: DamageBag<i32, BufferCoord>,
 }
 
@@ -691,6 +743,8 @@ impl LiquidGlassPipeline {
         for buf in self.outputs.values_mut() {
             buf.has_valid_scene = false;
             buf.has_valid_blur = false;
+            buf.has_valid_sig = false;
+            buf.last_backdrop_sig.clear();
             buf.blur_damage.reset();
         }
         self.slots.clear();
@@ -701,6 +755,16 @@ impl LiquidGlassPipeline {
     pub(crate) fn has_active_backdrop(&self) -> bool {
         self.active_output
             .is_some_and(|id| self.outputs.get(&id).is_some_and(|buf| buf.has_valid_blur))
+    }
+
+    fn finish_active_frame(&mut self, output_id: u32, clamped_scale: f64) {
+        self.frame_counter = self.frame_counter.wrapping_add(1);
+        self.active_output = Some(output_id);
+        self.active_scale = clamped_scale;
+        if self.slots.len() > 128 {
+            let cutoff = self.frame_counter.saturating_sub(32);
+            self.slots.retain(|_, v| v.last_frame >= cutoff);
+        }
     }
 
     /// Renders `backdrop_elements` incrementally into `output_id`'s offscreen FBO and runs
@@ -724,6 +788,7 @@ impl LiquidGlassPipeline {
         let scene_phys =
             Size::<i32, Physical>::from((phys_size_i32.w.max(1), phys_size_i32.h.max(1)));
         let scale_milli = (clamped_scale * 1000.0).round() as i64;
+        let scale = Scale::from(clamped_scale);
 
         if !self.ensure_programs(renderer) {
             return false;
@@ -732,6 +797,16 @@ impl LiquidGlassPipeline {
         {
             self.outputs.remove(&output_id);
             return false;
+        }
+
+        if let Some(buffers) = self.outputs.get(&output_id)
+            && buffers.has_valid_sig
+            && buffers.has_valid_scene
+            && buffers.has_valid_blur
+            && backdrop_signature_matches(&buffers.last_backdrop_sig, backdrop_elements, scale)
+        {
+            self.finish_active_frame(output_id, clamped_scale);
+            return true;
         }
 
         let Some(programs) = self.programs.as_ref() else {
@@ -744,13 +819,14 @@ impl LiquidGlassPipeline {
         let result = run_backdrop_blur_passes(renderer, programs, buffers, backdrop_elements);
         match result {
             Ok(()) => {
-                self.frame_counter = self.frame_counter.wrapping_add(1);
-                self.active_output = Some(output_id);
-                self.active_scale = clamped_scale;
-                if self.slots.len() > 128 {
-                    let cutoff = self.frame_counter.saturating_sub(32);
-                    self.slots.retain(|_, v| v.last_frame >= cutoff);
-                }
+                buffers.last_backdrop_sig.clear();
+                buffers.last_backdrop_sig.extend(
+                    backdrop_elements
+                        .iter()
+                        .map(|el| backdrop_sig_from_element(el, scale)),
+                );
+                buffers.has_valid_sig = buffers.has_valid_scene && buffers.has_valid_blur;
+                self.finish_active_frame(output_id, clamped_scale);
                 true
             }
             Err(err) => {
@@ -759,6 +835,8 @@ impl LiquidGlassPipeline {
                 );
                 buffers.has_valid_scene = false;
                 buffers.has_valid_blur = false;
+                buffers.has_valid_sig = false;
+                buffers.last_backdrop_sig.clear();
                 false
             }
         }
@@ -978,6 +1056,8 @@ impl LiquidGlassPipeline {
                 scene_tracker,
                 has_valid_scene: false,
                 has_valid_blur: false,
+                has_valid_sig: false,
+                last_backdrop_sig: Vec::new(),
                 blur_damage,
             })
         })();
@@ -1319,5 +1399,60 @@ mod tests {
                 && !LIQUID_GLASS_FRAG.contains("corner_flares")
                 && !LIQUID_GLASS_FRAG.contains("caustic_band")
         );
+    }
+
+    #[test]
+    fn backdrop_signature_detects_commits_geometry_and_alpha_changes() {
+        use smithay::backend::renderer::Color32F;
+        use smithay::backend::renderer::element::solid::SolidColorRenderElement;
+
+        let id = Id::new();
+        let mut commit = CommitCounter::default();
+        let geo = Rectangle::new((10, 20).into(), (200, 120).into());
+        let color = Color32F::new(0.2, 0.4, 0.8, 1.0);
+        let scale = Scale::from(1.0);
+
+        let elem_a = CompositorRenderElement::Solid(SolidColorRenderElement::new(
+            id.clone(),
+            geo,
+            commit,
+            color,
+            Kind::Unspecified,
+        ));
+        let cached = vec![backdrop_sig_from_element(&elem_a, scale)];
+
+        let elem_same = CompositorRenderElement::Solid(SolidColorRenderElement::new(
+            id.clone(),
+            geo,
+            commit,
+            color,
+            Kind::Unspecified,
+        ));
+        assert!(backdrop_signature_matches(&cached, &[elem_same], scale));
+
+        commit.increment();
+        let elem_recommit = CompositorRenderElement::Solid(SolidColorRenderElement::new(
+            id.clone(),
+            geo,
+            commit,
+            color,
+            Kind::Unspecified,
+        ));
+        assert!(!backdrop_signature_matches(
+            &cached,
+            &[elem_recommit],
+            scale
+        ));
+
+        let moved_geo = Rectangle::new((12, 20).into(), (200, 120).into());
+        let elem_moved = CompositorRenderElement::Solid(SolidColorRenderElement::new(
+            id,
+            moved_geo,
+            CommitCounter::default(),
+            color,
+            Kind::Unspecified,
+        ));
+        assert!(!backdrop_signature_matches(&cached, &[elem_moved], scale));
+        assert!(!backdrop_signature_matches(&cached, &[], scale));
     }
 }

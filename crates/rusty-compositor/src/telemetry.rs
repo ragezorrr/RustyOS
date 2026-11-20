@@ -85,7 +85,7 @@ enum TelemetryCmd {
 }
 
 struct SharedState {
-    latest: Mutex<SystemTelemetry>,
+    latest: Mutex<Arc<SystemTelemetry>>,
     queue: Mutex<VecDeque<TelemetryCmd>>,
     cvar: Condvar,
     stop: AtomicBool,
@@ -130,7 +130,7 @@ impl SystemMetricsHandle {
     pub fn with_initial(initial: SystemTelemetry) -> Self {
         Self {
             shared: Arc::new(SharedState {
-                latest: Mutex::new(initial),
+                latest: Mutex::new(Arc::new(initial)),
                 queue: Mutex::new(VecDeque::new()),
                 cvar: Condvar::new(),
                 stop: AtomicBool::new(false),
@@ -143,7 +143,7 @@ impl SystemMetricsHandle {
     #[must_use]
     pub fn start_background() -> Self {
         let shared = Arc::new(SharedState {
-            latest: Mutex::new(SystemTelemetry::default()),
+            latest: Mutex::new(Arc::new(SystemTelemetry::default())),
             queue: Mutex::new(VecDeque::new()),
             cvar: Condvar::new(),
             stop: AtomicBool::new(false),
@@ -158,13 +158,19 @@ impl SystemMetricsHandle {
         Self { shared, worker }
     }
 
-    /// Returns the latest cached telemetry without blocking on hardware or CLI I/O.
+    /// Returns a shared read-only handle to the latest cached telemetry without cloning strings or lists (`RUSTYOS-119`).
+    #[must_use]
+    pub fn snapshot_arc(&self) -> Arc<SystemTelemetry> {
+        self.shared.latest.try_lock().map_or_else(
+            |_| Arc::new(SystemTelemetry::default()),
+            |guard| Arc::clone(&guard),
+        )
+    }
+
+    /// Returns an owned copy of the latest cached telemetry without blocking on hardware or CLI I/O.
     #[must_use]
     pub fn snapshot(&self) -> SystemTelemetry {
-        self.shared
-            .latest
-            .try_lock()
-            .map_or_else(|_| SystemTelemetry::default(), |guard| guard.clone())
+        (*self.snapshot_arc()).clone()
     }
 
     /// Schedules an immediate non-blocking background refresh of all services.
@@ -175,11 +181,12 @@ impl SystemMetricsHandle {
     /// Adjusts master output volume by `delta` (-100..=100) optimistically and dispatches asynchronously.
     pub fn step_volume(&self, delta: i8) {
         let target = if let Ok(mut guard) = self.shared.latest.lock() {
-            let cur = i16::from(guard.audio.volume_percent);
+            let state = Arc::make_mut(&mut guard);
+            let cur = i16::from(state.audio.volume_percent);
             let next = u8::try_from((cur + i16::from(delta)).clamp(0, 100)).unwrap_or(100);
-            guard.audio.volume_percent = next;
+            state.audio.volume_percent = next;
             if delta > 0 {
-                guard.audio.muted = false;
+                state.audio.muted = false;
             }
             Some(next)
         } else {
@@ -193,7 +200,8 @@ impl SystemMetricsHandle {
     /// Toggles master mute optimistically and dispatches asynchronously.
     pub fn toggle_mute(&self) {
         if let Ok(mut guard) = self.shared.latest.lock() {
-            guard.audio.muted = !guard.audio.muted;
+            let state = Arc::make_mut(&mut guard);
+            state.audio.muted = !state.audio.muted;
         }
         self.push_cmd(TelemetryCmd::ToggleMute);
     }
@@ -202,9 +210,10 @@ impl SystemMetricsHandle {
     pub fn set_volume_percent(&self, percent: u8) {
         let clamped = percent.min(100);
         if let Ok(mut guard) = self.shared.latest.lock() {
-            guard.audio.volume_percent = clamped;
+            let state = Arc::make_mut(&mut guard);
+            state.audio.volume_percent = clamped;
             if clamped > 0 {
-                guard.audio.muted = false;
+                state.audio.muted = false;
             }
         }
         self.push_cmd(TelemetryCmd::SetVolume(clamped));
@@ -231,14 +240,15 @@ impl SystemMetricsHandle {
     pub fn step_brightness_with_osd(&self, delta: i8) -> (bool, u8) {
         let mut target_to_apply = None;
         let result = if let Ok(mut guard) = self.shared.latest.lock() {
-            if guard.brightness.available {
-                let cur = i16::from(guard.brightness.percentage);
+            let cur_state = Arc::make_mut(&mut guard);
+            if cur_state.brightness.available {
+                let cur = i16::from(cur_state.brightness.percentage);
                 let next = u8::try_from((cur + i16::from(delta)).clamp(1, 100)).unwrap_or(100);
-                guard.brightness.percentage = next;
+                cur_state.brightness.percentage = next;
                 target_to_apply = Some(next);
                 (true, next)
             } else {
-                (false, guard.brightness.percentage)
+                (false, cur_state.brightness.percentage)
             }
         } else {
             (false, 100)
@@ -256,7 +266,7 @@ impl SystemMetricsHandle {
         let applied = if let Ok(mut guard) = self.shared.latest.lock()
             && guard.brightness.available
         {
-            guard.brightness.percentage = clamped;
+            Arc::make_mut(&mut guard).brightness.percentage = clamped;
             true
         } else {
             false
@@ -273,7 +283,8 @@ impl SystemMetricsHandle {
             && let Ok(mut guard) = self.shared.latest.lock()
             && guard.media.active
         {
-            guard.media.playing = !guard.media.playing;
+            let state = Arc::make_mut(&mut guard);
+            state.media.playing = !state.media.playing;
         }
         self.push_cmd(TelemetryCmd::MediaControl(action));
     }
@@ -282,35 +293,36 @@ impl SystemMetricsHandle {
     #[must_use]
     pub fn toggle_wifi(&self) -> bool {
         let next_enabled = if let Ok(mut guard) = self.shared.latest.lock() {
-            let currently_on = guard.network.wifi_enabled || guard.network.wifi_ssid.is_some();
+            let state = Arc::make_mut(&mut guard);
+            let currently_on = state.network.wifi_enabled || state.network.wifi_ssid.is_some();
             let next = !currently_on;
-            guard.network.wifi_enabled = next;
+            state.network.wifi_enabled = next;
             if next {
-                if !guard.network.connected {
-                    "Wi-Fi: On".clone_into(&mut guard.network.status_label);
+                if !state.network.connected {
+                    "Wi-Fi: On".clone_into(&mut state.network.status_label);
                 }
             } else {
-                guard.network.wifi_connected = false;
-                guard.network.wifi_ssid = None;
-                guard.network.wifi_signal_percent = None;
-                for ap in &mut guard.network.wifi_networks {
+                state.network.wifi_connected = false;
+                state.network.wifi_ssid = None;
+                state.network.wifi_signal_percent = None;
+                for ap in &mut state.network.wifi_networks {
                     ap.connected = false;
                 }
-                if guard.network.wired_connected {
-                    guard.network.connected = true;
-                    guard.network.status_label = guard
+                if state.network.wired_connected {
+                    state.network.connected = true;
+                    state.network.status_label = state
                         .network
                         .wired_label
                         .clone()
                         .unwrap_or_else(|| "Ethernet Connected".to_owned());
-                } else if guard
+                } else if state
                     .network
                     .interface
                     .as_deref()
                     .is_some_and(|iface| iface.starts_with('w'))
                 {
-                    guard.network.connected = false;
-                    "Wi-Fi Off".clone_into(&mut guard.network.status_label);
+                    state.network.connected = false;
+                    "Wi-Fi Off".clone_into(&mut state.network.status_label);
                 }
             }
             next
@@ -328,12 +340,13 @@ impl SystemMetricsHandle {
             return;
         }
         if let Ok(mut guard) = self.shared.latest.lock() {
-            guard.network.connected = true;
-            guard.network.wifi_enabled = true;
-            guard.network.wifi_connected = true;
-            guard.network.wifi_ssid = Some(trimmed.to_owned());
+            let state = Arc::make_mut(&mut guard);
+            state.network.connected = true;
+            state.network.wifi_enabled = true;
+            state.network.wifi_connected = true;
+            state.network.wifi_ssid = Some(trimmed.to_owned());
             let mut matched_sig = None;
-            for ap in &mut guard.network.wifi_networks {
+            for ap in &mut state.network.wifi_networks {
                 ap.connected = ap.ssid == trimmed;
                 if ap.connected {
                     ap.known = true;
@@ -341,10 +354,10 @@ impl SystemMetricsHandle {
                 }
             }
             if let Some(sig) = matched_sig {
-                guard.network.wifi_signal_percent = Some(sig);
+                state.network.wifi_signal_percent = Some(sig);
             }
-            if !guard.network.wired_connected {
-                guard.network.status_label = format!("Wi-Fi: {trimmed}");
+            if !state.network.wired_connected {
+                state.network.status_label = format!("Wi-Fi: {trimmed}");
             }
         }
         self.push_cmd(TelemetryCmd::ConnectWifi(trimmed.to_owned()));
@@ -353,13 +366,14 @@ impl SystemMetricsHandle {
     /// Toggles Bluetooth adapter power optimistically and applies via BlueZ asynchronously (`RUSTYOS-027`).
     pub fn toggle_bluetooth(&self) {
         let next_powered = if let Ok(mut guard) = self.shared.latest.lock() {
-            let next = !guard.bluetooth.powered;
             if guard.bluetooth.available {
-                guard.bluetooth.powered = next;
-                guard.bluetooth.status_label = rusty_services::format_bluetooth_label(
+                let state = Arc::make_mut(&mut guard);
+                let next = !state.bluetooth.powered;
+                state.bluetooth.powered = next;
+                state.bluetooth.status_label = rusty_services::format_bluetooth_label(
                     true,
                     next,
-                    guard.bluetooth.connected_device.as_deref(),
+                    state.bluetooth.connected_device.as_deref(),
                 );
                 Some(next)
             } else {
@@ -410,7 +424,7 @@ fn telemetry_worker_loop(shared: &SharedState) {
     // Perform initial snapshot outside lock
     let initial = poll_once(&services);
     if let Ok(mut latest) = shared.latest.lock() {
-        *latest = initial;
+        *latest = Arc::new(initial);
     }
 
     while !shared.stop.load(Ordering::Acquire) {
@@ -464,7 +478,7 @@ fn telemetry_worker_loop(shared: &SharedState) {
 
         let snap = poll_once(&services);
         if let Ok(mut latest) = shared.latest.lock() {
-            *latest = snap;
+            *latest = Arc::new(snap);
         }
     }
 }
@@ -552,5 +566,13 @@ mod tests {
         handle.set_volume_percent(42);
         assert_eq!(handle.snapshot().audio.volume_percent, 42);
         assert!(!handle.snapshot().audio.muted);
+
+        let arc1 = handle.snapshot_arc();
+        let arc2 = handle.snapshot_arc();
+        assert!(Arc::ptr_eq(&arc1, &arc2));
+        handle.set_volume_percent(60);
+        let arc3 = handle.snapshot_arc();
+        assert!(!Arc::ptr_eq(&arc1, &arc3));
+        assert_eq!(arc3.audio.volume_percent, 60);
     }
 }

@@ -705,3 +705,59 @@ fn dock_glass_and_icon_shadow_rasterize_cleanly() {
     assert_eq!(shadow_corner[3], 0);
     assert!(shadow_center[3] >= 20 && shadow_center[3] <= 34);
 }
+
+#[test]
+fn ui_shape_cache_evicts_stale_glyphs_and_keeps_active_entries() {
+    let mut cache = UiShapeCache::new();
+    let white = [255, 255, 255, 255];
+    let dummy_buf = || {
+        smithay::backend::renderer::element::memory::MemoryRenderBuffer::from_slice(
+            &[0_u8; 4],
+            smithay::backend::allocator::Fourcc::Argb8888,
+            (1, 1),
+            1,
+            smithay::utils::Transform::Normal,
+            None,
+        )
+    };
+
+    let active_key = super::GlyphKey {
+        kind: UiGlyphKind::Search,
+        width_px: 16,
+        height_px: 16,
+        tint_rgba: white,
+    };
+    cache.glyphs.insert(
+        active_key,
+        super::AgedShapeEntry {
+            value: dummy_buf(),
+            last_frame: 0,
+        },
+    );
+    for w in 1_u16..=280 {
+        cache.glyphs.insert(
+            super::GlyphKey {
+                kind: UiGlyphKind::Close,
+                width_px: w,
+                height_px: 16,
+                tint_rgba: white,
+            },
+            super::AgedShapeEntry {
+                value: dummy_buf(),
+                last_frame: 0,
+            },
+        );
+    }
+    assert_eq!(cache.glyphs.len(), 281);
+
+    for f in 1..=1920 {
+        cache.begin_shadow_frame(1);
+        if f == 1500
+            && let Some(entry) = cache.glyphs.get_mut(&active_key)
+        {
+            entry.last_frame = cache.frame_counter;
+        }
+    }
+    assert_eq!(cache.glyphs.len(), 1);
+    assert!(cache.glyphs.contains_key(&active_key));
+}
