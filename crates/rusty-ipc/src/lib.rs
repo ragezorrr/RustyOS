@@ -1,7 +1,7 @@
 //! `RustyOS` versioned local IPC protocol (`RUSTYOS-009`, ADR-0005).
 //!
 //! Provides a bounded, zero-dependency, line-delimited protocol over Unix Domain Sockets (`0600`)
-//! connecting `rusty-compositor` and `rusty-shell` with explicit version negotiation (`v1`)
+//! connecting `rusty-compositor` and local IPC clients (tools, settings, portals) with explicit version negotiation (`v1`)
 //! and strict input validation (`SECURITY.md`).
 
 use std::env;
@@ -54,7 +54,7 @@ impl Urgency {
     }
 }
 
-/// Summary of a single mapped window exposed to `rusty-shell`.
+/// Summary of a single mapped window exposed over compositor IPC.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WindowSummary {
     /// Unique window ID in `rusty-wm`.
@@ -67,7 +67,7 @@ pub struct WindowSummary {
     pub maximized: bool,
 }
 
-/// Summary of an active desktop notification exposed to `rusty-shell` (`RUSTYOS-024`).
+/// Summary of an active desktop notification exposed over compositor IPC (`RUSTYOS-024`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NotificationSummary {
     /// Unique monotonic notification ID assigned by the compositor.
@@ -80,7 +80,7 @@ pub struct NotificationSummary {
     pub body: String,
 }
 
-/// Complete snapshot of compositor state sent to `rusty-shell` for `TopBar`, `Dock`, `Overview`, and `QuickSettings`.
+/// Complete snapshot of compositor state sent over IPC for `TopBar`, `Dock`, `Overview`, and `QuickSettings`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct DesktopStateSnapshot {
@@ -129,14 +129,14 @@ impl Default for DesktopStateSnapshot {
     }
 }
 
-/// Requests sent from `rusty-shell` (client) to `rusty-compositor` (server).
+/// Requests sent from a local IPC client to `rusty-compositor` (server).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ShellRequest {
-    /// Negotiates protocol version and identifies the shell component.
+    /// Negotiates protocol version and identifies the IPC client component.
     Handshake {
         /// Client protocol version (`IPC_PROTOCOL_VERSION`).
         protocol_version: u16,
-        /// Client identifier (e.g. `"rusty-shell"`).
+        /// Client identifier (e.g. `"rustyos-ctl"`).
         client_name: String,
     },
     /// Requests an immediate [`DesktopStateSnapshot`].
@@ -192,7 +192,7 @@ pub enum ShellRequest {
     ReloadConfig,
 }
 
-/// Events/responses sent from `rusty-compositor` (server) to `rusty-shell` (client).
+/// Events/responses sent from `rusty-compositor` (server) to a local IPC client.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CompositorEvent {
     /// Confirms protocol version handshake.
@@ -791,7 +791,7 @@ impl Drop for IpcServer {
     }
 }
 
-/// Synchronous IPC client used by `rusty-shell` to exchange messages with `rusty-compositor`.
+/// Synchronous IPC client used to exchange messages with `rusty-compositor`.
 #[derive(Debug)]
 pub struct IpcClient {
     reader: BufReader<UnixStream>,
@@ -964,7 +964,7 @@ mod tests {
         let requests = [
             ShellRequest::Handshake {
                 protocol_version: IPC_PROTOCOL_VERSION,
-                client_name: "rusty-shell".to_owned(),
+                client_name: "rustyos-ipc-client".to_owned(),
             },
             ShellRequest::GetStateSnapshot,
             ShellRequest::SwitchWorkspace { workspace: 4 },

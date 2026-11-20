@@ -18,12 +18,15 @@ mod liquid_glass;
 mod sdf;
 #[cfg(test)]
 mod tests;
+mod window_clip;
 mod window_minimize;
 mod window_shadow;
 mod xcursor;
 
 pub use liquid_glass::LiquidGlassElement;
 pub use sdf::ShadowEdgeSide;
+pub use window_clip::ClippedSurfaceElement;
+pub(crate) use window_minimize::centered_scaled_rect;
 
 pub(crate) use glyphs::GLYPH_BUFFER_SCALE;
 use glyphs::rasterize_ui_glyph_buffer_rect;
@@ -285,6 +288,7 @@ pub struct UiShapeCache {
     cursor_arrow: Option<MemoryRenderBuffer>,
     xcursors: HashMap<(Option<String>, &'static str, u32), Option<CachedCursor>>,
     liquid_glass: liquid_glass::LiquidGlassPipeline,
+    window_clip: window_clip::WindowClipPipeline,
     window_minimize: window_minimize::WindowMinimizePipeline,
     window_shadow: window_shadow::WindowShadowPipeline,
     frame_counter: u64,
@@ -485,44 +489,28 @@ impl UiShapeCache {
         );
     }
 
-    /// Builds a hardware-accelerated seamless Golden Gate drop shadow element for a mapped window (`RUSTYOS-075`, `RUSTYOS-080`).
-    pub(crate) fn window_shadow_render_element(
+    /// Builds a hardware-accelerated seamless drop shadow element with explicit opacity scaling (`RUSTYOS-128`).
+    pub(crate) fn window_shadow_render_element_with_opacity(
         &mut self,
         renderer: &mut GlesRenderer,
         win_rect: Rectangle<i32, Logical>,
         radius: i32,
         is_focused: bool,
         mode: crate::config::WindowShadowMode,
+        opacity_scale: f32,
     ) -> Option<crate::shell_render::CompositorRenderElement> {
-        if mode == crate::config::WindowShadowMode::None {
+        if mode == crate::config::WindowShadowMode::None || opacity_scale <= 0.002 {
             return None;
         }
         let spec =
-            window_shadow::WindowShadowSpec::for_window_mode(win_rect, radius, is_focused, mode);
+            window_shadow::WindowShadowSpec::for_window_mode(win_rect, radius, is_focused, mode)
+                .with_opacity(opacity_scale);
         self.window_shadow
             .make_shadow_element(renderer, spec)
             .map(crate::shell_render::CompositorRenderElement::ShaderTexture)
     }
 
-    /// Builds a hardware-accelerated seamless drop shadow element for shell panels and popovers (`RUSTYOS-075`).
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn soft_shadow_render_element(
-        &mut self,
-        renderer: &mut GlesRenderer,
-        rect: Rectangle<i32, Logical>,
-        radius: i32,
-        spread: i32,
-        shadow_rgb: [u8; 3],
-        max_alpha: u8,
-    ) -> Option<crate::shell_render::CompositorRenderElement> {
-        let spec =
-            window_shadow::WindowShadowSpec::for_panel(rect, radius, spread, shadow_rgb, max_alpha);
-        self.window_shadow
-            .make_shadow_element(renderer, spec)
-            .map(crate::shell_render::CompositorRenderElement::ShaderTexture)
-    }
-
-    /// Builds a hardware-accelerated seamless 3-lobe elevation drop shadow element (`RUSTYOS-126`).
+    /// Builds a hardware-accelerated seamless 3-lobe elevation drop shadow element (`RUSTYOS-126`, `RUSTYOS-128`).
     pub(crate) fn elevation_shadow_render_element(
         &mut self,
         renderer: &mut GlesRenderer,
@@ -539,6 +527,27 @@ impl UiShapeCache {
         self.window_shadow
             .make_shadow_element(renderer, spec)
             .map(crate::shell_render::CompositorRenderElement::ShaderTexture)
+    }
+
+    /// Wraps a non-fullscreen client `WaylandSurfaceRenderElement` with unified cubic squircle
+    /// corner clipping (`RUSTYOS-128`), falling back to raw `Surface` if GLES clip setup fails.
+    pub(crate) fn clip_surface_element(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        inner: smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement<
+            GlesRenderer,
+        >,
+        clip_rect_phys: Rectangle<i32, smithay::utils::Physical>,
+        clip_radius_phys: f32,
+        extra_alpha: f32,
+    ) -> crate::shell_render::CompositorRenderElement {
+        self.window_clip.wrap_or_surface(
+            renderer,
+            inner,
+            clip_rect_phys,
+            clip_radius_phys,
+            extra_alpha,
+        )
     }
 
     /// Prepares offscreen Dual-Kawase backdrop blur for Liquid Glass panels on `output_id` (`RUSTYOS-069`).
@@ -558,6 +567,30 @@ impl UiShapeCache {
             output_scale,
             backdrop_elements,
         )
+    }
+
+    /// Prepares offscreen Dual-Kawase backdrop blur for a specific window/output slot (`RUSTYOS-128`).
+    pub(crate) fn prepare_liquid_glass_backdrop_slot(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        slot_id: u64,
+        logical_size: Size<i32, Logical>,
+        output_scale: f64,
+        backdrop_elements: &[crate::shell_render::CompositorRenderElement],
+    ) -> bool {
+        let _ = self.window_minimize.ensure_program(renderer);
+        self.liquid_glass.prepare_backdrop_slot(
+            renderer,
+            slot_id,
+            logical_size,
+            output_scale,
+            backdrop_elements,
+        )
+    }
+
+    /// Retains only active output & layered glass window backdrop FBO slots (`RUSTYOS-128`).
+    pub(crate) fn retain_liquid_glass_slots(&mut self, keep: impl FnMut(u64) -> bool) {
+        self.liquid_glass.retain_slots(keep);
     }
 
     /// Clears the active blurred backdrop reference after an output's shell elements are built (`RUSTYOS-069`).
@@ -596,8 +629,62 @@ impl UiShapeCache {
     }
 
     /// Retains only minimize/restore snapshot textures matching `keep`.
-    pub(crate) fn retain_minimize_snapshots(&mut self, keep: impl FnMut(u64) -> bool) {
-        self.window_minimize.retain_snapshots(keep);
+    pub(crate) fn retain_minimize_snapshots(&mut self, mut keep: impl FnMut(u64) -> bool) {
+        self.window_minimize.retain_snapshots(&mut keep);
+    }
+
+    /// Captures or updates a window lifecycle open/close snapshot texture (`RUSTYOS-128`).
+    pub(crate) fn capture_lifecycle_snapshot(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        window_id: u64,
+        win_size: Size<i32, Logical>,
+        output_scale: f64,
+        commit_sig: u64,
+        local_elements: &[crate::shell_render::CompositorRenderElement],
+    ) -> bool {
+        self.window_minimize.capture_lifecycle_snapshot(
+            renderer,
+            window_id,
+            win_size,
+            output_scale,
+            commit_sig,
+            local_elements,
+        )
+    }
+
+    /// Returns `true` if a cached lifecycle snapshot already matches `commit_sig` (`RUSTYOS-128`).
+    #[must_use]
+    pub(crate) fn lifecycle_snapshot_matches_sig(&self, window_id: u64, commit_sig: u64) -> bool {
+        self.window_minimize
+            .lifecycle_snapshot_matches_sig(window_id, commit_sig)
+    }
+
+    /// Retains only open/close lifecycle snapshot textures matching `keep`.
+    pub(crate) fn retain_lifecycle_snapshots(&mut self, keep: impl FnMut(u64) -> bool) {
+        self.window_minimize.retain_lifecycle_snapshots(keep);
+    }
+
+    /// Emits a centered fade+scale transition element for window open or close (`RUSTYOS-128`).
+    pub(crate) fn lifecycle_warp_element(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        window_id: u64,
+        win_rect: Rectangle<i32, Logical>,
+        progress: f64,
+        closing: bool,
+        output_scale: f64,
+    ) -> Option<crate::shell_render::CompositorRenderElement> {
+        self.window_minimize
+            .make_lifecycle_element(
+                renderer,
+                window_id,
+                win_rect,
+                progress,
+                closing,
+                output_scale,
+            )
+            .map(crate::shell_render::CompositorRenderElement::ShaderTexture)
     }
 
     /// Emits a `Genie`/`Scale` warp element interpolating between `win_rect` and `dock_rect` (`RUSTYOS-073`).

@@ -29,7 +29,6 @@ impl RustyCompositorState {
             && !self.updates_popover_open
             && !self.wifi_popover_open
             && !self.notification_center_open
-            && !self.settings_active
             && !self.has_foreground_layer_surfaces()
             && !self.should_hide_shell_chrome_for_fullscreen();
 
@@ -663,8 +662,7 @@ impl RustyCompositorState {
             y,
         ) {
             if button == 273 {
-                self.settings_tab = crate::shell_render::SettingsTab::Keyboard;
-                self.open_settings();
+                self.open_settings_page(Some("keyboard"));
             } else {
                 self.cycle_keyboard_layout();
             }
@@ -958,22 +956,6 @@ impl RustyCompositorState {
             crate::shell_render::PolkitHit::PasswordField
             | crate::shell_render::PolkitHit::Outside => {}
         }
-    }
-
-    pub(crate) fn handle_settings_pointer_click(
-        &mut self,
-        output_phys: Size<i32, smithay::utils::Physical>,
-    ) {
-        let hit = {
-            let view = self.settings_render_state();
-            crate::shell_render::hit_test_settings_modal(
-                output_phys,
-                &view,
-                self.pointer_location.x,
-                self.pointer_location.y,
-            )
-        };
-        self.apply_settings_hit(hit);
     }
 
     pub(crate) fn handle_portal_pointer_click(

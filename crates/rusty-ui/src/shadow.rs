@@ -133,17 +133,37 @@ pub fn draw_elevation_shadow(
     elevation: ShadowElevation,
     pal: &ThemePalette,
 ) {
+    draw_elevation_shadow_with(rect, radius, elevation, pal.is_dark, |r, rad, color| {
+        canvas.fill_rounded_rect(r, rad.max(0) as u32, color);
+    });
+}
+
+/// Renders a 3-lobe Gaussian shadow using a custom rounded-rectangle raster callback.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
+pub fn draw_elevation_shadow_with<F>(
+    rect: Rect,
+    radius: u32,
+    elevation: ShadowElevation,
+    is_dark: bool,
+    mut fill_rounded: F,
+) where
+    F: FnMut(Rect, i32, [u8; 4]),
+{
     if elevation == ShadowElevation::None {
         return;
     }
     let style = ShadowStyle::for_elevation(elevation);
-    let shadow_color = if pal.is_dark {
+    let shadow_color = if is_dark {
         [0u8, 0u8, 0u8]
     } else {
         [15u8, 20u8, 30u8]
     };
 
-    // Render each active lobe through multi-pass Gaussian layer approximations
+    // Render each active lobe through multi-pass Gaussian slice approximations
     for lobe in &style.lobes {
         if lobe.opacity <= 0.001 {
             continue;
@@ -164,9 +184,9 @@ pub fn draw_elevation_shadow(
                     rect.width + (g * 2) as u32,
                     rect.height + (g * 2) as u32,
                 );
-                canvas.fill_rounded_rect(
+                fill_rounded(
                     target_rect,
-                    radius + g as u32,
+                    radius as i32 + g,
                     [shadow_color[0], shadow_color[1], shadow_color[2], a],
                 );
             }
@@ -186,9 +206,9 @@ pub fn draw_elevation_shadow(
                     rect.width + (spread * 2) as u32,
                     rect.height + (spread * 2) as u32,
                 );
-                canvas.fill_rounded_rect(
+                fill_rounded(
                     target_rect,
-                    radius + spread as u32,
+                    radius as i32 + spread,
                     [shadow_color[0], shadow_color[1], shadow_color[2], a],
                 );
             }

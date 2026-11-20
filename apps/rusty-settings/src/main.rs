@@ -1,6 +1,7 @@
 //! Standalone Wayland CSD System Settings window (`RUSTYOS-103`).
 
 mod layout;
+pub(crate) mod liquid_glass;
 mod render;
 mod state;
 mod wayland;

@@ -92,6 +92,8 @@ pub(crate) struct FilesAppState {
     pub status_message: Option<String>,
     pub window_title: String,
     pub window_size: WindowSizeState,
+    pub focused: bool,
+    pub reduce_transparency: bool,
     pub traffic_hovered: bool,
     pub dirty: bool,
     pub run_state: AppRunState,
@@ -127,6 +129,7 @@ impl FilesAppState {
             .or_else(|| locations.detect_system_theme())
             .unwrap_or(tags_config.theme);
         let accent_index = locations.detect_system_accent().unwrap_or(0);
+        let reduce_transparency = locations.detect_reduce_transparency().unwrap_or(false);
         let mut app = Self {
             sort_field: tags_config.sort_field,
             sort_order: tags_config.sort_order,
@@ -185,6 +188,8 @@ impl FilesAppState {
             status_message: None,
             window_title: String::from("Files"),
             window_size: WindowSizeState::Normal,
+            focused: true,
+            reduce_transparency,
             traffic_hovered: false,
             dirty: true,
             run_state: AppRunState::Running,
@@ -252,6 +257,12 @@ impl FilesAppState {
                 && next_accent != self.accent_index
             {
                 self.accent_index = next_accent;
+                changed = true;
+            }
+            if let Some(next_rt) = self.locations.detect_reduce_transparency()
+                && next_rt != self.reduce_transparency
+            {
+                self.reduce_transparency = next_rt;
                 changed = true;
             }
             if changed {
@@ -491,7 +502,7 @@ mod tests {
         let guard = TestHomeGuard::new("miller")?;
         let mut state = FilesAppState::new(guard.locations(), &StartupOptions::default());
         state.complete_pending_loads_sync();
-        assert_eq!(state.theme, FilesThemeMode::LightGoldenGate);
+        assert_eq!(state.theme, FilesThemeMode::Light);
         assert_eq!(state.view_mode, FileViewMode::Icons);
         assert!(!state.show_path_bar);
         state.set_view_mode(FileViewMode::Columns);
@@ -562,7 +573,7 @@ mod tests {
         state.complete_pending_loads_sync();
 
         state.toggle_theme();
-        assert_eq!(state.theme, FilesThemeMode::DarkPurpleGlass);
+        assert_eq!(state.theme, FilesThemeMode::Dark);
         state.toggle_show_hidden();
         assert!(state.show_hidden);
         state.set_view_mode(FileViewMode::List);
@@ -574,7 +585,7 @@ mod tests {
 
         // Reload fresh app state -> persisted preferences & tags are restored
         let reloaded = FilesAppState::new(locs.clone(), &StartupOptions::default());
-        assert_eq!(reloaded.theme, FilesThemeMode::DarkPurpleGlass);
+        assert_eq!(reloaded.theme, FilesThemeMode::Dark);
         assert_eq!(reloaded.view_mode, FileViewMode::List);
         assert!(reloaded.show_hidden);
         assert_eq!(reloaded.tags_for(&notes_path), &[FileTagColor::Green]);
@@ -746,7 +757,7 @@ mod tests {
             "[ui]\ntheme = \"dark\"\naccent_index = 2\n",
         )?;
         let state = FilesAppState::new(locs, &StartupOptions::default());
-        assert_eq!(state.theme, FilesThemeMode::DarkPurpleGlass);
+        assert_eq!(state.theme, FilesThemeMode::Dark);
         assert_eq!(state.accent_index, 2);
         let pal = crate::render::palette_for_with_accent(state.theme, state.accent_index);
         assert_eq!(

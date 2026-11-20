@@ -11,23 +11,20 @@ use std::process;
 /// Visual theme mode for `rusty-files` (`RUSTYOS-065`, `RUSTYOS-067`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FilesThemeMode {
-    /// Golden Gate frosted light appearance (default).
+    /// Frosted light appearance (default).
     #[default]
-    LightGoldenGate,
-    /// Golden Gate dark graphite appearance (`DESIGN.md`).
-    DarkPurpleGlass,
+    Light,
+    /// Neutral graphite dark appearance (`DESIGN.md`).
+    Dark,
 }
 
 impl FilesThemeMode {
-    /// Alias for Golden Gate dark appearance (`RUSTYOS-067`).
-    pub const DARK_GOLDEN_GATE: Self = Self::DarkPurpleGlass;
-
     /// Toggles between light and dark themes.
     #[must_use]
     pub const fn toggle(self) -> Self {
         match self {
-            Self::LightGoldenGate => Self::DarkPurpleGlass,
-            Self::DarkPurpleGlass => Self::LightGoldenGate,
+            Self::Light => Self::Dark,
+            Self::Dark => Self::Light,
         }
     }
 
@@ -35,17 +32,17 @@ impl FilesThemeMode {
     #[must_use]
     pub const fn as_config_str(self) -> &'static str {
         match self {
-            Self::LightGoldenGate => "light",
-            Self::DarkPurpleGlass => "dark",
+            Self::Light => "light",
+            Self::Dark => "dark",
         }
     }
 
-    /// Parses a persisted theme token.
+    /// Parses a persisted theme token, accepting legacy names for backward config compatibility.
     #[must_use]
     pub fn from_config_str(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
-            "light" | "light_golden_gate" => Some(Self::LightGoldenGate),
-            "dark" | "dark_golden_gate" | "dark_purple_glass" => Some(Self::DarkPurpleGlass),
+            "light" | "light_golden_gate" => Some(Self::Light),
+            "dark" | "dark_golden_gate" | "dark_purple_glass" => Some(Self::Dark),
             _ => None,
         }
     }
@@ -140,6 +137,17 @@ pub fn detect_system_accent_from_toml(content: &str) -> Option<usize> {
         .parse::<usize>()
         .ok()
         .map(clamp_accent_index)
+}
+
+/// Parses `[ui] reduce_transparency` from a RustyOS `config.toml` content string if present (`RUSTYOS-128`).
+#[must_use]
+pub fn detect_reduce_transparency_from_toml(content: &str) -> Option<bool> {
+    let raw = find_ui_toml_value(content, &["reduce_transparency"])?;
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" | "on" => Some(true),
+        "false" | "0" | "no" | "off" => Some(false),
+        _ => None,
+    }
 }
 
 /// Content view modes presented in the Golden Gate view switcher pill.
@@ -653,6 +661,14 @@ impl UserFileLocations {
         let path = self.config_dir.join("config.toml");
         let content = fs::read_to_string(path).ok()?;
         detect_system_accent_from_toml(&content)
+    }
+
+    /// Detects `[ui].reduce_transparency` from `~/.config/rustyos/config.toml` if present (`RUSTYOS-128`).
+    #[must_use]
+    pub fn detect_reduce_transparency(&self) -> Option<bool> {
+        let path = self.config_dir.join("config.toml");
+        let content = fs::read_to_string(path).ok()?;
+        detect_reduce_transparency_from_toml(&content)
     }
 }
 

@@ -92,35 +92,39 @@ impl<'a> UiCanvas<'a> {
         let alpha = a as u32;
         let inv = 255 - alpha;
 
-        let (dst_r, dst_g, dst_b) = match self.format {
+        let (dst_r, dst_g, dst_b, dst_a) = match self.format {
             PixelFormat::Bgra8888 => (
                 self.buffer[idx + 2] as u32,
                 self.buffer[idx + 1] as u32,
                 self.buffer[idx] as u32,
+                self.buffer[idx + 3] as u32,
             ),
             PixelFormat::Rgba8888 => (
                 self.buffer[idx] as u32,
                 self.buffer[idx + 1] as u32,
                 self.buffer[idx + 2] as u32,
+                self.buffer[idx + 3] as u32,
             ),
         };
 
-        let out_r = ((r as u32 * alpha + dst_r * inv) / 255) as u8;
-        let out_g = ((g as u32 * alpha + dst_g * inv) / 255) as u8;
-        let out_b = ((b as u32 * alpha + dst_b * inv) / 255) as u8;
+        // Premultiplied Porter-Duff Over preserves Wayland transparent surfaces cleanly.
+        let out_r = ((r as u32 * alpha + dst_r * inv + 127) / 255).min(255) as u8;
+        let out_g = ((g as u32 * alpha + dst_g * inv + 127) / 255).min(255) as u8;
+        let out_b = ((b as u32 * alpha + dst_b * inv + 127) / 255).min(255) as u8;
+        let out_a = (alpha + ((dst_a * inv + 127) / 255)).min(255) as u8;
 
         match self.format {
             PixelFormat::Bgra8888 => {
                 self.buffer[idx] = out_b;
                 self.buffer[idx + 1] = out_g;
                 self.buffer[idx + 2] = out_r;
-                self.buffer[idx + 3] = 255;
+                self.buffer[idx + 3] = out_a;
             }
             PixelFormat::Rgba8888 => {
                 self.buffer[idx] = out_r;
                 self.buffer[idx + 1] = out_g;
                 self.buffer[idx + 2] = out_b;
-                self.buffer[idx + 3] = 255;
+                self.buffer[idx + 3] = out_a;
             }
         }
     }
@@ -136,7 +140,17 @@ impl<'a> UiCanvas<'a> {
             return;
         }
 
-        if color[3] == 255 {
+        if color[3] == 0 {
+            for y in y0..y1 {
+                let row_offset = y as usize * self.stride;
+                for x in x0..x1 {
+                    let idx = row_offset + x as usize * 4;
+                    if idx + 4 <= self.buffer.len() {
+                        self.buffer[idx..idx + 4].fill(0);
+                    }
+                }
+            }
+        } else if color[3] == 255 {
             let [r, g, b, _] = color;
             let (b0, b1, b2) = match self.format {
                 PixelFormat::Bgra8888 => (b, g, r),

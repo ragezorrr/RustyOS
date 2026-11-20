@@ -1,6 +1,6 @@
 //! Geometric primitives and standard dimension constants for RustyOS UI.
 
-pub const WINDOW_RADIUS: u32 = 20;
+pub const WINDOW_RADIUS: u32 = 14;
 pub const TITLEBAR_HEIGHT: u32 = 40;
 pub const SSD_TITLEBAR_HEIGHT: u32 = 28;
 

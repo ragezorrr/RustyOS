@@ -503,9 +503,14 @@ fn render_header(
         (&layout.traffic_max, rusty_ui::TrafficLightKind::Maximize),
     ];
     for (rect, kind) in lights {
+        let color = if app.win.focused {
+            kind.active_color()
+        } else {
+            rusty_ui::TrafficLightKind::inactive_color()
+        };
         let cx = rect.x as f32 + 7.0;
         let cy = tl.center_y;
-        c.fill_circle(cx, cy, 7.0, kind.active_color());
+        c.fill_circle(cx, cy, 7.0, color);
         if tl_hovered {
             draw_traffic_glyph(c, cx, cy, kind);
         }
@@ -2003,9 +2008,9 @@ mod tests {
                 mode: WizardMode::Oobe,
                 env_kind: crate::state::RunEnv::Demo,
                 theme_override: Some(if dark {
-                    rusty_services::file_manager::FilesThemeMode::DarkPurpleGlass
+                    rusty_services::file_manager::FilesThemeMode::Dark
                 } else {
-                    rusty_services::file_manager::FilesThemeMode::LightGoldenGate
+                    rusty_services::file_manager::FilesThemeMode::Light
                 }),
                 accent_override: Some(accent),
                 ..Default::default()

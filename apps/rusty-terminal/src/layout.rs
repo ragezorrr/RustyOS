@@ -8,7 +8,8 @@ pub(crate) const DEFAULT_HEIGHT: i32 = 560;
 pub(crate) const MIN_WIDTH: i32 = 480;
 pub(crate) const MIN_HEIGHT: i32 = 320;
 pub(crate) const HEADER_HEIGHT: i32 = 40;
-pub(crate) const WINDOW_CORNER_RADIUS: i32 = 14;
+#[allow(clippy::cast_possible_wrap)]
+pub(crate) const WINDOW_CORNER_RADIUS: i32 = rusty_ui::WINDOW_RADIUS as i32;
 pub(crate) const TERMINAL_PAD_X: i32 = 12;
 pub(crate) const TERMINAL_PAD_Y: i32 = 8;
 pub(crate) const SEARCH_BAR_HEIGHT: i32 = 38;

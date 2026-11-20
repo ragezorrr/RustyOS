@@ -31,8 +31,12 @@ pub use geometry::{
 pub use menu::{
     MenuEntry, MenuItem, MenuLayout, MenuRowLayout, draw_menu_background, draw_menu_row,
 };
-pub use shadow::{ShadowElevation, ShadowLobe, ShadowStyle, draw_elevation_shadow};
-pub use theme::{ACCENT_PALETTE, ThemeMode, ThemePalette, TrafficLightKind};
+pub use shadow::{
+    ShadowElevation, ShadowLobe, ShadowStyle, draw_elevation_shadow, draw_elevation_shadow_with,
+};
+pub use theme::{
+    ACCENT_DARK_PALETTE, ACCENT_PALETTE, ThemeMode, ThemePalette, TrafficLightKind, accent_for,
+};
 pub use traffic_lights::{GlyphSegment, TrafficLightButtons, glyph_segments};
 pub use widgets::{
     ButtonStyle, GroupCard, PushButton, SearchField, SearchFieldHit, ToggleSwitch, WidgetState,
@@ -90,7 +94,7 @@ mod tests {
 
         let dark = ThemePalette::new(true, 1);
         assert!(dark.is_dark);
-        assert_eq!(dark.accent, ACCENT_PALETTE[1]);
+        assert_eq!(dark.accent, ACCENT_DARK_PALETTE[1]);
         assert_eq!(dark.window_bg, [0x1C, 0x1C, 0x1D, 255]);
 
         let close = TrafficLightKind::Close;

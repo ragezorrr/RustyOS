@@ -64,7 +64,7 @@ pub(crate) const fn rgba(r: u8, g: u8, b: u8, a: u8) -> [u8; 4] {
 
 pub(crate) const fn palette_for(theme: FilesThemeMode) -> Palette {
     match theme {
-        FilesThemeMode::LightGoldenGate => Palette {
+        FilesThemeMode::Light => Palette {
             window_bg: rgba(255, 255, 255, 255),
             window_border: rgba(0, 0, 0, 24),
             sidebar_bg: rgba(236, 237, 241, 255),
@@ -93,7 +93,7 @@ pub(crate) const fn palette_for(theme: FilesThemeMode) -> Palette {
             popover_text_secondary: rgba(110, 114, 122, 255),
             is_dark: false,
         },
-        FilesThemeMode::DarkPurpleGlass => Palette {
+        FilesThemeMode::Dark => Palette {
             window_bg: rgba(30, 30, 32, 255),
             window_border: rgba(255, 255, 255, 22),
             sidebar_bg: rgba(38, 38, 40, 255),
@@ -153,27 +153,34 @@ pub(crate) fn render_window_pixels(
     state: &FilesAppState,
     layout: &FilesLayout,
 ) {
-    render_window_pixels_with_popup(buf, width, height, state, layout, true);
+    render_window_pixels_with_options(buf, width, height, state, layout, true, false);
 }
 
-/// Renders one complete frame of `rusty-files` into an `ARGB8888` SHM buffer, optionally
-/// omitting inline popups when native Wayland `xdg_popup` surfaces are active.
-pub(crate) fn render_window_pixels_with_popup(
+/// Renders one complete frame of `rusty-files` into an `ARGB8888` SHM buffer with explicit
+/// inline-popup and Liquid Glass sidebar flags (`RUSTYOS-128`).
+pub(crate) fn render_window_pixels_with_options(
     buf: &mut [u8],
     width: u32,
     height: u32,
     state: &FilesAppState,
     layout: &FilesLayout,
     include_inline_popup: bool,
+    sidebar_glass: bool,
 ) {
     let pal = palette_for_with_accent(state.theme, state.accent_index);
     let mut c = Canvas::new(buf, width, height);
     c.clear();
 
     let win_rect = Rect::new(0, 0, layout.width, layout.height);
-    c.fill_rounded_rect(win_rect, WINDOW_CORNER_RADIUS, pal.window_bg);
+    if sidebar_glass {
+        let side_r = layout.sidebar_rect.right().clamp(0, layout.width);
+        let content_rect = Rect::new(side_r, 0, (layout.width - side_r).max(0), layout.height);
+        c.fill_rect(content_rect, pal.window_bg);
+    } else {
+        c.fill_rounded_rect(win_rect, WINDOW_CORNER_RADIUS, pal.window_bg);
+    }
 
-    render_sidebar(&mut c, state, layout, &pal);
+    render_sidebar(&mut c, state, layout, &pal, sidebar_glass);
     render_toolbar(&mut c, state, layout, &pal);
 
     if let Some(tb) = &layout.tab_bar {
@@ -251,7 +258,7 @@ mod tests {
         // Rounded top-left pixel outside 20px radius remains transparent
         assert_eq!(&buf[0..4], &[0, 0, 0, 0]);
         // Full-bleed edge-to-edge sidebar reaches x=2 with no white outer gutter and ends with 1px divider
-        let pal_light = palette_for(FilesThemeMode::LightGoldenGate);
+        let pal_light = palette_for(FilesThemeMode::Light);
         let side_edge_idx = ((220 * w + 2) * 4) as usize;
         assert_eq!(
             &buf[side_edge_idx..side_edge_idx + 4],
@@ -295,11 +302,23 @@ mod tests {
         let bg_idx = ((120 * w + 650) * 4) as usize;
         assert_eq!(&buf[bg_idx..bg_idx + 4], &[255, 255, 255, 255]);
 
-        // Toggle to Dark Golden Gate and re-render (`#1E1E20` -> BGRA [32, 30, 30, 255])
+        // Toggle to Dark and re-render (`#1E1E20` -> BGRA [32, 30, 30, 255])
         state.toggle_theme();
         let layout_dark = compute_layout(&state, w, h);
         render_window_pixels(&mut buf, w, h, &state, &layout_dark);
         assert_eq!(&buf[bg_idx..bg_idx + 4], &[32, 30, 30, 255]);
+
+        // Liquid Glass sidebar leaves sidebar translucent while keeping content opaque,
+        // and unfocused window dims traffic lights to inactive grey.
+        state.focused = false;
+        render_window_pixels_with_options(&mut buf, w, h, &state, &layout_dark, false, true);
+        assert!(buf[side_edge_idx + 3] < 200);
+        assert_eq!(buf[bg_idx + 3], 255);
+        let inactive = rusty_ui::TrafficLightKind::inactive_color();
+        assert_eq!(
+            &buf[red_idx..red_idx + 4],
+            &[inactive[2], inactive[1], inactive[0], 255]
+        );
 
         let _ = fs::remove_dir_all(&root);
     }
@@ -403,7 +422,7 @@ mod tests {
         state.caret_visible = true;
         state.set_search_query(String::from("read"));
         let search_layout = compute_layout(&state, w, h);
-        render_window_pixels_with_popup(&mut buf, w, h, &state, &search_layout, false);
+        render_window_pixels_with_options(&mut buf, w, h, &state, &search_layout, false, false);
         let pal = palette_for_with_accent(state.theme, state.accent_index);
         let pill = search_layout.search_pill_rect;
         let caret_y = (pill.y + 12).cast_unsigned();
@@ -460,7 +479,7 @@ mod tests {
         state.toggle_theme();
         state.overlay_scrollbar_alpha = 1.0;
         let dark_layout = compute_layout(&state, w, h);
-        render_window_pixels_with_popup(&mut buf, w, h, &state, &dark_layout, false);
+        render_window_pixels_with_options(&mut buf, w, h, &state, &dark_layout, false, false);
         assert_eq!(&buf[0..4], &[0, 0, 0, 0]);
 
         let _ = fs::remove_dir_all(&root);
@@ -512,10 +531,10 @@ mod tests {
             state.set_view_mode(mode);
             let layout = compute_layout(&state, w, h);
             // Warm icon/glyph caches then verify deterministic repeat & inspect speed.
-            render_window_pixels_with_popup(&mut buf, w, h, &state, &layout, false);
+            render_window_pixels_with_options(&mut buf, w, h, &state, &layout, false, false);
             let warm_start = std::time::Instant::now();
             for _ in 0..5 {
-                render_window_pixels_with_popup(&mut buf2, w, h, &state, &layout, false);
+                render_window_pixels_with_options(&mut buf2, w, h, &state, &layout, false, false);
             }
             let avg_ms = warm_start.elapsed().as_secs_f64() * 1000.0 / 5.0;
             eprintln!("bench {mode:?} {w}x{h}: warm_avg={avg_ms:.2} ms/frame");

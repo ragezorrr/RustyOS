@@ -417,6 +417,51 @@ pub fn check_top_bar_clock_click_for_options(
     x >= f64::from(right.clock_x - 2) && x < f64::from(right.clock_x + right.clock_w + 8)
 }
 
+fn push_top_bar_network_glyph(
+    out: &mut Vec<CompositorRenderElement>,
+    shape_cache: &mut crate::surfaces::UiShapeCache,
+    renderer: &mut GlesRenderer,
+    right: &TopBarRightLayout,
+    t: &TopBarTelemetry<'_>,
+    ink: [u8; 4],
+    light_opaque: bool,
+) {
+    use crate::surfaces::UiGlyphKind;
+
+    if t.wired_connected && !t.wifi_connected {
+        if let Some(el) = shape_cache.ui_glyph_element(
+            renderer,
+            UiGlyphKind::Ethernet,
+            20,
+            ink,
+            Point::from((right.wifi_x, TOP_BAR_ITEM_Y)),
+        ) {
+            out.push(CompositorRenderElement::Memory(el));
+        }
+        return;
+    }
+
+    let wifi_tint = if t.wifi_connected || t.wifi_enabled {
+        ink
+    } else if light_opaque {
+        [28, 29, 34, 130]
+    } else {
+        [255, 255, 255, 148]
+    };
+    if let Some(el) = shape_cache.ui_glyph_element(
+        renderer,
+        UiGlyphKind::Wifi {
+            connected: t.wifi_connected,
+            signal_percent: t.wifi_signal_percent,
+        },
+        20,
+        wifi_tint,
+        Point::from((right.wifi_x, TOP_BAR_ITEM_Y)),
+    ) {
+        out.push(CompositorRenderElement::Memory(el));
+    }
+}
+
 /// Draws monochrome macOS Menu Bar glyphs (`[Volume] · [Battery] · Wi-Fi · Search · Control Center`) (`RUSTYOS-036`, `RUSTYOS-049`).
 pub(crate) fn push_top_bar_right_glyphs(
     out: &mut Vec<CompositorRenderElement>,
@@ -427,7 +472,13 @@ pub(crate) fn push_top_bar_right_glyphs(
 ) {
     use crate::surfaces::UiGlyphKind;
 
-    let white = [255, 255, 255, 255];
+    let light_opaque =
+        t.reduce_transparency && !crate::shell_render::tokens::ThemePalette::active().is_dark;
+    let white = if light_opaque {
+        [28, 29, 34, 255]
+    } else {
+        [255, 255, 255, 255]
+    };
 
     if let Some(ux) = right.updates_x
         && let Some(el) = shape_cache.ui_glyph_element(
@@ -471,35 +522,7 @@ pub(crate) fn push_top_bar_right_glyphs(
     {
         out.push(CompositorRenderElement::Memory(el));
     }
-    if t.wired_connected && !t.wifi_connected {
-        if let Some(el) = shape_cache.ui_glyph_element(
-            renderer,
-            UiGlyphKind::Ethernet,
-            20,
-            white,
-            Point::from((right.wifi_x, TOP_BAR_ITEM_Y)),
-        ) {
-            out.push(CompositorRenderElement::Memory(el));
-        }
-    } else {
-        let wifi_tint = if t.wifi_connected || t.wifi_enabled {
-            white
-        } else {
-            [255, 255, 255, 148]
-        };
-        if let Some(el) = shape_cache.ui_glyph_element(
-            renderer,
-            UiGlyphKind::Wifi {
-                connected: t.wifi_connected,
-                signal_percent: t.wifi_signal_percent,
-            },
-            20,
-            wifi_tint,
-            Point::from((right.wifi_x, TOP_BAR_ITEM_Y)),
-        ) {
-            out.push(CompositorRenderElement::Memory(el));
-        }
-    }
+    push_top_bar_network_glyph(out, shape_cache, renderer, right, t, white, light_opaque);
     if let Some(el) = shape_cache.ui_glyph_element(
         renderer,
         UiGlyphKind::Search,

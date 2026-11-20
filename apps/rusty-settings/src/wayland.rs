@@ -6,13 +6,14 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use smithay_client_toolkit::{
-    compositor::{CompositorHandler, CompositorState},
+    compositor::{CompositorHandler, CompositorState, Region},
     delegate_compositor, delegate_output, delegate_pointer, delegate_registry, delegate_seat,
     delegate_shm, delegate_xdg_shell, delegate_xdg_window,
     output::{OutputHandler, OutputState},
     reexports::{
         calloop::{EventLoop, ping},
         calloop_wayland_source::WaylandSource,
+        csd_frame::WindowState,
         protocols::xdg::shell::client::xdg_toplevel::ResizeEdge,
     },
     registry::{ProvidesRegistryState, RegistryState},
@@ -41,9 +42,11 @@ use wayland_client::{
 };
 
 use crate::layout::{
-    ResizeEdgeZone, SIDEBAR_WIDTH, SettingsHit, SettingsLayout, compute_layout, hit_test,
+    ResizeEdgeZone, SIDEBAR_WIDTH, SettingsHit, SettingsLayout, WINDOW_CORNER_RADIUS,
+    compute_layout, hit_test,
 };
-use crate::render::render_window_pixels;
+use crate::liquid_glass::{GlassStyle, RustyosLiquidGlassManagerV1, RustyosSurfaceGlassV1};
+use crate::render::render_window_pixels_with_glass;
 use crate::state::{
     DamageScope, ServiceCommand, ServiceSnapshot, SettingsAppState, StartupOptions,
     execute_coalesced_service_batch,
@@ -111,7 +114,11 @@ struct SettingsClient {
     registry_state: RegistryState,
     output_state: OutputState,
     seat_state: SeatState,
+    compositor_state: CompositorState,
     shm: Shm,
+    _glass_mgr: Option<RustyosLiquidGlassManagerV1>,
+    window_glass: Option<RustyosSurfaceGlassV1>,
+    last_glass_state: Option<(u32, u32, bool)>,
     pool: SlotPool,
     window: Option<Window>,
     buffers: Vec<Buffer>,
@@ -267,6 +274,29 @@ fn spawn_service_worker(wake: ping::Ping) -> (Sender<ServiceCommand>, Receiver<S
     (cmd_tx, snap_rx)
 }
 
+fn tick_settings_frame(client: &mut SettingsClient, now: Instant) -> Result<(), WaylandAppError> {
+    let _ = client.app.update_caret_blink(now);
+    if client.app.poll_external_config_if_due(now) {
+        client.layout_cache = None;
+    }
+    sync_settings_glass_region(client);
+    if client.app.poll_updates() {
+        client.layout_cache = None;
+    }
+    if let Some(sent_at) = client.frame_sent_at
+        && now.saturating_duration_since(sent_at) >= Duration::from_millis(120)
+    {
+        client.frame_sent_at = None;
+    }
+    if client.app.step_scroll_animation(now) {
+        client.layout_cache = None;
+    }
+    if client.configured && client.frame_sent_at.is_none() && client.app.dirty {
+        draw_frame(client)?;
+    }
+    Ok(())
+}
+
 pub(crate) fn run(opts: &StartupOptions) -> Result<(), WaylandAppError> {
     let conn = Connection::connect_to_env()?;
     let (globals, queue) = registry_queue_init(&conn)?;
@@ -283,6 +313,15 @@ pub(crate) fn run(opts: &StartupOptions) -> Result<(), WaylandAppError> {
     window.set_title("Settings");
     window.set_app_id("org.rustyos.Settings");
     window.set_min_size(Some((640, 500)));
+
+    let glass_mgr: Option<RustyosLiquidGlassManagerV1> = globals.bind(&qh, 1..=1, ()).ok();
+    let window_glass = glass_mgr.as_ref().map(|mgr| {
+        let g = mgr.get_surface_glass(window.wl_surface(), &qh, ());
+        g.set_corner_radius(u32::try_from(WINDOW_CORNER_RADIUS).unwrap_or(14));
+        g.set_style(GlassStyle::Sidebar);
+        g.commit();
+        g
+    });
     window.commit();
 
     let (wake_ping, wake_source) =
@@ -294,7 +333,11 @@ pub(crate) fn run(opts: &StartupOptions) -> Result<(), WaylandAppError> {
         registry_state: RegistryState::new(&globals),
         output_state: OutputState::new(&globals, &queue.handle()),
         seat_state: SeatState::new(&globals, &queue.handle()),
+        compositor_state,
         shm,
+        _glass_mgr: glass_mgr,
+        window_glass,
+        last_glass_state: None,
         pool,
         window: Some(window),
         buffers: Vec::new(),
@@ -337,24 +380,7 @@ pub(crate) fn run(opts: &StartupOptions) -> Result<(), WaylandAppError> {
 
     while client.app.running {
         let now = Instant::now();
-        let _ = client.app.update_caret_blink(now);
-        if client.app.poll_external_config_if_due(now) {
-            client.layout_cache = None;
-        }
-        if client.app.poll_updates() {
-            client.layout_cache = None;
-        }
-        if let Some(sent_at) = client.frame_sent_at
-            && now.saturating_duration_since(sent_at) >= Duration::from_millis(120)
-        {
-            client.frame_sent_at = None;
-        }
-        if client.app.step_scroll_animation(now) {
-            client.layout_cache = None;
-        }
-        if client.configured && client.frame_sent_at.is_none() && client.app.dirty {
-            draw_frame(&mut client)?;
-        }
+        tick_settings_frame(&mut client, now)?;
         conn.flush()?;
 
         let timeout = if client.app.is_scroll_animating() {
@@ -456,13 +482,15 @@ fn draw_frame(client: &mut SettingsClient) -> Result<(), WaylandAppError> {
         .canvas(&mut client.pool)
         .ok_or_else(|| WaylandAppError::ShmPool(String::from("Settings SHM slot busy")))?;
 
-    render_window_pixels(
+    let sidebar_glass = client.window_glass.is_some() && !client.app.reduce_transparency;
+    render_window_pixels_with_glass(
         canvas,
         w,
         h,
         &client.app,
         &layout,
         client.hover_hit.as_ref(),
+        sidebar_glass,
     );
     let damage_scope = client.app.take_damage_scope();
     let (dx, dy, dw, dh) = damage_rect_for_scope(damage_scope, &layout, w, h);
@@ -506,6 +534,30 @@ delegate_seat!(SettingsClient);
 delegate_pointer!(SettingsClient);
 delegate_xdg_shell!(SettingsClient);
 delegate_xdg_window!(SettingsClient);
+
+impl Dispatch<RustyosLiquidGlassManagerV1, ()> for SettingsClient {
+    fn event(
+        _state: &mut Self,
+        _proxy: &RustyosLiquidGlassManagerV1,
+        _event: crate::liquid_glass::protocol::rustyos_liquid_glass_manager_v1::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<RustyosSurfaceGlassV1, ()> for SettingsClient {
+    fn event(
+        _state: &mut Self,
+        _proxy: &RustyosSurfaceGlassV1,
+        _event: crate::liquid_glass::protocol::rustyos_surface_glass_v1::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+    }
+}
 
 impl OutputHandler for SettingsClient {
     fn output_state(&mut self) -> &mut OutputState {
@@ -595,16 +647,49 @@ impl WindowHandler for SettingsClient {
             .1
             .map_or(DEFAULT_HEIGHT, std::num::NonZeroU32::get)
             .max(500);
+        let next_focused = configure.state.contains(WindowState::ACTIVATED);
+        let focus_changed = self.app.focused != next_focused;
         let max_changed = self.app.maximized != configure.is_maximized();
-        if next_w != self.width || next_h != self.height || !self.configured || max_changed {
+        let size_changed = next_w != self.width || next_h != self.height || !self.configured;
+        if size_changed || max_changed || focus_changed {
             self.width = next_w;
             self.height = next_h;
             self.layout_cache = None;
             self.app.maximized = configure.is_maximized();
+            self.app.focused = next_focused;
             self.configured = true;
-            self.app.mark_dirty(DamageScope::Full);
+            self.app.mark_dirty(if size_changed || max_changed {
+                DamageScope::Full
+            } else {
+                DamageScope::Sidebar
+            });
         }
+        sync_settings_glass_region(self);
     }
+}
+
+fn sync_settings_glass_region(client: &mut SettingsClient) {
+    let Some(ref g) = client.window_glass else {
+        return;
+    };
+    let next = (client.width, client.height, !client.app.reduce_transparency);
+    if client.last_glass_state == Some(next) {
+        return;
+    }
+    client.last_glass_state = Some(next);
+    if let Ok(region) = Region::new(&client.compositor_state) {
+        if !client.app.reduce_transparency {
+            let wi = i32::try_from(client.width).unwrap_or(1);
+            let hi = i32::try_from(client.height).unwrap_or(1);
+            let glass_w = (SIDEBAR_WIDTH + WINDOW_CORNER_RADIUS).min(wi).max(1);
+            region.add(0, 0, glass_w, hi.max(1));
+        }
+        g.set_region(Some(region.wl_region()));
+    }
+    g.set_corner_radius(u32::try_from(WINDOW_CORNER_RADIUS).unwrap_or(14));
+    g.set_style(GlassStyle::Sidebar);
+    g.commit();
+    client.app.mark_dirty(DamageScope::Full);
 }
 
 impl SeatHandler for SettingsClient {

@@ -26,8 +26,8 @@ where
             "--help" | "-h" => return Ok(None),
             "--trash" => opts.open_trash = true,
             "--recents" => opts.open_recents = true,
-            "--light" => opts.theme_override = Some(FilesThemeMode::LightGoldenGate),
-            "--dark" => opts.theme_override = Some(FilesThemeMode::DarkPurpleGlass),
+            "--light" => opts.theme_override = Some(FilesThemeMode::Light),
+            "--dark" => opts.theme_override = Some(FilesThemeMode::Dark),
             "--open-popup" => opts.open_test_popup = true,
             "--path" => {
                 let Some(dir) = iter.next() else {
@@ -83,7 +83,7 @@ mod tests {
                 initial_path: None,
                 open_trash: true,
                 open_recents: false,
-                theme_override: Some(FilesThemeMode::DarkPurpleGlass),
+                theme_override: Some(FilesThemeMode::Dark),
                 open_test_popup: false,
             }))
         );
@@ -97,7 +97,7 @@ mod tests {
                 initial_path: Some(PathBuf::from("/tmp/demo")),
                 open_trash: false,
                 open_recents: false,
-                theme_override: Some(FilesThemeMode::LightGoldenGate),
+                theme_override: Some(FilesThemeMode::Light),
                 open_test_popup: false,
             }))
         );

@@ -242,22 +242,11 @@ fn fullscreen_unoccluded_bypass_yields_for_polkit_portal_and_pick_color_without_
     assert_eq!(compositor.active_unoccluded_fullscreen_window(), Some(w1));
     assert!(compositor.should_hide_shell_chrome_for_fullscreen());
 
-    // System Settings modal also overrides fullscreen chrome hiding and direct scanout.
-    compositor.open_settings();
-    assert!(compositor.settings_active);
-    assert!(compositor.has_blocking_shell_overlay());
-    assert_eq!(compositor.active_unoccluded_fullscreen_window(), None);
-    assert!(!compositor.should_hide_shell_chrome_for_fullscreen());
-    compositor.close_settings();
-    assert_eq!(compositor.active_unoccluded_fullscreen_window(), Some(w1));
-
     Ok(())
 }
 
 #[test]
 fn persistent_config_save_reload_and_settings_toggles_roundtrip() -> Result<(), Box<dyn Error>> {
-    use crate::shell_render::{SettingsHit, SettingsTab};
-
     let mut display: Display<RustyCompositorState> = Display::new()?;
     let mut event_loop: EventLoop<RustyCompositorState> = EventLoop::try_new()?;
     let mut compositor = RustyCompositorState::new(
@@ -272,36 +261,24 @@ fn persistent_config_save_reload_and_settings_toggles_roundtrip() -> Result<(), 
     let temp_dir =
         std::env::temp_dir().join(format!("rustyos-state-settings-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&temp_dir);
+    std::fs::create_dir_all(&temp_dir)?;
     let cfg_path = temp_dir.join("config.toml");
     compositor.config_path = Some(cfg_path.clone());
 
-    let serial = smithay::utils::SERIAL_COUNTER.next_serial();
-    compositor
-        .dispatch_top_bar_menu_action(crate::shell_render::TopBarMenuAction::OpenSettings, serial);
-    assert!(compositor.settings_active);
+    compositor.set_glass_opacity(0.83);
+    compositor.toggle_reduce_transparency();
+    compositor.set_reduced_motion_pref(true);
+    compositor.menubar_show_workspaces = true;
+    compositor.clock_24h = true;
+    compositor.user_config.display_scale = 1.25;
+    compositor.user_config.display_rotation = crate::config::DisplayRotation::Rotate90;
+    compositor.user_config.vrr_mode = crate::config::VrrMode::Always;
+    compositor.user_config.prefer_max_refresh = false;
+    compositor.user_config.require_password_on_lock = false;
+    compositor.user_config.lock_on_sleep = false;
+    compositor.user_config.enable_polkit_agent = false;
+    compositor.sync_and_save_user_config();
 
-    for hit in [
-        SettingsHit::SelectTab(SettingsTab::Appearance),
-        SettingsHit::GlassOpacityUp,
-        SettingsHit::ToggleReduceTransparency,
-        SettingsHit::ToggleReducedMotion,
-        SettingsHit::SelectTab(SettingsTab::MenuBar),
-        SettingsHit::ToggleMenuWorkspaces,
-        SettingsHit::ToggleClock24h,
-        SettingsHit::SelectTab(SettingsTab::Displays),
-        SettingsHit::ScaleUp,
-        SettingsHit::CycleRotation,
-        SettingsHit::CycleVrrMode,
-        SettingsHit::TogglePreferMaxRefresh,
-        SettingsHit::SelectTab(SettingsTab::Security),
-        SettingsHit::ToggleRequirePassword,
-        SettingsHit::ToggleLockOnSleep,
-        SettingsHit::TogglePolkitAgent,
-    ] {
-        compositor.apply_settings_hit(hit);
-    }
-
-    assert_eq!(compositor.config_status_label, "Saved");
     let disk_cfg = crate::config::UserConfig::load_from_path(&cfg_path);
     assert!((disk_cfg.glass_opacity - 0.83).abs() < 0.01);
     assert!(disk_cfg.reduce_transparency && disk_cfg.reduced_motion);
@@ -324,7 +301,6 @@ fn persistent_config_save_reload_and_settings_toggles_roundtrip() -> Result<(), 
          [security]\nrequire_password_on_lock = true\nlock_on_sleep = true\nenable_polkit_agent = true\n",
     )?;
     compositor.handle_ipc_request(rusty_ipc::ShellRequest::ReloadConfig);
-    assert_eq!(compositor.config_status_label, "Reloaded");
     assert!((compositor.glass_opacity - 0.55).abs() < 0.01);
     assert!(!compositor.reduce_transparency && !compositor.animations.reduced_motion());
     assert!(!compositor.menubar_show_workspaces && compositor.menubar_show_volume);
@@ -337,17 +313,13 @@ fn persistent_config_save_reload_and_settings_toggles_roundtrip() -> Result<(), 
     assert_eq!(compositor.user_config.vrr_mode, crate::config::VrrMode::Off);
     assert!(compositor.user_config.require_password_on_lock);
 
-    compositor.apply_settings_hit(SettingsHit::Close);
-    assert!(!compositor.settings_active);
     let _ = std::fs::remove_dir_all(&temp_dir);
     Ok(())
 }
 
 #[test]
 fn keyboard_settings_wallpaper_reload_and_menubar_click_roundtrip() -> Result<(), Box<dyn Error>> {
-    use crate::shell_render::{
-        SettingsHit, SettingsTab, TopBarLayoutOptions, compute_top_bar_right_layout_with_options,
-    };
+    use crate::shell_render::{TopBarLayoutOptions, compute_top_bar_right_layout_with_options};
 
     let mut display: Display<RustyCompositorState> = Display::new()?;
     let mut event_loop: EventLoop<RustyCompositorState> = EventLoop::try_new()?;
@@ -369,17 +341,15 @@ fn keyboard_settings_wallpaper_reload_and_menubar_click_roundtrip() -> Result<()
     std::fs::write(&wp_path, b"stub-png")?;
     compositor.config_path = Some(cfg_path.clone());
 
-    for hit in [
-        SettingsHit::SelectTab(SettingsTab::Keyboard),
-        SettingsHit::CycleKeyboardLayout,
-        SettingsHit::CycleKeyboardOptions,
-        SettingsHit::RepeatRateUp,
-        SettingsHit::RepeatDelayDown,
-        SettingsHit::CycleActiveInputSource,
-        SettingsHit::ToggleMenuInputSource,
-    ] {
-        compositor.apply_settings_hit(hit);
-    }
+    let mut next_cfg = compositor.user_config.clone();
+    next_cfg.keyboard_layout = "us,ua".to_owned();
+    next_cfg.keyboard_options = "grp:caps_toggle".to_owned();
+    next_cfg.repeat_rate = 30;
+    next_cfg.repeat_delay = 150;
+    next_cfg.menubar_show_input_source = true;
+    compositor.apply_user_config(next_cfg);
+    compositor.cycle_keyboard_layout();
+    compositor.sync_and_save_user_config();
 
     let disk_cfg = crate::config::UserConfig::load_from_path(&cfg_path);
     assert_eq!(disk_cfg.keyboard_layout, "us,ua");
@@ -410,8 +380,6 @@ fn keyboard_settings_wallpaper_reload_and_menubar_click_roundtrip() -> Result<()
     assert!(compositor.shell_redraw_needed);
 
     assert!(compositor.handle_top_bar_pointer_click(1280, serial, 273));
-    assert!(compositor.settings_active);
-    assert_eq!(compositor.settings_tab, SettingsTab::Keyboard);
 
     std::fs::write(
         &cfg_path,
@@ -422,11 +390,6 @@ fn keyboard_settings_wallpaper_reload_and_menubar_click_roundtrip() -> Result<()
     assert_eq!(compositor.user_config.wallpaper.as_ref(), Some(&wp_path));
     assert!(compositor.wallpaper_revision > rev_before);
 
-    compositor.apply_settings_hit(SettingsHit::ToggleWallpaper);
-    assert_eq!(compositor.user_config.wallpaper, None);
-    compositor.apply_settings_hit(SettingsHit::ToggleWallpaper);
-    assert_eq!(compositor.user_config.wallpaper.as_ref(), Some(&wp_path));
-
     let _ = std::fs::remove_dir_all(&temp_dir);
     Ok(())
 }
@@ -435,7 +398,6 @@ fn keyboard_settings_wallpaper_reload_and_menubar_click_roundtrip() -> Result<()
 fn multi_output_settings_targets_each_display_independently_with_unplug_fallback()
 -> Result<(), Box<dyn Error>> {
     use crate::config::{DisplayRotation, UserConfig};
-    use crate::shell_render::SettingsHit;
     use smithay::output::{Mode, PhysicalProperties, Scale, Subpixel};
 
     let mut display: Display<RustyCompositorState> = Display::new()?;
@@ -456,7 +418,6 @@ fn multi_output_settings_targets_each_display_independently_with_unplug_fallback
     compositor.config_path = Some(cfg_path.clone());
 
     let primary_id = compositor.output_map.primary().id;
-    let primary_name = compositor.output_map.primary().name.clone();
     let dp1_id = compositor.add_output(
         "DP-1",
         PhysicalProperties {
@@ -473,24 +434,15 @@ fn multi_output_settings_targets_each_display_independently_with_unplug_fallback
         (1280, 0).into(),
     );
 
-    assert_eq!(compositor.selected_settings_output().id, primary_id);
-    assert_eq!(compositor.settings_render_state().output_count, 2);
-    assert_eq!(
-        compositor.settings_render_state().target_connector,
-        primary_name.as_str()
-    );
+    assert_eq!(compositor.output_map.entries().len(), 2);
+    let mut next_cfg = compositor.user_config.clone();
+    next_cfg.output_scales.insert("DP-1".to_owned(), 1.25);
+    next_cfg
+        .output_rotations
+        .insert("DP-1".to_owned(), DisplayRotation::Rotate90);
+    compositor.apply_user_config(next_cfg);
+    compositor.sync_and_save_user_config();
 
-    compositor.apply_settings_hit(SettingsHit::CycleTargetOutput);
-    assert_eq!(compositor.selected_settings_output().id, dp1_id);
-    let targeted = compositor.settings_render_state();
-    assert_eq!(targeted.target_connector, "DP-1");
-    assert_eq!(targeted.target_output_index, 1);
-    assert_eq!(targeted.display_width_px, 2560);
-    assert_eq!(targeted.display_height_px, 1440);
-    assert_eq!(targeted.display_refresh_hz, 144);
-
-    compositor.apply_settings_hit(SettingsHit::ScaleUp);
-    compositor.apply_settings_hit(SettingsHit::CycleRotation);
     let dp1_entry = compositor.output_map.get(dp1_id).ok_or("missing DP-1")?;
     assert!((dp1_entry.scale - 1.25).abs() < f64::EPSILON);
     assert_eq!(dp1_entry.rotation, DisplayRotation::Rotate90);
@@ -510,13 +462,9 @@ fn multi_output_settings_targets_each_display_independently_with_unplug_fallback
         DisplayRotation::Rotate90
     );
 
-    compositor.apply_settings_hit(SettingsHit::CycleTargetOutput);
-    assert_eq!(compositor.selected_settings_output().id, primary_id);
-    compositor.apply_settings_hit(SettingsHit::CycleTargetOutput);
-    assert_eq!(compositor.selected_settings_output().id, dp1_id);
     compositor.output_map.remove(dp1_id);
-    assert_eq!(compositor.selected_settings_output().id, primary_id);
-    assert_eq!(compositor.settings_render_state().output_count, 1);
+    assert_eq!(compositor.output_map.primary().id, primary_id);
+    assert_eq!(compositor.output_map.entries().len(), 1);
 
     let _ = std::fs::remove_dir_all(&temp_dir);
     Ok(())
@@ -525,7 +473,7 @@ fn multi_output_settings_targets_each_display_independently_with_unplug_fallback
 #[test]
 fn context_menu_desktop_folder_multi_monitor_dismiss_and_actions() -> Result<(), Box<dyn Error>> {
     use super::context_menu_actions::create_unique_desktop_folder;
-    use crate::shell_render::{ContextMenuAction, SettingsTab};
+    use crate::shell_render::ContextMenuAction;
     use rusty_wm::LayoutMode;
     use smithay::output::{Mode, PhysicalProperties, Scale, Subpixel};
 
@@ -607,10 +555,7 @@ fn context_menu_desktop_folder_multi_monitor_dismiss_and_actions() -> Result<(),
     assert!(compositor.context_menu.is_none());
 
     compositor.execute_context_menu_action(ContextMenuAction::DesktopDisplaySettings, serial);
-    assert!(compositor.settings_active);
-    assert_eq!(compositor.settings_tab, SettingsTab::Displays);
     compositor.execute_context_menu_action(ContextMenuAction::DesktopChangeWallpaper, serial);
-    assert_eq!(compositor.settings_tab, SettingsTab::Appearance);
     let initial_layout = compositor.wm.active_layout_mode();
     compositor.execute_context_menu_action(ContextMenuAction::DesktopToggleLayoutMode, serial);
     assert_ne!(compositor.wm.active_layout_mode(), initial_layout);
@@ -1406,7 +1351,7 @@ fn dock_pin_drag_reorder_remove_and_settings_config_work() -> Result<(), Box<dyn
     use crate::config::{
         DockMinimizeEffect, DockPosition, DownloadsDisplayMode, DownloadsSortMode,
     };
-    use crate::shell_render::{ContextMenuAction, SettingsHit, SettingsTab};
+    use crate::shell_render::ContextMenuAction;
 
     let mut display: Display<RustyCompositorState> = Display::new()?;
     let mut event_loop: EventLoop<RustyCompositorState> = EventLoop::try_new()?;
@@ -1442,15 +1387,15 @@ fn dock_pin_drag_reorder_remove_and_settings_config_work() -> Result<(), Box<dyn
             .any(|p| p == "notes")
     );
 
-    compositor.apply_settings_hit(SettingsHit::SelectTab(SettingsTab::DesktopDock));
-    compositor.apply_settings_hit(SettingsHit::DockCyclePosition);
+    compositor.user_config.dock_position = DockPosition::Left;
+    compositor.user_config.dock_minimize_effect = DockMinimizeEffect::Scale;
+    compositor.user_config.dock_auto_hide = true;
+    compositor.sync_and_save_user_config();
     assert_eq!(compositor.user_config.dock_position, DockPosition::Left);
-    compositor.apply_settings_hit(SettingsHit::DockToggleMinimizeEffect);
     assert_eq!(
         compositor.user_config.dock_minimize_effect,
         DockMinimizeEffect::Scale
     );
-    compositor.apply_settings_hit(SettingsHit::DockToggleAutoHide);
     assert!(compositor.user_config.dock_auto_hide);
 
     let serial = smithay::utils::SERIAL_COUNTER.next_serial();
@@ -1553,8 +1498,9 @@ fn updates_popover_and_topbar_menu_workflow_persist_settings()
     compositor.open_software_updater_action();
     assert!(!compositor.updates_popover_open);
 
-    compositor.apply_settings_hit(crate::shell_render::SettingsHit::ToggleMenuUpdates);
-    compositor.apply_settings_hit(crate::shell_render::SettingsHit::ToggleUpdatesEnabled);
+    compositor.menubar_show_updates = false;
+    compositor.updates_enabled = false;
+    compositor.sync_and_save_user_config();
     let saved = crate::config::UserConfig::load_from_path(&cfg_path);
     assert!(!saved.updates_show_in_menu_bar);
     assert!(!saved.updates_enabled);
@@ -1699,6 +1645,57 @@ fn focused_window_reports_active_focus_for_keyboard_pacing() -> Result<(), Box<d
     // When window is unmapped (e.g. closed).
     compositor.wm.unmap_window(win_id);
     assert!(compositor.wm.focused_window().is_none());
+
+    Ok(())
+}
+
+#[test]
+fn window_open_and_close_lifecycle_animations_respect_reduced_motion() -> Result<(), Box<dyn Error>>
+{
+    let display: Display<RustyCompositorState> = Display::new()?;
+    let event_loop: EventLoop<RustyCompositorState> = EventLoop::try_new()?;
+    let mut compositor = RustyCompositorState::new(
+        &display,
+        "rusty-test-lifecycle-anims".to_owned(),
+        event_loop.get_signal(),
+        event_loop.handle(),
+        (1280, 800).into(),
+    )?;
+    compositor.animations.set_reduced_motion(false);
+
+    let win_id = compositor.wm.next_window_id();
+    let rect = compositor.wm.map_window(win_id, Some((920, 640)));
+    compositor.register_window_open_animation(win_id, rect);
+    assert_eq!(compositor.lifecycle_anims.len(), 1);
+    assert_eq!(
+        compositor.lifecycle_anims[0].kind,
+        crate::state::WindowLifecycleKind::Open
+    );
+    assert!(compositor.lifecycle_anims[0].snapshot_pending);
+
+    // Start close transition explicitly and advance beyond 160ms so it settles cleanly.
+    compositor.start_window_close_animation(win_id, rect, true);
+    assert_eq!(compositor.lifecycle_anims.len(), 1);
+    assert_eq!(
+        compositor.lifecycle_anims[0].kind,
+        crate::state::WindowLifecycleKind::Close
+    );
+    assert!(compositor.has_active_compositor_animations());
+
+    let future = compositor.elapsed() + std::time::Duration::from_millis(220);
+    let _ = compositor.lifecycle_anims[0].progress.tick(future);
+    assert!(!compositor.lifecycle_anims[0].progress.is_active());
+    compositor.tick_animations();
+    assert!(
+        compositor.lifecycle_anims.is_empty(),
+        "completed close animation must be pruned on tick"
+    );
+
+    // With reduced_motion enabled, open and close lifecycle animations are skipped immediately.
+    compositor.animations.set_reduced_motion(true);
+    compositor.register_window_open_animation(win_id, rect);
+    compositor.start_window_close_animation(win_id, rect, true);
+    assert!(compositor.lifecycle_anims.is_empty());
 
     Ok(())
 }

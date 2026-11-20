@@ -11,7 +11,7 @@ use super::tokens::{
     COLOR_BORDER, COLOR_DANGER, COLOR_MUTED, COLOR_SUBTLE, COLOR_SUCCESS, COLOR_WARNING,
     RESIZE_GRAB_BORDER, RGBA_BORDER, RGBA_BORDER_HIGHLIGHT, RGBA_SURFACE_ELEVATED,
     RGBA_SURFACE_OVERLAY, TITLEBAR_HEIGHT, WINDOW_RADIUS, blend_border_over_fill_color,
-    make_solid_element, push_soft_shadow, rgba_to_premul_color32f,
+    make_solid_element, push_cpu_nine_slice_shadow, rgba_to_premul_color32f,
 };
 
 /// Active edges targeted by an interactive window resize (`RUSTYOS-022`).
@@ -402,7 +402,7 @@ pub fn generate_window_ssd_composite_elements_with_hover(
         }
     }
 
-    // Rounded top & bottom corners (`WINDOW_RADIUS = 20`) + crisp 1px glass rim
+    // Rounded top & bottom corners (`WINDOW_RADIUS = 14`) + crisp 1px glass rim
     let r = WINDOW_RADIUS.min(w / 2).min(h / 2).max(4);
     let pal = super::tokens::ThemePalette::active();
     let (titlebar_rgba, border_rgba) = ssd_frame_colors(pal.is_dark, is_focused);
@@ -498,7 +498,7 @@ pub fn generate_window_ssd_composite_elements_with_hover(
     out
 }
 
-/// Generates a seamless Golden Gate drop shadow behind a window frame (`RUSTYOS-075`, `RUSTYOS-080`).
+/// Generates a seamless 3-lobe drop shadow behind a window frame (`RUSTYOS-075`, `RUSTYOS-128`).
 pub fn generate_window_shadow_elements(
     shape_cache: &mut crate::surfaces::UiShapeCache,
     renderer: &mut GlesRenderer,
@@ -506,39 +506,57 @@ pub fn generate_window_shadow_elements(
     is_focused: bool,
     shadow_mode: crate::config::WindowShadowMode,
 ) -> Vec<CompositorRenderElement> {
+    generate_window_shadow_elements_with_opacity(
+        shape_cache,
+        renderer,
+        rect,
+        is_focused,
+        shadow_mode,
+        1.0,
+    )
+}
+
+/// Generates a seamless 3-lobe drop shadow behind a window frame scaled by `opacity_scale` (`RUSTYOS-128`).
+pub fn generate_window_shadow_elements_with_opacity(
+    shape_cache: &mut crate::surfaces::UiShapeCache,
+    renderer: &mut GlesRenderer,
+    rect: rusty_wm::Rect,
+    is_focused: bool,
+    shadow_mode: crate::config::WindowShadowMode,
+    opacity_scale: f32,
+) -> Vec<CompositorRenderElement> {
     let mut out = Vec::new();
-    if shadow_mode == crate::config::WindowShadowMode::None {
+    let opacity = opacity_scale.clamp(0.0, 1.0);
+    if shadow_mode == crate::config::WindowShadowMode::None || opacity <= 0.002 {
         return out;
     }
     let w = rect.width.max(64);
     let h = rect.height.max(TITLEBAR_HEIGHT + 32);
     let win_logical = Rectangle::new(Point::from((rect.x, rect.y)), Size::from((w, h)));
-    if let Some(el) = shape_cache.window_shadow_render_element(
+    if let Some(el) = shape_cache.window_shadow_render_element_with_opacity(
         renderer,
         win_logical,
         WINDOW_RADIUS,
         is_focused,
         shadow_mode,
+        opacity,
     ) {
         out.push(el);
         return out;
     }
 
-    let (spread, max_alpha, drop) = if shadow_mode == crate::config::WindowShadowMode::Normal {
-        if is_focused { (28, 48, 4) } else { (18, 28, 2) }
-    } else if is_focused {
-        (16, 28, 3)
+    let elevation = if is_focused && opacity >= 0.65 {
+        rusty_ui::shadow::ShadowElevation::ActiveWindow
     } else {
-        (10, 16, 2)
+        rusty_ui::shadow::ShadowElevation::InactiveWindow
     };
-    push_soft_shadow(
+    push_cpu_nine_slice_shadow(
         &mut out,
         shape_cache,
         renderer,
-        Rectangle::new(Point::from((rect.x, rect.y + drop)), Size::from((w, h))),
+        Rectangle::new(Point::from((rect.x, rect.y + 6)), Size::from((w, h))),
         WINDOW_RADIUS,
-        spread,
-        max_alpha,
+        elevation,
     );
     out
 }

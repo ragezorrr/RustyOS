@@ -78,12 +78,10 @@ impl crate::state::RustyCompositorState {
                 }
             }
             ContextMenuAction::DesktopChangeWallpaper => {
-                self.settings_tab = crate::shell_render::SettingsTab::Appearance;
-                self.open_settings();
+                self.open_settings_page(Some("wallpaper"));
             }
             ContextMenuAction::DesktopDisplaySettings => {
-                self.settings_tab = crate::shell_render::SettingsTab::Displays;
-                self.open_settings();
+                self.open_settings_page(Some("displays"));
             }
             ContextMenuAction::DesktopOpenTerminal => {
                 let desktop = crate::context_menu::desktop_menu::resolve_desktop_dir();

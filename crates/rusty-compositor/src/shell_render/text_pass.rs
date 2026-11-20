@@ -7,9 +7,7 @@ use smithay::utils::{Point, Rectangle, Size};
 use super::context_menu::render_context_menu_text;
 use super::dock::dock_tooltip_rect_and_label;
 use super::dock_stack::render_dock_stack_text;
-use super::modals::{
-    render_pick_color_text, render_polkit_text, render_portal_text, render_settings_text,
-};
+use super::modals::{render_pick_color_text, render_polkit_text, render_portal_text};
 use super::notification_center::render_notification_center_text;
 use super::quick_settings::render_quick_settings_text;
 use super::spotlight_overview::{
@@ -23,9 +21,9 @@ use super::top_bar_menus::{ResolvedTopBarMenuItem, resolve_top_bar_menu_entries}
 use super::updates_popover::render_updates_text;
 use super::wifi_popover::render_wifi_popover_text;
 use super::{
-    DockViewState, NotificationToastView, ShellOverlayView, TEXT_BRIGHT, TEXT_MUTED,
-    TOP_BAR_FONT_SIZE, TOP_BAR_ITEM_H, TOP_BAR_ITEM_Y, TopBarMenuHit, TopBarTelemetry,
-    WS_BTN_STRIDE, WS_BTN_WIDTH, compute_dock_layout, compute_top_bar_left_layout_for_profile,
+    DockViewState, NotificationToastView, ShellOverlayView, TEXT_MUTED, TOP_BAR_FONT_SIZE,
+    TOP_BAR_ITEM_H, TOP_BAR_ITEM_Y, TopBarMenuHit, TopBarTelemetry, WS_BTN_STRIDE, WS_BTN_WIDTH,
+    compute_dock_layout, compute_top_bar_left_layout_for_profile,
     compute_top_bar_right_layout_with_options, dock_tooltip_hidden_by_overlay,
     notification_toast_rects, notifications_hidden_by_overlay,
     top_bar_menu_popover_rect_for_profile, tray_slot_rects_with_options,
@@ -175,9 +173,6 @@ pub(super) fn append_foreground_overlay_text(
         ShellOverlayView::PickColor(app_id) => {
             render_pick_color_text(text_cache, renderer, screen_size, app_id, elements);
         }
-        ShellOverlayView::Settings(st) => {
-            render_settings_text(text_cache, renderer, screen_size, st, elements);
-        }
         ShellOverlayView::ContextMenu(ctx) => {
             render_context_menu_text(text_cache, renderer, screen_size, ctx, true, elements);
         }
@@ -278,7 +273,6 @@ pub(super) fn append_chrome_text(
     let width = screen_size.w;
     let height = screen_size.h;
     let pal = ThemePalette::active();
-    let text_bright = TEXT_BRIGHT;
     let text_muted = TEXT_MUTED;
 
     // 1b. TopBar Left Active App & Global Menus (`RUSTYOS-038`, `RUSTYOS-048`, `RUSTYOS-049`)
@@ -298,19 +292,28 @@ pub(super) fn append_chrome_text(
         Point::from((left_layout.app_x, ws_y)),
         Size::from((left_layout.app_w, ws_btn_height)),
     );
-    let pure_white = [255, 255, 255, 255];
+    let light_opaque_bar = top_telemetry.reduce_transparency && !pal.is_dark;
+    let bar_fg = if light_opaque_bar {
+        [28, 29, 34, 255]
+    } else {
+        [255, 255, 255, 255]
+    };
     if let Some(el) = text_cache.render_label_centered_weighted(
         renderer,
         active_app_name,
         crate::text::FontWeight::Bold,
         TOP_BAR_FONT_SIZE,
-        pure_white,
+        bar_fg,
         app_bounds,
     ) {
         elements.push(el);
     }
 
-    let text_menu = [246, 247, 250, 245];
+    let text_menu = if light_opaque_bar {
+        [28, 29, 34, 240]
+    } else {
+        [246, 247, 250, 245]
+    };
     for (menu_kind, name, x, w) in [
         (
             TopBarMenuHit::File,
@@ -348,7 +351,7 @@ pub(super) fn append_chrome_text(
             continue;
         }
         let color = if top_telemetry.active_menu == Some(menu_kind) {
-            [255, 255, 255, 255]
+            bar_fg
         } else {
             text_menu
         };
@@ -438,6 +441,8 @@ pub(super) fn append_chrome_text(
         for ws in 1..=9 {
             let color = if ws == active_workspace {
                 [255, 255, 255, 255]
+            } else if light_opaque_bar {
+                [90, 92, 100, 220]
             } else {
                 [214, 214, 222, 220]
             };
@@ -462,13 +467,9 @@ pub(super) fn append_chrome_text(
             Point::from((left_layout.layout_x, ws_y)),
             Size::from((left_layout.layout_w, ws_btn_height)),
         );
-        if let Some(el) = text_cache.render_label_centered(
-            renderer,
-            layout_label,
-            11.0,
-            text_bright,
-            layout_bounds,
-        ) {
+        if let Some(el) =
+            text_cache.render_label_centered(renderer, layout_label, 11.0, bar_fg, layout_bounds)
+        {
             elements.push(el);
         }
     }
@@ -485,7 +486,7 @@ pub(super) fn append_chrome_text(
         top_telemetry.clock_hhmm,
         crate::text::FontWeight::Regular,
         TOP_BAR_FONT_SIZE,
-        pure_white,
+        bar_fg,
         clock_bounds,
     ) {
         elements.push(el);
@@ -500,7 +501,7 @@ pub(super) fn append_chrome_text(
             renderer,
             top_telemetry.kbd_layout,
             10.5,
-            pure_white,
+            bar_fg,
             kbd_bounds,
         ) {
             elements.push(el);
@@ -522,11 +523,19 @@ pub(super) fn append_chrome_text(
                 continue;
             }
             let label_color = if item.attention {
-                [255, 210, 214, 255]
+                if light_opaque_bar {
+                    [200, 40, 52, 255]
+                } else {
+                    [255, 210, 214, 255]
+                }
             } else if item.passive {
-                text_muted
+                if light_opaque_bar {
+                    [90, 92, 100, 230]
+                } else {
+                    text_muted
+                }
             } else {
-                pure_white
+                bar_fg
             };
             let tray_bounds =
                 Rectangle::new(Point::from((tx, ws_y)), Size::from((tw, ws_btn_height)));

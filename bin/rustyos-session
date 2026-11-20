@@ -45,7 +45,6 @@ find_rusty_bin() {
 }
 
 COMPOSITOR_BIN="$(find_rusty_bin rusty-compositor)"
-SHELL_BIN="$(find_rusty_bin rusty-shell)"
 FILES_BIN="$(find_rusty_bin rusty-files)"
 SETTINGS_BIN="$(find_rusty_bin rusty-settings)"
 TERMINAL_BIN="$(find_rusty_bin rusty-terminal)"
@@ -98,7 +97,6 @@ run_doctor() {
 
     for spec in \
         "rusty-compositor:$COMPOSITOR_BIN:req:build workspace or install package" \
-        "rusty-shell:$SHELL_BIN:warn:only needed when RUSTYOS_EXTERNAL_SHELL=1" \
         "rusty-files:$FILES_BIN:req:build workspace or install package" \
         "rusty-settings:$SETTINGS_BIN:req:build workspace or install package" \
         "rusty-terminal:$TERMINAL_BIN:req:build workspace or install package" \
@@ -381,16 +379,6 @@ fi
 
 if [ -n "$OOBE_SPAWN_ARG" ]; then
     set -- --spawn "$OOBE_SPAWN_ARG" "$@"
-fi
-
-if [ "${RUSTYOS_EXTERNAL_SHELL:-0}" = "1" ] \
-    && [ "$BACKEND_FLAG" != "--check" ] \
-    && [ "$BACKEND_FLAG" != "--drm-probe" ]; then
-    if [ -n "$SHELL_BIN" ] && [ -x "$SHELL_BIN" ]; then
-        set -- --spawn "$SHELL_BIN --wayland" "$@"
-    else
-        echo "Warning: RUSTYOS_EXTERNAL_SHELL=1 set, but rusty-shell binary not found; falling back to built-in compositor shell" >&2
-    fi
 fi
 
 if [ "$BACKEND_FLAG" = "--drm" ] || [ "$BACKEND_FLAG" = "--kms" ]; then

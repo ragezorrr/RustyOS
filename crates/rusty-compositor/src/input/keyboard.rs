@@ -93,23 +93,8 @@ impl RustyCompositorState {
                 );
             }
             KeyIntercept::ToggleSettings => {
-                self.toggle_settings();
-                info!(
-                    settings_active = self.settings_active,
-                    "Toggled System Settings overlay"
-                );
-            }
-            KeyIntercept::SettingsClose => {
-                self.close_settings();
-                info!("Closed System Settings overlay");
-            }
-            KeyIntercept::SettingsNextTab => {
-                self.settings_tab = self.settings_tab.next();
-                self.shell_redraw_needed = true;
-            }
-            KeyIntercept::SettingsPrevTab => {
-                self.settings_tab = self.settings_tab.prev();
-                self.shell_redraw_needed = true;
+                self.open_settings();
+                info!("Opened or focused System Settings");
             }
             KeyIntercept::ReloadConfig => {
                 let reloaded = self.reload_user_config();
@@ -576,11 +561,6 @@ pub(super) fn classify_keyboard_input(
     if state.notification_center_open && sym.raw() == Keysym::Escape.raw() {
         return FilterResult::Intercept(KeyIntercept::NotificationCenterClose);
     }
-    if state.settings_active
-        && let Some(intercept) = classify_settings_key(modifiers, sym)
-    {
-        return FilterResult::Intercept(intercept);
-    }
     if state.dock_stack.is_some()
         && let Some(intercept) = classify_dock_stack_key(modifiers, sym)
     {
@@ -638,20 +618,6 @@ fn classify_dock_stack_key(modifiers: ModifiersState, sym: Keysym) -> Option<Key
         Keysym::Return | Keysym::KP_Enter => Some(KeyIntercept::DockStackActivate),
         _ => None,
     }
-}
-
-fn classify_settings_key(modifiers: ModifiersState, sym: Keysym) -> Option<KeyIntercept> {
-    if sym.raw() == Keysym::Escape.raw() {
-        return Some(KeyIntercept::SettingsClose);
-    }
-    if !modifiers.ctrl && !modifiers.alt && !modifiers.logo {
-        match sym {
-            Keysym::Tab | Keysym::Down => return Some(KeyIntercept::SettingsNextTab),
-            Keysym::ISO_Left_Tab | Keysym::Up => return Some(KeyIntercept::SettingsPrevTab),
-            _ => {}
-        }
-    }
-    None
 }
 
 fn classify_context_menu_key(

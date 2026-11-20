@@ -13,6 +13,7 @@ use smithay_client_toolkit::{
     reexports::{
         calloop::EventLoop,
         calloop_wayland_source::WaylandSource,
+        csd_frame::WindowState,
         protocols::xdg::shell::client::{
             xdg_positioner::{Anchor, ConstraintAdjustment, Gravity},
             xdg_toplevel::ResizeEdge,
@@ -47,11 +48,11 @@ use wayland_client::{
 };
 
 use crate::layout::{
-    FilesHit, FilesLayout, PopupCommand, PopupSurfaceSpec, ResizeEdgeZone, compute_layout,
-    compute_popup_surface_spec, hit_test, scroll_area_at,
+    FilesHit, FilesLayout, PopupCommand, PopupSurfaceSpec, ResizeEdgeZone, SIDEBAR_WIDTH,
+    WINDOW_CORNER_RADIUS, compute_layout, compute_popup_surface_spec, hit_test, scroll_area_at,
 };
 use crate::liquid_glass::{GlassStyle, RustyosLiquidGlassManagerV1, RustyosSurfaceGlassV1};
-use crate::render::{render_popup_surface_pixels_with_style, render_window_pixels_with_popup};
+use crate::render::{render_popup_surface_pixels_with_style, render_window_pixels_with_options};
 use crate::state::OpenPopupMenu;
 use crate::state::{FilesAppState, ScrollTargetArea, SearchScope, StartupOptions};
 use rusty_services::file_manager::UserFileLocations;
@@ -145,7 +146,8 @@ struct WaylandClientData {
     shm: Shm,
     xdg_shell: XdgShell,
     glass_manager: Option<RustyosLiquidGlassManagerV1>,
-    _window_glass: Option<RustyosSurfaceGlassV1>,
+    window_glass: Option<RustyosSurfaceGlassV1>,
+    last_glass_state: Option<(u32, u32, bool)>,
     pool: SlotPool,
     window: Option<Window>,
     main_buffers: Vec<Buffer>,
@@ -182,6 +184,29 @@ impl WaylandClientData {
             return l.clone();
         }
         self.layout()
+    }
+
+    fn sync_window_glass_region(&mut self) {
+        let Some(ref g) = self.window_glass else {
+            return;
+        };
+        let next = (self.width, self.height, !self.app.reduce_transparency);
+        if self.last_glass_state == Some(next) {
+            return;
+        }
+        self.last_glass_state = Some(next);
+        if let Ok(region) = Region::new(&self.compositor_state) {
+            if !self.app.reduce_transparency {
+                let wi = i32::try_from(self.width).unwrap_or(1);
+                let hi = i32::try_from(self.height).unwrap_or(1);
+                let glass_w = (SIDEBAR_WIDTH + WINDOW_CORNER_RADIUS).min(wi).max(1);
+                region.add(0, 0, glass_w, hi.max(1));
+            }
+            g.set_region(Some(region.wl_region()));
+        }
+        g.set_corner_radius(u32::try_from(WINDOW_CORNER_RADIUS).unwrap_or(14));
+        g.set_style(GlassStyle::Sidebar);
+        g.commit();
     }
 
     fn close_popup(&mut self) {
@@ -248,7 +273,7 @@ impl WaylandClientData {
                 region.add(r.x, r.y, r.w, r.h);
                 g.set_region(Some(region.wl_region()));
             }
-            g.set_corner_radius(13);
+            g.set_corner_radius(u32::try_from(rusty_ui::menu::MENU_RADIUS).unwrap_or(14));
             g.set_style(GlassStyle::Popover);
             g.commit();
             g
@@ -797,7 +822,7 @@ pub(crate) fn run(options: &StartupOptions) -> Result<(), WaylandAppError> {
     let glass_manager: Option<RustyosLiquidGlassManagerV1> = globals.bind(&qh, 1..=1, ()).ok();
     let window_glass = glass_manager.as_ref().map(|mgr| {
         let g = mgr.get_surface_glass(window.wl_surface(), &qh, ());
-        g.set_corner_radius(12);
+        g.set_corner_radius(u32::try_from(WINDOW_CORNER_RADIUS).unwrap_or(14));
         g.set_style(GlassStyle::Sidebar);
         g.commit();
         g
@@ -814,7 +839,8 @@ pub(crate) fn run(options: &StartupOptions) -> Result<(), WaylandAppError> {
         shm,
         xdg_shell,
         glass_manager,
-        _window_glass: window_glass,
+        window_glass,
+        last_glass_state: None,
         pool,
         window: Some(window),
         main_buffers: Vec::new(),
@@ -846,7 +872,9 @@ pub(crate) fn run(options: &StartupOptions) -> Result<(), WaylandAppError> {
     while data.app.is_running() {
         let now = Instant::now();
         let _ = data.app.poll_background_loads();
-        let _ = data.app.poll_system_theme();
+        if data.app.poll_system_theme() {
+            data.sync_window_glass_region();
+        }
         let _ = data.app.update_caret_blink(now);
 
         if data.app.window_title != data.last_title
@@ -942,7 +970,8 @@ fn draw_main_frame(data: &mut WaylandClientData) -> Result<(), WaylandAppError> 
         .canvas(&mut data.pool)
         .ok_or_else(|| WaylandAppError::ShmPool(String::from("Main SHM slot unexpectedly busy")))?;
 
-    render_window_pixels_with_popup(canvas, w, h, &data.app, &layout, false);
+    let sidebar_glass = data.window_glass.is_some() && !data.app.reduce_transparency;
+    render_window_pixels_with_options(canvas, w, h, &data.app, &layout, false, sidebar_glass);
     win.set_window_geometry(0, 0, w, h);
     buf_ref
         .attach_to(win.wl_surface())
@@ -1178,8 +1207,13 @@ impl WindowHandler for WaylandClientData {
         self.width = new_w;
         self.height = new_h;
         self.app.set_maximized(configure.is_maximized());
+        let next_focused = configure.state.contains(WindowState::ACTIVATED);
+        if self.app.focused != next_focused {
+            self.app.focused = next_focused;
+        }
         self.configured = true;
         self.frame_sent_at = None;
+        self.sync_window_glass_region();
         self.app.dirty = true;
     }
 }

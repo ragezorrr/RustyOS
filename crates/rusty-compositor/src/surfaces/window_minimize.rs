@@ -36,7 +36,12 @@ pub(crate) const WINDOW_MINIMIZE_FRAG: &str = r"#version 100
 #extension GL_OES_EGL_image_external : require
 #endif
 
+#ifdef GL_FRAGMENT_PRECISION_HIGH
+precision highp float;
+#else
 precision mediump float;
+#endif
+
 #if defined(EXTERNAL)
 uniform samplerExternalOES tex;
 #else
@@ -70,7 +75,8 @@ vec4 sample_filtered(vec2 uv, vec2 half_texel, vec2 step_uv) {
 
 void main() {
     float t = clamp(u_params.x, 0.0, 1.0);
-    bool is_genie = u_params.y > 0.5;
+    bool is_genie = u_params.y > 0.5 && u_params.y < 1.5;
+    bool is_lifecycle = u_params.y >= 1.5;
     float edge = u_params.z;
 
     float p_a;
@@ -167,7 +173,9 @@ void main() {
     float fw_c = clamp(px_c * 0.9, 0.0015, 0.25);
     float aa_a = min(smoothstep(0.0, fw_a, raw_v), smoothstep(1.0, 1.0 - fw_a, raw_v));
     float aa_c = min(smoothstep(0.0, fw_c, uv_c), smoothstep(1.0, 1.0 - fw_c, uv_c));
-    float end_fade = 1.0 - smoothstep(0.76, 0.99, t);
+    float end_fade = is_lifecycle
+        ? clamp(u_params.w, 0.0, 1.0)
+        : (1.0 - smoothstep(0.76, 0.99, t));
     float mask = clamp(aa_a * aa_c * end_fade * alpha, 0.0, 1.0);
     color = color * mask;
 
@@ -182,6 +190,9 @@ void main() {
 ";
 
 type WarpFrameKey = (u32, u8, u8, [i32; 8]);
+
+const MAX_LIFECYCLE_SNAPSHOTS: usize = 12;
+const LIFECYCLE_SCALE_FACTOR: f64 = 0.93;
 
 /// Cached snapshot texture and incremental damage state for an active minimize/restore animation (`RUSTYOS-073`).
 pub(crate) struct MinimizedWindowSnapshot {
@@ -199,12 +210,21 @@ impl std::fmt::Debug for MinimizedWindowSnapshot {
     }
 }
 
-/// Manages the offscreen window snapshot textures and warp shader for `Genie`/`Scale` animations.
+#[derive(Debug)]
+struct LifecycleWindowSnapshot {
+    snap: MinimizedWindowSnapshot,
+    commit_sig: u64,
+    last_used_frame: u64,
+}
+
+/// Manages offscreen window snapshot textures and warp/scale shaders for minimize & open/close animations.
 #[derive(Default)]
 pub(crate) struct WindowMinimizePipeline {
     program: Option<GlesTexProgram>,
     compile_failed: bool,
     snapshots: HashMap<u64, MinimizedWindowSnapshot>,
+    lifecycle_snapshots: HashMap<u64, LifecycleWindowSnapshot>,
+    lifecycle_tick: u64,
 }
 
 impl std::fmt::Debug for WindowMinimizePipeline {
@@ -213,6 +233,8 @@ impl std::fmt::Debug for WindowMinimizePipeline {
             .field("has_program", &self.program.is_some())
             .field("compile_failed", &self.compile_failed)
             .field("snapshot_count", &self.snapshots.len())
+            .field("lifecycle_snapshot_count", &self.lifecycle_snapshots.len())
+            .field("lifecycle_tick", &self.lifecycle_tick)
             .finish()
     }
 }
@@ -244,17 +266,17 @@ impl WindowMinimizePipeline {
         }
     }
 
-    /// Captures window-local `elements` (origin `(0, 0)`, logical size `win_size`) into an offscreen [`GlesTexture`].
-    pub(crate) fn capture_snapshot(
+    fn capture_into_slot(
         &mut self,
         renderer: &mut GlesRenderer,
         window_id: u64,
         win_size: Size<i32, Logical>,
         output_scale: f64,
         local_elements: &[CompositorRenderElement],
-    ) -> bool {
+        reusable: Option<MinimizedWindowSnapshot>,
+    ) -> Option<MinimizedWindowSnapshot> {
         if win_size.w <= 0 || win_size.h <= 0 || !self.ensure_program(renderer) {
-            return false;
+            return None;
         }
         let clamped_scale = crate::config::clamp_display_scale(output_scale);
         #[allow(clippy::cast_possible_truncation)]
@@ -264,23 +286,20 @@ impl WindowMinimizePipeline {
         let phys_size = Size::<i32, Physical>::from((phys_w, phys_h));
         let buf_size = Size::<i32, BufferCoord>::from((phys_w, phys_h));
 
-        let reusable = self
-            .snapshots
-            .remove(&window_id)
-            .filter(|s| s.texture.size() == buf_size);
-        let (mut tex, stable_id, mut damage) = if let Some(mut old) = reusable {
-            old.damage.reset();
-            (old.texture, old.stable_id, old.damage)
-        } else {
-            let tex = match renderer.create_buffer(Fourcc::Abgr8888, buf_size) {
-                Ok(t) => t,
-                Err(err) => {
-                    warn!("Failed to allocate minimize snapshot FBO for win {window_id}: {err}");
-                    return false;
-                }
+        let (mut tex, stable_id, mut damage) =
+            if let Some(mut old) = reusable.filter(|s| s.texture.size() == buf_size) {
+                old.damage.reset();
+                (old.texture, old.stable_id, old.damage)
+            } else {
+                let tex = match renderer.create_buffer(Fourcc::Abgr8888, buf_size) {
+                    Ok(t) => t,
+                    Err(err) => {
+                        warn!("Failed to allocate snapshot FBO for win {window_id}: {err}");
+                        return None;
+                    }
+                };
+                (tex, Id::new(), DamageBag::new(8))
             };
-            (tex, Id::new(), DamageBag::new(8))
-        };
 
         let mut tracker =
             OutputDamageTracker::new(phys_size, Scale::from(clamped_scale), Transform::Normal);
@@ -290,25 +309,102 @@ impl WindowMinimizePipeline {
                 .map_err(|e| format!("bind snapshot FBO: {e}"))?;
             tracker
                 .render_output(renderer, &mut fb, 0, local_elements, Color32F::TRANSPARENT)
-                .map_err(|e| format!("render minimize snapshot: {e}"))?;
+                .map_err(|e| format!("render snapshot: {e}"))?;
             Ok(())
         })();
         if let Err(err) = render_ok {
-            warn!("Minimize snapshot render failed for win {window_id}: {err}");
-            return false;
+            warn!("Snapshot render failed for win {window_id}: {err}");
+            return None;
         }
 
         damage.add([Rectangle::from_size(buf_size)]);
-        self.snapshots.insert(
+        Some(MinimizedWindowSnapshot {
+            texture: tex,
+            stable_id,
+            damage,
+            last_anim_key: None,
+        })
+    }
+
+    /// Captures window-local `elements` (origin `(0, 0)`, logical size `win_size`) into an offscreen [`GlesTexture`].
+    pub(crate) fn capture_snapshot(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        window_id: u64,
+        win_size: Size<i32, Logical>,
+        output_scale: f64,
+        local_elements: &[CompositorRenderElement],
+    ) -> bool {
+        let reusable = self.snapshots.remove(&window_id);
+        let Some(snap) = self.capture_into_slot(
+            renderer,
             window_id,
-            MinimizedWindowSnapshot {
-                texture: tex,
-                stable_id,
-                damage,
-                last_anim_key: None,
+            win_size,
+            output_scale,
+            local_elements,
+            reusable,
+        ) else {
+            return false;
+        };
+        self.snapshots.insert(window_id, snap);
+        true
+    }
+
+    /// Captures/updates an offscreen snapshot for smooth window open/close fade+scale (`RUSTYOS-128`).
+    pub(crate) fn capture_lifecycle_snapshot(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        window_id: u64,
+        win_size: Size<i32, Logical>,
+        output_scale: f64,
+        commit_sig: u64,
+        local_elements: &[CompositorRenderElement],
+    ) -> bool {
+        let reusable = self
+            .lifecycle_snapshots
+            .remove(&window_id)
+            .map(|entry| entry.snap);
+        let Some(snap) = self.capture_into_slot(
+            renderer,
+            window_id,
+            win_size,
+            output_scale,
+            local_elements,
+            reusable,
+        ) else {
+            return false;
+        };
+        if self.lifecycle_snapshots.len() >= MAX_LIFECYCLE_SNAPSHOTS
+            && let Some(oldest_id) = self
+                .lifecycle_snapshots
+                .iter()
+                .min_by_key(|(_, entry)| entry.last_used_frame)
+                .map(|(id, _)| *id)
+        {
+            self.lifecycle_snapshots.remove(&oldest_id);
+        }
+        self.lifecycle_tick = self.lifecycle_tick.saturating_add(1);
+        let tick = self.lifecycle_tick;
+        self.lifecycle_snapshots.insert(
+            window_id,
+            LifecycleWindowSnapshot {
+                snap,
+                commit_sig,
+                last_used_frame: tick,
             },
         );
         true
+    }
+
+    #[must_use]
+    pub(crate) fn lifecycle_snapshot_matches_sig(&self, window_id: u64, commit_sig: u64) -> bool {
+        self.lifecycle_snapshots
+            .get(&window_id)
+            .is_some_and(|entry| entry.commit_sig == commit_sig)
+    }
+
+    pub(crate) fn retain_lifecycle_snapshots(&mut self, mut keep: impl FnMut(u64) -> bool) {
+        self.lifecycle_snapshots.retain(|&win_id, _| keep(win_id));
     }
 
     /// Returns `true` if a GPU snapshot exists for `window_id`.
@@ -348,91 +444,175 @@ impl WindowMinimizePipeline {
     ) -> Option<LiquidGlassElement> {
         let program = self.program.as_ref()?.clone();
         let snap = self.snapshots.get_mut(&window_id)?;
-        let (bounds, win_uv, dock_uv) = compute_warp_bounds_and_uvs(win_rect, dock_rect);
         let edge_u8: u8 = match position {
             DockPosition::Bottom => 0,
             DockPosition::Left => 1,
             DockPosition::Right => 2,
         };
-        let is_genie = effect == DockMinimizeEffect::Genie;
-        let clamped_t = progress.clamp(0.0, 1.0);
-        let progress_q = (clamped_t * 8192.0).round() as u32;
-        let cur_key: WarpFrameKey = (
-            progress_q,
-            u8::from(is_genie),
+        let mode = if effect == DockMinimizeEffect::Genie {
+            1.0_f32
+        } else {
+            0.0_f32
+        };
+        Some(build_snapshot_warp_element(
+            renderer,
+            program,
+            snap,
+            win_rect,
+            dock_rect,
+            output_scale,
+            progress,
+            mode,
             edge_u8,
-            [
-                win_rect.loc.x,
-                win_rect.loc.y,
-                win_rect.size.w,
-                win_rect.size.h,
-                dock_rect.loc.x,
-                dock_rect.loc.y,
-                dock_rect.size.w,
-                dock_rect.size.h,
-            ],
-        );
-        let tex_size = snap.texture.size();
-        if snap.last_anim_key != Some(cur_key) {
-            snap.last_anim_key = Some(cur_key);
-            snap.damage.add([Rectangle::from_size(tex_size)]);
-        }
-
-        let clamped_scale = crate::config::clamp_display_scale(output_scale) as f32;
-        let bounds_phys_w = (bounds.size.w.max(1) as f32 * clamped_scale).max(1.0);
-        let bounds_phys_h = (bounds.size.h.max(1) as f32 * clamped_scale).max(1.0);
-        let uniforms = vec![
-            Uniform::new(
-                "u_win_uv",
-                UniformValue::_4f(win_uv[0], win_uv[1], win_uv[2], win_uv[3]),
-            ),
-            Uniform::new(
-                "u_dock_uv",
-                UniformValue::_4f(dock_uv[0], dock_uv[1], dock_uv[2], dock_uv[3]),
-            ),
-            Uniform::new(
-                "u_params",
-                UniformValue::_4f(
-                    clamped_t as f32,
-                    if is_genie { 1.0 } else { 0.0 },
-                    f32::from(edge_u8),
-                    0.0,
-                ),
-            ),
-            Uniform::new(
-                "u_bounds_px",
-                UniformValue::_4f(
-                    bounds_phys_w,
-                    bounds_phys_h,
-                    tex_size.w.max(1) as f32,
-                    tex_size.h.max(1) as f32,
-                ),
-            ),
-        ];
-
-        let inner = TextureRenderElement::from_texture_with_damage(
-            snap.stable_id.clone(),
-            renderer.context_id(),
-            Point::from((f64::from(bounds.loc.x), f64::from(bounds.loc.y))),
-            snap.texture.clone(),
-            1,
-            Transform::Normal,
-            Some(1.0),
-            Some(Rectangle::from_size(Size::from((
-                f64::from(tex_size.w.max(1)),
-                f64::from(tex_size.h.max(1)),
-            )))),
-            Some(Size::from((bounds.size.w.max(1), bounds.size.h.max(1)))),
-            None,
-            snap.damage.snapshot(),
-            Kind::Unspecified,
-        );
-        let shader = TextureShaderElement::new(inner, program, uniforms);
-        Some(LiquidGlassElement::from_parts(
-            snap.stable_id.clone(),
-            shader,
+            0.0,
         ))
     }
+
+    /// Emits a centered fade+scale transition element for window Open/Close lifecycle (`RUSTYOS-128`).
+    #[allow(clippy::cast_possible_truncation)]
+    pub(crate) fn make_lifecycle_element(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        window_id: u64,
+        win_rect: Rectangle<i32, Logical>,
+        progress: f64,
+        closing: bool,
+        output_scale: f64,
+    ) -> Option<LiquidGlassElement> {
+        let program = self.program.as_ref()?.clone();
+        self.lifecycle_tick = self.lifecycle_tick.saturating_add(1);
+        let tick = self.lifecycle_tick;
+        let entry = self.lifecycle_snapshots.get_mut(&window_id)?;
+        entry.last_used_frame = tick;
+        let target_rect = centered_scaled_rect(win_rect, LIFECYCLE_SCALE_FACTOR);
+        let p = progress.clamp(0.0, 1.0);
+        let (scale_t, fade_alpha) = if closing {
+            (p, (1.0 - p) as f32)
+        } else {
+            (1.0 - p, p as f32)
+        };
+        Some(build_snapshot_warp_element(
+            renderer,
+            program,
+            &mut entry.snap,
+            win_rect,
+            target_rect,
+            output_scale,
+            scale_t,
+            2.0,
+            0,
+            fade_alpha,
+        ))
+    }
+}
+
+/// Computes centered target rect scaled by `factor` (e.g. `0.93`) for open/close transitions.
+#[must_use]
+#[allow(clippy::cast_possible_truncation)]
+pub(crate) fn centered_scaled_rect(
+    rect: Rectangle<i32, Logical>,
+    factor: f64,
+) -> Rectangle<i32, Logical> {
+    let w = (f64::from(rect.size.w.max(1)) * factor).round().max(16.0) as i32;
+    let h = (f64::from(rect.size.h.max(1)) * factor).round().max(16.0) as i32;
+    Rectangle::new(
+        Point::from((
+            rect.loc.x + (rect.size.w - w) / 2,
+            rect.loc.y + (rect.size.h - h) / 2,
+        )),
+        Size::from((w, h)),
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
+)]
+fn build_snapshot_warp_element(
+    renderer: &mut GlesRenderer,
+    program: GlesTexProgram,
+    snap: &mut MinimizedWindowSnapshot,
+    win_rect: Rectangle<i32, Logical>,
+    target_rect: Rectangle<i32, Logical>,
+    output_scale: f64,
+    progress: f64,
+    mode: f32,
+    edge_u8: u8,
+    fade_alpha: f32,
+) -> LiquidGlassElement {
+    let (bounds, win_uv, dock_uv) = compute_warp_bounds_and_uvs(win_rect, target_rect);
+    let clamped_t = progress.clamp(0.0, 1.0);
+    let progress_q = (clamped_t * 8192.0).round() as u32;
+    let fade_q = (fade_alpha.clamp(0.0, 1.0) * 255.0).round() as u8;
+    let cur_key: WarpFrameKey = (
+        progress_q,
+        mode as u8,
+        edge_u8 ^ fade_q,
+        [
+            win_rect.loc.x,
+            win_rect.loc.y,
+            win_rect.size.w,
+            win_rect.size.h,
+            target_rect.loc.x,
+            target_rect.loc.y,
+            target_rect.size.w,
+            target_rect.size.h,
+        ],
+    );
+    let tex_size = snap.texture.size();
+    if snap.last_anim_key != Some(cur_key) {
+        snap.last_anim_key = Some(cur_key);
+        snap.damage.add([Rectangle::from_size(tex_size)]);
+    }
+
+    let clamped_scale = crate::config::clamp_display_scale(output_scale) as f32;
+    let bounds_phys_w = (bounds.size.w.max(1) as f32 * clamped_scale).max(1.0);
+    let bounds_phys_h = (bounds.size.h.max(1) as f32 * clamped_scale).max(1.0);
+    let uniforms = vec![
+        Uniform::new(
+            "u_win_uv",
+            UniformValue::_4f(win_uv[0], win_uv[1], win_uv[2], win_uv[3]),
+        ),
+        Uniform::new(
+            "u_dock_uv",
+            UniformValue::_4f(dock_uv[0], dock_uv[1], dock_uv[2], dock_uv[3]),
+        ),
+        Uniform::new(
+            "u_params",
+            UniformValue::_4f(clamped_t as f32, mode, f32::from(edge_u8), fade_alpha),
+        ),
+        Uniform::new(
+            "u_bounds_px",
+            UniformValue::_4f(
+                bounds_phys_w,
+                bounds_phys_h,
+                tex_size.w.max(1) as f32,
+                tex_size.h.max(1) as f32,
+            ),
+        ),
+    ];
+
+    let inner = TextureRenderElement::from_texture_with_damage(
+        snap.stable_id.clone(),
+        renderer.context_id(),
+        Point::from((f64::from(bounds.loc.x), f64::from(bounds.loc.y))),
+        snap.texture.clone(),
+        1,
+        Transform::Normal,
+        Some(1.0),
+        Some(Rectangle::from_size(Size::from((
+            f64::from(tex_size.w.max(1)),
+            f64::from(tex_size.h.max(1)),
+        )))),
+        Some(Size::from((bounds.size.w.max(1), bounds.size.h.max(1)))),
+        None,
+        snap.damage.snapshot(),
+        Kind::Unspecified,
+    );
+    let shader = TextureShaderElement::new(inner, program, uniforms);
+    LiquidGlassElement::from_parts(snap.stable_id.clone(), shader)
 }
 
 /// Computes the union quad (`bounds`) and normalized UV sub-rectangles for `win_rect` and `dock_rect`.
@@ -493,5 +673,13 @@ mod tests {
         assert!((win_uv[0] - 0.0).abs() < 1e-4);
         assert!((win_uv[1] - 0.0).abs() < 1e-4);
         assert!(dock_uv[0] > 0.4 && dock_uv[1] > 0.9);
+    }
+
+    #[test]
+    fn centered_scaled_rect_preserves_window_center() {
+        let win = Rectangle::new((100, 80).into(), (1000, 600).into());
+        let scaled = centered_scaled_rect(win, 0.93);
+        assert_eq!(scaled.size, Size::from((930, 558)));
+        assert_eq!(scaled.loc, Point::from((135, 101)));
     }
 }

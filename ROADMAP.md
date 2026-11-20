@@ -87,15 +87,18 @@ interruptible/reversible transitions; - reduced-motion mode; -
 
 ## Фаза 6 --- Desktop Shell
 
-**Цель:** собственная полноценная оболочка.
+**Цель:** собственная полноценная оболочка в составе композитора (`ADR-0027`, `ADR-0072`) с изолированными внутренними модулями и внешним IPC/приложениями.
 
 Компоненты: - top bar/system status; - dock/task switcher; - app
 launcher; - notifications; - quick settings; - workspace overview; -
 lock screen; - wallpaper management.
 
-Критерии выхода: - shell имеет независимый lifecycle; - shell можно
-перезапустить без перезапуска compositor; - IPC документирован и
-версионируется.
+Критерии выхода: - подсистемы shell чётко модульно изолированы от ядра
+WM/output и управляются через единую схему токенов (`crates/rusty-ui`); -
+внешние настройки и утилиты (`rusty-settings`, `rusty-files`,
+`rusty-terminal`, `rusty-installer`) общаются с композитором через
+документированный версионируемый IPC (`crates/rusty-ipc`); - дубли внешних
+процессов оболочки и дублирующих модалей настроек устранены.
 
 ## Фаза 7 --- System Integration
 
@@ -145,7 +148,7 @@ engineering.
 ## Ближайший порядок
 
 1.  Фазы 1–7: Smithay compositor, DRM/KMS backend, Wayland protocols, Liquid Glass GPU pipeline, input, system bridges — выполнены (`RUSTYOS-001`–`RUSTYOS-075`).
-2.  Фаза 8 (Core UX) & 10 (Distribution): повседневные десктопные рабочие процессы, файловый менеджер (`rusty-files`), отдельное окно настроек со страницей обновлений (`rusty-settings`, `RUSTYOS-103`, `RUSTYOS-123`), общий UI-крейт (`crates/rusty-ui`), сессионные мосты systemd/logind (`RUSTYOS-084`), унифицированные контекстные меню (`RUSTYOS-086`, `RUSTYOS-087`), унификация Liquid Glass шейдера с кубической суперэллиптической линзой и направленным `uRim` (`RUSTYOS-098`–`100`) и модульная декомпозиция рендеринга (`RUSTYOS-088`, `RUSTYOS-089`, `RUSTYOS-101`).
+2.  Фаза 8 (Core UX) & 10 (Distribution): повседневные десктопные рабочие процессы, файловый менеджер (`rusty-files`), отдельное окно настроек со страницей обновлений (`rusty-settings`, `RUSTYOS-103`, `RUSTYOS-123`), общий UI-крейт (`crates/rusty-ui`), сессионные мосты systemd/logind (`RUSTYOS-084`), унификация меню, 3-дольных теней Гаусса, `TopBar` (`Desktop` по умолчанию) и Liquid Glass / композиторной обрезки клиентских окон + open/close анимаций (`RUSTYOS-125`–`RUSTYOS-128`, `ADR-0069`–`ADR-0072`).
 3.  Подготовка дистрибутива, инсталлятора и проверочной матрицы VM.
 
 ## Правила закрытия фазы

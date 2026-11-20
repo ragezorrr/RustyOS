@@ -11,9 +11,19 @@ pub(crate) fn render_sidebar(
     state: &FilesAppState,
     layout: &FilesLayout,
     pal: &Palette,
+    sidebar_glass: bool,
 ) {
-    // Full-bleed edge-to-edge Finder sidebar (`x=0, y=0..height`, clipped to window corners).
-    c.fill_rect(layout.sidebar_rect, pal.sidebar_bg);
+    // Full-bleed edge-to-edge sidebar (x=0, y=0..height, clipped to window corners).
+    let sidebar_fill = if sidebar_glass {
+        if pal.is_dark {
+            rgba(34, 35, 39, 158)
+        } else {
+            rgba(242, 243, 247, 152)
+        }
+    } else {
+        pal.sidebar_bg
+    };
+    c.fill_rect(layout.sidebar_rect, sidebar_fill);
     c.fill_rect(
         Rect::new(
             layout.sidebar_rect.right() - 1,
@@ -26,43 +36,21 @@ pub(crate) fn render_sidebar(
 
     // Unified 14 px traffic lights matching `rusty-ui` (step 22 px, centers y = 20.0)
     let tl = rusty_ui::TrafficLightButtons::default_csd();
-    c.fill_circle_f(
-        tl.center_of(rusty_ui::TrafficLightKind::Close).0,
-        tl.center_y,
-        7.0,
-        rgba(0xEE, 0x5A, 0x6A, 255),
-    );
-    c.fill_circle_f(
-        tl.center_of(rusty_ui::TrafficLightKind::Minimize).0,
-        tl.center_y,
-        7.0,
-        rgba(0xF4, 0xB6, 0x3F, 255),
-    );
-    c.fill_circle_f(
-        tl.center_of(rusty_ui::TrafficLightKind::Maximize).0,
-        tl.center_y,
-        7.0,
-        rgba(0x3C, 0xC6, 0x8A, 255),
-    );
-    if state.traffic_hovered {
-        draw_traffic_glyph(
-            c,
-            tl.center_of(rusty_ui::TrafficLightKind::Close).0,
-            tl.center_y,
-            rusty_ui::TrafficLightKind::Close,
-        );
-        draw_traffic_glyph(
-            c,
-            tl.center_of(rusty_ui::TrafficLightKind::Minimize).0,
-            tl.center_y,
-            rusty_ui::TrafficLightKind::Minimize,
-        );
-        draw_traffic_glyph(
-            c,
-            tl.center_of(rusty_ui::TrafficLightKind::Maximize).0,
-            tl.center_y,
-            rusty_ui::TrafficLightKind::Maximize,
-        );
+    for kind in [
+        rusty_ui::TrafficLightKind::Close,
+        rusty_ui::TrafficLightKind::Minimize,
+        rusty_ui::TrafficLightKind::Maximize,
+    ] {
+        let color = if state.focused {
+            kind.active_color()
+        } else {
+            rusty_ui::TrafficLightKind::inactive_color()
+        };
+        let (cx, cy) = tl.center_of(kind);
+        c.fill_circle_f(cx, cy, 7.0, color);
+        if state.traffic_hovered {
+            draw_traffic_glyph(c, cx, cy, kind);
+        }
     }
 
     let clip = layout.sidebar_clip_rect;
@@ -85,7 +73,16 @@ pub(crate) fn render_sidebar(
 
             let selected = state.active_sidebar.as_ref() == Some(&item.location);
             if selected {
-                c.fill_rounded_rect(row.rect, 10, pal.sidebar_active);
+                let pill_col = if sidebar_glass {
+                    if pal.is_dark {
+                        rgba(255, 255, 255, 34)
+                    } else {
+                        rgba(0, 0, 0, 24)
+                    }
+                } else {
+                    pal.sidebar_active
+                };
+                c.fill_rounded_rect(row.rect, 10, pill_col);
             }
             #[allow(clippy::cast_precision_loss)]
             draw_sidebar_icon(

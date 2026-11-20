@@ -33,8 +33,8 @@ where
             "--demo" => opts.env_kind = RunEnv::Demo,
             "--dry-run" => opts.dry_run = true,
             "--no-glass" => opts.no_glass = true,
-            "--light" => opts.theme_override = Some(FilesThemeMode::LightGoldenGate),
-            "--dark" => opts.theme_override = Some(FilesThemeMode::DarkPurpleGlass),
+            "--light" => opts.theme_override = Some(FilesThemeMode::Light),
+            "--dark" => opts.theme_override = Some(FilesThemeMode::Dark),
             "--accent" => {
                 let Some(raw) = iter.next() else {
                     return Err(String::from("--accent requires a numeric index 0..6"));
@@ -106,7 +106,7 @@ mod tests {
                 env_kind: RunEnv::Demo,
                 dry_run: true,
                 no_glass: true,
-                theme_override: Some(FilesThemeMode::DarkPurpleGlass),
+                theme_override: Some(FilesThemeMode::Dark),
                 accent_override: Some(2),
                 install_script: None,
             }))

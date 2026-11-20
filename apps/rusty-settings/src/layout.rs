@@ -2,7 +2,8 @@
 
 use crate::state::{RowControlId, SettingsAppState, SettingsPage, ThemeChoice};
 
-pub(crate) const WINDOW_CORNER_RADIUS: i32 = 14;
+#[allow(clippy::cast_possible_wrap)]
+pub(crate) const WINDOW_CORNER_RADIUS: i32 = rusty_ui::WINDOW_RADIUS as i32;
 pub(crate) const CARD_CORNER_RADIUS: i32 = 12;
 pub(crate) const SIDEBAR_WIDTH: i32 = 230;
 pub(crate) const HEADER_HEIGHT: i32 = 40;

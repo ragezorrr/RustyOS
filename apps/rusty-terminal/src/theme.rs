@@ -6,16 +6,6 @@ use std::time::SystemTime;
 
 use crate::vt::TermColor;
 
-/// macOS Golden Gate neutral accent palette (`#007AFF` default, zero legacy purple).
-pub(crate) const GOLDEN_GATE_ACCENTS: &[[u8; 3]] = &[
-    [0x00, 0x7A, 0xFF], // Tahoe Blue (default)
-    [0x28, 0xCD, 0x41], // Green
-    [0xFF, 0x9F, 0x0A], // Orange
-    [0xFF, 0x45, 0x3A], // Red
-    [0x32, 0xAD, 0xE6], // Cyan / Teal
-    [0x8E, 0x8E, 0x93], // Graphite
-];
-
 /// Complete color tokens for `Clear Light`, `Clear Dark`, and opaque mode.
 #[derive(Debug, Clone)]
 pub(crate) struct TerminalTheme {
@@ -147,7 +137,7 @@ impl TerminalConfigSnapshot {
                 "theme" => snap.dark = val.eq_ignore_ascii_case("dark"),
                 "accent_index" => {
                     if let Ok(idx) = val.parse::<usize>() {
-                        snap.accent_index = idx.min(GOLDEN_GATE_ACCENTS.len() - 1);
+                        snap.accent_index = idx.min(rusty_ui::ACCENT_PALETTE.len() - 1);
                     }
                 }
                 "reduce_transparency" => {
@@ -175,12 +165,7 @@ impl TerminalTheme {
     pub(crate) fn from_config(cfg: &TerminalConfigSnapshot, glass_override: Option<bool>) -> Self {
         let use_glass = glass_override.unwrap_or(!cfg.reduce_transparency);
         let reduce_transparency = !use_glass;
-        let accent_rgb = GOLDEN_GATE_ACCENTS[cfg.accent_index.min(GOLDEN_GATE_ACCENTS.len() - 1)];
-        let accent = if cfg.dark && cfg.accent_index == 0 {
-            [0x0A, 0x84, 0xFF, 255]
-        } else {
-            [accent_rgb[0], accent_rgb[1], accent_rgb[2], 255]
-        };
+        let accent = rusty_ui::theme::accent_for(cfg.accent_index, cfg.dark);
 
         // Keep window backdrop translucent when Liquid Glass is active (`rustyos_liquid_glass_v1`)
         // so the compositor's frosted backdrop blur renders smoothly behind terminal text.

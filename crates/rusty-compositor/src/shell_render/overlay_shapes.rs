@@ -7,14 +7,13 @@ use super::context_menu::render_context_menu_composite;
 use super::dock_stack::render_dock_stack_composite;
 use super::modals::{
     render_pick_color_composite, render_polkit_composite, render_portal_composite,
-    render_settings_composite,
 };
 use super::notification_center::render_notification_center_composite;
 use super::quick_settings::render_quick_settings_composite;
 use super::spotlight_overview::{spotlight_results_rect, spotlight_search_pill_rect};
 use super::text_pass::append_foreground_overlay_text;
 use super::tokens::{
-    ThemePalette, anim_offset, push_liquid_glass_panel, push_rounded_glass_box,
+    ThemePalette, anim_offset, push_liquid_glass_panel_elevation, push_rounded_glass_box,
     resolved_icon_to_element,
 };
 use super::top_bar::push_notification_card_chrome;
@@ -122,7 +121,7 @@ fn build_foreground_overlay_shapes(
                     COLOR_MUTED,
                 )));
             }
-            push_liquid_glass_panel(
+            push_liquid_glass_panel_elevation(
                 &mut out,
                 shape_cache,
                 renderer,
@@ -131,7 +130,7 @@ fn build_foreground_overlay_shapes(
                 crate::surfaces::GlassPanelStyle::Popover,
                 glass_op,
                 reduce_tr,
-                Some((24, 30)),
+                rusty_ui::shadow::ShadowElevation::Popup,
             );
 
             // Detached results capsule with 10 px breathing space below search pill
@@ -182,7 +181,7 @@ fn build_foreground_overlay_shapes(
                 }
             }
 
-            push_liquid_glass_panel(
+            push_liquid_glass_panel_elevation(
                 &mut out,
                 shape_cache,
                 renderer,
@@ -191,7 +190,7 @@ fn build_foreground_overlay_shapes(
                 crate::surfaces::GlassPanelStyle::Popover,
                 glass_op,
                 reduce_tr,
-                Some((26, 32)),
+                rusty_ui::shadow::ShadowElevation::MenuOrTooltip,
             );
         }
         ShellOverlayView::QuickSettings(qs) => {
@@ -263,7 +262,7 @@ fn build_foreground_overlay_shapes(
             }
 
             if panel_rect.size.w > 0 {
-                push_liquid_glass_panel(
+                push_liquid_glass_panel_elevation(
                     &mut out,
                     shape_cache,
                     renderer,
@@ -272,7 +271,7 @@ fn build_foreground_overlay_shapes(
                     crate::surfaces::GlassPanelStyle::Popover,
                     top_telemetry.glass_opacity,
                     top_telemetry.reduce_transparency,
-                    Some((20, 58)),
+                    rusty_ui::shadow::ShadowElevation::Popup,
                 );
             }
         }
@@ -303,16 +302,6 @@ fn build_foreground_overlay_shapes(
                 renderer,
                 screen_size,
                 top_telemetry,
-            );
-        }
-        ShellOverlayView::Settings(st) => {
-            render_settings_composite(
-                &mut out,
-                shape_cache,
-                renderer,
-                screen_size,
-                top_telemetry,
-                st,
             );
         }
         ShellOverlayView::ContextMenu(ctx) => {

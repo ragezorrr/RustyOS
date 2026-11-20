@@ -766,60 +766,28 @@ pub(crate) fn render_conflict_dialog(
     });
 }
 
-#[allow(
-    clippy::cast_precision_loss,
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss
-)]
+#[allow(clippy::cast_possible_wrap, clippy::cast_sign_loss)]
 pub(crate) fn draw_modal_shadow_and_frame(
     c: &mut Canvas<'_>,
     rect: Rect,
     radius: i32,
     pal: &Palette,
 ) {
-    let shadow_style =
-        rusty_ui::shadow::ShadowStyle::for_elevation(rusty_ui::shadow::ShadowElevation::Popup);
-    for lobe in &shadow_style.lobes {
-        if lobe.opacity <= 0.001 {
-            continue;
-        }
-        let dy = lobe.offset.1.round() as i32;
-        let base_alpha = (lobe.opacity * 255.0).clamp(0.0, 255.0);
-        if lobe.sigma <= 2.0 {
-            for (step, a_mult) in [(0, 0.65f32), (1, 0.35f32)] {
-                let a = (base_alpha * a_mult).round().clamp(1.0, 255.0) as u8;
-                c.fill_rounded_rect(
-                    Rect::new(
-                        rect.x - step,
-                        rect.y - step + dy,
-                        rect.w + step * 2,
-                        rect.h + step * 2,
-                    ),
-                    radius + step,
-                    rgba(0, 0, 0, a),
-                );
-            }
-        } else {
-            let steps = 3;
-            let max_spread = (lobe.sigma * 1.5).round() as i32;
-            for i in 1..=steps {
-                let frac = i as f32 / steps as f32;
-                let spread = (max_spread as f32 * frac).round() as i32;
-                let weight = (-2.0 * frac * frac).exp() * (1.0 / steps as f32);
-                let a = (base_alpha * weight * 1.4).round().clamp(1.0, 255.0) as u8;
-                c.fill_rounded_rect(
-                    Rect::new(
-                        rect.x - spread,
-                        rect.y - spread + dy,
-                        rect.w + spread * 2,
-                        rect.h + spread * 2,
-                    ),
-                    radius + spread,
-                    rgba(0, 0, 0, a),
-                );
-            }
-        }
-    }
+    let shadow_rect =
+        rusty_ui::Rect::new(rect.x, rect.y, rect.w.max(0) as u32, rect.h.max(0) as u32);
+    rusty_ui::draw_elevation_shadow_with(
+        shadow_rect,
+        u32::try_from(radius).unwrap_or(0),
+        rusty_ui::ShadowElevation::Popup,
+        pal.is_dark,
+        |sr, rad, col| {
+            c.fill_rounded_rect(
+                Rect::new(sr.x, sr.y, sr.width as i32, sr.height as i32),
+                rad,
+                col,
+            );
+        },
+    );
     c.fill_rounded_rect(rect, radius, pal.popup_bg);
     c.stroke_rounded_rect(rect, radius, pal.popup_border);
 }

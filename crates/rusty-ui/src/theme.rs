@@ -73,16 +73,42 @@ impl TrafficLightKind {
     }
 }
 
-/// Standard 7 accent colors for RustyOS.
+/// Standard 7 Light accent colors for RustyOS (neutral Golden Gate tokens, zero purple).
 pub const ACCENT_PALETTE: [[u8; 4]; 7] = [
-    [0, 122, 255, 255],   // 0: Blue #007AFF
-    [255, 59, 48, 255],   // 1: Red #FF3B30
-    [52, 199, 89, 255],   // 2: Green #34C759
-    [175, 82, 222, 255],  // 3: Purple #AF52DE
-    [255, 45, 85, 255],   // 4: Pink #FF2D55
-    [255, 149, 0, 255],   // 5: Orange #FF9500
-    [142, 142, 147, 255], // 6: Grey #8E8E93
+    [0, 122, 255, 255],  // 0: Blue #007AFF
+    [255, 59, 48, 255],  // 1: Coral Red #FF3B30
+    [40, 205, 65, 255],  // 2: Emerald Green #28CD41
+    [94, 92, 230, 255],  // 3: Indigo #5E5CE6
+    [212, 84, 166, 255], // 4: Pink #D454A6
+    [255, 149, 0, 255],  // 5: Orange #FF9500
+    [99, 105, 118, 255], // 6: Graphite #636976
 ];
+
+/// Standard 7 Dark accent colors for RustyOS.
+pub const ACCENT_DARK_PALETTE: [[u8; 4]; 7] = [
+    [10, 132, 255, 255],  // 0: Dark Blue #0A84FF
+    [255, 92, 109, 255],  // 1: Coral Red #FF5C6D
+    [53, 191, 86, 255],   // 2: Emerald Green #35BF56
+    [130, 102, 255, 255], // 3: Indigo #8266FF
+    [232, 104, 184, 255], // 4: Pink #E868B8
+    [254, 160, 66, 255],  // 5: Orange #FEA042
+    [122, 132, 148, 255], // 6: Graphite #7A8494
+];
+
+/// Resolves theme-aware `[r, g, b, 255]` accent color for `accent_idx` (`0..7`).
+#[must_use]
+pub const fn accent_for(accent_idx: usize, is_dark: bool) -> [u8; 4] {
+    let idx = if accent_idx >= ACCENT_PALETTE.len() {
+        ACCENT_PALETTE.len() - 1
+    } else {
+        accent_idx
+    };
+    if is_dark {
+        ACCENT_DARK_PALETTE[idx]
+    } else {
+        ACCENT_PALETTE[idx]
+    }
+}
 
 /// Precomputed color scheme for Light or Dark theme.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,7 +128,7 @@ pub struct ThemePalette {
 impl ThemePalette {
     #[must_use]
     pub fn new(is_dark: bool, accent_idx: usize) -> Self {
-        let accent = ACCENT_PALETTE[accent_idx % ACCENT_PALETTE.len()];
+        let accent = accent_for(accent_idx, is_dark);
         if is_dark {
             Self {
                 is_dark: true,

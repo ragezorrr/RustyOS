@@ -524,8 +524,8 @@ impl FilesAppState {
         self.tags_config.theme = self.theme;
         self.persist_preferences();
         self.status_message = Some(match self.theme {
-            FilesThemeMode::LightGoldenGate => String::from("Light appearance"),
-            FilesThemeMode::DarkPurpleGlass => String::from("Dark appearance"),
+            FilesThemeMode::Light => String::from("Light appearance"),
+            FilesThemeMode::Dark => String::from("Dark appearance"),
         });
         self.dirty = true;
     }

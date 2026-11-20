@@ -7,7 +7,7 @@ use smithay::utils::{Point, Rectangle, Size};
 use crate::shell_render::CompositorRenderElement;
 use crate::shell_render::tokens::{
     COLOR_ACCENT, TOP_BAR_HEIGHT, ThemePalette, WINDOW_RADIUS, make_solid_element, premul,
-    push_liquid_glass_panel, push_rounded_glass_box, rect_contains, scale_glass_rgba,
+    push_liquid_glass_panel_elevation, push_rounded_glass_box, rect_contains, scale_glass_rgba,
     truncate_ascii,
 };
 use crate::shell_render::top_bar::TopBarTelemetry;
@@ -389,7 +389,7 @@ pub(crate) fn render_polkit_composite(
         Some(pal.accent_hover_border),
     );
 
-    push_liquid_glass_panel(
+    push_liquid_glass_panel_elevation(
         out,
         shape_cache,
         renderer,
@@ -398,7 +398,7 @@ pub(crate) fn render_polkit_composite(
         crate::surfaces::GlassPanelStyle::Popover,
         top_telemetry.glass_opacity,
         top_telemetry.reduce_transparency,
-        Some((22, 62)),
+        rusty_ui::shadow::ShadowElevation::ActiveWindow,
     );
 
     out.push(CompositorRenderElement::Solid(make_solid_element(

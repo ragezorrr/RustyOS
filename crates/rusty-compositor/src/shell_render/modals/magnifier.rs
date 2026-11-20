@@ -6,7 +6,7 @@ use smithay::utils::{Point, Rectangle, Size};
 
 use crate::shell_render::CompositorRenderElement;
 use crate::shell_render::tokens::{
-    TOP_BAR_HEIGHT, ThemePalette, push_liquid_glass_panel, truncate_ascii,
+    TOP_BAR_HEIGHT, ThemePalette, push_liquid_glass_panel_elevation, truncate_ascii,
 };
 use crate::shell_render::top_bar::TopBarTelemetry;
 
@@ -59,7 +59,7 @@ pub(crate) fn render_pick_color_composite(
     top_telemetry: &TopBarTelemetry<'_>,
 ) {
     let pill = pick_color_pill_rect(screen_size);
-    push_liquid_glass_panel(
+    push_liquid_glass_panel_elevation(
         out,
         shape_cache,
         renderer,
@@ -68,6 +68,6 @@ pub(crate) fn render_pick_color_composite(
         crate::surfaces::GlassPanelStyle::Popover,
         top_telemetry.glass_opacity,
         top_telemetry.reduce_transparency,
-        Some((12, 42)),
+        rusty_ui::shadow::ShadowElevation::Popup,
     );
 }

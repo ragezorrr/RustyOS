@@ -6,8 +6,8 @@ use smithay::utils::{Physical, Point, Rectangle, Size};
 
 use crate::shell_render::CompositorRenderElement;
 use crate::shell_render::tokens::{
-    DOCK_HEIGHT, DOCK_MARGIN_BOTTOM, TOP_BAR_HEIGHT, ThemePalette, push_liquid_glass_panel,
-    push_rounded_glass_box,
+    DOCK_HEIGHT, DOCK_MARGIN_BOTTOM, TOP_BAR_HEIGHT, ThemePalette,
+    push_liquid_glass_panel_elevation, push_rounded_glass_box,
 };
 #[cfg(test)]
 use crate::shell_render::tokens::{TOP_BAR_ITEM_H, TOP_BAR_ITEM_Y};
@@ -306,7 +306,7 @@ pub fn generate_osd_elements(
         out.push(CompositorRenderElement::Memory(el));
     }
 
-    push_liquid_glass_panel(
+    push_liquid_glass_panel_elevation(
         &mut out,
         shape_cache,
         renderer,
@@ -315,7 +315,7 @@ pub fn generate_osd_elements(
         crate::surfaces::GlassPanelStyle::Popover,
         crate::config::DEFAULT_GLASS_OPACITY,
         false,
-        Some((14, 46)),
+        rusty_ui::shadow::ShadowElevation::Popup,
     );
     out
 }
@@ -421,7 +421,7 @@ pub(crate) fn push_notification_card_chrome(
         out.push(CompositorRenderElement::Memory(icon_el));
     }
 
-    push_liquid_glass_panel(
+    push_liquid_glass_panel_elevation(
         out,
         shape_cache,
         renderer,
@@ -430,7 +430,7 @@ pub(crate) fn push_notification_card_chrome(
         crate::surfaces::GlassPanelStyle::NotificationCard,
         glass_opacity,
         reduce_transparency,
-        Some((14, 44)),
+        rusty_ui::shadow::ShadowElevation::Popup,
     );
 }
 

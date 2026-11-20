@@ -9,8 +9,8 @@ use crate::surfaces::{GlassPanelStyle, UiGlyphKind};
 
 use super::CompositorRenderElement;
 use super::tokens::{
-    TOP_BAR_HEIGHT, ThemePalette, make_solid_element, push_liquid_glass_panel,
-    push_liquid_glass_panel_elevation, push_rounded_glass_box, rect_contains, truncate_ascii,
+    TOP_BAR_HEIGHT, ThemePalette, make_solid_element, push_liquid_glass_panel_elevation,
+    push_rounded_glass_box, rect_contains, truncate_ascii,
 };
 
 const STACK_FAN_LIMIT: usize = 6;
@@ -628,7 +628,7 @@ pub(super) fn render_dock_stack_composite(
                     Some(pal.accent_hover_border),
                 );
             } else {
-                push_liquid_glass_panel(
+                push_liquid_glass_panel_elevation(
                     out,
                     shape_cache,
                     renderer,
@@ -637,7 +637,7 @@ pub(super) fn render_dock_stack_composite(
                     GlassPanelStyle::Popover,
                     glass_opacity,
                     reduce_transparency,
-                    Some((10, 38)),
+                    rusty_ui::shadow::ShadowElevation::Popup,
                 );
             }
         } else if hovered {

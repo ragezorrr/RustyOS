@@ -19,7 +19,8 @@ use crate::surfaces::{GlassPanelStyle, UiGlyphKind};
 use super::CompositorRenderElement;
 use super::tokens::{
     DOCK_HEIGHT, DOCK_MARGIN_BOTTOM, TOP_BAR_HEIGHT, ThemePalette, make_solid_element,
-    push_liquid_glass_panel_elevation, push_rounded_glass_box, push_soft_shadow, truncate_ascii,
+    push_elevation_shadow, push_liquid_glass_panel_elevation, push_rounded_glass_box,
+    truncate_ascii,
 };
 use super::top_bar::{
     NOTIFICATION_CARD_HEIGHT, NOTIFICATION_CARD_RADIUS, NOTIFICATION_CARD_RIGHT_MARGIN,
@@ -807,14 +808,13 @@ fn push_weather_widget_composite(
         }
     }
     push_weather_card_background(out, renderer, weather_rect, is_dark);
-    push_soft_shadow(
+    push_elevation_shadow(
         out,
         shape_cache,
         renderer,
         weather_rect,
         NC_WIDGET_RADIUS,
-        16,
-        44,
+        rusty_ui::shadow::ShadowElevation::Popup,
     );
 }
 
@@ -919,14 +919,13 @@ fn push_reminders_widget_composite(
         rem_fill,
         rem_border,
     );
-    push_soft_shadow(
+    push_elevation_shadow(
         out,
         shape_cache,
         renderer,
         layout.reminders_rect,
         NC_WIDGET_RADIUS,
-        16,
-        44,
+        rusty_ui::shadow::ShadowElevation::Popup,
     );
 }
 

@@ -5,13 +5,16 @@
 рендерером и оболочкой рабочего стола (визуальное направление вдохновлено
 macOS / Liquid Glass при оригинальной реализации).
 
-> **Текущий статус (`RUSTYOS-001` -- `RUSTYOS-045`):** ядро композитора,
-> WM, animation engine, shell-оверлеи, multi-monitor DRM/KMS, VRR,
-> Direct Scanout (`DMA-BUF`), дробное HiDPI-масштабирование, low-latency
-> input/presentation, `cursor-shape`, `xdg-activation`, `idle` и
+> **Текущий статус (`RUSTYOS-001` -- `RUSTYOS-128`):** ядро композитора,
+> WM, animation engine, встроенный single-process shell (`shell_render/*`),
+> единый UI-крейт `rusty-ui`, системные Wayland-приложения (`rusty-files`,
+> `rusty-settings`, `rusty-terminal`, `rusty-installer`), Liquid Glass
+> сайдбары и поповеры, 3-дольные GPU-тени Гаусса, композиторная обрезка
+> углов (`WINDOW_RADIUS = 14`), open/close анимации, multi-monitor DRM/KMS,
+> VRR, Direct Scanout (`DMA-BUF`), дробное HiDPI-масштабирование и
 > `ext_session_lock` реализованы и покрыты автотестами.
 > Проверка live bare-metal `--drm` на реальных GPU AMD/NVIDIA и финальная
-> упаковка дистрибутива (Фазы 7/9/10) находятся в работе.
+> упаковка дистрибутива (Фазы 9/10) находятся в работе.
 
 ## Структура Cargo Workspace (`MSRV 1.99`, `edition = "2024"`)
 
@@ -22,11 +25,14 @@ macOS / Liquid Glass при оригинальной реализации).
   (`1..=9`), фокуса, стекинга и раскладок (`Floating`, `Snap`, `MasterStack`).
 - `crates/rusty-animation` --- refresh-independent движок анимаций
   (`60/120/144/240` Hz, easing, отмена/реверс, `reduced_motion`).
-- `crates/rusty-ipc` --- версионируемый Unix socket IPC-протокол между
-  композитором и внешним shell.
+- `crates/rusty-ui` --- общий UI-крейт: геометрия (`WINDOW_RADIUS = 14`), светофоры,
+  `menu`, 3-дольные тени `shadow`, `window_header`, палитры `Light`/`Dark`, `UiCanvas`.
+- `crates/rusty-ipc` --- версионируемый Unix socket IPC-протокол для взаимодействия
+  системных приложений (`rusty-settings` и др.) с композитором.
 - `crates/rusty-services` --- неблокирующие системные адаптеры (`BlueZ`,
-  `NetworkManager`, аудио/`wpctl`, питание/`UPower`, подсветка `sysfs`).
-- `apps/rusty-shell` --- внешний процесс оболочки (`wlr-layer-shell` + IPC).
+  `NetworkManager`, аудио/`wpctl`, питание/`UPower`, подсветка `sysfs`, `file_manager`).
+- `apps/rusty-files`, `apps/rusty-settings`, `apps/rusty-terminal`, `apps/rusty-installer` ---
+  самостоятельные Wayland CSD-приложения с Liquid Glass сайдбарами.
 - `bin/rustyos-session`, `packaging/`, `scripts/install.sh` --- заготовка
   системной сессии и локальной установки.
 
@@ -97,10 +103,10 @@ cargo run -p rusty-compositor -- --drm
   `HARDWARE.md`                Требования совместимости AMD, Intel и NVIDIA
   `DESIGN.md`                  Визуальный язык и дизайн-система macOS / Liquid Glass
   `SECURITY.md`                Правила безопасности, IPC и системных изменений
-  `DECISIONS.md`               Реестр принятых решений (`D-001` .. `D-022`)
-  `TASKS.md`                   Журнал выполненных и текущих задач (`RUSTYOS-001` .. `RUSTYOS-045`)
+  `DECISIONS.md`               Реестр принятых решений (`D-001` .. `D-086`)
+  `TASKS.md`                   Журнал выполненных и текущих задач (`RUSTYOS-001` .. `RUSTYOS-128`)
   `FILE_INVENTORY.md`          Инвентарь файлов репозитория
-  `docs/`                      ADR (`0001`..`0014`), hardware matrix и гайды
+  `docs/`                      ADR (`0001`..`0072`), hardware matrix и гайды
   `.agents/rules/`             Правила Antigravity
   `.agents/skills/`            14 специализированных навыков
   `.agents/workflows/`         Повторяемые workflows

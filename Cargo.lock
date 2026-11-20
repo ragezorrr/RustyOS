@@ -1740,18 +1740,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "wayland-client",
-]
-
-[[package]]
-name = "rusty-shell"
-version = "0.1.0"
-dependencies = [
- "fontdue",
- "rusty-animation",
- "rusty-ipc",
- "rusty-services",
- "smithay-client-toolkit",
- "wayland-client",
+ "wayland-scanner",
 ]
 
 [[package]]

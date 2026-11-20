@@ -10,8 +10,8 @@ use super::CompositorRenderElement;
 use super::tokens::{
     COLOR_ACCENT, COLOR_ACCENT_HOVER, COLOR_ACCENT_MUTED, COLOR_SUBTLE, COLOR_SURFACE,
     COLOR_SURFACE_OVERLAY, TOP_BAR_HEIGHT, ThemePalette, anim_offset, make_solid_element,
-    push_liquid_glass_panel, push_rounded_glass_box, rect_contains, rounded_rect_contains,
-    truncate_ascii,
+    push_liquid_glass_panel_elevation, push_rounded_glass_box, rect_contains,
+    rounded_rect_contains, truncate_ascii,
 };
 
 /// Live data for the Quick Settings Control Center popover (`RUSTYOS-021`).
@@ -1215,7 +1215,7 @@ pub(super) fn render_quick_settings_composite(
         (layout.sound_card, 26),
         (layout.lock_btn, layout.lock_btn.size.h / 2),
     ] {
-        push_liquid_glass_panel(
+        push_liquid_glass_panel_elevation(
             out,
             shape_cache,
             renderer,
@@ -1224,7 +1224,7 @@ pub(super) fn render_quick_settings_composite(
             crate::surfaces::GlassPanelStyle::ControlModule,
             qs.glass_opacity,
             qs.reduce_transparency,
-            Some((18, 42)),
+            rusty_ui::shadow::ShadowElevation::Popup,
         );
     }
 }

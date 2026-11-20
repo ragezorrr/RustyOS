@@ -182,6 +182,25 @@ pub struct WindowMinimizeAnimState {
     pub snapshot_pending: bool,
 }
 
+/// Direction of a window open/close lifecycle animation (`RUSTYOS-128`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowLifecycleKind {
+    Open,
+    Close,
+}
+
+/// Active per-window open or close scale+fade lifecycle animation (`RUSTYOS-128`).
+#[derive(Debug, Clone)]
+pub struct WindowLifecycleAnimState {
+    pub win_id: WindowId,
+    pub window_rect: Rect,
+    pub kind: WindowLifecycleKind,
+    pub focused: bool,
+    pub snapshot_pending: bool,
+    pub started_after_commit: bool,
+    pub progress: AnimatedValue,
+}
+
 /// Active `Alt+Tab` window switcher HUD state (`RUSTYOS-033`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WindowSwitcherState {
@@ -508,6 +527,10 @@ pub struct RustyCompositorState {
     pub overview_filter_app: Option<String>,
     /// Active per-window GLES Genie / Scale minimize & restore animations (`RUSTYOS-073`).
     pub minimize_anims: Vec<WindowMinimizeAnimState>,
+    /// Active per-window Open & Close fade+scale animations (`RUSTYOS-128`).
+    pub lifecycle_anims: Vec<WindowLifecycleAnimState>,
+    /// Monotonic per-window surface commit counter for close-snapshot invalidation (`RUSTYOS-128`).
+    pub window_commit_revisions: std::collections::HashMap<WindowId, u64>,
     /// Open `TopBar` left dropdown menu popover if any (`RUSTYOS-048`).
     pub active_top_bar_menu: Option<crate::shell_render::TopBarMenuHit>,
     /// True when the user clicked the empty desktop background so `Files` is the active Menu Bar app (`RUSTYOS-067`).
@@ -589,18 +612,8 @@ pub struct RustyCompositorState {
     pub quick_settings_active: bool,
     /// Animated Quick Settings transition progress (`0.0` closed -> `1.0` open) (`RUSTYOS-025`).
     pub quick_settings_anim: AnimatedValue,
-    /// Whether the built-in System Settings modal overlay is open (`RUSTYOS-061`).
-    pub settings_active: bool,
-    /// Active left-sidebar category in System Settings (`RUSTYOS-061`).
-    pub settings_tab: crate::shell_render::SettingsTab,
-    /// Optional target display ID selected in `System Settings -> Displays` (`RUSTYOS-063`).
-    pub settings_target_output: Option<OutputId>,
-    /// Footer persistence badge (`""`, `"Saved"`, `"Reloaded"`, or `"Error"`) (`RUSTYOS-061`).
-    pub config_status_label: &'static str,
     /// Monotonic counter incremented when custom wallpaper configuration/files reload (`RUSTYOS-062`).
     pub wallpaper_revision: u64,
-    /// Last configured custom `.png` wallpaper path recalled when toggling back from built-in Tahoe (`RUSTYOS-062`).
-    pub last_custom_wallpaper: Option<std::path::PathBuf>,
     /// Whether Focus (Do Not Disturb) notification popup suppression is active (`RUSTYOS-053`).
     pub focus_mode: bool,
     /// Non-blocking system telemetry & quick audio controls (`RUSTYOS-021`).
@@ -864,7 +877,6 @@ impl RustyCompositorState {
         let initial_menubar_show_updates = user_config.updates_show_in_menu_bar;
         let initial_clock_24h = user_config.clock_24h;
         let initial_updates_enabled = user_config.updates_enabled;
-        let initial_last_custom_wallpaper = user_config.wallpaper.clone();
 
         let mut state = Self {
             start_time: Instant::now(),
@@ -941,6 +953,8 @@ impl RustyCompositorState {
             dock_stack: None,
             overview_filter_app: None,
             minimize_anims: Vec::new(),
+            lifecycle_anims: Vec::new(),
+            window_commit_revisions: std::collections::HashMap::new(),
             active_top_bar_menu: None,
             desktop_focused: false,
             desktop_items: crate::state::context_menu_actions::scan_desktop_canvas_items(
@@ -982,12 +996,7 @@ impl RustyCompositorState {
             launcher: crate::launcher::LauncherState::new(),
             quick_settings_active: false,
             quick_settings_anim: AnimatedValue::new_settled(0.0),
-            settings_active: false,
-            settings_tab: crate::shell_render::SettingsTab::Appearance,
-            settings_target_output: None,
-            config_status_label: "",
             wallpaper_revision: 0,
-            last_custom_wallpaper: initial_last_custom_wallpaper,
             focus_mode: false,
             telemetry: crate::telemetry::SystemMetricsHandle::static_default(),
             screen_locked: false,
@@ -1218,14 +1227,6 @@ impl RustyCompositorState {
         true
     }
 
-    /// Returns the output currently targeted by System Settings -> Displays, falling back to primary (`RUSTYOS-063`).
-    #[must_use]
-    pub fn selected_settings_output(&self) -> &crate::outputs::OutputEntry {
-        self.settings_target_output
-            .and_then(|id| self.output_map.get(id))
-            .unwrap_or_else(|| self.output_map.primary())
-    }
-
     pub(in crate::state) fn relayout_wm_for_all_outputs(&mut self) {
         let entries: Vec<_> = self.output_map.entries().to_vec();
         for entry in entries {
@@ -1413,7 +1414,6 @@ impl RustyCompositorState {
             || self.updates_popover_open
             || self.wifi_popover_open
             || self.notification_center_open
-            || self.settings_active
             || self.dock_stack.is_some()
             || self.context_menu.is_some()
             || self.window_switcher.is_some()
@@ -1996,7 +1996,6 @@ impl RustyCompositorState {
                 || self.wifi_popover_open
                 || self.notification_center_open
                 || self.overview_active
-                || self.settings_active
                 || self
                     .context_menu
                     .as_ref()
@@ -2038,7 +2037,6 @@ impl RustyCompositorState {
                 || self.wifi_popover_open
                 || self.notification_center_open
                 || self.overview_active
-                || self.settings_active
                 || self.window_switcher.is_some()
                 || self.polkit_prompt.is_some()
                 || self.portal_prompt.is_some()

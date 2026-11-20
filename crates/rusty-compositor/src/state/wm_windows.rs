@@ -114,6 +114,8 @@ impl RustyCompositorState {
         self.sync_space_with_wm(serial);
 
         self.minimize_anims.retain(|anim| anim.win_id != win_id);
+        self.lifecycle_anims
+            .retain(|anim| anim.win_id != win_id || anim.kind == super::WindowLifecycleKind::Close);
         if !self.animations.reduced_motion() {
             let dock_rect = self.compute_minimize_target_rect(win_id);
             let mut progress = AnimatedValue::new_settled(0.0);
@@ -148,6 +150,8 @@ impl RustyCompositorState {
         self.sync_space_with_wm(serial);
 
         self.minimize_anims.retain(|anim| anim.win_id != win_id);
+        self.lifecycle_anims
+            .retain(|anim| anim.win_id != win_id || anim.kind == super::WindowLifecycleKind::Close);
         if !self.animations.reduced_motion() {
             let mut progress = AnimatedValue::new_settled(1.0);
             progress.retarget(
@@ -563,8 +567,120 @@ impl RustyCompositorState {
         self.recent_unpinned_apps.retain(|r| r.app_key != app_key);
     }
 
+    /// Records a surface commit revision bump so cached lifecycle snapshots refresh cleanly (`RUSTYOS-128`).
+    pub fn bump_window_commit_revision(&mut self, win_id: WindowId) {
+        let entry = self.window_commit_revisions.entry(win_id).or_insert(0);
+        *entry = entry.wrapping_add(1);
+    }
+
+    /// Returns the monotonic surface commit revision for `win_id` (`RUSTYOS-128`).
+    #[must_use]
+    pub fn window_commit_revision(&self, win_id: WindowId) -> u64 {
+        self.window_commit_revisions
+            .get(&win_id)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Registers a scale+fade window open transition triggered upon first surface commit (`RUSTYOS-128`).
+    pub fn register_window_open_animation(&mut self, win_id: WindowId, rect: rusty_wm::Rect) {
+        self.lifecycle_anims.retain(|anim| anim.win_id != win_id);
+        if self.animations.reduced_motion() || rect.width < 16 || rect.height < 16 {
+            return;
+        }
+        self.lifecycle_anims.push(super::WindowLifecycleAnimState {
+            win_id,
+            window_rect: rect,
+            kind: super::WindowLifecycleKind::Open,
+            focused: self.wm.focused_window() == Some(win_id),
+            snapshot_pending: true,
+            started_after_commit: false,
+            progress: AnimatedValue::new_settled(0.0),
+        });
+        self.shell_redraw_needed = true;
+    }
+
+    /// Starts a 160 ms scale+fade window close transition when a non-fullscreen window unmaps (`RUSTYOS-128`).
+    pub fn start_window_close_animation(
+        &mut self,
+        win_id: WindowId,
+        rect: rusty_wm::Rect,
+        focused: bool,
+    ) {
+        self.lifecycle_anims.retain(|anim| anim.win_id != win_id);
+        if self.animations.reduced_motion() || rect.width < 16 || rect.height < 16 {
+            return;
+        }
+        let mut progress = AnimatedValue::new_settled(0.0);
+        progress.retarget(
+            1.0,
+            self.elapsed(),
+            Duration::from_millis(160),
+            Easing::EaseOutCubic,
+            false,
+        );
+        self.lifecycle_anims.push(super::WindowLifecycleAnimState {
+            win_id,
+            window_rect: rect,
+            kind: super::WindowLifecycleKind::Close,
+            focused,
+            snapshot_pending: false,
+            started_after_commit: true,
+            progress,
+        });
+        self.shell_redraw_needed = true;
+    }
+
+    /// Computes exact current global frame geometry (including committed size and titlebar) for `win_id`.
+    #[must_use]
+    pub fn resolved_window_global_rect(&self, win_id: WindowId) -> Option<rusty_wm::Rect> {
+        let wm_win = self.wm.window(win_id)?;
+        let rect = wm_win.geometry;
+        let global_origin = self
+            .animations
+            .animated_window_origin(win_id.0)
+            .unwrap_or((rect.x, rect.y));
+        let is_fullscreen = self.is_window_fullscreen(win_id);
+        let has_ssd = !is_fullscreen && !self.window_uses_csd(win_id);
+        let titlebar_h = if has_ssd {
+            crate::shell_render::TITLEBAR_HEIGHT
+        } else {
+            0
+        };
+        let actively_resizing = self
+            .active_window_resize
+            .is_some_and(|resize| resize.window_id == win_id);
+        let committed_size = self
+            .smithay_window_for_id(win_id)
+            .map(|w| w.geometry().size);
+        Some(match (self.wm.active_layout_mode(), committed_size) {
+            (rusty_wm::LayoutMode::Floating, Some(sz))
+                if !actively_resizing && sz.w >= 64 && sz.h >= 64 =>
+            {
+                rusty_wm::Rect::new(global_origin.0, global_origin.1, sz.w, sz.h + titlebar_h)
+            }
+            _ => rusty_wm::Rect::new(global_origin.0, global_origin.1, rect.width, rect.height),
+        })
+    }
+
     /// Shared teardown executed when a Wayland or XWayland window closes (`RUSTYOS-073`).
     pub fn finish_window_teardown(&mut self, win_id: WindowId) {
+        let close_rect = if !self.animations.reduced_motion()
+            && !self.is_window_minimized(win_id)
+            && !self.is_window_fullscreen(win_id)
+            && self.smithay_window_for_id(win_id).is_some()
+        {
+            self.resolved_window_global_rect(win_id)
+                .map(|r| (r, self.wm.focused_window() == Some(win_id)))
+        } else {
+            None
+        };
+        if let Some((rect, focused)) = close_rect {
+            self.start_window_close_animation(win_id, rect, focused);
+        } else {
+            self.lifecycle_anims.retain(|anim| anim.win_id != win_id);
+        }
+        self.window_commit_revisions.remove(&win_id);
         if self
             .active_window_drag
             .is_some_and(|drag| drag.window_id == win_id)
@@ -1353,6 +1469,10 @@ impl RustyCompositorState {
                 .minimize_anims
                 .iter()
                 .any(|anim| anim.progress.is_active() || anim.snapshot_pending)
+            || self
+                .lifecycle_anims
+                .iter()
+                .any(|anim| anim.progress.is_active())
             || self.animations.has_active_animations()
     }
 
@@ -1391,6 +1511,40 @@ impl RustyCompositorState {
             }
             self.minimize_anims
                 .retain(|anim| anim.progress.is_active() || anim.snapshot_pending);
+            if finished_any {
+                self.shell_redraw_needed = true;
+            }
+        }
+
+        if !self.lifecycle_anims.is_empty() {
+            let mut finished_any = false;
+            let live_rects: Vec<(WindowId, rusty_wm::Rect)> = self
+                .lifecycle_anims
+                .iter()
+                .filter(|a| a.kind == super::WindowLifecycleKind::Open)
+                .filter_map(|a| {
+                    self.resolved_window_global_rect(a.win_id)
+                        .map(|r| (a.win_id, r))
+                })
+                .collect();
+            for anim in &mut self.lifecycle_anims {
+                if anim.kind == super::WindowLifecycleKind::Open
+                    && let Some((_, r)) = live_rects.iter().find(|(id, _)| *id == anim.win_id)
+                {
+                    anim.window_rect = *r;
+                }
+                if anim.started_after_commit {
+                    let was_active = anim.progress.is_active();
+                    let _ = anim.progress.tick(now);
+                    if was_active && !anim.progress.is_active() {
+                        finished_any = true;
+                    }
+                }
+            }
+            self.lifecycle_anims.retain(|anim| {
+                anim.progress.is_active()
+                    || (anim.kind == super::WindowLifecycleKind::Open && !anim.started_after_commit)
+            });
             if finished_any {
                 self.shell_redraw_needed = true;
             }

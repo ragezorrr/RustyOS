@@ -43,7 +43,6 @@ impl RustyCompositorState {
             self.close_wifi_popover();
             self.close_notification_center();
             self.close_overview();
-            self.close_settings();
         }
         self.launcher.reset();
         self.retarget_launcher_anim();
@@ -70,7 +69,6 @@ impl RustyCompositorState {
             self.window_switcher = None;
             self.close_launcher();
             self.close_overview();
-            self.close_settings();
             self.telemetry.request_refresh();
         }
         self.retarget_quick_settings_anim();
@@ -117,7 +115,6 @@ impl RustyCompositorState {
         self.close_notification_center();
         self.close_launcher();
         self.close_overview();
-        self.close_settings();
         if trigger_refresh {
             self.trigger_updates_check();
         }
@@ -238,7 +235,6 @@ impl RustyCompositorState {
         self.close_notification_center();
         self.close_launcher();
         self.close_overview();
-        self.close_settings();
         self.sync_telemetry_active_ui();
         self.telemetry.request_refresh();
         self.shell_redraw_needed = true;
@@ -254,15 +250,10 @@ impl RustyCompositorState {
         }
     }
 
-    /// Opens `rusty-settings --page wifi` when available, or falls back to the built-in modal (`RUSTYOS-108`).
+    /// Opens `rusty-settings --page wifi` (`RUSTYOS-108`, `RUSTYOS-128`).
     pub fn open_wifi_settings_action(&mut self) {
         self.close_wifi_popover();
-        if self.wayland_socket_exists() && self.launch_rusty_settings_args(&["--page", "wifi"]) {
-            self.shell_redraw_needed = true;
-            return;
-        }
-        self.settings_tab = crate::shell_render::SettingsTab::Security;
-        self.open_settings();
+        self.open_settings_page(Some("wifi"));
     }
 
     /// Builds [`crate::shell_render::WifiPopoverRenderState`] anchored below the `TopBar` network glyph (`RUSTYOS-108`).
@@ -325,7 +316,6 @@ impl RustyCompositorState {
         self.close_quick_settings();
         self.close_launcher();
         self.close_overview();
-        self.close_settings();
         self.telemetry.request_refresh();
         self.shell_redraw_needed = true;
     }
@@ -347,17 +337,10 @@ impl RustyCompositorState {
         }
     }
 
-    /// Opens `rusty-settings --page notifications` from `Edit Widgets` (`RUSTYOS-109`).
+    /// Opens `rusty-settings --page notifications` from `Edit Widgets` (`RUSTYOS-109`, `RUSTYOS-128`).
     pub fn open_notification_settings_action(&mut self) {
         self.close_notification_center();
-        if self.wayland_socket_exists()
-            && self.launch_rusty_settings_args(&["--page", "notifications"])
-        {
-            self.shell_redraw_needed = true;
-            return;
-        }
-        self.settings_tab = crate::shell_render::SettingsTab::MenuBar;
-        self.open_settings();
+        self.open_settings_page(Some("notifications"));
     }
 
     /// Builds newest-first items backed by [`Self::notification_history`] (`RUSTYOS-109`).
@@ -697,7 +680,6 @@ impl RustyCompositorState {
         if locked {
             self.polkit_password.clear();
             self.abort_portal_activity_for_lock();
-            self.close_settings();
             self.close_context_menu();
             self.window_switcher = None;
             self.dnd_icon = None;
@@ -1133,7 +1115,6 @@ impl RustyCompositorState {
             self.close_updates_popover();
             self.close_wifi_popover();
             self.close_notification_center();
-            self.close_settings();
             self.active_window_drag = None;
             self.active_window_resize = None;
         } else {
@@ -1814,7 +1795,6 @@ impl RustyCompositorState {
         self.close_updates_popover();
         self.close_wifi_popover();
         self.close_notification_center();
-        self.close_settings();
         self.close_launcher();
         self.close_overview();
         let tiles = self.build_dock_tiles();
@@ -1965,24 +1945,7 @@ impl RustyCompositorState {
         }
         self.close_dock_stack();
         match hit {
-            crate::shell_render::DockHit::PinnedSettings => {
-                self.close_overview();
-                let open_settings_win = self
-                    .collect_dock_window_records()
-                    .into_iter()
-                    .find(|r| r.app_key == "settings")
-                    .map(|r| r.id);
-                if let Some(win_id) = open_settings_win {
-                    if self.is_window_minimized(win_id) {
-                        self.restore_window(win_id, serial);
-                    } else {
-                        self.wm.focus_and_raise(win_id);
-                        self.sync_space_with_wm(serial);
-                    }
-                } else {
-                    self.toggle_settings();
-                }
-            }
+            crate::shell_render::DockHit::PinnedSettings => self.open_settings(),
             crate::shell_render::DockHit::PinnedTrash => {
                 if !self.launch_rusty_files(&["--trash"]) {
                     self.toggle_launcher();
@@ -2018,8 +1981,8 @@ impl RustyCompositorState {
         self.close_launcher();
     }
 
-    /// Opens the standalone `rusty-settings` Wayland window in live sessions or falls back to the built-in modal (`RUSTYOS-103`).
-    pub fn open_settings(&mut self) {
+    /// Opens or focuses the standalone `rusty-settings` Wayland window, optionally on `page` (`RUSTYOS-103`, `RUSTYOS-128`).
+    pub fn open_settings_page(&mut self, page: Option<&str>) {
         if self.is_session_locked() {
             return;
         }
@@ -2050,82 +2013,20 @@ impl RustyCompositorState {
             return;
         }
 
-        if self.wayland_socket_exists() && self.launch_rusty_settings() {
-            self.shell_redraw_needed = true;
-            return;
-        }
-
-        self.settings_active = true;
-        self.shell_redraw_needed = true;
-    }
-
-    /// Closes the built-in System Settings modal overlay (`RUSTYOS-061`).
-    pub fn close_settings(&mut self) {
-        if self.settings_active {
-            self.settings_active = false;
-            self.shell_redraw_needed = true;
+        if self.wayland_socket_exists() {
+            let launched = match page {
+                Some(p) => self.launch_rusty_settings_args(&["--page", p]),
+                None => self.launch_rusty_settings(),
+            };
+            if launched {
+                self.shell_redraw_needed = true;
+            }
         }
     }
 
-    /// Toggles the built-in System Settings modal overlay (`Super+,`) (`RUSTYOS-061`).
-    pub fn toggle_settings(&mut self) {
-        if self.settings_active {
-            self.close_settings();
-        } else {
-            self.open_settings();
-        }
-    }
-
-    /// Builds a snapshot of live settings & config state for [`crate::shell_render::ShellOverlayView::Settings`].
-    #[must_use]
-    pub fn settings_render_state(&self) -> crate::shell_render::SettingsRenderState<'_> {
-        let entries = self.output_map.entries();
-        let target = self.selected_settings_output();
-        let target_idx = entries
-            .iter()
-            .position(|entry| entry.id == target.id)
-            .unwrap_or(0);
-        crate::shell_render::SettingsRenderState {
-            active_tab: self.settings_tab,
-            glass_opacity: self.glass_opacity,
-            reduce_transparency: self.reduce_transparency,
-            reduced_motion: self.animations.reduced_motion(),
-            has_custom_wallpaper: self.user_config.wallpaper.is_some(),
-            menubar_show_workspaces: self.menubar_show_workspaces,
-            menubar_show_tray: self.menubar_show_tray,
-            menubar_show_input_source: self.menubar_show_input_source,
-            menubar_show_volume: self.menubar_show_volume,
-            menubar_show_updates: self.menubar_show_updates,
-            clock_24h: self.clock_24h,
-            target_connector: &target.name,
-            target_output_index: target_idx,
-            output_count: entries.len().max(1),
-            display_width_px: target.physical_size.w,
-            display_height_px: target.physical_size.h,
-            display_refresh_hz: target.refresh_hz(),
-            display_scale: target.scale,
-            display_rotation: target.rotation,
-            vrr_mode: self.user_config.vrr_mode,
-            prefer_max_refresh: self.user_config.prefer_max_refresh,
-            keyboard_layout: &self.user_config.keyboard_layout,
-            keyboard_options: &self.user_config.keyboard_options,
-            repeat_rate: self.user_config.repeat_rate,
-            repeat_delay: self.user_config.repeat_delay,
-            active_kbd_layout: &self.active_kbd_layout,
-            require_password_on_lock: self.user_config.require_password_on_lock,
-            lock_on_sleep: self.user_config.lock_on_sleep,
-            enable_polkit_agent: self.user_config.enable_polkit_agent,
-            updates_enabled: self.updates_enabled,
-            dock_icon_size: self.user_config.dock_icon_size,
-            dock_position: self.user_config.dock_position,
-            dock_minimize_effect: self.user_config.dock_minimize_effect,
-            dock_minimize_into_app: self.user_config.dock_minimize_into_app,
-            dock_auto_hide: self.user_config.dock_auto_hide,
-            dock_animate_opening: self.user_config.dock_animate_opening,
-            dock_show_indicators: self.user_config.dock_show_indicators,
-            dock_show_recent: self.user_config.dock_show_recent,
-            config_status_label: self.config_status_label,
-        }
+    /// Opens or focuses the standalone `rusty-settings` Wayland window (`RUSTYOS-103`, `RUSTYOS-128`).
+    pub fn open_settings(&mut self) {
+        self.open_settings_page(None);
     }
 
     /// Synchronizes runtime UI/menu preferences back into [`Self::user_config`] and persists
@@ -2149,11 +2050,9 @@ impl RustyCompositorState {
         if let Some(path) = self.config_path.as_deref() {
             match self.user_config.save_to_path(path) {
                 Ok(()) => {
-                    self.config_status_label = "Saved";
                     info!(path = %path.display(), "Saved RustyOS user configuration");
                 }
                 Err(err) => {
-                    self.config_status_label = "Save Err";
                     tracing::warn!(
                         ?err,
                         path = %path.display(),
@@ -2161,8 +2060,6 @@ impl RustyCompositorState {
                     );
                 }
             }
-        } else {
-            self.config_status_label = "Saved";
         }
         self.shell_redraw_needed = true;
     }
@@ -2240,21 +2137,19 @@ impl RustyCompositorState {
         }
 
         if wallpaper_changed || appearance_changed {
-            if let Some(ref wp) = cfg.wallpaper {
-                self.last_custom_wallpaper = Some(wp.clone());
-                if !wp.exists() {
-                    tracing::warn!(
-                        path = %wp.display(),
-                        "Configured wallpaper file does not exist; falling back to built-in gradient"
-                    );
-                }
+            if let Some(ref wp) = cfg.wallpaper
+                && !wp.exists()
+            {
+                tracing::warn!(
+                    path = %wp.display(),
+                    "Configured wallpaper file does not exist; falling back to built-in gradient"
+                );
             }
             self.wallpaper_revision = self.wallpaper_revision.wrapping_add(1);
         }
 
         self.user_config = cfg;
         crate::shell_render::set_active_appearance(self.user_config.appearance);
-        crate::shell_render::set_active_accent_index(self.user_config.ui_accent_index);
         crate::shell_render::set_active_accent_index(self.user_config.ui_accent_index);
         if updates_changed {
             self.updates_checker.reconfigure(
@@ -2282,13 +2177,11 @@ impl RustyCompositorState {
             Ok(contents) => {
                 let parsed = crate::config::UserConfig::parse_toml(&contents);
                 self.apply_user_config(parsed);
-                self.config_status_label = "Reloaded";
                 self.show_osd("Config Reloaded", None, false);
                 info!(path = %path.display(), "Reloaded RustyOS configuration from disk");
                 true
             }
             Err(err) => {
-                self.config_status_label = "Reload Err";
                 self.shell_redraw_needed = true;
                 tracing::warn!(
                     ?err,
@@ -2298,319 +2191,5 @@ impl RustyCompositorState {
                 false
             }
         }
-    }
-
-    /// Executes an interactive control hit inside the System Settings modal (`RUSTYOS-061`/`062`).
-    pub fn apply_settings_hit(&mut self, hit: crate::shell_render::SettingsHit) {
-        use crate::shell_render::SettingsHit;
-
-        match hit {
-            SettingsHit::SelectTab(tab) => {
-                self.settings_tab = tab;
-                self.shell_redraw_needed = true;
-            }
-            SettingsHit::GlassOpacityDown => self.set_glass_opacity(self.glass_opacity - 0.05),
-            SettingsHit::GlassOpacityUp => self.set_glass_opacity(self.glass_opacity + 0.05),
-            SettingsHit::ToggleReduceTransparency => self.toggle_reduce_transparency(),
-            SettingsHit::ToggleReducedMotion => {
-                let next = !self.animations.reduced_motion();
-                self.set_reduced_motion_pref(next);
-            }
-            SettingsHit::ToggleWallpaper => self.toggle_wallpaper_setting(),
-            SettingsHit::ToggleAppearance => self.toggle_appearance_setting(),
-            SettingsHit::ToggleMenuWorkspaces => {
-                self.menubar_show_workspaces = !self.menubar_show_workspaces;
-                self.sync_and_save_user_config();
-            }
-            SettingsHit::ToggleMenuTray => {
-                self.menubar_show_tray = !self.menubar_show_tray;
-                self.sync_and_save_user_config();
-            }
-            SettingsHit::ToggleMenuInputSource => {
-                self.menubar_show_input_source = !self.menubar_show_input_source;
-                self.sync_and_save_user_config();
-            }
-            SettingsHit::ToggleMenuVolume => {
-                self.menubar_show_volume = !self.menubar_show_volume;
-                self.sync_and_save_user_config();
-            }
-            SettingsHit::ToggleMenuUpdates => {
-                self.menubar_show_updates = !self.menubar_show_updates;
-                self.sync_and_save_user_config();
-            }
-            SettingsHit::ToggleClock24h => {
-                self.clock_24h = !self.clock_24h;
-                self.sync_and_save_user_config();
-            }
-            dock_hit @ (SettingsHit::DockSizeDown
-            | SettingsHit::DockSizeUp
-            | SettingsHit::DockCyclePosition
-            | SettingsHit::DockToggleMinimizeEffect
-            | SettingsHit::DockToggleMinimizeIntoApp
-            | SettingsHit::DockToggleAutoHide
-            | SettingsHit::DockToggleAnimateOpening
-            | SettingsHit::DockToggleShowIndicators
-            | SettingsHit::DockToggleShowRecent) => self.apply_dock_settings_hit(dock_hit),
-            SettingsHit::ReloadConfig => {
-                let _ = self.reload_user_config();
-            }
-            SettingsHit::Close | SettingsHit::Outside => self.close_settings(),
-            SettingsHit::ModalBody => {}
-            other => self.apply_display_keyboard_security_settings_hit(other),
-        }
-    }
-
-    fn apply_display_keyboard_security_settings_hit(
-        &mut self,
-        hit: crate::shell_render::SettingsHit,
-    ) {
-        use crate::config::{VrrMode, next_keyboard_layout_preset, next_keyboard_option_preset};
-        use crate::shell_render::SettingsHit;
-
-        match hit {
-            SettingsHit::CycleTargetOutput => self.cycle_target_settings_output(),
-            SettingsHit::ScaleDown | SettingsHit::ScaleUp => {
-                self.step_target_display_scale(matches!(hit, SettingsHit::ScaleUp));
-            }
-            SettingsHit::CycleRotation => self.cycle_target_display_rotation(),
-            SettingsHit::CycleVrrMode => {
-                self.user_config.vrr_mode = match self.user_config.vrr_mode {
-                    VrrMode::Off => VrrMode::Fullscreen,
-                    VrrMode::Fullscreen => VrrMode::Always,
-                    VrrMode::Always => VrrMode::Off,
-                };
-                self.sync_and_save_user_config();
-            }
-            SettingsHit::TogglePreferMaxRefresh => {
-                self.user_config.prefer_max_refresh = !self.user_config.prefer_max_refresh;
-                self.sync_and_save_user_config();
-            }
-            SettingsHit::CycleKeyboardLayout => {
-                let next = next_keyboard_layout_preset(&self.user_config.keyboard_layout);
-                self.apply_keyboard_settings_and_save(Some(next.to_owned()), None, None, None);
-            }
-            SettingsHit::CycleKeyboardOptions => {
-                let next = next_keyboard_option_preset(&self.user_config.keyboard_options);
-                self.apply_keyboard_settings_and_save(None, Some(next.to_owned()), None, None);
-            }
-            SettingsHit::RepeatRateDown | SettingsHit::RepeatRateUp => {
-                let delta = if matches!(hit, SettingsHit::RepeatRateUp) {
-                    5
-                } else {
-                    -5
-                };
-                let next_rate = (self.user_config.repeat_rate + delta).clamp(5, 120);
-                self.apply_keyboard_settings_and_save(None, None, None, Some(next_rate));
-            }
-            SettingsHit::RepeatDelayDown | SettingsHit::RepeatDelayUp => {
-                let delta = if matches!(hit, SettingsHit::RepeatDelayUp) {
-                    50
-                } else {
-                    -50
-                };
-                let next_delay = (self.user_config.repeat_delay + delta).clamp(100, 1000);
-                self.apply_keyboard_settings_and_save(None, None, Some(next_delay), None);
-            }
-            SettingsHit::CycleActiveInputSource => self.cycle_keyboard_layout(),
-            SettingsHit::ToggleRequirePassword => {
-                self.user_config.require_password_on_lock =
-                    !self.user_config.require_password_on_lock;
-                self.sync_and_save_user_config();
-            }
-            SettingsHit::ToggleLockOnSleep => {
-                self.user_config.lock_on_sleep = !self.user_config.lock_on_sleep;
-                self.sync_and_save_user_config();
-            }
-            SettingsHit::TogglePolkitAgent => {
-                self.user_config.enable_polkit_agent = !self.user_config.enable_polkit_agent;
-                self.sync_and_save_user_config();
-            }
-            SettingsHit::ToggleUpdatesEnabled => {
-                self.updates_enabled = !self.updates_enabled;
-                self.sync_and_save_user_config();
-            }
-            _ => {}
-        }
-    }
-
-    fn apply_dock_settings_hit(&mut self, hit: crate::shell_render::SettingsHit) {
-        use crate::shell_render::SettingsHit;
-
-        let mut layout_changed = false;
-        match hit {
-            SettingsHit::DockSizeDown => {
-                self.user_config.dock_icon_size =
-                    crate::config::clamp_dock_icon_size(self.user_config.dock_icon_size - 4);
-                layout_changed = true;
-            }
-            SettingsHit::DockSizeUp => {
-                self.user_config.dock_icon_size =
-                    crate::config::clamp_dock_icon_size(self.user_config.dock_icon_size + 4);
-                layout_changed = true;
-            }
-            SettingsHit::DockCyclePosition => {
-                self.user_config.dock_position = self.user_config.dock_position.next();
-                layout_changed = true;
-            }
-            SettingsHit::DockToggleMinimizeEffect => {
-                self.user_config.dock_minimize_effect =
-                    self.user_config.dock_minimize_effect.toggle();
-            }
-            SettingsHit::DockToggleMinimizeIntoApp => {
-                self.user_config.dock_minimize_into_app = !self.user_config.dock_minimize_into_app;
-            }
-            SettingsHit::DockToggleAutoHide => {
-                self.user_config.dock_auto_hide = !self.user_config.dock_auto_hide;
-                self.sync_dock_auto_hide_target();
-                layout_changed = true;
-            }
-            SettingsHit::DockToggleAnimateOpening => {
-                self.user_config.dock_animate_opening = !self.user_config.dock_animate_opening;
-            }
-            SettingsHit::DockToggleShowIndicators => {
-                self.user_config.dock_show_indicators = !self.user_config.dock_show_indicators;
-            }
-            SettingsHit::DockToggleShowRecent => {
-                self.user_config.dock_show_recent = !self.user_config.dock_show_recent;
-            }
-            _ => return,
-        }
-        if layout_changed {
-            self.close_dock_stack();
-            self.relayout_wm_for_all_outputs();
-        }
-        self.sync_and_save_user_config();
-        self.shell_redraw_needed = true;
-    }
-
-    fn toggle_appearance_setting(&mut self) {
-        self.user_config.appearance = self.user_config.appearance.toggle();
-        crate::shell_render::set_active_appearance(self.user_config.appearance);
-        crate::shell_render::set_active_accent_index(self.user_config.ui_accent_index);
-        self.wallpaper_revision = self.wallpaper_revision.wrapping_add(1);
-        let label = self.user_config.appearance.label();
-        self.sync_and_save_user_config();
-        self.show_osd(format!("Appearance: {label}"), None, false);
-    }
-
-    fn cycle_target_settings_output(&mut self) {
-        let entries = self.output_map.entries();
-        if entries.len() <= 1 {
-            return;
-        }
-        let cur_id = self.selected_settings_output().id;
-        let cur_idx = entries
-            .iter()
-            .position(|entry| entry.id == cur_id)
-            .unwrap_or(0);
-        let next = &entries[(cur_idx + 1) % entries.len()];
-        let next_id = next.id;
-        let next_name = next.name.clone();
-        self.settings_target_output = Some(next_id);
-        self.shell_redraw_needed = true;
-        self.show_osd(format!("Display: {next_name}"), None, false);
-    }
-
-    fn cycle_target_display_rotation(&mut self) {
-        use crate::config::DisplayRotation;
-
-        let target = self.selected_settings_output();
-        let id = target.id;
-        let name = target.name.clone();
-        let next_rot = match target.rotation {
-            DisplayRotation::Rotate0 => DisplayRotation::Rotate90,
-            DisplayRotation::Rotate90 => DisplayRotation::Rotate180,
-            DisplayRotation::Rotate180 => DisplayRotation::Rotate270,
-            DisplayRotation::Rotate270 => DisplayRotation::Rotate0,
-        };
-        self.rotation_override = None;
-        let use_winit_flip = name.eq_ignore_ascii_case("winit-0");
-        self.user_config.output_rotations.insert(name, next_rot);
-        if self.output_map.entries().len() == 1 {
-            self.user_config.display_rotation = next_rot;
-        }
-        self.set_output_rotation(id, next_rot, use_winit_flip);
-        self.sync_and_save_user_config();
-    }
-
-    fn toggle_wallpaper_setting(&mut self) {
-        if self.user_config.wallpaper.is_some() {
-            self.last_custom_wallpaper = self.user_config.wallpaper.take();
-            self.wallpaper_revision = self.wallpaper_revision.wrapping_add(1);
-            self.sync_and_save_user_config();
-            return;
-        }
-
-        let candidate = self
-            .last_custom_wallpaper
-            .clone()
-            .or_else(|| crate::config::default_user_wallpaper_path().filter(|p| p.is_file()));
-        if let Some(path) = candidate {
-            self.last_custom_wallpaper = Some(path.clone());
-            self.user_config.wallpaper = Some(path);
-            self.wallpaper_revision = self.wallpaper_revision.wrapping_add(1);
-            self.sync_and_save_user_config();
-        } else {
-            self.config_status_label = "No PNG";
-            self.show_osd("Set wallpaper in config.toml", None, false);
-            self.shell_redraw_needed = true;
-        }
-    }
-
-    fn apply_keyboard_settings_and_save(
-        &mut self,
-        layout: Option<String>,
-        options: Option<String>,
-        repeat_delay: Option<i32>,
-        repeat_rate: Option<i32>,
-    ) {
-        let mut next = self.user_config.clone();
-        if let Some(l) = layout {
-            next.keyboard_layout = l;
-        }
-        if let Some(o) = options {
-            next.keyboard_options = o;
-        }
-        if let Some(delay) = repeat_delay {
-            next.repeat_delay = delay.clamp(50, 2000);
-        }
-        if let Some(rate) = repeat_rate {
-            next.repeat_rate = rate.clamp(1, 120);
-        }
-        self.apply_user_config(next);
-        self.sync_and_save_user_config();
-    }
-
-    fn step_target_display_scale(&mut self, increase: bool) {
-        const SCALE_PRESETS: [f64; 4] = [1.0, 1.25, 1.5, 2.0];
-        let target = self.selected_settings_output();
-        let id = target.id;
-        let name = target.name.clone();
-        let phys = target.physical_size;
-        let refresh = target.refresh_milli_hz;
-        let cur = target.scale;
-
-        let nearest = SCALE_PRESETS
-            .iter()
-            .enumerate()
-            .min_by(|(_, a), (_, b)| {
-                (*a - cur)
-                    .abs()
-                    .partial_cmp(&(*b - cur).abs())
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
-            .map_or(0, |(idx, _)| idx);
-        let next_idx = if increase {
-            (nearest + 1).min(SCALE_PRESETS.len() - 1)
-        } else {
-            nearest.saturating_sub(1)
-        };
-        let next_scale = SCALE_PRESETS[next_idx];
-        self.user_config.output_scales.insert(name, next_scale);
-        if self.output_map.entries().len() == 1 {
-            self.user_config.display_scale = next_scale;
-        }
-        self.update_output_geometry(id, phys, next_scale, refresh);
-        self.sync_and_save_user_config();
     }
 }

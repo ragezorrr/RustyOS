@@ -131,48 +131,24 @@ pub(crate) fn render_popup_surface_pixels_with_style(
 #[allow(
     clippy::cast_precision_loss,
     clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
     clippy::cast_sign_loss
 )]
 fn render_popup_chrome(c: &mut Canvas<'_>, r: Rect, pal: &Palette) {
-    let shadow_style = rusty_ui::shadow::ShadowStyle::for_elevation(
-        rusty_ui::shadow::ShadowElevation::MenuOrTooltip,
+    let shadow_rect = rusty_ui::Rect::new(r.x, r.y, r.w.max(0) as u32, r.h.max(0) as u32);
+    rusty_ui::draw_elevation_shadow_with(
+        shadow_rect,
+        u32::try_from(MENU_POPOVER_RADIUS).unwrap_or(14),
+        rusty_ui::ShadowElevation::MenuOrTooltip,
+        pal.is_dark,
+        |sr, rad, col| {
+            c.fill_rounded_rect(
+                Rect::new(sr.x, sr.y, sr.width as i32, sr.height as i32),
+                rad,
+                col,
+            );
+        },
     );
-    for lobe in &shadow_style.lobes {
-        if lobe.opacity <= 0.001 {
-            continue;
-        }
-        let dy = lobe.offset.1.round() as i32;
-        let base_alpha = (lobe.opacity * 255.0).clamp(0.0, 255.0);
-        if lobe.sigma <= 2.0 {
-            for (step, a_mult) in [(0, 0.65f32), (1, 0.35f32)] {
-                let a = (base_alpha * a_mult).round().clamp(1.0, 255.0) as u8;
-                c.fill_rounded_rect(
-                    Rect::new(r.x - step, r.y - step + dy, r.w + step * 2, r.h + step * 2),
-                    MENU_POPOVER_RADIUS + step,
-                    rgba(0, 0, 0, a),
-                );
-            }
-        } else {
-            let steps = if lobe.sigma > 12.0 { 4 } else { 3 };
-            let max_spread = (lobe.sigma * 1.5).round() as i32;
-            for i in 1..=steps {
-                let frac = i as f32 / steps as f32;
-                let spread = (max_spread as f32 * frac).round() as i32;
-                let weight = (-2.0 * frac * frac).exp() * (1.0 / steps as f32);
-                let a = (base_alpha * weight * 1.4).round().clamp(1.0, 255.0) as u8;
-                c.fill_rounded_rect(
-                    Rect::new(
-                        r.x - spread,
-                        r.y - spread + dy,
-                        r.w + spread * 2,
-                        r.h + spread * 2,
-                    ),
-                    MENU_POPOVER_RADIUS + spread,
-                    rgba(0, 0, 0, a),
-                );
-            }
-        }
-    }
 
     c.fill_rounded_rect(r, MENU_POPOVER_RADIUS, pal.popover_bg);
 
@@ -440,16 +416,9 @@ mod tests {
         let mut buf = vec![0_u8; (pw * ph * 4) as usize];
 
         // Render with first item hovered in Light theme
-        render_popup_surface_pixels(
-            &mut buf,
-            pw,
-            ph,
-            &layout,
-            Some(0),
-            FilesThemeMode::LightGoldenGate,
-        );
+        render_popup_surface_pixels(&mut buf, pw, ph, &layout, Some(0), FilesThemeMode::Light);
 
-        let pal = palette_for_with_accent(FilesThemeMode::LightGoldenGate, 0);
+        let pal = palette_for_with_accent(FilesThemeMode::Light, 0);
         // Verify hover pill fill at row 0 mid-point inside left margin of pill (x = 8 + 10 = 18, y = 13 + 12 = 25)
         let pill_idx = ((25 * pw + 18) * 4) as usize;
         assert_eq!(buf[pill_idx + 2], pal.accent[0]); // R

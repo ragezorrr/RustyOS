@@ -248,7 +248,8 @@ pub const DOCK_PINNED_COUNT: usize = 6;
 pub const DOCK_UTILITY_COUNT: usize = 2;
 
 /// SSD window frame & glass popover corner radius in logical pixels (`DESIGN.md` §12.3).
-pub const WINDOW_RADIUS: i32 = 14;
+#[allow(clippy::cast_possible_wrap)]
+pub const WINDOW_RADIUS: i32 = rusty_ui::WINDOW_RADIUS as i32;
 
 /// Liquid Glass context/dropdown menu corner radius in logical pixels (`DESIGN.md` §12.3, ADR-0058, ADR-0069).
 pub(super) const MENU_POPOVER_RADIUS: i32 = rusty_ui::menu::MENU_RADIUS;
@@ -579,20 +580,21 @@ pub(super) fn push_rounded_glass_box(
     }
 }
 
-/// Pushes a zero-overdraw soft drop shadow halo around `rect` (`RUSTYOS-022`).
+/// CPU 9-slice soft drop shadow fallback when GPU shadow shader resources are unavailable.
 #[allow(
     clippy::too_many_arguments,
     clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
     clippy::many_single_char_names
 )]
-pub(super) fn push_soft_shadow(
+pub(super) fn push_cpu_nine_slice_shadow(
     out: &mut Vec<CompositorRenderElement>,
     shape_cache: &mut crate::surfaces::UiShapeCache,
     renderer: &mut GlesRenderer,
     rect: Rectangle<i32, smithay::utils::Physical>,
     inner_radius: i32,
-    spread: i32,
-    max_alpha: u8,
+    elevation: rusty_ui::shadow::ShadowElevation,
 ) {
     use crate::surfaces::{CornerQuadrant, ShadowEdgeSide};
 
@@ -601,24 +603,14 @@ pub(super) fn push_soft_shadow(
     let w = rect.size.w;
     let h = rect.size.h;
     let r = inner_radius.min(w / 2).min(h / 2).max(0);
-    if spread <= 0 || w <= 0 || h <= 0 {
+    let style = rusty_ui::shadow::ShadowStyle::for_elevation(elevation);
+    let spread = style.lobes[0].sigma.ceil() as i32;
+    let max_alpha = (style.lobes[0].opacity * 255.0).clamp(0.0, 255.0) as u8;
+    if spread <= 0 || w <= 0 || h <= 0 || max_alpha == 0 {
         return;
     }
 
     let shadow_rgb = [6, 8, 14];
-    let logical_rect = Rectangle::new(Point::from((x, y)), Size::from((w, h)));
-    if let Some(el) = shape_cache.soft_shadow_render_element(
-        renderer,
-        logical_rect,
-        r,
-        spread,
-        shadow_rgb,
-        max_alpha,
-    ) {
-        out.push(el);
-        return;
-    }
-
     let corner_locs = [
         (
             CornerQuadrant::TopLeft,
@@ -688,7 +680,6 @@ pub(crate) fn push_liquid_glass_panel(
     style: crate::surfaces::GlassPanelStyle,
     glass_opacity: f32,
     reduce_transparency: bool,
-    shadow: Option<(i32, u8)>,
 ) {
     if let Some(el) = shape_cache.glass_panel_render_element(
         renderer,
@@ -702,17 +693,10 @@ pub(crate) fn push_liquid_glass_panel(
     ) {
         out.push(el);
     }
-    if let Some((spread, max_alpha)) = shadow {
-        push_soft_shadow(out, shape_cache, renderer, rect, radius, spread, max_alpha);
-    }
 }
 
-/// Pushes a standardized 3-lobe elevation drop shadow (`RUSTYOS-126`).
-#[allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    clippy::many_single_char_names
-)]
+/// Pushes a standardized 3-lobe elevation drop shadow (`RUSTYOS-126`, `RUSTYOS-128`).
+#[allow(clippy::many_single_char_names)]
 pub(crate) fn push_elevation_shadow(
     out: &mut Vec<CompositorRenderElement>,
     shape_cache: &mut crate::surfaces::UiShapeCache,
@@ -746,10 +730,7 @@ pub(crate) fn push_elevation_shadow(
         return;
     }
 
-    let style = rusty_ui::shadow::ShadowStyle::for_elevation(elevation);
-    let spread = style.lobes[0].sigma.ceil() as i32;
-    let max_alpha = (style.lobes[0].opacity * 255.0).clamp(0.0, 255.0) as u8;
-    push_soft_shadow(out, shape_cache, renderer, rect, r, spread, max_alpha);
+    push_cpu_nine_slice_shadow(out, shape_cache, renderer, rect, r, elevation);
 }
 
 #[allow(clippy::too_many_arguments)]

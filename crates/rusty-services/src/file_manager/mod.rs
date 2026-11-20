@@ -87,7 +87,7 @@ tmpfs /run tmpfs rw,nosuid,nodev 0 0
         let cfg_path = guard.path.join("rustyos/file_tags.toml");
 
         let mut cfg = FileTagsConfig {
-            theme: FilesThemeMode::DarkPurpleGlass,
+            theme: FilesThemeMode::Dark,
             view_mode: FileViewMode::List,
             sort_field: FileSortField::Size,
             sort_order: FileSortOrder::Descending,

@@ -565,7 +565,7 @@ impl crate::state::RustyCompositorState {
             options_sub,
         ));
 
-        let has_running = !matching.is_empty() || (app_key == "settings" && self.settings_active);
+        let has_running = !matching.is_empty();
         if has_running {
             entries.push(ContextMenuEntry::Separator);
             let quit_entry = if alt_held {
@@ -674,9 +674,6 @@ impl crate::state::RustyCompositorState {
         let Some(app_key) = self.dock_key_for_hit(hit) else {
             return;
         };
-        if app_key == "settings" {
-            self.close_settings();
-        }
         let matching = self.matching_windows_for_dock_key(&app_key);
         if force {
             let self_pid = std::process::id();

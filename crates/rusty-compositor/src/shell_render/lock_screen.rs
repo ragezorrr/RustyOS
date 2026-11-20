@@ -5,8 +5,8 @@ use smithay::utils::{Point, Rectangle, Size};
 
 use super::CompositorRenderElement;
 use super::tokens::{
-    anim_offset, make_solid_element, premul, push_liquid_glass_panel, push_rounded_glass_box,
-    rect_contains, truncate_ascii,
+    anim_offset, make_solid_element, premul, push_liquid_glass_panel_elevation,
+    push_rounded_glass_box, rect_contains, truncate_ascii,
 };
 
 /// Live data for the macOS-style interactive Lock Screen (`RUSTYOS-025`/`054`).
@@ -469,7 +469,7 @@ pub(super) fn render_lock_power_menu(
             )));
         }
     }
-    push_liquid_glass_panel(
+    push_liquid_glass_panel_elevation(
         out,
         shape_cache,
         renderer,
@@ -478,7 +478,7 @@ pub(super) fn render_lock_power_menu(
         crate::surfaces::GlassPanelStyle::Popover,
         lock.glass_opacity,
         lock.reduce_transparency,
-        Some((14, (44.0 * fade).round() as u8)),
+        rusty_ui::shadow::ShadowElevation::MenuOrTooltip,
     );
 }
 
@@ -827,7 +827,7 @@ pub(super) fn render_lock_password_pill(
         );
     }
     if fade >= 0.96 && !lock.reduce_transparency {
-        push_liquid_glass_panel(
+        push_liquid_glass_panel_elevation(
             out,
             shape_cache,
             renderer,
@@ -836,7 +836,7 @@ pub(super) fn render_lock_password_pill(
             crate::surfaces::GlassPanelStyle::ControlModule,
             lock.glass_opacity,
             lock.reduce_transparency,
-            Some((12, 42)),
+            rusty_ui::shadow::ShadowElevation::Popup,
         );
     } else {
         push_rounded_glass_box(

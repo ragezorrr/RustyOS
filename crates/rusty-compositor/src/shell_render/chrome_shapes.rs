@@ -9,8 +9,7 @@ use super::text_pass::append_chrome_text;
 use super::tokens::{
     RGBA_ACCENT, RGBA_BORDER, RGBA_DANGER, ThemePalette, anim_offset, premul,
     push_elevation_shadow, push_liquid_glass_panel, push_liquid_glass_panel_elevation,
-    push_rounded_glass_box, push_soft_shadow, resolved_icon_to_element, rgba_to_premul_color32f,
-    title_hue_seed,
+    push_rounded_glass_box, resolved_icon_to_element, rgba_to_premul_color32f, title_hue_seed,
 };
 use super::top_bar::{
     MENU_ITEM_HEIGHT, MENU_POPOVER_PAD_Y, MENU_SEPARATOR_HEIGHT, push_top_bar_right_glyphs,
@@ -122,13 +121,18 @@ fn build_chrome_shapes(
     let right_layout =
         compute_top_bar_right_layout_with_options(width, top_telemetry.clock_hhmm, opts);
 
-    let pure_white = [255, 255, 255, 255];
+    let light_opaque_bar = top_telemetry.reduce_transparency && !pal.is_dark;
+    let logo_ink = if light_opaque_bar {
+        [28, 29, 34, 255]
+    } else {
+        [255, 255, 255, 255]
+    };
     let logo_loc = Point::from((TOP_BAR_LOGO_X + 1, TOP_BAR_ITEM_Y + 1));
     if let Some(el) = shape_cache.ui_glyph_element(
         renderer,
         crate::surfaces::UiGlyphKind::RustyLogo,
         18,
-        pure_white,
+        logo_ink,
         logo_loc,
     ) {
         out.push(CompositorRenderElement::Memory(el));
@@ -309,6 +313,11 @@ fn build_chrome_shapes(
         }
     }
 
+    let topbar_active_pill = if light_opaque_bar {
+        [0, 0, 0, 24]
+    } else {
+        [255, 255, 255, 42]
+    };
     if top_telemetry.quick_settings_open {
         push_rounded_glass_box(
             &mut out,
@@ -319,7 +328,7 @@ fn build_chrome_shapes(
                 Size::from((right_layout.control_center_w + 10, TOP_BAR_ITEM_H)),
             ),
             6,
-            [255, 255, 255, 42],
+            topbar_active_pill,
             None,
         );
     }
@@ -333,7 +342,7 @@ fn build_chrome_shapes(
                 Size::from((right_layout.clock_w + 10, TOP_BAR_ITEM_H)),
             ),
             6,
-            [255, 255, 255, 42],
+            topbar_active_pill,
             None,
         );
     }
@@ -347,7 +356,7 @@ fn build_chrome_shapes(
                 Size::from((28, TOP_BAR_ITEM_H)),
             ),
             6,
-            [255, 255, 255, 42],
+            topbar_active_pill,
             None,
         );
     }
@@ -363,7 +372,7 @@ fn build_chrome_shapes(
                 Size::from((right_layout.updates_w + 6, TOP_BAR_ITEM_H)),
             ),
             6,
-            [255, 255, 255, 42],
+            topbar_active_pill,
             None,
         );
     }
@@ -415,15 +424,23 @@ fn build_chrome_shapes(
     }
 
     // Fully transparent TopBar by default (`reduce_transparency == false`);
-    // render solid high-contrast bar only when `reduce_transparency` is enabled (`RUSTYOS-049`).
+    // render solid Light or Dark high-contrast bar when `reduce_transparency` is enabled (`RUSTYOS-049`, `RUSTYOS-128`).
     if top_telemetry.reduce_transparency {
+        let (bar_fill, bar_border) = if pal.is_dark {
+            (rgba_to_premul_color32f([26, 26, 30, 245]), COLOR_BORDER)
+        } else {
+            (
+                rgba_to_premul_color32f([242, 243, 247, 248]),
+                rgba_to_premul_color32f([0, 0, 0, 26]),
+            )
+        };
         out.push(CompositorRenderElement::Solid(make_solid_element(
             Rectangle::new(Point::from((0, TOP_BAR_HEIGHT - 1)), Size::from((width, 1))),
-            COLOR_BORDER,
+            bar_border,
         )));
         out.push(CompositorRenderElement::Solid(make_solid_element(
             Rectangle::new(Point::from((0, 0)), Size::from((width, TOP_BAR_HEIGHT))),
-            rgba_to_premul_color32f([26, 26, 30, 245]),
+            bar_fill,
         )));
     }
 
@@ -531,7 +548,14 @@ fn push_dock_tooltip_and_drag(
             [218, 56, 66, 232],
             Some([255, 146, 150, 185]),
         );
-        push_soft_shadow(out, shape_cache, renderer, badge_rect, 10, 8, 42);
+        push_elevation_shadow(
+            out,
+            shape_cache,
+            renderer,
+            badge_rect,
+            10,
+            rusty_ui::shadow::ShadowElevation::Popup,
+        );
     }
     if let Some((ref dragged_tile, drag_rect)) = layout.dragged_icon {
         if let Some(el) = render_dock_tile_icon(
@@ -543,7 +567,14 @@ fn push_dock_tooltip_and_drag(
         ) {
             out.push(el);
         }
-        push_soft_shadow(out, shape_cache, renderer, drag_rect, 12, 10, 48);
+        push_elevation_shadow(
+            out,
+            shape_cache,
+            renderer,
+            drag_rect,
+            12,
+            rusty_ui::shadow::ShadowElevation::Popup,
+        );
     }
 }
 
@@ -753,7 +784,14 @@ fn build_overview_shapes(
                 thumb_bg,
                 Some(thumb_border),
             );
-            push_soft_shadow(&mut out, shape_cache, renderer, thumb, 8, 8, 32);
+            push_elevation_shadow(
+                &mut out,
+                shape_cache,
+                renderer,
+                thumb,
+                8,
+                rusty_ui::shadow::ShadowElevation::Popup,
+            );
         }
         out.push(CompositorRenderElement::Solid(make_solid_element(
             Rectangle::new(Point::from((0, TOP_BAR_HEIGHT)), Size::from((width, 98))),
@@ -776,7 +814,6 @@ fn build_overview_shapes(
             crate::surfaces::GlassPanelStyle::Popover,
             top_telemetry.glass_opacity,
             top_telemetry.reduce_transparency,
-            None,
         );
         if win.focused {
             push_rounded_glass_box(

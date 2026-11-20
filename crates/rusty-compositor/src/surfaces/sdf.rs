@@ -132,18 +132,18 @@ pub(super) fn sample_corner_pixel(
     fill_rgba: [u8; 4],
     border_rgba: Option<[u8; 4]>,
 ) -> [u8; 4] {
-    let r_f = radius as f32;
-    let lx = match quadrant {
-        CornerQuadrant::TopLeft | CornerQuadrant::BottomLeft => r_f - (px as f32 + 0.5),
-        CornerQuadrant::TopRight | CornerQuadrant::BottomRight => px as f32 + 0.5,
+    let r_f = (radius.max(1)) as f32;
+    let u = match quadrant {
+        CornerQuadrant::TopLeft | CornerQuadrant::BottomLeft => px as f32 + 0.5,
+        CornerQuadrant::TopRight | CornerQuadrant::BottomRight => r_f - (px as f32 + 0.5),
     };
-    let ly = match quadrant {
-        CornerQuadrant::TopLeft | CornerQuadrant::TopRight => r_f - (py as f32 + 0.5),
-        CornerQuadrant::BottomLeft | CornerQuadrant::BottomRight => py as f32 + 0.5,
+    let v = match quadrant {
+        CornerQuadrant::TopLeft | CornerQuadrant::TopRight => py as f32 + 0.5,
+        CornerQuadrant::BottomLeft | CornerQuadrant::BottomRight => r_f - (py as f32 + 0.5),
     };
-    let dist = lx.hypot(ly);
-    let d_out = dist - (r_f - 0.5);
-    let outer_cov = (0.5 - d_out).clamp(0.0, 1.0);
+    let half = (r_f * 2.0).max(8.0);
+    let sd = sd_squircle_box(u, v, half, half, half, half, r_f);
+    let outer_cov = (0.5 - sd).clamp(0.0, 1.0);
     if outer_cov <= 0.0 {
         return [0, 0, 0, 0];
     }
@@ -157,8 +157,8 @@ pub(super) fn sample_corner_pixel(
     );
 
     if let Some(border) = border_rgba {
-        // 1px outer ring along the rounded arc matching straight 1px edge border strips
-        let ring_cov = (d_out + 1.15).clamp(0.0, 1.0) * outer_cov;
+        // 1px outer ring along the squircle contour matching straight 1px edge border strips
+        let ring_cov = (sd + 1.5).clamp(0.0, 1.0) * outer_cov;
         if ring_cov > 0.0 {
             let b_a = (f32::from(border[3]) / 255.0) * ring_cov;
             let b_px = premul_pixel(
@@ -569,6 +569,30 @@ pub(super) fn sd_rounded_box(u: f32, v: f32, cx: f32, cy: f32, hw: f32, hh: f32,
     qx.max(0.0).hypot(qy.max(0.0)) + qx.max(qy).min(0.0) - r
 }
 
+/// Signed distance to a continuous cubic squircle box (`u^3 + v^3 = 1` corners matching GLSL shaders).
+pub(super) fn sd_squircle_box(u: f32, v: f32, cx: f32, cy: f32, hw: f32, hh: f32, r: f32) -> f32 {
+    let min_half = hw.min(hh);
+    let r_clamped = r.clamp(0.0, min_half);
+    if r_clamped >= min_half - 0.5 || r_clamped <= 0.5 {
+        return sd_rounded_box(u, v, cx, cy, hw, hh, r_clamped);
+    }
+    let r_ext = (r_clamped * 1.42).clamp(0.0, min_half);
+    let qx = (u - cx).abs() - hw + r_ext;
+    let qy = (v - cy).abs() - hh + r_ext;
+    if qx.min(qy) <= 0.0 {
+        return qx.max(qy) - r_ext;
+    }
+    let ux = (qx / r_ext).max(0.0);
+    let uy = (qy / r_ext).max(0.0);
+    let s3 = ux * ux * ux + uy * uy * uy;
+    let s1 = s3.max(1e-8).cbrt();
+    let s2 = s1 * s1;
+    let gx = (ux * ux) / s2.max(1e-6);
+    let gy = (uy * uy) / s2.max(1e-6);
+    let grad_len = gx.hypot(gy).max(0.707);
+    ((s1 - 1.0) * r_ext) / grad_len
+}
+
 pub(super) fn sd_segment(u: f32, v: f32, ax: f32, ay: f32, bx: f32, by: f32, r: f32) -> f32 {
     let pax = u - ax;
     let pay = v - ay;
@@ -906,7 +930,7 @@ pub(super) fn sample_glass_panel_pixel_themed(
     let u = px as f32 + 0.5;
     let v = py as f32 + 0.5;
 
-    let sd = sd_rounded_box(u, v, hw, hh, hw, hh, r);
+    let sd = sd_squircle_box(u, v, hw, hh, hw, hh, r);
     let cov = sd_cov(sd, 1.15);
     if cov <= 0.001 {
         return [0, 0, 0, 0];

@@ -19,7 +19,8 @@ use crate::state::{
 };
 
 /// Unified window corner radius (`14 px`, matching `rusty-settings` and compositor shadows).
-pub(crate) const WINDOW_CORNER_RADIUS: i32 = 14;
+#[allow(clippy::cast_possible_wrap)]
+pub(crate) const WINDOW_CORNER_RADIUS: i32 = rusty_ui::WINDOW_RADIUS as i32;
 /// Edge-to-edge Finder sidebar width (`196 px`).
 pub(crate) const SIDEBAR_WIDTH: i32 = 196;
 /// Resize border hotspot thickness around CSD window edges.
@@ -1023,8 +1024,8 @@ fn actions_menu_rows(state: &FilesAppState) -> Vec<PopupRowSpec> {
         Some(PopupCommand::ToggleShowHidden),
     ));
     let theme_label = match state.theme {
-        rusty_services::file_manager::FilesThemeMode::LightGoldenGate => "Dark Theme",
-        rusty_services::file_manager::FilesThemeMode::DarkPurpleGlass => "Light Theme",
+        rusty_services::file_manager::FilesThemeMode::Light => "Dark Theme",
+        rusty_services::file_manager::FilesThemeMode::Dark => "Light Theme",
     };
     rows.push((
         String::from(theme_label),

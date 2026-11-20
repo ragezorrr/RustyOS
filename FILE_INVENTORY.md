@@ -1,6 +1,6 @@
 # File Inventory
 
-Актуальная карта файлов репозитория `RustyOS` (по состоянию на `RUSTYOS-045`).
+Актуальная карта файлов репозитория `RustyOS` (по состоянию на `RUSTYOS-128`).
 
 ## Правила, навыки и workflows (`.agents/`)
 - `.agents/rules/approval-gates.md`
@@ -75,8 +75,12 @@
 - `crates/rusty-animation/` (`Cargo.toml`, `src/lib.rs`)
 - `crates/rusty-ipc/` (`Cargo.toml`, `src/lib.rs`)
 - `crates/rusty-services/` (`Cargo.toml`, `src/lib.rs`)
-- `crates/rusty-compositor/` (`Cargo.toml`, `src/main.rs`, `src/lib.rs`, `src/config.rs`, `src/outputs.rs`, `src/state.rs`, `src/input.rs`, `src/winit_backend.rs`, `src/drm_backend.rs`, `src/frame_timing.rs`, `src/shell_render.rs`, `src/surfaces.rs`, `src/text.rs`, `src/icons.rs`, `src/launcher.rs`, `src/tray.rs`, `src/dbus_notifications.rs`, `src/telemetry.rs`, `src/screenshot.rs`, `src/xwayland.rs`)
-- `apps/rusty-shell/` (`Cargo.toml`, `src/main.rs`, `src/lib.rs`, `src/wayland.rs`)
+- `crates/rusty-ui/` (`Cargo.toml`, `src/{lib.rs, canvas.rs, geometry.rs, menu.rs, shadow.rs, theme.rs, traffic_lights.rs, window_frame.rs, window_header.rs}`)
+- `crates/rusty-compositor/` (`Cargo.toml`, `src/`: `main.rs`, `lib.rs`, `config.rs`, `outputs.rs`, `frame_composer.rs`, `frame_timing.rs`, `input/`, `state/`, `shell_render/`, `context_menu/`, `surfaces/{mod,sdf,glyphs,xcursor,liquid_glass,window_clip,window_shadow,window_minimize}.rs`, `text.rs`, `icons.rs`, `icon_art.rs`, `launcher.rs`, `tray.rs`, `dbus_notifications.rs`, `telemetry.rs`, `screenshot.rs`, `xwayland.rs`)
+- `apps/rusty-files/` (`Cargo.toml`, `src/`)
+- `apps/rusty-installer/` (`Cargo.toml`, `src/`)
+- `apps/rusty-settings/` (`Cargo.toml`, `src/`)
+- `apps/rusty-terminal/` (`Cargo.toml`, `src/`)
 
 ## Сессия и упаковка (`bin/`, `packaging/`, `scripts/`)
 - `bin/rustyos-session`

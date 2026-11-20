@@ -63,7 +63,7 @@ pub use updates::{
 #[cfg(test)]
 use std::fs;
 
-/// Unified registry providing refreshed system metrics to `rusty-shell`.
+/// Unified registry providing refreshed system metrics to the compositor shell and system apps.
 #[derive(Debug, Default, Clone)]
 pub struct ServiceRegistry {
     /// Power supply service.

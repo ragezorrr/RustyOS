@@ -96,6 +96,7 @@ impl CompositorHandler for RustyCompositorState {
         }) {
             window.on_commit();
             if let Some(win_id) = self.window_id_for_smithay(&window) {
+                self.bump_window_commit_revision(win_id);
                 self.sync_toplevel_icon_from_surface(win_id, surface);
                 self.sync_foreign_toplevel_metadata(win_id);
                 self.refresh_dock_window_presence(win_id);
@@ -133,6 +134,9 @@ impl CompositorHandler for RustyCompositorState {
                 .then(|| w.clone())
         }) {
             parent_win.on_commit();
+            if let Some(win_id) = self.window_id_for_smithay(&parent_win) {
+                self.bump_window_commit_revision(win_id);
+            }
         }
 
         if let Some(PopupKind::Xdg(xdg)) = self.popups.find_popup(surface) {
@@ -249,6 +253,8 @@ impl XdgShellHandler for RustyCompositorState {
 
         let serial = smithay::utils::SERIAL_COUNTER.next_serial();
         self.sync_space_with_wm(serial);
+        let mapped_rect = self.resolved_window_global_rect(win_id).unwrap_or(rect);
+        self.register_window_open_animation(win_id, mapped_rect);
 
         info!(
             window_id = win_id.0,

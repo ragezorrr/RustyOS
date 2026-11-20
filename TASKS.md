@@ -2237,6 +2237,25 @@ hardware/software context и низкие накладные расходы.
 - **Tests:** 325 unit-тестов workspace (включая `200` в `rusty-compositor`; `1` предсуществующий тест `rusty-services::tests::networkmanager_and_bluetooth_formatters_handle_all_states` требует BlueZ D-Bus в sandbox).
 - **Risks:** Нет.
 
+### RUSTYOS-128 — Консолидация архитектуры, единый суперэллипс, композиторный клиппинг углов, анимации окон и Liquid Glass сайдбаров (`RUSTYOS-128 Вариант 1`)
+
+- **Status:** Done (`RUSTYOS-128 Вариант 1` — утверждённый объём выполнен)
+- **Goal:** Устранить дубли (`apps/rusty-shell`, `modals/settings.rs`), синхронизировать `crates/rusty-ui` (`WINDOW_RADIUS = 14`, 7-цветные палитры, premul `UiCanvas`), перевести тени на честный 3-дольный GPU-шейдер без `push_soft_shadow`, внедрить композиторную обрезку клиентских углов и послойный Liquid Glass сайдбаров, добавить анимации открытия/закрытия окон, приглушение светофоров в фоне и обновить навыки/документацию.
+- **Dependencies:** `RUSTYOS-125`, `RUSTYOS-126`, `RUSTYOS-127`.
+- **Scope:**
+  - Удаление дублей: удалены `apps/rusty-shell` (с актуализацией `Cargo.toml`, `bin/rustyos-session`, `scripts/install.sh`, `packaging/arch/PKGBUILD`) и `crates/rusty-compositor/src/shell_render/modals/settings.rs` (`ShellOverlayView::Settings`);
+  - `crates/rusty-ui`, `crates/rusty-services/src/file_manager`, `apps/*`: `WINDOW_RADIUS = 14`, нейтральный `FilesThemeMode::{Light, Dark}`, единый `ACCENT_PALETTE` (`#5E5CE6` на индексе 3), premul Porter-Duff Over в `UiCanvas`, `draw_elevation_shadow_with`;
+  - `crates/rusty-compositor/src/surfaces/`: новый `window_clip.rs` (`ClippedSurfaceElement`, `SURFACE_CLIP_FRAG`), 3-дольный `WINDOW_SHADOW_FRAG` (`u_lobe1..3`), единый кубический суперэллипс в `LIQUID_GLASS_FRAG`, `WINDOW_SHADOW_FRAG`, `SURFACE_CLIP_FRAG` и `sdf::sample_corner_pixel`, послойный `prepare_backdrop_slot` в `liquid_glass.rs`, open/close lifecycle-снимки в `window_minimize.rs`;
+  - `crates/rusty-compositor/src/{frame_composer.rs, state/*, shell_render/*}`: полная ликвидация `push_soft_shadow` и кортежей `(spread, alpha)`, светлая полярность `TopBar` при `reduce_transparency`, послойный `build_backdrop_render_elements` снизу вверх, обёртка неполноэкранных окон в `ClippedSurfaceElement` (с сохранением Direct Scanout), `180 ms`/`160 ms` fade+scale open/close анимации с тенью;
+  - `apps/rusty-files`, `apps/rusty-settings`, `apps/rusty-installer`: `WlRegion`-ограниченные Liquid Glass сайдбары (`rustyos_liquid_glass_v1`) с матовым фолбэком и приглушение светофоров без `State::Activated`;
+  - Документация и навыки: `ADR-0072`, `D-086` (`DECISIONS.md`), `DESIGN.md`, `ROADMAP.md`, `ARCHITECTURE.md`, `FILE_INVENTORY.md`, `README.md`, `.agents/skills/{ui-ux-design,gpu-rendering,desktop-shell,window-management,wayland-compositor,animation-engine}/SKILL.md`.
+- **Acceptance Criteria:**
+  - Все 48 вариантов 6 GLSL-шейдеров валидируются `/usr/bin/glslangValidator`;
+  - `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --offline -- -D warnings`, тесты workspace (за вычетом D-Bus теста BlueZ в sandbox) и `--drm-probe` проходят без ошибок и предупреждений;
+  - Живые прогоны `--winit` на Wayland (Light) и X11 (Dark) со спауном `rusty-files` и `rusty-settings` проходят без ошибок EGL/shader и подтверждены визуальной инспекцией PNG.
+- **Tests:** 323 пройденных теста workspace (`4` `rusty-animation`, `201` `rusty-compositor`, `17` `rusty-files`, `13` `rusty-installer`, `3` `rusty-ipc`, `43` `rusty-services` + `1` пропущенный D-Bus BlueZ тест, `12` `rusty-settings`, `15` `rusty-terminal`, `8` `rusty-ui`, `7` `rusty-wm`).
+- **Risks:** Нет; полноэкранные клиенты не оборачиваются в `ClippedSurfaceElement`, сохраняя путь Direct Scanout.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

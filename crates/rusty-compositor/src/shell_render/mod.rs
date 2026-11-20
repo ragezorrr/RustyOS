@@ -14,8 +14,10 @@ use smithay::utils::Size;
 smithay::backend::renderer::element::render_elements! {
     /// Unified render element type emitted across shell, SSD frames, text, and Wayland surfaces.
     pub CompositorRenderElement<=GlesRenderer>;
-    /// Client Wayland surface element.
+    /// Client Wayland surface element (raw/unclipped for fullscreen Direct Scanout).
     Surface = WaylandSurfaceRenderElement<GlesRenderer>,
+    /// Client Wayland surface element clipped to unified cubic squircle corners (`RUSTYOS-128`).
+    ClippedSurface = crate::surfaces::ClippedSurfaceElement,
     /// Solid or translucent colored rectangle.
     Solid = SolidColorRenderElement,
     /// Scaled solid rectangle mapped from logical shell UI coordinates to HiDPI physical pixels.
@@ -89,8 +91,7 @@ pub use lock_screen::{
 };
 pub use modals::{
     PolkitHit, PolkitPromptRenderState, PortalHit, PortalPromptRenderState, PortalSourceRow,
-    SettingsHit, SettingsRenderState, SettingsTab, hit_test_polkit_dialog, hit_test_portal_dialog,
-    hit_test_settings_modal,
+    hit_test_polkit_dialog, hit_test_portal_dialog,
 };
 pub use notification_center::{
     DEFAULT_NOTIFICATION_TASKS, NotificationCardSlot, NotificationCenterHit,
@@ -110,8 +111,8 @@ pub use spotlight_overview::{
 pub use ssd::{
     ResizeEdges, SsdHit, SsdHitWindow, check_window_frame_hit, check_window_ssd_hit,
     check_window_traffic_lights_hover, generate_ssd_title_element, generate_window_shadow_elements,
-    generate_window_ssd_composite_elements, generate_window_ssd_composite_elements_with_hover,
-    generate_window_ssd_elements,
+    generate_window_shadow_elements_with_opacity, generate_window_ssd_composite_elements,
+    generate_window_ssd_composite_elements_with_hover, generate_window_ssd_elements,
 };
 pub(crate) use tokens::push_liquid_glass_panel_elevation;
 #[cfg(test)]
@@ -194,9 +195,7 @@ pub enum ShellOverlayView<'a> {
     Portal(&'a PortalPromptRenderState<'a>),
     /// Non-dimming interactive `PickColor` sampling banner pill (`RUSTYOS-057`).
     PickColor(&'a str),
-    /// Built-in System Settings modal (`RUSTYOS-061`).
-    Settings(&'a SettingsRenderState<'a>),
-    /// macOS-aligned Liquid Glass right-click context menu (`RUSTYOS-064`).
+    /// Context menu rendered with Liquid Glass (`RUSTYOS-064`).
     ContextMenu(&'a ContextMenuState),
     /// Graphical Downloads Stack popover (`RUSTYOS-073`).
     DockStack(&'a DockStackRenderState<'a>),
@@ -248,7 +247,6 @@ pub fn generate_shell_render_elements(
         | ShellOverlayView::Polkit(_)
         | ShellOverlayView::Portal(_)
         | ShellOverlayView::PickColor(_)
-        | ShellOverlayView::Settings(_)
         | ShellOverlayView::ContextMenu(_)
         | ShellOverlayView::DockStack(_)
         | ShellOverlayView::Updates(_)
@@ -267,7 +265,6 @@ pub fn generate_shell_render_elements(
     elements
 }
 
-pub(super) const TEXT_BRIGHT: [u8; 4] = [242, 242, 247, 255]; // #F2F2F7
 pub(super) const TEXT_MUTED: [u8; 4] = [148, 148, 156, 255]; // #94949C
 
 pub(super) const fn notifications_hidden_by_overlay(overlay: ShellOverlayView<'_>) -> bool {
@@ -277,7 +274,6 @@ pub(super) const fn notifications_hidden_by_overlay(overlay: ShellOverlayView<'_
             | ShellOverlayView::QuickSettings(_)
             | ShellOverlayView::Polkit(_)
             | ShellOverlayView::Portal(_)
-            | ShellOverlayView::Settings(_)
             | ShellOverlayView::ContextMenu(_)
             | ShellOverlayView::DockStack(_)
             | ShellOverlayView::Updates(_)
@@ -294,7 +290,6 @@ pub(super) const fn dock_tooltip_hidden_by_overlay(overlay: ShellOverlayView<'_>
             | ShellOverlayView::Switcher(_)
             | ShellOverlayView::Polkit(_)
             | ShellOverlayView::Portal(_)
-            | ShellOverlayView::Settings(_)
             | ShellOverlayView::ContextMenu(_)
             | ShellOverlayView::DockStack(_)
             | ShellOverlayView::Updates(_)

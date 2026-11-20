@@ -125,7 +125,12 @@ pub fn run_nested_winit(config: &CompositorConfig) -> Result<BootstrapReport, Co
                 }
 
                 if let Ok(menu_test) = std::env::var("RUSTYOS_TEST_CAPTURE_MENU") {
-                    if rendered_frames == 5 {
+                    let (cap_frame, exit_frame) = if menu_test == "windows" {
+                        (50_u64, 58_u64)
+                    } else {
+                        (5_u64, 12_u64)
+                    };
+                    if rendered_frames == cap_frame {
                         if menu_test == "desktop" {
                             app_state.active_top_bar_menu =
                                 Some(crate::shell_render::TopBarMenuHit::ActiveApp);
@@ -138,7 +143,7 @@ pub fn run_nested_winit(config: &CompositorConfig) -> Result<BootstrapReport, Co
                         app_state.pending_screenshot =
                             Some(crate::screenshot::ScreenshotRequest::FullScreen);
                         app_state.shell_redraw_needed = true;
-                    } else if rendered_frames >= 12 {
+                    } else if rendered_frames >= exit_frame {
                         app_state.request_shutdown();
                     }
                 }

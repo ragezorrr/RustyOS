@@ -711,6 +711,7 @@ impl WindowHandler for InstallerClient {
             self.layout_cache = None;
         }
         self.app.win.maximized = configure.state.contains(WindowState::MAXIMIZED);
+        self.app.win.focused = configure.state.contains(WindowState::ACTIVATED);
         self.configured = true;
         self.app.win.dirty = true;
     }

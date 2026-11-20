@@ -187,6 +187,8 @@ impl XwmHandler for RustyCompositorState {
 
         let serial = SERIAL_COUNTER.next_serial();
         self.sync_space_with_wm(serial);
+        let mapped_rect = self.resolved_window_global_rect(win_id).unwrap_or(rect);
+        self.register_window_open_animation(win_id, mapped_rect);
 
         info!(
             window_id = win_id.0,

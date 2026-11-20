@@ -52,7 +52,6 @@ if [ "${ACTION}" = "uninstall" ]; then
     echo "=== Removing RustyOS (${BIN_DIR}, ${SESSIONS_DIR}) ==="
     rm -f \
         "${BIN_DIR}/rusty-compositor" \
-        "${BIN_DIR}/rusty-shell" \
         "${BIN_DIR}/rusty-files" \
         "${BIN_DIR}/rusty-settings" \
         "${BIN_DIR}/rusty-terminal" \
@@ -101,7 +100,6 @@ fi
 
 echo "Installing binaries to ${BIN_DIR} and ${LIB_DIR}..."
 install -m 755 "${TARGET_DIR}/rusty-compositor" "${BIN_DIR}/rusty-compositor"
-install -m 755 "${TARGET_DIR}/rusty-shell" "${BIN_DIR}/rusty-shell"
 install -m 755 "${TARGET_DIR}/rusty-files" "${BIN_DIR}/rusty-files"
 install -m 755 "${TARGET_DIR}/rusty-settings" "${BIN_DIR}/rusty-settings"
 install -m 755 "${TARGET_DIR}/rusty-terminal" "${BIN_DIR}/rusty-terminal"

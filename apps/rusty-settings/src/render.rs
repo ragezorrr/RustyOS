@@ -708,24 +708,35 @@ fn lerp_rgba(a: [u8; 4], b: [u8; 4], t: f32) -> [u8; 4] {
     [f(a[0], b[0]), f(a[1], b[1]), f(a[2], b[2]), f(a[3], b[3])]
 }
 
-pub(crate) fn render_window_pixels(
+pub(crate) fn render_window_pixels_with_glass(
     buf: &mut [u8],
     width: u32,
     height: u32,
     app: &SettingsAppState,
     layout: &SettingsLayout,
     hover: Option<&SettingsHit>,
+    sidebar_glass: bool,
 ) {
     let pal = palette_for(app);
+    buf.fill(0);
     let mut c = Canvas::new(buf, width, height);
 
-    // 1. Flat split-pane background: grey sidebar (#ECEDF1) left + light canvas (#F5F6FA) right.
-    c.fill_rect(layout.sidebar_rect, pal.sidebar_bg);
+    // 1. Split-pane background: translucent frosted sidebar (or solid fallback) left + solid canvas right.
+    let sidebar_bg = if sidebar_glass {
+        if pal.is_dark {
+            [34, 35, 39, 158]
+        } else {
+            [242, 243, 247, 152]
+        }
+    } else {
+        pal.sidebar_bg
+    };
+    c.fill_rect(layout.sidebar_rect, sidebar_bg);
     c.fill_rect(Rect::new(layout.divider_x, 0, 1, layout.win_h), pal.divider);
     c.fill_rect(layout.page_rect, pal.page_bg);
 
     // 2. Left sidebar header (traffic lights + borderless capsule search) and scrollable items.
-    render_sidebar(&mut c, app, layout, &pal, hover);
+    render_sidebar(&mut c, app, layout, &pal, hover, sidebar_glass);
 
     // 3. Scrollable right page content clipped cleanly below header, then header + scrollbar thumb.
     c.clip = Some(layout.page_viewport);
@@ -762,7 +773,7 @@ pub(crate) fn render_window_pixels(
     c.apply_window_corner_mask(WINDOW_CORNER_RADIUS);
 }
 
-fn render_sidebar(
+fn render_sidebar_traffic_and_search(
     c: &mut Canvas<'_>,
     app: &SettingsAppState,
     layout: &SettingsLayout,
@@ -775,17 +786,33 @@ fn render_sidebar(
             SettingsHit::TrafficClose | SettingsHit::TrafficMinimize | SettingsHit::TrafficMaximize
         )
     );
+    let tl = rusty_ui::TrafficLightButtons::default_csd();
     let lights = [
-        (layout.traffic_close, [0xEE, 0x5A, 0x6A, 0xFF], 'x'),
-        (layout.traffic_min, [0xF4, 0xB6, 0x3F, 0xFF], '-'),
-        (layout.traffic_max, [0x3C, 0xC6, 0x8A, 0xFF], '+'),
+        (layout.traffic_close, rusty_ui::TrafficLightKind::Close),
+        (layout.traffic_min, rusty_ui::TrafficLightKind::Minimize),
+        (layout.traffic_max, rusty_ui::TrafficLightKind::Maximize),
     ];
-    for (rect, col, glyph) in lights {
+    for (rect, kind) in lights {
+        let col = if app.focused {
+            kind.active_color()
+        } else {
+            rusty_ui::TrafficLightKind::inactive_color()
+        };
         let cx = rect.x as f32 + 7.0;
-        let cy = rect.y as f32 + 7.0;
+        let cy = tl.center_y;
         c.fill_circle(cx, cy, 7.0, col);
         if tl_hovered {
-            draw_traffic_glyph(c, cx, cy, glyph);
+            let ink = rusty_ui::TrafficLightKind::glyph_ink();
+            for seg in rusty_ui::glyph_segments(kind) {
+                c.draw_segment(
+                    cx + seg.dx0,
+                    cy + seg.dy0,
+                    cx + seg.dx1,
+                    cy + seg.dy1,
+                    0.75,
+                    ink,
+                );
+            }
         }
     }
 
@@ -832,6 +859,17 @@ fn render_sidebar(
             pal.accent,
         );
     }
+}
+
+fn render_sidebar(
+    c: &mut Canvas<'_>,
+    app: &SettingsAppState,
+    layout: &SettingsLayout,
+    pal: &Palette,
+    hover: Option<&SettingsHit>,
+    sidebar_glass: bool,
+) {
+    render_sidebar_traffic_and_search(c, app, layout, pal, hover);
 
     c.clip = Some(layout.sidebar_viewport);
     for cat in &layout.categories {
@@ -853,10 +891,28 @@ fn render_sidebar(
             continue;
         }
         let is_hovered = hover == Some(&SettingsHit::SidebarItem(item.page));
+        let active_pill = if sidebar_glass {
+            if pal.is_dark {
+                [255, 255, 255, 34]
+            } else {
+                [0, 0, 0, 24]
+            }
+        } else {
+            pal.sidebar_active
+        };
+        let hover_pill = if sidebar_glass {
+            if pal.is_dark {
+                [255, 255, 255, 18]
+            } else {
+                [0, 0, 0, 14]
+            }
+        } else {
+            pal.sidebar_hover
+        };
         if item.selected {
-            c.fill_rounded_rect(item.rect, 10, pal.sidebar_active);
+            c.fill_rounded_rect(item.rect, 10, active_pill);
         } else if is_hovered {
-            c.fill_rounded_rect(item.rect, 10, pal.sidebar_hover);
+            c.fill_rounded_rect(item.rect, 10, hover_pill);
         }
         render_row_icon(c, item.icon_rect, item.page);
         c.draw_text(
@@ -869,22 +925,6 @@ fn render_sidebar(
         );
     }
     c.clip = None;
-}
-
-fn draw_traffic_glyph(c: &mut Canvas<'_>, cx: f32, cy: f32, kind: char) {
-    let ink = [0, 0, 0, 150];
-    match kind {
-        'x' => {
-            c.draw_segment(cx - 2.6, cy - 2.6, cx + 2.6, cy + 2.6, 0.7, ink);
-            c.draw_segment(cx + 2.6, cy - 2.6, cx - 2.6, cy + 2.6, 0.7, ink);
-        }
-        '-' => c.draw_segment(cx - 3.2, cy, cx + 3.2, cy, 0.75, ink),
-        '+' => {
-            c.draw_segment(cx - 3.0, cy, cx + 3.0, cy, 0.75, ink);
-            c.draw_segment(cx, cy - 3.0, cx, cy + 3.0, 0.75, ink);
-        }
-        _ => {}
-    }
 }
 
 fn render_page_header(
@@ -1747,5 +1787,27 @@ mod tests {
         }
 
         assert_eq!(cached_buf, direct_buf);
+    }
+
+    #[test]
+    fn sidebar_glass_and_unfocused_traffic_lights_render_cleanly() {
+        let mut app = SettingsAppState::new(&crate::state::StartupOptions::default());
+        app.focused = false;
+        let layout = crate::layout::compute_layout(&app, 882, 600);
+        let mut buf = vec![0_u8; 882 * 600 * 4];
+        render_window_pixels_with_glass(&mut buf, 882, 600, &app, &layout, None, true);
+        let side_idx = ((300 * 882 + 12) * 4) as usize;
+        let page_idx = ((300 * 882 + 400) * 4) as usize;
+        assert!(buf[side_idx + 3] < 200);
+        assert_eq!(buf[page_idx + 3], 255);
+
+        let tl = rusty_ui::TrafficLightButtons::default_csd();
+        let (cx, cy) = tl.center_of(rusty_ui::TrafficLightKind::Close);
+        let tl_idx = ((cy as usize) * 882 + (cx as usize)) * 4;
+        let inactive = rusty_ui::TrafficLightKind::inactive_color();
+        assert_eq!(
+            &buf[tl_idx..tl_idx + 4],
+            &[inactive[2], inactive[1], inactive[0], 255]
+        );
     }
 }

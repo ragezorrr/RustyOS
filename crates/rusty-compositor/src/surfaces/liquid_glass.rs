@@ -183,19 +183,45 @@ uniform vec4 u_sat_refract;
 uniform float tint;
 #endif
 
-vec2 cornerExtent(vec2 radius, vec2 halfSize) {
-    float lim = min(halfSize.x, halfSize.y);
-    return vec2(clamp(radius.x, 0.0, lim));
+bool useSquircle(vec2 halfSize, float r) {
+    float minHalf = min(halfSize.x, halfSize.y);
+    float rClamped = clamp(r, 0.0, minHalf);
+    return rClamped < minHalf - 0.5 && rClamped > 0.5;
 }
 
-vec2 cornerNormal(vec2 q, vec2 r) {
-    return normalize(max(q * r, vec2(0.0001)));
+vec2 cornerExtent(vec2 radius, vec2 halfSize) {
+    float lim = min(halfSize.x, halfSize.y);
+    float rClamped = clamp(radius.x, 0.0, lim);
+    if (useSquircle(halfSize, radius.x)) {
+        return vec2(clamp(rClamped * 1.42, 0.0, lim));
+    }
+    return vec2(rClamped);
+}
+
+vec2 cornerNormal(vec2 u, vec2 halfSize, float r) {
+    vec2 dir = useSquircle(halfSize, r) ? (u * u) : u;
+    return normalize(max(dir, vec2(0.0001)));
 }
 
 float roundedDistance(vec2 p, vec2 halfSize, float r) {
-    float rc = clamp(r, 0.0, min(halfSize.x, halfSize.y));
-    vec2 q = abs(p) - halfSize + vec2(rc);
-    return length(max(q, vec2(0.0))) + min(max(q.x, q.y), 0.0) - rc;
+    float minHalf = min(halfSize.x, halfSize.y);
+    float rClamped = clamp(r, 0.0, minHalf);
+    if (!useSquircle(halfSize, r)) {
+        vec2 q = abs(p) - halfSize + vec2(rClamped);
+        return length(max(q, vec2(0.0))) + min(max(q.x, q.y), 0.0) - rClamped;
+    }
+    float rExt = clamp(rClamped * 1.42, 0.0, minHalf);
+    vec2 q = abs(p) - halfSize + vec2(rExt);
+    if (min(q.x, q.y) <= 0.0) {
+        return max(q.x, q.y) - rExt;
+    }
+    vec2 u = max(q / rExt, vec2(0.0));
+    float s3 = u.x * u.x * u.x + u.y * u.y * u.y;
+    float s1 = pow(max(s3, 1e-8), 1.0 / 3.0);
+    float s2 = s1 * s1;
+    vec2 grad = (u * u) / max(s2, 1e-6);
+    float gradLen = max(length(grad), 0.707);
+    return ((s1 - 1.0) * rExt) / gradLen;
 }
 
 vec2 outwardAt(vec2 p, vec2 halfSize, float r) {
@@ -205,7 +231,7 @@ vec2 outwardAt(vec2 p, vec2 halfSize, float r) {
     vec2 sgn = vec2(p.x >= 0.0 ? 1.0 : -1.0, p.y >= 0.0 ? 1.0 : -1.0);
     if (min(r_ext.x, r_ext.y) <= 0.0 || min(q.x, q.y) <= 0.0)
         return edge.x > edge.y ? vec2(sgn.x, 0.0) : vec2(0.0, sgn.y);
-    return sgn * cornerNormal(q / r_ext, r_ext);
+    return sgn * cornerNormal(q / r_ext, halfSize, r);
 }
 
 float tangentCoverage(vec2 p, vec2 halfSize, float r, float pixelSize) {
@@ -214,7 +240,7 @@ float tangentCoverage(vec2 p, vec2 halfSize, float r, float pixelSize) {
     vec2 corner = edge + r_ext;
     vec2 normal = edge.x > edge.y ? vec2(1.0, 0.0) : vec2(0.0, 1.0);
     if (min(r_ext.x, r_ext.y) > 0.0 && min(corner.x, corner.y) > 0.0)
-        normal = cornerNormal(corner / r_ext, r_ext);
+        normal = cornerNormal(corner / r_ext, halfSize, r);
     float t = -roundedDistance(p, halfSize, r);
     vec2 extent = abs(normal) * (0.5 * pixelSize);
     float a = max(extent.x, extent.y);
@@ -701,7 +727,7 @@ impl std::fmt::Debug for OutputGlassBuffers {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct PanelSlotKey {
-    output_id: u32,
+    output_id: u64,
     style: GlassPanelStyle,
     loc_x: i32,
     loc_y: i32,
@@ -722,11 +748,11 @@ struct CachedPanelSlot {
 pub(crate) struct LiquidGlassPipeline {
     programs: Option<GlassShaderPrograms>,
     compile_failed: bool,
-    outputs: HashMap<u32, OutputGlassBuffers>,
-    active_output: Option<u32>,
+    outputs: HashMap<u64, OutputGlassBuffers>,
+    active_output: Option<u64>,
     active_scale: f64,
     frame_counter: u64,
-    frame_slot_counts: HashMap<(u32, GlassPanelStyle, i32, i32, u16, u16), u16>,
+    frame_slot_counts: HashMap<(u64, GlassPanelStyle, i32, i32, u16, u16), u16>,
     slots: HashMap<PanelSlotKey, CachedPanelSlot>,
 }
 
@@ -757,7 +783,7 @@ impl LiquidGlassPipeline {
             .is_some_and(|id| self.outputs.get(&id).is_some_and(|buf| buf.has_valid_blur))
     }
 
-    fn finish_active_frame(&mut self, output_id: u32, clamped_scale: f64) {
+    fn finish_active_frame(&mut self, output_id: u64, clamped_scale: f64) {
         self.frame_counter = self.frame_counter.wrapping_add(1);
         self.active_output = Some(output_id);
         self.active_scale = clamped_scale;
@@ -767,6 +793,11 @@ impl LiquidGlassPipeline {
         }
     }
 
+    /// Retains only backdrop FBO slots matching `keep` (`RUSTYOS-128`).
+    pub(crate) fn retain_slots(&mut self, mut keep: impl FnMut(u64) -> bool) {
+        self.outputs.retain(|&slot_id, _| keep(slot_id));
+    }
+
     /// Renders `backdrop_elements` incrementally into `output_id`'s offscreen FBO and runs
     /// the 5-pass Dual-Kawase blur whenever the underlying scene reports damage.
     #[allow(clippy::cast_possible_truncation)]
@@ -774,6 +805,25 @@ impl LiquidGlassPipeline {
         &mut self,
         renderer: &mut GlesRenderer,
         output_id: u32,
+        logical_size: Size<i32, Logical>,
+        output_scale: f64,
+        backdrop_elements: &[CompositorRenderElement],
+    ) -> bool {
+        self.prepare_backdrop_slot(
+            renderer,
+            u64::from(output_id),
+            logical_size,
+            output_scale,
+            backdrop_elements,
+        )
+    }
+
+    /// Renders `backdrop_elements` incrementally into a keyed backdrop slot (output or layered glass window).
+    #[allow(clippy::cast_possible_truncation)]
+    pub(crate) fn prepare_backdrop_slot(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        output_id: u64,
         logical_size: Size<i32, Logical>,
         output_scale: f64,
         backdrop_elements: &[CompositorRenderElement],
@@ -920,7 +970,7 @@ impl LiquidGlassPipeline {
 
     fn resolve_slot_id(
         &mut self,
-        output_id: u32,
+        output_id: u64,
         style: GlassPanelStyle,
         loc: Point<i32, Logical>,
         width: u16,
@@ -1019,7 +1069,7 @@ impl LiquidGlassPipeline {
     fn ensure_output_buffers(
         &mut self,
         renderer: &mut GlesRenderer,
-        output_id: u32,
+        output_id: u64,
         scene_phys: Size<i32, Physical>,
         clamped_scale: f64,
         scale_milli: i64,

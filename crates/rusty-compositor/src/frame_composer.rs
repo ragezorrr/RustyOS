@@ -477,7 +477,7 @@ fn push_window_liquid_glass_elements(
     let radius = if glass.corner_radius > 0 {
         glass.corner_radius as i32
     } else {
-        12
+        crate::shell_render::WINDOW_RADIUS
     };
 
     if let Some(ref regions) = glass.region {
@@ -746,36 +746,61 @@ fn push_window_elements_with_options(
         let client_loc =
             Point::<i32, Logical>::from((origin.0 - geo_loc.x, origin.1 + titlebar_h - geo_loc.y))
                 .to_physical_precise_round(output_scale);
-        if has_open_popup && let Some(root) = smithay::wayland::seat::WaylandFocus::wl_surface(sw) {
-            surface_elems.extend(
-                render_elements_from_surface_tree::<
-                    GlesRenderer,
-                    WaylandSurfaceRenderElement<GlesRenderer>,
-                >(
-                    renderer,
-                    &root,
-                    client_loc,
-                    smithay::utils::Scale::from(output_scale),
-                    1.0,
-                    Kind::Unspecified,
-                )
-                .into_iter()
-                .map(CompositorRenderElement::Surface),
-            );
+        let raw_elems = if has_open_popup
+            && let Some(root) = smithay::wayland::seat::WaylandFocus::wl_surface(sw)
+        {
+            render_elements_from_surface_tree::<
+                GlesRenderer,
+                WaylandSurfaceRenderElement<GlesRenderer>,
+            >(
+                renderer,
+                &root,
+                client_loc,
+                smithay::utils::Scale::from(output_scale),
+                1.0,
+                Kind::Unspecified,
+            )
         } else {
-            surface_elems.extend(
-                <smithay::desktop::Window as AsRenderElements<GlesRenderer>>::render_elements::<
-                    WaylandSurfaceRenderElement<GlesRenderer>,
-                >(
-                    sw,
+            <smithay::desktop::Window as AsRenderElements<GlesRenderer>>::render_elements::<
+                WaylandSurfaceRenderElement<GlesRenderer>,
+            >(
+                sw,
+                renderer,
+                client_loc,
+                smithay::utils::Scale::from(output_scale),
+                1.0,
+            )
+        };
+        if is_fullscreen {
+            surface_elems.extend(raw_elems.into_iter().map(CompositorRenderElement::Surface));
+        } else {
+            let clip_p0: Point<i32, smithay::utils::Physical> =
+                Point::<i32, Logical>::from((frame_rect.x, frame_rect.y))
+                    .to_physical_precise_round(output_scale);
+            let clip_p1: Point<i32, smithay::utils::Physical> = Point::<i32, Logical>::from((
+                frame_rect.x + frame_rect.width,
+                frame_rect.y + frame_rect.height,
+            ))
+            .to_physical_precise_round(output_scale);
+            let clip_rect_phys = Rectangle::new(
+                clip_p0,
+                Size::from((
+                    (clip_p1.x - clip_p0.x).max(1),
+                    (clip_p1.y - clip_p0.y).max(1),
+                )),
+            );
+            #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+            let clip_radius_phys = crate::shell_render::WINDOW_RADIUS as f32
+                * (crate::config::clamp_display_scale(output_scale) as f32);
+            surface_elems.extend(raw_elems.into_iter().map(|el| {
+                shape_cache.clip_surface_element(
                     renderer,
-                    client_loc,
-                    smithay::utils::Scale::from(output_scale),
+                    el,
+                    clip_rect_phys,
+                    clip_radius_phys,
                     1.0,
                 )
-                .into_iter()
-                .map(CompositorRenderElement::Surface),
-            );
+            }));
         }
         if should_skip_uncommitted_bound_window(!surface_elems.is_empty(), committed_size) {
             return;
@@ -841,23 +866,338 @@ fn push_window_elements_with_options(
     }
 }
 
+const fn window_glass_backdrop_slot(output_id: u32, win_id: u64) -> u64 {
+    0x8000_0000_0000_0000 | ((output_id as u64) << 40) | (win_id & 0x00FF_FFFF_FFFF)
+}
+
 fn prune_inactive_minimize_snapshots(
     state: &RustyCompositorState,
     visible_windows: &[(rusty_wm::WindowId, rusty_wm::Rect)],
     shape_cache: &mut crate::surfaces::UiShapeCache,
 ) {
-    let _ = visible_windows;
-    if !shape_cache.has_any_minimize_snapshots() {
-        return;
+    if shape_cache.has_any_minimize_snapshots() {
+        shape_cache.retain_minimize_snapshots(|win_id_u64| {
+            let win_id = rusty_wm::WindowId(win_id_u64);
+            state.is_window_minimized(win_id)
+                || state
+                    .minimize_anims
+                    .iter()
+                    .any(|anim| anim.win_id == win_id)
+        });
     }
-    shape_cache.retain_minimize_snapshots(|win_id_u64| {
+    shape_cache.retain_lifecycle_snapshots(|win_id_u64| {
         let win_id = rusty_wm::WindowId(win_id_u64);
-        state.is_window_minimized(win_id)
+        visible_windows.iter().any(|(id, _)| *id == win_id)
             || state
-                .minimize_anims
+                .lifecycle_anims
                 .iter()
                 .any(|anim| anim.win_id == win_id)
     });
+    shape_cache.retain_liquid_glass_slots(|slot_id| {
+        if (slot_id & 0x8000_0000_0000_0000) == 0 {
+            return true;
+        }
+        let win_id_part = slot_id & 0x00FF_FFFF_FFFF;
+        visible_windows
+            .iter()
+            .any(|(id, _)| (id.0 & 0x00FF_FFFF_FFFF) == win_id_part)
+    });
+}
+
+fn window_lifecycle_commit_sig(
+    state: &RustyCompositorState,
+    win_id: rusty_wm::WindowId,
+    frame_rect: rusty_wm::Rect,
+    is_focused: bool,
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    state.window_commit_revision(win_id).hash(&mut h);
+    frame_rect.width.hash(&mut h);
+    frame_rect.height.hash(&mut h);
+    is_focused.hash(&mut h);
+    (!state.window_uses_csd(win_id)).hash(&mut h);
+    (state.hovered_traffic_light_window == Some(win_id)).hash(&mut h);
+    state.reduce_transparency.hash(&mut h);
+    state.user_config.appearance.hash(&mut h);
+    state.user_config.ui_accent_index.hash(&mut h);
+    h.finish()
+}
+
+fn capture_window_local_elements(
+    renderer: &mut GlesRenderer,
+    text_cache: &mut crate::text::TextCache,
+    shape_cache: &mut crate::surfaces::UiShapeCache,
+    state: &RustyCompositorState,
+    win: (rusty_wm::WindowId, rusty_wm::Rect, bool),
+    output_loc: Point<i32, Logical>,
+    output_scale: f64,
+) -> (rusty_wm::Rect, Vec<CompositorRenderElement>) {
+    let (win_id, rect, is_focused) = win;
+    let frame_rect = state.resolved_window_global_rect(win_id).unwrap_or(rect);
+    let win_origin = (frame_rect.x, frame_rect.y);
+    let glass_offset = Point::from((win_origin.0 - output_loc.x, win_origin.1 - output_loc.y));
+    let mut local_elements = Vec::new();
+    push_window_elements_with_options(
+        &mut local_elements,
+        renderer,
+        text_cache,
+        shape_cache,
+        state,
+        win_id,
+        rect,
+        Point::from(win_origin),
+        output_scale,
+        is_focused,
+        state.is_window_fullscreen(win_id),
+        false,
+        glass_offset,
+    );
+    (
+        frame_rect,
+        scale_render_elements_for_output(local_elements, output_scale),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn capture_pending_open_lifecycle_snapshots(
+    renderer: &mut GlesRenderer,
+    text_cache: &mut crate::text::TextCache,
+    shape_cache: &mut crate::surfaces::UiShapeCache,
+    state: &mut RustyCompositorState,
+    output_loc: Point<i32, Logical>,
+    output_windows: &[(rusty_wm::WindowId, rusty_wm::Rect)],
+    focused_win: Option<rusty_wm::WindowId>,
+    output_scale: f64,
+) {
+    let now = state.elapsed();
+    for idx in 0..state.lifecycle_anims.len() {
+        let (win_id, kind, started_after_commit, snapshot_pending) = {
+            let anim = &state.lifecycle_anims[idx];
+            (
+                anim.win_id,
+                anim.kind,
+                anim.started_after_commit,
+                anim.snapshot_pending,
+            )
+        };
+        if kind != crate::state::WindowLifecycleKind::Open {
+            continue;
+        }
+        let Some(&(_, rect)) = output_windows.iter().find(|(id, _)| *id == win_id) else {
+            continue;
+        };
+        let is_focused = focused_win == Some(win_id);
+        let probe_rect = state.resolved_window_global_rect(win_id).unwrap_or(rect);
+        let sig = window_lifecycle_commit_sig(state, win_id, probe_rect, is_focused);
+        if started_after_commit
+            && !snapshot_pending
+            && shape_cache.lifecycle_snapshot_matches_sig(win_id.0, sig)
+        {
+            continue;
+        }
+        let (actual_rect, scaled) = capture_window_local_elements(
+            renderer,
+            text_cache,
+            shape_cache,
+            state,
+            (win_id, rect, is_focused),
+            output_loc,
+            output_scale,
+        );
+        if scaled.is_empty() {
+            continue;
+        }
+        if shape_cache.capture_lifecycle_snapshot(
+            renderer,
+            win_id.0,
+            Size::from((actual_rect.width.max(1), actual_rect.height.max(1))),
+            output_scale,
+            sig,
+            &scaled,
+        ) {
+            let anim = &mut state.lifecycle_anims[idx];
+            anim.window_rect = actual_rect;
+            anim.focused = is_focused;
+            anim.snapshot_pending = false;
+            if !anim.started_after_commit {
+                anim.started_after_commit = true;
+                let mut progress = rusty_animation::AnimatedValue::new_settled(0.0);
+                progress.retarget(
+                    1.0,
+                    now,
+                    Duration::from_millis(180),
+                    rusty_animation::Easing::EaseOutQuart,
+                    false,
+                );
+                anim.progress = progress;
+                state.shell_redraw_needed = true;
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn refresh_idle_close_lifecycle_snapshots(
+    renderer: &mut GlesRenderer,
+    text_cache: &mut crate::text::TextCache,
+    shape_cache: &mut crate::surfaces::UiShapeCache,
+    state: &RustyCompositorState,
+    output_loc: Point<i32, Logical>,
+    output_windows: &[(rusty_wm::WindowId, rusty_wm::Rect)],
+    focused_win: Option<rusty_wm::WindowId>,
+    output_scale: f64,
+) {
+    if state.animations.reduced_motion() {
+        return;
+    }
+    for &(win_id, rect) in output_windows {
+        if state.is_window_minimized(win_id)
+            || state.is_window_fullscreen(win_id)
+            || state.minimize_anims.iter().any(|a| a.win_id == win_id)
+            || state.lifecycle_anims.iter().any(|a| a.win_id == win_id)
+        {
+            continue;
+        }
+        let is_focused = focused_win == Some(win_id);
+        let probe_rect = state.resolved_window_global_rect(win_id).unwrap_or(rect);
+        let sig = window_lifecycle_commit_sig(state, win_id, probe_rect, is_focused);
+        if shape_cache.lifecycle_snapshot_matches_sig(win_id.0, sig) {
+            continue;
+        }
+        let (actual_rect, scaled) = capture_window_local_elements(
+            renderer,
+            text_cache,
+            shape_cache,
+            state,
+            (win_id, rect, is_focused),
+            output_loc,
+            output_scale,
+        );
+        if !scaled.is_empty() {
+            let _ = shape_cache.capture_lifecycle_snapshot(
+                renderer,
+                win_id.0,
+                Size::from((actual_rect.width.max(1), actual_rect.height.max(1))),
+                output_scale,
+                sig,
+                &scaled,
+            );
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_window_lifecycle_snapshots_for_output(
+    renderer: &mut GlesRenderer,
+    text_cache: &mut crate::text::TextCache,
+    shape_cache: &mut crate::surfaces::UiShapeCache,
+    state: &mut RustyCompositorState,
+    output_loc: Point<i32, Logical>,
+    output_windows: &[(rusty_wm::WindowId, rusty_wm::Rect)],
+    focused_win: Option<rusty_wm::WindowId>,
+    fullscreen_win: Option<rusty_wm::WindowId>,
+    output_scale: f64,
+) {
+    if fullscreen_win.is_some() {
+        return;
+    }
+    capture_pending_open_lifecycle_snapshots(
+        renderer,
+        text_cache,
+        shape_cache,
+        state,
+        output_loc,
+        output_windows,
+        focused_win,
+        output_scale,
+    );
+    refresh_idle_close_lifecycle_snapshots(
+        renderer,
+        text_cache,
+        shape_cache,
+        state,
+        output_loc,
+        output_windows,
+        focused_win,
+        output_scale,
+    );
+}
+
+#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+fn push_lifecycle_warp_elements(
+    backdrop_list: &mut Vec<CompositorRenderElement>,
+    renderer: &mut GlesRenderer,
+    shape_cache: &mut crate::surfaces::UiShapeCache,
+    state: &RustyCompositorState,
+    output_geo: Rectangle<i32, Logical>,
+    output_scale: f64,
+) {
+    let output_loc = output_geo.loc;
+    for anim in &state.lifecycle_anims {
+        if !anim.started_after_commit {
+            continue;
+        }
+        let closing = anim.kind == crate::state::WindowLifecycleKind::Close;
+        let anim_geo = Rectangle::new(
+            Point::from((anim.window_rect.x, anim.window_rect.y)),
+            Size::from((
+                anim.window_rect.width.max(1),
+                anim.window_rect.height.max(1),
+            )),
+        );
+        if anim_geo.intersection(output_geo).is_none() {
+            continue;
+        }
+        let t = anim.progress.current().clamp(0.0, 1.0);
+        let (scale_factor, alpha) = if closing {
+            (1.0 - 0.07 * t, 1.0 - t)
+        } else {
+            (0.93 + 0.07 * t, t)
+        };
+        let win_rect = Rectangle::new(
+            Point::from((
+                anim.window_rect.x - output_loc.x,
+                anim.window_rect.y - output_loc.y,
+            )),
+            Size::from((
+                anim.window_rect.width.max(1),
+                anim.window_rect.height.max(1),
+            )),
+        );
+        if let Some(el) = shape_cache.lifecycle_warp_element(
+            renderer,
+            anim.win_id.0,
+            win_rect,
+            t,
+            closing,
+            output_scale,
+        ) {
+            backdrop_list.push(el);
+        }
+        let shadow_alpha = (alpha * alpha) as f32;
+        if state.user_config.window_shadow != crate::config::WindowShadowMode::None
+            && shadow_alpha > 0.002
+        {
+            let scaled_rect = crate::surfaces::centered_scaled_rect(win_rect, scale_factor);
+            let frame_rect = rusty_wm::Rect::new(
+                scaled_rect.loc.x,
+                scaled_rect.loc.y,
+                scaled_rect.size.w,
+                scaled_rect.size.h,
+            );
+            backdrop_list.extend(
+                crate::shell_render::generate_window_shadow_elements_with_opacity(
+                    shape_cache,
+                    renderer,
+                    frame_rect,
+                    anim.focused,
+                    state.user_config.window_shadow,
+                    shadow_alpha,
+                ),
+            );
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1006,6 +1346,7 @@ fn build_backdrop_render_elements(
     shape_cache: &mut crate::surfaces::UiShapeCache,
     state: &RustyCompositorState,
     smithay_output: &smithay::output::Output,
+    output_id: u32,
     output_geo: Rectangle<i32, Logical>,
     output_loc: Point<i32, Logical>,
     output_scale: f64,
@@ -1014,40 +1355,9 @@ fn build_backdrop_render_elements(
     fullscreen_win: Option<rusty_wm::WindowId>,
     is_primary: bool,
 ) -> Vec<CompositorRenderElement> {
-    let mut backdrop_list: Vec<CompositorRenderElement> = Vec::new();
-    for &(win_id, rect) in output_windows.iter().rev() {
-        if state.is_window_minimized(win_id)
-            || state
-                .minimize_anims
-                .iter()
-                .any(|anim| anim.win_id == win_id)
-        {
-            continue;
-        }
-        if let Some(fs_id) = fullscreen_win
-            && win_id != fs_id
-        {
-            continue;
-        }
-        let is_focused = focused_win == Some(win_id);
-        let is_fullscreen = fullscreen_win == Some(win_id) || state.is_window_fullscreen(win_id);
-        push_window_backdrop_elements(
-            &mut backdrop_list,
-            renderer,
-            text_cache,
-            shape_cache,
-            state,
-            win_id,
-            rect,
-            output_loc,
-            output_scale,
-            is_focused,
-            is_fullscreen,
-        );
-    }
-
+    let mut bg_raw: Vec<CompositorRenderElement> = Vec::new();
     let _ = push_layer_elements(
-        &mut backdrop_list,
+        &mut bg_raw,
         smithay_output,
         renderer,
         &[Layer::Bottom, Layer::Background],
@@ -1067,7 +1377,7 @@ fn build_backdrop_render_elements(
                 state.desktop_inline_rename.as_ref(),
                 Size::<i32, Logical>::from((output_geo.size.w.max(1), output_geo.size.h.max(1))),
                 crate::shell_render::DOCK_HEIGHT,
-                &mut backdrop_list,
+                &mut bg_raw,
             );
         }
         if let Some(wallpaper) = shape_cache.wallpaper_element(
@@ -1075,11 +1385,80 @@ fn build_backdrop_render_elements(
             Size::<i32, Logical>::from((output_geo.size.w.max(1), output_geo.size.h.max(1))),
             state.user_config.wallpaper.as_deref(),
         ) {
-            backdrop_list.push(CompositorRenderElement::Memory(wallpaper));
+            bg_raw.push(CompositorRenderElement::Memory(wallpaper));
         }
     }
 
-    scale_render_elements_for_output(backdrop_list, output_scale)
+    let mut accumulated = scale_render_elements_for_output(bg_raw, output_scale);
+    let backdrop_logical =
+        Size::<i32, Logical>::from((output_geo.size.w.max(1), output_geo.size.h.max(1)));
+
+    // Walk bottom-to-top so every Liquid Glass window samples the true Dual-Kawase blur
+    // of wallpaper, desktop items, and all windows strictly beneath it (zero self-blur).
+    for &(win_id, rect) in output_windows {
+        if state.is_window_minimized(win_id)
+            || state
+                .minimize_anims
+                .iter()
+                .any(|anim| anim.win_id == win_id)
+            || state.lifecycle_anims.iter().any(|anim| {
+                anim.win_id == win_id && anim.kind == crate::state::WindowLifecycleKind::Open
+            })
+        {
+            continue;
+        }
+        if let Some(fs_id) = fullscreen_win
+            && win_id != fs_id
+        {
+            continue;
+        }
+        let is_focused = focused_win == Some(win_id);
+        let is_fullscreen = fullscreen_win == Some(win_id) || state.is_window_fullscreen(win_id);
+        let has_glass = !is_fullscreen
+            && !state.reduce_transparency
+            && !state.screen_locked
+            && state
+                .smithay_window_for_id(win_id)
+                .and_then(|sw| {
+                    smithay::wayland::seat::WaylandFocus::wl_surface(&sw).map(|s| {
+                        crate::state::liquid_glass::surface_liquid_glass_state(&s).is_some()
+                    })
+                })
+                .unwrap_or(false);
+        if has_glass {
+            let slot = window_glass_backdrop_slot(output_id, win_id.0);
+            let _ = shape_cache.prepare_liquid_glass_backdrop_slot(
+                renderer,
+                slot,
+                backdrop_logical,
+                output_scale,
+                &accumulated,
+            );
+        } else {
+            shape_cache.clear_active_liquid_glass_backdrop();
+        }
+
+        let mut win_raw: Vec<CompositorRenderElement> = Vec::new();
+        push_window_backdrop_elements(
+            &mut win_raw,
+            renderer,
+            text_cache,
+            shape_cache,
+            state,
+            win_id,
+            rect,
+            output_loc,
+            output_scale,
+            is_focused,
+            is_fullscreen,
+        );
+        shape_cache.clear_active_liquid_glass_backdrop();
+        let mut win_scaled = scale_render_elements_for_output(win_raw, output_scale);
+        win_scaled.extend(accumulated);
+        accumulated = win_scaled;
+    }
+
+    accumulated
 }
 
 /// Builds the front-to-back composite render element list for `output_id` using `cursor_mode` (`RUSTYOS-046`, `RUSTYOS-060`).
@@ -1260,6 +1639,7 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
         shape_cache,
         state,
         &smithay_output,
+        output_entry.id.0,
         output_geo,
         output_loc,
         output_scale,
@@ -1305,6 +1685,17 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
         state,
         output_loc,
         &output_windows,
+        output_scale,
+    );
+    prepare_window_lifecycle_snapshots_for_output(
+        renderer,
+        text_cache,
+        shape_cache,
+        state,
+        output_loc,
+        &output_windows,
+        focused_win,
+        fullscreen_win,
         output_scale,
     );
 
@@ -1593,7 +1984,6 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
                 selected: p.selected,
             });
 
-        let settings_view = state.settings_active.then(|| state.settings_render_state());
         let context_menu_view = state
             .context_menu
             .as_ref()
@@ -1618,8 +2008,6 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
             ShellOverlayView::Switcher(sw)
         } else if let Some(spot) = spotlight_view.as_ref() {
             ShellOverlayView::Spotlight(spot)
-        } else if let Some(settings) = settings_view.as_ref() {
-            ShellOverlayView::Settings(settings)
         } else if let Some(qs) = qs_view.as_ref() {
             ShellOverlayView::QuickSettings(qs)
         } else if let Some(up) = updates_view.as_ref() {
@@ -1640,7 +2028,6 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
             ShellOverlayView::None
         };
 
-        let settings_overlay = matches!(overlay, ShellOverlayView::Settings(_));
         let overlay_elements = crate::shell_render::generate_shell_foreground_overlay_elements(
             text_cache,
             shape_cache,
@@ -1666,8 +2053,6 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
             Vec::new()
         };
 
-        // Settings behaves like a standard floating window under TopBar & Dock (no dimming scrim);
-        // priority modals/popovers (Polkit, Portal, Spotlight, QuickSettings, Switcher) stay above chrome.
         let mut popup_elements = Vec::new();
         push_client_popup_elements(
             &mut popup_elements,
@@ -1679,17 +2064,10 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
             &output_windows,
             fullscreen_win,
         );
-        if settings_overlay {
-            render_list.extend(chrome_elements);
-            render_list.extend(overlay_elements);
-            render_list.extend(top_layer_elements);
-            render_list.extend(popup_elements);
-        } else {
-            render_list.extend(overlay_elements);
-            render_list.extend(top_layer_elements);
-            render_list.extend(popup_elements);
-            render_list.extend(chrome_elements);
-        }
+        render_list.extend(overlay_elements);
+        render_list.extend(top_layer_elements);
+        render_list.extend(popup_elements);
+        render_list.extend(chrome_elements);
 
         let overview_overlay = if matches!(overlay, ShellOverlayView::ContextMenu(_))
             && let Some(ov) = ov_view.as_ref()
@@ -1742,17 +2120,31 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
 
     shape_cache.clear_active_liquid_glass_backdrop();
     let mut final_list = scale_render_elements_for_output(render_list, output_scale);
-    if fullscreen_win.is_none() && !state.minimize_anims.is_empty() {
+    if fullscreen_win.is_none()
+        && (!state.minimize_anims.is_empty() || !state.lifecycle_anims.is_empty())
+    {
         let mut warp_elements = Vec::new();
-        push_minimize_warp_elements(
-            &mut warp_elements,
-            renderer,
-            shape_cache,
-            state,
-            output_loc,
-            output_scale,
-            &output_windows,
-        );
+        if !state.lifecycle_anims.is_empty() {
+            push_lifecycle_warp_elements(
+                &mut warp_elements,
+                renderer,
+                shape_cache,
+                state,
+                output_geo,
+                output_scale,
+            );
+        }
+        if !state.minimize_anims.is_empty() {
+            push_minimize_warp_elements(
+                &mut warp_elements,
+                renderer,
+                shape_cache,
+                state,
+                output_loc,
+                output_scale,
+                &output_windows,
+            );
+        }
         final_list.extend(scale_render_elements_for_output(
             warp_elements,
             output_scale,

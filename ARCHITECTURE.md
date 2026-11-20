@@ -1,15 +1,17 @@
 # RustyOS --- Architecture
 
-Статус: **актуально для реализации до `RUSTYOS-088`** (развитие новых
+Статус: **актуально для реализации до `RUSTYOS-128`** (развитие новых
 границ и протоколов по-прежнему требует ADR и `APPROVE:` по `AGENTS.md`).
 
 ## 1. Архитектурная модель
 
 RustyOS состоит из собственного Wayland-композитора (`rusty-compositor`)
 на базе Smithay `0.7` (`calloop`, EGL/GLES, DRM/KMS/GBM/libinput/udev),
-модулей управления окнами/анимациями/сервисами и внешнего процесса
-оболочки (`rusty-shell`), взаимодействующего через версионируемый Unix
-socket IPC (`rusty-ipc`) и `zwlr_layer_shell_v1`.
+встроенного single-process desktop shell (`shell_render/*`, `ADR-0027`,
+`ADR-0072`), модулей управления окнами/анимациями/сервисами и
+самостоятельных системных Wayland CSD-приложений (`rusty-files`,
+`rusty-settings`, `rusty-terminal`, `rusty-installer`), взаимодействующих с
+композитором через Wayland и версионируемый Unix socket IPC (`rusty-ipc`).
 
 ## 2. Компоненты
 
@@ -55,31 +57,35 @@ Event loop не должен блокироваться тяжёлыми опе�
 - tracking damage (`OutputDamageTracker`), Direct Scanout при полноэкранном
   DMA-BUF клиенте;
 - единый Liquid Glass пайплайн (`surfaces/liquid_glass.rs`: damage-gated Dual-Kawase FBO-пирамида
-  `1 -> half_a -> quarter_a -> eighth_a -> quarter_b -> half_out`, кубический суперэллиптический
+  `1 -> half_a -> quarter_a -> eighth_a -> quarter_b -> half_out`, непрерывный кубический суперэллиптический
   шейдер `LIQUID_GLASS_FRAG` с 14 px преломляющей линзой, 3-слойным направленным кантом `uRim` и
   профилями `GlassPanelStyle::{Dock, Popover, ControlModule}` + `invalidate_all()` при смене темы/обоев);
-- 2D shell/SSD рендеринг и CPU-fallback стекла через `UiShapeCache` (`surfaces/`: `mod`, `sdf`,
-  `glyphs`, `xcursor`, `window_shadow`, `window_minimize`) и `TextCache` (`fontdue`).
+- композиторная обрезка неполноэкранных клиентских окон (`surfaces/window_clip.rs`: `ClippedSurfaceElement`,
+  `SURFACE_CLIP_FRAG`, единый кубический суперэллипс `WINDOW_RADIUS = 14`, прямая сохранность Direct Scanout
+  для полноэкранных окон);
+- единый 3-дольный GPU-шейдер теней (`surfaces/window_shadow.rs`: wide + narrow + `1.5 px` contact) и
+  жизненные scale+fade анимации открытия/закрытия окон (`surfaces/window_minimize.rs`: `180 ms` open /
+  `160 ms` close по сдвигу `0.93 <-> 1.0`, плюс Genie/Scale minimize/restore);
+- 2D shell/SSD рендеринг и CPU-fallback стекла/теней через `UiShapeCache` (`surfaces/`: `mod`, `sdf`,
+  `glyphs`, `xcursor`, `liquid_glass`, `window_clip`, `window_shadow`, `window_minimize`) и `TextCache` (`fontdue`).
 
 ### Animation Engine (`crates/rusty-animation`)
 
 - единая монотонная временная шкала, независимая от `60/120/144/240` Hz;
-- easing-кривые (`EaseOutQuart`, spring/smooth переходы);
+- easing-кривые (`EaseOutQuart`, `EaseOutCubic`, spring/smooth переходы);
 - прерывание/реверс на лету и режим `reduced_motion`.
 
-### Shell и IPC (`apps/rusty-shell`, `crates/rusty-ipc`)
+### Shell и IPC (`crates/rusty-compositor/src/shell_render`, `crates/rusty-ipc`)
 
 - `rusty-ipc`: версионируемый протокол (`ShellRequest`, `CompositorEvent`,
   `DesktopStateSnapshot`) поверх Unix domain socket с защитой от битых/oversized
-  сообщений;
-- `apps/rusty-shell`: опциональный внешний процесс shell-клиента
-  (`--wayland`, opt-in через `RUSTYOS_EXTERNAL_SHELL=1` в `rustyos-session`),
-  плюс канонические встроенные композиторные оверлеи
-  (`shell_render/`: `mod`, `text_pass`, `overlay_shapes`, `chrome_shapes`, `tokens`,
-  `top_bar`, `dock`, `context_menu`, `quick_settings`, `spotlight_overview`,
-  `lock_screen`, `modals`, `ssd`) для low-latency
-  взаимодействия (TopBar, Dock, Context Menus, Spotlight Launcher, Overview, Quick Settings,
-  Lock Screen, Notifications, Alt+Tab HUD, Polkit/Portal/PickColor/Settings modals).
+  сообщений для внешних клиентов (`rusty-settings` и др.);
+- встроенные композиторные оверлеи (`shell_render/`: `mod`, `text_pass`, `overlay_shapes`,
+  `chrome_shapes`, `tokens`, `top_bar`, `top_bar_menus`, `dock`, `dock_stack`,
+  `context_menu`, `quick_settings`, `notification_center`, `updates_popover`,
+  `wifi_popover`, `spotlight_overview`, `desktop_canvas`, `lock_screen`,
+  `modals/{magnifier,polkit,portal}`, `ssd`) для low-latency взаимодействия без
+  дублирующего процесса `rusty-shell` или дубля `modals/settings.rs` (`ADR-0027`, `ADR-0072`).
 
 ### System Services (`crates/rusty-services`)
 
@@ -98,22 +104,25 @@ Event loop не должен блокироваться тяжёлыми опе�
 ### Системные приложения (`apps/rusty-files`, `apps/rusty-settings`, `apps/rusty-terminal`, `apps/rusty-installer`) и общий UI-крейт (`crates/rusty-ui`)
 
 - Самостоятельные Wayland CSD-клиенты на базе `smithay-client-toolkit`, `fontdue` и
-  общего крейта `crates/rusty-ui` в едином эталонном стиле окон (`WINDOW_RADIUS = 20`,
+  общего крейта `crates/rusty-ui` в едином эталонном стиле окон (`WINDOW_RADIUS = 14`,
   единые `14 px` traffic lights `#EE5A6A`/`#F4B63F`/`#3CC68A` в `(14/36/58, 13)`
-  с центрами `21.0, 43.0, 65.0`, обводка до угловой маски и сквозная синхронизация темы
-  `Light` / `Dark` / `Auto`), запускаемые композитором с приоритетом `exe_dir`
-  над `PATH` (`launcher.rs`):
-- `rusty-ui`: единый общий крейт для оконной геометрии (`Rect`, `Point`, `Size`, `WINDOW_RADIUS = 20`,
+  с центрами `21.0, 43.0, 65.0` и приглушением `inactive_color()` в фоне, обводка до угловой
+  маски и сквозная синхронизация темы `Light` / `Dark` / `Auto`), запускаемые композитором с
+  приоритетом `exe_dir` над `PATH` (`launcher.rs`):
+- `rusty-ui`: единый общий крейт для оконной геометрии (`Rect`, `Point`, `Size`, `WINDOW_RADIUS = 14`,
   `TITLEBAR_HEIGHT = 40`, `SSD_TITLEBAR_HEIGHT = 28`), светофоров (`TrafficLightButtons`, `TrafficLightKind`,
-  векторные микроглифы `x`, `-`, `+`), тем (`ThemePalette`, `ACCENT_PALETTE`), структуры окна (`WindowFrame`,
-  `WindowHitTarget`, double-click maximize) и CPU-рендерера с субпиксельным сглаживанием (`UiCanvas`);
-- `rusty-files`: плоский edge-to-edge sidebar (`#ECEDF1`/`#262628`, активный пункт `r = 10` `#D9DADD`/`#3E3E41`),
-  бесшовные капсулы тулбара/вкладок без рамок, Icons/List/Columns/Gallery,
-  clickable Path Bar, Quick Look, Get Info, Copy/Move, Trash, теги и Liquid Glass поповеры;
-- `rusty-settings`: отдельное окно настроек (`882×600`, `org.rustyos.Settings`) с
-  плоским непрозрачным сайдбаром (`#ECEDF1`/`#262628`), карточками `#FFFFFF`/`#2C2C2D` (`r = 12`)
-  на фоне `#F5F6FA`/`#1C1C1D` без рамок, скроллингом, выбором темы (`Light`/`Dark`/`Auto`),
-  встроенной страницей *Software Update* (`--page updates`) с интерактивным прогрессом и
+  векторные микроглифы `x`, `-`, `+`), 7-цветовых палитр Light/Dark (`ThemePalette`, `ACCENT_PALETTE`,
+  `accent_for`), меню (`menu`: `14/26/12/9 px`), шапок (`window_header`), 3-дольных теней Гаусса
+  (`shadow`: `ShadowElevation`, `ShadowStyle`, `draw_elevation_shadow_with`), структуры окна (`WindowFrame`,
+  `WindowHitTarget`, double-click maximize) и CPU-рендерера с Porter-Duff premul-смешиванием (`UiCanvas`);
+- `rusty-files`: сайдбар с реальным Liquid Glass через `rustyos_liquid_glass_v1` (`GlassStyle::Sidebar`,
+  `WlRegion` шириной сайдбара + радиус, плоский `#ECEDF1`/`#262628` fallback при `reduce_transparency`,
+  активный пункт `r = 10` `#D9DADD`/`#3E3E41`), бесшовные капсулы тулбара/вкладок без рамок,
+  Icons/List/Columns/Gallery, clickable Path Bar, Quick Look, Get Info, Copy/Move, Trash, теги и Liquid Glass поповеры;
+- `rusty-settings`: отдельное окно настроек (`920×640` / `882×600`, `org.rustyos.Settings`) с
+  Liquid Glass сайдбаром (`rustyos_liquid_glass_v1`, `WlRegion` по ширине сайдбара + плоский fallback при
+  `reduce_transparency`), карточками `#FFFFFF`/`#2C2C2D` (`r = 12`) на фоне `#F5F6FA`/`#1C1C1D`,
+  выбором темы (`Light`/`Dark`/`Auto`), встроенной страницей *Software Update* (`--page updates`) и
   живой отправкой `v1|RELOAD_CONFIG` в композитор;
 - `rusty-terminal`: Wayland-EGL GLES2 + wl_shm терминал с векторными светофорами, вкладками,
   scrollback и плавным скроллингом;
@@ -134,21 +143,20 @@ RustyOS/
 │   │   └── src/
 │   │       ├── frame_composer.rs  # Backend-независимая сборка render list кадра, Z-order overlay/chrome/layer-shell, HiDPI scale, readback
 │   │       ├── state/         # RustyCompositorState, wm_windows, shell_actions, context_menu_actions, system_bridges, wayland_handlers/
-│   │       ├── shell_render/  # mod (фасад), text_pass, overlay_shapes, chrome_shapes, tokens, top_bar (panel, menus, status, notifications), dock, dock_stack, context_menu, quick_settings, updates_popover, spotlight_overview, lock_screen, modals (polkit, portal, magnifier, settings), ssd
+│   │       ├── shell_render/  # mod (фасад), text_pass, overlay_shapes, chrome_shapes, tokens, top_bar, top_bar_menus, dock, dock_stack, context_menu, quick_settings, updates_popover, wifi_popover, notification_center, spotlight_overview, desktop_canvas, lock_screen, modals (polkit, portal, magnifier), ssd
 │   │       ├── input/         # keyboard, pointer, shell_pointer, gestures
-│   │       └── surfaces/      # UiShapeCache, sdf, glyphs, xcursor, liquid_glass, window_shadow, window_minimize
+│   │       └── surfaces/      # UiShapeCache, sdf, glyphs, xcursor, liquid_glass, window_clip, window_shadow, window_minimize
 │   ├── rusty-wm/              # Детерминированная модель WM и workspace 1..9
 │   ├── rusty-animation/       # Refresh-rate independent animation engine
-│   ├── rusty-ipc/             # Версионируемый IPC-протокол compositor <-> shell
+│   ├── rusty-ipc/             # Версионируемый IPC-протокол клиентов/приложений с композитором
 │   ├── rusty-services/        # Адаптеры NetworkManager, BlueZ, PipeWire, UPower, sysfs, logind, Polkit, Portal, file_manager, image_decode, updates
 │   │   └── src/               # lib (ServiceRegistry), power, connectivity, media, display_session, auth, logind, polkit, portal, file_manager (types, listing, trash, operations, metadata), image_decode, updates
-│   └── rusty-ui/              # Общий UI-крейт: геометрия окон, светофоры, палитры тем, WindowFrame, UiCanvas
+│   └── rusty-ui/              # Общий UI-крейт: геометрия окон (WINDOW_RADIUS=14), светофоры, menu, shadow, window_header, палитры Light/Dark, WindowFrame, UiCanvas
 ├── apps/
-│   ├── rusty-files/           # Самостоятельный Wayland-файловый менеджер (CSD, render: canvas, chrome, sidebar, views, dialogs, popup, mod; layout; state)
+│   ├── rusty-files/           # Самостоятельный Wayland-файловый менеджер (CSD + Liquid Glass sidebar, render: canvas, chrome, sidebar, views, dialogs, popup, mod; layout; state)
 │   ├── rusty-installer/       # Wayland CSD-установщик и OOBE Setup Assistant (disks, layout, liquid_glass, render, state, wayland)
-│   ├── rusty-settings/        # Самостоятельное Wayland CSD-окно System Settings (`882×600`, flat sidebar, Software Update, scroll, TOML + `RELOAD_CONFIG`)
-│   ├── rusty-shell/           # Внешний процесс shell поверх Wayland layer-shell + IPC
-│   └── rusty-terminal/        # Wayland-EGL GLES2 + wl_shm терминал с вкладками и векторными светофорами
+│   ├── rusty-settings/        # Самостоятельное Wayland CSD-окно System Settings (Liquid Glass sidebar, Software Update, scroll, TOML + `RELOAD_CONFIG`)
+│   └── rusty-terminal/        # Wayland-EGL GLES2 + wl_shm терминал с Liquid Glass сайдбаром, вкладками и векторными светофорами
 ├── bin/
 │   └── rustyos-session        # Лаунчер пользовательской сессии (`--doctor`, `.oobe-pending` autolaunch)
 ├── packaging/
@@ -215,9 +223,10 @@ RustyOS/
   - Системные меню: `shell_render/context_menu.rs` (`ContextMenuState`, `ContextMenuEntry`, `ContextMenuAction`, `compute_context_menu_layout`, `generate_context_menu_elements`) + `ShellOverlayView::ContextMenu` в `shell_render/mod.rs`.
   - Модульная подсистема: `crates/rusty-compositor/src/context_menu/` (`window_menu.rs`, `desktop_menu.rs`, `dock_menu.rs`, `actions.rs`, `mod.rs`) с фасадом в `state/context_menu_actions.rs`.
   - Оконное управление: перехват правого клика на SSD-заголовках/кнопках (`input/pointer.rs`), глобальные хоткеи `Alt+Right` / `Super+Right` и Wayland CSD callback `show_window_menu` (`state/wayland_handlers/core.rs`).
-  - Стандарт контекстных и выпадающих меню (`top_bar/menus.rs`, `shell_render/context_menu.rs`, `crates/rusty-compositor/src/frame_composer.rs`, `apps/rusty-files/src/{layout.rs, render/popup.rs, wayland.rs}`): концентрический `MENU_POPOVER_RADIUS = 13`, `MENU_POPOVER_PAD_Y = 5`, `MENU_ITEM_HEIGHT = 24`, `MENU_SEPARATOR_HEIGHT = 9`, инсетные пилюли ховера `HOVER_PILL_RADIUS = 7`, `HOVER_PILL_INSET_H = 5`, `HOVER_PILL_INSET_V = 1`, двухрежимное левое выравнивание (`icon: Option<UiGlyphKind>`, `14 px` без иконки / `14 px` глиф + `35 px` текст; в `rusty-files` раздельные `any_non_swatch_checked` / `swatch_rgb`: `x + 14` для текстовых строк, `cx = x + 19.0` + `x + 32` для tag-кружков, `x + 14` чекмарк + `x + 28` текст для `SortMenu`), многостадийная SDF-тень `(16, 52)`, направленный внутренний `1 px` hairline (верх `100%`, низ `35%`), колонка шорткатов `12 px`. Клиентские `xdg_popup` (`sync_popup_surface`) передают точный `wl_region` (`spec.layout.rect`) и прозрачный SHM-буфер при активном композиторном стекле (`render_popup_surface_pixels_with_glass`) (`ADR-0043`, `D-051`, `ADR-0053`, `ADR-0058`, `D-071`).
-  - Унифицированный GPU-шейдер Liquid Glass и CPU-fallback (`crates/rusty-compositor/src/surfaces/liquid_glass.rs`, `sdf.rs`): `LIQUID_GLASS_FRAG` с кубическим суперэллипсом (`cornerExtent = 1.5*r`), 14 px линзой (`ior = 1.7`) и 3-слойным направленным `uRim` для `GlassPanelStyle::{Dock, Popover, ControlModule}` плюс матовый карточный вариант `GlassPanelStyle::NotificationCard` (`refract = 3.0`, `rim = 0.22`, `alpha ≈ 0.75..0.79`) и `LiquidGlassPipeline::invalidate_all()` при смене темы/обоев (ADR-0052, ADR-0053, ADR-0061).
-  - First-party Wayland-протокол Liquid Glass `rustyos_liquid_glass_v1`: серверный менеджер `crates/rusty-compositor/src/state/wayland_handlers/liquid_glass.rs`, композиторная отрисовка в `frame_composer.rs` (`push_window_liquid_glass_elements` для основных окон и `push_client_popup_elements` / `push_popup_glass_panels` для `xdg_popup` поверх `PrepareBackdrop` и окон/Dock), клиентская интеграция в `apps/rusty-files` (`liquid_glass.rs`, `wayland.rs`) (ADR-0048, D-056, ADR-0058).
+  - Стандарт контекстных и выпадающих меню (`top_bar/menus.rs`, `shell_render/context_menu.rs`, `crates/rusty-compositor/src/frame_composer.rs`, `crates/rusty-ui/src/menu.rs`, `apps/rusty-files/src/{layout.rs, render/popup.rs, wayland.rs}`): концентрический `MENU_RADIUS = 14`, `MENU_POPOVER_PAD_Y = 5`, `MENU_ITEM_HEIGHT = 26`, `MENU_SEPARATOR_HEIGHT = 12`, инсетные пилюли ховера `HOVER_PILL_RADIUS = 9`, `HOVER_PILL_INSET_H = 5`, `HOVER_PILL_INSET_V = 1`, `TopBar` плашка открытого меню `8 px`, профиль `TopBarAppProfile::Desktop` по умолчанию, двухрежимное левое выравнивание, 3-дольная SDF/GPU тень `ShadowElevation::MenuOrTooltip`, направленный внутренний `1 px` hairline (верх `100%`, низ `35%`), колонка шорткатов `12 px`. Клиентские `xdg_popup` (`sync_popup_surface`) передают точный `wl_region` (`spec.layout.rect`) и прозрачный SHM-буфер при активном композиторном стекле (`render_popup_surface_pixels_with_glass`) (`ADR-0043`, `ADR-0058`, `ADR-0069`–`0071`).
+  - Унифицированный GPU-шейдер Liquid Glass и CPU-fallback (`crates/rusty-compositor/src/surfaces/liquid_glass.rs`, `sdf.rs`): `LIQUID_GLASS_FRAG` с непрерывным кубическим суперэллипсом (`r * 1.42` для скруглённых углов и L2-круг для капсул), 14 px линзой (`ior = 1.7`) и 3-слойным направленным `uRim` для `GlassPanelStyle::{Dock, Popover, ControlModule}` плюс `GlassPanelStyle::NotificationCard` (`ADR-0052`, `ADR-0053`, `ADR-0061`, `ADR-0072`).
+  - First-party Wayland-протокол Liquid Glass `rustyos_liquid_glass_v1`: серверный менеджер `crates/rusty-compositor/src/state/wayland_handlers/liquid_glass.rs`, композиторная отрисовка в `frame_composer.rs` (`push_window_liquid_glass_elements` для основных окон/сайдбаров и `push_client_popup_elements` / `push_popup_glass_panels` для `xdg_popup`), клиентская интеграция сайдбаров в `apps/rusty-files`, `apps/rusty-settings` и `apps/rusty-terminal` (`liquid_glass.rs`, `WlRegion` по ширине сайдбара + радиус) (`ADR-0048`, `ADR-0058`, `ADR-0072`).
+  - Композиторная обрезка клиентских углов и lifecycle-анимации (`RUSTYOS-128`, `ADR-0072`): `surfaces/window_clip.rs` (`ClippedSurfaceElement`, `SURFACE_CLIP_FRAG`) + `surfaces/window_minimize.rs` (`180 ms` open / `160 ms` close `0.93 <-> 1.0`).
   - Сеть, проводное подключение, `WifiPopover` и страницы `Wi-Fi` / `Network` (`RUSTYOS-108`, `ADR-0059`, `D-072`):
     - `crates/rusty-services/src/connectivity.rs`: разделение Ethernet и Wi-Fi в `NetworkStatus` (`wired_connected`, `wired_interface`, `wired_label`, `wifi_connected`, `wifi_networks: Vec<WifiAccessPoint>`), сбор списка сетей `NetworkService::list_wifi_networks` / `parse_nmcli_wifi_list` и подключение `NetworkService::connect_wifi`;
     - `crates/rusty-compositor`: глиф `UiGlyphKind::Ethernet` (`surfaces/glyphs.rs`), отображение `Ethernet` в `TopBar` при `wired_connected && !wifi_connected`, клик `TopBarHit::Wifi` / правый клик `QuickSettingsHit::ToggleWifi`, оверлей `ShellOverlayView::Wifi` (`shell_render/wifi_popover.rs`, `WifiPopoverRenderState`, `WifiPopoverHit`, `KeyIntercept::WifiPopoverClose`, `MENU_POPOVER_RADIUS = 13`, `HOVER_PILL_RADIUS = 7`), изолированная подпись Wi-Fi в `QuickSettingsRenderState` (`wifi_connected`, `wifi_ssid`) без изменения геометрии `Control Center` / `Dock`;
@@ -237,12 +246,12 @@ RustyOS/
   - GPU-терминал `rusty-terminal` (`RUSTYOS-113`, `ADR-0064`, `D-077`):
     - `apps/rusty-terminal/src/{gpu_egl.rs, renderer_shm.rs, font.rs, theme.rs, liquid_glass.rs}`: `GpuRenderer` (`Wayland-EGL` + `GLES 2.0` 2-pass `RECT_PROG`/`TEXT_PROG` + `1024×1024` `ShelfPacker` атлас), CPU fallback `ShmFallbackRenderer` (`--no-gpu`), `FontSet` с процедурными `Box Drawing` / `Block Elements` / `Powerline` / UI-иконками, `TerminalTheme` (`Clear Light` / `Clear Dark` / `Opaque`, `ConfigWatcher`) и `rustyos_liquid_glass_v1` (`GlassStyle::Sidebar`, `r = 14`);
     - `apps/rusty-terminal/src/{vt.rs, pty.rs, state.rs, layout.rs, wayland.rs}`: `TerminalEngine` (UTF-8, `16`/`256`/TrueColor, `DECSTBM`, alt-screen, SGR mouse, `10 000`-строчный scrollback), `PtySession` (`rustix::pty` + `poll` + `calloop::ping`), вкладки, плавный скролл (`AnimatedValue`), поиск, clipboard (`DataDeviceManagerState`);
-    - `crates/rusty-compositor/src/{launcher.rs, shell_render/dock.rs, state/shell_actions.rs, context_menu/actions.rs}` + `apps/rusty-shell/src/lib.rs`: приоритет `rusty-terminal` для `terminal` Dock/Launcher/Desktop (`launch_terminal_in_dir`) с fallback на внешние терминалы.
+    - `crates/rusty-compositor/src/{launcher.rs, shell_render/dock.rs, state/shell_actions.rs, context_menu/actions.rs}`: приоритет `rusty-terminal` для `terminal` Dock/Launcher/Desktop (`launch_terminal_in_dir`) с fallback на внешние терминалы.
   - Инсталлятор `rusty-installer`, OOBE Setup Assistant, Live ISO и Dual-Boot (`RUSTYOS-115`, `RUSTYOS-116`, `ADR-0065`, `ADR-0066`, `D-079`, `D-080`):
     - `apps/rusty-installer/src/{main.rs, disks.rs, state.rs, layout.rs, render.rs, liquid_glass.rs, wayland.rs}`: двухрежимный CSD-клиент (`--install` / `--oobe`, `--live`, `--demo`, `--dry-run`) с режимами `Erase Entire Disk` и `Dual-Boot` (выбор уже созданного root-раздела или неразмеченного пространства по `lsblk -Jpb` без `sgdisk --zap-all`), защитой смонтированных разделов, переиспользованием EFI `>= 260 MiB` без форматирования либо выделением отдельного `512 MiB` EFI при маленьком ESP, живой перекраской `RustyOS Light`/`Dark`/`Auto` + `[ui].accent_index` (`RELOAD_CONFIG`) и потоковым прогрессом `STEP:<pct>:<stage>:<msg>`;
     - `scripts/rustyos-install.sh` (`--install-mode`, `--root-part`, `--free-space`, `--efi-part`, `--confirm-dualboot`, `os-prober`, сохранение чужого `loader.conf`) + `packaging/polkit/org.rustyos.installer.policy` + `bin/rustyos-session` (`--doctor`, `.oobe-pending`) + `packaging/arch/PKGBUILD` + `packaging/archiso/` (`profiledef.sh`, `greetd`, `packages.x86_64`, `build-iso.sh`).
-- **Эталонный стиль системных CSD-окон (`crates/rusty-ui`, `ADR-0055`, `ADR-0057`, `ADR-0067`):**
-  - Единые константы окон и теней (`crates/rusty-ui/src/geometry.rs`, `crates/rusty-compositor/src/shell_render/tokens.rs`): `WINDOW_RADIUS = 20` (или `WINDOW_CORNER_RADIUS = 14`), `1 px` внешний контур (`[0, 0, 0, 24]` Light / `[255, 255, 255, 22]` Dark) строго **до** угловой маски (`apply_window_corner_mask` / `clip_rounded_corners`).
+- **Эталонный стиль системных CSD-окон (`crates/rusty-ui`, `ADR-0055`, `ADR-0057`, `ADR-0067`, `ADR-0070`, `ADR-0072`):**
+  - Единые константы окон и теней (`crates/rusty-ui/src/{geometry,shadow,menu}.rs`, `crates/rusty-compositor/src/shell_render/tokens.rs`): `WINDOW_RADIUS = 14` (`WINDOW_CORNER_RADIUS = 14`), `1 px` внешний контур (`[0, 0, 0, 24]` Light / `[255, 255, 255, 22]` Dark) строго **до** угловой маски (`apply_window_corner_mask` / `clip_rounded_corners`).
   - Единые `14 px` traffic lights (`crates/rusty-ui/src/traffic_lights.rs`: `TrafficLightButtons`, `TRAFFIC_LIGHT_DIAMETER = 14`, `Rect(14/36/58, 13, 14, 14)`, центры `(21/43/65, 20)`, `r = 7.0`, `#EE5A6A` / `#F4B63F` / `#3CC68A`, без квадратной рамки ореола, с векторными hover-глифами `x`, `-`, `+`).
   - Сайдбар `#ECEDF1`/`#262628`, активный пункт `r = 10` (`#D9DADD`/`#3E3E41`), холст `#F5F6FA`/`#1C1C1D`, карточки (`CARD_CORNER_RADIUS = 12`, `#FFFFFF`/`#2C2C2D`) и капсулы тулбара/фильтров без серых рамок.
 - **Нетривиальные сигнатуры и lint-правила:**

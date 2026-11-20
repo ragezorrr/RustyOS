@@ -253,9 +253,11 @@ impl Default for NetworkSummary {
 }
 
 #[derive(Debug, Clone)]
+#[allow(clippy::struct_excessive_bools)]
 pub(crate) struct WindowFlags {
     pub running: bool,
     pub maximized: bool,
+    pub focused: bool,
     pub dirty: bool,
 }
 
@@ -351,12 +353,10 @@ impl InstallerAppState {
     #[must_use]
     pub(crate) fn new(opts: &StartupOptions) -> Self {
         let loc = UserFileLocations::detect();
-        let sys_theme = loc
-            .detect_system_theme()
-            .unwrap_or(FilesThemeMode::LightGoldenGate);
+        let sys_theme = loc.detect_system_theme().unwrap_or(FilesThemeMode::Light);
         let sys_accent = loc.detect_system_accent().unwrap_or(0);
         let effective_theme = opts.theme_override.unwrap_or(sys_theme);
-        let resolved_dark = effective_theme == FilesThemeMode::DarkPurpleGlass;
+        let resolved_dark = effective_theme == FilesThemeMode::Dark;
         let theme_choice = if resolved_dark {
             ThemeChoice::Dark
         } else {
@@ -371,6 +371,7 @@ impl InstallerAppState {
             win: WindowFlags {
                 running: true,
                 maximized: false,
+                focused: true,
                 dirty: true,
             },
             mode: opts.mode,
@@ -788,10 +789,8 @@ impl InstallerAppState {
         }
         self.last_config_mtime = next_mtime;
         let loc = UserFileLocations::detect();
-        let next_dark = loc
-            .detect_system_theme()
-            .unwrap_or(FilesThemeMode::LightGoldenGate)
-            == FilesThemeMode::DarkPurpleGlass;
+        let next_dark =
+            loc.detect_system_theme().unwrap_or(FilesThemeMode::Light) == FilesThemeMode::Dark;
         let next_accent = loc.detect_system_accent().unwrap_or(0);
         if next_dark != self.resolved_dark || next_accent != self.accent_index {
             self.resolved_dark = next_dark;
