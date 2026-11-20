@@ -2131,6 +2131,27 @@ hardware/software context и низкие накладные расходы.
 - **Tests:** 321 unit-тест workspace (`4` `rusty-animation`, `199` `rusty-compositor`, `17` `rusty-files`, `13` `rusty-installer`, `3` `rusty-ipc`, `44` `rusty-services`, `10` `rusty-settings`, `5` `rusty-shell`, `15` `rusty-terminal`, `5` `rusty-updater`, `7` `rusty-wm`).
 - **Risks:** Нет; векторная отрисовка глифов выполняется субпиксельно без аллокаций памяти и шрифтовых зависимостей.
 
+### RUSTYOS-123 — Создание общего крейта crates/rusty-ui, интеграция Software Update в Settings и удаление rusty-updater (`RUSTYOS-123 Вариант 1`)
+
+- **Status:** Done (`RUSTYOS-123 Вариант 1` — утверждённый объём выполнен)
+- **Goal:** Создать общий крейт `crates/rusty-ui` для переиспользования геометрии окон, светофоров, токенов тем и вспомогательного canvas; интегрировать полноценную страницу Software Update в `apps/rusty-settings`; полностью удалить отдельное приложение `apps/rusty-updater` и перенаправить все системные вызовы на Settings.
+- **Dependencies:** `RUSTYOS-122`.
+- **Scope:**
+  - `crates/rusty-ui`: создан новый общий крейт в составе рабочего пространства (`[workspace.members]`, `[workspace.dependencies]`), содержащий модули `geometry` (`WINDOW_RADIUS = 20`, `TITLEBAR_HEIGHT = 40`, `SSD_TITLEBAR_HEIGHT = 28`, `TRAFFIC_LIGHT_DIAMETER = 14`, `TRAFFIC_LIGHT_CENTERS_X = [21.0, 43.0, 65.0]`, `Rect`, `Point`, `Size`), `theme` (`ThemeMode`, `TrafficLightKind`, `ThemePalette`), `traffic_lights` (`TrafficLightButtons`, `glyph_segments`, субпиксельные векторные глифы `x`, `-`, `+`), `canvas` (`UiCanvas` с субпиксельным антиалиасингом `blend_pixel`, `draw_circle_aa`, `stroke_line_aa`, `fast_rounded_rect`), `window_frame` (`WindowFrame`, `WindowHitTarget`, детектирование двойного клика максимизации) и 5 всесторонних unit-тестов;
+  - `apps/rusty-settings`: добавлена страница `SettingsPage::SoftwareUpdate` (категория `System`, заголовок `Software Update`, CLI `--page updates`), фоновый чекер обновлений через `rusty_services::updates::check_all_pending_updates`, запуск транзакций через `UpdateTransactionHandle::start_system_upgrade`, карточка текущего статуса, полоса прогресса с лейблами фаз, список ожидающих пакетов и интеграция в sidebar/поиск/иконки;
+  - `apps/rusty-updater`: полностью удален каталог `apps/rusty-updater` и его объявление из корневого `Cargo.toml`;
+  - Системная интеграция: `bin/rustyos-session`, `scripts/install.sh`, `packaging/arch/PKGBUILD` очищены от устаревшего бинарника `rusty-updater`; `packaging/applications/org.rustyos.updater.desktop` переведён на `Exec=rusty-settings --page updates`;
+  - Композитор: `crates/rusty-compositor/src/state/shell_actions.rs` (`open_software_updater_action`), `shell_render/updates_popover.rs` и `launcher.rs` переведены на запуск страницы `rusty-settings --page updates`;
+  - Документация: `ADR-0067` (`docs/adr/0067-shared-ui-crate-and-settings-updates.md`), запись `D-081` в `DECISIONS.md`.
+- **Acceptance Criteria:**
+  - `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace` (317 unit-тестов) проходят без единой ошибки и предупреждения;
+  - `cargo run -p rusty-compositor -- --drm-probe` завершается штатно;
+  - Живой `--winit` прогон композитора стартует и работает стабильно;
+  - `apps/rusty-updater` полностью отсутствует в исходниках и сборке;
+  - `rusty-settings --page updates` открывает страницу Software Update с корректным рендерингом и управлением.
+- **Tests:** 317 unit-тестов workspace (`4` `rusty-animation`, `199` `rusty-compositor`, `16` `rusty-files`, `12` `rusty-installer`, `3` `rusty-ipc`, `44` `rusty-services`, `11` `rusty-settings`, `5` `rusty-shell`, `15` `rusty-terminal`, `5` `rusty-ui`, `7` `rusty-wm`).
+- **Risks:** Нет; фоновая проверка обновлений и транзакции используют проверенные низкоуровневые сервисы `rusty-services` без блокировки цикла Wayland.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

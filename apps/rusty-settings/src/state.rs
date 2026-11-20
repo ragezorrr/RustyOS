@@ -6,9 +6,15 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::mpsc::{self, Receiver};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use rusty_services::file_manager::RUSTYOS_ACCENT_SWATCHES;
+use rusty_services::updates::{
+    UpdateCheckState, UpdateStatusSnapshot, UpdateTransactionHandle, UpdateTxEvent, UpdateTxPhase,
+    check_all_pending_updates,
+};
 use rusty_services::{AudioService, NetworkService, NetworkStatus};
 
 /// Predefined accent color palette shared across RustyOS (`RUSTYOS-114`).
@@ -40,6 +46,7 @@ pub(crate) enum SettingsPage {
     Wallpaper,
     DockDesktop,
     Notifications,
+    SoftwareUpdate,
     Display,
     Sound,
     Keyboard,
@@ -51,13 +58,14 @@ pub(crate) enum SettingsPage {
 }
 
 impl SettingsPage {
-    pub(crate) const SIDEBAR: [Self; 11] = [
+    pub(crate) const SIDEBAR: [Self; 12] = [
         Self::Wifi,
         Self::Network,
         Self::Appearance,
         Self::Wallpaper,
         Self::DockDesktop,
         Self::Notifications,
+        Self::SoftwareUpdate,
         Self::Display,
         Self::Sound,
         Self::Keyboard,
@@ -70,6 +78,7 @@ impl SettingsPage {
         match id.trim().to_ascii_lowercase().as_str() {
             "wifi" | "wlan" => Self::Wifi,
             "network" => Self::Network,
+            "updates" | "update" | "softwareupdate" | "software-update" => Self::SoftwareUpdate,
             "wallpaper" | "background" => Self::Wallpaper,
             "dock" | "desktop" => Self::DockDesktop,
             "notifications" => Self::Notifications,
@@ -94,6 +103,7 @@ impl SettingsPage {
             Self::Wallpaper => "Wallpaper",
             Self::DockDesktop => "Dock & Desktop",
             Self::Notifications => "Notifications",
+            Self::SoftwareUpdate => "Software Update",
             Self::Display => "Display",
             Self::Sound => "Sound",
             Self::Keyboard => "Keyboard",
@@ -112,6 +122,7 @@ impl SettingsPage {
             Self::Appearance | Self::Wallpaper | Self::DockDesktop | Self::Notifications => {
                 Some("Desktop")
             }
+            Self::SoftwareUpdate => Some("System"),
             Self::Display | Self::Sound | Self::Keyboard | Self::Mouse | Self::Touchpad => {
                 Some("Devices")
             }
@@ -135,6 +146,7 @@ impl SettingsPage {
             Self::Wallpaper => [0x34, 0xB4, 0xA7, 0xFF],
             Self::DockDesktop => [0x85, 0x85, 0xFC, 0xFF],
             Self::Notifications => [0xFF, 0x3B, 0x30, 0xFF],
+            Self::SoftwareUpdate => [0x00, 0x7A, 0xFF, 0xFF],
             Self::Sound => [0xF1, 0x68, 0x84, 0xFF],
             Self::Display => [0x00, 0x87, 0xED, 0xFF],
             Self::Keyboard => [0x5E, 0x6A, 0xD2, 0xFF],
@@ -154,6 +166,7 @@ impl SettingsPage {
             Self::Wallpaper => "background picture desktop image wallpaper",
             Self::DockDesktop => "dock position size auto hide glass effect transparency motion",
             Self::Notifications => "alerts banners menubar clock workspaces tray",
+            Self::SoftwareUpdate => "updates packages upgrade software check version pacman",
             Self::Display => "monitor screen scale hidpi refresh rate vrr rotation",
             Self::Sound => "audio volume speakers mute microphone",
             Self::Keyboard => "input layout shortcut repeat rate delay",
@@ -215,6 +228,8 @@ pub(crate) enum RowControlId {
     NotifWhenLockedToggle,
     NotifMirroringCycle,
     NotifAppToggle(usize),
+    UpdatesCheckNow,
+    UpdatesInstallNow,
 }
 
 /// Coalesced UI damage scope for partial `wl_surface::damage_buffer` updates (`RUSTYOS-112`).
@@ -336,6 +351,16 @@ pub(crate) struct SettingsAppState {
     pub(crate) volume_percent: u8,
     pub(crate) muted: bool,
     pending_service_cmds: Vec<ServiceCommand>,
+
+    // Software update state
+    pub(crate) updates_snapshot: UpdateStatusSnapshot,
+    pub(crate) updates_checking: bool,
+    pub(crate) updates_tx_phase: Option<UpdateTxPhase>,
+    pub(crate) updates_tx_progress: f32,
+    pub(crate) updates_tx_summary: Option<String>,
+    pub(crate) updates_tx_restart: bool,
+    updates_rx: Arc<Mutex<Option<Receiver<UpdateStatusSnapshot>>>>,
+    active_tx: Arc<Mutex<Option<UpdateTransactionHandle>>>,
 }
 
 impl SettingsAppState {
@@ -350,6 +375,9 @@ impl SettingsAppState {
             state.theme_locked = true;
         }
         state.pending_service_cmds.push(ServiceCommand::Refresh);
+        if opts.initial_page == SettingsPage::SoftwareUpdate {
+            state.check_updates_now();
+        }
         state
     }
 
@@ -419,6 +447,14 @@ impl SettingsAppState {
             volume_percent: 65,
             muted: false,
             pending_service_cmds: Vec::new(),
+            updates_snapshot: UpdateStatusSnapshot::default(),
+            updates_checking: false,
+            updates_tx_phase: None,
+            updates_tx_progress: 0.0,
+            updates_tx_summary: None,
+            updates_tx_restart: false,
+            updates_rx: Arc::new(Mutex::new(None)),
+            active_tx: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -469,7 +505,128 @@ impl SettingsAppState {
             SettingsPage::Wifi | SettingsPage::Network | SettingsPage::Sound
         ) {
             self.pending_service_cmds.push(ServiceCommand::Refresh);
+        } else if page == SettingsPage::SoftwareUpdate
+            && self.updates_snapshot.state == UpdateCheckState::Idle
+        {
+            self.check_updates_now();
         }
+    }
+
+    pub(crate) fn check_updates_now(&mut self) {
+        if self.updates_checking {
+            return;
+        }
+        self.updates_checking = true;
+        self.updates_snapshot.state = UpdateCheckState::Checking;
+        self.mark_dirty(DamageScope::Page);
+
+        let (tx, rx) = mpsc::channel();
+        if let Ok(mut lock) = self.updates_rx.lock() {
+            *lock = Some(rx);
+        }
+        std::thread::spawn(move || {
+            let snap = check_all_pending_updates();
+            let _ = tx.send(snap);
+        });
+    }
+
+    pub(crate) fn start_update_transaction(&mut self) {
+        if self.updates_tx_phase.is_some() {
+            return;
+        }
+        self.updates_tx_phase = Some(UpdateTxPhase::Synchronizing);
+        self.updates_tx_progress = 0.0;
+        self.mark_dirty(DamageScope::Page);
+
+        let restart = self.updates_snapshot.restart_recommended;
+        let preview = self.updates_snapshot.items.clone();
+        let handle = UpdateTransactionHandle::start_system_upgrade(false, None, restart, preview);
+        if let Ok(mut lock) = self.active_tx.lock() {
+            *lock = Some(handle);
+        }
+    }
+
+    pub(crate) fn poll_updates(&mut self) -> bool {
+        let mut changed = false;
+        let snap_res = if let Ok(mut lock) = self.updates_rx.lock() {
+            if let Some(rx) = lock.as_mut() {
+                match rx.try_recv() {
+                    Ok(snap) => {
+                        *lock = None;
+                        Some(Some(snap))
+                    }
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        *lock = None;
+                        Some(None)
+                    }
+                    Err(mpsc::TryRecvError::Empty) => None,
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        if let Some(res) = snap_res {
+            if let Some(snap) = res {
+                self.updates_snapshot = snap;
+            }
+            self.updates_checking = false;
+            self.mark_dirty(DamageScope::Page);
+            changed = true;
+        }
+
+        let events = if let Ok(mut lock) = self.active_tx.lock() {
+            if let Some(tx) = lock.as_mut() {
+                tx.drain_events()
+            } else {
+                Vec::new()
+            }
+        } else {
+            Vec::new()
+        };
+
+        if !events.is_empty() {
+            changed = true;
+            self.mark_dirty(DamageScope::Page);
+            for event in events {
+                match event {
+                    UpdateTxEvent::Phase(phase) => {
+                        self.updates_tx_phase = Some(phase);
+                    }
+                    UpdateTxEvent::Progress(prog) => {
+                        self.updates_tx_progress = prog;
+                    }
+                    UpdateTxEvent::Finished {
+                        success,
+                        summary,
+                        restart_recommended,
+                    } => {
+                        self.updates_tx_phase = if success {
+                            Some(UpdateTxPhase::Complete)
+                        } else {
+                            Some(UpdateTxPhase::Failed)
+                        };
+                        self.updates_tx_summary = Some(summary);
+                        self.updates_tx_restart = restart_recommended;
+                    }
+                    UpdateTxEvent::LogLine(_) => {}
+                }
+            }
+        }
+
+        if self.updates_tx_phase.is_some_and(|p| {
+            matches!(
+                p,
+                UpdateTxPhase::Complete | UpdateTxPhase::Failed | UpdateTxPhase::Cancelled
+            )
+        }) && let Ok(mut lock) = self.active_tx.lock()
+        {
+            *lock = None;
+        }
+
+        changed
     }
 
     fn reset_page_scroll(&mut self) {
@@ -956,6 +1113,12 @@ impl SettingsAppState {
                 self.updates_enabled = !self.updates_enabled;
                 let v = bool_str(self.updates_enabled);
                 let _ = update_config_entries(&[("updates", "enabled", v)]);
+            }
+            RowControlId::UpdatesCheckNow => {
+                self.check_updates_now();
+            }
+            RowControlId::UpdatesInstallNow => {
+                self.start_update_transaction();
             }
             RowControlId::ScaleDown => {
                 self.display_scale = (self.display_scale - 0.25).clamp(1.0, 3.0);

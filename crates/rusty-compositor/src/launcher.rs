@@ -389,7 +389,6 @@ impl LauncherState {
     pub(crate) fn canonical_preferred_bins(app_key: &str) -> Option<&'static [&'static str]> {
         const FILES: &[&str] = &["rusty-files"];
         const SETTINGS: &[&str] = &["rusty-settings"];
-        const UPDATER: &[&str] = &["rusty-updater"];
         const TERMINAL: &[&str] = &[
             "rusty-terminal",
             "foot",
@@ -422,8 +421,9 @@ impl LauncherState {
         const CHROME: &[&str] = &["google-chrome", "google-chrome-stable", "chromium"];
         match app_key.trim().to_ascii_lowercase().as_str() {
             "files" | "rusty-files" => Some(FILES),
-            "settings" | "rusty-settings" | "system-settings" => Some(SETTINGS),
-            "updater" | "rusty-updater" => Some(UPDATER),
+            "settings" | "rusty-settings" | "system-settings" | "updater" | "rusty-updater" => {
+                Some(SETTINGS)
+            }
             "terminal" | "rusty-terminal" => Some(TERMINAL),
             "browser" => Some(BROWSER),
             "notes" => Some(NOTES),
@@ -633,13 +633,12 @@ fn priority_rank(app: &LauncherApp) -> u8 {
     match bin.as_str() {
         "rusty-terminal" => 0,
         "rusty-files" => 1,
-        "rusty-updater" => 2,
+        "rusty-settings" => 2,
         "firefox" | "chromium" | "google-chrome" | "google-chrome-stable" | "brave" => 3,
         "foot" | "kitty" | "alacritty" | "wezterm" | "ghostty" | "weston-terminal" | "konsole"
         | "gnome-terminal" | "xfce4-terminal" => 4,
         "es2gears_wayland" | "glmark2-wayland" => 5,
-        "rusty-settings" => 6,
-        "rusty-installer" => 7,
+        "rusty-installer" => 6,
         _ => 10,
     }
 }
@@ -816,7 +815,7 @@ fn merge_builtin_fallbacks(catalog: &mut Vec<LauncherApp>) {
             id: "org.rustyos.updater".to_owned(),
             name: "Software Update".to_owned(),
             subtitle: "Update Arch Linux & RustyOS packages".to_owned(),
-            exec: "rusty-updater".to_owned(),
+            exec: "rusty-settings --page updates".to_owned(),
             keywords: vec![
                 "update".to_owned(),
                 "upgrade".to_owned(),

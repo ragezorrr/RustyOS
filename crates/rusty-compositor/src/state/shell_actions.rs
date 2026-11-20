@@ -140,27 +140,32 @@ impl RustyCompositorState {
         self.shell_redraw_needed = true;
     }
 
-    /// Launches `rusty-updater` when installed, or shows a clean guidance notice (`RUSTYOS-076`/`RUSTYOS-077`).
+    /// Launches System Settings on the Software Update page (`RUSTYOS-123`).
     pub fn open_software_updater_action(&mut self) {
         self.close_updates_popover();
-        if crate::launcher::resolve_program_path("rusty-updater").is_some() {
+        if crate::launcher::resolve_program_path("rusty-settings").is_some() {
             let ipc_path = rusty_ipc::default_ipc_socket_path(&self.socket_name);
             if self
                 .launcher
-                .launch_program_with_args("rusty-updater", &[], &self.socket_name, &ipc_path)
+                .launch_program_with_args(
+                    "rusty-settings",
+                    &["--page", "updates"],
+                    &self.socket_name,
+                    &ipc_path,
+                )
                 .is_ok()
             {
-                self.trigger_app_bounce("updater", false);
+                self.trigger_app_bounce("settings", false);
                 return;
             }
         }
         let body = if self.updates_status.total_count > 0 {
             format!(
-                "{} updates ready · run 'sudo pacman -Syu' or install rusty-updater",
+                "{} updates ready · run 'sudo pacman -Syu' or open System Settings",
                 self.updates_status.total_count
             )
         } else {
-            "rusty-updater binary is not installed; system is current".to_owned()
+            "System is up to date".to_owned()
         };
         let _ = self.push_notification(
             rusty_ipc::Urgency::Normal,
@@ -204,7 +209,7 @@ impl RustyCompositorState {
             snapshot: &self.updates_status,
             anchor_right_x,
             hovered_hit: self.updates_popover_hover,
-            updater_installed: crate::launcher::resolve_program_path("rusty-updater").is_some(),
+            updater_installed: crate::launcher::resolve_program_path("rusty-settings").is_some(),
         }
     }
 

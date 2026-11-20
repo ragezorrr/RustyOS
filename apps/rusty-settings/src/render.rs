@@ -1611,6 +1611,12 @@ fn draw_sidebar_glyph(c: &mut Canvas<'_>, rect: Rect, page: SettingsPage) {
             c.draw_segment(cx - 5.2, cy + 3.8, cx + 5.2, cy + 3.8, 0.7, w);
             c.fill_circle(cx, cy + 5.3, 1.2, w);
         }
+        SettingsPage::SoftwareUpdate => {
+            c.stroke_rounded_rect(Rect::new(rect.x + 5, rect.y + 5, 14, 14), 7.0, 1.3, w);
+            c.draw_segment(cx, cy - 3.5, cx, cy + 2.5, 1.2, w);
+            c.draw_segment(cx - 2.5, cy, cx, cy + 2.5, 1.1, w);
+            c.draw_segment(cx + 2.5, cy, cx, cy + 2.5, 1.1, w);
+        }
         SettingsPage::Display => {
             c.stroke_rounded_rect(Rect::new(rect.x + 5, rect.y + 5, 14, 11), 2.0, 1.3, w);
             c.draw_segment(cx - 3.0, cy + 5.8, cx + 3.0, cy + 5.8, 0.7, w);

@@ -1732,6 +1732,7 @@ version = "0.1.0"
 dependencies = [
  "fontdue",
  "rusty-services",
+ "rusty-ui",
  "smithay-client-toolkit",
  "tracing",
  "tracing-subscriber",
@@ -1768,15 +1769,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "rusty-updater"
+name = "rusty-ui"
 version = "0.1.0"
 dependencies = [
  "fontdue",
- "rusty-services",
- "smithay-client-toolkit",
- "tracing",
- "tracing-subscriber",
- "wayland-client",
 ]
 
 [[package]]

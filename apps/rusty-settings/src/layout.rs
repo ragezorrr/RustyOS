@@ -662,6 +662,7 @@ fn build_standard_page_sections(
     match page {
         SettingsPage::Wallpaper
         | SettingsPage::Notifications
+        | SettingsPage::SoftwareUpdate
         | SettingsPage::Wifi
         | SettingsPage::Network => {
             build_system_page_sections(app, page, content_x, &mut cur_y, content_w)
@@ -713,6 +714,9 @@ fn build_system_page_sections(
         }
         SettingsPage::Notifications => {
             build_notifications_page_sections(app, content_x, cur_y, content_w)
+        }
+        SettingsPage::SoftwareUpdate => {
+            build_software_update_sections(app, content_x, cur_y, content_w)
         }
         SettingsPage::Wifi => build_wifi_page_sections(app, content_x, cur_y, content_w),
         SettingsPage::Network => build_network_page_sections(app, content_x, cur_y, content_w),
@@ -1329,6 +1333,118 @@ fn row_info(label: &'static str, value: String) -> RowSpec {
     }
 }
 
+fn row_info_string(label: String, value: String) -> RowSpec {
+    RowSpec {
+        label,
+        height: 44,
+        control: CardRowControl::Info { value },
+    }
+}
+
+fn build_software_update_sections(
+    app: &SettingsAppState,
+    content_x: i32,
+    cur_y: &mut i32,
+    content_w: i32,
+) -> Vec<CardSectionLayout> {
+    let mut sections = Vec::new();
+
+    // Section 1: Update Status
+    let mut status_rows = Vec::new();
+    if app.updates_checking {
+        status_rows.push(row_info("Status", "Checking for updates...".to_owned()));
+    } else if let Some(phase) = app.updates_tx_phase {
+        let phase_str = phase.label();
+        status_rows.push(row_info(
+            "Progress",
+            format!("{} ({:.0}%)", phase_str, app.updates_tx_progress * 100.0),
+        ));
+        if let Some(summary) = &app.updates_tx_summary {
+            status_rows.push(row_info_string("Summary".to_owned(), summary.clone()));
+        }
+    } else if app.updates_snapshot.total_count > 0 {
+        status_rows.push(row_info_string(
+            "Available Updates".to_owned(),
+            format!("{} pending packages", app.updates_snapshot.total_count),
+        ));
+        status_rows.push(row_choice(
+            "Install",
+            RowControlId::UpdatesInstallNow,
+            "Update Now".to_owned(),
+        ));
+        status_rows.push(row_choice(
+            "Refresh",
+            RowControlId::UpdatesCheckNow,
+            "Check Again".to_owned(),
+        ));
+    } else {
+        status_rows.push(row_info(
+            "System Status",
+            "RustyOS is up to date".to_owned(),
+        ));
+        status_rows.push(row_info_string(
+            "Last Checked".to_owned(),
+            app.updates_snapshot.last_checked_label.clone(),
+        ));
+        status_rows.push(row_choice(
+            "Check",
+            RowControlId::UpdatesCheckNow,
+            "Check for Updates".to_owned(),
+        ));
+    }
+
+    sections.push(place_card_section(
+        Some("Software Update"),
+        content_x,
+        cur_y,
+        content_w,
+        status_rows,
+    ));
+
+    // Section 2: Pending Packages List
+    if app.updates_snapshot.total_count > 0 && app.updates_tx_phase.is_none() {
+        let mut pkg_rows = Vec::new();
+        for item in &app.updates_snapshot.items {
+            let label = if item.is_rustyos {
+                format!("{} [RustyOS]", item.name)
+            } else if item.requires_restart {
+                format!("{} [Core]", item.name)
+            } else {
+                item.name.clone()
+            };
+            pkg_rows.push(row_info_string(
+                label,
+                format!("{} -> {}", item.old_version, item.new_version),
+            ));
+        }
+        if !pkg_rows.is_empty() {
+            sections.push(place_card_section(
+                Some("Pending Packages"),
+                content_x,
+                cur_y,
+                content_w,
+                pkg_rows,
+            ));
+        }
+    }
+
+    // Section 3: Preferences
+    let auto_rows = vec![row_switch(
+        "Check Automatically",
+        RowControlId::UpdatesEnabledToggle,
+        app.updates_enabled,
+    )];
+    sections.push(place_card_section(
+        Some("Preferences"),
+        content_x,
+        cur_y,
+        content_w,
+        auto_rows,
+    ));
+
+    sections
+}
+
 fn place_card_section(
     title: Option<&str>,
     content_x: i32,
@@ -1541,7 +1657,7 @@ mod tests {
         let mut app = SettingsAppState::new(&StartupOptions::default());
         let l = compute_layout(&app, 882, 600);
         assert_eq!(l.sidebar_rect.w, 230);
-        assert_eq!(l.sidebar_items.len(), 11);
+        assert_eq!(l.sidebar_items.len(), 12);
         assert!(l.max_page_scroll > 0);
         assert!(l.page_scrollbar_thumb.is_some());
         assert_eq!(hit_test(&l, 20.0, 20.0), Some(SettingsHit::TrafficClose));
@@ -1686,5 +1802,23 @@ mod tests {
         );
         app.apply_row_action(RowControlId::NotifAppToggle(0));
         assert!(!app.notif_app_enabled[0]);
+    }
+
+    #[test]
+    fn software_update_page_exposes_status_and_actions() {
+        let app = SettingsAppState::new(&StartupOptions {
+            initial_page: SettingsPage::SoftwareUpdate,
+            theme_override: None,
+        });
+        assert_eq!(app.current_page, SettingsPage::SoftwareUpdate);
+        let layout = compute_layout(&app, 882, 600);
+        assert!(layout.sections.len() >= 2);
+        assert_eq!(
+            layout.sections[0]
+                .section_label
+                .as_ref()
+                .map(|(s, _)| s.as_str()),
+            Some("Software Update")
+        );
     }
 }

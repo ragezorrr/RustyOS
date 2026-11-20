@@ -910,6 +910,19 @@
                            512M EFI при малом ESP,
                            сохранением loader.conf в
                            systemd-boot и GRUB + os-prober
+
+   D-081                   Фаза 10 Общий UI-крейт и        accepted
+                           интеграция обновлений в
+                           rusty-settings (RUSTYOS-123,
+                           ADR-0067): создание crates/rusty-ui
+                           с общими светофорами (14 px,
+                           центры 21/43/65 px), токенами,
+                           WindowFrame и AA-холстом UiCanvas;
+                           интеграция страницы Software Update
+                           в apps/rusty-settings (--page updates);
+                           полное удаление apps/rusty-updater
+                           и перевод вызовов оболочки и
+                           desktop-файла на rusty-settings
   -----------------------------------------------------------------------
 
 ## Открытые решения

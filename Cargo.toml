@@ -6,11 +6,11 @@ members = [
     "apps/rusty-settings",
     "apps/rusty-shell",
     "apps/rusty-terminal",
-    "apps/rusty-updater",
     "crates/rusty-animation",
     "crates/rusty-compositor",
     "crates/rusty-ipc",
     "crates/rusty-services",
+    "crates/rusty-ui",
     "crates/rusty-wm",
 ]
 
@@ -26,6 +26,7 @@ fontdue = "0.9.5"
 rusty-animation = { path = "crates/rusty-animation" }
 rusty-ipc = { path = "crates/rusty-ipc" }
 rusty-services = { path = "crates/rusty-services" }
+rusty-ui = { path = "crates/rusty-ui" }
 rusty-wm = { path = "crates/rusty-wm" }
 smithay = { version = "0.7.0", default-features = false, features = [
     "backend_drm",

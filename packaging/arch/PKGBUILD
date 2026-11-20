@@ -114,7 +114,6 @@ package() {
   install -m755 "${target_dir}/rusty-files" "${pkgdir}/usr/bin/rusty-files"
   install -m755 "${target_dir}/rusty-settings" "${pkgdir}/usr/bin/rusty-settings"
   install -m755 "${target_dir}/rusty-terminal" "${pkgdir}/usr/bin/rusty-terminal"
-  install -m755 "${target_dir}/rusty-updater" "${pkgdir}/usr/bin/rusty-updater"
   install -m755 "${target_dir}/rusty-installer" "${pkgdir}/usr/bin/rusty-installer"
   install -m755 "${target_dir}/rustyos-update-helper" \
     "${pkgdir}/usr/lib/rustyos/rustyos-update-helper"

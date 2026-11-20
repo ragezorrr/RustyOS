@@ -23,7 +23,7 @@ pub const MAX_POPOVER_UPDATE_ITEMS: usize = 6;
 pub enum UpdatesPopoverHit {
     /// Trigger an immediate background `checkupdates` refresh.
     CheckNow,
-    /// Launch `rusty-updater` (or fallback info notice until Stage B `RUSTYOS-077`).
+    /// Launch System Settings on the Software Update page (`RUSTYOS-123`).
     OpenUpdater,
     /// Click fell inside the popover panel background.
     InsidePopover,
@@ -409,11 +409,7 @@ fn render_updates_footer_text(
         elements.push(el);
     }
 
-    let open_label = if state.updater_installed {
-        "Open Updater..."
-    } else {
-        "Software Update..."
-    };
+    let open_label = "Software Update...";
     if let Some(el) = text_cache.render_label_centered_weighted(
         renderer,
         open_label,

@@ -341,6 +341,9 @@ pub(crate) fn run(opts: &StartupOptions) -> Result<(), WaylandAppError> {
         if client.app.poll_external_config_if_due(now) {
             client.layout_cache = None;
         }
+        if client.app.poll_updates() {
+            client.layout_cache = None;
+        }
         if let Some(sent_at) = client.frame_sent_at
             && now.saturating_duration_since(sent_at) >= Duration::from_millis(120)
         {
@@ -356,6 +359,8 @@ pub(crate) fn run(opts: &StartupOptions) -> Result<(), WaylandAppError> {
 
         let timeout = if client.app.is_scroll_animating() {
             Some(Duration::from_millis(8))
+        } else if client.app.updates_checking || client.app.updates_tx_phase.is_some() {
+            Some(Duration::from_millis(50))
         } else if client.app.search_focused {
             Some(Duration::from_millis(250))
         } else {
