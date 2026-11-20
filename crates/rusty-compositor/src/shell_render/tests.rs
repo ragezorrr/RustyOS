@@ -298,15 +298,15 @@ fn ssd_hit_testing_detects_traffic_lights_and_drag_in_top_to_bottom_order() {
 
     // Overlapping window win2 is topmost (last in bottom-to-top list)
     assert_eq!(
-        check_window_ssd_hit(&windows, 118.0, 114.0),
+        check_window_ssd_hit(&windows, 121.0, 114.0),
         Some(SsdHit::Close(win2))
     );
     assert_eq!(
-        check_window_ssd_hit(&windows, 136.0, 114.0),
+        check_window_ssd_hit(&windows, 143.0, 114.0),
         Some(SsdHit::Minimize(win2))
     );
     assert_eq!(
-        check_window_ssd_hit(&windows, 154.0, 114.0),
+        check_window_ssd_hit(&windows, 165.0, 114.0),
         Some(SsdHit::Maximize(win2))
     );
     assert_eq!(
@@ -1031,7 +1031,7 @@ fn macos27_traffic_hover_notifications_and_osd_routing() {
         has_ssd: false,
     };
     assert_eq!(
-        check_window_traffic_lights_hover(&[ssd_win], 116.0, 92.0),
+        check_window_traffic_lights_hover(&[ssd_win], 121.0, 94.0),
         Some(rusty_wm::WindowId(10))
     );
     assert_eq!(

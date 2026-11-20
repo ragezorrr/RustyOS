@@ -472,7 +472,7 @@ pub(crate) fn render_window_pixels(
         0,
         pal.rim_top,
     );
-    render_header(&mut c, app, layout, &pal);
+    render_header(&mut c, app, layout, hover, &pal);
     render_content(&mut c, app, layout, hover, &pal);
     render_footer(&mut c, app, layout, hover, &pal);
 
@@ -485,29 +485,30 @@ fn render_header(
     c: &mut Canvas<'_>,
     app: &InstallerAppState,
     layout: &InstallerLayout,
+    hover: Option<InstallerHit>,
     pal: &Palette,
 ) {
-    let tc = &layout.traffic_close;
-    let tm = &layout.traffic_min;
-    let tx = &layout.traffic_max;
-    c.fill_circle(
-        tc.x as f32 + 7.0,
-        tc.y as f32 + 7.0,
-        6.5,
-        [255, 95, 87, 255],
+    let tl_hovered = matches!(
+        hover,
+        Some(
+            InstallerHit::TrafficClose
+                | InstallerHit::TrafficMinimize
+                | InstallerHit::TrafficMaximize
+        )
     );
-    c.fill_circle(
-        tm.x as f32 + 7.0,
-        tm.y as f32 + 7.0,
-        6.5,
-        [254, 188, 46, 255],
-    );
-    c.fill_circle(
-        tx.x as f32 + 7.0,
-        tx.y as f32 + 7.0,
-        6.5,
-        [40, 200, 64, 255],
-    );
+    let lights = [
+        (&layout.traffic_close, [0xEE, 0x5A, 0x6A, 255], 'x'),
+        (&layout.traffic_min, [0xF4, 0xB6, 0x3F, 255], '-'),
+        (&layout.traffic_max, [0x3C, 0xC6, 0x8A, 255], '+'),
+    ];
+    for (rect, col, glyph) in lights {
+        let cx = rect.x as f32 + 7.0;
+        let cy = rect.y as f32 + 7.0;
+        c.fill_circle(cx, cy, 7.0, col);
+        if tl_hovered {
+            draw_traffic_glyph(c, cx, cy, glyph);
+        }
+    }
 
     let title = match app.mode {
         crate::state::WizardMode::Install => app.install_step.title(),
@@ -554,6 +555,22 @@ fn render_header(
         0,
         pal.divider,
     );
+}
+
+fn draw_traffic_glyph(c: &mut Canvas<'_>, cx: f32, cy: f32, kind: char) {
+    let ink = [0, 0, 0, 150];
+    match kind {
+        'x' => {
+            c.draw_line(cx - 2.6, cy - 2.6, cx + 2.6, cy + 2.6, 0.7, ink);
+            c.draw_line(cx + 2.6, cy - 2.6, cx - 2.6, cy + 2.6, 0.7, ink);
+        }
+        '-' => c.draw_line(cx - 3.2, cy, cx + 3.2, cy, 0.75, ink),
+        '+' => {
+            c.draw_line(cx - 3.0, cy, cx + 3.0, cy, 0.75, ink);
+            c.draw_line(cx, cy - 3.0, cx, cy + 3.0, 0.75, ink);
+        }
+        _ => {}
+    }
 }
 
 fn render_footer(
@@ -2034,5 +2051,27 @@ mod tests {
         let err_layout = compute_layout(&app, 800, 580);
         render_window_pixels(&mut buf, 800, 580, &app, &err_layout, None, true);
         assert_eq!(buf[3], 0);
+    }
+
+    #[test]
+    fn traffic_lights_render_vector_hover_glyphs() {
+        let app = InstallerAppState::new(&StartupOptions::default());
+        let layout = compute_layout(&app, 800, 580);
+        let mut unhovered = vec![0_u8; 800 * 580 * 4];
+        render_window_pixels(&mut unhovered, 800, 580, &app, &layout, None, true);
+
+        let mut hovered = vec![0_u8; 800 * 580 * 4];
+        render_window_pixels(
+            &mut hovered,
+            800,
+            580,
+            &app,
+            &layout,
+            Some(crate::layout::InstallerHit::TrafficClose),
+            true,
+        );
+
+        let min_center_off = ((20 * 800 + 43) * 4) as usize;
+        assert!(hovered[min_center_off + 2] < unhovered[min_center_off + 2]);
     }
 }

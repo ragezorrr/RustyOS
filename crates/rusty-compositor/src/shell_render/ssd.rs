@@ -87,14 +87,14 @@ pub fn check_window_frame_hit(
         let rel_y = y - ry;
 
         // 1. Traffic-light buttons take priority inside SSD titlebars only.
-        if win.has_ssd && (6.0..=22.0).contains(&rel_y) {
-            if (10.0..=26.0).contains(&rel_x) {
+        if win.has_ssd && (5.0..=23.0).contains(&rel_y) {
+            if (12.0..=28.0).contains(&rel_x) {
                 return Some(SsdHit::Close(win.id));
             }
-            if (28.0..=44.0).contains(&rel_x) {
+            if (34.0..=50.0).contains(&rel_x) {
                 return Some(SsdHit::Minimize(win.id));
             }
-            if (46.0..=62.0).contains(&rel_x) {
+            if (56.0..=72.0).contains(&rel_x) {
                 return Some(SsdHit::Maximize(win.id));
             }
         }
@@ -211,8 +211,8 @@ pub fn generate_window_ssd_elements(
     ));
 
     // 3. macOS-style traffic light buttons (Close, Minimize, Maximize)
-    let btn_y = y + 8;
-    let btn_size = 12;
+    let btn_y = y + 7;
+    let btn_size = 14;
     let close_color = if is_focused {
         COLOR_DANGER
     } else {
@@ -231,21 +231,21 @@ pub fn generate_window_ssd_elements(
 
     elements.push(make_solid_element(
         Rectangle::new(
-            Point::from((x + 12, btn_y)),
+            Point::from((x + 14, btn_y)),
             Size::from((btn_size, btn_size)),
         ),
         close_color,
     ));
     elements.push(make_solid_element(
         Rectangle::new(
-            Point::from((x + 30, btn_y)),
+            Point::from((x + 36, btn_y)),
             Size::from((btn_size, btn_size)),
         ),
         min_color,
     ));
     elements.push(make_solid_element(
         Rectangle::new(
-            Point::from((x + 48, btn_y)),
+            Point::from((x + 58, btn_y)),
             Size::from((btn_size, btn_size)),
         ),
         max_color,
@@ -383,12 +383,12 @@ pub fn generate_window_ssd_composite_elements_with_hover(
     }
 
     // 4x4 SSAA gel-lit traffic lights with hover glyphs (`Close`, `Minimize`, `Maximize`)
-    let btn_y = y + 8;
-    let btn_d = 12;
+    let btn_y = y + 7;
+    let btn_d = 14;
     for (bx, kind) in [
-        (x + 12, TrafficLightKind::Close),
-        (x + 30, TrafficLightKind::Minimize),
-        (x + 48, TrafficLightKind::Maximize),
+        (x + 14, TrafficLightKind::Close),
+        (x + 36, TrafficLightKind::Minimize),
+        (x + 58, TrafficLightKind::Maximize),
     ] {
         if let Some(el) = shape_cache.traffic_light_element(
             renderer,

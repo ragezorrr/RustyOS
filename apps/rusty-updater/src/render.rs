@@ -376,6 +376,27 @@ impl<'a> Canvas<'a> {
         }
     }
 
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_precision_loss,
+        clippy::cast_sign_loss
+    )]
+    fn draw_segment(&mut self, ax: f32, ay: f32, bx: f32, by: f32, radius: f32, color: [u8; 4]) {
+        let bx0 = (ax.min(bx) - radius - 2.0).floor() as i32;
+        let by0 = (ay.min(by) - radius - 2.0).floor() as i32;
+        let bx1 = (ax.max(bx) + radius + 2.0).ceil() as i32;
+        let by1 = (ay.max(by) + radius + 2.0).ceil() as i32;
+        let eff = self.effective_clip(Rect::new(bx0, by0, bx1 - bx0, by1 - by0));
+        for py in eff.y..eff.bottom() {
+            for px in eff.x..eff.right() {
+                let cov = aa_cov8(px, py, |x, y| sd_segment(x, y, ax, ay, bx, by, radius));
+                if cov > 0 {
+                    self.blend_px(px, py, color, cov);
+                }
+            }
+        }
+    }
+
     fn draw_text(&mut self, text: &str, x: i32, y: i32, size_px: f32, bold: bool, color: [u8; 4]) {
         let mut cursor_x = x;
         #[allow(clippy::cast_possible_truncation)]
@@ -498,21 +519,31 @@ fn draw_refresh_icon(canvas: &mut Canvas<'_>, rect: Rect, color: [u8; 4]) {
 
 fn draw_traffic_lights(canvas: &mut Canvas<'_>, hover: Option<&UpdaterHit>) {
     let lights = [
-        (21.0_f32, 20.0_f32, [0xEE, 0x5A, 0x6A, 0xFF]),
-        (43.0, 20.0, [0xF4, 0xB6, 0x3F, 0xFF]),
-        (65.0, 20.0, [0x3C, 0xC6, 0x8A, 0xFF]),
+        (21.0_f32, 20.0_f32, [0xEE, 0x5A, 0x6A, 0xFF], 'x'),
+        (43.0, 20.0, [0xF4, 0xB6, 0x3F, 0xFF], '-'),
+        (65.0, 20.0, [0x3C, 0xC6, 0x8A, 0xFF], '+'),
     ];
-    for (cx, cy, fill) in lights {
-        canvas.fill_circle(cx, cy, 7.0, fill);
-    }
     let show_glyphs = matches!(
         hover,
         Some(UpdaterHit::TrafficClose | UpdaterHit::TrafficMinimize | UpdaterHit::TrafficMaximize)
     );
-    if show_glyphs {
-        canvas.draw_text("x", 18, 13, 10.0, true, [0, 0, 0, 150]);
-        canvas.draw_text("-", 40, 13, 11.0, true, [0, 0, 0, 150]);
-        canvas.draw_text("+", 62, 13, 10.5, true, [0, 0, 0, 150]);
+    for (cx, cy, fill, glyph) in lights {
+        canvas.fill_circle(cx, cy, 7.0, fill);
+        if show_glyphs {
+            let ink = [0, 0, 0, 150];
+            match glyph {
+                'x' => {
+                    canvas.draw_segment(cx - 2.6, cy - 2.6, cx + 2.6, cy + 2.6, 0.7, ink);
+                    canvas.draw_segment(cx + 2.6, cy - 2.6, cx - 2.6, cy + 2.6, 0.7, ink);
+                }
+                '-' => canvas.draw_segment(cx - 3.2, cy, cx + 3.2, cy, 0.75, ink),
+                '+' => {
+                    canvas.draw_segment(cx - 3.0, cy, cx + 3.0, cy, 0.75, ink);
+                    canvas.draw_segment(cx, cy - 3.0, cx, cy + 3.0, 0.75, ink);
+                }
+                _ => {}
+            }
+        }
     }
 }
 
@@ -1044,5 +1075,33 @@ mod tests {
                 assert!(buf[mid_idx + 2] < 80);
             }
         }
+    }
+
+    #[test]
+    fn traffic_lights_render_vector_hover_glyphs() {
+        let app = UpdaterAppState::new(&StartupOptions {
+            theme_override: Some(FilesThemeMode::LightGoldenGate),
+            dry_run: true,
+            check_immediately: false,
+            pkgbuild_dir: None,
+        });
+        let w = 740_u32;
+        let h = 560_u32;
+        let layout = compute_layout(&app, w, h);
+        let mut unhovered = vec![0_u8; (w * h * 4) as usize];
+        render_window_pixels(&mut unhovered, w, h, &app, &layout, None);
+
+        let mut hovered = vec![0_u8; (w * h * 4) as usize];
+        render_window_pixels(
+            &mut hovered,
+            w,
+            h,
+            &app,
+            &layout,
+            Some(&crate::layout::UpdaterHit::TrafficClose),
+        );
+
+        let min_center_off = ((20 * w + 43) * 4) as usize;
+        assert!(hovered[min_center_off + 2] < unhovered[min_center_off + 2]);
     }
 }

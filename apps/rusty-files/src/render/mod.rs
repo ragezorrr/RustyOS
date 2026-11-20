@@ -525,4 +525,30 @@ mod tests {
 
         let _ = fs::remove_dir_all(&root);
     }
+
+    #[test]
+    fn traffic_lights_render_hover_glyphs() {
+        let root =
+            std::env::temp_dir().join(format!("rustyos-files-traffic-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let locs = UserFileLocations::with_roots(
+            &root.join("home"),
+            &root.join("cfg"),
+            &root.join("data"),
+        );
+        let mut state = FilesAppState::new(locs, &StartupOptions::default());
+        let (w, h) = (900_u32, 600_u32);
+        let layout = compute_layout(&state, w, h);
+        let mut unhovered_buf = vec![0_u8; (w * h * 4) as usize];
+        render_window_pixels(&mut unhovered_buf, w, h, &state, &layout);
+
+        state.traffic_hovered = true;
+        let mut hovered_buf = vec![0_u8; (w * h * 4) as usize];
+        render_window_pixels(&mut hovered_buf, w, h, &state, &layout);
+
+        // Center pixel of minimize light (x=43, y=20) is darkened by '-' glyph
+        let min_center_off = ((20 * w + 43) * 4) as usize;
+        assert!(hovered_buf[min_center_off + 2] < unhovered_buf[min_center_off + 2]);
+        let _ = fs::remove_dir_all(&root);
+    }
 }

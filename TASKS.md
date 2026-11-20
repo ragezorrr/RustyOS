@@ -2112,6 +2112,25 @@ hardware/software context и низкие накладные расходы.
 - **Tests:** 317 unit-тестов workspace (`4` `rusty-animation`, `199` `rusty-compositor`, `16` `rusty-files`, `12` `rusty-installer`, `3` `rusty-ipc`, `44` `rusty-services`, `10` `rusty-settings`, `5` `rusty-shell`, `14` `rusty-terminal`, `4` `rusty-updater`, `7` `rusty-wm`).
 - **Risks:** Нет; при отсутствии сфокусированных окон и анимаций композитор сохраняет энергоэффективный idle-режим с таймаутом 50 мс.
 
+### RUSTYOS-122 — Сквозная унификация оформления светофоров окон по эталону Settings (`RUSTYOS-122 Вариант 1`)
+
+- **Status:** Done (`RUSTYOS-122 Вариант 1` — утверждённый объём выполнен)
+- **Goal:** Привести размеры, координаты, цветовую гамму и hover-эффекты светофоров управления окном (Close, Minimize, Maximize) во всех приложениях и серверных декорациях (SSD) к единому эталону по образцу `apps/rusty-settings`.
+- **Dependencies:** `RUSTYOS-121`.
+- **Scope:**
+  - **Геометрия и цвета эталона:** диаметр 14 px (радиус 7.0 px), вертикальный центр `y = 20 px` (для CSD заголовков высотой 40 px) или `btn_y = y + 7 px` (для SSD высотой 28 px), центры кнопок по горизонтали `21.0`, `43.0`, `65.0` (отступ слева 14 px, зазор 8 px, шаг 22 px), цвета палитры RustyOS (`#EE5A6A` Close, `#F4B63F` Minimize, `#3CC68A` Maximize);
+  - `apps/rusty-terminal`: цвета выровнены на фирменную палитру, реализована векторная отрисовка hover-глифов (`x`, `-`, `+`) для CPU SHM (`renderer_shm.rs`) и GPU EGL (`gpu_egl.rs`) путей, добавлен unit-тест `shm_renderer_draws_hover_glyphs_on_traffic_lights`;
+  - `apps/rusty-files`: добавлены состояние `traffic_hovered` в `FilesAppState` и отслеживание курсора в `wayland.rs`, в `sidebar.rs` добавлена векторная отрисовка сглаженных глифов `x`, `-`, `+` через `stroke_line_aa`, добавлен unit-тест `traffic_lights_render_hover_glyphs`;
+  - `apps/rusty-updater`: в `render.rs` добавлен векторный рендерер линий `Canvas::draw_segment`, устаревший растровый вывод символов заменен на точные векторные отрезки, добавлен unit-тест `traffic_lights_render_vector_hover_glyphs`;
+  - `apps/rusty-installer`: в `layout.rs` и `render.rs` координаты кнопок выровнены на `(14, 13)`, `(36, 13)`, `(58, 13)` (размер 14×14 px), цвета приведены к эталону, реализован векторный hover с глифами, добавлен unit-тест `traffic_lights_render_vector_hover_glyphs`;
+  - `crates/rusty-compositor/src/shell_render/ssd.rs`: диаметр кнопок SSD увеличен с 12 px до 14 px, позиции выровнены на `x + 14`, `x + 36`, `x + 58` (`btn_y = y + 7`), обновлены диапазоны hit-теста `check_window_frame_hit` (`(5.0..=23.0).contains(&rel_y)`, Close `12.0..=28.0`, Minimize `34.0..=50.0`, Maximize `56.0..=72.0`), обновлены тесты в `shell_render/tests.rs`.
+- **Acceptance Criteria:**
+  - `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace` (321 unit-тест, включая 4 новых теста на hover-глифы) проходят без ошибок;
+  - Живые `--winit` прогоны на Wayland и X11 (`--max-frames 60`) и `--drm-probe` проходят штатно;
+  - Светофоры во всех окнах системы (Terminal, Files, Updater, Installer, Settings, SSD-окна) имеют строго одинаковые пропорции 14 px, одинаковый шаг и векторные микроглифы `x`, `-`, `+` при наведении.
+- **Tests:** 321 unit-тест workspace (`4` `rusty-animation`, `199` `rusty-compositor`, `17` `rusty-files`, `13` `rusty-installer`, `3` `rusty-ipc`, `44` `rusty-services`, `10` `rusty-settings`, `5` `rusty-shell`, `15` `rusty-terminal`, `5` `rusty-updater`, `7` `rusty-wm`).
+- **Risks:** Нет; векторная отрисовка глифов выполняется субпиксельно без аллокаций памяти и шрифтовых зависимостей.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

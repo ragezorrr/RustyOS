@@ -1247,7 +1247,19 @@ impl PointerHandler for WaylandClientData {
                 continue;
             }
             self.pointer_pos = ev.position;
+            let (px, py) = ev.position;
+            let tl_hovered = (10.0..=76.0).contains(&px) && (8.0..=32.0).contains(&py);
+            if self.app.traffic_hovered != tl_hovered {
+                self.app.traffic_hovered = tl_hovered;
+                self.app.dirty = true;
+            }
             match ev.kind {
+                PointerEventKind::Leave { .. } => {
+                    if self.app.traffic_hovered {
+                        self.app.traffic_hovered = false;
+                        self.app.dirty = true;
+                    }
+                }
                 PointerEventKind::Press { button, serial, .. } => {
                     let (px, py) = ev.position;
                     if button == BTN_LEFT {

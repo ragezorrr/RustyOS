@@ -28,6 +28,11 @@ pub(crate) fn render_sidebar(
     c.fill_circle_f(21.0, 20.0, 7.0, rgba(0xEE, 0x5A, 0x6A, 255));
     c.fill_circle_f(43.0, 20.0, 7.0, rgba(0xF4, 0xB6, 0x3F, 255));
     c.fill_circle_f(65.0, 20.0, 7.0, rgba(0x3C, 0xC6, 0x8A, 255));
+    if state.traffic_hovered {
+        draw_traffic_glyph(c, 21.0, 20.0, 'x');
+        draw_traffic_glyph(c, 43.0, 20.0, '-');
+        draw_traffic_glyph(c, 65.0, 20.0, '+');
+    }
 
     let clip = layout.sidebar_clip_rect;
     c.with_clip(clip, |c| {
@@ -111,5 +116,21 @@ pub(crate) fn render_trash_banner(
             pal.text_primary,
             btn,
         );
+    }
+}
+
+fn draw_traffic_glyph(c: &mut Canvas<'_>, cx: f32, cy: f32, kind: char) {
+    let ink = [0, 0, 0, 150];
+    match kind {
+        'x' => {
+            c.stroke_line_aa(cx - 2.6, cy - 2.6, cx + 2.6, cy + 2.6, 0.7, ink);
+            c.stroke_line_aa(cx + 2.6, cy - 2.6, cx - 2.6, cy + 2.6, 0.7, ink);
+        }
+        '-' => c.stroke_line_aa(cx - 3.2, cy, cx + 3.2, cy, 0.75, ink),
+        '+' => {
+            c.stroke_line_aa(cx - 3.0, cy, cx + 3.0, cy, 0.75, ink);
+            c.stroke_line_aa(cx, cy - 3.0, cx, cy + 3.0, 0.75, ink);
+        }
+        _ => {}
     }
 }

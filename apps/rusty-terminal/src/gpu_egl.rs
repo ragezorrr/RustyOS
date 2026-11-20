@@ -783,26 +783,99 @@ impl GpuRenderer {
         }
     }
 
+    #[allow(clippy::too_many_lines, clippy::similar_names)]
     fn emit_chrome_rects(&mut self, app: &TerminalAppState, layout: &TerminalLayout) {
         let unfocused = !app.focused;
         let close_c = if unfocused {
             [110, 114, 122, 255]
         } else {
-            [0xFF, 0x5F, 0x57, 255]
+            [0xEE, 0x5A, 0x6A, 255]
         };
         let min_c = if unfocused {
             [110, 114, 122, 255]
         } else {
-            [0xFE, 0xBC, 0x2E, 255]
+            [0xF4, 0xB6, 0x3F, 255]
         };
         let max_c = if unfocused {
             [110, 114, 122, 255]
         } else {
-            [0x28, 0xC8, 0x40, 255]
+            [0x3C, 0xC6, 0x8A, 255]
         };
         self.push_sdf_rect(layout.close_rect, 7.0, 0.0, close_c, [0, 0, 0, 0]);
         self.push_sdf_rect(layout.minimize_rect, 7.0, 0.0, min_c, [0, 0, 0, 0]);
         self.push_sdf_rect(layout.maximize_rect, 7.0, 0.0, max_c, [0, 0, 0, 0]);
+
+        let tl_hovered = matches!(
+            app.hover,
+            Some(
+                crate::layout::HitTarget::CloseButton
+                    | crate::layout::HitTarget::MinimizeButton
+                    | crate::layout::HitTarget::MaximizeButton
+            )
+        );
+        if tl_hovered {
+            let ink = [0, 0, 0, 150];
+            let close_cx = layout.close_rect.x as f32 + 7.0;
+            let close_cy = layout.close_rect.y as f32 + 7.0;
+            for (dx, dy) in [
+                (-2.6, -2.6),
+                (-1.3, -1.3),
+                (0.0, 0.0),
+                (1.3, 1.3),
+                (2.6, 2.6),
+                (-2.6, 2.6),
+                (-1.3, 1.3),
+                (1.3, -1.3),
+                (2.6, -2.6),
+            ] {
+                self.push_rect_f(
+                    close_cx + dx - 0.5,
+                    close_cy + dy - 0.5,
+                    1.1,
+                    1.1,
+                    0.2,
+                    0.0,
+                    ink,
+                    [0, 0, 0, 0],
+                );
+            }
+
+            let min_cx = layout.minimize_rect.x as f32 + 7.0;
+            let min_cy = layout.minimize_rect.y as f32 + 7.0;
+            self.push_rect_f(
+                min_cx - 3.2,
+                min_cy - 0.5,
+                6.4,
+                1.0,
+                0.4,
+                0.0,
+                ink,
+                [0, 0, 0, 0],
+            );
+
+            let max_cx = layout.maximize_rect.x as f32 + 7.0;
+            let max_cy = layout.maximize_rect.y as f32 + 7.0;
+            self.push_rect_f(
+                max_cx - 3.0,
+                max_cy - 0.5,
+                6.0,
+                1.0,
+                0.4,
+                0.0,
+                ink,
+                [0, 0, 0, 0],
+            );
+            self.push_rect_f(
+                max_cx - 0.5,
+                max_cy - 3.0,
+                1.0,
+                6.0,
+                0.4,
+                0.0,
+                ink,
+                [0, 0, 0, 0],
+            );
+        }
 
         for (idx, tab_l) in layout.tab_rects.iter().enumerate() {
             let active = idx == app.active_tab;

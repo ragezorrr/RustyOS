@@ -245,10 +245,14 @@ impl ShmFallbackRenderer {
         canvas: &mut [u8],
         stride_px: i32,
     ) {
-        for (rect, focused_c) in [
-            (layout.close_rect, [0xFF, 0x5F, 0x57, 255]),
-            (layout.minimize_rect, [0xFE, 0xBC, 0x2E, 255]),
-            (layout.maximize_rect, [0x28, 0xC8, 0x40, 255]),
+        let tl_hovered = matches!(
+            app.hover,
+            Some(HitTarget::CloseButton | HitTarget::MinimizeButton | HitTarget::MaximizeButton)
+        );
+        for (rect, focused_c, glyph) in [
+            (layout.close_rect, [0xEE, 0x5A, 0x6A, 255], 'x'),
+            (layout.minimize_rect, [0xF4, 0xB6, 0x3F, 255], '-'),
+            (layout.maximize_rect, [0x3C, 0xC6, 0x8A, 255], '+'),
         ] {
             let c = if app.focused {
                 focused_c
@@ -265,6 +269,11 @@ impl ShmFallbackRenderer {
                 c,
                 None,
             );
+            if tl_hovered {
+                let cx = rect.x as f32 + 7.0;
+                let cy = rect.y as f32 + 7.0;
+                draw_traffic_glyph(canvas, stride_px, cx, cy, glyph);
+            }
         }
 
         for (target, rect, is_on, glyph) in [
@@ -661,6 +670,36 @@ fn blend_pixel_premul(canvas: &mut [u8], stride_px: i32, x: i32, y: i32, rgba: [
     canvas[off + 3] = (a + da * inv / 255).min(255) as u8;
 }
 
+fn draw_traffic_glyph(canvas: &mut [u8], stride_px: i32, cx: f32, cy: f32, kind: char) {
+    let ink = [0, 0, 0, 150];
+    let mut draw_seg = |x0: f32, y0: f32, x1: f32, y1: f32| {
+        let steps = 14;
+        for i in 0..=steps {
+            #[allow(clippy::cast_precision_loss)]
+            let t = i as f32 / steps as f32;
+            #[allow(clippy::cast_possible_truncation)]
+            let px = (x0 + (x1 - x0) * t).round() as i32;
+            #[allow(clippy::cast_possible_truncation)]
+            let py = (y0 + (y1 - y0) * t).round() as i32;
+            blend_pixel_premul(canvas, stride_px, px, py, ink);
+        }
+    };
+    match kind {
+        'x' => {
+            draw_seg(cx - 2.6, cy - 2.6, cx + 2.6, cy + 2.6);
+            draw_seg(cx + 2.6, cy - 2.6, cx - 2.6, cy + 2.6);
+        }
+        '-' => {
+            draw_seg(cx - 3.2, cy, cx + 3.2, cy);
+        }
+        '+' => {
+            draw_seg(cx - 3.0, cy, cx + 3.0, cy);
+            draw_seg(cx, cy - 3.0, cx, cy + 3.0);
+        }
+        _ => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -679,5 +718,20 @@ mod tests {
         let tl_off = ((20 * 640 + 21) * 4) as usize;
         assert_eq!(buf[tl_off + 3], 255);
         assert!(buf[tl_off + 2] > 200);
+    }
+
+    #[test]
+    fn shm_renderer_draws_hover_glyphs_on_traffic_lights() {
+        let mut app = TerminalAppState::new(640, 400, None, Vec::new(), None, None, None, false);
+        let mut shm = ShmFallbackRenderer::new();
+        let mut unhovered_buf = vec![0_u8; (640 * 400 * 4) as usize];
+        shm.render(&app, &mut unhovered_buf, 640);
+
+        app.hover = Some(crate::layout::HitTarget::CloseButton);
+        let mut hovered_buf = vec![0_u8; (640 * 400 * 4) as usize];
+        shm.render(&app, &mut hovered_buf, 640);
+
+        let min_center_off = ((20 * 640 + 43) * 4) as usize;
+        assert!(hovered_buf[min_center_off + 2] < unhovered_buf[min_center_off + 2]);
     }
 }
