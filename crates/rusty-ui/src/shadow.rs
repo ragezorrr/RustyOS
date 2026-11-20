@@ -101,10 +101,10 @@ impl ShadowStyle {
                 ],
             },
             ShadowElevation::Dock => Self::new(10.0, 4.0, 3.0, 0.25, 0.0),
-            ShadowElevation::Popup => Self::new(8.0, 4.0, 3.0, 0.70, 1.0),
-            ShadowElevation::MenuOrTooltip => Self::new(14.0, 6.0, 8.0, 0.85, 1.0),
-            ShadowElevation::InactiveWindow => Self::new(24.0, 9.0, 14.0, 0.55, 1.0),
-            ShadowElevation::ActiveWindow => Self::new(24.0, 9.0, 14.0, 1.00, 1.0),
+            ShadowElevation::Popup => Self::new(10.0, 4.0, 4.0, 0.24, 0.0),
+            ShadowElevation::MenuOrTooltip => Self::new(14.0, 6.0, 8.0, 0.28, 0.0),
+            ShadowElevation::InactiveWindow => Self::new(24.0, 9.0, 14.0, 0.48, 0.20),
+            ShadowElevation::ActiveWindow => Self::new(24.0, 9.0, 14.0, 0.85, 0.28),
         }
     }
 

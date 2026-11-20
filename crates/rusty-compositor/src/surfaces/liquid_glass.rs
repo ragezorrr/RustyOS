@@ -409,14 +409,14 @@ pub(crate) fn compute_glass_material(
             tint_rgba: [0.38, 0.38, 0.38, 0.15 + 0.14 * g],
             sat_refract_rim_sheen: [1.30, 36.0, 1.0, 0.0],
         },
-        // Popover (`popupGlass`): Light [1,1,1,0.60], Dark [0.17,0.17,0.19,0.60], saturation=1.20, displacement=20, rim=0.85, chroma=0.03 (`RUSTYOS-100`).
+        // Popover: lighter cool frosted glass without heavy rim lip or lens bulge (`RUSTYOS-129`).
         (GlassPanelStyle::Popover, false) => GlassMaterialUniforms {
-            tint_rgba: [1.0, 1.0, 1.0, 0.32 + 0.28 * g],
-            sat_refract_rim_sheen: [1.20, 20.0, 0.85, 0.03],
+            tint_rgba: [0.95, 0.96, 0.98, 0.22 + 0.22 * g],
+            sat_refract_rim_sheen: [1.18, 6.0, 0.22, 0.01],
         },
         (GlassPanelStyle::Popover, true) => GlassMaterialUniforms {
-            tint_rgba: [0.17, 0.17, 0.19, 0.34 + 0.26 * g],
-            sat_refract_rim_sheen: [1.20, 20.0, 0.85, 0.03],
+            tint_rgba: [0.17, 0.18, 0.20, 0.28 + 0.24 * g],
+            sat_refract_rim_sheen: [1.18, 6.0, 0.22, 0.01],
         },
         // ControlModule (Control Center islands, Lock Screen pill, client Sidebar/ControlPill): frosted `half_out`
         // backdrop preventing sharp icon/label bleed-through (`RUSTYOS-104`) with crisp crystal rim refraction and Light/Dark polarity.
@@ -1504,5 +1504,18 @@ mod tests {
         ));
         assert!(!backdrop_signature_matches(&cached, &[elem_moved], scale));
         assert!(!backdrop_signature_matches(&cached, &[], scale));
+    }
+
+    #[test]
+    fn popover_material_keeps_subtle_rim_and_low_displacement() {
+        let light = compute_glass_material(GlassPanelStyle::Popover, 0.78, false);
+        assert!(light.tint_rgba[3] > 0.30 && light.tint_rgba[3] < 0.45);
+        assert!(light.sat_refract_rim_sheen[1] <= 8.0);
+        assert!(light.sat_refract_rim_sheen[2] <= 0.30);
+
+        let dark = compute_glass_material(GlassPanelStyle::Popover, 0.78, true);
+        assert!(dark.tint_rgba[3] > 0.35 && dark.tint_rgba[3] < 0.55);
+        assert!(dark.sat_refract_rim_sheen[1] <= 8.0);
+        assert!(dark.sat_refract_rim_sheen[2] <= 0.30);
     }
 }

@@ -844,7 +844,7 @@ fn base_glass_layer(
         // RUSTYOS-100: CutefishOS uniform glass layer across Dock, Popover (`popupGlass`), and ControlModule (`fishuiGlass`).
         (true, GlassPanelStyle::Dock) => (0.29 * (0.45 + 0.55 * glass_scale), [96.0, 96.0, 98.0]),
         (true, GlassPanelStyle::Popover) => {
-            (0.76 * (0.50 + 0.50 * glass_scale), [43.0, 43.0, 48.0])
+            (0.68 * (0.50 + 0.50 * glass_scale), [42.0, 44.0, 48.0])
         }
         (true, GlassPanelStyle::ControlModule) => {
             (0.28 * (0.48 + 0.52 * glass_scale), [60.0, 60.0, 68.0])
@@ -853,7 +853,7 @@ fn base_glass_layer(
             (0.25 * (0.44 + 0.56 * glass_scale), [153.0, 153.0, 153.0])
         }
         (false, GlassPanelStyle::Popover) => {
-            (0.62 * (0.52 + 0.48 * glass_scale), [250.0, 250.0, 252.0])
+            (0.56 * (0.52 + 0.48 * glass_scale), [243.0, 246.0, 250.0])
         }
         (false, GlassPanelStyle::ControlModule) => {
             (0.22 * (0.48 + 0.52 * glass_scale), [184.0, 188.0, 198.0])
@@ -968,11 +968,10 @@ pub(super) fn sample_glass_panel_pixel_themed(
     let rim_peak = match (is_dark, style) {
         (false, GlassPanelStyle::Dock) => 0.43,
         (true, GlassPanelStyle::Dock | GlassPanelStyle::ControlModule) => 0.35,
-        (false, GlassPanelStyle::Popover) => 0.36,
-        (true, GlassPanelStyle::Popover) => 0.30,
+        (false, GlassPanelStyle::Popover) | (true, GlassPanelStyle::NotificationCard) => 0.16,
+        (true, GlassPanelStyle::Popover) => 0.14,
         (false, GlassPanelStyle::ControlModule) => 0.42,
         (false, GlassPanelStyle::NotificationCard) => 0.18,
-        (true, GlassPanelStyle::NotificationCard) => 0.16,
     };
     let rim_alpha = cutefish_rim_alpha(ny, sd, rim_peak);
     if rim_alpha > 0.001 {

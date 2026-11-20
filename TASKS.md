@@ -2256,6 +2256,22 @@ hardware/software context и низкие накладные расходы.
 - **Tests:** 323 пройденных теста workspace (`4` `rusty-animation`, `201` `rusty-compositor`, `17` `rusty-files`, `13` `rusty-installer`, `3` `rusty-ipc`, `43` `rusty-services` + `1` пропущенный D-Bus BlueZ тест, `12` `rusty-settings`, `15` `rusty-terminal`, `8` `rusty-ui`, `7` `rusty-wm`).
 - **Risks:** Нет; полноэкранные клиенты не оборачиваются в `ClippedSurfaceElement`, сохраняя путь Direct Scanout.
 
+### RUSTYOS-129 — Калибровка `ShadowElevation`, облегчение `GlassPanelStyle::Popover` и контраст токенов меню (`RUSTYOS-129 Вариант 1`)
+
+- **Status:** Done (`RUSTYOS-129 Вариант 1` — утверждённый объём выполнен)
+- **Goal:** Убрать жёсткую тёмную контактную обводку и избыточный ореол у меню/поповеров и верхних/боковых границ окон, убрать толстый глянцевый кант и молочную плотность у `GlassPanelStyle::Popover`, повысить читаемость `popover_text_disabled` и смягчить `popover_separator`.
+- **Dependencies:** `RUSTYOS-126`, `RUSTYOS-127`, `RUSTYOS-128`.
+- **Scope:**
+  - `crates/rusty-ui/src/shadow.rs`, `crates/rusty-ui/src/lib.rs`: калибровка `ShadowStyle::for_elevation` (`MenuOrTooltip`: `(14.0, 6.0, 8.0, 0.28, 0.0)`, `Popup`: `(10.0, 4.0, 4.0, 0.24, 0.0)`, `InactiveWindow`: `(24.0, 9.0, 14.0, 0.48, 0.20)`, `ActiveWindow`: `(24.0, 9.0, 14.0, 0.85, 0.28)`) и расширение тестов `shadow_elevation_and_rendering`;
+  - `crates/rusty-compositor/src/surfaces/liquid_glass.rs`, `surfaces/sdf.rs`: облегчение `GlassPanelStyle::Popover` (`displacement = 6.0`, `rim = 0.22`, Light `[0.95, 0.96, 0.98, 0.22 + 0.22 * g]`, Dark `[0.17, 0.18, 0.20, 0.28 + 0.24 * g]`), синхронизация CPU-фолбэка `base_glass_layer`/`rim_peak` (`0.16`/`0.14`) и тест `popover_material_keeps_subtle_rim_and_low_displacement`;
+  - `crates/rusty-compositor/src/shell_render/tokens.rs`: обновление `popover_text_disabled` (`[72, 78, 90, 155]` Light / `[154, 158, 168, 145]` Dark) и `popover_separator` (`0.055` Light / `0.07` Dark);
+  - Документация: обновление `DESIGN.md`, создание `ADR-0073` (`docs/adr/0073-popover-glass-and-soft-shadow-calibration.md`), запись `D-087` в `DECISIONS.md`.
+- **Acceptance Criteria:**
+  - `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --offline -- -D warnings`, тесты workspace (за вычетом D-Bus теста BlueZ в sandbox) и `--drm-probe` проходят без ошибок;
+  - Живые `--winit` прогоны на Wayland (Light меню + окна) и X11 (Dark окна) проходят без ошибок EGL/shader и подтверждают визуальным осмотром PNG отсутствие жёсткого контура вокруг меню/окон, воздушный матовый поповер и чёткую читаемость `Hide Desktop`/`Quit`.
+- **Tests:** 324 пройденных unit-теста workspace (`4` `rusty-animation`, `202` `rusty-compositor`, `17` `rusty-files`, `13` `rusty-installer`, `3` `rusty-ipc`, `43` `rusty-services` + `1` пропущенный D-Bus BlueZ тест, `12` `rusty-settings`, `15` `rusty-terminal`, `8` `rusty-ui`, `7` `rusty-wm`).
+- **Risks:** Нет; `bounds_and_offsets` окон не изменились, Direct Scanout не затронут.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

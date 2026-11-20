@@ -240,15 +240,25 @@ mod tests {
         let active = ShadowStyle::for_elevation(ShadowElevation::ActiveWindow);
         assert_eq!(active.lobes[0].sigma, 24.0);
         assert_eq!(active.lobes[0].offset.1, 14.0);
-        assert!((active.lobes[0].opacity - 0.22).abs() < 0.001);
+        assert!((active.lobes[0].opacity - (0.22 * 0.85)).abs() < 0.001);
         assert_eq!(active.lobes[1].sigma, 9.0);
         assert_eq!(active.lobes[1].offset.1, 7.5);
         assert_eq!(active.lobes[2].sigma, 1.5);
         assert_eq!(active.lobes[2].offset.1, 1.0);
+        assert!(active.lobes[2].opacity > 0.0 && active.lobes[2].opacity < 0.06);
 
         let inactive = ShadowStyle::for_elevation(ShadowElevation::InactiveWindow);
         assert_eq!(inactive.lobes[0].sigma, 24.0);
-        assert!((inactive.lobes[0].opacity - (0.22 * 0.55)).abs() < 0.001);
+        assert!((inactive.lobes[0].opacity - (0.22 * 0.48)).abs() < 0.001);
+        assert!(active.lobes[2].opacity > inactive.lobes[2].opacity);
+
+        let menu = ShadowStyle::for_elevation(ShadowElevation::MenuOrTooltip);
+        assert_eq!(menu.lobes[0].sigma, 14.0);
+        assert_eq!(menu.lobes[2].opacity, 0.0);
+
+        let popup = ShadowStyle::for_elevation(ShadowElevation::Popup);
+        assert_eq!(popup.lobes[0].sigma, 10.0);
+        assert_eq!(popup.lobes[2].opacity, 0.0);
 
         let dock = ShadowStyle::for_elevation(ShadowElevation::Dock);
         assert_eq!(dock.lobes[0].sigma, 10.0);
