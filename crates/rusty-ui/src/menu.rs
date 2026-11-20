@@ -269,19 +269,13 @@ pub fn draw_menu_background(
     draw_shadow: bool,
 ) {
     if draw_shadow {
-        // Multi-stage soft drop shadow (dx=0, dy=2..4)
-        for (dx, dy, g, a) in [(0, 3, 4, 16), (0, 2, 2, 28), (0, 1, 1, 40)] {
-            canvas.fill_rounded_rect(
-                Rect::new(
-                    rect.x - g + dx,
-                    rect.y - g + dy,
-                    rect.width + (g * 2) as u32,
-                    rect.height + (g * 2) as u32,
-                ),
-                MENU_RADIUS as u32 + g as u32,
-                [0, 0, 0, a],
-            );
-        }
+        crate::shadow::draw_elevation_shadow(
+            canvas,
+            rect,
+            MENU_RADIUS as u32,
+            crate::shadow::ShadowElevation::MenuOrTooltip,
+            pal,
+        );
     }
 
     // Menu translucent background

@@ -132,10 +132,10 @@ pub(crate) struct WindowShadowSpec {
 }
 
 impl WindowShadowSpec {
-    /// Golden Gate active/inactive window shadow preset (`RUSTYOS-075`, `RUSTYOS-080`).
+    /// Standard active/inactive window shadow preset (`RUSTYOS-075`, `RUSTYOS-080`).
     #[must_use]
     #[allow(dead_code)]
-    pub(crate) const fn for_window(
+    pub(crate) fn for_window(
         win_rect: Rectangle<i32, Logical>,
         radius: i32,
         is_focused: bool,
@@ -148,66 +148,49 @@ impl WindowShadowSpec {
         )
     }
 
-    /// Golden Gate active/inactive window shadow preset for a specific mode (`RUSTYOS-080`).
+    /// Standardized 3-lobe Gaussian shadow specification for a desktop elevation (`RUSTYOS-126`).
     #[must_use]
-    pub(crate) const fn for_window_mode(
+    pub(crate) fn for_elevation(
+        win_rect: Rectangle<i32, Logical>,
+        radius: i32,
+        elevation: rusty_ui::shadow::ShadowElevation,
+        shadow_rgb: [u8; 3],
+    ) -> Self {
+        let style = rusty_ui::shadow::ShadowStyle::for_elevation(elevation);
+        let wide_lobe = style.lobes[0];
+        let narrow_lobe = style.lobes[1];
+        let contact_lobe = style.lobes[2];
+        Self {
+            win_rect,
+            radius,
+            drop_y: wide_lobe.offset.1,
+            contact_alpha: narrow_lobe.opacity + contact_lobe.opacity,
+            contact_spread: narrow_lobe.sigma,
+            amb_alpha: wide_lobe.opacity,
+            amb_spread: wide_lobe.sigma,
+            shadow_rgb,
+        }
+    }
+
+    /// Standard active/inactive window shadow preset for a specific mode (`RUSTYOS-080`, `RUSTYOS-126`).
+    #[must_use]
+    pub(crate) fn for_window_mode(
         win_rect: Rectangle<i32, Logical>,
         radius: i32,
         is_focused: bool,
         mode: crate::config::WindowShadowMode,
     ) -> Self {
-        match mode {
-            crate::config::WindowShadowMode::Subtle | crate::config::WindowShadowMode::None => {
-                if is_focused {
-                    Self {
-                        win_rect,
-                        radius,
-                        drop_y: 5.0,
-                        contact_alpha: 0.08,
-                        contact_spread: 6.0,
-                        amb_alpha: 0.09,
-                        amb_spread: 16.0,
-                        shadow_rgb: [6, 8, 14],
-                    }
-                } else {
-                    Self {
-                        win_rect,
-                        radius,
-                        drop_y: 3.0,
-                        contact_alpha: 0.05,
-                        contact_spread: 4.0,
-                        amb_alpha: 0.05,
-                        amb_spread: 10.0,
-                        shadow_rgb: [6, 8, 14],
-                    }
-                }
-            }
-            crate::config::WindowShadowMode::Normal => {
-                if is_focused {
-                    Self {
-                        win_rect,
-                        radius,
-                        drop_y: 8.0,
-                        contact_alpha: 0.10,
-                        contact_spread: 8.0,
-                        amb_alpha: 0.16,
-                        amb_spread: 28.0,
-                        shadow_rgb: [6, 8, 14],
-                    }
-                } else {
-                    Self {
-                        win_rect,
-                        radius,
-                        drop_y: 4.0,
-                        contact_alpha: 0.06,
-                        contact_spread: 5.0,
-                        amb_alpha: 0.08,
-                        amb_spread: 16.0,
-                        shadow_rgb: [6, 8, 14],
-                    }
-                }
-            }
+        let elevation = if is_focused {
+            rusty_ui::shadow::ShadowElevation::ActiveWindow
+        } else {
+            rusty_ui::shadow::ShadowElevation::InactiveWindow
+        };
+        let mut spec = Self::for_elevation(win_rect, radius, elevation, [6, 8, 14]);
+        if mode == crate::config::WindowShadowMode::Subtle {
+            spec.amb_alpha *= 0.85;
+            spec.contact_alpha *= 0.85;
         }
+        spec
     }
 
     /// Unified shell popover/card shadow preset derived from `spread` and `max_alpha`.
@@ -522,12 +505,16 @@ mod tests {
         let focused = WindowShadowSpec::for_window(win, 20, true);
         let unfocused = WindowShadowSpec::for_window(win, 20, false);
         let (fb, fpx, fpt) = focused.bounds_and_offsets();
-        let (ub, _, _) = unfocused.bounds_and_offsets();
-        assert_eq!(fpx, 16);
-        assert_eq!(fpt, 11);
-        assert_eq!(fb.loc, Point::from((84, 109)));
-        assert_eq!(fb.size, Size::from((832, 532)));
-        assert!(fb.size.w > ub.size.w && fb.size.h > ub.size.h);
+        let (ub, upx, upt) = unfocused.bounds_and_offsets();
+        assert_eq!(fpx, 24);
+        assert_eq!(fpt, 10);
+        assert_eq!(upx, 24);
+        assert_eq!(upt, 10);
+        assert_eq!(fb.loc, Point::from((76, 110)));
+        assert_eq!(fb.size, Size::from((848, 548)));
+        // Scene bounds remain stable across focus changes to prevent layout jitter
+        assert_eq!(fb.size, ub.size);
         assert!(focused.amb_alpha > unfocused.amb_alpha);
+        assert!(focused.contact_alpha > unfocused.contact_alpha);
     }
 }

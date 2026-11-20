@@ -128,23 +128,50 @@ pub(crate) fn render_popup_surface_pixels_with_style(
 }
 
 /// Draws the soft shadow, translucent glass body, directional hairline rim, and outer shade border.
-#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
+)]
 fn render_popup_chrome(c: &mut Canvas<'_>, r: Rect, pal: &Palette) {
-    let shadow_layers = [
-        // (dx, dy, grow_x, grow_y, radius, alpha)
-        (0, 4, 7, 8, 18, 5),
-        (0, 3, 5, 6, 17, 9),
-        (0, 3, 4, 5, 16, 14),
-        (0, 2, 3, 4, 15, 19),
-        (0, 1, 2, 2, 14, 25),
-        (0, 1, 1, 1, 13, 32),
-    ];
-    for (dx, dy, gx, gy, rad, a) in shadow_layers {
-        c.fill_rounded_rect(
-            Rect::new(r.x - gx + dx, r.y - gy + dy, r.w + gx * 2, r.h + gy * 2),
-            rad,
-            rgba(0, 0, 0, a),
-        );
+    let shadow_style = rusty_ui::shadow::ShadowStyle::for_elevation(
+        rusty_ui::shadow::ShadowElevation::MenuOrTooltip,
+    );
+    for lobe in &shadow_style.lobes {
+        if lobe.opacity <= 0.001 {
+            continue;
+        }
+        let dy = lobe.offset.1.round() as i32;
+        let base_alpha = (lobe.opacity * 255.0).clamp(0.0, 255.0);
+        if lobe.sigma <= 2.0 {
+            for (step, a_mult) in [(0, 0.65f32), (1, 0.35f32)] {
+                let a = (base_alpha * a_mult).round().clamp(1.0, 255.0) as u8;
+                c.fill_rounded_rect(
+                    Rect::new(r.x - step, r.y - step + dy, r.w + step * 2, r.h + step * 2),
+                    MENU_POPOVER_RADIUS + step,
+                    rgba(0, 0, 0, a),
+                );
+            }
+        } else {
+            let steps = if lobe.sigma > 12.0 { 4 } else { 3 };
+            let max_spread = (lobe.sigma * 1.5).round() as i32;
+            for i in 1..=steps {
+                let frac = i as f32 / steps as f32;
+                let spread = (max_spread as f32 * frac).round() as i32;
+                let weight = (-2.0 * frac * frac).exp() * (1.0 / steps as f32);
+                let a = (base_alpha * weight * 1.4).round().clamp(1.0, 255.0) as u8;
+                c.fill_rounded_rect(
+                    Rect::new(
+                        r.x - spread,
+                        r.y - spread + dy,
+                        r.w + spread * 2,
+                        r.h + spread * 2,
+                    ),
+                    MENU_POPOVER_RADIUS + spread,
+                    rgba(0, 0, 0, a),
+                );
+            }
+        }
     }
 
     c.fill_rounded_rect(r, MENU_POPOVER_RADIUS, pal.popover_bg);

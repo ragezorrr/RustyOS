@@ -9,8 +9,8 @@ use crate::surfaces::{GlassPanelStyle, UiGlyphKind};
 
 use super::CompositorRenderElement;
 use super::tokens::{
-    MENU_POPOVER_RADIUS, TOP_BAR_HEIGHT, ThemePalette, make_solid_element, push_liquid_glass_panel,
-    push_rounded_glass_box, truncate_ascii,
+    MENU_POPOVER_RADIUS, TOP_BAR_HEIGHT, ThemePalette, make_solid_element,
+    push_liquid_glass_panel_elevation, push_rounded_glass_box, truncate_ascii,
 };
 
 const WIFI_POPOVER_WIDTH: i32 = 280;
@@ -639,8 +639,8 @@ pub(super) fn render_wifi_popover_composite(
         )));
     }
 
-    // 6. Backmost Liquid Glass Popover panel (`r = 13`, specular rim, `(16, 52)` soft shadow)
-    push_liquid_glass_panel(
+    // 6. Backmost Liquid Glass Popover panel (`r = 13`, specular rim, 3-lobe MenuOrTooltip shadow)
+    push_liquid_glass_panel_elevation(
         out,
         shape_cache,
         renderer,
@@ -649,6 +649,6 @@ pub(super) fn render_wifi_popover_composite(
         GlassPanelStyle::Popover,
         state.glass_opacity,
         state.reduce_transparency,
-        Some((16, 52)),
+        rusty_ui::shadow::ShadowElevation::MenuOrTooltip,
     );
 }

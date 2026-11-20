@@ -11,8 +11,8 @@ use crate::text::FontWeight;
 use super::CompositorRenderElement;
 use super::dock::DockHit;
 use super::tokens::{
-    MENU_POPOVER_RADIUS, TOP_BAR_HEIGHT, ThemePalette, make_solid_element, push_liquid_glass_panel,
-    push_rounded_glass_box, truncate_ascii,
+    MENU_POPOVER_RADIUS, TOP_BAR_HEIGHT, ThemePalette, make_solid_element,
+    push_liquid_glass_panel_elevation, push_rounded_glass_box, truncate_ascii,
 };
 use super::top_bar::{MENU_ITEM_HEIGHT, MENU_POPOVER_PAD_Y, MENU_SEPARATOR_HEIGHT};
 
@@ -897,7 +897,7 @@ fn render_panel_shapes(
         );
     }
 
-    push_liquid_glass_panel(
+    push_liquid_glass_panel_elevation(
         out,
         shape_cache,
         renderer,
@@ -906,7 +906,7 @@ fn render_panel_shapes(
         GlassPanelStyle::Popover,
         glass_opacity,
         reduce_transparency,
-        Some((16, 52)),
+        rusty_ui::shadow::ShadowElevation::MenuOrTooltip,
     );
 }
 

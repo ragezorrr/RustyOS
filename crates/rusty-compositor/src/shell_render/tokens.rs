@@ -707,6 +707,80 @@ pub(crate) fn push_liquid_glass_panel(
     }
 }
 
+/// Pushes a standardized 3-lobe elevation drop shadow (`RUSTYOS-126`).
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::many_single_char_names
+)]
+pub(crate) fn push_elevation_shadow(
+    out: &mut Vec<CompositorRenderElement>,
+    shape_cache: &mut crate::surfaces::UiShapeCache,
+    renderer: &mut GlesRenderer,
+    rect: Rectangle<i32, smithay::utils::Physical>,
+    inner_radius: i32,
+    elevation: rusty_ui::shadow::ShadowElevation,
+) {
+    if elevation == rusty_ui::shadow::ShadowElevation::None {
+        return;
+    }
+    let x = rect.loc.x;
+    let y = rect.loc.y;
+    let w = rect.size.w;
+    let h = rect.size.h;
+    let r = inner_radius.min(w / 2).min(h / 2).max(0);
+    if w <= 0 || h <= 0 {
+        return;
+    }
+
+    let shadow_rgb = [6, 8, 14];
+    let logical_rect = Rectangle::new(Point::from((x, y)), Size::from((w, h)));
+    if let Some(el) = shape_cache.elevation_shadow_render_element(
+        renderer,
+        logical_rect,
+        r,
+        elevation,
+        shadow_rgb,
+    ) {
+        out.push(el);
+        return;
+    }
+
+    let style = rusty_ui::shadow::ShadowStyle::for_elevation(elevation);
+    let spread = style.lobes[0].sigma.ceil() as i32;
+    let max_alpha = (style.lobes[0].opacity * 255.0).clamp(0.0, 255.0) as u8;
+    push_soft_shadow(out, shape_cache, renderer, rect, r, spread, max_alpha);
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn push_liquid_glass_panel_elevation(
+    out: &mut Vec<CompositorRenderElement>,
+    shape_cache: &mut crate::surfaces::UiShapeCache,
+    renderer: &mut GlesRenderer,
+    rect: Rectangle<i32, smithay::utils::Physical>,
+    radius: i32,
+    style: crate::surfaces::GlassPanelStyle,
+    glass_opacity: f32,
+    reduce_transparency: bool,
+    elevation: rusty_ui::shadow::ShadowElevation,
+) {
+    if let Some(el) = shape_cache.glass_panel_render_element(
+        renderer,
+        style,
+        rect.size.w,
+        rect.size.h,
+        radius,
+        glass_opacity,
+        reduce_transparency,
+        Point::from((rect.loc.x, rect.loc.y)),
+    ) {
+        out.push(el);
+    }
+    if elevation != rusty_ui::shadow::ShadowElevation::None {
+        push_elevation_shadow(out, shape_cache, renderer, rect, radius, elevation);
+    }
+}
+
 pub(super) fn title_hue_seed(title: &str, id: u64) -> u8 {
     let base = u8::try_from(id & 0xff).unwrap_or(0);
     title.bytes().fold(base, u8::wrapping_add) % 4

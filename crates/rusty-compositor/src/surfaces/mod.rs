@@ -522,6 +522,25 @@ impl UiShapeCache {
             .map(crate::shell_render::CompositorRenderElement::ShaderTexture)
     }
 
+    /// Builds a hardware-accelerated seamless 3-lobe elevation drop shadow element (`RUSTYOS-126`).
+    pub(crate) fn elevation_shadow_render_element(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        rect: Rectangle<i32, Logical>,
+        radius: i32,
+        elevation: rusty_ui::shadow::ShadowElevation,
+        shadow_rgb: [u8; 3],
+    ) -> Option<crate::shell_render::CompositorRenderElement> {
+        if elevation == rusty_ui::shadow::ShadowElevation::None {
+            return None;
+        }
+        let spec =
+            window_shadow::WindowShadowSpec::for_elevation(rect, radius, elevation, shadow_rgb);
+        self.window_shadow
+            .make_shadow_element(renderer, spec)
+            .map(crate::shell_render::CompositorRenderElement::ShaderTexture)
+    }
+
     /// Prepares offscreen Dual-Kawase backdrop blur for Liquid Glass panels on `output_id` (`RUSTYOS-069`).
     pub(crate) fn prepare_liquid_glass_backdrop(
         &mut self,

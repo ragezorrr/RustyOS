@@ -2195,6 +2195,30 @@ hardware/software context и низкие накладные расходы.
 - **Tests:** 322 unit-теста workspace (`4` `rusty-animation`, `199` `rusty-compositor`, `17` `rusty-files`, `13` `rusty-installer`, `3` `rusty-ipc`, `44` `rusty-services`, `11` `rusty-settings`, `5` `rusty-shell`, `15` `rusty-terminal`, `7` `rusty-ui`, `7` `rusty-wm`).
 - **Risks:** Нет; изменения геометрии меню и оконных заголовков строго концентричны и полностью покрыты автоматическими тестами.
 
+### RUSTYOS-126 — Трёхдольная система теней Гаусса и сквозная ликвидация хардкода (`RUSTYOS-126 Вариант 2`)
+
+- **Status:** Done (`RUSTYOS-126 Вариант 2` — утверждённый объём выполнен)
+- **Goal:** Реализовать модуль `crates/rusty-ui::shadow` с эталонной 3-дольной математической моделью Гаусса (`ShadowStyle`, `ShadowElevation`: `ActiveWindow`, `InactiveWindow`, `MenuOrTooltip`, `Popup`, `Dock`) и сквозной заменой всего локального хардкода параметров теней в `crates/rusty-compositor`, `apps/rusty-files` и `crates/rusty-ui`.
+- **Dependencies:** `RUSTYOS-125`.
+- **Scope:**
+  - `crates/rusty-ui/src/shadow.rs`: реализованы структуры `ShadowElevation`, `ShadowLobe`, `ShadowStyle` (`lobes: [ShadowLobe; 3]`), вычисление радиуса охвата `reach()`, эталонные уровни возвышения (Active/Inactive 24/9/14 px, Menu/Tooltip 14/6/8 px, Popup 8/4/3 px, Dock 10/4/3 px без контакта), функция отрисовки на холсте `draw_elevation_shadow`;
+  - `crates/rusty-ui/src/lib.rs`: экспорт модуля `shadow`, unit-тест `shadow_elevation_and_rendering`;
+  - `crates/rusty-ui/src/menu.rs`: замена ad-hoc цикла в `draw_menu_background` на вызов `draw_elevation_shadow(..., ShadowElevation::MenuOrTooltip)`;
+  - `crates/rusty-compositor/src/surfaces/window_shadow.rs`: добавление `for_elevation` на базе `ShadowStyle`, перевод `for_window_mode` на эталонные 24/9/14 px (границы окна `fb.size == ub.size` стабильны при переключении фокуса);
+  - `crates/rusty-compositor/src/surfaces/mod.rs`: добавлен метод `elevation_shadow_render_element`;
+  - `crates/rusty-compositor/src/shell_render/tokens.rs`: добавлены `push_elevation_shadow` и `push_liquid_glass_panel_elevation`;
+  - `crates/rusty-compositor`: устранение магических кортежей `(16, 52)`, `(18, 54)` и `(8, 28)` в `chrome_shapes.rs`, `context_menu.rs`, `wifi_popover.rs`, `updates_popover.rs`, `dock_stack.rs`, `notification_center.rs` и `frame_composer.rs`;
+  - `apps/rusty-files`: в `render/popup.rs` и `dialogs.rs` удалены жестко закодированные массивы `shadow_layers = [...]` и смещения, отрисовка переведена на расчёт через `rusty_ui::shadow::ShadowElevation`;
+  - `apps/rusty-shell`: очищен устаревший комментарий в `wayland.rs`;
+  - Документация: `ADR-0070` (`docs/adr/0070-unified-three-lobe-shadow-system.md`), запись `D-084` в `DECISIONS.md`.
+- **Acceptance Criteria:**
+  - `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace` (323 unit-теста) проходят без ошибок и предупреждений;
+  - `cargo run -p rusty-compositor -- --drm-probe` завершается штатно;
+  - Живой `--winit` прогон композитора стартует и работает стабильно;
+  - Полная ликвидация хардкода параметров теней во всех компонентах десктопа.
+- **Tests:** 323 unit-теста workspace (`4` `rusty-animation`, `199` `rusty-compositor`, `17` `rusty-files`, `13` `rusty-installer`, `3` `rusty-ipc`, `44` `rusty-services`, `11` `rusty-settings`, `5` `rusty-shell`, `15` `rusty-terminal`, `8` `rusty-ui`, `7` `rusty-wm`).
+- **Risks:** Нет; аналитический расчет долей строго эквивалентен эталону и проверен в тестах.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

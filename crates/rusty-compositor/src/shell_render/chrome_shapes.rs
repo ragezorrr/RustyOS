@@ -8,8 +8,9 @@ use super::spotlight_overview::render_overview_text;
 use super::text_pass::append_chrome_text;
 use super::tokens::{
     RGBA_ACCENT, RGBA_BORDER, RGBA_DANGER, ThemePalette, anim_offset, premul,
-    push_liquid_glass_panel, push_rounded_glass_box, push_soft_shadow, resolved_icon_to_element,
-    rgba_to_premul_color32f, title_hue_seed,
+    push_elevation_shadow, push_liquid_glass_panel, push_liquid_glass_panel_elevation,
+    push_rounded_glass_box, push_soft_shadow, resolved_icon_to_element, rgba_to_premul_color32f,
+    title_hue_seed,
 };
 use super::top_bar::{
     MENU_ITEM_HEIGHT, MENU_POPOVER_PAD_Y, MENU_SEPARATOR_HEIGHT, push_top_bar_right_glyphs,
@@ -219,7 +220,7 @@ fn build_chrome_shapes(
                 }
             }
         }
-        push_liquid_glass_panel(
+        push_liquid_glass_panel_elevation(
             &mut out,
             shape_cache,
             renderer,
@@ -228,7 +229,7 @@ fn build_chrome_shapes(
             crate::surfaces::GlassPanelStyle::Popover,
             top_telemetry.glass_opacity,
             top_telemetry.reduce_transparency,
-            Some((16, 52)),
+            rusty_ui::shadow::ShadowElevation::MenuOrTooltip,
         );
     }
 
@@ -486,7 +487,7 @@ fn push_dock_tooltip_and_drag(
         && let Some((tooltip_rect, _)) =
             dock_tooltip_rect_and_label(screen_size.w, screen_size.h, dock_view)
     {
-        push_liquid_glass_panel(
+        push_liquid_glass_panel_elevation(
             out,
             shape_cache,
             renderer,
@@ -495,7 +496,7 @@ fn push_dock_tooltip_and_drag(
             crate::surfaces::GlassPanelStyle::Popover,
             top_telemetry.glass_opacity,
             top_telemetry.reduce_transparency,
-            Some((8, 28)),
+            rusty_ui::shadow::ShadowElevation::MenuOrTooltip,
         );
     }
     if let Some(badge_rect) = layout.drag_remove_badge {
@@ -769,7 +770,14 @@ fn build_overview_shapes(
                 Some([64, 156, 255, 245]),
             );
         }
-        push_soft_shadow(&mut out, shape_cache, renderer, card, 14, 16, 50);
+        push_elevation_shadow(
+            &mut out,
+            shape_cache,
+            renderer,
+            card,
+            14,
+            rusty_ui::shadow::ShadowElevation::Popup,
+        );
     }
     #[allow(clippy::cast_possible_truncation)]
     let scrim_a = 0.36 * (ov.progress.clamp(0.0, 1.0) as f32);

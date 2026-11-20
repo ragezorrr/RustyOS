@@ -766,18 +766,60 @@ pub(crate) fn render_conflict_dialog(
     });
 }
 
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
+)]
 pub(crate) fn draw_modal_shadow_and_frame(
     c: &mut Canvas<'_>,
     rect: Rect,
     radius: i32,
     pal: &Palette,
 ) {
-    let shadow = Rect::new(rect.x - 2, rect.y + 2, rect.w + 4, rect.h + 5);
-    c.fill_rounded_rect(
-        shadow,
-        radius + 1,
-        rgba(0, 0, 0, if pal.is_dark { 96 } else { 42 }),
-    );
+    let shadow_style =
+        rusty_ui::shadow::ShadowStyle::for_elevation(rusty_ui::shadow::ShadowElevation::Popup);
+    for lobe in &shadow_style.lobes {
+        if lobe.opacity <= 0.001 {
+            continue;
+        }
+        let dy = lobe.offset.1.round() as i32;
+        let base_alpha = (lobe.opacity * 255.0).clamp(0.0, 255.0);
+        if lobe.sigma <= 2.0 {
+            for (step, a_mult) in [(0, 0.65f32), (1, 0.35f32)] {
+                let a = (base_alpha * a_mult).round().clamp(1.0, 255.0) as u8;
+                c.fill_rounded_rect(
+                    Rect::new(
+                        rect.x - step,
+                        rect.y - step + dy,
+                        rect.w + step * 2,
+                        rect.h + step * 2,
+                    ),
+                    radius + step,
+                    rgba(0, 0, 0, a),
+                );
+            }
+        } else {
+            let steps = 3;
+            let max_spread = (lobe.sigma * 1.5).round() as i32;
+            for i in 1..=steps {
+                let frac = i as f32 / steps as f32;
+                let spread = (max_spread as f32 * frac).round() as i32;
+                let weight = (-2.0 * frac * frac).exp() * (1.0 / steps as f32);
+                let a = (base_alpha * weight * 1.4).round().clamp(1.0, 255.0) as u8;
+                c.fill_rounded_rect(
+                    Rect::new(
+                        rect.x - spread,
+                        rect.y - spread + dy,
+                        rect.w + spread * 2,
+                        rect.h + spread * 2,
+                    ),
+                    radius + spread,
+                    rgba(0, 0, 0, a),
+                );
+            }
+        }
+    }
     c.fill_rounded_rect(rect, radius, pal.popup_bg);
     c.stroke_rounded_rect(rect, radius, pal.popup_border);
 }

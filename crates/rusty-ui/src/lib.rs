@@ -15,6 +15,7 @@
 pub mod canvas;
 pub mod geometry;
 pub mod menu;
+pub mod shadow;
 pub mod theme;
 pub mod traffic_lights;
 pub mod widgets;
@@ -30,6 +31,7 @@ pub use geometry::{
 pub use menu::{
     MenuEntry, MenuItem, MenuLayout, MenuRowLayout, draw_menu_background, draw_menu_row,
 };
+pub use shadow::{ShadowElevation, ShadowLobe, ShadowStyle, draw_elevation_shadow};
 pub use theme::{ACCENT_PALETTE, ThemeMode, ThemePalette, TrafficLightKind};
 pub use traffic_lights::{GlyphSegment, TrafficLightButtons, glyph_segments};
 pub use widgets::{
@@ -226,6 +228,37 @@ mod tests {
         assert_eq!(
             header.on_pointer_down(200.0, 20.0, 800),
             WindowHitTarget::TitlebarDrag
+        );
+    }
+
+    #[test]
+    fn shadow_elevation_and_rendering() {
+        let active = ShadowStyle::for_elevation(ShadowElevation::ActiveWindow);
+        assert_eq!(active.lobes[0].sigma, 24.0);
+        assert_eq!(active.lobes[0].offset.1, 14.0);
+        assert!((active.lobes[0].opacity - 0.22).abs() < 0.001);
+        assert_eq!(active.lobes[1].sigma, 9.0);
+        assert_eq!(active.lobes[1].offset.1, 7.5);
+        assert_eq!(active.lobes[2].sigma, 1.5);
+        assert_eq!(active.lobes[2].offset.1, 1.0);
+
+        let inactive = ShadowStyle::for_elevation(ShadowElevation::InactiveWindow);
+        assert_eq!(inactive.lobes[0].sigma, 24.0);
+        assert!((inactive.lobes[0].opacity - (0.22 * 0.55)).abs() < 0.001);
+
+        let dock = ShadowStyle::for_elevation(ShadowElevation::Dock);
+        assert_eq!(dock.lobes[0].sigma, 10.0);
+        assert_eq!(dock.lobes[2].opacity, 0.0); // No contact line
+
+        let mut buf = vec![0u8; 100 * 100 * 4];
+        let mut canvas = UiCanvas::new(&mut buf, 100, 100, 100 * 4, PixelFormat::Bgra8888);
+        let pal = ThemePalette::new(false, 0);
+        draw_elevation_shadow(
+            &mut canvas,
+            Rect::new(20, 20, 60, 60),
+            14,
+            ShadowElevation::Popup,
+            &pal,
         );
     }
 }

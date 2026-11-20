@@ -540,7 +540,7 @@ fn push_popup_glass_panels(
                 )),
                 Size::from((region_rect.size.w.max(1), region_rect.size.h.max(1))),
             );
-            crate::shell_render::push_liquid_glass_panel(
+            crate::shell_render::push_liquid_glass_panel_elevation(
                 render_list,
                 shape_cache,
                 renderer,
@@ -549,7 +549,7 @@ fn push_popup_glass_panels(
                 style,
                 state.glass_opacity,
                 state.reduce_transparency,
-                Some((16, 52)),
+                rusty_ui::shadow::ShadowElevation::MenuOrTooltip,
             );
         }
     } else {
@@ -557,7 +557,7 @@ fn push_popup_glass_panels(
             Point::from((popup_logical_loc.x, popup_logical_loc.y)),
             Size::from((popup_size.w.max(1), popup_size.h.max(1))),
         );
-        crate::shell_render::push_liquid_glass_panel(
+        crate::shell_render::push_liquid_glass_panel_elevation(
             render_list,
             shape_cache,
             renderer,
@@ -566,7 +566,7 @@ fn push_popup_glass_panels(
             style,
             state.glass_opacity,
             state.reduce_transparency,
-            Some((16, 52)),
+            rusty_ui::shadow::ShadowElevation::MenuOrTooltip,
         );
     }
 }

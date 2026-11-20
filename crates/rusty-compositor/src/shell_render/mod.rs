@@ -113,7 +113,7 @@ pub use ssd::{
     generate_window_ssd_composite_elements, generate_window_ssd_composite_elements_with_hover,
     generate_window_ssd_elements,
 };
-pub(crate) use tokens::push_liquid_glass_panel;
+pub(crate) use tokens::push_liquid_glass_panel_elevation;
 #[cfg(test)]
 pub(crate) use tokens::scale_glass_rgba;
 pub use tokens::{

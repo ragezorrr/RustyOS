@@ -946,6 +946,19 @@
                            2 px; сквозное применение стиля
                            контекстных меню в rusty-compositor
                            и rusty-files
+
+    D-084                  Фаза 10 Трёхдольная система     accepted
+                           теней Гаусса и ликвидация
+                           хардкода (RUSTYOS-126, ADR-0070):
+                           создание модуля shadow в
+                           crates/rusty-ui с аналитической
+                           моделью 3-lobe Gaussian shadows
+                           (ActiveWindow, InactiveWindow,
+                           MenuOrTooltip, Popup, Dock) и
+                           отрисовкой на UiCanvas;
+                           сквозная замена локального хардкода
+                           теней в rusty-compositor, rusty-files
+                           и rusty-ui
   -----------------------------------------------------------------------
 
 ## Открытые решения

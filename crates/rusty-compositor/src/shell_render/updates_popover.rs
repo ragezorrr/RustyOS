@@ -9,7 +9,7 @@ use crate::surfaces::{GlassPanelStyle, UiGlyphKind};
 
 use super::CompositorRenderElement;
 use super::tokens::{
-    TOP_BAR_HEIGHT, ThemePalette, make_solid_element, push_liquid_glass_panel,
+    TOP_BAR_HEIGHT, ThemePalette, make_solid_element, push_liquid_glass_panel_elevation,
     push_rounded_glass_box, scale_glass_rgba, truncate_ascii,
 };
 
@@ -637,7 +637,7 @@ pub(super) fn render_updates_composite(
         )));
     }
 
-    push_liquid_glass_panel(
+    push_liquid_glass_panel_elevation(
         out,
         shape_cache,
         renderer,
@@ -646,6 +646,6 @@ pub(super) fn render_updates_composite(
         GlassPanelStyle::Popover,
         state.glass_opacity,
         state.reduce_transparency,
-        Some((18, 54)),
+        rusty_ui::shadow::ShadowElevation::Popup,
     );
 }

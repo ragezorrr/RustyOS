@@ -19,7 +19,7 @@ use crate::surfaces::{GlassPanelStyle, UiGlyphKind};
 use super::CompositorRenderElement;
 use super::tokens::{
     DOCK_HEIGHT, DOCK_MARGIN_BOTTOM, TOP_BAR_HEIGHT, ThemePalette, make_solid_element,
-    push_liquid_glass_panel, push_rounded_glass_box, push_soft_shadow, truncate_ascii,
+    push_liquid_glass_panel_elevation, push_rounded_glass_box, push_soft_shadow, truncate_ascii,
 };
 use super::top_bar::{
     NOTIFICATION_CARD_HEIGHT, NOTIFICATION_CARD_RADIUS, NOTIFICATION_CARD_RIGHT_MARGIN,
@@ -754,7 +754,7 @@ fn push_notification_card_composite(
             )),
             Size::from(((slot.card_rect.size.w - 20).max(80), 20)),
         );
-        push_liquid_glass_panel(
+        push_liquid_glass_panel_elevation(
             out,
             shape_cache,
             renderer,
@@ -763,7 +763,7 @@ fn push_notification_card_composite(
             GlassPanelStyle::NotificationCard,
             state.glass_opacity,
             state.reduce_transparency,
-            Some((10, 32)),
+            rusty_ui::shadow::ShadowElevation::Popup,
         );
     }
 }
@@ -949,7 +949,7 @@ fn push_clear_and_bottom_bars_composite(
             None,
         );
     } else {
-        push_liquid_glass_panel(
+        push_liquid_glass_panel_elevation(
             out,
             shape_cache,
             renderer,
@@ -958,7 +958,7 @@ fn push_clear_and_bottom_bars_composite(
             GlassPanelStyle::Popover,
             state.glass_opacity,
             state.reduce_transparency,
-            Some((10, 32)),
+            rusty_ui::shadow::ShadowElevation::Popup,
         );
     }
 
@@ -990,7 +990,7 @@ fn push_clear_and_bottom_bars_composite(
             out.push(CompositorRenderElement::Memory(el));
         }
     } else {
-        push_liquid_glass_panel(
+        push_liquid_glass_panel_elevation(
             out,
             shape_cache,
             renderer,
@@ -999,7 +999,7 @@ fn push_clear_and_bottom_bars_composite(
             GlassPanelStyle::Popover,
             state.glass_opacity,
             state.reduce_transparency,
-            Some((10, 32)),
+            rusty_ui::shadow::ShadowElevation::Popup,
         );
     }
 }
@@ -1047,7 +1047,7 @@ pub(super) fn render_notification_center_composite(
                 out.push(CompositorRenderElement::Memory(el));
             }
         } else {
-            push_liquid_glass_panel(
+            push_liquid_glass_panel_elevation(
                 out,
                 shape_cache,
                 renderer,
@@ -1056,13 +1056,13 @@ pub(super) fn render_notification_center_composite(
                 GlassPanelStyle::Popover,
                 state.glass_opacity,
                 state.reduce_transparency,
-                Some((8, 28)),
+                rusty_ui::shadow::ShadowElevation::Popup,
             );
         }
     }
 
     if let Some(empty_rect) = layout.empty_rect {
-        push_liquid_glass_panel(
+        push_liquid_glass_panel_elevation(
             out,
             shape_cache,
             renderer,
@@ -1071,7 +1071,7 @@ pub(super) fn render_notification_center_composite(
             GlassPanelStyle::NotificationCard,
             state.glass_opacity,
             state.reduce_transparency,
-            Some((12, 36)),
+            rusty_ui::shadow::ShadowElevation::Popup,
         );
     }
 
