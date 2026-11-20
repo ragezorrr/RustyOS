@@ -116,7 +116,7 @@ Rules:
 - Provide opaque fallbacks when transparency is unavailable or `reduce_transparency = true`.
 - Consider GPU and compositor performance (damage-gated Dual-Kawase FBO caching).
 
-Not every component needs glass effects — desktop application windows (`apps/rusty-settings`, `apps/rusty-files`, `apps/rusty-updater`, and future CSD utilities) intentionally use the opaque **Reference Window Style** (flat cool-grey sidebar `#ECEDF1` Light / `#262628` Dark without backdrop blur, clean page canvas `#F5F6FA` Light / `#1C1C1D` Dark, and borderless cards/pills `#FFFFFF` / `#2C2C2D`), reserving `Liquid Glass` for shell overlays (`Dock`, `Control Center`, `Spotlight`, `Popovers`, `Notifications`, `OSD`).
+Not every component needs glass effects — desktop application windows (`apps/rusty-settings`, `apps/rusty-files`, `apps/rusty-terminal`, and future CSD utilities) intentionally use the opaque **Reference Window Style** (flat cool-grey sidebar `#ECEDF1` Light / `#262628` Dark without backdrop blur, clean page canvas `#F5F6FA` Light / `#1C1C1D` Dark, and borderless cards/pills `#FFFFFF` / `#2C2C2D`), reserving `Liquid Glass` for shell overlays (`Dock`, `Control Center`, `Spotlight`, `Popovers`, `Notifications`, `OSD`).
 
 ### 4.3 Geometry
 
@@ -250,7 +250,7 @@ All system components must follow the same visual language.
 
 ### Windows (Reference Window Style)
 
-Every system application window (`rusty-settings`, `rusty-files`, `rusty-updater`, and new CSD utilities) follows one unified contract (`ADR-0055`, `ADR-0057`):
+Every system application window (`rusty-settings`, `rusty-files`, `rusty-terminal`, `rusty-installer`, and new CSD utilities) follows one unified contract (`crates/rusty-ui`, `ADR-0055`, `ADR-0057`, `ADR-0067`):
 
 - **Corner Radius & Hairline Contour (`14 px`):** `WINDOW_CORNER_RADIUS = 14` on CSD clients and `WINDOW_RADIUS = 14` in compositor `SSD` & `WindowShadowPipeline` drop shadows. Draw the `1 px` outer border (`[0, 0, 0, 24]` Light / `[255, 255, 255, 22]` Dark) **before** applying the anti-aliased corner mask (`apply_window_corner_mask` / `clip_rounded_corners`) so rounded corners never darken unevenly.
 - **Traffic Lights (`14 px`, step `22 px`):** `Rect(14, 13, 14, 14)`, `Rect(36, 13, 14, 14)`, `Rect(58, 13, 14, 14)` (centers `(21.0, 20.0)`, `(43.0, 20.0)`, `(65.0, 20.0)`, `r = 7.0`) in `#EE5A6A` / `#F4B63F` / `#3CC68A`, rendered as pure anti-aliased circles without box-stroke rings and revealing `×`, `−`, `+` (`[0, 0, 0, 150]`) on group hover.
@@ -458,17 +458,16 @@ palettes (section 5.1); geometry, Liquid Glass clarity, and interactions target 
   (`WindowShadowPipeline`: continuous contact + Y-shifted ambient glow with 4x4 ordered dithering
   replacing multi-offset strips and discrete `Solid` bands; CPU 9-slice fallback via continuous
   corner + stretched edge buffers in `UiShapeCache`) (`generate_window_shadow_elements`, `RUSTYOS-075`, `RUSTYOS-105`).
-  System apps (`apps/rusty-settings`, `apps/rusty-files`, `apps/rusty-updater`) share unified `WINDOW_CORNER_RADIUS = 14`,
+  System apps (`apps/rusty-settings`, `apps/rusty-files`, `apps/rusty-terminal`, `apps/rusty-installer`) share unified `crates/rusty-ui` tokens: `WINDOW_CORNER_RADIUS = 14`,
   `1 px` outer border clipped by the corner mask (`[0, 0, 0, 24]` Light / `[255, 255, 255, 22]` Dark),
   and unified `14 px` traffic lights (`#EE5A6A` / `#F4B63F` / `#3CC68A`, centers `(21, 20)`, `(43, 20)`, `(65, 20)`):
   - `rusty-settings` (`882×600`, `min_size = 640×500`): flat cool-grey sidebar (`#ECEDF1` Light / `#262628` Dark, `r = 10` active pill `#D9DADD`/`#3E3E41`), borderless cards (`#FFFFFF` / `#2C2C2D`, `r = 12`) on `#F5F6FA` / `#1C1C1D`, `Light`/`Dark`/`Auto` preview tiles, and vertical scrolling without dimming `TopBar` or `Dock`.
-- Titlebar traffic lights (`SSD`): `12 px` gel-lit buttons (`TrafficLightKind::{Close, Minimize, Maximize}`)
+- Titlebar traffic lights (`SSD`): `14 px` buttons (`TrafficLightKind::{Close, Minimize, Maximize}`)
   revealing `×`, `−`, `+` hover glyphs (`hovered_traffic_light_window`).
 - System apps & visual parity:
   - `rusty-files`: Sky Blue folder icons in BOTH Light and Dark appearances (never purple/lavender),
     full-bleed edge-to-edge sidebar (`#ECEDF1` Light / `#262628` Dark, `r = 10` active row `#D9DADD`/`#3E3E41`) containing the unified `14 px` traffic lights and a subtle `1 px` right divider, borderless toolbar/tab capsules (`< | >`, view switcher, sort, actions, search), and clean status bar without debug theme-toggle buttons.
-  - `rusty-updater` (*Software Update*, `RUSTYOS-077`, `RUSTYOS-105`): `Light & Dark` CSD window (`740x560`,
-    `WINDOW_CORNER_RADIUS = 14`, `TITLEBAR_HEIGHT = 42`, background `#F5F6FA`/`#1C1C1D`), centered header titlebar with unified `14 px` traffic lights, borderless hero/progress/list cards (`#FFFFFF`/`#2C2C2D`, `r = 12`) with `#007AFF`/`#0A84FF` Software Update squircle, borderless filter pills (`All`, `RustyOS`, `Restart`, `View Log`), live progress bar, expandable `pacman` log view, and Polkit-backed upgrade actions.
+  - `rusty-settings` (*Software Update*, `RUSTYOS-123`, `ADR-0067`): встроенная страница Software Update (`--page updates`) с карточками текущего статуса, полосой прогресса с лейблами фаз, списком пакетов и кнопками обновления через Polkit.
   - `rusty-settings` (*Wi-Fi* и *Network*, `RUSTYOS-108`, `ADR-0059`): разделение страниц `SettingsPage::Wifi` (карточка заголовка с тумблером, текущая активная сеть, `Known Networks` с отметкой активного SSID и замочком защищённых точек, `Other Networks` и `Refresh`) и `SettingsPage::Network` (карточки сервисов `Wi-Fi`, `Ethernet`, `Firewall` с подписью статуса подключения и секция `Other Services`) по референсам `27-Golden-Gate-Settings-Wi-Fi.png` и `27-Golden-Gate-Settings-Network.png`.
   - `rusty-settings` (*Notifications*, `RUSTYOS-109`, `ADR-0060`): иконка с красным фоном `#FF3B30`, верхняя карточка с основным переключателем `Notifications`, секция `Notification Center` (`Show previews`, `when display is sleeping`, `when screen is locked`, `when mirroring or sharing the display`), список `Application Notifications` (`Files`, `Terminal`, `Browser`, `Software Update`, `System Settings` с векторными скворклами) и политики `Menu Bar & Updates` с синхронизацией в TOML `[notifications]` по референсу `27-Golden-Gate-Settings-Notifications.png`.
 - Menu bar dropdowns, desktop context menus, and client `xdg_popup` surfaces (`MENU_POPOVER_RADIUS = 13`, `MENU_POPOVER_PAD_Y = 5`, `MENU_ITEM_HEIGHT = 24`, `MENU_SEPARATOR_HEIGHT = 9`, `§6`, `ADR-0043`, `ADR-0058`): clear `GlassPanelStyle::Popover` Liquid Glass (`push_client_popup_elements` / `push_liquid_glass_panel` over `PrepareBackdrop`, scoped via `wl_region = spec.layout.rect` with transparent client SHM buffers when compositor glass is active — never inside `backdrop_list`, never opaque `popover_bg` boxes), two-mode left alignment (`x = 14 px` for iconless rows; `14×14 px` `UiGlyphKind` icon at `x = 14 px` + `13 px` label at `x = 35 px`, or `rusty-files` `14/28/32 px` with swatch dot at `cx = x + 19.0`), `9 px` hairline dividers (`12 px` inset), right-aligned `12 px` shortcut column (`⌘`/`⌥`/`⌃`/`⇧`/`⌫`/`▲`/`⇥`/`⏎`), submenu chevrons (`>`), and concentric accent pill highlight on hover (`HOVER_PILL_RADIUS = 7`, `HOVER_PILL_INSET_H = 5`, `HOVER_PILL_INSET_V = 1`, pure `#FFFFFF` text/icon/shortcut on hover).
@@ -514,10 +513,10 @@ palettes (section 5.1); geometry, Liquid Glass clarity, and interactions target 
   - `GlassPanelStyle::Popover` (menus, popovers, Spotlight, Notifications, App Switcher, Overview cards, `DockStack`, Dock tooltip, `Polkit`/`Portal`/`Magnifier` sheets, `LockScreen` card, client `Popover`/`Custom`): samples smooth `half_out`, `sat = 1.20`, `displacement = 20.0`, `rim = 0.85`, `chroma = 0.03`, Light `[1.0, 1.0, 1.0, 0.32 + 0.28 * g]`, Dark `[0.17, 0.17, 0.19, 0.34 + 0.26 * g]`.
   - `GlassPanelStyle::ControlModule` (Control Center islands, Lock Screen password pill, client `Sidebar`/`ControlPill`): samples smooth `half_out` (`RUSTYOS-104`), `sat = 1.30`, `displacement = 34.0`, `rim = 1.0`, `chroma = 0.01`, Light `[0.72, 0.74, 0.78, 0.11 + 0.11 * g]`, Dark `[0.24, 0.24, 0.27, 0.15 + 0.15 * g]`.
 - **CPU Fallback & Client Surfaces:**
-  - `UiShapeCache::glass_panel_element` (`surfaces/sdf.rs`, `sample_glass_panel_pixel_themed`) uses flat themed `base_glass_layer` + `4×4` Bayer dithering + matching directional top/bottom rim (`cutefish_rim_alpha`, no side glare or diagonal flares), automatically taking over on `reduce_transparency = true` (high-contrast opaque surfaces), Lock Screen, or GLES unavailability.
+  - `UiShapeCache::glass_panel_element` (`surfaces/sdf.rs`, `sample_glass_panel_pixel_themed`) uses flat themed `base_glass_layer` + `4×4` Bayer dithering + matching directional top/bottom rim (`directional_rim_alpha`, no side glare or diagonal flares), automatically taking over on `reduce_transparency = true` (high-contrast opaque surfaces), Lock Screen, or GLES unavailability.
   - Client-rendered Chrome (`apps/rusty-files/src/render/{sidebar.rs, popup.rs}`: `draw_glass_pill`, `render_popup_chrome`) mirrors the directional `100%` top / `35%` bottom `1 px` inner hairline cleanly.
 - **Runtime Configuration:**
-  - `glass_opacity` (`0.35..=1.0`, `DEFAULT_GLASS_OPACITY = 0.78`) and `reduce_transparency` live under `[ui]` in `config.toml` and update compositor + Wayland apps (`rusty-settings`, `rusty-files`, `rusty-updater`) live via `RELOAD_CONFIG` / mtime sync.
+  - `glass_opacity` (`0.35..=1.0`, `DEFAULT_GLASS_OPACITY = 0.78`) and `reduce_transparency` live under `[ui]` in `config.toml` and update compositor + Wayland apps (`rusty-settings`, `rusty-files`, `rusty-terminal`, `rusty-installer`) live via `RELOAD_CONFIG` / mtime sync.
 
 ### 12.6 Mission Control / Overview
 

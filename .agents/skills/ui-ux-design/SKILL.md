@@ -11,9 +11,9 @@ name: ui-ux-design
 - Use consistent spacing, typography, radius and motion tokens.
 - Respect reduced motion and scaling.
 - Do not copy proprietary assets or exact branded interfaces; achieve 1:1 layout,
-  material, and interaction parity with `macOS 27 Golden Gate` using original RustyOS emblems/artwork.
+  material, and interaction parity with modern macOS-inspired desktop standards using original RustyOS emblems/artwork.
 - Check GPU cost of blur, shadows and transparency; respect `reduce_transparency` fallback.
-- Enforce `Golden Gate Light & Dark` tokens (`DESIGN.md` §5.1, §12): `#F5F6F8` / `#1E1E20`,
+- Enforce `RustyOS Light & Dark` tokens (`DESIGN.md` §5.1, §12): `#F5F6F8` / `#1E1E20`,
   accent `#007AFF` / `#0A84FF`, Sky Blue folders in BOTH Light and Dark. Zero legacy purple,
   lavender, or plum in surfaces, selections, borders, or folder palettes.
 - Before designing or editing UI: open the matching Light and Dark PNGs from
@@ -25,14 +25,16 @@ name: ui-ux-design
   - All primary glass overlays (`Dock`, `Popover`, `ControlModule`, `Spotlight` search pill +
     separate results card, `App Switcher`, `LockScreen` password pill, `rustyos_liquid_glass_v1`
     client surfaces) use GPU `LiquidGlassElement` (`compute_glass_material`) with matching CPU
-    `UiShapeCache::glass_panel_element` fallback (`cutefish_rim_alpha`).
+    `UiShapeCache::glass_panel_element` fallback (`directional_rim_alpha`).
   - Transparent `TopBar` with no opaque backing box under right status icons or placeholder block
     behind the logo.
-  - **Reference Window Style (`DESIGN.md` §6, `§12.3`, `ADR-0057`):** all system CSD/SSD windows
-    (`rusty-settings`, `rusty-files`, `rusty-updater`, and `WindowShadowPipeline`) share
-    `WINDOW_RADIUS = 14` / `WINDOW_CORNER_RADIUS = 14`, outer `1 px` border (`[0,0,0,24]` Light /
-    `[255,255,255,22]` Dark) drawn **before** the corner mask, and unified `14 px` traffic lights
-    (`#EE5A6A`/`#F4B63F`/`#3CC68A` at `Rect(14/36/58, 13, 14, 14)`, no box-stroke ring). Sidebars
+  - **Shared UI Crate & Reference Window Style (`crates/rusty-ui`, `DESIGN.md` §6, `§12.3`, `ADR-0057`, `ADR-0067`):**
+    all system CSD/SSD windows (`rusty-settings`, `rusty-files`, `rusty-terminal`, `rusty-installer`,
+    and compositor `ssd.rs`) use `crates/rusty-ui` as the single source of truth for window geometry,
+    traffic light buttons (`TrafficLightButtons`, `TRAFFIC_LIGHT_DIAMETER = 14`, centers `21.0, 43.0, 65.0`,
+    `#EE5A6A`/`#F4B63F`/`#3CC68A` with vector microglyphs `x`, `-`, `+`), outer `1 px` border
+    (`[0,0,0,24]` Light / `[255,255,255,22]` Dark) drawn **before** the corner mask, and `WindowFrame`.
+    Software Update is integrated directly into `rusty-settings` (`--page updates`). Sidebars
     use flat `#ECEDF1` Light / `#262628` Dark (zero backdrop blur) with `r = 10` `#D9DADD`/`#3E3E41`
     active pills; content canvases use `#F5F6FA` / `#1C1C1D` with borderless `r = 12` `#FFFFFF`/`#2C2C2D`
     cards and borderless toolbar/filter capsules, clean status bars, and never dim `TopBar`/`Dock`.

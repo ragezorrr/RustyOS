@@ -14,5 +14,6 @@ name: rust-engineering
 - Keep hot paths allocation- and lock-conscious; benchmark before
   optimizing.
 - Review dependency maintenance, features and licenses.
+- Reuse `crates/rusty-ui` for shared window geometry, traffic light buttons, theme palette tokens, and UI canvas primitives instead of duplicating them across crates.
 - Run fmt, check, clippy and relevant tests.
 - Ask before changing public APIs or workspace architecture.

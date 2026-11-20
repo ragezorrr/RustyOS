@@ -13,7 +13,7 @@ name: desktop-shell
 - Shell crash/restart must not unnecessarily terminate compositor.
 - Do not add a UI toolkit or process boundary without approval.
 - Panel, Dock, quick settings, app-aware TopBar (`TopBarAppProfile`, `Files` default), and
-  overview follow `DESIGN.md` §12 (`macOS 27 Golden Gate` Light/Dark + Liquid Glass) with
+  overview follow `DESIGN.md` §12 (`RustyOS Light/Dark + Liquid Glass`) with
   CPU/opaque fallbacks when `reduce_transparency = true` or screen-locked.
 - Verify front-to-back ordering in `frame_composer.rs`: modal scrims must only appear for true
   blocking modals (`Polkit`, `Portal`), never darkening `TopBar` or `Dock` behind non-blocking

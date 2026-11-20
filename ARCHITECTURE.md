@@ -95,25 +95,28 @@ Event loop не должен блокироваться тяжёлыми опе�
   `connectivity`, `media`, `display_session`, `auth`, `logind`, `polkit`,
   `portal`, `file_manager`, `image_decode`.
 
-### Системные приложения (`apps/rusty-files`, `apps/rusty-settings`, `apps/rusty-updater`, `apps/rusty-terminal`, `apps/rusty-installer`)
+### Системные приложения (`apps/rusty-files`, `apps/rusty-settings`, `apps/rusty-terminal`, `apps/rusty-installer`) и общий UI-крейт (`crates/rusty-ui`)
 
-- Самостоятельные Wayland CSD-клиенты на базе `smithay-client-toolkit` и
-  `fontdue` в едином эталонном стиле окон (`14 px` скругления и тень
-  `WINDOW_RADIUS = 14`, единые `14 px` traffic lights `#EE5A6A`/`#F4B63F`/`#3CC68A`
-  в `(14/36/58, 13)`, обводка до угловой маски и сквозная синхронизация темы
+- Самостоятельные Wayland CSD-клиенты на базе `smithay-client-toolkit`, `fontdue` и
+  общего крейта `crates/rusty-ui` в едином эталонном стиле окон (`WINDOW_RADIUS = 20`,
+  единые `14 px` traffic lights `#EE5A6A`/`#F4B63F`/`#3CC68A` в `(14/36/58, 13)`
+  с центрами `21.0, 43.0, 65.0`, обводка до угловой маски и сквозная синхронизация темы
   `Light` / `Dark` / `Auto`), запускаемые композитором с приоритетом `exe_dir`
   над `PATH` (`launcher.rs`):
+- `rusty-ui`: единый общий крейт для оконной геометрии (`Rect`, `Point`, `Size`, `WINDOW_RADIUS = 20`,
+  `TITLEBAR_HEIGHT = 40`, `SSD_TITLEBAR_HEIGHT = 28`), светофоров (`TrafficLightButtons`, `TrafficLightKind`,
+  векторные микроглифы `x`, `-`, `+`), тем (`ThemePalette`, `ACCENT_PALETTE`), структуры окна (`WindowFrame`,
+  `WindowHitTarget`, double-click maximize) и CPU-рендерера с субпиксельным сглаживанием (`UiCanvas`);
 - `rusty-files`: плоский edge-to-edge sidebar (`#ECEDF1`/`#262628`, активный пункт `r = 10` `#D9DADD`/`#3E3E41`),
   бесшовные капсулы тулбара/вкладок без рамок, Icons/List/Columns/Gallery,
   clickable Path Bar, Quick Look, Get Info, Copy/Move, Trash, теги и Liquid Glass поповеры;
 - `rusty-settings`: отдельное окно настроек (`882×600`, `org.rustyos.Settings`) с
   плоским непрозрачным сайдбаром (`#ECEDF1`/`#262628`), карточками `#FFFFFF`/`#2C2C2D` (`r = 12`)
-  на фоне `#F5F6FA`/`#1C1C1D` без рамок, скроллингом, выбором темы (`Light`/`Dark`/`Auto`)
-  и живой отправкой `v1|RELOAD_CONFIG` в композитор;
-- `rusty-updater`: окно *Software Update* (`740×560`, шапка `42 px`) на фоне `#F5F6FA`/`#1C1C1D`
-  с карточками (`r = 12`) и пилюлями (`r = 10`) без рамок, списком обновлений
-  Arch Linux и RustyOS (`checkupdates`), потоковым прогрессом/логом и
-  запуском `pacman` через валидируемый Polkit-хелпер `rustyos-update-helper`.
+  на фоне `#F5F6FA`/`#1C1C1D` без рамок, скроллингом, выбором темы (`Light`/`Dark`/`Auto`),
+  встроенной страницей *Software Update* (`--page updates`) с интерактивным прогрессом и
+  живой отправкой `v1|RELOAD_CONFIG` в композитор;
+- `rusty-terminal`: Wayland-EGL GLES2 + wl_shm терминал с векторными светофорами, вкладками,
+  scrollback и плавным скроллингом;
 - `rusty-installer`: мастер установки системы и первый OOBE Setup Assistant
   (`org.rustyos.Installer`, `--install`/`--oobe`/`--live`/`--demo`/`--dry-run`) с
   карточками дисков, безопасным Polkit-бэкендом `scripts/rustyos-install.sh`,
@@ -137,15 +140,15 @@ RustyOS/
 │   ├── rusty-wm/              # Детерминированная модель WM и workspace 1..9
 │   ├── rusty-animation/       # Refresh-rate independent animation engine
 │   ├── rusty-ipc/             # Версионируемый IPC-протокол compositor <-> shell
-│   └── rusty-services/        # Адаптеры NetworkManager, BlueZ, PipeWire, UPower, sysfs, logind, Polkit, Portal, file_manager, image_decode, updates
-│       └── src/               # lib (ServiceRegistry), power, connectivity, media, display_session, auth, logind, polkit, portal, file_manager (types, listing, trash, operations, metadata), image_decode, updates
+│   ├── rusty-services/        # Адаптеры NetworkManager, BlueZ, PipeWire, UPower, sysfs, logind, Polkit, Portal, file_manager, image_decode, updates
+│   │   └── src/               # lib (ServiceRegistry), power, connectivity, media, display_session, auth, logind, polkit, portal, file_manager (types, listing, trash, operations, metadata), image_decode, updates
+│   └── rusty-ui/              # Общий UI-крейт: геометрия окон, светофоры, палитры тем, WindowFrame, UiCanvas
 ├── apps/
 │   ├── rusty-files/           # Самостоятельный Wayland-файловый менеджер (CSD, render: canvas, chrome, sidebar, views, dialogs, popup, mod; layout; state)
 │   ├── rusty-installer/       # Wayland CSD-установщик и OOBE Setup Assistant (disks, layout, liquid_glass, render, state, wayland)
-│   ├── rusty-settings/        # Самостоятельное Wayland CSD-окно System Settings (`882×600`, flat sidebar, scroll, TOML + `RELOAD_CONFIG`)
+│   ├── rusty-settings/        # Самостоятельное Wayland CSD-окно System Settings (`882×600`, flat sidebar, Software Update, scroll, TOML + `RELOAD_CONFIG`)
 │   ├── rusty-shell/           # Внешний процесс shell поверх Wayland layer-shell + IPC
-│   ├── rusty-terminal/        # Wayland-EGL GLES2 + wl_shm терминал в стиле Tahoe Clear Glass
-│   └── rusty-updater/         # Автономный GUI-клиент обновления Arch Linux и RustyOS (CSD, Этап B)
+│   └── rusty-terminal/        # Wayland-EGL GLES2 + wl_shm терминал с вкладками и векторными светофорами
 ├── bin/
 │   └── rustyos-session        # Лаунчер пользовательской сессии (`--doctor`, `.oobe-pending` autolaunch)
 ├── packaging/
@@ -226,7 +229,7 @@ RustyOS/
   - Антиалиасинг иконoк и UI-глифов (`RUSTYOS-111`, `ADR-0062`, `D-075`):
     - `crates/rusty-compositor/src/aa.rs` (`R2_TAPS_16`, `LinearAccum`): 16-точечный субпиксельный сэмплинг в линейном свете с `GLYPH_BUFFER_SCALE = 2` (`2x` `HiDPI` буферы в `icons.rs`, `surfaces/glyphs.rs`, а также `R2_TAPS_16` в `surfaces/sdf.rs`);
     - `crates/rusty-services/src/image_decode.rs` (`downscale_lanczos_linear`): сепарабельный `Lanczos-3` downsampling в линейном свете для внешних `.png` (`load_png_as_bgra_scaled`) и `SNI` (`argb32_be_to_premul_bgra`);
-    - `apps/rusty-settings/src/render.rs`, `apps/rusty-updater/src/render.rs`: 4-tap `RGSS` (`aa_cov8`) для скруглённых прямоугольников, скворклов, кругов, сегментов и эмблем.
+    - `apps/rusty-settings/src/render.rs`, `crates/rusty-ui/src/canvas.rs`: 4-tap `RGSS` (`aa_cov8`) и субпиксельный AA для скруглённых прямоугольников, скворклов, кругов, сегментов и эмблем.
   - Resize-минимум, минимизация и плавность `rusty-settings` (`RUSTYOS-112`, `ADR-0063`, `D-076`):
     - `crates/rusty-wm/src/lib.rs` + `crates/rusty-compositor/src/{state/wm_windows.rs, input/pointer.rs}`: `WindowManager::resize_window_with_min`, `effective_window_min_size`, `compute_resized_rect_with_min`;
     - `crates/rusty-compositor/src/{frame_composer.rs, surfaces/liquid_glass.rs, surfaces/window_minimize.rs}`: `push_window_elements_with_options`, `should_skip_uncommitted_bound_window`, `make_glass_element_with_backdrop_loc`, premul `WINDOW_MINIMIZE_FRAG` с `u_bounds_px` и 4-tap `sample_filtered`;
@@ -236,11 +239,11 @@ RustyOS/
     - `apps/rusty-terminal/src/{vt.rs, pty.rs, state.rs, layout.rs, wayland.rs}`: `TerminalEngine` (UTF-8, `16`/`256`/TrueColor, `DECSTBM`, alt-screen, SGR mouse, `10 000`-строчный scrollback), `PtySession` (`rustix::pty` + `poll` + `calloop::ping`), вкладки, плавный скролл (`AnimatedValue`), поиск, clipboard (`DataDeviceManagerState`);
     - `crates/rusty-compositor/src/{launcher.rs, shell_render/dock.rs, state/shell_actions.rs, context_menu/actions.rs}` + `apps/rusty-shell/src/lib.rs`: приоритет `rusty-terminal` для `terminal` Dock/Launcher/Desktop (`launch_terminal_in_dir`) с fallback на внешние терминалы.
   - Инсталлятор `rusty-installer`, OOBE Setup Assistant, Live ISO и Dual-Boot (`RUSTYOS-115`, `RUSTYOS-116`, `ADR-0065`, `ADR-0066`, `D-079`, `D-080`):
-    - `apps/rusty-installer/src/{main.rs, disks.rs, state.rs, layout.rs, render.rs, liquid_glass.rs, wayland.rs}`: двухрежимный CSD-клиент (`--install` / `--oobe`, `--live`, `--demo`, `--dry-run`) с режимами `Erase Entire Disk` и `Dual-Boot` (выбор уже созданного root-раздела или неразмеченного пространства по `lsblk -Jpb` без `sgdisk --zap-all`), защитой смонтированных разделов, переиспользованием EFI `>= 260 MiB` без форматирования либо выделением отдельного `512 MiB` EFI при маленьком ESP, живой перекраской Golden Gate `Light`/`Dark`/`Auto` + `[ui].accent_index` (`RELOAD_CONFIG`) и потоковым прогрессом `STEP:<pct>:<stage>:<msg>`;
+    - `apps/rusty-installer/src/{main.rs, disks.rs, state.rs, layout.rs, render.rs, liquid_glass.rs, wayland.rs}`: двухрежимный CSD-клиент (`--install` / `--oobe`, `--live`, `--demo`, `--dry-run`) с режимами `Erase Entire Disk` и `Dual-Boot` (выбор уже созданного root-раздела или неразмеченного пространства по `lsblk -Jpb` без `sgdisk --zap-all`), защитой смонтированных разделов, переиспользованием EFI `>= 260 MiB` без форматирования либо выделением отдельного `512 MiB` EFI при маленьком ESP, живой перекраской `RustyOS Light`/`Dark`/`Auto` + `[ui].accent_index` (`RELOAD_CONFIG`) и потоковым прогрессом `STEP:<pct>:<stage>:<msg>`;
     - `scripts/rustyos-install.sh` (`--install-mode`, `--root-part`, `--free-space`, `--efi-part`, `--confirm-dualboot`, `os-prober`, сохранение чужого `loader.conf`) + `packaging/polkit/org.rustyos.installer.policy` + `bin/rustyos-session` (`--doctor`, `.oobe-pending`) + `packaging/arch/PKGBUILD` + `packaging/archiso/` (`profiledef.sh`, `greetd`, `packages.x86_64`, `build-iso.sh`).
-- **Эталонный стиль системных CSD-окон (`ADR-0055`, `ADR-0057`):**
-  - Единые константы окон и теней (`crates/rusty-compositor/src/shell_render/tokens.rs`, `apps/rusty-{settings,files,updater}/src/layout.rs`): `WINDOW_RADIUS = 14`, `WINDOW_CORNER_RADIUS = 14`, `1 px` внешний контур (`[0, 0, 0, 24]` Light / `[255, 255, 255, 22]` Dark) строго **до** угловой маски (`apply_window_corner_mask` / `clip_rounded_corners`).
-  - Единые `14 px` traffic lights (`Rect(14/36/58, 13, 14, 14)`, центры `(21/43/65, 20)`, `r = 7.0`, `#EE5A6A` / `#F4B63F` / `#3CC68A`, без квадратной рамки ореола, с hover-глифами).
+- **Эталонный стиль системных CSD-окон (`crates/rusty-ui`, `ADR-0055`, `ADR-0057`, `ADR-0067`):**
+  - Единые константы окон и теней (`crates/rusty-ui/src/geometry.rs`, `crates/rusty-compositor/src/shell_render/tokens.rs`): `WINDOW_RADIUS = 20` (или `WINDOW_CORNER_RADIUS = 14`), `1 px` внешний контур (`[0, 0, 0, 24]` Light / `[255, 255, 255, 22]` Dark) строго **до** угловой маски (`apply_window_corner_mask` / `clip_rounded_corners`).
+  - Единые `14 px` traffic lights (`crates/rusty-ui/src/traffic_lights.rs`: `TrafficLightButtons`, `TRAFFIC_LIGHT_DIAMETER = 14`, `Rect(14/36/58, 13, 14, 14)`, центры `(21/43/65, 20)`, `r = 7.0`, `#EE5A6A` / `#F4B63F` / `#3CC68A`, без квадратной рамки ореола, с векторными hover-глифами `x`, `-`, `+`).
   - Сайдбар `#ECEDF1`/`#262628`, активный пункт `r = 10` (`#D9DADD`/`#3E3E41`), холст `#F5F6FA`/`#1C1C1D`, карточки (`CARD_CORNER_RADIUS = 12`, `#FFFFFF`/`#2C2C2D`) и капсулы тулбара/фильтров без серых рамок.
 - **Нетривиальные сигнатуры и lint-правила:**
   - `KeyboardHandle::change_repeat_info(&self, rate: i32, delay: i32)` (порядок `(rate, delay)`, обратный к `seat.add_keyboard(xkb, delay, rate)`).
