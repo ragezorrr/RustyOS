@@ -248,13 +248,13 @@ mod tests {
     #[test]
     fn greetd_json_ipc_roundtrips_all_request_and_response_variants() -> Result<(), String> {
         let frame = encode_greetd_frame(&GreetdRequest::CreateSession {
-            username: "anc".to_owned(),
+            username: "alice".to_owned(),
         });
         let len = u32::from_ne_bytes([frame[0], frame[1], frame[2], frame[3]]) as usize;
         assert_eq!(len + 4, frame.len());
         let body = std::str::from_utf8(&frame[4..]).map_err(|e| e.to_string())?;
         assert!(body.contains("\"type\":\"create_session\""));
-        assert!(body.contains("\"username\":\"anc\""));
+        assert!(body.contains("\"username\":\"alice\""));
 
         assert_eq!(
             decode_greetd_json("{\"type\":\"success\"}")?,

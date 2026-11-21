@@ -382,7 +382,6 @@ pub(crate) enum WorkerEvent {
         success: bool,
         message: String,
     },
-    DoctorResult(String),
 }
 
 pub(crate) struct InstallerAppState {
@@ -430,7 +429,6 @@ pub(crate) struct InstallerAppState {
     pub stage_id: String,
     pub stage_message: String,
     pub log_lines: Vec<String>,
-    pub utility_status: Option<String>,
 
     event_tx: Sender<WorkerEvent>,
     event_rx: Receiver<WorkerEvent>,
@@ -525,7 +523,6 @@ impl InstallerAppState {
             stage_id: String::from("ready"),
             stage_message: String::from("Ready to install RustyOS to your destination drive."),
             log_lines: Vec::new(),
-            utility_status: None,
             event_tx,
             event_rx,
             wake_ping: None,
@@ -747,44 +744,6 @@ impl InstallerAppState {
             });
     }
 
-    pub(crate) fn spawn_doctor_check(&mut self) {
-        self.utility_status = Some(String::from("Running rustyos-session --doctor..."));
-        self.win.dirty = true;
-        let tx = self.event_tx.clone();
-        let wake = self.wake_ping.clone();
-        let _ = thread::Builder::new()
-            .name(String::from("installer-doctor"))
-            .spawn(move || {
-                let msg = match Command::new("rustyos-session").arg("--doctor").output() {
-                    Ok(out) => {
-                        let txt = String::from_utf8_lossy(&out.stdout);
-                        txt.lines()
-                            .rfind(|l| !l.trim().is_empty())
-                            .map_or_else(|| String::from("Session check completed"), str::to_owned)
-                    }
-                    Err(_) => String::from(
-                        "rustyos-session --doctor available after workspace build / install",
-                    ),
-                };
-                let _ = tx.send(WorkerEvent::DoctorResult(msg));
-                if let Some(cb) = wake {
-                    cb();
-                }
-            });
-    }
-
-    pub(crate) fn launch_terminal(&mut self) {
-        let ok = ["rusty-terminal", "foot", "alacritty"]
-            .into_iter()
-            .any(|bin| Command::new(bin).spawn().is_ok());
-        self.utility_status = Some(if ok {
-            String::from("Opened terminal window")
-        } else {
-            String::from("No terminal binary found in PATH")
-        });
-        self.win.dirty = true;
-    }
-
     pub(crate) fn poll_workers(&mut self, now: Instant) -> bool {
         let mut changed = false;
         while let Ok(ev) = self.event_rx.try_recv() {
@@ -857,7 +816,6 @@ impl InstallerAppState {
                     }
                     self.push_log(message);
                 }
-                WorkerEvent::DoctorResult(msg) => self.utility_status = Some(msg),
             }
         }
         if self.progress_anim.is_active() {

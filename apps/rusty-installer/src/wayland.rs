@@ -56,7 +56,7 @@ use wayland_client::{
 use crate::disks::TargetDiskInfo;
 use crate::layout::{
     InstallerHit, InstallerLayout, MIN_HEIGHT, MIN_WIDTH, ResizeEdgeZone, WINDOW_CORNER_RADIUS,
-    WelcomeAction, compute_layout, hit_test,
+    compute_layout, hit_test,
 };
 use crate::liquid_glass::{GlassStyle, RustyosLiquidGlassManagerV1, RustyosSurfaceGlassV1};
 use crate::render::{render_window_pixels, with_font_engine};
@@ -367,16 +367,8 @@ impl InstallerClient {
         }
     }
 
-    fn dispatch_content_hit(&mut self, hit: InstallerHit, px: f64, py: f64, now: Instant) {
+    fn dispatch_content_hit(&mut self, hit: InstallerHit, px: f64, py: f64, _now: Instant) {
         match hit {
-            InstallerHit::WelcomeCard(action) => match action {
-                WelcomeAction::InstallToDisk => {
-                    self.app.go_next(now);
-                    self.layout_cache = None;
-                }
-                WelcomeAction::RunDoctor => self.app.spawn_doctor_check(),
-                WelcomeAction::OpenTerminal => self.app.launch_terminal(),
-            },
             InstallerHit::SelectDiskMode(mode) => {
                 self.app.disk_mode = mode;
                 self.app.form_error = None;

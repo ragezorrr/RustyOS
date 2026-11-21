@@ -61,14 +61,6 @@ pub(crate) enum ResizeEdgeZone {
     BottomRight,
 }
 
-#[allow(dead_code)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum WelcomeAction {
-    InstallToDisk,
-    RunDoctor,
-    OpenTerminal,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InstallerHit {
     ResizeEdge(ResizeEdgeZone),
@@ -80,7 +72,6 @@ pub(crate) enum InstallerHit {
     OtherButton,
     PrimaryButton,
     TimezoneRow(usize),
-    WelcomeCard(WelcomeAction),
     SelectDiskMode(DiskInstallMode),
     SelectDisk(usize),
     RefreshDisks,
@@ -96,14 +87,6 @@ pub(crate) enum InstallerHit {
     SelectTheme(ThemeChoice),
     SelectAccent(usize),
     ToggleLogs,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct ActionCardRect {
-    pub action: WelcomeAction,
-    pub rect: Rect,
-    pub title: &'static str,
-    pub subtitle: &'static str,
 }
 
 #[derive(Debug, Clone)]
@@ -159,14 +142,8 @@ pub(crate) struct DiskTileRect {
     pub selectable: bool,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub(crate) enum StepContentLayout {
-    Welcome {
-        hero_emblem: Rect,
-        cards: Vec<ActionCardRect>,
-        status_rect: Rect,
-    },
     SelectDisk {
         mode_whole: Rect,
         mode_dualboot: Rect,
@@ -588,43 +565,6 @@ fn compute_network_content(app: &InstallerAppState, c: Rect) -> StepContentLayou
     }
 }
 
-#[allow(dead_code)]
-fn compute_install_welcome(c: Rect) -> StepContentLayout {
-    let emblem = Rect::new(c.x + (c.w - 56) / 2, c.y + 4, 56, 56);
-    let card_specs = [
-        (
-            WelcomeAction::InstallToDisk,
-            "Install RustyOS to Disk",
-            "Guided macOS-style installation on NVMe, SSD, or VM drive",
-        ),
-        (
-            WelcomeAction::RunDoctor,
-            "System Readiness Check (--doctor)",
-            "Verify DRM/KMS, PipeWire, Polkit, Seatd, and Wayland session tools",
-        ),
-        (
-            WelcomeAction::OpenTerminal,
-            "Open RustyOS Terminal",
-            "Inspect disks, partitions, or run recovery utilities in shell",
-        ),
-    ];
-    let cards = card_specs
-        .into_iter()
-        .enumerate()
-        .map(|(i, (action, title, subtitle))| ActionCardRect {
-            action,
-            rect: Rect::new(c.x + 28, c.y + 124 + idx_i32(i) * 66, c.w - 56, 58),
-            title,
-            subtitle,
-        })
-        .collect();
-    StepContentLayout::Welcome {
-        hero_emblem: emblem,
-        cards,
-        status_rect: Rect::new(c.x + 28, c.y + 322, c.w - 56, 30),
-    }
-}
-
 fn compute_install_select_disk(app: &InstallerAppState, c: Rect) -> StepContentLayout {
     let cards: Vec<DiskCardRect> = match app.disk_mode {
         DiskInstallMode::WholeDisk => app
@@ -894,10 +834,6 @@ pub(crate) fn hit_test(layout: &InstallerLayout, px: f64, py: f64) -> Option<Ins
 #[allow(clippy::too_many_lines)]
 fn hit_content(content: &StepContentLayout, px: f64, py: f64) -> Option<InstallerHit> {
     match content {
-        StepContentLayout::Welcome { cards, .. } => cards
-            .iter()
-            .find(|c| c.rect.contains_f64(px, py))
-            .map(|c| InstallerHit::WelcomeCard(c.action)),
         StepContentLayout::SelectDisk {
             mode_whole,
             mode_dualboot,

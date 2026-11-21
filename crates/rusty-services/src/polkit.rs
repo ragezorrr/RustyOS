@@ -978,7 +978,7 @@ mod tests {
     fn picks_preferred_identity_from_polkit_subjects() {
         let passwd = "\
 root:x:0:0:root:/root:/bin/bash
-anc:x:1000:1000:Anc:/home/anc:/bin/bash
+alice:x:1000:1000:Alice:/home/alice:/bin/bash
 ";
         let mut root_props = HashMap::new();
         root_props.insert("uid".to_owned(), OwnedValue::from(0_u32));
@@ -991,7 +991,7 @@ anc:x:1000:1000:Anc:/home/anc:/bin/bash
 
         assert_eq!(
             pick_preferred_identity(&identities, Some(1000), passwd),
-            Some((1000, "anc".to_owned()))
+            Some((1000, "alice".to_owned()))
         );
         assert_eq!(
             pick_preferred_identity(&identities, Some(2000), passwd),
@@ -1005,7 +1005,7 @@ anc:x:1000:1000:Anc:/home/anc:/bin/bash
             action_id: "org.freedesktop.policykit.exec".to_owned(),
             message: "Authentication required".to_owned(),
             icon_name: "dialog-password".to_owned(),
-            username: "anc".to_owned(),
+            username: "alice".to_owned(),
             uid: 1000,
             caller_pid: Some(1234),
             prompt_label: "Password:".to_owned(),
@@ -1032,7 +1032,7 @@ anc:x:1000:1000:Anc:/home/anc:/bin/bash
         let attempt = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let attempt_clone = Arc::clone(&attempt);
         let opener: HelperOpener = Arc::new(move |username, cookie| {
-            assert_eq!(username, "anc");
+            assert_eq!(username, "alice");
             assert_eq!(cookie, "cookie-1");
             let (client_sock, mut helper_sock) = UnixStream::pair().map_err(|e| e.to_string())?;
             let n = attempt_clone.fetch_add(1, Ordering::Relaxed);

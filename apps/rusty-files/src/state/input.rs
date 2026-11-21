@@ -153,6 +153,10 @@ impl FilesAppState {
             self.open_go_to_folder();
             return true;
         }
+        if key_matches_ascii(key_name, utf8, 'a') {
+            self.select_all_active_column();
+            return true;
+        }
         if key_matches_ascii(key_name, utf8, 'c') {
             self.action_copy_selected();
             return true;
@@ -355,7 +359,8 @@ impl FilesAppState {
     ) {
         match area {
             ScrollTargetArea::Sidebar => {
-                let content_h = sidebar_total_height(&self.sidebar_items);
+                let content_h =
+                    sidebar_total_height(&self.sidebar_items, &self.collapsed_sidebar_sections);
                 let max_scroll = (content_h - viewport_extent + 6).max(0);
                 if self.sidebar_scroll_anim.rounded() != self.sidebar_scroll_y {
                     self.sidebar_scroll_anim

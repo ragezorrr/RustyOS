@@ -416,7 +416,7 @@ mod tests {
 
     #[test]
     fn validates_posix_usernames_safely() {
-        assert!(is_valid_unix_username("anc"));
+        assert!(is_valid_unix_username("alice"));
         assert!(is_valid_unix_username("john.doe_1"));
         assert!(!is_valid_unix_username(""));
         assert!(!is_valid_unix_username("-root"));
@@ -427,15 +427,15 @@ mod tests {
     #[test]
     fn async_auth_handle_verifies_via_injected_verifier() {
         let handle = AsyncAuthHandle::with_verifier(Arc::new(|user, pass| {
-            if user == "anc" && pass.as_bytes() == b"secret" {
+            if user == "alice" && pass.as_bytes() == b"secret" {
                 AuthOutcome::Verified
             } else {
                 AuthOutcome::InvalidCredentials
             }
         }));
         assert!(handle.is_active());
-        assert!(handle.submit_check(1, "anc".to_owned(), SecretText::from_slice("wrong")));
-        assert!(handle.submit_check(2, "anc".to_owned(), SecretText::from_slice("secret")));
+        assert!(handle.submit_check(1, "alice".to_owned(), SecretText::from_slice("wrong")));
+        assert!(handle.submit_check(2, "alice".to_owned(), SecretText::from_slice("secret")));
 
         let mut results = Vec::new();
         for _ in 0..50 {

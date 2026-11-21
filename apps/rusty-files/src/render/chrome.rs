@@ -1,10 +1,13 @@
 //! Window chrome rendering (CSD traffic lights, toolbar, search scope bar, tab strip, path bar).
 
 use crate::icons::{
-    draw_chevron_aa, draw_close_x_glyph, draw_ellipsis_glyph, draw_plus_glyph, draw_search_glyph,
-    draw_share_glyph, draw_sort_pill_glyph, draw_tag_outline_glyph, draw_view_mode_icon,
+    draw_close_x_glyph, draw_ellipsis_glyph, draw_nav_chevron_svg, draw_plus_glyph,
+    draw_search_glyph, draw_share_glyph, draw_sort_pill_glyph, draw_tag_outline_glyph,
+    draw_view_mode_icon,
 };
-use crate::layout::{FilesLayout, PathCrumbLayout, Rect, SearchScopeBarLayout, TabBarLayout};
+use crate::layout::{
+    FilesHit, FilesLayout, PathCrumbLayout, Rect, SearchScopeBarLayout, TabBarLayout,
+};
 use crate::render::canvas::{
     Canvas, make_ui_canvas, to_ui_rect, ui_theme_palette, with_font_engine,
 };
@@ -133,6 +136,19 @@ pub(crate) fn render_path_bar(c: &mut Canvas<'_>, crumbs: &[PathCrumbLayout], pa
     }
 }
 
+fn toolbar_hover_fill(pal: &Palette) -> [u8; 4] {
+    if pal.is_dark {
+        rgba(255, 255, 255, 22)
+    } else {
+        rgba(0, 0, 0, 16)
+    }
+}
+
+fn fill_toolbar_segment_hover(c: &mut Canvas<'_>, rect: Rect, pal: &Palette) {
+    let inset = Rect::new(rect.x + 2, rect.y + 2, rect.w - 4, rect.h - 4);
+    c.fill_rounded_rect(inset, 14, toolbar_hover_fill(pal));
+}
+
 pub(crate) fn render_toolbar(
     c: &mut Canvas<'_>,
     state: &FilesAppState,
@@ -140,9 +156,15 @@ pub(crate) fn render_toolbar(
     pal: &Palette,
 ) {
     draw_glass_pill(c, layout.nav_pill_rect, 16, pal);
+    if state.can_go_back() && state.hovered_hit == Some(FilesHit::NavBack) {
+        fill_toolbar_segment_hover(c, layout.nav_back_rect, pal);
+    }
+    if state.can_go_forward() && state.hovered_hit == Some(FilesHit::NavForward) {
+        fill_toolbar_segment_hover(c, layout.nav_forward_rect, pal);
+    }
     c.fill_rect(
         Rect::new(
-            layout.nav_pill_rect.x + 34,
+            layout.nav_pill_rect.x + layout.nav_back_rect.w,
             layout.nav_pill_rect.y + 7,
             1,
             18,
@@ -161,24 +183,18 @@ pub(crate) fn render_toolbar(
     };
     #[allow(clippy::cast_precision_loss)]
     {
-        draw_chevron_aa(
+        draw_nav_chevron_svg(
             c,
-            layout.nav_back_rect.x as f32 + 17.5,
-            layout.nav_back_rect.y as f32 + 16.0,
+            layout.nav_back_rect.x as f32 + (layout.nav_back_rect.w as f32) * 0.5,
+            layout.nav_back_rect.y as f32 + (layout.nav_back_rect.h as f32) * 0.5,
             true,
-            2.6,
-            4.8,
-            1.5,
             back_col,
         );
-        draw_chevron_aa(
+        draw_nav_chevron_svg(
             c,
-            layout.nav_forward_rect.x as f32 + 16.5,
-            layout.nav_forward_rect.y as f32 + 16.0,
+            layout.nav_forward_rect.x as f32 + (layout.nav_forward_rect.w as f32) * 0.5,
+            layout.nav_forward_rect.y as f32 + (layout.nav_forward_rect.h as f32) * 0.5,
             false,
-            2.6,
-            4.8,
-            1.5,
             fwd_col,
         );
     }
@@ -210,6 +226,7 @@ pub(crate) fn render_toolbar_right_cluster(
     draw_glass_pill(c, layout.view_pill_rect, 16, pal);
     for (mode, seg_rect) in layout.view_segments {
         let active = state.view_mode == mode;
+        let hovered = state.hovered_hit == Some(FilesHit::ViewMode(mode));
         if active {
             let pill = Rect::new(
                 seg_rect.x + 2,
@@ -218,8 +235,10 @@ pub(crate) fn render_toolbar_right_cluster(
                 seg_rect.h - 4,
             );
             c.fill_rounded_rect(pill, 14, pal.pill_active);
+        } else if hovered {
+            fill_toolbar_segment_hover(c, seg_rect, pal);
         }
-        let col = if active {
+        let col = if active || hovered {
             pal.text_primary
         } else {
             pal.text_secondary
@@ -233,33 +252,45 @@ pub(crate) fn render_toolbar_right_cluster(
         );
     }
 
-    // Group By / Sort pill (`2x3` glyph + chevron)
+    // Group By / Sort pill
     draw_glass_pill(c, layout.sort_pill_rect, 16, pal);
+    if state.hovered_hit == Some(FilesHit::SortButton) {
+        fill_toolbar_segment_hover(c, layout.sort_pill_rect, pal);
+    }
     draw_sort_pill_glyph(
         c,
-        layout.sort_pill_rect.x as f32,
-        layout.sort_pill_rect.y as f32 + 16.0,
+        layout.sort_pill_rect.x as f32 + (layout.sort_pill_rect.w as f32) * 0.5,
+        layout.sort_pill_rect.y as f32 + (layout.sort_pill_rect.h as f32) * 0.5,
         pal.text_primary,
     );
 
     // Actions pill (`Share` | `Tag` | `...`)
     draw_glass_pill(c, layout.action_pill_rect, 16, pal);
+    if state.hovered_hit == Some(FilesHit::ActionPrimary) {
+        fill_toolbar_segment_hover(c, layout.action_primary_rect, pal);
+    }
+    if state.hovered_hit == Some(FilesHit::ActionTagPicker) {
+        fill_toolbar_segment_hover(c, layout.action_tag_rect, pal);
+    }
+    if state.hovered_hit == Some(FilesHit::ActionMoreMenu) {
+        fill_toolbar_segment_hover(c, layout.action_more_rect, pal);
+    }
     draw_share_glyph(
         c,
-        layout.action_primary_rect.x as f32 + 17.5,
-        layout.action_primary_rect.y as f32 + 16.0,
+        layout.action_primary_rect.x as f32 + (layout.action_primary_rect.w as f32) * 0.5,
+        layout.action_primary_rect.y as f32 + (layout.action_primary_rect.h as f32) * 0.5,
         pal.text_primary,
     );
     draw_tag_outline_glyph(
         c,
-        layout.action_tag_rect.x as f32 + 17.0,
-        layout.action_tag_rect.y as f32 + 16.0,
+        layout.action_tag_rect.x as f32 + (layout.action_tag_rect.w as f32) * 0.5,
+        layout.action_tag_rect.y as f32 + (layout.action_tag_rect.h as f32) * 0.5,
         pal.text_primary,
     );
     draw_ellipsis_glyph(
         c,
-        layout.action_more_rect.x as f32 + 16.5,
-        layout.action_more_rect.y as f32 + 16.0,
+        layout.action_more_rect.x as f32 + (layout.action_more_rect.w as f32) * 0.5,
+        layout.action_more_rect.y as f32 + (layout.action_more_rect.h as f32) * 0.5,
         pal.text_primary,
     );
 
@@ -278,8 +309,16 @@ pub(crate) fn render_toolbar_search_pill(
     let show_text = state.search_active || !state.search_query.is_empty() || wide;
     if !show_text {
         draw_glass_pill(c, pill, 16, pal);
-        let icon_cx = pill.x as f32 + (pill.w as f32) * 0.5 - 0.5;
-        draw_search_glyph(c, icon_cx, pill.y as f32 + 15.5, pal.text_primary);
+        if state.hovered_hit == Some(FilesHit::SearchToggle) {
+            fill_toolbar_segment_hover(c, pill, pal);
+        }
+        let icon_cx = pill.x as f32 + (pill.w as f32) * 0.5;
+        draw_search_glyph(
+            c,
+            icon_cx,
+            pill.y as f32 + (pill.h as f32) * 0.5,
+            pal.text_primary,
+        );
         return;
     }
 

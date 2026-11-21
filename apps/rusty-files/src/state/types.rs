@@ -1,5 +1,6 @@
 //! Common data types, enums, and component states for `rusty-files` state machine.
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -107,6 +108,7 @@ pub(crate) enum SidebarIconKind {
     Downloads,
     Home,
     Volume,
+    RemovableDrive,
     Network,
     Trash,
     Tag(FileTagColor),
@@ -123,6 +125,8 @@ pub(crate) struct SidebarRowItem {
     pub location: SidebarLocation,
     /// Icon to draw left of the label.
     pub icon: SidebarIconKind,
+    /// Block device path (e.g. `"/dev/sdb1"`) for removable volumes that show an `Eject` button.
+    pub removable_device: Option<String>,
 }
 
 /// Single Miller column (or root listing in List view).
@@ -136,8 +140,10 @@ pub(crate) struct ColumnPane {
     pub raw_entries: Vec<FileEntry>,
     /// Filtered & sorted entries currently visible.
     pub visible_entries: Vec<FileEntry>,
-    /// Currently selected row index in `visible_entries`.
+    /// Currently selected primary/anchor row index in `visible_entries`.
     pub selected_index: Option<usize>,
+    /// All selected row indices in `visible_entries` (`RUSTYOS-150` Multi-Select).
+    pub selected_indices: BTreeSet<usize>,
     /// Vertical scroll offset in pixels (`>= 0`).
     pub scroll_y: i32,
     /// Floating-point smooth scroll state paired with `scroll_y`.
@@ -156,6 +162,7 @@ impl ColumnPane {
             raw_entries: Vec::new(),
             visible_entries: Vec::new(),
             selected_index: None,
+            selected_indices: BTreeSet::new(),
             scroll_y: 0,
             scroll_anim: SmoothAxis::default(),
             loading: true,
@@ -163,11 +170,101 @@ impl ColumnPane {
         }
     }
 
-    /// Returns currently selected entry if valid.
+    /// Returns currently selected primary entry if valid.
     #[must_use]
     pub(crate) fn selected_entry(&self) -> Option<&FileEntry> {
         self.selected_index
             .and_then(|idx| self.visible_entries.get(idx))
+    }
+
+    /// Returns true when `idx` is part of the current selection.
+    #[must_use]
+    pub(crate) fn is_selected(&self, idx: usize) -> bool {
+        self.selected_index == Some(idx) || self.selected_indices.contains(&idx)
+    }
+
+    /// Returns all currently selected entries in visible order.
+    #[must_use]
+    pub(crate) fn selected_entries(&self) -> Vec<&FileEntry> {
+        if self.selected_indices.is_empty() {
+            return self.selected_entry().into_iter().collect();
+        }
+        self.selected_indices
+            .iter()
+            .filter_map(|&idx| self.visible_entries.get(idx))
+            .collect()
+    }
+
+    /// Returns total count of selected items in this column.
+    #[must_use]
+    pub(crate) fn selected_count(&self) -> usize {
+        if self.selected_indices.is_empty() {
+            usize::from(self.selected_index.is_some())
+        } else {
+            self.selected_indices.len()
+        }
+    }
+
+    /// Replaces selection with a single item `idx`.
+    pub(crate) fn set_single_selection(&mut self, idx: usize) {
+        self.selected_indices.clear();
+        if idx < self.visible_entries.len() {
+            self.selected_index = Some(idx);
+            self.selected_indices.insert(idx);
+        } else {
+            self.selected_index = None;
+        }
+    }
+
+    /// Toggles `idx` in the multi-selection (`Ctrl+Click`).
+    pub(crate) fn toggle_selection(&mut self, idx: usize) {
+        if idx >= self.visible_entries.len() {
+            return;
+        }
+        if self.selected_indices.is_empty()
+            && let Some(prev) = self.selected_index
+        {
+            self.selected_indices.insert(prev);
+        }
+        if !self.selected_indices.remove(&idx) {
+            self.selected_indices.insert(idx);
+            self.selected_index = Some(idx);
+        } else if self.selected_index == Some(idx) {
+            self.selected_index = self.selected_indices.iter().next_back().copied();
+        }
+    }
+
+    /// Selects a contiguous range from the anchor `selected_index` to `idx` (`Shift+Click`).
+    pub(crate) fn select_range_to(&mut self, idx: usize) {
+        if idx >= self.visible_entries.len() {
+            return;
+        }
+        let anchor = self.selected_index.unwrap_or(idx);
+        let (lo, hi) = if anchor <= idx {
+            (anchor, idx)
+        } else {
+            (idx, anchor)
+        };
+        self.selected_indices.clear();
+        for i in lo..=hi {
+            self.selected_indices.insert(i);
+        }
+        self.selected_index = Some(idx);
+    }
+
+    /// Selects all visible entries (`Ctrl+A`).
+    pub(crate) fn select_all(&mut self) {
+        self.selected_indices.clear();
+        for i in 0..self.visible_entries.len() {
+            self.selected_indices.insert(i);
+        }
+        self.selected_index = (!self.visible_entries.is_empty()).then_some(0);
+    }
+
+    /// Clears all selection in this column.
+    pub(crate) fn clear_selection(&mut self) {
+        self.selected_index = None;
+        self.selected_indices.clear();
     }
 
     /// Re-applies active search filter and sort settings, preserving selection by path.
@@ -179,6 +276,11 @@ impl ColumnPane {
         sort_order: FileSortOrder,
     ) {
         let selected_path = self.selected_entry().map(|entry| entry.path.clone());
+        let selected_paths: BTreeSet<PathBuf> = self
+            .selected_entries()
+            .into_iter()
+            .map(|e| e.path.clone())
+            .collect();
         self.visible_entries = filter_and_sort_entries(
             self.raw_entries.clone(),
             show_hidden,
@@ -189,6 +291,17 @@ impl ColumnPane {
         self.selected_index = selected_path
             .as_ref()
             .and_then(|p| self.visible_entries.iter().position(|e| &e.path == p));
+        self.selected_indices.clear();
+        for (i, e) in self.visible_entries.iter().enumerate() {
+            if selected_paths.contains(&e.path) {
+                self.selected_indices.insert(i);
+            }
+        }
+        if let Some(primary) = self.selected_index {
+            self.selected_indices.insert(primary);
+        } else {
+            self.selected_index = self.selected_indices.iter().next().copied();
+        }
     }
 }
 
@@ -245,6 +358,14 @@ pub(crate) struct LoadJobResult {
     pub col_idx: usize,
     pub target: ListingTarget,
     pub entries: Result<Vec<FileEntry>, String>,
+    pub available_bytes: Option<u64>,
+}
+
+/// Completed background archive extract/compress operation delivered over `mpsc`.
+#[derive(Debug)]
+pub(crate) struct ArchiveJobResult {
+    pub target_dir: PathBuf,
+    pub outcome: Result<String, String>,
 }
 
 /// Snapshot of an open Finder tab.
@@ -457,15 +578,23 @@ pub(crate) enum ScrollTargetArea {
     Column(usize),
 }
 
-/// Computes total pixel height consumed by sidebar items + section headers.
+/// Computes total pixel height consumed by visible sidebar items + section headers + bottom padding.
 #[must_use]
-pub(crate) fn sidebar_total_height(items: &[SidebarRowItem]) -> i32 {
+pub(crate) fn sidebar_total_height(
+    items: &[SidebarRowItem],
+    collapsed_sections: &BTreeSet<&'static str>,
+) -> i32 {
     let mut h = 0_i32;
+    let mut current_section: Option<&'static str> = None;
     for item in items {
-        if item.section.is_some() {
+        if let Some(sec) = item.section {
+            current_section = Some(sec);
             h += SIDEBAR_SECTION_HEIGHT;
+        }
+        if current_section.is_some_and(|s| collapsed_sections.contains(s)) {
+            continue;
         }
         h += SIDEBAR_ROW_HEIGHT;
     }
-    h
+    h + 14
 }

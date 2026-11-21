@@ -60,6 +60,9 @@ pub(crate) fn shortcut_for_command(cmd: &PopupCommand) -> Option<&'static str> {
         | PopupCommand::OpenEntry(_)
         | PopupCommand::RestoreEntry(_)
         | PopupCommand::EmptyTrash
+        | PopupCommand::OpenInTerminal(_)
+        | PopupCommand::ExtractArchive(_)
+        | PopupCommand::CompressToZip(_)
         | PopupCommand::ToggleTag { .. } => None,
     }
 }

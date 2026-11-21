@@ -1854,8 +1854,8 @@ mod tests {
     #[test]
     fn converts_paths_to_percent_encoded_file_uris() {
         assert_eq!(
-            path_to_file_uri(Path::new("/home/anc/Pictures/Screenshots/My Shot #1.png")),
-            "file:///home/anc/Pictures/Screenshots/My%20Shot%20%231.png"
+            path_to_file_uri(Path::new("/home/alice/Pictures/Screenshots/My Shot #1.png")),
+            "file:///home/alice/Pictures/Screenshots/My%20Shot%20%231.png"
         );
     }
 

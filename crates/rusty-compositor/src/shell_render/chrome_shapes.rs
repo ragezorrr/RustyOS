@@ -502,7 +502,7 @@ fn render_dock_tile_icon(
     draw_size: i32,
     icon_loc: Point<i32, smithay::utils::Logical>,
 ) -> Option<CompositorRenderElement> {
-    // Frame default third-party browser (Firefox) inside a cohesive macOS 27 squircle tile
+    // Frame third-party browser (Firefox) inside a cohesive RustyOS squircle tile
     // when its XDG PNG is available, falling back to our procedural Browser compass squircle.
     if (tile.app_key == "browser" || tile.app_key == "firefox")
         && let Some(icon_name) = tile.icon_name.as_deref()
@@ -517,6 +517,20 @@ fn render_dock_tile_icon(
             .icons
             .builtin_squircle_icon_element(renderer, kind, draw_size, icon_loc)
             .map(CompositorRenderElement::Memory);
+    }
+    // Unify all third-party XDG app icons (Chrome, Steam, Discord, etc.) inside the same squircle frame.
+    for candidate in tile
+        .icon_name
+        .as_deref()
+        .into_iter()
+        .chain(std::iter::once(tile.app_key.as_str()))
+    {
+        if let Some(framed_el) = shape_cache
+            .icons
+            .framed_xdg_squircle_icon_element(renderer, candidate, draw_size, icon_loc)
+        {
+            return Some(CompositorRenderElement::Memory(framed_el));
+        }
     }
     shape_cache
         .icons

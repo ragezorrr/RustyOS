@@ -132,6 +132,9 @@ impl FilesAppState {
         if self.poll_transfer_jobs() {
             changed = true;
         }
+        if self.poll_archive_jobs() {
+            changed = true;
+        }
         if changed {
             self.dirty = true;
         }
@@ -172,6 +175,9 @@ impl FilesAppState {
             };
             if col.target != msg.target {
                 continue;
+            }
+            if msg.col_idx == self.active_column {
+                self.active_dir_avail_bytes = msg.available_bytes;
             }
             col.loading = false;
             match msg.entries {
@@ -313,6 +319,24 @@ impl FilesAppState {
         }
     }
 
+    fn poll_archive_jobs(&mut self) -> bool {
+        let mut changed = false;
+        while let Ok(job) = self.archive_rx.try_recv() {
+            match job.outcome {
+                Ok(msg) => {
+                    self.status_message = Some(msg);
+                    self.reload_directory(&job.target_dir);
+                    self.reload_active_column();
+                }
+                Err(err) => {
+                    self.status_message = Some(format!("Archive error: {err}"));
+                }
+            }
+            changed = true;
+        }
+        changed
+    }
+
     pub(crate) fn spawn_load_job(&self, col_idx: usize, target: ListingTarget) {
         let tx = self.result_tx.clone();
         let gen_id = self.loader_gen;
@@ -321,11 +345,18 @@ impl FilesAppState {
         thread::spawn(move || {
             let res =
                 list_entries_for_target(&target, &locations, &tags).map_err(|e| e.to_string());
+            let available_bytes = match &target {
+                ListingTarget::Directory(dir) => {
+                    rusty_services::StorageService::available_disk_space_bytes(dir)
+                }
+                _ => None,
+            };
             let _ = tx.send(LoadJobResult {
                 generation: gen_id,
                 col_idx,
                 target,
                 entries: res,
+                available_bytes,
             });
         });
     }
@@ -380,6 +411,18 @@ impl FilesAppState {
 
     /// Handles row selection inside `col_idx` (expands Miller child column if directory).
     pub(crate) fn select_entry(&mut self, col_idx: usize, row_idx: usize, double_click: bool) {
+        self.select_entry_with_modifiers(col_idx, row_idx, false, false, double_click);
+    }
+
+    /// Handles row selection with optional `Ctrl` (toggle) or `Shift` (range) multi-select (`RUSTYOS-150`).
+    pub(crate) fn select_entry_with_modifiers(
+        &mut self,
+        col_idx: usize,
+        row_idx: usize,
+        ctrl: bool,
+        shift: bool,
+        double_click: bool,
+    ) {
         self.popup = None;
         self.inline_rename = None;
         let Some(entry) = self
@@ -391,9 +434,24 @@ impl FilesAppState {
             return;
         };
         if let Some(col) = self.columns.get_mut(col_idx) {
-            col.selected_index = Some(row_idx);
+            if ctrl {
+                col.toggle_selection(row_idx);
+            } else if shift {
+                col.select_range_to(row_idx);
+            } else {
+                col.set_single_selection(row_idx);
+            }
         }
         self.active_column = col_idx;
+
+        if ctrl || shift {
+            if let Some(ql) = &mut self.quick_look {
+                ql.entry = entry.clone();
+            }
+            self.ensure_stage_b_assets_for_selection(&entry);
+            self.dirty = true;
+            return;
+        }
 
         if self.view_mode == FileViewMode::Columns {
             self.columns.truncate(col_idx + 1);
@@ -425,6 +483,15 @@ impl FilesAppState {
         self.ensure_stage_b_assets_for_selection(&entry);
         self.follow_right_column = true;
         self.dirty = true;
+    }
+
+    /// Selects all visible items in the active column (`Ctrl+A`, `RUSTYOS-150`).
+    pub(crate) fn select_all_active_column(&mut self) {
+        if let Some(col) = self.columns.get_mut(self.active_column) {
+            col.select_all();
+            self.status_message = None;
+            self.dirty = true;
+        }
     }
 
     /// Activates the currently selected item (opens folder into next column or launches file).
@@ -653,11 +720,19 @@ impl FilesAppState {
                 return err.clone();
             }
             let n = col.visible_entries.len();
-            return if n == 1 {
+            let sel = col.selected_count();
+            let count_str = if sel > 1 {
+                format!("{sel} of {n} selected")
+            } else if n == 1 {
                 String::from("1 item")
             } else {
                 format!("{n} items")
             };
+            if let Some(avail) = self.active_dir_avail_bytes {
+                let space = rusty_services::StorageService::format_available_space(avail);
+                return format!("{count_str}  •  {space}");
+            }
+            return count_str;
         }
         String::new()
     }

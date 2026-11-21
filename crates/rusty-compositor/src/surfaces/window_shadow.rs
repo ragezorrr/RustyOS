@@ -149,8 +149,8 @@ pub(crate) struct WindowShadowSpec {
 
 impl WindowShadowSpec {
     /// Standard active/inactive window shadow preset (`RUSTYOS-075`, `RUSTYOS-080`).
+    #[cfg(test)]
     #[must_use]
-    #[allow(dead_code)]
     pub(crate) fn for_window(
         win_rect: Rectangle<i32, Logical>,
         radius: i32,

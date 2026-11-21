@@ -491,12 +491,12 @@ fn notification_toast_and_badge_hit_testing_match_rendered_bounds() {
 fn lock_screen_hit_testing_and_animation_offsets_match_bounds() {
     let size = Size::from((1280, 800));
     let single_users = [rusty_services::UserAccount {
-        username: "anc".to_owned(),
-        display_name: "anc".to_owned(),
+        username: "alice".to_owned(),
+        display_name: "alice".to_owned(),
         uid: 1000,
         avatar_path: None,
     }];
-    let single_layout = compute_lock_screen_layout(size, "EN", true, &["anc"], 0, false);
+    let single_layout = compute_lock_screen_layout(size, "EN", true, &["alice"], 0, false);
     let single_state = LockScreenRenderState {
         date_label: "Thu Sep 10",
         clock_hhmm: "8:52",
@@ -561,8 +561,8 @@ fn lock_screen_power_menu_and_multi_user_hit_testing() {
     let size = Size::from((1280, 800));
     let multi_users = [
         rusty_services::UserAccount {
-            username: "anc".to_owned(),
-            display_name: "anc".to_owned(),
+            username: "alice".to_owned(),
+            display_name: "alice".to_owned(),
             uid: 1000,
             avatar_path: None,
         },
@@ -574,7 +574,7 @@ fn lock_screen_power_menu_and_multi_user_hit_testing() {
         },
     ];
     let multi_layout =
-        compute_lock_screen_layout(size, "RU", true, &["anc", "Stephen Hackett"], 0, false);
+        compute_lock_screen_layout(size, "RU", true, &["alice", "Stephen Hackett"], 0, false);
     let mut multi_state = LockScreenRenderState {
         date_label: "Thu Sep 10",
         clock_hhmm: "8:52",
@@ -1079,7 +1079,7 @@ fn macos27_traffic_hover_notifications_and_osd_routing() {
 #[test]
 fn lock_screen_password_pill_and_polkit_modal_hit_testing() {
     let size = Size::from((1280, 800));
-    let layout = compute_lock_screen_layout(size, "EN", true, &["anc"], 0, true);
+    let layout = compute_lock_screen_layout(size, "EN", true, &["alice"], 0, true);
     assert!(layout.password_submit_rect.is_some());
     assert!(layout.password_pill_rect.is_some());
     if let (Some(submit), Some(pill)) = (layout.password_submit_rect, layout.password_pill_rect) {

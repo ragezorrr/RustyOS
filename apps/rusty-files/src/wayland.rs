@@ -514,25 +514,42 @@ impl WaylandClientData {
                 self.app.set_search_query(String::new());
             }
             FilesHit::EmptyTrashBanner => self.app.action_empty_trash(),
+            FilesHit::SidebarSectionHeader(sec) => self.app.toggle_sidebar_section(sec),
             FilesHit::SidebarItem(loc) => self.app.navigate_sidebar(loc, true),
+            FilesHit::SidebarRemovableMount(dev) => self.app.mount_or_open_removable_volume(&dev),
+            FilesHit::SidebarRemovableEject(dev) => self.app.eject_removable_volume(&dev),
             FilesHit::ColumnRow { col_idx, row_idx } => {
-                self.app.select_entry(col_idx, row_idx, double_click);
+                self.app.select_entry_with_modifiers(
+                    col_idx,
+                    row_idx,
+                    self.modifiers.ctrl,
+                    self.modifiers.shift,
+                    double_click,
+                );
             }
             FilesHit::ColumnEmpty { col_idx } => {
                 self.app.popup = None;
                 self.app.active_column = col_idx;
                 if let Some(col) = self.app.columns.get_mut(col_idx) {
-                    col.selected_index = None;
+                    col.clear_selection();
                 }
                 self.app.columns.truncate(col_idx + 1);
                 self.app.dirty = true;
             }
             FilesHit::ListHeaderSort(field) => self.app.set_sort(field),
-            FilesHit::ListRow { row_idx } => self.app.select_entry(0, row_idx, double_click),
+            FilesHit::ListRow { row_idx } => {
+                self.app.select_entry_with_modifiers(
+                    0,
+                    row_idx,
+                    self.modifiers.ctrl,
+                    self.modifiers.shift,
+                    double_click,
+                );
+            }
             FilesHit::ListEmpty | FilesHit::IconsEmpty => {
                 self.app.popup = None;
                 if let Some(col) = self.app.columns.first_mut() {
-                    col.selected_index = None;
+                    col.clear_selection();
                 }
                 self.app.dirty = true;
             }
@@ -554,7 +571,13 @@ impl WaylandClientData {
     ) {
         match hit {
             FilesHit::IconCell { idx } | FilesHit::GalleryThumb { idx } => {
-                self.app.select_entry(0, idx, double_click);
+                self.app.select_entry_with_modifiers(
+                    0,
+                    idx,
+                    self.modifiers.ctrl,
+                    self.modifiers.shift,
+                    double_click,
+                );
             }
             FilesHit::GalleryStageOpen => {
                 if double_click {
@@ -823,6 +846,9 @@ impl WaylandClientData {
             PopupCommand::NewFolder => self.app.action_new_folder(),
             PopupCommand::NewTab => self.app.new_tab(None),
             PopupCommand::NewTabIn(path) => self.app.new_tab(Some(ListingTarget::Directory(path))),
+            PopupCommand::OpenInTerminal(dir) => self.app.action_open_in_terminal(&dir),
+            PopupCommand::ExtractArchive(path) => self.app.action_extract_archive(path),
+            PopupCommand::CompressToZip(path) => self.app.action_compress_to_zip(&path),
             PopupCommand::ToggleTabBar => self.app.toggle_tab_bar(),
             PopupCommand::TogglePathBar => self.app.toggle_path_bar(),
             PopupCommand::ShareCopyPath(path) => {
@@ -1584,6 +1610,9 @@ impl PointerHandler for WaylandClientData {
                         if drag.update_pos((px, py)) {
                             self.app.dirty = true;
                         }
+                    } else {
+                        let layout = compute_layout(&self.app, self.width, self.height);
+                        self.app.set_hovered_hit(hit_test(&layout, px, py));
                     }
                 }
                 PointerEventKind::Leave { .. } => {
@@ -1591,20 +1620,24 @@ impl PointerHandler for WaylandClientData {
                         self.app.traffic_hovered = false;
                         self.app.dirty = true;
                     }
+                    self.app.set_hovered_hit(None);
                 }
                 PointerEventKind::Press { button, serial, .. } => {
                     let (px, py) = ev.position;
                     if button == BTN_LEFT {
                         self.pointer_pressed = true;
                         self.execute_left_click(px, py, serial);
-                        if self.app.popup.is_none()
-                            && self.app.quick_look.is_none()
-                            && let Some(entry) = self.app.selected_entry()
-                        {
-                            self.app.file_drag = Some(crate::state::FileDragState::start(
-                                vec![entry.path.clone()],
-                                (px, py),
-                            ));
+                        if self.app.popup.is_none() && self.app.quick_look.is_none() {
+                            let drag_paths: Vec<std::path::PathBuf> = self
+                                .app
+                                .selected_entries()
+                                .into_iter()
+                                .map(|e| e.path)
+                                .collect();
+                            if !drag_paths.is_empty() {
+                                self.app.file_drag =
+                                    Some(crate::state::FileDragState::start(drag_paths, (px, py)));
+                            }
                         }
                     } else if button == BTN_RIGHT {
                         self.execute_right_click(px, py, serial);

@@ -41,6 +41,8 @@ pub(crate) struct FilesAppState {
     pub removable_volumes: Vec<rusty_services::RemovableVolume>,
     pub file_drag: Option<FileDragState>,
     pub sidebar_items: Vec<SidebarRowItem>,
+    pub collapsed_sidebar_sections: BTreeSet<&'static str>,
+    pub hovered_hit: Option<crate::layout::FilesHit>,
     pub active_sidebar: Option<SidebarLocation>,
     pub view_mode: FileViewMode,
     pub theme: FilesThemeMode,
@@ -97,6 +99,7 @@ pub(crate) struct FilesAppState {
     pub inline_rename: Option<InlineRenameState>,
     pub active_transfer: Option<ActiveTransferState>,
     pub status_message: Option<String>,
+    pub active_dir_avail_bytes: Option<u64>,
     pub window_title: String,
     pub window_size: WindowSizeState,
     pub focused: bool,
@@ -117,20 +120,25 @@ pub(crate) struct FilesAppState {
     pub(crate) info_rx: mpsc::Receiver<InfoJobResult>,
     pub(crate) transfer_tx: mpsc::Sender<TransferWorkerMsg>,
     pub(crate) transfer_rx: mpsc::Receiver<TransferWorkerMsg>,
+    pub(crate) archive_tx: mpsc::Sender<ArchiveJobResult>,
+    pub(crate) archive_rx: mpsc::Receiver<ArchiveJobResult>,
 }
 
 impl FilesAppState {
     /// Creates application state using XDG locations, persisted `file_tags.toml`, and CLI options.
     #[must_use]
+    #[allow(clippy::too_many_lines)]
     pub(crate) fn new(locations: UserFileLocations, opts: &StartupOptions) -> Self {
         let tags_config = FileTagsConfig::load_from_path(&locations.tags_config_path());
         let volumes = discover_mounts();
+        let removable_volumes = rusty_services::StorageService::list_removable_volumes();
         let (result_tx, result_rx) = mpsc::channel();
         let (preview_tx, preview_rx) = mpsc::channel();
         let (info_tx, info_rx) = mpsc::channel();
         let (transfer_tx, transfer_rx) = mpsc::channel();
         let (home_search_tx, home_search_rx) = mpsc::channel();
-        let sidebar_items = build_sidebar_items(&locations, &volumes);
+        let (archive_tx, archive_rx) = mpsc::channel();
+        let sidebar_items = build_sidebar_items(&locations, &volumes, &removable_volumes);
         let theme = opts
             .theme_override
             .or_else(|| locations.detect_system_theme())
@@ -147,6 +155,8 @@ impl FilesAppState {
             tags_config,
             volumes,
             sidebar_items,
+            collapsed_sidebar_sections: BTreeSet::new(),
+            hovered_hit: None,
             active_sidebar: None,
             theme,
             accent_index,
@@ -197,9 +207,10 @@ impl FilesAppState {
             go_to_folder: None,
             inline_rename: None,
             active_transfer: None,
-            removable_volumes: rusty_services::StorageService::list_removable_volumes(),
+            removable_volumes,
             file_drag: None,
             status_message: None,
+            active_dir_avail_bytes: None,
             window_title: String::from("Files"),
             window_size: WindowSizeState::Normal,
             focused: true,
@@ -220,6 +231,8 @@ impl FilesAppState {
             info_rx,
             transfer_tx,
             transfer_rx,
+            archive_tx,
+            archive_rx,
         };
 
         app.apply_startup_options(opts);
@@ -333,6 +346,7 @@ fn rustyos_config_mtime() -> Option<SystemTime> {
 pub(crate) fn build_sidebar_items(
     locations: &UserFileLocations,
     volumes: &[VolumeInfo],
+    removable_volumes: &[rusty_services::RemovableVolume],
 ) -> Vec<SidebarRowItem> {
     let mut items = vec![
         SidebarRowItem {
@@ -340,67 +354,67 @@ pub(crate) fn build_sidebar_items(
             label: String::from("Recents"),
             location: SidebarLocation::Recents,
             icon: SidebarIconKind::Recents,
+            removable_device: None,
         },
         SidebarRowItem {
             section: None,
             label: String::from("Shared"),
             location: SidebarLocation::Shared,
             icon: SidebarIconKind::Shared,
+            removable_device: None,
         },
         SidebarRowItem {
             section: Some("Favorites"),
             label: String::from("Applications"),
             location: SidebarLocation::Applications,
             icon: SidebarIconKind::Applications,
+            removable_device: None,
         },
         SidebarRowItem {
             section: None,
             label: String::from("Desktop"),
             location: SidebarLocation::Desktop,
             icon: SidebarIconKind::Desktop,
+            removable_device: None,
         },
         SidebarRowItem {
             section: None,
             label: String::from("Documents"),
             location: SidebarLocation::Documents,
             icon: SidebarIconKind::Documents,
+            removable_device: None,
         },
         SidebarRowItem {
             section: None,
             label: String::from("Downloads"),
             location: SidebarLocation::Downloads,
             icon: SidebarIconKind::Downloads,
+            removable_device: None,
         },
         SidebarRowItem {
             section: Some("Locations"),
             label: locations.user_label.clone(),
             location: SidebarLocation::Home,
             icon: SidebarIconKind::Home,
+            removable_device: None,
         },
     ];
 
-    for vol in volumes {
-        if !vol.is_network {
-            items.push(SidebarRowItem {
-                section: None,
-                label: vol.name.clone(),
-                location: SidebarLocation::Volume(vol.mount_point.clone()),
-                icon: SidebarIconKind::Volume,
-            });
-        }
-    }
+    append_sidebar_volumes(&mut items, volumes, removable_volumes);
 
     items.push(SidebarRowItem {
         section: None,
         label: String::from("Network"),
         location: SidebarLocation::Network,
         icon: SidebarIconKind::Network,
+        removable_device: None,
     });
     items.push(SidebarRowItem {
         section: None,
         label: String::from("Trash"),
         location: SidebarLocation::Trash,
         icon: SidebarIconKind::Trash,
+        removable_device: None,
     });
 
     for (idx, tag) in FileTagColor::ALL.iter().enumerate() {
@@ -409,9 +423,55 @@ pub(crate) fn build_sidebar_items(
             label: String::from(tag.label()),
             location: SidebarLocation::Tag(*tag),
             icon: SidebarIconKind::Tag(*tag),
+            removable_device: None,
         });
     }
     items
+}
+
+fn append_sidebar_volumes(
+    items: &mut Vec<SidebarRowItem>,
+    volumes: &[VolumeInfo],
+    removable_volumes: &[rusty_services::RemovableVolume],
+) {
+    for vol in volumes {
+        if !vol.is_network {
+            let matched_rem = removable_volumes
+                .iter()
+                .find(|r| r.mount_point.as_ref() == Some(&vol.mount_point));
+            items.push(SidebarRowItem {
+                section: None,
+                label: matched_rem.map_or_else(|| vol.name.clone(), |r| r.label.clone()),
+                location: SidebarLocation::Volume(vol.mount_point.clone()),
+                icon: if matched_rem.is_some() {
+                    SidebarIconKind::RemovableDrive
+                } else {
+                    SidebarIconKind::Volume
+                },
+                removable_device: matched_rem.map(|r| r.device.clone()),
+            });
+        }
+    }
+
+    for rem in removable_volumes {
+        let already_listed = rem
+            .mount_point
+            .as_ref()
+            .is_some_and(|mp| volumes.iter().any(|v| &v.mount_point == mp));
+        if !already_listed {
+            let target_path = rem
+                .mount_point
+                .clone()
+                .unwrap_or_else(|| PathBuf::from(&rem.device));
+            items.push(SidebarRowItem {
+                section: None,
+                label: rem.label.clone(),
+                location: SidebarLocation::Volume(target_path),
+                icon: SidebarIconKind::RemovableDrive,
+                removable_device: Some(rem.device.clone()),
+            });
+        }
+    }
 }
 
 pub(crate) fn match_path_to_sidebar(
@@ -485,15 +545,16 @@ pub(crate) fn parse_desktop_exec_tokens(exec_line: &str) -> Option<Vec<String>> 
 }
 
 impl FilesAppState {
-    /// Refreshes removable volumes from `StorageService` (`UDisks2` / `lsblk`, `RUSTYOS-134`).
-    #[allow(dead_code)]
+    /// Refreshes removable volumes from `StorageService` (`UDisks2` / `lsblk`, `RUSTYOS-134`, `RUSTYOS-149`).
     pub(crate) fn refresh_removable_volumes(&mut self) {
+        self.volumes = discover_mounts();
         self.removable_volumes = rusty_services::StorageService::list_removable_volumes();
+        self.sidebar_items =
+            build_sidebar_items(&self.locations, &self.volumes, &self.removable_volumes);
         self.dirty = true;
     }
 
-    /// Safely unmounts and ejects a removable block device (`RUSTYOS-134`).
-    #[allow(dead_code)]
+    /// Safely unmounts and ejects a removable block device (`RUSTYOS-134`, `RUSTYOS-149`).
     pub(crate) fn eject_removable_volume(&mut self, device: &str) {
         match rusty_services::StorageService::unmount_and_eject(device) {
             Ok(msg) => {
@@ -507,8 +568,7 @@ impl FilesAppState {
         }
     }
 
-    /// Mounts (if needed) and navigates to a removable volume (`RUSTYOS-134`).
-    #[allow(dead_code)]
+    /// Mounts (if needed) and navigates to a removable volume (`RUSTYOS-134`, `RUSTYOS-149`).
     pub(crate) fn mount_or_open_removable_volume(&mut self, device: &str) {
         if let Some(mp) = self
             .removable_volumes
@@ -529,6 +589,236 @@ impl FilesAppState {
                 self.dirty = true;
             }
         }
+    }
+
+    /// Returns all currently selected entries in the active column (multi-select aware, `RUSTYOS-150`).
+    #[must_use]
+    pub(crate) fn selected_entries(&self) -> Vec<FileEntry> {
+        self.columns
+            .get(self.active_column)
+            .map(|col| col.selected_entries().into_iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// Toggles collapsed state for a sidebar section header (`Favorites`, `Locations`, `Tags`).
+    pub(crate) fn toggle_sidebar_section(&mut self, section: &'static str) {
+        if !self.collapsed_sidebar_sections.remove(section) {
+            self.collapsed_sidebar_sections.insert(section);
+        }
+        self.sidebar_scroll_y = 0;
+        self.sidebar_scroll_anim.set_immediate(0);
+        self.dirty = true;
+    }
+
+    /// Updates pointer hover hit target, marking the frame dirty only on state transitions.
+    pub(crate) fn set_hovered_hit(&mut self, hit: Option<crate::layout::FilesHit>) {
+        if self.hovered_hit != hit {
+            self.hovered_hit = hit;
+            self.dirty = true;
+        }
+    }
+
+    /// Returns the filesystem path of the active column when it displays a real directory.
+    #[must_use]
+    pub(crate) fn active_directory_path(&self) -> Option<PathBuf> {
+        let col = self
+            .columns
+            .get(self.active_column)
+            .or_else(|| self.columns.first())?;
+        match &col.target {
+            ListingTarget::Directory(dir) => Some(dir.clone()),
+            _ => None,
+        }
+    }
+
+    /// Spawns `rusty-terminal` (or a system terminal fallback) in `dir` (`RUSTYOS-149`).
+    pub(crate) fn action_open_in_terminal(&mut self, dir: &Path) {
+        let target_dir = if dir.is_dir() {
+            dir.to_path_buf()
+        } else {
+            dir.parent()
+                .map_or_else(|| self.locations.home.clone(), Path::to_path_buf)
+        };
+        let mut candidates: Vec<PathBuf> = Vec::new();
+        if let Ok(exe) = std::env::current_exe()
+            && let Some(parent) = exe.parent()
+        {
+            let sibling = parent.join("rusty-terminal");
+            if sibling.is_file() {
+                candidates.push(sibling);
+            }
+        }
+        candidates.push(PathBuf::from("rusty-terminal"));
+        if let Ok(term) = std::env::var("TERMINAL")
+            && !term.trim().is_empty()
+        {
+            candidates.push(PathBuf::from(term));
+        }
+        candidates.push(PathBuf::from("alacritty"));
+        candidates.push(PathBuf::from("foot"));
+        candidates.push(PathBuf::from("xterm"));
+
+        for bin in &candidates {
+            if std::process::Command::new(bin)
+                .current_dir(&target_dir)
+                .spawn()
+                .is_ok()
+            {
+                self.status_message = Some(format!(
+                    "Opened terminal in {}",
+                    path_display_title(&target_dir)
+                ));
+                self.dirty = true;
+                return;
+            }
+        }
+        self.status_message = Some(String::from("No terminal emulator found"));
+        self.dirty = true;
+    }
+
+    /// Extracts an archive (`.zip`, `.tar.*`, `.tgz`) into its parent directory on a background thread (`RUSTYOS-149`).
+    pub(crate) fn action_extract_archive(&mut self, archive_path: PathBuf) {
+        let Some(parent_dir) = archive_path.parent().map(Path::to_path_buf) else {
+            self.status_message = Some(String::from("Cannot determine target folder"));
+            self.dirty = true;
+            return;
+        };
+        let name = path_display_title(&archive_path);
+        self.status_message = Some(format!("Extracting {name}..."));
+        self.dirty = true;
+        let tx = self.archive_tx.clone();
+        std::thread::spawn(move || {
+            let is_zip = archive_path
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("zip"));
+            let outcome = if is_zip {
+                run_archive_command(
+                    "unzip",
+                    &[
+                        "-o",
+                        &archive_path.to_string_lossy(),
+                        "-d",
+                        &parent_dir.to_string_lossy(),
+                    ],
+                    &parent_dir,
+                    format!("Extracted {name}"),
+                )
+            } else {
+                run_archive_command(
+                    "tar",
+                    &[
+                        "-xf",
+                        &archive_path.to_string_lossy(),
+                        "-C",
+                        &parent_dir.to_string_lossy(),
+                    ],
+                    &parent_dir,
+                    format!("Extracted {name}"),
+                )
+            };
+            let _ = tx.send(ArchiveJobResult {
+                target_dir: parent_dir,
+                outcome,
+            });
+        });
+    }
+
+    /// Compresses a file or directory to `<name>.zip` in its parent directory on a background thread (`RUSTYOS-149`).
+    pub(crate) fn action_compress_to_zip(&mut self, item_path: &Path) {
+        let Some(parent_dir) = item_path.parent().map(Path::to_path_buf) else {
+            self.status_message = Some(String::from("Cannot determine target folder"));
+            self.dirty = true;
+            return;
+        };
+        let Some(item_name) = item_path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+        else {
+            return;
+        };
+        let zip_path = unique_zip_output_path(&parent_dir, &item_name);
+        let zip_name = path_display_title(&zip_path);
+        self.status_message = Some(format!("Compressing to {zip_name}..."));
+        self.dirty = true;
+        let tx = self.archive_tx.clone();
+        std::thread::spawn(move || {
+            let zip_str = zip_path.to_string_lossy().into_owned();
+            let outcome = match run_archive_command(
+                "zip",
+                &["-r", "-q", &zip_str, &item_name],
+                &parent_dir,
+                format!("Created {zip_name}"),
+            ) {
+                Ok(msg) => Ok(msg),
+                Err(_) => run_archive_command(
+                    "python3",
+                    &["-m", "zipfile", "-c", &zip_str, &item_name],
+                    &parent_dir,
+                    format!("Created {zip_name}"),
+                ),
+            };
+            let _ = tx.send(ArchiveJobResult {
+                target_dir: parent_dir,
+                outcome,
+            });
+        });
+    }
+}
+
+/// Returns true when `path` has a supported archive extension for `"Extract Here"`.
+#[must_use]
+pub(crate) fn is_extractable_archive(path: &Path) -> bool {
+    if path.extension().is_some_and(|ext| {
+        ext.eq_ignore_ascii_case("zip")
+            || ext.eq_ignore_ascii_case("tar")
+            || ext.eq_ignore_ascii_case("tgz")
+    }) {
+        return true;
+    }
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    let lower = name.to_ascii_lowercase();
+    lower.ends_with(".tar.gz")
+        || lower.ends_with(".tar.zst")
+        || lower.ends_with(".tar.xz")
+        || lower.ends_with(".tar.bz2")
+}
+
+fn unique_zip_output_path(parent_dir: &Path, item_name: &str) -> PathBuf {
+    let base = parent_dir.join(format!("{item_name}.zip"));
+    if !base.exists() {
+        return base;
+    }
+    for n in 2..=999 {
+        let candidate = parent_dir.join(format!("{item_name} ({n}).zip"));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    base
+}
+
+fn run_archive_command(
+    program: &str,
+    args: &[&str],
+    cwd: &Path,
+    ok_msg: String,
+) -> Result<String, String> {
+    let output = std::process::Command::new(program)
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .map_err(|err| format!("{program} unavailable: {err}"))?;
+    if output.status.success() {
+        Ok(ok_msg)
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        Err(if stderr.is_empty() {
+            format!("{program} exited with status {}", output.status)
+        } else {
+            stderr
+        })
     }
 }
 
@@ -910,5 +1200,119 @@ mod tests {
         assert!(!drag.can_drop_on(std::path::Path::new("/tmp/folder_a")));
         assert!(!drag.can_drop_on(std::path::Path::new("/tmp/folder_a/sub")));
         assert!(drag.can_drop_on(std::path::Path::new("/tmp/folder_b")));
+    }
+
+    #[test]
+    fn removable_volumes_appear_in_sidebar_with_eject_hit_target_and_status_space()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let guard = TestHomeGuard::new("removable-and-space")?;
+        let locs = guard.locations();
+        let rem = vec![rusty_services::RemovableVolume {
+            device: String::from("/dev/sdb1"),
+            label: String::from("BACKUP_USB"),
+            mount_point: Some(PathBuf::from("/run/media/alice/BACKUP_USB")),
+            size_bytes: 32_000_000_000,
+            removable: true,
+            ejectable: true,
+        }];
+        let items = build_sidebar_items(&locs, &[], &rem);
+        let usb_item = items
+            .iter()
+            .find(|i| i.removable_device.as_deref() == Some("/dev/sdb1"));
+        assert!(usb_item.is_some());
+        if let Some(item) = usb_item {
+            assert_eq!(item.label, "BACKUP_USB");
+            assert_eq!(item.icon, SidebarIconKind::RemovableDrive);
+        }
+
+        let mut state = FilesAppState::new(locs, &StartupOptions::default());
+        state.complete_pending_loads_sync();
+        state.removable_volumes = rem;
+        state.sidebar_items = build_sidebar_items(&state.locations, &[], &state.removable_volumes);
+        state.active_dir_avail_bytes = Some(184_200_000_000);
+        assert!(state.status_summary().contains("184.2 GB available"));
+
+        let layout = crate::layout::compute_layout(&state, 960, 620);
+        let usb_row = layout
+            .sidebar_rows
+            .iter()
+            .find(|r| r.removable_device.as_deref() == Some("/dev/sdb1"));
+        assert!(usb_row.is_some());
+        if let Some(row) = usb_row {
+            let eject_r = row.eject_rect;
+            assert!(eject_r.is_some());
+            if let Some(er) = eject_r {
+                let hit = crate::layout::hit_test(
+                    &layout,
+                    f64::from(er.x + er.w / 2),
+                    f64::from(er.y + er.h / 2),
+                );
+                assert_eq!(
+                    hit,
+                    Some(crate::layout::FilesHit::SidebarRemovableEject(
+                        String::from("/dev/sdb1")
+                    ))
+                );
+            }
+        }
+
+        assert!(is_extractable_archive(Path::new("/tmp/release.zip")));
+        assert!(is_extractable_archive(Path::new("/tmp/archive.tar.gz")));
+        assert!(is_extractable_archive(Path::new("/tmp/pkg.tar.zst")));
+        assert!(!is_extractable_archive(Path::new("/tmp/notes.txt")));
+        Ok(())
+    }
+
+    #[test]
+    fn multi_select_collapsible_sidebar_and_hover_state_work()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let guard = TestHomeGuard::new("multiselect-sidebar-hover")?;
+        let locs = guard.locations();
+        fs::write(locs.home.join("a.txt"), "a")?;
+        fs::write(locs.home.join("b.txt"), "b")?;
+        fs::write(locs.home.join("c.txt"), "c")?;
+
+        let mut state = FilesAppState::new(locs, &StartupOptions::default());
+        state.complete_pending_loads_sync();
+        let total = state.columns[0].visible_entries.len();
+        assert!(total >= 3);
+
+        // Single select -> Shift+Click range -> Ctrl+Click toggle -> Ctrl+A
+        state.select_entry_with_modifiers(0, 0, false, false, false);
+        assert_eq!(state.selected_entries().len(), 1);
+        state.select_entry_with_modifiers(0, 2, false, true, false);
+        assert_eq!(state.selected_entries().len(), 3);
+        assert!(state.status_summary().starts_with("3 of "));
+        state.select_entry_with_modifiers(0, 1, true, false, false);
+        assert_eq!(state.selected_entries().len(), 2);
+
+        state.action_copy_selected();
+        assert_eq!(state.clipboard.as_ref().map(|c| c.paths.len()), Some(2));
+        state.select_all_active_column();
+        assert_eq!(state.selected_entries().len(), total);
+
+        // Collapsible sidebar section hides rows and reduces total height
+        let expanded_h =
+            sidebar_total_height(&state.sidebar_items, &state.collapsed_sidebar_sections);
+        let expanded_rows = crate::layout::compute_layout(&state, 960, 620)
+            .sidebar_rows
+            .len();
+        state.toggle_sidebar_section("Tags");
+        let collapsed_h =
+            sidebar_total_height(&state.sidebar_items, &state.collapsed_sidebar_sections);
+        let collapsed_rows = crate::layout::compute_layout(&state, 960, 620)
+            .sidebar_rows
+            .len();
+        assert!(collapsed_h < expanded_h);
+        assert!(collapsed_rows < expanded_rows);
+
+        // Hover transitions mark dirty only on change
+        state.dirty = false;
+        state.set_hovered_hit(Some(crate::layout::FilesHit::SortButton));
+        assert!(state.dirty);
+        state.dirty = false;
+        state.set_hovered_hit(Some(crate::layout::FilesHit::SortButton));
+        assert!(!state.dirty);
+        Ok(())
     }
 }

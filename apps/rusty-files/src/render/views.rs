@@ -101,7 +101,20 @@ pub(crate) fn render_miller_column_pane(
             let Some(entry) = col.visible_entries.get(row_idx) else {
                 continue;
             };
-            let selected = col.selected_index == Some(row_idx);
+            let selected = col.is_selected(row_idx);
+            let hovered = state.hovered_hit
+                == Some(crate::layout::FilesHit::ColumnRow {
+                    col_idx: col_layout.col_idx,
+                    row_idx,
+                });
+            if !selected && hovered {
+                let hover_bg = if pal.is_dark {
+                    rgba(255, 255, 255, 12)
+                } else {
+                    rgba(0, 0, 0, 10)
+                };
+                c.fill_rounded_rect(row_rect, 6, hover_bg);
+            }
             let primary_active = selected && is_focused_col;
             render_miller_column_row(
                 c,
@@ -382,7 +395,17 @@ pub(crate) fn render_list_view(
     c.with_clip(clip, |c| {
         for &(row_idx, rect) in &layout.list_rows {
             if let Some(entry) = col.visible_entries.get(row_idx) {
-                let selected = col.selected_index == Some(row_idx);
+                let selected = col.is_selected(row_idx);
+                let hovered =
+                    state.hovered_hit == Some(crate::layout::FilesHit::ListRow { row_idx });
+                if !selected && hovered {
+                    let hover_bg = if pal.is_dark {
+                        rgba(255, 255, 255, 12)
+                    } else {
+                        rgba(0, 0, 0, 10)
+                    };
+                    c.fill_rounded_rect(rect, 6, hover_bg);
+                }
                 render_list_row(c, entry, rect, row_idx, selected, cols_x, clip, pal);
             }
         }
@@ -482,6 +505,15 @@ pub(crate) fn render_status_bar(
     layout: &FilesLayout,
     pal: &Palette,
 ) {
+    c.fill_rect(
+        Rect::new(
+            layout.status_bar_rect.x + 4,
+            layout.status_bar_rect.y,
+            layout.status_bar_rect.w - 8,
+            1,
+        ),
+        pal.divider,
+    );
     let summary = state.status_summary();
     let status_right = layout.status_bar_rect.right() - 8;
     if layout.path_crumbs.is_empty() {
@@ -504,15 +536,6 @@ pub(crate) fn render_status_bar(
             layout.status_bar_rect,
         );
     } else {
-        c.fill_rect(
-            Rect::new(
-                layout.status_bar_rect.x + 4,
-                layout.status_bar_rect.y,
-                layout.status_bar_rect.w - 8,
-                1,
-            ),
-            pal.divider,
-        );
         render_path_bar(c, &layout.path_crumbs, pal);
         let right_edge = layout
             .path_crumbs
@@ -577,7 +600,23 @@ pub(crate) fn render_icons_grid(
             let Some(entry) = col.visible_entries.get(cell.row_idx) else {
                 continue;
             };
-            let selected = col.selected_index == Some(cell.row_idx);
+            let selected = col.is_selected(cell.row_idx);
+            let hovered =
+                state.hovered_hit == Some(crate::layout::FilesHit::IconCell { idx: cell.row_idx });
+            if !selected && hovered {
+                let hover_bg = if pal.is_dark {
+                    rgba(255, 255, 255, 14)
+                } else {
+                    rgba(0, 0, 0, 10)
+                };
+                let art_hl = Rect::new(
+                    cell.art_rect.x - 4,
+                    cell.art_rect.y - 4,
+                    cell.art_rect.w + 8,
+                    cell.art_rect.h + 8,
+                );
+                c.fill_rounded_rect(art_hl, 10, hover_bg);
+            }
             let tags = state.tags_for(&entry.path);
             render_single_icon_cell(c, state, cell, entry, tags, selected, pal);
         }

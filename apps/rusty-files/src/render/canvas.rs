@@ -7,26 +7,6 @@ use rusty_services::file_manager::DecodedPreviewImage;
 use crate::layout::Rect;
 use crate::render::Palette;
 
-/// 4x4 rotated-grid supersampling offsets in `[0.0, 1.0)` for polygon anti-aliasing.
-const RGSS_16: [(f32, f32); 16] = [
-    (0.125, 0.0625),
-    (0.375, 0.1875),
-    (0.625, 0.0625),
-    (0.875, 0.1875),
-    (0.0625, 0.375),
-    (0.3125, 0.3125),
-    (0.5625, 0.4375),
-    (0.8125, 0.3125),
-    (0.1875, 0.625),
-    (0.4375, 0.5625),
-    (0.6875, 0.6875),
-    (0.9375, 0.5625),
-    (0.0625, 0.875),
-    (0.3125, 0.9375),
-    (0.5625, 0.8125),
-    (0.8125, 0.9375),
-];
-
 thread_local! {
     static FONT_ENGINE: RefCell<rusty_ui::UiFontEngine> =
         RefCell::new(rusty_ui::UiFontEngine::new());
@@ -509,91 +489,6 @@ impl<'a> Canvas<'a> {
         }
     }
 
-    #[allow(
-        clippy::cast_possible_truncation,
-        clippy::cast_precision_loss,
-        clippy::too_many_arguments
-    )]
-    pub(crate) fn fill_rounded_rect_vgrad_f(
-        &mut self,
-        left: f32,
-        top: f32,
-        width: f32,
-        height: f32,
-        radius: f32,
-        top_col: [u8; 4],
-        bot_col: [u8; 4],
-    ) {
-        let cx = left + width * 0.5;
-        let cy = top + height * 0.5;
-        let bx0 = left.floor() as i32 - 1;
-        let by0 = top.floor() as i32 - 1;
-        let bx1 = (left + width).ceil() as i32 + 1;
-        let by1 = (top + height).ceil() as i32 + 1;
-        let eff = self.effective_clip(Rect::new(bx0, by0, bx1 - bx0, by1 - by0));
-        let inv_h = if height > 0.1 { 1.0 / height } else { 0.0 };
-        for py in eff.y..eff.bottom() {
-            let mix = (((py as f32 + 0.5) - top) * inv_h).clamp(0.0, 1.0);
-            let col = lerp_rgba(top_col, bot_col, mix);
-            if col[3] == 0 {
-                continue;
-            }
-            for px in eff.x..eff.right() {
-                let dist = sd_rounded_box(
-                    px as f32 + 0.5 - cx,
-                    py as f32 + 0.5 - cy,
-                    width,
-                    height,
-                    radius,
-                );
-                self.blend_sdf_clipped(px, py, col, dist);
-            }
-        }
-    }
-
-    #[allow(
-        clippy::cast_possible_truncation,
-        clippy::cast_precision_loss,
-        clippy::too_many_arguments
-    )]
-    pub(crate) fn stroke_rounded_rect_f(
-        &mut self,
-        left: f32,
-        top: f32,
-        width: f32,
-        height: f32,
-        radius: f32,
-        thickness: f32,
-        color: [u8; 4],
-    ) {
-        if color[3] == 0 {
-            return;
-        }
-        let cx = left + width * 0.5;
-        let cy = top + height * 0.5;
-        let half_t = thickness * 0.5;
-        let pad = half_t.ceil() as i32 + 1;
-        let bx0 = left.floor() as i32 - pad;
-        let by0 = top.floor() as i32 - pad;
-        let bx1 = (left + width).ceil() as i32 + pad;
-        let by1 = (top + height).ceil() as i32 + pad;
-        let eff = self.effective_clip(Rect::new(bx0, by0, bx1 - bx0, by1 - by0));
-        for py in eff.y..eff.bottom() {
-            for px in eff.x..eff.right() {
-                let dist = sd_rounded_box(
-                    px as f32 + 0.5 - cx,
-                    py as f32 + 0.5 - cy,
-                    width,
-                    height,
-                    radius,
-                )
-                .abs()
-                    - half_t;
-                self.blend_sdf_clipped(px, py, color, dist);
-            }
-        }
-    }
-
     #[allow(clippy::cast_precision_loss)]
     pub(crate) fn fill_circle(&mut self, cx: i32, cy: i32, radius: f32, color: [u8; 4]) {
         self.fill_circle_f(cx as f32, cy as f32, radius, color);
@@ -635,36 +530,6 @@ impl<'a> Canvas<'a> {
                 let dy = (y as f32 + 0.5) - cy;
                 let dist = (dx.hypot(dy) - radius).abs() - half_t;
                 self.blend_sdf(x, y, color, dist);
-            }
-        }
-    }
-
-    #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
-    pub(crate) fn stroke_ellipse_aa(
-        &mut self,
-        cx: f32,
-        cy: f32,
-        rx: f32,
-        ry: f32,
-        thickness: f32,
-        color: [u8; 4],
-    ) {
-        let half_t = thickness * 0.5;
-        let x0 = ((cx - rx - half_t - 1.5).floor() as i32).max(0);
-        let y0 = ((cy - ry - half_t - 1.5).floor() as i32).max(0);
-        let x1 = ((cx + rx + half_t + 2.0).ceil() as i32).min(self.w);
-        let y1 = ((cy + ry + half_t + 2.0).ceil() as i32).min(self.h);
-        let horiz_inv_sq = 1.0 / (rx * rx);
-        let vert_inv_sq = 1.0 / (ry * ry);
-        for y in y0..y1 {
-            for x in x0..x1 {
-                let dx = (x as f32 + 0.5) - cx;
-                let dy = (y as f32 + 0.5) - cy;
-                let f = dx * dx * horiz_inv_sq + dy * dy * vert_inv_sq - 1.0;
-                let gx = 2.0 * dx * horiz_inv_sq;
-                let gy = 2.0 * dy * vert_inv_sq;
-                let grad = gx.hypot(gy).max(0.001);
-                self.blend_sdf(x, y, color, (f / grad).abs() - half_t);
             }
         }
     }
@@ -712,37 +577,6 @@ impl<'a> Canvas<'a> {
                     best = best.min(dist_to_segment(px, py, ax, ay, bx, by));
                 }
                 self.blend_sdf(x, y, color, best - half_t);
-            }
-        }
-    }
-
-    #[allow(
-        clippy::cast_possible_truncation,
-        clippy::cast_precision_loss,
-        clippy::cast_sign_loss
-    )]
-    pub(crate) fn fill_poly_aa(&mut self, pts: &[(f32, f32)], color: [u8; 4]) {
-        if pts.len() < 3 {
-            return;
-        }
-        let (min_x, min_y, max_x, max_y) = poly_bounds(pts);
-        let x0 = (min_x.floor() as i32).max(0);
-        let y0 = (min_y.floor() as i32).max(0);
-        let x1 = (max_x.ceil() as i32 + 1).min(self.w);
-        let y1 = (max_y.ceil() as i32 + 1).min(self.h);
-
-        for y in y0..y1 {
-            for x in x0..x1 {
-                let mut inside = 0_u16;
-                for &(ox, oy) in &RGSS_16 {
-                    if point_in_poly(x as f32 + ox, y as f32 + oy, pts) {
-                        inside += 1;
-                    }
-                }
-                if inside > 0 {
-                    let cov = ((inside * 255) / 16) as u8;
-                    self.blend_pixel(x, y, color, cov);
-                }
             }
         }
     }
@@ -885,17 +719,6 @@ pub(crate) fn intersect_rect(a: Rect, b: Rect) -> Rect {
     Rect::new(x0, y0, (x1 - x0).max(0), (y1 - y0).max(0))
 }
 
-#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-pub(crate) fn lerp_rgba(a: [u8; 4], b: [u8; 4], t: f32) -> [u8; 4] {
-    let inv = 1.0 - t;
-    [
-        (f32::from(a[0]) * inv + f32::from(b[0]) * t).round() as u8,
-        (f32::from(a[1]) * inv + f32::from(b[1]) * t).round() as u8,
-        (f32::from(a[2]) * inv + f32::from(b[2]) * t).round() as u8,
-        (f32::from(a[3]) * inv + f32::from(b[3]) * t).round() as u8,
-    ]
-}
-
 pub(crate) fn sd_rounded_box(px: f32, py: f32, w: f32, h: f32, r: f32) -> f32 {
     let r = r.min(w * 0.5).min(h * 0.5).max(0.0);
     let qx = px.abs() - (w * 0.5 - r);
@@ -927,20 +750,6 @@ pub(crate) fn poly_bounds(pts: &[(f32, f32)]) -> (f32, f32, f32, f32) {
         max_y = max_y.max(y);
     }
     (min_x, min_y, max_x, max_y)
-}
-
-pub(crate) fn point_in_poly(px: f32, py: f32, pts: &[(f32, f32)]) -> bool {
-    let mut inside = false;
-    let mut j = pts.len().saturating_sub(1);
-    for (i, &(xi, yi)) in pts.iter().enumerate() {
-        let (xj, yj) = pts[j];
-        let crosses = ((yi > py) != (yj > py)) && (px < (xj - xi) * (py - yi) / (yj - yi) + xi);
-        if crosses {
-            inside = !inside;
-        }
-        j = i;
-    }
-    inside
 }
 
 #[allow(clippy::cast_precision_loss)]

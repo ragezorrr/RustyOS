@@ -37,15 +37,42 @@ impl FilesAppState {
         self.dirty = true;
     }
 
-    /// Moves the currently selected entry to Trash, or prompts reload if inside Trash.
+    /// Moves all currently selected entries to Trash, or restores if inside Trash (`RUSTYOS-150`).
     pub(crate) fn action_move_selected_to_trash(&mut self) {
         self.popup = None;
-        let Some(entry) = self.selected_entry().cloned() else {
+        let entries = self.selected_entries();
+        if entries.is_empty() {
             self.status_message = Some(String::from("Select an item first"));
             self.dirty = true;
             return;
-        };
-        self.trash_entry(&entry);
+        }
+        if entries.len() == 1 {
+            self.trash_entry(&entries[0]);
+            return;
+        }
+        if self.is_trash_view() {
+            let mut restored = 0_usize;
+            for entry in &entries {
+                if restore_from_trash(&entry.name, &self.locations.trash_dir).is_ok() {
+                    restored += 1;
+                }
+            }
+            self.status_message = Some(format!("Restored {restored} items"));
+            self.reload_active_column();
+            self.dirty = true;
+            return;
+        }
+        let mut trashed = 0_usize;
+        for entry in &entries {
+            if move_to_trash(&entry.path, &self.locations.trash_dir).is_ok() {
+                self.tags_config.remove_tags_for(&entry.path);
+                trashed += 1;
+            }
+        }
+        self.persist_preferences();
+        self.status_message = Some(format!("Moved {trashed} items to Trash"));
+        self.reload_active_column();
+        self.dirty = true;
     }
 
     /// Moves specific `entry` to `FreeDesktop` Trash (updating tags & reloading).
@@ -111,23 +138,26 @@ impl FilesAppState {
 
     fn stage_clipboard(&mut self, kind: TransferKind) {
         self.popup = None;
-        let Some(entry) = self.selected_entry().cloned() else {
+        let entries = self.selected_entries();
+        if entries.is_empty() {
             self.status_message = Some(String::from("Select an item first"));
             self.dirty = true;
             return;
-        };
+        }
         if self.is_trash_view() {
             return;
         }
-        self.clipboard = Some(ClipboardItemSet {
-            kind,
-            paths: vec![entry.path],
-        });
+        let paths: Vec<PathBuf> = entries.iter().map(|e| e.path.clone()).collect();
+        self.clipboard = Some(ClipboardItemSet { kind, paths });
         let label = match kind {
             TransferKind::Copy => "Copied",
             TransferKind::Move => "Cut",
         };
-        self.status_message = Some(format!("{label} \"{}\"", entry.name));
+        self.status_message = if entries.len() == 1 {
+            Some(format!("{label} \"{}\"", entries[0].name))
+        } else {
+            Some(format!("{label} {} items", entries.len()))
+        };
         self.dirty = true;
     }
 

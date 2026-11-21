@@ -83,9 +83,18 @@ pub(crate) enum ResizeEdgeZone {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SidebarRowLayout {
     pub index: usize,
-    pub section_header_y: Option<i32>,
     pub rect: Rect,
     pub location: SidebarLocation,
+    pub removable_device: Option<String>,
+    pub eject_rect: Option<Rect>,
+}
+
+/// Clickable collapsible sidebar section header (`Favorites`, `Locations`, `Tags`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SidebarSectionHeaderLayout {
+    pub title: &'static str,
+    pub rect: Rect,
+    pub collapsed: bool,
 }
 
 /// Column pane layout in Miller Columns mode.
@@ -114,6 +123,9 @@ pub(crate) enum PopupCommand {
     NewFolder,
     NewTab,
     NewTabIn(PathBuf),
+    OpenInTerminal(PathBuf),
+    ExtractArchive(PathBuf),
+    CompressToZip(PathBuf),
     ToggleTabBar,
     TogglePathBar,
     ShareCopyPath(PathBuf),
@@ -203,7 +215,10 @@ pub(crate) enum FilesHit {
     SearchScope(SearchScope),
     SearchScopeClear,
     EmptyTrashBanner,
+    SidebarSectionHeader(&'static str),
     SidebarItem(SidebarLocation),
+    SidebarRemovableMount(String),
+    SidebarRemovableEject(String),
     ColumnRow { col_idx: usize, row_idx: usize },
     ColumnEmpty { col_idx: usize },
     ListHeaderSort(FileSortField),
@@ -256,6 +271,7 @@ pub(crate) struct FilesLayout {
     pub traffic_min: Rect,
     pub traffic_max: Rect,
     pub sidebar_rows: Vec<SidebarRowLayout>,
+    pub sidebar_sections: Vec<SidebarSectionHeaderLayout>,
     pub toolbar_rect: Rect,
     pub nav_pill_rect: Rect,
     pub nav_back_rect: Rect,
@@ -340,7 +356,8 @@ pub(crate) fn compute_layout(state: &FilesAppState, surface_w: u32, surface_h: u
     let traffic_min = Rect::new(tl.minimize_rect.x, tl.minimize_rect.y, btn_d, btn_d);
     let traffic_max = Rect::new(tl.maximize_rect.x, tl.maximize_rect.y, btn_d, btn_d);
 
-    let sidebar_rows = layout_sidebar_rows(state, sidebar_rect, sidebar_clip_rect);
+    let (sidebar_rows, sidebar_sections) =
+        layout_sidebar_rows(state, sidebar_rect, sidebar_clip_rect);
     let toolbar_x = sidebar_rect.right() + 12;
     let tb = layout_toolbar(state, width, toolbar_x);
     let tab_bar = compute_tab_bar_layout(state, toolbar_x, width);
@@ -388,6 +405,7 @@ pub(crate) fn compute_layout(state: &FilesAppState, surface_w: u32, surface_h: u
         traffic_min,
         traffic_max,
         sidebar_rows,
+        sidebar_sections,
         toolbar_rect: tb.toolbar_rect,
         nav_pill_rect: tb.nav_pill_rect,
         nav_back_rect: tb.nav_back_rect,
@@ -513,16 +531,16 @@ fn compute_search_scope_layout(
 
 fn layout_toolbar(state: &FilesAppState, width: i32, toolbar_x: i32) -> ToolbarRects {
     let toolbar_rect = Rect::new(toolbar_x, 10, (width - toolbar_x - 10).max(200), 46);
-    let nav_pill_rect = Rect::new(toolbar_x + 4, 15, 68, 32);
-    let nav_back_rect = Rect::new(nav_pill_rect.x, nav_pill_rect.y, 34, 32);
-    let nav_forward_rect = Rect::new(nav_pill_rect.x + 34, nav_pill_rect.y, 34, 32);
-    let title_x = nav_pill_rect.right() + 14;
+    let nav_pill_rect = Rect::new(toolbar_x + 4, 15, 60, 32);
+    let nav_back_rect = Rect::new(nav_pill_rect.x, nav_pill_rect.y, 30, 32);
+    let nav_forward_rect = Rect::new(nav_pill_rect.x + 30, nav_pill_rect.y, 30, 32);
+    let title_x = nav_pill_rect.right() + 12;
 
     let right_margin = width - 16;
-    let fixed_cluster_w = 136 + 8 + 54 + 8 + 102 + 8;
+    let fixed_cluster_w = 120 + 8 + 42 + 8 + 90 + 8;
     let min_cluster_x = nav_pill_rect.right() + 8;
     let max_search_w = (right_margin - min_cluster_x - fixed_cluster_w).max(32);
-    let wide_unfocused_cap = (right_margin - (title_x + 96) - fixed_cluster_w).clamp(32, 164);
+    let wide_unfocused_cap = (right_margin - (title_x + 120) - fixed_cluster_w).clamp(32, 164);
     let search_w = if state.search_active || !state.search_query.is_empty() {
         172.min(max_search_w)
     } else if width >= 880 && wide_unfocused_cap >= 120 {
@@ -540,26 +558,26 @@ fn layout_toolbar(state: &FilesAppState, width: i32, toolbar_x: i32) -> ToolbarR
         Rect::default()
     };
 
-    let action_pill_rect = Rect::new(search_pill_rect.x - 8 - 102, 15, 102, 32);
-    let action_primary_rect = Rect::new(action_pill_rect.x, 15, 34, 32);
-    let action_tag_rect = Rect::new(action_pill_rect.x + 34, 15, 34, 32);
-    let action_more_rect = Rect::new(action_pill_rect.x + 68, 15, 34, 32);
+    let action_pill_rect = Rect::new(search_pill_rect.x - 8 - 90, 15, 90, 32);
+    let action_primary_rect = Rect::new(action_pill_rect.x, 15, 30, 32);
+    let action_tag_rect = Rect::new(action_pill_rect.x + 30, 15, 30, 32);
+    let action_more_rect = Rect::new(action_pill_rect.x + 60, 15, 30, 32);
 
-    let sort_pill_rect = Rect::new(action_pill_rect.x - 8 - 54, 15, 54, 32);
-    let view_pill_rect = Rect::new(sort_pill_rect.x - 8 - 136, 15, 136, 32);
+    let sort_pill_rect = Rect::new(action_pill_rect.x - 8 - 42, 15, 42, 32);
+    let view_pill_rect = Rect::new(sort_pill_rect.x - 8 - 120, 15, 120, 32);
     let view_segments = [
-        (FileViewMode::Icons, Rect::new(view_pill_rect.x, 15, 34, 32)),
+        (FileViewMode::Icons, Rect::new(view_pill_rect.x, 15, 30, 32)),
         (
             FileViewMode::List,
-            Rect::new(view_pill_rect.x + 34, 15, 34, 32),
+            Rect::new(view_pill_rect.x + 30, 15, 30, 32),
         ),
         (
             FileViewMode::Columns,
-            Rect::new(view_pill_rect.x + 68, 15, 34, 32),
+            Rect::new(view_pill_rect.x + 60, 15, 30, 32),
         ),
         (
             FileViewMode::Gallery,
-            Rect::new(view_pill_rect.x + 102, 15, 34, 32),
+            Rect::new(view_pill_rect.x + 90, 15, 30, 32),
         ),
     ];
     let title_max_x = (view_pill_rect.x - 10).max(title_x);
@@ -587,35 +605,55 @@ fn layout_sidebar_rows(
     state: &FilesAppState,
     sidebar_rect: Rect,
     clip: Rect,
-) -> Vec<SidebarRowLayout> {
+) -> (Vec<SidebarRowLayout>, Vec<SidebarSectionHeaderLayout>) {
     let mut rows = Vec::with_capacity(state.sidebar_items.len());
+    let mut sections = Vec::with_capacity(4);
     let mut y = 50 - state.sidebar_scroll_y;
+    let mut current_section: Option<&'static str> = None;
     for (index, item) in state.sidebar_items.iter().enumerate() {
-        let top_y = y;
-        let section_header_y = if item.section.is_some() {
-            let hdr_y = y + 8;
+        if let Some(sec_title) = item.section {
+            current_section = Some(sec_title);
+            let collapsed = state.collapsed_sidebar_sections.contains(sec_title);
+            let hdr_rect = Rect::new(
+                sidebar_rect.x + 10,
+                y + 4,
+                sidebar_rect.w - 20,
+                SIDEBAR_SECTION_HEIGHT - 4,
+            );
+            if hdr_rect.bottom() > clip.y && hdr_rect.y < clip.bottom() {
+                sections.push(SidebarSectionHeaderLayout {
+                    title: sec_title,
+                    rect: hdr_rect,
+                    collapsed,
+                });
+            }
             y += SIDEBAR_SECTION_HEIGHT;
-            Some(hdr_y)
-        } else {
-            None
-        };
+        }
+        if current_section.is_some_and(|s| state.collapsed_sidebar_sections.contains(s)) {
+            continue;
+        }
         let rect = Rect::new(
             sidebar_rect.x + 10,
             y,
             sidebar_rect.w - 20,
             SIDEBAR_ROW_HEIGHT,
         );
-        if rect.bottom() > clip.y && top_y < clip.bottom() {
+        if rect.bottom() > clip.y && rect.y < clip.bottom() {
+            let eject_rect = item
+                .removable_device
+                .as_ref()
+                .map(|_| Rect::new(rect.right() - 22, rect.y + 2, 20, rect.h - 4));
             rows.push(SidebarRowLayout {
                 index,
-                section_header_y,
                 rect,
                 location: item.location.clone(),
+                removable_device: item.removable_device.clone(),
+                eject_rect,
             });
         }
         y += SIDEBAR_ROW_HEIGHT;
     }
-    rows
+    (rows, sections)
 }
 
 fn layout_content_area(state: &FilesAppState, content_rect: Rect) -> ContentAreaLayout {
@@ -1129,6 +1167,14 @@ fn context_menu_rows(state: &FilesAppState, entry: Option<&FileEntry>) -> Vec<Po
             None,
             Some(PopupCommand::NewTab),
         ));
+        if let Some(dir) = state.active_directory_path() {
+            rows.push((
+                String::from("Open in Terminal"),
+                false,
+                None,
+                Some(PopupCommand::OpenInTerminal(dir)),
+            ));
+        }
         if !state.is_trash_view() && state.clipboard.is_some() {
             rows.push((
                 String::from("Paste Item"),
@@ -1182,6 +1228,12 @@ fn append_context_item_rows(state: &FilesAppState, item: &FileEntry, rows: &mut 
             None,
             Some(PopupCommand::NewTabIn(item.path.clone())),
         ));
+        rows.push((
+            String::from("Open in Terminal"),
+            false,
+            None,
+            Some(PopupCommand::OpenInTerminal(item.path.clone())),
+        ));
     }
     rows.push((
         String::from("Quick Look"),
@@ -1203,6 +1255,20 @@ fn append_context_item_rows(state: &FilesAppState, item: &FileEntry, rows: &mut 
             Some(PopupCommand::RestoreEntry(item.clone())),
         ));
     } else {
+        if crate::state::is_extractable_archive(&item.path) {
+            rows.push((
+                String::from("Extract Here"),
+                false,
+                None,
+                Some(PopupCommand::ExtractArchive(item.path.clone())),
+            ));
+        }
+        rows.push((
+            String::from("Compress to .zip"),
+            false,
+            None,
+            Some(PopupCommand::CompressToZip(item.path.clone())),
+        ));
         rows.push((String::new(), false, None, None));
         rows.push((
             String::from("Rename..."),
@@ -1364,8 +1430,22 @@ fn hit_test_chrome(layout: &FilesLayout, px: f64, py: f64) -> Option<FilesHit> {
 
 fn hit_test_body(layout: &FilesLayout, px: f64, py: f64) -> Option<FilesHit> {
     if layout.sidebar_clip_rect.contains_f64(px, py) {
+        for sec in &layout.sidebar_sections {
+            if sec.rect.contains_f64(px, py) {
+                return Some(FilesHit::SidebarSectionHeader(sec.title));
+            }
+        }
         for row in &layout.sidebar_rows {
+            if let Some(eject_r) = row.eject_rect
+                && eject_r.contains_f64(px, py)
+                && let Some(dev) = &row.removable_device
+            {
+                return Some(FilesHit::SidebarRemovableEject(dev.clone()));
+            }
             if row.rect.contains_f64(px, py) {
+                if let Some(dev) = &row.removable_device {
+                    return Some(FilesHit::SidebarRemovableMount(dev.clone()));
+                }
                 return Some(FilesHit::SidebarItem(row.location.clone()));
             }
         }

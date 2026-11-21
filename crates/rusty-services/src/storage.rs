@@ -200,6 +200,43 @@ impl StorageService {
             .output();
         Ok(format!("Ejected {device}"))
     }
+
+    /// Queries available (free for non-root users) bytes on the filesystem containing `path`.
+    #[must_use]
+    pub fn available_disk_space_bytes(path: &std::path::Path) -> Option<u64> {
+        let output = Command::new("df")
+            .args(["-B1", "--output=avail", "--"])
+            .arg(path)
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        stdout.lines().nth(1)?.trim().parse::<u64>().ok()
+    }
+
+    /// Formats available disk bytes into a compact human-readable label (e.g. `"184.2 GB available"`).
+    #[must_use]
+    #[allow(clippy::cast_precision_loss)]
+    pub fn format_available_space(bytes: u64) -> String {
+        const KB: f64 = 1_000.0;
+        const MB: f64 = 1_000_000.0;
+        const GB: f64 = 1_000_000_000.0;
+        const TB: f64 = 1_000_000_000_000.0;
+        let b = bytes as f64;
+        if b >= TB {
+            format!("{:.2} TB available", b / TB)
+        } else if b >= GB {
+            format!("{:.1} GB available", b / GB)
+        } else if b >= MB {
+            format!("{:.1} MB available", b / MB)
+        } else if b >= KB {
+            format!("{:.0} KB available", b / KB)
+        } else {
+            format!("{bytes} B available")
+        }
+    }
 }
 
 #[cfg(test)]
@@ -216,7 +253,7 @@ mod tests {
 
         let sample = r#"
 NAME="nvme0n1p2" LABEL="Root" MOUNTPOINT="/" SIZE="256000000000" RM="0" HOTPLUG="0" TYPE="part"
-NAME="sdb1" LABEL="RUSTY_USB" MOUNTPOINT="/run/media/anc/RUSTY_USB" SIZE="32000000000" RM="1" HOTPLUG="1" TYPE="part"
+NAME="sdb1" LABEL="RUSTY_USB" MOUNTPOINT="/run/media/alice/RUSTY_USB" SIZE="32000000000" RM="1" HOTPLUG="1" TYPE="part"
 NAME="sdc1" LABEL="" MOUNTPOINT="" SIZE="16000000000" RM="1" HOTPLUG="1" TYPE="part"
 NAME="sdd" LABEL="RAW" MOUNTPOINT="" SIZE="8000000000" RM="1" HOTPLUG="1" TYPE="disk"
 "#;
@@ -226,10 +263,34 @@ NAME="sdd" LABEL="RAW" MOUNTPOINT="" SIZE="8000000000" RM="1" HOTPLUG="1" TYPE="
         assert_eq!(vols[0].label, "RUSTY_USB");
         assert_eq!(
             vols[0].mount_point,
-            Some(PathBuf::from("/run/media/anc/RUSTY_USB"))
+            Some(PathBuf::from("/run/media/alice/RUSTY_USB"))
         );
         assert_eq!(vols[1].device, "/dev/sdc1");
         assert_eq!(vols[1].label, "sdc1");
         assert_eq!(vols[1].mount_point, None);
+    }
+
+    #[test]
+    fn format_available_space_scales_units_cleanly() {
+        assert_eq!(
+            StorageService::format_available_space(512),
+            "512 B available"
+        );
+        assert_eq!(
+            StorageService::format_available_space(25_000),
+            "25 KB available"
+        );
+        assert_eq!(
+            StorageService::format_available_space(640_000_000),
+            "640.0 MB available"
+        );
+        assert_eq!(
+            StorageService::format_available_space(184_200_000_000),
+            "184.2 GB available"
+        );
+        assert_eq!(
+            StorageService::format_available_space(2_500_000_000_000),
+            "2.50 TB available"
+        );
     }
 }

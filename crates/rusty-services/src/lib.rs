@@ -338,13 +338,13 @@ Inter-| sta-|   Quality        |   Discarded packets               | Missed | WE
 root:x:0:0:root:/root:/bin/bash
 nobody:x:65534:65534:Kernel Overflow User:/:/sbin/nologin
 merri:x:1001:1001:Merri,,,:/home/merri:/bin/zsh
-anc:x:1000:1000:Stephen Hackett,Room 1:/home/anc:/bin/bash
+alice:x:1000:1000:Alice Example,Room 1:/home/alice:/bin/bash
 svc:x:1002:1002:Disabled Account:/home/svc:/usr/bin/false
 ";
-        let users = parse_passwd_users(passwd, Some("anc"));
+        let users = parse_passwd_users(passwd, Some("alice"));
         assert_eq!(users.len(), 2);
-        assert_eq!(users[0].username, "anc");
-        assert_eq!(users[0].display_name, "Stephen Hackett");
+        assert_eq!(users[0].username, "alice");
+        assert_eq!(users[0].display_name, "Alice Example");
         assert_eq!(users[1].username, "merri");
         assert_eq!(users[1].display_name, "Merri");
 

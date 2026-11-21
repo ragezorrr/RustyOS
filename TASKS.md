@@ -2505,6 +2505,28 @@ hardware/software context и низкие накладные расходы.
   - `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --offline -- -D warnings` и `cargo test --workspace --no-fail-fast --offline` проходят чисто.
 - **Risks:** Низкие; шрифты OFL-1.1, все тесты проходят.
 
+### RUSTYOS-149 — Единые SVG-иконки, USB/Eject в сайдбаре, свободное место и архивы в `rusty-files`
+- **Status:** Done
+- **Goal:** Заменить процедурные иконки сайдбара, папок и файлов в `apps/rusty-files` на единый набор чётких `@2x` SVG→PNG иконок (`assets/icons/files/{svg,png}/`), вывести съёмные USB/диски с кнопкой `Eject` в секцию `Locations`, добавить отображение свободного места на диске в статусной строке, пункт `Open in Terminal` и фоновые `Extract Here` / `Compress to .zip` в контекстном меню.
+- **Dependencies:** `RUSTYOS-134`, `RUSTYOS-147`.
+- **Scope:**
+  - `assets/icons/files/{svg,png}/`: 15 `@2x` (32×32) иконок сайдбара (`recents`, `shared`, `applications`, `desktop`, `documents`, `downloads`, `pictures`, `music`, `videos`, `home`, `drive`, `usb`, `eject`, `network`, `trash`) и 10 `@2x` (128×128) иконок папок и типов файлов (`folder`, `file_generic`, `file_text`, `file_code`, `file_image`, `file_audio`, `file_video`, `file_archive`, `file_pdf`, `file_app`).
+  - `apps/rusty-files/src/{svg_icons.rs, icons.rs, main.rs, state/{types.rs, mod.rs, navigation.rs}, layout.rs, render/{sidebar.rs, popup.rs, canvas.rs}, wayland.rs}` и `crates/rusty-services/src/storage.rs` (`available_disk_space_bytes`, `format_available_space`).
+- **Acceptance Criteria:**
+  - Все 25 встроенных PNG-спрайтов декодируются и рендерятся с area-averaged ресемплингом без новых Cargo-зависимостей; `#[allow(dead_code)]` на методах съёмных томов удалены; `cargo fmt`, `clippy -D warnings`, `cargo test --workspace` и живая проверка `rusty-files` проходят чисто.
+- **Risks:** Низкие; операции архивации и `df` выполняются на фоновых потоках без блокировки UI event loop.
+
+### RUSTYOS-150 — UX/UI-полировка, `@2x` SVG-иконки тулбара, hover-состояния и Multi-Select в `rusty-files`
+- **Status:** Done
+- **Goal:** Добавить hover-подсветку (сайдбар, кнопки тулбара, `Eject`, файлы), расширить доступную ширину заголовка папки в тулбаре, добавить `1 px` разделитель над статусной строкой и сворачиваемые секции сайдбара (`Favorites`/`Locations`/`Tags`), перевести все иконки тулбара на `@2x` SVG→PNG спрайты и реализовать Multi-Select (`Ctrl+Click`, `Shift+Click`, `Ctrl+A`, групповые `Copy`/`Cut`/`Trash`/DnD и `"N of M selected"` в статусной строке).
+- **Dependencies:** `RUSTYOS-149`.
+- **Scope:**
+  - `assets/icons/files/{svg,png}/toolbar_*.{svg,png}`: 13 `@2x` (32×32) SVG→PNG иконок тулбара и шевронов секций.
+  - `apps/rusty-files/src/{svg_icons.rs, icons.rs, layout.rs, wayland.rs, state/{types.rs, mod.rs, navigation.rs, clipboard.rs, input.rs}, render/{sidebar.rs, chrome.rs, views.rs}}`.
+- **Acceptance Criteria:**
+  - Все 38 встроенных PNG-спрайтов (15 sidebar + 13 toolbar + 10 file/folder) декодируются чисто; `Ctrl+Click`/`Shift+Click`/`Ctrl+A`, сворачивание секций сайдбара и `hovered_hit` покрыты unit-тестами; `cargo fmt`, `clippy -D warnings`, `cargo test --workspace` и живая визуальная проверка проходят чисто.
+- **Risks:** Низкие; изменения локализованы в `apps/rusty-files`.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

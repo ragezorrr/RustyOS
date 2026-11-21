@@ -95,7 +95,7 @@ tmpfs /run tmpfs rw,nosuid,nodev 0 0
             ..Default::default()
         };
 
-        let target = PathBuf::from("/home/anc/Documents/Quote \"A\"\\Draft.txt");
+        let target = PathBuf::from("/home/alice/Documents/Quote \"A\"\\Draft.txt");
         assert!(cfg.toggle_tag(&target, FileTagColor::Blue));
         assert!(cfg.toggle_tag(&target, FileTagColor::Red));
         assert_eq!(

@@ -16,7 +16,7 @@ use rusty_services::file_manager::accent_rgba_for_index;
 use crate::disks::DualBootKind;
 use crate::layout::{
     CARD_CORNER_RADIUS, InstallerHit, InstallerLayout, PILL_CORNER_RADIUS, Rect, StepContentLayout,
-    TextFieldRect, ThemeTileRect, WINDOW_CORNER_RADIUS, WelcomeAction, WifiRowRect,
+    TextFieldRect, ThemeTileRect, WINDOW_CORNER_RADIUS, WifiRowRect,
 };
 use crate::state::{
     BootloaderKind, DiskInstallMode, InstallPhase, InstallerAppState, KEYBOARD_PRESETS,
@@ -581,11 +581,6 @@ fn render_content(
     pal: &Palette,
 ) {
     match &layout.content {
-        StepContentLayout::Welcome {
-            hero_emblem,
-            cards,
-            status_rect,
-        } => render_welcome(c, app, *hero_emblem, cards, *status_rect, hover, pal),
         StepContentLayout::SelectDisk {
             mode_whole,
             mode_dualboot,
@@ -720,8 +715,7 @@ fn render_content_oobe_and_net(
         } => {
             render_wizard_result(c, content_rect, *badge_rect, *success, message, pal);
         }
-        StepContentLayout::Welcome { .. }
-        | StepContentLayout::SelectDisk { .. }
+        StepContentLayout::SelectDisk { .. }
         | StepContentLayout::AccountAndStyle { .. }
         | StepContentLayout::Installing { .. } => {}
     }
@@ -1118,91 +1112,6 @@ fn render_oobe_keyboard(
             row.selected,
             hov,
             pal,
-        );
-    }
-}
-
-fn render_welcome(
-    c: &mut Canvas<'_>,
-    app: &InstallerAppState,
-    hero_emblem: Rect,
-    cards: &[crate::layout::ActionCardRect],
-    status_rect: Rect,
-    hover: Option<InstallerHit>,
-    pal: &Palette,
-) {
-    draw_rustyos_emblem(c, hero_emblem, pal.accent, pal.dark);
-    c.draw_text_centered(
-        Rect::new(
-            hero_emblem.x - 160,
-            hero_emblem.bottom() + 6,
-            hero_emblem.w + 320,
-            28,
-        ),
-        "Welcome to RustyOS",
-        22.0,
-        true,
-        pal.text_primary,
-    );
-    c.draw_text_centered(
-        Rect::new(
-            hero_emblem.x - 200,
-            hero_emblem.bottom() + 34,
-            hero_emblem.w + 400,
-            20,
-        ),
-        "Install RustyOS onto your drive or verify hardware compatibility first",
-        13.0,
-        false,
-        pal.text_secondary,
-    );
-
-    for card in cards {
-        let hovered = hover == Some(InstallerHit::WelcomeCard(card.action));
-        let bg = if hovered { pal.card_hover } else { pal.card_bg };
-        c.fill_rounded_rect(card.rect, CARD_CORNER_RADIUS, bg);
-        c.stroke_rounded_rect(
-            card.rect,
-            CARD_CORNER_RADIUS,
-            1.0,
-            if hovered { pal.accent } else { pal.card_border },
-        );
-        let badge = Rect::new(card.rect.x + 14, card.rect.y + 11, 36, 36);
-        c.fill_rounded_rect(badge, 10, pal.accent_soft);
-        let glyph = match card.action {
-            WelcomeAction::InstallToDisk => "OS",
-            WelcomeAction::RunDoctor => "OK",
-            WelcomeAction::OpenTerminal => ">_",
-        };
-        c.draw_text_centered(badge, glyph, 13.0, true, pal.accent);
-        c.draw_text(
-            badge.right() + 14,
-            card.rect.y + 24,
-            card.title,
-            14.5,
-            true,
-            pal.text_primary,
-        );
-        c.draw_text(
-            badge.right() + 14,
-            card.rect.y + 44,
-            card.subtitle,
-            12.5,
-            false,
-            pal.text_secondary,
-        );
-    }
-
-    if let Some(status) = &app.utility_status {
-        c.fill_rounded_rect(status_rect, 10, pal.accent_soft);
-        c.draw_text_clipped(
-            status_rect.x + 14,
-            status_rect.y + 21,
-            status,
-            12.0,
-            false,
-            pal.text_primary,
-            status_rect.right() - 14,
         );
     }
 }
