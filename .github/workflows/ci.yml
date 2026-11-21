@@ -111,6 +111,7 @@ jobs:
           pacman -Qlp /tmp/rustyos-pkg/pkg/rustyos-git-*.pkg.tar.* | grep -F "/usr/bin/rusty-greeter"
           pacman -Qlp /tmp/rustyos-pkg/pkg/rustyos-git-*.pkg.tar.* | grep -F "/usr/bin/rusty-installer"
           pacman -Qlp /tmp/rustyos-pkg/pkg/rustyos-git-*.pkg.tar.* | grep -F "/usr/lib/rustyos/rustyos-update-helper"
+          pacman -Qlp /tmp/rustyos-pkg/pkg/rustyos-git-*.pkg.tar.* | grep -F "/usr/lib/rustyos/rustyos-installer-service"
           pacman -Qlp /tmp/rustyos-pkg/pkg/rustyos-git-*.pkg.tar.* | grep -F "/usr/lib/rustyos/rustyos-install"
           pacman -Qlp /tmp/rustyos-pkg/pkg/rustyos-git-*.pkg.tar.* | grep -F "/usr/share/wayland-sessions/rustyos.desktop"
           pacman -Qlp /tmp/rustyos-pkg/pkg/rustyos-git-*.pkg.tar.* | grep -F "/usr/share/applications/org.rustyos.files.desktop"

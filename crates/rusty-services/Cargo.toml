@@ -11,6 +11,10 @@ description = "RustyOS Linux system service adapters (audio, battery, network, s
 name = "rustyos-update-helper"
 path = "src/bin/rustyos_update_helper.rs"
 
+[[bin]]
+name = "rustyos-installer-service"
+path = "src/bin/rustyos_installer_service.rs"
+
 [dependencies]
 zbus.workspace = true
 

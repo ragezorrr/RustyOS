@@ -51,6 +51,12 @@ where
                 };
                 opts.install_script = Some(PathBuf::from(path));
             }
+            "--step" => {
+                let Some(raw) = iter.next() else {
+                    return Err(String::from("--step requires a step name"));
+                };
+                opts.initial_step = state::InstallStep::from_cli_name(&raw);
+            }
             other => return Err(format!("unknown argument '{other}'")),
         }
     }

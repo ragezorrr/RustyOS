@@ -2,7 +2,8 @@
 
 use crate::state::{
     BootloaderKind, DiskInstallMode, InstallPhase, InstallStep, InstallerAppState,
-    KEYBOARD_PRESETS, LANGUAGE_OPTIONS, OobeStep, RunEnv, TextFieldId, ThemeChoice, WizardMode,
+    KEYBOARD_PRESETS, LANGUAGE_OPTIONS, OobeStep, RunEnv, TIMEZONE_OPTIONS, TextFieldId,
+    ThemeChoice, WizardMode,
 };
 use rusty_services::file_manager::RUSTYOS_ACCENT_SWATCHES;
 
@@ -60,6 +61,7 @@ pub(crate) enum ResizeEdgeZone {
     BottomRight,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WelcomeAction {
     InstallToDisk,
@@ -75,7 +77,9 @@ pub(crate) enum InstallerHit {
     TrafficMinimize,
     TrafficMaximize,
     BackButton,
+    OtherButton,
     PrimaryButton,
+    TimezoneRow(usize),
     WelcomeCard(WelcomeAction),
     SelectDiskMode(DiskInstallMode),
     SelectDisk(usize),
@@ -145,6 +149,18 @@ pub(crate) struct ThemeTileRect {
 }
 
 #[derive(Debug, Clone)]
+pub(crate) struct DiskTileRect {
+    pub idx: usize,
+    pub rect: Rect,
+    pub title: String,
+    pub subtitle: String,
+    pub badge: &'static str,
+    pub selected: bool,
+    pub selectable: bool,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
 pub(crate) enum StepContentLayout {
     Welcome {
         hero_emblem: Rect,
@@ -200,6 +216,25 @@ pub(crate) enum StepContentLayout {
         hero_emblem: Rect,
         summary_card: Rect,
     },
+    WizardWelcome {
+        logo_rect: Rect,
+    },
+    WizardDiskTiles {
+        tiles: Vec<DiskTileRect>,
+    },
+    WizardTimezone {
+        rows: Vec<OptionRowRect>,
+    },
+    WizardSummary {
+        card_rect: Rect,
+        lines: Vec<String>,
+        warning_rect: Rect,
+    },
+    WizardResult {
+        badge_rect: Rect,
+        success: bool,
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -215,6 +250,8 @@ pub(crate) struct InstallerLayout {
     pub active_step_idx: usize,
     pub content_rect: Rect,
     pub footer_rect: Rect,
+    pub other_btn: Option<Rect>,
+    pub other_label: &'static str,
     pub back_btn: Option<Rect>,
     pub back_label: &'static str,
     pub primary_btn: Rect,
@@ -225,26 +262,74 @@ pub(crate) struct InstallerLayout {
 #[must_use]
 #[allow(clippy::cast_possible_wrap)]
 pub(crate) fn compute_layout(app: &InstallerAppState, width: u32, height: u32) -> InstallerLayout {
-    let win_w = i32::try_from(width).unwrap_or(800).max(MIN_WIDTH);
-    let win_h = i32::try_from(height).unwrap_or(580).max(MIN_HEIGHT);
+    let win_w = i32::try_from(width).unwrap_or(880).max(MIN_WIDTH);
+    let win_h = i32::try_from(height).unwrap_or(560).max(MIN_HEIGHT);
+    let is_install = app.mode == WizardMode::Install;
     let tl = rusty_ui::TrafficLightButtons::default_csd();
     let btn_d = i32::try_from(tl.close_rect.width).unwrap_or(14);
-    let traffic_close = Rect::new(tl.close_rect.x, tl.close_rect.y, btn_d, btn_d);
-    let traffic_min = Rect::new(tl.minimize_rect.x, tl.minimize_rect.y, btn_d, btn_d);
-    let traffic_max = Rect::new(tl.maximize_rect.x, tl.maximize_rect.y, btn_d, btn_d);
-    let header_rect = Rect::new(0, 0, win_w, HEADER_HEIGHT);
-    let content_rect = Rect::new(
-        36,
-        HEADER_HEIGHT + 6,
-        win_w - 72,
-        win_h - HEADER_HEIGHT - FOOTER_HEIGHT - 12,
-    );
+    let (traffic_close, traffic_min, traffic_max) = if is_install {
+        (
+            Rect::new(0, 0, 0, 0),
+            Rect::new(0, 0, 0, 0),
+            Rect::new(0, 0, 0, 0),
+        )
+    } else {
+        (
+            Rect::new(tl.close_rect.x, tl.close_rect.y, btn_d, btn_d),
+            Rect::new(tl.minimize_rect.x, tl.minimize_rect.y, btn_d, btn_d),
+            Rect::new(tl.maximize_rect.x, tl.maximize_rect.y, btn_d, btn_d),
+        )
+    };
+    let header_rect = Rect::new(0, 0, win_w, if is_install { 32 } else { HEADER_HEIGHT });
+    let content_rect = if is_install {
+        Rect::new(32, 32, win_w - 64, win_h - 32 - 36 - 44)
+    } else {
+        Rect::new(
+            36,
+            HEADER_HEIGHT + 6,
+            win_w - 72,
+            win_h - HEADER_HEIGHT - FOOTER_HEIGHT - 12,
+        )
+    };
     let footer_rect = Rect::new(0, win_h - FOOTER_HEIGHT, win_w, FOOTER_HEIGHT);
 
     let (step_count, active_step_idx, show_back, back_label, primary_label) = footer_meta(app);
-    let back_btn = show_back.then(|| Rect::new(36, footer_rect.y + 13, 98, 32));
-    let primary_w = if primary_label.len() > 14 { 176 } else { 132 };
-    let primary_btn = Rect::new(win_w - 36 - primary_w, footer_rect.y + 13, primary_w, 32);
+    let primary_w = if primary_label.len() > 14 {
+        164
+    } else if is_install {
+        112
+    } else {
+        132
+    };
+    let (primary_btn, back_btn) = if is_install {
+        let btn_y = win_h - 32 - 36;
+        let p_btn = Rect::new(win_w - 32 - primary_w, btn_y, primary_w, 36);
+        let b_btn = show_back.then(|| Rect::new(p_btn.x - 12 - 112, btn_y, 112, 36));
+        (p_btn, b_btn)
+    } else {
+        let p_btn = Rect::new(win_w - 36 - primary_w, footer_rect.y + 13, primary_w, 32);
+        let b_btn = show_back.then(|| Rect::new(36, footer_rect.y + 13, 98, 32));
+        (p_btn, b_btn)
+    };
+
+    let (other_btn, other_label) = if is_install {
+        let btn_y = win_h - 32 - 36;
+        match app.install_step {
+            InstallStep::Welcome => (Some(Rect::new(32, btn_y, 132, 36)), "Try RustyOS"),
+            InstallStep::Disk => (Some(Rect::new(32, btn_y, 176, 36)), "Manual Partitioning"),
+            InstallStep::Result => {
+                let label = if app.install_error.is_some() {
+                    "Close"
+                } else {
+                    "Keep Trying"
+                };
+                (Some(Rect::new(32, btn_y, 128, 36)), label)
+            }
+            _ => (None, ""),
+        }
+    } else {
+        (None, "")
+    };
 
     let content = match app.mode {
         WizardMode::Install => compute_install_content(app, content_rect),
@@ -263,6 +348,8 @@ pub(crate) fn compute_layout(app: &InstallerAppState, width: u32, height: u32) -
         active_step_idx,
         content_rect,
         footer_rect,
+        other_btn,
+        other_label,
         back_btn,
         back_label,
         primary_btn,
@@ -278,28 +365,28 @@ fn idx_i32(idx: usize) -> i32 {
 fn footer_meta(app: &InstallerAppState) -> (usize, usize, bool, &'static str, &'static str) {
     match app.mode {
         WizardMode::Install => {
-            let show_back =
-                app.install_step != InstallStep::Welcome && app.phase != InstallPhase::Running;
+            let show_back = !matches!(
+                app.install_step,
+                InstallStep::Language | InstallStep::Progress | InstallStep::Result
+            );
             let primary = match app.install_step {
-                InstallStep::Welcome
-                | InstallStep::Network
-                | InstallStep::SelectDisk
-                | InstallStep::AccountStyle => "Continue",
-                InstallStep::Installing if app.phase == InstallPhase::Finished => {
+                InstallStep::Language
+                | InstallStep::Disk
+                | InstallStep::Partition
+                | InstallStep::Account
+                | InstallStep::TimeZone => "Next",
+                InstallStep::Welcome | InstallStep::Summary => "Install",
+                InstallStep::Progress if app.phase == InstallPhase::Finished => "Continue",
+                InstallStep::Progress => "Installing...",
+                InstallStep::Result => {
                     if app.dry_run || app.env_kind == RunEnv::Demo {
-                        "Preview Setup"
+                        "Close"
                     } else {
                         "Restart Now"
                     }
                 }
-                InstallStep::Installing if app.phase == InstallPhase::Running => "Installing...",
-                InstallStep::Installing if app.dry_run => "Run Simulation",
-                InstallStep::Installing if app.disk_mode == DiskInstallMode::DualBoot => {
-                    "Install RustyOS"
-                }
-                InstallStep::Installing => "Erase & Install",
             };
-            (5, app.install_step.index(), show_back, "Back", primary)
+            (9, app.install_step.index(), show_back, "Back", primary)
         }
         WizardMode::Oobe => {
             let show_back = app.oobe_step != OobeStep::Hello;
@@ -314,11 +401,143 @@ fn footer_meta(app: &InstallerAppState) -> (usize, usize, bool, &'static str, &'
 
 fn compute_install_content(app: &InstallerAppState, c: Rect) -> StepContentLayout {
     match app.install_step {
-        InstallStep::Welcome => compute_install_welcome(c),
-        InstallStep::Network => compute_network_content(app, c),
-        InstallStep::SelectDisk => compute_install_select_disk(app, c),
-        InstallStep::AccountStyle => compute_install_account_style(app, c),
-        InstallStep::Installing => compute_install_progress(app, c),
+        InstallStep::Language => compute_hello_content(app, c),
+        InstallStep::Welcome => StepContentLayout::WizardWelcome {
+            logo_rect: Rect::new(c.x + (c.w - 168) / 2, c.y + 72, 168, 78),
+        },
+        InstallStep::Disk => compute_wizard_disk_tiles(app, c),
+        InstallStep::Partition => compute_install_select_disk(app, c),
+        InstallStep::Account => compute_install_account_style(app, c),
+        InstallStep::TimeZone => compute_wizard_timezone(app, c),
+        InstallStep::Summary => compute_wizard_summary(app, c),
+        InstallStep::Progress => compute_install_progress(app, c),
+        InstallStep::Result => StepContentLayout::WizardResult {
+            badge_rect: Rect::new(c.x + (c.w - 72) / 2, c.y + 116, 72, 72),
+            success: app.install_error.is_none(),
+            message: app.install_error.clone().unwrap_or_else(|| {
+                "RustyOS has been installed. Restart your computer to begin.".to_owned()
+            }),
+        },
+    }
+}
+
+fn compute_wizard_disk_tiles(app: &InstallerAppState, c: Rect) -> StepContentLayout {
+    let count = app.disks.len().clamp(1, 4);
+    let tile_w = 160;
+    let tile_h = 176;
+    let gap = 12;
+    let total_w = idx_i32(count) * tile_w + idx_i32(count.saturating_sub(1)) * gap;
+    let start_x = c.x + (c.w - total_w) / 2;
+    let y = c.y + 132;
+    let tiles = app
+        .disks
+        .iter()
+        .enumerate()
+        .take(4)
+        .map(|(i, d)| DiskTileRect {
+            idx: i,
+            rect: Rect::new(start_x + idx_i32(i) * (tile_w + gap), y, tile_w, tile_h),
+            title: if d.model.is_empty() {
+                d.path.clone()
+            } else {
+                d.model.clone()
+            },
+            subtitle: format!("{}  •  {}", d.size_label, d.path),
+            badge: if d.removable { "USB" } else { "DISK" },
+            selected: app.selected_disk_idx == Some(i),
+            selectable: d.is_selectable(),
+        })
+        .collect();
+    StepContentLayout::WizardDiskTiles { tiles }
+}
+
+fn compute_wizard_timezone(app: &InstallerAppState, c: Rect) -> StepContentLayout {
+    let card_w = 480.min(c.w);
+    let card_x = c.x + (c.w - card_w) / 2;
+    let rows = TIMEZONE_OPTIONS
+        .iter()
+        .enumerate()
+        .map(|(i, &(tz, desc))| OptionRowRect {
+            idx: i,
+            rect: Rect::new(card_x + 4, c.y + 116 + idx_i32(i) * 48, card_w - 8, 42),
+            title: tz.to_owned(),
+            subtitle: desc.to_owned(),
+            selected: app.timezone_idx == i,
+        })
+        .collect();
+    StepContentLayout::WizardTimezone { rows }
+}
+
+fn compute_wizard_summary(app: &InstallerAppState, c: Rect) -> StepContentLayout {
+    let card_w = 480.min(c.w);
+    let card_x = c.x + (c.w - card_w) / 2;
+    let card_rect = Rect::new(card_x, c.y + 108, card_w, 168);
+    let warning_rect = Rect::new(card_x, card_rect.bottom() + 14, card_w, 56);
+    let disk_lbl = app.selected_disk().map_or_else(
+        || "None".to_owned(),
+        |d| format!("{} ({})", d.path, d.size_label),
+    );
+    let tz = TIMEZONE_OPTIONS
+        .get(app.timezone_idx)
+        .map_or("UTC", |&(t, _)| t);
+    let lines = vec![
+        format!("Target Disk:  {disk_lbl}"),
+        format!(
+            "Install Source:  {}",
+            rusty_services::detect_install_source().display_label()
+        ),
+        format!(
+            "User Account:  {} ({})",
+            app.account.full_name, app.account.username
+        ),
+        format!(
+            "Computer Name:  {}  •  Time Zone: {tz}",
+            app.account.hostname
+        ),
+    ];
+    StepContentLayout::WizardSummary {
+        card_rect,
+        lines,
+        warning_rect,
+    }
+}
+
+fn compute_hello_content(app: &InstallerAppState, c: Rect) -> StepContentLayout {
+    let card_w = 480.min(c.w);
+    let card_x = c.x + (c.w - card_w) / 2;
+    StepContentLayout::Hello {
+        hero_emblem: Rect::new(c.x + (c.w - 64) / 2, c.y + 4, 64, 64),
+        rows: LANGUAGE_OPTIONS
+            .iter()
+            .enumerate()
+            .map(|(i, &(loc, name, tz))| OptionRowRect {
+                idx: i,
+                rect: Rect::new(card_x + 4, c.y + 150 + idx_i32(i) * 52, card_w - 8, 46),
+                title: name.to_owned(),
+                subtitle: format!("Locale: {loc}  •  Timezone: {tz}"),
+                selected: app.language_idx == i,
+            })
+            .collect(),
+    }
+}
+
+fn compute_keyboard_content(app: &InstallerAppState, c: Rect) -> StepContentLayout {
+    StepContentLayout::Keyboard {
+        rows: KEYBOARD_PRESETS
+            .iter()
+            .enumerate()
+            .map(|(i, &(layout, label, opt, _))| OptionRowRect {
+                idx: i,
+                rect: Rect::new(c.x + 48, c.y + 84 + idx_i32(i) * 62, c.w - 96, 52),
+                title: label.to_owned(),
+                subtitle: if opt.is_empty() {
+                    format!("XKB layout: {layout}")
+                } else {
+                    format!("XKB layout: {layout}  •  Switch: Alt+Shift")
+                },
+                selected: app.keyboard_idx == i,
+            })
+            .collect(),
     }
 }
 
@@ -369,6 +588,7 @@ fn compute_network_content(app: &InstallerAppState, c: Rect) -> StepContentLayou
     }
 }
 
+#[allow(dead_code)]
 fn compute_install_welcome(c: Rect) -> StepContentLayout {
     let emblem = Rect::new(c.x + (c.w - 56) / 2, c.y + 4, 56, 56);
     let card_specs = [
@@ -524,9 +744,9 @@ fn compute_install_progress(app: &InstallerAppState, c: Rect) -> StepContentLayo
         ),
     };
     let theme_lbl = match app.theme_choice {
-        ThemeChoice::Light => "Golden Gate Light",
-        ThemeChoice::Dark => "Golden Gate Dark",
-        ThemeChoice::Auto => "Golden Gate Auto",
+        ThemeChoice::Light => "RustyOS Light",
+        ThemeChoice::Dark => "RustyOS Dark",
+        ThemeChoice::Auto => "RustyOS Auto",
     };
     let summary_lines = vec![
         target_line,
@@ -537,8 +757,9 @@ fn compute_install_progress(app: &InstallerAppState, c: Rect) -> StepContentLayo
             app.account.hostname.trim()
         ),
         format!(
-            "Bootloader & Desktop: {}  •  {}",
+            "Bootloader & Source: {}  •  {}  •  {}",
             app.bootloader.as_flag(),
+            rusty_services::detect_install_source().display_label(),
             theme_lbl
         ),
     ];
@@ -553,37 +774,8 @@ fn compute_install_progress(app: &InstallerAppState, c: Rect) -> StepContentLayo
 
 fn compute_oobe_content(app: &InstallerAppState, c: Rect) -> StepContentLayout {
     match app.oobe_step {
-        OobeStep::Hello => StepContentLayout::Hello {
-            hero_emblem: Rect::new(c.x + (c.w - 56) / 2, c.y + 6, 56, 56),
-            rows: LANGUAGE_OPTIONS
-                .iter()
-                .enumerate()
-                .map(|(i, &(loc, name, tz))| OptionRowRect {
-                    idx: i,
-                    rect: Rect::new(c.x + 48, c.y + 132 + idx_i32(i) * 58, c.w - 96, 50),
-                    title: name.to_owned(),
-                    subtitle: format!("Locale: {loc}  •  Timezone: {tz}"),
-                    selected: app.language_idx == i,
-                })
-                .collect(),
-        },
-        OobeStep::Keyboard => StepContentLayout::Keyboard {
-            rows: KEYBOARD_PRESETS
-                .iter()
-                .enumerate()
-                .map(|(i, &(layout, label, opt, _))| OptionRowRect {
-                    idx: i,
-                    rect: Rect::new(c.x + 48, c.y + 84 + idx_i32(i) * 62, c.w - 96, 52),
-                    title: label.to_owned(),
-                    subtitle: if opt.is_empty() {
-                        format!("XKB layout: {layout}")
-                    } else {
-                        format!("XKB layout: {layout}  •  Switch: Alt+Shift")
-                    },
-                    selected: app.keyboard_idx == i,
-                })
-                .collect(),
-        },
+        OobeStep::Hello => compute_hello_content(app, c),
+        OobeStep::Keyboard => compute_keyboard_content(app, c),
         OobeStep::Network => compute_network_content(app, c),
         OobeStep::Account => compute_oobe_account(c),
         OobeStep::Appearance => compute_oobe_appearance(app, c),
@@ -680,14 +872,26 @@ pub(crate) fn hit_test(layout: &InstallerLayout, px: f64, py: f64) -> Option<Ins
             return Some(hit);
         }
     }
+    if let Some(other) = layout.other_btn
+        && other.contains_f64(px, py)
+    {
+        return Some(InstallerHit::OtherButton);
+    }
     if let Some(back) = layout.back_btn
         && back.contains_f64(px, py)
     {
         return Some(InstallerHit::BackButton);
     }
-    hit_content(&layout.content, px, py)
+    if let Some(hit) = hit_content(&layout.content, px, py) {
+        return Some(hit);
+    }
+    if layout.traffic_close.w == 0 {
+        return Some(InstallerHit::WindowDrag);
+    }
+    None
 }
 
+#[allow(clippy::too_many_lines)]
 fn hit_content(content: &StepContentLayout, px: f64, py: f64) -> Option<InstallerHit> {
     match content {
         StepContentLayout::Welcome { cards, .. } => cards
@@ -779,7 +983,18 @@ fn hit_content(content: &StepContentLayout, px: f64, py: f64) -> Option<Installe
             .find(|t| t.ring_rect.contains_f64(px, py))
             .map(|t| InstallerHit::SelectTheme(t.choice))
             .or_else(|| hit_swatches(swatches, px, py)),
-        StepContentLayout::Finish { .. } => None,
+        StepContentLayout::Finish { .. }
+        | StepContentLayout::WizardWelcome { .. }
+        | StepContentLayout::WizardSummary { .. }
+        | StepContentLayout::WizardResult { .. } => None,
+        StepContentLayout::WizardDiskTiles { tiles } => tiles
+            .iter()
+            .find(|t| t.selectable && t.rect.contains_f64(px, py))
+            .map(|t| InstallerHit::SelectDisk(t.idx)),
+        StepContentLayout::WizardTimezone { rows } => rows
+            .iter()
+            .find(|r| r.rect.contains_f64(px, py))
+            .map(|r| InstallerHit::TimezoneRow(r.idx)),
     }
 }
 
@@ -893,9 +1108,9 @@ mod tests {
             hit_test(&l0, f64::from(p.x + 10), f64::from(p.y + 10)),
             Some(InstallerHit::PrimaryButton)
         );
-        assert_eq!(hit_test(&l0, 22.0, 22.0), Some(InstallerHit::TrafficClose));
+        assert_eq!(hit_test(&l0, 22.0, 22.0), Some(InstallerHit::WindowDrag));
 
-        app.install_step = InstallStep::SelectDisk;
+        app.install_step = InstallStep::Partition;
         app.disk_mode = DiskInstallMode::DualBoot;
         let l_disk = compute_layout(&app, 768, 500);
         if let StepContentLayout::SelectDisk {

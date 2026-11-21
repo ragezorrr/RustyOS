@@ -273,6 +273,8 @@ RustyOS/
     - `crates/rusty-services/src/theme_sync.rs`: `ThemeSyncConfig`, `merge_gtk_settings_ini`, `ThemeSyncService::{write_gtk_settings_to_dir, apply_async}` (`gtk-3.0/settings.ini`, `gtk-4.0/settings.ini`, `gsettings` `color-scheme`/`icon-theme`/`cursor-theme`), вызывается из `apply_user_config` (`crates/rusty-compositor/src/state/shell_actions.rs`).
   - Нативный экран входа `apps/rusty-greeter` (`RUSTYOS-136`, `ADR-0080`, `D-094`):
     - `apps/rusty-greeter/src/{greetd.rs, main.rs}`: zero-dependency JSON-IPC клиент `greetd` (`GREETD_SOCK`), интерфейс входа на `crates/rusty-ui` (`--demo`, `--light`/`--dark`, `--user`, `--session-cmd`), упаковка `/usr/bin/rusty-greeter` в `packaging/arch/PKGBUILD` и проверка в `.github/workflows/ci.yml`.
+  - Привилегированный сервис установки `rustyos-installer-service` (`RUSTYOS-137`, `ADR-0081`, `D-095`):
+    - `crates/rusty-services/src/{installer_service.rs, bin/rustyos_installer_service.rs}`: `InstallSource::{LiveSquashFs, PackageRepo}`, `detect_install_source`, `validate_installer_request`, `build_install_stages`, `encode_installer_event`/`decode_installer_event`, режимы `--detect-source` и `--dry-run`, упаковка `/usr/lib/rustyos/rustyos-installer-service` в `PKGBUILD` и CI.
   - Сайдбар `#ECEDF1`/`#262628`, активный пункт `r = 10` (`#D9DADD`/`#3E3E41`), холст `#F5F6FA`/`#1C1C1D`, карточки (`CARD_CORNER_RADIUS = 12`, `#FFFFFF`/`#2C2C2D`) и капсулы тулбара/фильтров без серых рамок.
 - **Нетривиальные сигнатуры и lint-правила:**
   - `KeyboardHandle::change_repeat_info(&self, rate: i32, delay: i32)` (порядок `(rate, delay)`, обратный к `seat.add_keyboard(xkb, delay, rate)`).

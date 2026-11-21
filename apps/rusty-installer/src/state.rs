@@ -72,35 +72,72 @@ pub(crate) enum ThemeSync {
     Locked,
 }
 
+pub(crate) const TIMEZONE_OPTIONS: &[(&str, &str)] = &[
+    ("UTC", "Coordinated Universal Time (UTC+0)"),
+    ("Europe/Kyiv", "Kyiv, Ukraine (UTC+2 / UTC+3)"),
+    ("Europe/Berlin", "Berlin, Central Europe (UTC+1 / UTC+2)"),
+    ("Europe/London", "London, United Kingdom (UTC+0 / UTC+1)"),
+    ("America/New_York", "New York, Eastern Time (UTC-5 / UTC-4)"),
+    ("Asia/Tokyo", "Tokyo, Japan (UTC+9)"),
+];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InstallStep {
+    Language,
     Welcome,
-    Network,
-    SelectDisk,
-    AccountStyle,
-    Installing,
+    Disk,
+    Partition,
+    Account,
+    TimeZone,
+    Summary,
+    Progress,
+    Result,
 }
 
 impl InstallStep {
     #[must_use]
     pub(crate) const fn index(self) -> usize {
         match self {
-            Self::Welcome => 0,
-            Self::Network => 1,
-            Self::SelectDisk => 2,
-            Self::AccountStyle => 3,
-            Self::Installing => 4,
+            Self::Language => 0,
+            Self::Welcome => 1,
+            Self::Disk => 2,
+            Self::Partition => 3,
+            Self::Account => 4,
+            Self::TimeZone => 5,
+            Self::Summary => 6,
+            Self::Progress => 7,
+            Self::Result => 8,
         }
     }
 
     #[must_use]
     pub(crate) const fn title(self) -> &'static str {
         match self {
-            Self::Welcome => "Install RustyOS",
-            Self::Network => "Internet & Wi-Fi",
-            Self::SelectDisk => "Select Destination Disk",
-            Self::AccountStyle => "Account & Appearance",
-            Self::Installing => "Installing RustyOS",
+            Self::Language => "Language",
+            Self::Welcome => "Welcome",
+            Self::Disk => "Select Disk",
+            Self::Partition => "Manual Partitioning",
+            Self::Account => "Account",
+            Self::TimeZone => "Time Zone",
+            Self::Summary => "Summary",
+            Self::Progress => "Installing RustyOS",
+            Self::Result => "Installation Complete",
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn from_cli_name(name: &str) -> Option<Self> {
+        match name.to_ascii_lowercase().as_str() {
+            "language" => Some(Self::Language),
+            "welcome" => Some(Self::Welcome),
+            "disk" => Some(Self::Disk),
+            "partition" => Some(Self::Partition),
+            "account" => Some(Self::Account),
+            "timezone" => Some(Self::TimeZone),
+            "summary" => Some(Self::Summary),
+            "progress" => Some(Self::Progress),
+            "result" => Some(Self::Result),
+            _ => None,
         }
     }
 }
@@ -236,6 +273,7 @@ pub(crate) struct StartupOptions {
     pub theme_override: Option<FilesThemeMode>,
     pub accent_override: Option<usize>,
     pub install_script: Option<PathBuf>,
+    pub initial_step: Option<InstallStep>,
 }
 
 #[derive(Debug, Clone)]
@@ -366,6 +404,7 @@ pub(crate) struct InstallerAppState {
     pub last_theme_poll: Instant,
 
     pub language_idx: usize,
+    pub timezone_idx: usize,
     pub keyboard_idx: usize,
     pub bootloader: BootloaderKind,
 
@@ -425,7 +464,7 @@ impl InstallerAppState {
             },
             mode: opts.mode,
             env_kind: opts.env_kind,
-            install_step: InstallStep::Welcome,
+            install_step: opts.initial_step.unwrap_or(InstallStep::Language),
             oobe_step: OobeStep::Hello,
             phase: InstallPhase::Review,
             dry_run: opts.dry_run || is_demo,
@@ -442,6 +481,7 @@ impl InstallerAppState {
             last_config_mtime: current_config_mtime(),
             last_theme_poll: Instant::now(),
             language_idx: 0,
+            timezone_idx: 1,
             keyboard_idx: 0,
             bootloader: BootloaderKind::SystemdBoot,
             disk_mode: DiskInstallMode::WholeDisk,
@@ -901,14 +941,26 @@ impl InstallerAppState {
                     return;
                 }
                 self.install_step = match self.install_step {
-                    InstallStep::Welcome | InstallStep::Network => InstallStep::Welcome,
-                    InstallStep::SelectDisk => InstallStep::Network,
-                    InstallStep::AccountStyle => InstallStep::SelectDisk,
-                    InstallStep::Installing => {
+                    InstallStep::Language | InstallStep::Welcome => InstallStep::Language,
+                    InstallStep::Disk => InstallStep::Welcome,
+                    InstallStep::Partition => {
+                        self.disk_mode = DiskInstallMode::WholeDisk;
+                        InstallStep::Disk
+                    }
+                    InstallStep::Account => {
+                        if self.disk_mode == DiskInstallMode::DualBoot {
+                            InstallStep::Partition
+                        } else {
+                            InstallStep::Disk
+                        }
+                    }
+                    InstallStep::TimeZone => InstallStep::Account,
+                    InstallStep::Summary => InstallStep::TimeZone,
+                    InstallStep::Progress | InstallStep::Result => {
                         self.phase = InstallPhase::Review;
                         self.install_error = None;
                         self.show_logs = false;
-                        InstallStep::AccountStyle
+                        InstallStep::Summary
                     }
                 };
             }
@@ -934,74 +986,92 @@ impl InstallerAppState {
         self.win.dirty = true;
     }
 
+    /// Handles the bottom-left `Other` button (`Try RustyOS` / `Manual Partitioning`).
+    pub(crate) fn trigger_other_action(&mut self) {
+        if self.mode != WizardMode::Install {
+            return;
+        }
+        match self.install_step {
+            InstallStep::Welcome | InstallStep::Result => {
+                self.win.running = false;
+            }
+            InstallStep::Disk => {
+                self.disk_mode = DiskInstallMode::DualBoot;
+                self.install_step = InstallStep::Partition;
+                self.win.dirty = true;
+            }
+            _ => {}
+        }
+    }
+
     fn advance_install(&mut self, now: Instant) {
         match self.install_step {
-            InstallStep::Welcome => {
-                self.spawn_network_probe();
-                self.install_step = InstallStep::Network;
+            InstallStep::Language => {
+                self.install_step = InstallStep::Welcome;
             }
-            InstallStep::Network => {
-                if self.env_kind == RunEnv::Live && !self.dry_run && !self.network.internet_ready {
+            InstallStep::Welcome => {
+                self.install_step = InstallStep::Disk;
+            }
+            InstallStep::Disk => {
+                if !self
+                    .selected_disk()
+                    .is_some_and(TargetDiskInfo::is_selectable)
+                {
                     self.form_error = Some(String::from(
-                        "Connect Ethernet or a Wi-Fi network before continuing (required by pacstrap).",
+                        "Select an unmounted destination disk (>= 8 GB)",
                     ));
                     return;
                 }
-                self.caret.focused_field = None;
-                self.install_step = InstallStep::SelectDisk;
+                self.disk_mode = DiskInstallMode::WholeDisk;
+                self.caret.focused_field = Some(TextFieldId::FullName);
+                self.install_step = InstallStep::Account;
             }
-            InstallStep::SelectDisk => {
-                match self.disk_mode {
-                    DiskInstallMode::WholeDisk => {
-                        if !self
-                            .selected_disk()
-                            .is_some_and(TargetDiskInfo::is_selectable)
-                        {
-                            self.form_error = Some(String::from(
-                                "Select an unmounted destination disk (>= 8 GB)",
-                            ));
-                            return;
-                        }
-                    }
-                    DiskInstallMode::DualBoot => {
-                        if !self.selected_dualboot().is_some_and(|t| t.selectable) {
-                            self.form_error = Some(String::from(
-                                "Select free space or an unmounted partition (>= 12 GB)",
-                            ));
-                            return;
-                        }
-                    }
+            InstallStep::Partition => {
+                if !self.selected_dualboot().is_some_and(|t| t.selectable) {
+                    self.form_error = Some(String::from(
+                        "Select free space or an unmounted partition (>= 12 GB)",
+                    ));
+                    return;
                 }
                 self.caret.focused_field = Some(TextFieldId::FullName);
-                self.install_step = InstallStep::AccountStyle;
+                self.install_step = InstallStep::Account;
             }
-            InstallStep::AccountStyle => {
+            InstallStep::Account => {
                 if let Err(err) = self.validate_account_form() {
                     self.form_error = Some(err);
                     return;
                 }
                 self.caret.focused_field = None;
+                self.install_step = InstallStep::TimeZone;
+            }
+            InstallStep::TimeZone => {
                 self.phase = InstallPhase::Review;
                 self.install_error = None;
                 self.target_pct = 0;
                 self.progress_anim = AnimatedValue::new_settled(0.0);
                 self.stage_id = String::from("review");
                 self.stage_message = String::from("Review installation summary and click Install.");
-                self.install_step = InstallStep::Installing;
+                self.install_step = InstallStep::Summary;
             }
-            InstallStep::Installing => match self.phase {
+            InstallStep::Summary => {
+                self.install_step = InstallStep::Progress;
+                self.start_install_worker(now);
+            }
+            InstallStep::Progress => match self.phase {
                 InstallPhase::Finished => {
-                    if self.dry_run || self.env_kind == RunEnv::Demo {
-                        self.mode = WizardMode::Oobe;
-                        self.oobe_step = OobeStep::Hello;
-                    } else {
-                        let _ = Command::new("systemctl").arg("reboot").spawn();
-                        self.win.running = false;
-                    }
+                    self.install_step = InstallStep::Result;
                 }
                 InstallPhase::Review => self.start_install_worker(now),
                 InstallPhase::Running => {}
             },
+            InstallStep::Result => {
+                if self.dry_run || self.env_kind == RunEnv::Demo {
+                    self.win.running = false;
+                } else {
+                    let _ = Command::new("systemctl").arg("reboot").spawn();
+                    self.win.running = false;
+                }
+            }
         }
     }
 
@@ -1215,7 +1285,7 @@ impl InstallerAppState {
     pub(crate) fn cycle_focus(&mut self, reverse: bool) {
         if !matches!(
             (self.mode, self.install_step, self.oobe_step),
-            (WizardMode::Install, InstallStep::AccountStyle, _)
+            (WizardMode::Install, InstallStep::Account, _)
                 | (WizardMode::Oobe, _, OobeStep::Account)
         ) {
             return;
@@ -1848,19 +1918,19 @@ mod tests {
             ..Default::default()
         };
         let mut st = InstallerAppState::new(&opts);
-        assert_eq!(st.install_step, InstallStep::Welcome);
+        assert_eq!(st.install_step, InstallStep::Language);
         let now = Instant::now();
         st.go_next(now);
-        assert_eq!(st.install_step, InstallStep::Network);
+        assert_eq!(st.install_step, InstallStep::Welcome);
         st.go_next(now);
-        assert_eq!(st.install_step, InstallStep::SelectDisk);
+        assert_eq!(st.install_step, InstallStep::Disk);
         assert!(
             st.selected_disk()
                 .is_some_and(TargetDiskInfo::is_selectable)
         );
 
         st.go_next(now);
-        assert_eq!(st.install_step, InstallStep::AccountStyle);
+        assert_eq!(st.install_step, InstallStep::Account);
 
         st.account.password = String::from("abc");
         st.account.confirm_password = String::from("xyz");
@@ -1879,7 +1949,9 @@ mod tests {
         assert!(args.contains(&String::from("1")));
 
         st.go_next(now);
-        assert_eq!(st.install_step, InstallStep::Installing);
+        assert_eq!(st.install_step, InstallStep::TimeZone);
+        st.go_next(now);
+        assert_eq!(st.install_step, InstallStep::Summary);
         assert_eq!(
             parse_step_line("STEP:55:pacstrap:Installing packages"),
             Some((
@@ -1931,14 +2003,16 @@ mod tests {
         };
         let mut st = InstallerAppState::new(&opts);
         let now = Instant::now();
-        st.go_next(now);
-        st.go_next(now);
-        st.go_next(now);
+        st.go_next(now); // Welcome
+        st.go_next(now); // Disk
+        st.go_next(now); // Account
         st.account.password = String::from("secret12");
         st.account.confirm_password = String::from("secret12");
-        st.go_next(now);
-        assert_eq!(st.install_step, InstallStep::Installing);
-        st.go_next(now);
+        st.go_next(now); // TimeZone
+        st.go_next(now); // Summary
+        assert_eq!(st.install_step, InstallStep::Summary);
+        st.go_next(now); // Progress + starts worker
+        assert_eq!(st.install_step, InstallStep::Progress);
         assert_eq!(st.phase, InstallPhase::Running);
 
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -1965,9 +2039,10 @@ mod tests {
         };
         let mut st = InstallerAppState::new(&opts);
         let now = Instant::now();
-        st.go_next(now);
-        st.go_next(now);
-        st.disk_mode = DiskInstallMode::DualBoot;
+        st.go_next(now); // Welcome
+        st.go_next(now); // Disk
+        st.trigger_other_action(); // Manual Partitioning (DualBoot)
+        assert_eq!(st.install_step, InstallStep::Partition);
         assert!(st.selected_dualboot().is_some());
 
         let args = st.build_install_args();
@@ -1981,13 +2056,15 @@ mod tests {
         );
         assert!(!args.iter().any(|a| a == "--confirm-erase"));
 
-        st.go_next(now);
-        assert_eq!(st.install_step, InstallStep::AccountStyle);
+        st.go_next(now); // Account
+        assert_eq!(st.install_step, InstallStep::Account);
         st.account.password = String::from("secret12");
         st.account.confirm_password = String::from("secret12");
-        st.go_next(now);
-        assert_eq!(st.install_step, InstallStep::Installing);
-        st.go_next(now);
+        st.go_next(now); // TimeZone
+        st.go_next(now); // Summary
+        assert_eq!(st.install_step, InstallStep::Summary);
+        st.go_next(now); // Progress + starts worker
+        assert_eq!(st.install_step, InstallStep::Progress);
         assert_eq!(st.phase, InstallPhase::Running);
 
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -2022,31 +2099,13 @@ error: failed retrieving file 'core.db' from mirror.example.org : Could not reso
 
     #[test]
     fn install_network_step_blocks_offline_live_and_connects_wifi_in_demo() {
-        let mut live = InstallerAppState::new(&StartupOptions {
-            mode: WizardMode::Install,
-            env_kind: RunEnv::Live,
-            dry_run: false,
-            ..Default::default()
-        });
-        let now = Instant::now();
-        live.install_step = InstallStep::Network;
-        live.network.internet_ready = false;
-        live.go_next(now);
-        assert_eq!(live.install_step, InstallStep::Network);
-        assert!(live.form_error.is_some());
-
-        live.network.ethernet_online = true;
-        live.network.internet_ready = true;
-        live.go_next(now);
-        assert_eq!(live.install_step, InstallStep::SelectDisk);
-
         let mut demo = InstallerAppState::new(&StartupOptions {
-            mode: WizardMode::Install,
+            mode: WizardMode::Oobe,
             env_kind: RunEnv::Demo,
             dry_run: true,
             ..Default::default()
         });
-        demo.install_step = InstallStep::Network;
+        demo.oobe_step = OobeStep::Network;
         demo.select_wifi_row(1);
         assert_eq!(demo.caret.focused_field, Some(TextFieldId::WifiPassword));
         demo.wifi_password = String::from("wifi-pass-123");

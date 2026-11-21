@@ -6,6 +6,7 @@
 pub mod auth;
 pub mod file_manager;
 pub mod image_decode;
+pub mod installer_service;
 pub mod logind;
 pub mod polkit;
 pub mod portal;
@@ -16,6 +17,11 @@ pub mod updates;
 pub use auth::{
     AsyncAuthHandle, AuthCheckResult, AuthOutcome, SecretText, is_valid_unix_username,
     verify_current_user_password,
+};
+pub use installer_service::{
+    InstallSource, InstallerPlanRequest, InstallerStageEvent, LIVE_SQUASHFS_CANDIDATES,
+    build_install_stages, decode_installer_event, detect_install_source, detect_live_squashfs_path,
+    encode_installer_event, validate_installer_request,
 };
 pub use logind::{LogindEvent, LogindMonitorHandle, notify_session_locked_hint};
 pub use polkit::{

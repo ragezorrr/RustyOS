@@ -65,8 +65,8 @@ use crate::state::{
     WizardMode,
 };
 
-const DEFAULT_WIDTH: u32 = 800;
-const DEFAULT_HEIGHT: u32 = 580;
+const DEFAULT_WIDTH: u32 = 880;
+const DEFAULT_HEIGHT: u32 = 560;
 
 #[derive(Debug)]
 pub(crate) enum WaylandAppError {
@@ -227,7 +227,10 @@ impl InstallerClient {
             Keysym::BackSpace => self.app.handle_backspace(),
             Keysym::Left
                 if self.app.mode == WizardMode::Install
-                    && self.app.install_step == InstallStep::SelectDisk =>
+                    && matches!(
+                        self.app.install_step,
+                        InstallStep::Disk | InstallStep::Partition
+                    ) =>
             {
                 self.app.disk_mode = DiskInstallMode::WholeDisk;
                 self.app.win.dirty = true;
@@ -235,7 +238,10 @@ impl InstallerClient {
             }
             Keysym::Right
                 if self.app.mode == WizardMode::Install
-                    && self.app.install_step == InstallStep::SelectDisk =>
+                    && matches!(
+                        self.app.install_step,
+                        InstallStep::Disk | InstallStep::Partition
+                    ) =>
             {
                 self.app.disk_mode = DiskInstallMode::DualBoot;
                 self.app.win.dirty = true;
@@ -345,6 +351,14 @@ impl InstallerClient {
                 self.app.go_back();
                 self.layout_cache = None;
             }
+            InstallerHit::OtherButton => {
+                self.app.trigger_other_action();
+                self.layout_cache = None;
+            }
+            InstallerHit::TimezoneRow(idx) => {
+                self.app.timezone_idx = idx;
+                self.app.win.dirty = true;
+            }
             InstallerHit::PrimaryButton => {
                 self.app.go_next(now);
                 self.layout_cache = None;
@@ -431,6 +445,8 @@ impl InstallerClient {
             | InstallerHit::TrafficMinimize
             | InstallerHit::TrafficMaximize
             | InstallerHit::BackButton
+            | InstallerHit::OtherButton
+            | InstallerHit::TimezoneRow(_)
             | InstallerHit::PrimaryButton => {}
         }
     }

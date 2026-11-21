@@ -1113,6 +1113,21 @@
                            режимом --demo для --winit проверки и
                            включением /usr/bin/rusty-greeter в
                            PKGBUILD и Arch CI
+
+    D-095                  Фаза 10 Привилегированный бэкенд      accepted
+                           rustyos-installer-service и оффлайн
+                           SquashFS-деплой (RUSTYOS-137,
+                           ADR-0081): по образцу
+                           cutefish-installer-service добавлен
+                           модуль crates/rusty-services/src/
+                           installer_service.rs и бинарник
+                           /usr/lib/rustyos/rustyos-installer-
+                           service (InstallSource::{LiveSquashFs,
+                           PackageRepo}, validate_installer_request,
+                           build_install_stages, протокол
+                           STEP/DONE/FAIL, --dry-run и
+                           --detect-source) + упаковка в PKGBUILD
+                           и проверка в Arch CI
   -----------------------------------------------------------------------
 
 ## Открытые решения

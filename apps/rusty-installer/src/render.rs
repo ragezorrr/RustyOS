@@ -1,6 +1,6 @@
 //! Pure CPU premultiplied `ARGB8888` renderer for `rusty-installer` (`RUSTYOS-115`).
 //!
-//! Matches `macOS 27 Golden Gate Light & Dark` (`DESIGN.md` §5, §12) with `Inter`
+//! Matches `RustyOS Light & Dark` (`DESIGN.md` §5, §12) with `Inter`
 //! typography, SDF rounded geometry, `Liquid Glass` alpha, and `[ui].accent_index`.
 
 #![allow(
@@ -419,6 +419,10 @@ fn render_header(
     hover: Option<InstallerHit>,
     pal: &Palette,
 ) {
+    if app.mode == crate::state::WizardMode::Install {
+        return;
+    }
+
     let tl_hovered = matches!(
         hover,
         Some(
@@ -516,7 +520,19 @@ fn render_footer(
     pal: &Palette,
 ) {
     let f = layout.footer_rect;
-    c.fill_rounded_rect(Rect::new(0, f.y, f.w, 1), 0, pal.divider);
+    if app.mode != crate::state::WizardMode::Install {
+        c.fill_rounded_rect(Rect::new(0, f.y, f.w, 1), 0, pal.divider);
+    }
+
+    if let Some(other) = layout.other_btn {
+        let bg = if hover == Some(InstallerHit::OtherButton) {
+            pal.pill_hover
+        } else {
+            pal.pill_bg
+        };
+        c.fill_rounded_rect(other, PILL_CORNER_RADIUS, bg);
+        c.draw_text_centered(other, layout.other_label, 13.5, true, pal.text_primary);
+    }
 
     if let Some(back) = layout.back_btn {
         let bg = if hover == Some(InstallerHit::BackButton) {
@@ -634,6 +650,15 @@ fn render_content_oobe_and_net(
 ) {
     match content {
         StepContentLayout::Hello { hero_emblem, rows } => {
+            if let (Some(first), Some(last)) = (rows.first(), rows.last()) {
+                let plate = Rect::new(
+                    first.rect.x - 4,
+                    first.rect.y - 4,
+                    first.rect.w + 8,
+                    last.rect.bottom() - first.rect.y + 8,
+                );
+                c.fill_rounded_rect(plate, CARD_CORNER_RADIUS, pal.card_bg);
+            }
             render_oobe_hello(c, content_rect, *hero_emblem, rows, hover, pal);
         }
         StepContentLayout::Keyboard { rows } => {
@@ -672,11 +697,298 @@ fn render_content_oobe_and_net(
             hero_emblem,
             summary_card,
         } => render_oobe_finish(c, app, content_rect, *hero_emblem, *summary_card, pal),
+        StepContentLayout::WizardWelcome { logo_rect } => {
+            render_wizard_welcome(c, content_rect, *logo_rect, pal);
+        }
+        StepContentLayout::WizardDiskTiles { tiles } => {
+            render_wizard_disk_tiles(c, content_rect, tiles, hover, pal);
+        }
+        StepContentLayout::WizardTimezone { rows } => {
+            render_wizard_timezone(c, content_rect, rows, hover, pal);
+        }
+        StepContentLayout::WizardSummary {
+            card_rect,
+            lines,
+            warning_rect,
+        } => {
+            render_wizard_summary(c, content_rect, *card_rect, lines, *warning_rect, pal);
+        }
+        StepContentLayout::WizardResult {
+            badge_rect,
+            success,
+            message,
+        } => {
+            render_wizard_result(c, content_rect, *badge_rect, *success, message, pal);
+        }
         StepContentLayout::Welcome { .. }
         | StepContentLayout::SelectDisk { .. }
         | StepContentLayout::AccountAndStyle { .. }
         | StepContentLayout::Installing { .. } => {}
     }
+}
+
+fn render_wizard_welcome(c: &mut Canvas<'_>, content: Rect, logo: Rect, pal: &Palette) {
+    let emblem = Rect::new(logo.x + (logo.w - 72) / 2, logo.y, 72, 72);
+    c.fill_rounded_rect(emblem, 20, pal.accent);
+    let cx = (emblem.x + emblem.w / 2) as f32;
+    let cy = (emblem.y + emblem.h / 2) as f32;
+    c.fill_circle(cx, cy, 18.0, [255, 255, 255, 245]);
+    c.fill_circle(cx, cy, 9.0, pal.accent);
+
+    c.draw_text_centered(
+        Rect::new(content.x, logo.bottom() + 24, content.w, 34),
+        "Welcome to RustyOS",
+        24.0,
+        true,
+        pal.text_primary,
+    );
+    c.draw_text_centered(
+        Rect::new(content.x + 80, logo.bottom() + 66, content.w - 160, 24),
+        "Fast, clean Linux desktop built in Rust with Liquid Glass.",
+        13.5,
+        false,
+        pal.text_secondary,
+    );
+    c.draw_text_centered(
+        Rect::new(content.x + 80, logo.bottom() + 92, content.w - 160, 22),
+        "Try RustyOS live or click Install to set up on your drive.",
+        12.5,
+        false,
+        pal.text_secondary,
+    );
+}
+
+fn render_wizard_disk_tiles(
+    c: &mut Canvas<'_>,
+    content: Rect,
+    tiles: &[crate::layout::DiskTileRect],
+    hover: Option<InstallerHit>,
+    pal: &Palette,
+) {
+    c.draw_text_centered(
+        Rect::new(content.x, content.y + 36, content.w, 30),
+        "Select Destination Disk",
+        20.0,
+        true,
+        pal.text_primary,
+    );
+    c.draw_text_centered(
+        Rect::new(content.x, content.y + 72, content.w, 22),
+        "Choose a drive to erase and install RustyOS, or use Manual Partitioning.",
+        12.5,
+        false,
+        pal.text_secondary,
+    );
+    for tile in tiles {
+        let hovered = hover == Some(InstallerHit::SelectDisk(tile.idx));
+        let bg = if tile.selected {
+            pal.accent_soft
+        } else if hovered {
+            pal.card_hover
+        } else {
+            pal.card_bg
+        };
+        c.fill_rounded_rect(tile.rect, CARD_CORNER_RADIUS, bg);
+        if tile.selected {
+            c.stroke_rounded_rect(tile.rect, CARD_CORNER_RADIUS, 1.8, pal.accent);
+        } else {
+            c.stroke_rounded_rect(tile.rect, CARD_CORNER_RADIUS, 1.0, pal.card_border);
+        }
+        let icon = Rect::new(
+            tile.rect.x + (tile.rect.w - 72) / 2,
+            tile.rect.y + 20,
+            72,
+            72,
+        );
+        c.fill_rounded_rect(icon, 16, pal.pill_bg);
+        c.draw_text_centered(icon, tile.badge, 14.0, true, pal.accent);
+        c.draw_text_centered(
+            Rect::new(tile.rect.x + 12, icon.bottom() + 12, tile.rect.w - 24, 22),
+            &tile.title,
+            13.0,
+            true,
+            pal.text_primary,
+        );
+        c.draw_text_centered(
+            Rect::new(tile.rect.x + 12, icon.bottom() + 36, tile.rect.w - 24, 20),
+            &tile.subtitle,
+            11.0,
+            false,
+            pal.text_secondary,
+        );
+    }
+}
+
+fn render_wizard_timezone(
+    c: &mut Canvas<'_>,
+    content: Rect,
+    rows: &[crate::layout::OptionRowRect],
+    hover: Option<InstallerHit>,
+    pal: &Palette,
+) {
+    c.draw_text_centered(
+        Rect::new(content.x, content.y + 32, content.w, 30),
+        "Time Zone",
+        20.0,
+        true,
+        pal.text_primary,
+    );
+    c.draw_text_centered(
+        Rect::new(content.x, content.y + 68, content.w, 22),
+        "Select your region and local time zone.",
+        12.5,
+        false,
+        pal.text_secondary,
+    );
+    if let (Some(first), Some(last)) = (rows.first(), rows.last()) {
+        let plate = Rect::new(
+            first.rect.x - 4,
+            first.rect.y - 4,
+            first.rect.w + 8,
+            last.rect.bottom() - first.rect.y + 8,
+        );
+        c.fill_rounded_rect(plate, CARD_CORNER_RADIUS, pal.card_bg);
+    }
+    for row in rows {
+        let hovered = hover == Some(InstallerHit::TimezoneRow(row.idx));
+        let bg = if row.selected {
+            pal.accent_soft
+        } else if hovered {
+            pal.card_hover
+        } else {
+            pal.card_bg
+        };
+        c.fill_rounded_rect(row.rect, 9, bg);
+        c.draw_text_clipped(
+            row.rect.x + 14,
+            row.rect.y + 18,
+            &row.title,
+            13.0,
+            true,
+            pal.text_primary,
+            row.rect.right() - 36,
+        );
+        c.draw_text_clipped(
+            row.rect.x + 14,
+            row.rect.y + 34,
+            &row.subtitle,
+            11.0,
+            false,
+            pal.text_secondary,
+            row.rect.right() - 36,
+        );
+        if row.selected {
+            let cx = (row.rect.right() - 20) as f32;
+            let cy = (row.rect.y + row.rect.h / 2) as f32;
+            c.fill_circle(cx, cy, 8.0, pal.accent);
+        }
+    }
+}
+
+fn render_wizard_summary(
+    c: &mut Canvas<'_>,
+    content: Rect,
+    card_rect: Rect,
+    lines: &[String],
+    warning_rect: Rect,
+    pal: &Palette,
+) {
+    c.draw_text_centered(
+        Rect::new(content.x, content.y + 32, content.w, 30),
+        "Ready to Install",
+        20.0,
+        true,
+        pal.text_primary,
+    );
+    c.draw_text_centered(
+        Rect::new(content.x, content.y + 68, content.w, 22),
+        "Review your choices before RustyOS writes changes to disk.",
+        12.5,
+        false,
+        pal.text_secondary,
+    );
+    c.fill_rounded_rect(card_rect, CARD_CORNER_RADIUS, pal.card_bg);
+    c.stroke_rounded_rect(card_rect, CARD_CORNER_RADIUS, 1.0, pal.card_border);
+    for (idx, line) in lines.iter().enumerate() {
+        let y = card_rect.y + 32 + i32::try_from(idx).unwrap_or(0) * 36;
+        c.draw_text_clipped(
+            card_rect.x + 20,
+            y,
+            line,
+            13.0,
+            false,
+            pal.text_primary,
+            card_rect.right() - 20,
+        );
+    }
+    let warn_fill = if pal.dark {
+        [255, 69, 58, 52]
+    } else {
+        [255, 59, 48, 30]
+    };
+    let warn_accent = if pal.dark {
+        [255, 105, 97, 255]
+    } else {
+        [215, 0, 21, 255]
+    };
+    c.fill_rounded_rect(warning_rect, CARD_CORNER_RADIUS, warn_fill);
+    c.draw_text_clipped(
+        warning_rect.x + 18,
+        warning_rect.y + 33,
+        "!  All data on the selected disk will be erased during installation.",
+        12.5,
+        true,
+        warn_accent,
+        warning_rect.right() - 16,
+    );
+}
+
+fn render_wizard_result(
+    c: &mut Canvas<'_>,
+    content: Rect,
+    badge_rect: Rect,
+    success: bool,
+    message: &str,
+    pal: &Palette,
+) {
+    let cx = (badge_rect.x + badge_rect.w / 2) as f32;
+    let cy = (badge_rect.y + badge_rect.h / 2) as f32;
+    let bg = if success {
+        [52, 199, 89, 255]
+    } else {
+        pal.danger
+    };
+    c.fill_circle(cx, cy, 36.0, bg);
+    c.draw_text_centered(
+        badge_rect,
+        if success { "OK" } else { "!" },
+        24.0,
+        true,
+        [255, 255, 255, 255],
+    );
+    c.draw_text_centered(
+        Rect::new(content.x, badge_rect.bottom() + 24, content.w, 32),
+        if success {
+            "Installation Complete"
+        } else {
+            "Installation Failed"
+        },
+        22.0,
+        true,
+        pal.text_primary,
+    );
+    c.draw_text_centered(
+        Rect::new(
+            content.x + 64,
+            badge_rect.bottom() + 64,
+            content.w - 128,
+            24,
+        ),
+        message,
+        13.0,
+        false,
+        pal.text_secondary,
+    );
 }
 
 fn render_oobe_hello(
@@ -687,32 +999,89 @@ fn render_oobe_hello(
     hover: Option<InstallerHit>,
     pal: &Palette,
 ) {
-    draw_rustyos_emblem(c, hero_emblem, pal.accent, pal.dark);
+    // Blue 64x64 rounded-square globe icon.
+    c.fill_rounded_rect(hero_emblem, 16, pal.accent);
+    let white = [255, 255, 255, 245];
+    let globe = Rect::new(hero_emblem.x + 16, hero_emblem.y + 16, 32, 32);
+    c.stroke_rounded_rect(globe, 16, 2.0, white);
+    c.stroke_rounded_rect(
+        Rect::new(hero_emblem.x + 24, hero_emblem.y + 16, 16, 32),
+        8,
+        1.6,
+        white,
+    );
+    c.fill_rounded_rect(
+        Rect::new(hero_emblem.x + 16, hero_emblem.y + 31, 32, 2),
+        0,
+        white,
+    );
+    c.fill_rounded_rect(
+        Rect::new(hero_emblem.x + 31, hero_emblem.y + 16, 2, 32),
+        0,
+        white,
+    );
+
     c.draw_text_centered(
-        Rect::new(area.x, hero_emblem.bottom() + 10, area.w, 34),
-        "Hello  •  Привет  •  Вітаємо",
+        Rect::new(area.x, hero_emblem.bottom() + 14, area.w, 34),
+        "Choose Your Language",
         24.0,
         true,
         pal.text_primary,
     );
     c.draw_text_centered(
-        Rect::new(area.x, hero_emblem.bottom() + 44, area.w, 22),
-        "Select your primary language and region",
+        Rect::new(area.x, hero_emblem.bottom() + 48, area.w, 22),
+        "The installer and the installed system use this language.",
         13.5,
         false,
         pal.text_secondary,
     );
-    for row in rows {
-        let hov = hover == Some(InstallerHit::SelectLanguage(row.idx));
-        draw_option_row(
-            c,
-            row.rect,
-            &row.title,
-            &row.subtitle,
-            row.selected,
-            hov,
-            pal,
+
+    if let (Some(first), Some(last)) = (rows.first(), rows.last()) {
+        let card = Rect::new(
+            first.rect.x - 4,
+            first.rect.y - 4,
+            first.rect.w + 8,
+            (last.rect.bottom() - first.rect.y) + 8,
         );
+        c.fill_rounded_rect(card, 12, pal.card_bg);
+        c.stroke_rounded_rect(card, 12, 1.0, pal.card_border);
+    }
+
+    let hover_bg = if pal.dark {
+        [255, 255, 255, 16]
+    } else {
+        [0, 0, 0, 10]
+    };
+    for (idx, row) in rows.iter().enumerate() {
+        let hov = hover == Some(InstallerHit::SelectLanguage(row.idx));
+        if hov {
+            c.fill_rounded_rect(row.rect, 8, hover_bg);
+        }
+        c.draw_text(
+            row.rect.x + 16,
+            row.rect.y + 29,
+            &row.title,
+            14.0,
+            false,
+            pal.text_primary,
+        );
+        if row.selected {
+            c.draw_text(
+                row.rect.right() - 28,
+                row.rect.y + 29,
+                "✓",
+                15.0,
+                true,
+                pal.accent,
+            );
+        }
+        if idx + 1 < rows.len() {
+            c.fill_rounded_rect(
+                Rect::new(row.rect.x + 16, row.rect.bottom() + 2, row.rect.w - 32, 1),
+                0,
+                pal.card_border,
+            );
+        }
     }
 }
 
@@ -1604,7 +1973,7 @@ fn render_oobe_appearance(
     );
     c.draw_text_centered(
         Rect::new(area.x, area.y + 42, area.w, 22),
-        "Select Golden Gate Light, Dark, or Auto and customize your system accent color.",
+        "Select RustyOS Light, Dark, or Auto and customize your system accent color.",
         13.0,
         false,
         pal.text_secondary,
@@ -1712,9 +2081,9 @@ fn render_oobe_finish(
     let (_, lang_lbl, _) = LANGUAGE_OPTIONS[app.language_idx];
     let (_, kb_lbl, _, _) = KEYBOARD_PRESETS[app.keyboard_idx];
     let theme_lbl = if app.resolved_dark {
-        "Golden Gate Dark"
+        "RustyOS Dark"
     } else {
-        "Golden Gate Light"
+        "RustyOS Light"
     };
     let rows = [
         format!("Language & Region:  {lang_lbl}"),
@@ -1976,7 +2345,7 @@ mod tests {
             env_kind: crate::state::RunEnv::Demo,
             ..Default::default()
         });
-        app.install_step = crate::state::InstallStep::Network;
+        app.install_step = crate::state::InstallStep::Disk;
         app.select_wifi_row(1);
         let net_layout = compute_layout(&app, 800, 580);
         let mut buf = vec![0_u8; 800 * 580 * 4];
@@ -1984,7 +2353,7 @@ mod tests {
         assert_eq!(buf[3], 0);
         assert!(buf.iter().skip(3).step_by(4).any(|&a| a >= 215));
 
-        app.install_step = crate::state::InstallStep::Installing;
+        app.install_step = crate::state::InstallStep::Progress;
         app.install_error = Some(String::from("Installer failed: error: core.db unreachable"));
         app.show_logs = true;
         app.log_lines.push(String::from(
@@ -1997,7 +2366,8 @@ mod tests {
 
     #[test]
     fn traffic_lights_render_vector_hover_glyphs() {
-        let app = InstallerAppState::new(&StartupOptions::default());
+        let mut app = InstallerAppState::new(&StartupOptions::default());
+        app.mode = crate::state::WizardMode::Oobe;
         let layout = compute_layout(&app, 800, 580);
         let mut unhovered = vec![0_u8; 800 * 580 * 4];
         render_window_pixels(&mut unhovered, 800, 580, &app, &layout, None, true);

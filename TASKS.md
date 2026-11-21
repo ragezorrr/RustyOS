@@ -2382,6 +2382,54 @@ hardware/software context и низкие накладные расходы.
 - **Tests:** 347 пройденных unit-тестов workspace (`1` в `rusty_greeter`, `50` в `rusty_services`, `206` в `rusty_compositor`, `19` в `rusty_files`; `2 ignored` doc-теста в `rusty_ui`).
 - **Risks:** Низкие; системные сервисы хоста не затрагиваются.
 
+### RUSTYOS-137 — Привилегированный сервис установки `rustyos-installer-service` и оффлайн SquashFS-планировщик
+- **Status:** Done
+- **Goal:** Реализовать типизированный Rust-бэкенд `rustyos-installer-service` по образцу `cutefish-installer-service` с поддержкой оффлайн-развёртывания Live SquashFS (`airootfs.sfs`), валидацией параметров, протоколом `STEP/DONE/FAIL`, режимом `--dry-run` и упаковкой в `PKGBUILD` / CI.
+- **Dependencies:** `RUSTYOS-115`, `RUSTYOS-116`, `ADR-0081`, `D-095`.
+- **Scope:**
+  - `crates/rusty-services/src/installer_service.rs` + `src/bin/rustyos_installer_service.rs` + `Cargo.toml` + `lib.rs`: `InstallSource`, `InstallerPlanRequest`, `InstallerStageEvent`, `detect_live_squashfs_path`, `detect_install_source`, `validate_installer_request`, `build_install_stages`, `encode_installer_event`, `decode_installer_event` и unit-тест `installer_service_validates_request_encodes_events_and_builds_squashfs_plan`.
+  - `packaging/arch/PKGBUILD`, `.github/workflows/ci.yml`, `docs/adr/0081-rusty-installer-service-and-squashfs.md`, `DECISIONS.md` (`D-095`), `ARCHITECTURE.md` §7.
+- **Acceptance Criteria:**
+  - `rustyos-installer-service --dry-run --target-disk /dev/vda --username rusty --hostname rustyos` проходит все 8 стадий и завершается с `DONE:...` без модификации дисков.
+  - `cargo check --workspace --locked`, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --offline -- -D warnings`, `cargo test --workspace` и `bash -n packaging/arch/PKGBUILD` проходят без ошибок.
+- **Tests:** 348 пройденных unit-тестов workspace (`51` в `rusty_services`; `2 ignored` doc-теста в `rusty_ui`).
+- **Risks:** Низкие; все дисковые пути и имена пользователей строго валидируются до запуска операций.
+
+### RUSTYOS-138 — Переработка UI `apps/rusty-installer` под 6-шаговый мастер `cutefish-installer`
+- **Status:** Done
+- **Goal:** Привести пошаговый поток и первый экран `apps/rusty-installer` к 6-шаговому мастеру `cutefish-installer` (`Welcome & Language -> Keyboard Layout -> Internet & Wi-Fi -> Select Destination Disk -> Account & Appearance -> Installing RustyOS`) с отображением источника образа (`Live SquashFS (Offline)` / `pacstrap`).
+- **Dependencies:** `RUSTYOS-137`.
+- **Scope:**
+  - `apps/rusty-installer/src/{state.rs, layout.rs}`: расширение `InstallStep` до 6 шагов (`Welcome` с выбором языка и часового пояса, `Keyboard` с выбором раскладки, `Network`, `SelectDisk`, `AccountStyle`, `Installing` с `detect_install_source().display_label()`), переиспользование `compute_hello_content` / `compute_keyboard_content` и обновление unit-тестов.
+- **Acceptance Criteria:**
+  - Инсталлятор открывается сразу на экране `Welcome & Language` с выбором языка/часового пояса и 6 точками шагов в заголовке.
+  - `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --offline -- -D warnings`, `cargo test --workspace` и живой `--winit` прогон Light & Dark проходят чисто.
+- **Tests:** 348 пройденных unit-тестов workspace (`13` в `rusty_installer`; `2 ignored` doc-теста в `rusty_ui`).
+- **Risks:** Низкие; режим `--oobe` и `Dual-Boot` сохранены без регрессий.
+
+### RUSTYOS-139 — Визуальная переработка `apps/rusty-installer` 1-в-1 по исходникам `cutefishos/cutefish-installer`
+- **Status:** Done
+- **Goal:** Привести геометрию и визуальный стиль `apps/rusty-installer` в режиме установки к точным константам `cutefishos/cutefish-installer` (`880×560`, `kWindowMargin = 32`, `kContentWidth = 480`, `kButtonHeight = 36`, `kButtonMinimumWidth = 112`, `kIconSize = 64`, единая карточка `Card` `r = 12` с `4 px` инсетом, без верхней header-полосы, точек шагов и разделителя футера).
+- **Dependencies:** `RUSTYOS-138`.
+- **Scope:**
+  - `apps/rusty-installer/src/{wayland.rs, layout.rs, render.rs}`: фиксированный размер `880×560`, нижние кнопки `Back` + `Continue` справа (`36 px`, `32 px` от края), единая `480 px` карточка `Card` для списка языков/часовых поясов, чистый фон без header/footer-разделителей и бейджа `Simulation`.
+- **Acceptance Criteria:**
+  - `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --offline -- -D warnings`, `cargo test --workspace` и живые `--winit` скриншоты Light & Dark проходят чисто.
+- **Tests:** 348 пройденных unit-тестов workspace (`13` в `rusty_installer`; `2 ignored` doc-теста в `rusty_ui`).
+- **Risks:** Низкие; режим `--oobe` сохраняет прежнюю компоновку.
+
+### RUSTYOS-140 — Полная 1-в-1 реализация всех 9 экранов `cutefishos/cutefish-installer` в `apps/rusty-installer`
+- **Status:** Done
+- **Goal:** Реализовать точную 9-страничную структуру и функционал `cutefishos/cutefish-installer` (`Language` с 3 языками -> `Welcome` с `Try RustyOS`/`Install` -> `Disk` с горизонтальными `160 px` плитками и `Manual Partitioning` -> `Partition` -> `Account` -> `TimeZone` -> `Summary` с Warning Callout -> `Progress` -> `Result` с `72 px` бейджем и `Restart Now`), левую кнопку `Other` и `--step` для визуальной проверки.
+- **Dependencies:** `RUSTYOS-139`.
+- **Scope:**
+  - `apps/rusty-installer/src/{main.rs, state.rs, layout.rs, render.rs, wayland.rs}`: 9 вариантов `InstallStep`, `TIMEZONE_OPTIONS`, `trigger_other_action`, `CutefishDiskTileRect`, `StepContentLayout::Cutefish{Welcome, DiskTiles, Timezone, Summary, Result}`, `other_btn` слева внизу и обновление unit-тестов.
+- **Acceptance Criteria:**
+  - Все 9 экранов и переходы `Next` / `Back` / `Other` работают и покрыты unit-тестами.
+  - `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --offline -- -D warnings`, `cargo test --workspace` и живые `--winit` скриншоты ключевых экранов проходят чисто.
+- **Tests:** 348 пройденных unit-тестов workspace (`13` в `rusty_installer`; `2 ignored` doc-теста в `rusty_ui`).
+- **Risks:** Низкие; `Dual-Boot` и `--oobe` сохранены без регрессий.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

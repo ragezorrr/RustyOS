@@ -120,6 +120,8 @@ package() {
   install -m755 "${target_dir}/rusty-installer" "${pkgdir}/usr/bin/rusty-installer"
   install -m755 "${target_dir}/rustyos-update-helper" \
     "${pkgdir}/usr/lib/rustyos/rustyos-update-helper"
+  install -m755 "${target_dir}/rustyos-installer-service" \
+    "${pkgdir}/usr/lib/rustyos/rustyos-installer-service"
   install -m755 "${root}/scripts/rustyos-install.sh" \
     "${pkgdir}/usr/lib/rustyos/rustyos-install"
   install -m755 "${root}/bin/rustyos-session" "${pkgdir}/usr/bin/rustyos-session"
