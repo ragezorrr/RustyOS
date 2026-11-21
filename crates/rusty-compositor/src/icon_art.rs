@@ -1,4 +1,4 @@
-//! Procedural `macOS 27 Golden Gate` 16-tap `R2` icon and folder rasterizers (`RUSTYOS-114`).
+//! Procedural `RustyOS` 16-tap `R2` icon and folder rasterizers (`RUSTYOS-114`).
 //!
 //! Renders resolution-independent subpixel-antialiased Dock app icons, free-standing folders,
 //! utility tiles (`Downloads`, `Trash`), and macOS squircle framing for default apps (Firefox),

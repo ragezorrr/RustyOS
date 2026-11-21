@@ -1,6 +1,6 @@
 //! Modular right-click Context Menu subsystem (`RUSTYOS-064`, `RUSTYOS-086`).
 //!
-//! Provides unified macOS 27 Golden Gate aligned context menus across all surfaces:
+//! Provides unified RustyOS aligned context menus across all surfaces:
 //! - Window context menu: tiling, workspaces, display hopping, minimize, close/force quit
 //! - Desktop context menu: new folder, wallpapers, display settings, terminal, tiling
 //! - Desktop item context menu: open, move to trash

@@ -41,8 +41,8 @@ impl FilesThemeMode {
     #[must_use]
     pub fn from_config_str(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
-            "light" | "light_golden_gate" => Some(Self::Light),
-            "dark" | "dark_golden_gate" | "dark_purple_glass" => Some(Self::Dark),
+            "light" | "light_rustyos" => Some(Self::Light),
+            "dark" | "dark_rustyos" | "dark_purple_glass" => Some(Self::Dark),
             _ => None,
         }
     }
@@ -63,7 +63,7 @@ pub const RUSTYOS_ACCENT_SWATCHES: [[u8; 4]; RUSTYOS_ACCENT_COUNT] = [
 ];
 
 const ACCENT_LIGHT_RGBA: [[u8; 4]; RUSTYOS_ACCENT_COUNT] = [
-    [0, 122, 255, 255],  // Golden Gate Blue #007AFF
+    [0, 122, 255, 255],  // RustyOS Blue #007AFF
     [255, 59, 48, 255],  // Coral Red #FF3B30
     [40, 205, 65, 255],  // Emerald Green #28CD41
     [94, 92, 230, 255],  // Indigo #5E5CE6
@@ -73,7 +73,7 @@ const ACCENT_LIGHT_RGBA: [[u8; 4]; RUSTYOS_ACCENT_COUNT] = [
 ];
 
 const ACCENT_DARK_RGBA: [[u8; 4]; RUSTYOS_ACCENT_COUNT] = [
-    [10, 132, 255, 255],  // Golden Gate Dark Blue #0A84FF
+    [10, 132, 255, 255],  // RustyOS Dark Blue #0A84FF
     [255, 92, 109, 255],  // Coral Red
     [53, 191, 86, 255],   // Green
     [130, 102, 255, 255], // Indigo
@@ -150,10 +150,10 @@ pub fn detect_reduce_transparency_from_toml(content: &str) -> Option<bool> {
     }
 }
 
-/// Content view modes presented in the Golden Gate view switcher pill.
+/// Content view modes presented in the RustyOS view switcher pill.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FileViewMode {
-    /// Icon grid view (default Golden Gate Home view; `RUSTYOS-066`/`071`).
+    /// Icon grid view (default RustyOS Home view; `RUSTYOS-066`/`071`).
     #[default]
     Icons,
     /// Multi-column sortable list view.

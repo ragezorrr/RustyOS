@@ -89,7 +89,7 @@ fn to_logical_rect(rect: Rectangle<i32, Physical>) -> Rectangle<i32, Logical> {
     )
 }
 
-/// Computes the Golden Gate `Liquid Glass` popover geometry anchored below `TopBar` (`RUSTYOS-076`).
+/// Computes the RustyOS `Liquid Glass` popover geometry anchored below `TopBar` (`RUSTYOS-076`).
 #[must_use]
 pub fn compute_updates_popover_layout(
     screen_size: Size<i32, Physical>,

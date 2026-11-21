@@ -1,4 +1,4 @@
-//! Crisp pixel-aligned 14-18 px UI vector glyphs and 4x4 SSAA Golden Gate
+//! Crisp pixel-aligned 14-18 px UI vector glyphs and 4x4 SSAA RustyOS
 //! folder artwork for `rusty-files` (`RUSTYOS-065`, `RUSTYOS-066`).
 
 use rusty_services::file_manager::{FileEntry, FileEntryKind, FileTagColor, FileViewMode};
@@ -18,7 +18,7 @@ pub(crate) fn snap_edge(coord: f32) -> f32 {
     coord.round()
 }
 
-/// Renders a crisp pixel-aligned 14-16 px Golden Gate sidebar icon centered at `(cx, cy)`.
+/// Renders a crisp pixel-aligned 14-16 px RustyOS sidebar icon centered at `(cx, cy)`.
 pub(crate) fn draw_sidebar_icon(
     c: &mut Canvas<'_>,
     cx: f32,
@@ -506,7 +506,7 @@ fn draw_entry_icon_uncached(
     }
 }
 
-/// Draws large high-detail 4x4 SSAA Golden Gate folder or file badge centered at `(cx, cy)`.
+/// Draws large high-detail 4x4 SSAA RustyOS folder or file badge centered at `(cx, cy)`.
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 pub(crate) fn draw_large_entry_artwork(
     c: &mut Canvas<'_>,
@@ -542,7 +542,7 @@ pub(crate) fn draw_large_entry_artwork(
                 qy,
             };
             blit_or_render_sprite(c, key, dst_x, dst_y, sprite_dim, sprite_dim, |offscreen| {
-                draw_large_golden_gate_folder(
+                draw_large_rustyos_folder(
                     offscreen,
                     ax,
                     ay,
@@ -739,7 +739,7 @@ fn sample_folder_subpixel(
     clippy::cast_precision_loss,
     clippy::cast_sign_loss
 )]
-fn draw_large_golden_gate_folder(
+fn draw_large_rustyos_folder(
     c: &mut Canvas<'_>,
     cx: f32,
     cy: f32,
@@ -1309,7 +1309,7 @@ pub(crate) fn draw_sort_pill_glyph(c: &mut Canvas<'_>, pill_x: f32, cy: f32, col
     );
 }
 
-/// Draws the macOS Golden Gate `Share` tray + upward arrow toolbar glyph (`RUSTYOS-071`).
+/// Draws the RustyOS `Share` tray + upward arrow toolbar glyph (`RUSTYOS-071`).
 pub(crate) fn draw_share_glyph(c: &mut Canvas<'_>, cx: f32, cy: f32, col: [u8; 4]) {
     let sx = snap_half(cx);
     let sy = snap_half(cy);

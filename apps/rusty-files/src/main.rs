@@ -1,4 +1,4 @@
-//! Binary entry point for `rusty-files`, RustyOS's standalone Golden Gate file manager
+//! Binary entry point for `rusty-files`, RustyOS's standalone RustyOS file manager
 //! (`RUSTYOS-065`, ADR-0030).
 
 mod icons;

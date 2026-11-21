@@ -7,8 +7,15 @@ use fontdue::{Font, FontSettings};
 use crate::canvas::UiCanvas;
 use crate::geometry::Rect;
 
-const INTER_REGULAR_BYTES: &[u8] = include_bytes!("../../../assets/fonts/Inter-Regular.ttf");
-const INTER_SEMIBOLD_BYTES: &[u8] = include_bytes!("../../../assets/fonts/Inter-SemiBold.ttf");
+/// Bundled `Inter Regular` (`OFL-1.1`) TrueType font bytes (`RUSTYOS-130`, `RUSTYOS-147`).
+pub const INTER_REGULAR_BYTES: &[u8] = include_bytes!("../../../assets/fonts/Inter-Regular.ttf");
+/// Bundled `Inter SemiBold` (`OFL-1.1`) TrueType font bytes (`RUSTYOS-130`, `RUSTYOS-147`).
+pub const INTER_SEMIBOLD_BYTES: &[u8] = include_bytes!("../../../assets/fonts/Inter-SemiBold.ttf");
+/// Bundled `Inter Bold` (`OFL-1.1`) TrueType font bytes (`RUSTYOS-147`).
+pub const INTER_BOLD_BYTES: &[u8] = include_bytes!("../../../assets/fonts/Inter-Bold.ttf");
+/// Bundled `JetBrains Mono Regular` (`OFL-1.1`) TrueType font bytes (`RUSTYOS-147`).
+pub const JETBRAINS_MONO_REGULAR_BYTES: &[u8] =
+    include_bytes!("../../../assets/fonts/JetBrainsMono-Regular.ttf");
 
 /// Font weight selector for UI text rendering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]

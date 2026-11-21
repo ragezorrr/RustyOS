@@ -1,5 +1,5 @@
-//! macOS Tahoe (`Clear Light` / `Clear Dark` via `rustyos_liquid_glass_v1` + opaque fallback)
-//! palette, Golden Gate accent sync, ANSI-16/256 color resolver, and live `config.toml` watcher.
+//! RustyOS (`Clear Light` / `Clear Dark` via `rustyos_liquid_glass_v1` + opaque fallback)
+//! palette, RustyOS accent sync, ANSI-16/256 color resolver, and live `config.toml` watcher.
 
 use std::path::PathBuf;
 use std::time::SystemTime;
@@ -160,7 +160,7 @@ impl TerminalConfigSnapshot {
 }
 
 impl TerminalTheme {
-    /// Builds `Clear Dark` / `Clear Light` or `Opaque` Tahoe theme from current config.
+    /// Builds `Clear Dark` / `Clear Light` or `Opaque` RustyOS theme from current config.
     #[must_use]
     pub(crate) fn from_config(cfg: &TerminalConfigSnapshot, glass_override: Option<bool>) -> Self {
         let use_glass = glass_override.unwrap_or(!cfg.reduce_transparency);
@@ -202,7 +202,7 @@ impl TerminalTheme {
                 search_border: [255, 255, 255, 42],
                 search_match_bg: [255, 214, 10, 88],
                 search_current_bg: [255, 159, 10, 170],
-                window_border: [255, 255, 255, 46],
+                window_border: [255, 255, 255, 22],
                 header_separator: [255, 255, 255, 24],
                 text_primary: [242, 244, 248, 255],
                 text_secondary: [158, 163, 174, 255],
@@ -242,7 +242,7 @@ impl TerminalTheme {
                 search_border: [0, 0, 0, 32],
                 search_match_bg: [255, 204, 0, 110],
                 search_current_bg: [255, 149, 0, 195],
-                window_border: [0, 0, 0, 34],
+                window_border: [0, 0, 0, 24],
                 header_separator: [0, 0, 0, 22],
                 text_primary: [28, 30, 34, 255],
                 text_secondary: [108, 113, 124, 255],
@@ -300,7 +300,7 @@ impl TerminalTheme {
     }
 }
 
-/// macOS Tahoe Dark ANSI-16 (tuned for crisp legibility on dark Liquid Glass, zero purple shift).
+/// RustyOS Dark ANSI-16 (tuned for crisp legibility on dark Liquid Glass, zero purple shift).
 const DARK_PALETTE_16: [[u8; 4]; 16] = [
     [38, 41, 48, 255],    // 0 Black
     [255, 69, 58, 255],   // 1 Red
@@ -320,7 +320,7 @@ const DARK_PALETTE_16: [[u8; 4]; 16] = [
     [255, 255, 255, 255], // 15 Bright White
 ];
 
-/// macOS Tahoe Light ANSI-16 (high contrast on translucent light glass).
+/// RustyOS Light ANSI-16 (high contrast on translucent light glass).
 const LIGHT_PALETTE_16: [[u8; 4]; 16] = [
     [28, 30, 34, 255],    // 0 Black
     [215, 42, 34, 255],   // 1 Red
@@ -356,7 +356,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_ui_theme_and_resolves_tahoe_palettes() {
+    fn parses_ui_theme_and_resolves_rustyos_palettes() {
         let cfg = TerminalConfigSnapshot::parse_toml(
             "[ui]\ntheme = \"light\"\nreduce_transparency = false\nglass_opacity = 0.72\n",
         );

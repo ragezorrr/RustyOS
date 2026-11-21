@@ -2492,6 +2492,19 @@ hardware/software context и низкие накладные расходы.
   - Все 20 иконок сайдбара и 3 иллюстрации тем декодируются и рендерятся без новых зависимостей в `Cargo.lock`; `cargo fmt`, `clippy -D warnings`, `cargo test` и живой просмотр проходят чисто.
 - **Risks:** Низкие; сохранена полная совместимость с существующими страницами и тестами.
 
+### RUSTYOS-147 — Унификация шрифтов, чистка кодовых названий и фикс Live ISO / `PKGBUILD`
+- **Status:** Done
+- **Goal:** Добавить `squashfs-tools`, `noto-fonts`, `noto-fonts-emoji` в `packaging/archiso` и `PKGBUILD`, переключить `greetd/config.toml` на `/usr/bin/rusty-greeter`, докачать OFL-1.1 `Inter-Bold.ttf` и `JetBrainsMono-Regular.ttf` с единым экспортом байтов из `crates/rusty-ui::text`, и полностью вычистить остаточные сторонние кодовые названия из `crates/` и `apps/`.
+- **Dependencies:** `RUSTYOS-146`.
+- **Scope:**
+  - `packaging/arch/PKGBUILD`, `packaging/archiso/packages.x86_64`, `packaging/archiso/airootfs/etc/greetd/config.toml`.
+  - `assets/fonts/{Inter-Bold.ttf, JetBrainsMono-Regular.ttf}`, `crates/rusty-ui/src/text.rs`, `crates/rusty-compositor/src/text.rs`, `apps/rusty-terminal/src/font.rs`.
+  - 40 `.rs` файлов в `crates/` и `apps/` (удаление сторонних кодовых названий).
+- **Acceptance Criteria:**
+  - `rg -i "cutefish|golden.?gate|tahoe" crates/ apps/` возвращает 0 совпадений.
+  - `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --offline -- -D warnings` и `cargo test --workspace --no-fail-fast --offline` проходят чисто.
+- **Risks:** Низкие; шрифты OFL-1.1, все тесты проходят.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

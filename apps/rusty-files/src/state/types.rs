@@ -15,9 +15,9 @@ use rusty_services::file_manager::{
 pub(crate) const MILLER_COLUMN_WIDTH: i32 = 216;
 /// Row height for Miller column rows.
 pub(crate) const ROW_HEIGHT: i32 = 26;
-/// Row height for Golden Gate sidebar rows.
+/// Row height for RustyOS sidebar rows.
 pub(crate) const SIDEBAR_ROW_HEIGHT: i32 = 22;
-/// Section header + top inter-section gap height in the Golden Gate sidebar.
+/// Section header + top inter-section gap height in the RustyOS sidebar.
 pub(crate) const SIDEBAR_SECTION_HEIGHT: i32 = 24;
 /// List view row height.
 pub(crate) const LIST_ROW_HEIGHT: i32 = 28;
@@ -96,7 +96,7 @@ impl SmoothAxis {
     }
 }
 
-/// Icon classification for Golden Gate sidebar entries.
+/// Icon classification for RustyOS sidebar entries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SidebarIconKind {
     Recents,

@@ -484,7 +484,7 @@ pub fn compute_top_bar_right_layout_with_options(
     let status_hit_x = control_center_x - 5;
     let status_hit_w = (clock_x - 2 - status_hit_x).max(28);
 
-    // macOS 27 Golden Gate (`27-Golden-Gate-Notification-Center.png`) never draws an `N:k` pill in
+    // RustyOS (`Notification-Center`) never draws an `N:k` pill in
     // the Menu Bar; Notification Center opens directly from the Clock. Keep layout slot empty.
     let (notif_x, notif_w) = (left_cursor, 0);
 

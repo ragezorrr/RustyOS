@@ -287,9 +287,11 @@ pub(crate) fn compute_layout(app: &SettingsAppState, width: u32, height: u32) ->
         (win_h - HEADER_HEIGHT).max(40),
     );
 
-    let traffic_close = Rect::new(14, 13, 14, 14);
-    let traffic_min = Rect::new(36, 13, 14, 14);
-    let traffic_max = Rect::new(58, 13, 14, 14);
+    let tl = rusty_ui::TrafficLightButtons::default_csd();
+    let btn_d = i32::try_from(tl.close_rect.width).unwrap_or(14);
+    let traffic_close = Rect::new(tl.close_rect.x, tl.close_rect.y, btn_d, btn_d);
+    let traffic_min = Rect::new(tl.minimize_rect.x, tl.minimize_rect.y, btn_d, btn_d);
+    let traffic_max = Rect::new(tl.maximize_rect.x, tl.maximize_rect.y, btn_d, btn_d);
     let search_rect = Rect::new(12, 48, SIDEBAR_WIDTH - 24, 28);
 
     let nav_back = Rect::new(divider_x + 16, 11, 22, 18);
@@ -1493,78 +1495,15 @@ fn build_notifications_page_sections(
     append_notification_app_rows_section(app, content_x, cur_y, content_w, &mut sections);
 
     sections.push(place_card_section(
-        Some("Menu Bar & Updates"),
+        Some("Update Notifications"),
         content_x,
         cur_y,
         content_w,
-        vec![
-            row_switch("24-Hour Clock", RowControlId::Clock24hToggle, app.clock_24h),
-            row_switch(
-                "Automatic Update Checks",
-                RowControlId::UpdatesEnabledToggle,
-                app.updates_enabled,
-            ),
-            row_switch(
-                "Show Workspace Strip",
-                RowControlId::MenubarWorkspacesToggle,
-                app.menubar_workspaces,
-            ),
-            row_switch(
-                "Show System Tray Applets",
-                RowControlId::MenubarTrayToggle,
-                app.menubar_tray,
-            ),
-            row_switch(
-                "Show Input Source Badge",
-                RowControlId::MenubarInputToggle,
-                app.menubar_input,
-            ),
-            row_switch(
-                "Show Wi-Fi Indicator",
-                RowControlId::MenubarWifiToggle,
-                app.menubar_wifi,
-            ),
-            row_switch(
-                "Show Battery Indicator",
-                RowControlId::MenubarBatteryToggle,
-                app.menubar_battery,
-            ),
-            row_switch(
-                "Show Battery Percentage",
-                RowControlId::MenubarBatteryPercentageToggle,
-                app.menubar_battery_percentage,
-            ),
-            row_switch(
-                "Show Volume Indicator",
-                RowControlId::MenubarVolumeToggle,
-                app.menubar_volume,
-            ),
-            row_switch(
-                "Show Bluetooth Indicator",
-                RowControlId::MenubarBluetoothToggle,
-                app.menubar_bluetooth,
-            ),
-            row_switch(
-                "Adaptive Wallpaper Contrast",
-                RowControlId::MenubarAdaptiveContrastToggle,
-                app.menubar_adaptive_contrast,
-            ),
-            row_switch(
-                "Use 24-Hour Clock",
-                RowControlId::Clock24hToggle,
-                app.clock_24h,
-            ),
-            row_choice(
-                "Clock Language",
-                RowControlId::ClockLocaleCycle,
-                match app.clock_locale.as_str() {
-                    "ru" => "Русский",
-                    "uk" => "Українська",
-                    _ => "English",
-                }
-                .to_owned(),
-            ),
-        ],
+        vec![row_switch(
+            "Automatic Update Checks",
+            RowControlId::UpdatesEnabledToggle,
+            app.updates_enabled,
+        )],
     ));
     sections
 }

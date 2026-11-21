@@ -65,8 +65,8 @@ pub(crate) fn palette_for(dark: bool, accent_idx: usize, has_glass: bool) -> Pal
     if dark {
         Palette {
             dark: true,
-            window_bg: [30, 31, 34, bg_alpha],
-            window_border: [255, 255, 255, 34],
+            window_bg: [28, 28, 29, bg_alpha],
+            window_border: [255, 255, 255, 22],
             rim_top: [255, 255, 255, 42],
             card_bg: [42, 43, 48, 224],
             card_hover: [52, 54, 60, 238],
@@ -86,8 +86,8 @@ pub(crate) fn palette_for(dark: bool, accent_idx: usize, has_glass: bool) -> Pal
     } else {
         Palette {
             dark: false,
-            window_bg: [246, 247, 250, bg_alpha],
-            window_border: [0, 0, 0, 28],
+            window_bg: [245, 246, 250, bg_alpha],
+            window_border: [0, 0, 0, 24],
             rim_top: [255, 255, 255, 210],
             card_bg: [255, 255, 255, 236],
             card_hover: [248, 250, 255, 245],
@@ -407,8 +407,8 @@ pub(crate) fn render_window_pixels(
     render_content(&mut c, app, layout, hover, &pal);
     render_footer(&mut c, app, layout, hover, &pal);
 
-    c.mask_window_corners(WINDOW_CORNER_RADIUS);
     c.stroke_rounded_rect(full, WINDOW_CORNER_RADIUS, 1.0, pal.window_border);
+    c.mask_window_corners(WINDOW_CORNER_RADIUS);
 }
 
 #[allow(clippy::cast_precision_loss, clippy::cast_possible_wrap)]

@@ -19,8 +19,8 @@ use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::utils::{Logical, Point, Rectangle, Size, Transform};
 use tracing::{info, warn};
 
-const BUNDLED_INTER_REGULAR: &[u8] = include_bytes!("../../../assets/fonts/Inter-Regular.ttf");
-const BUNDLED_INTER_SEMIBOLD: &[u8] = include_bytes!("../../../assets/fonts/Inter-SemiBold.ttf");
+const BUNDLED_INTER_REGULAR: &[u8] = rusty_ui::text::INTER_REGULAR_BYTES;
+const BUNDLED_INTER_SEMIBOLD: &[u8] = rusty_ui::text::INTER_BOLD_BYTES;
 
 const REGULAR_FONT_CANDIDATES: &[&str] = &[
     "/usr/share/fonts/inter/Inter-Regular.ttf",

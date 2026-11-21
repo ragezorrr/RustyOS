@@ -1,4 +1,4 @@
-//! macOS Tahoe / Golden Gate CSD window layout, hit-testing, and cell grid geometry.
+//! RustyOS CSD window layout, hit-testing, and cell grid geometry.
 
 use crate::font::CellMetrics;
 use crate::vt::GridPoint;

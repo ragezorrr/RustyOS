@@ -1,4 +1,4 @@
-//! Deterministic Golden Gate geometry layout and pointer hit-testing for `rusty-files`
+//! Deterministic RustyOS geometry layout and pointer hit-testing for `rusty-files`
 //! (`RUSTYOS-065`, ADR-0030). Both rendering and input handling read the same `FilesLayout`.
 
 use std::path::PathBuf;
@@ -1534,7 +1534,7 @@ pub(crate) struct GalleryLayout {
     pub selected_entry: Option<FileEntry>,
 }
 
-/// Computes the Golden Gate segmented `Tabs` bar beneath the toolbar when visible.
+/// Computes the RustyOS segmented `Tabs` bar beneath the toolbar when visible.
 #[must_use]
 pub(crate) fn compute_tab_bar_layout(
     state: &FilesAppState,
@@ -2145,7 +2145,7 @@ mod tests {
     }
 
     #[test]
-    fn golden_gate_layout_and_hit_testing_work() {
+    fn rustyos_layout_and_hit_testing_work() {
         let (mut state, root) = test_state();
         let layout = compute_layout(&state, 1060, 660);
 

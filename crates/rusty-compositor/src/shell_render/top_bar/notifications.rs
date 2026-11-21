@@ -16,7 +16,7 @@ use crate::shell_render::tokens::{TOP_BAR_ITEM_H, TOP_BAR_ITEM_Y};
 use super::panel::compute_top_bar_right_layout;
 use super::panel::{TopBarLayoutOptions, compute_top_bar_right_layout_with_options};
 
-/// Shared notification card geometry matching `27-Golden-Gate-Notification-Center.png` (`RUSTYOS-110`).
+/// Shared notification card geometry matching `Notification-Center` (`RUSTYOS-110`).
 pub(crate) const NOTIFICATION_CARD_WIDTH: i32 = 344;
 pub(crate) const NOTIFICATION_CARD_HEIGHT: i32 = 68;
 pub(crate) const NOTIFICATION_CARD_RADIUS: i32 = 22;
@@ -367,7 +367,7 @@ fn push_osd_level_bar(
     );
 }
 
-/// Appends unified Golden Gate chrome (hover close circle, app squircle, `NotificationCard` glass)
+/// Appends unified RustyOS chrome (hover close circle, app squircle, `NotificationCard` glass)
 /// for both floating HUD toasts and Notification Center stack cards (`RUSTYOS-110`).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn push_notification_card_chrome(
@@ -550,7 +550,7 @@ pub(crate) fn wrap_notification_lines(
     lines
 }
 
-/// Appends unified Golden Gate title and 1-2 line wrapped body labels without `"now"` (`RUSTYOS-110`).
+/// Appends unified RustyOS title and 1-2 line wrapped body labels without `"now"` (`RUSTYOS-110`).
 pub(crate) fn push_notification_card_text_lines(
     text_cache: &mut crate::text::TextCache,
     renderer: &mut GlesRenderer,

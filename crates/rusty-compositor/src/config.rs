@@ -141,7 +141,7 @@ impl VrrMode {
 /// Window drop shadow style (`Subtle` [default], `Normal`, `None`) (`RUSTYOS-080`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum WindowShadowMode {
-    /// Crisp, compact macOS Golden Gate elevation (default).
+    /// Crisp, compact RustyOS elevation (default).
     #[default]
     Subtle,
     /// Traditional deeper elevation blur.
@@ -520,13 +520,13 @@ impl DownloadsSortMode {
     }
 }
 
-/// Golden Gate system appearance mode (`RUSTYOS-067`).
+/// RustyOS system appearance mode (`RUSTYOS-067`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum AppearanceMode {
-    /// Golden Gate Light frosted milk-glass (`#F5F6F8` popovers, `#007AFF` blue accent).
+    /// RustyOS Light frosted milk-glass (`#F5F6F8` popovers, `#007AFF` blue accent).
     #[default]
     Light,
-    /// Golden Gate Dark neutral graphite (`#262629` popovers, `#0A84FF` blue accent).
+    /// RustyOS Dark neutral graphite (`#262629` popovers, `#0A84FF` blue accent).
     Dark,
 }
 
@@ -569,8 +569,8 @@ impl AppearanceMode {
     pub fn parse(raw: &str) -> Option<Self> {
         let norm = strip_toml_quotes(raw).trim().to_ascii_lowercase();
         match norm.as_str() {
-            "light" | "light_golden_gate" | "golden_gate_light" => Some(Self::Light),
-            "dark" | "dark_golden_gate" | "golden_gate_dark" => Some(Self::Dark),
+            "light" | "light_rustyos" | "rustyos_light" => Some(Self::Light),
+            "dark" | "dark_rustyos" | "rustyos_dark" => Some(Self::Dark),
             _ => None,
         }
     }
@@ -602,7 +602,7 @@ impl LowPowerMode {
         }
     }
 
-    /// Human-readable label matching Golden Gate Battery settings.
+    /// Human-readable label matching RustyOS Battery settings.
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {

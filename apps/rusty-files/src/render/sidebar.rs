@@ -1,4 +1,4 @@
-//! Golden Gate translucent sidebar and contextual warning banner rendering.
+//! RustyOS translucent sidebar and contextual warning banner rendering.
 
 use crate::icons::draw_sidebar_icon;
 use crate::layout::{FilesLayout, Rect};

@@ -1,6 +1,6 @@
 //! Window context menu builders for RustyOS (`RUSTYOS-086`).
 //!
-//! Provides unified macOS 27 Golden Gate aligned window management menus:
+//! Provides unified RustyOS aligned window management menus:
 //! tiling (left/right half), zoom/restore, multi-display hopping, workspace assignment,
 //! minimize, and close / force quit.
 

@@ -45,7 +45,7 @@ fn circle_and_corner_sdf_preserve_clean_edges_and_opaque_interior() {
     assert_eq!(top_inner, bot_inner);
     assert!(top_inner > 60 && top_outer <= 2 && bot_outer <= 2);
 
-    // Ambient Golden Gate silk wallpaper gradient is opaque and modulated smoothly
+    // Ambient RustyOS silk wallpaper gradient is opaque and modulated smoothly
     let glow_px = sample_wallpaper_pixel(62, 110, 256, 160);
     let corner_px = sample_wallpaper_pixel(250, 10, 256, 160);
     let dark_px = sample_wallpaper_pixel_themed(62, 110, 256, 160, true);
@@ -629,7 +629,7 @@ fn dock_glass_and_icon_shadow_rasterize_cleanly() {
     let height = 68;
     let radius = 18;
 
-    // Directional CutefishOS uRim around the Dock: top brighter than bottom, horizontally symmetric.
+    // Directional RustyOS uRim around the Dock: top brighter than bottom, horizontally symmetric.
     let corner = sample_dock_glass_pixel(0, 0, width, height, radius, 0.78, false);
     let top_center = sample_dock_glass_pixel(width / 2, 0, width, height, radius, 0.78, false);
     let bottom_straight =
@@ -645,7 +645,7 @@ fn dock_glass_and_icon_shadow_rasterize_cleanly() {
     assert!(top_center[3] > 0);
     assert_eq!(top_left_arc[3], top_right_arc[3]);
     assert_eq!(bottom_left_arc[3], bottom_right_arc[3]);
-    // RUSTYOS-099: CutefishOS top rim lit=1.0 vs bottom lit=0.35 (sides=0.0)
+    // RUSTYOS-099: RustyOS top rim lit=1.0 vs bottom lit=0.35 (sides=0.0)
     assert!(top_left_arc[3] >= bottom_left_arc[3]);
     assert!(bottom_straight[3] > 0);
     assert!(center[3] > 20 && center[3] <= 120);

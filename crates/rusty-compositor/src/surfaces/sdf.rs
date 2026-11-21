@@ -398,7 +398,7 @@ fn fold_blend_rgb(a: [f32; 3], b: [f32; 3], k: f32) -> [f32; 3] {
     ]
 }
 
-fn golden_gate_sky_rgb(norm_x: f32, norm_y: f32, is_dark: bool) -> [f32; 3] {
+fn rustyos_sky_rgb(norm_x: f32, norm_y: f32, is_dark: bool) -> [f32; 3] {
     let top_horizon = 1.0 - smoothstep01(0.0, 0.42, norm_y);
     let right_cool = smoothstep01(0.28, 0.95, norm_x * 0.72 + norm_y * 0.28);
     if is_dark {
@@ -426,7 +426,7 @@ fn golden_gate_sky_rgb(norm_x: f32, norm_y: f32, is_dark: bool) -> [f32; 3] {
     }
 }
 
-fn apply_golden_gate_folds(mut rgb: [f32; 3], norm_x: f32, norm_y: f32, is_dark: bool) -> [f32; 3] {
+fn apply_rustyos_folds(mut rgb: [f32; 3], norm_x: f32, norm_y: f32, is_dark: bool) -> [f32; 3] {
     let s1_y = 0.26 + 0.22 * norm_x + 0.11 * ((norm_x - 0.35) * 4.2).sin();
     let d1 = norm_y - s1_y;
     let sheet1 = smoothstep01(-0.018, 0.032, d1);
@@ -524,8 +524,8 @@ pub(super) fn sample_wallpaper_pixel_themed(
 
     let norm_x = (px as f32 + 0.5) / width.max(1) as f32;
     let norm_y = (py as f32 + 0.5) / height.max(1) as f32;
-    let base = golden_gate_sky_rgb(norm_x, norm_y, is_dark);
-    let rgb = apply_golden_gate_folds(base, norm_x, norm_y, is_dark);
+    let base = rustyos_sky_rgb(norm_x, norm_y, is_dark);
+    let rgb = apply_rustyos_folds(base, norm_x, norm_y, is_dark);
 
     // Ordered 4x4 Bayer dithering to eliminate 8-bit gradient banding
     let bx = usize::try_from(px.rem_euclid(4)).unwrap_or(0);
@@ -841,7 +841,7 @@ fn base_glass_layer(
     glass_scale: f32,
 ) -> [f32; 4] {
     let (base_a, rgb) = match (is_dark, style) {
-        // RUSTYOS-100: CutefishOS uniform glass layer across Dock, Popover (`popupGlass`), and ControlModule (`fishuiGlass`).
+        // RUSTYOS-100: RustyOS uniform glass layer across Dock, Popover (`popupGlass`), and ControlModule (`fishuiGlass`).
         (true, GlassPanelStyle::Dock) => (0.29 * (0.45 + 0.55 * glass_scale), [96.0, 96.0, 98.0]),
         (true, GlassPanelStyle::Popover) => {
             (0.68 * (0.50 + 0.50 * glass_scale), [42.0, 44.0, 48.0])
@@ -896,7 +896,7 @@ fn outward_normal_2d(u: f32, v: f32, hw: f32, hh: f32, r: f32) -> (f32, f32) {
     }
 }
 
-fn cutefish_rim_alpha(outward_y: f32, sd: f32, rim_peak: f32) -> f32 {
+fn glass_rim_alpha(outward_y: f32, sd: f32, rim_peak: f32) -> f32 {
     let lit = outward_y.abs() * (1.0 - 0.65 * (0.5 + 0.5 * outward_y));
     let inset = -sd;
     let hairline = smoothstep01(1.2, 0.0, (inset - 1.0).abs());
@@ -963,7 +963,7 @@ pub(super) fn sample_glass_panel_pixel_themed(
     let glass_scale = crate::config::clamp_glass_opacity(glass_opacity);
     let mut layer = base_glass_layer(style, is_dark, t_v, dither, glass_scale);
 
-    // RUSTYOS-100: Unified CutefishOS directional uRim across Dock, Popover, and ControlModule (no sheen/corner flares).
+    // RUSTYOS-100: Unified RustyOS directional uRim across Dock, Popover, and ControlModule (no sheen/corner flares).
     let (_nx, ny) = outward_normal_2d(u, v, hw, hh, r);
     let rim_peak = match (is_dark, style) {
         (false, GlassPanelStyle::Dock) => 0.43,
@@ -973,7 +973,7 @@ pub(super) fn sample_glass_panel_pixel_themed(
         (false, GlassPanelStyle::ControlModule) => 0.42,
         (false, GlassPanelStyle::NotificationCard) => 0.18,
     };
-    let rim_alpha = cutefish_rim_alpha(ny, sd, rim_peak);
+    let rim_alpha = glass_rim_alpha(ny, sd, rim_peak);
     if rim_alpha > 0.001 {
         layer = blend_premul_over(layer, [255.0, 255.0, 255.0], rim_alpha);
     }

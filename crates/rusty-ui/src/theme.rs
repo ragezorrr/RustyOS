@@ -73,7 +73,7 @@ impl TrafficLightKind {
     }
 }
 
-/// Standard 7 Light accent colors for RustyOS (neutral Golden Gate tokens, zero purple).
+/// Standard 7 Light accent colors for RustyOS (neutral RustyOS tokens, zero purple).
 pub const ACCENT_PALETTE: [[u8; 4]; 7] = [
     [0, 122, 255, 255],  // 0: Blue #007AFF
     [255, 59, 48, 255],  // 1: Coral Red #FF3B30

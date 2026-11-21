@@ -278,7 +278,7 @@ impl<'a> UiPainter<'a> {
         self.draw_text(s, tx, baseline, size_px, bold, color);
     }
 
-    /// Emits a Golden Gate focus ring around `rect` modulated by `alpha` (`0.0..=1.0`).
+    /// Emits a RustyOS focus ring around `rect` modulated by `alpha` (`0.0..=1.0`).
     pub fn draw_focus_ring(&mut self, rect: Rect, radius: f32, accent: [u8; 4], alpha: f32) {
         let clamped = alpha.clamp(0.0, 1.0);
         if clamped <= 0.01 {

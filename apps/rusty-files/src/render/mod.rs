@@ -3,7 +3,7 @@
 //! Submodules organize distinct visual layers:
 //! - `canvas`: 2D rasterization, Fontdue Inter font cache, SDF antialiased primitives and shadows;
 //! - `chrome`: window CSD traffic lights, toolbar, search scope bar, tab strip, path bar;
-//! - `sidebar`: translucent Golden Gate sidebar and warning banners;
+//! - `sidebar`: translucent RustyOS sidebar and warning banners;
 //! - `views`: Miller Columns, List View, Icon Grid, Gallery View, preview inspector, status bar;
 //! - `dialogs`: modal overlays (Quick Look, Get Info, Go to Folder, Rename, Transfer Conflict);
 //! - `popup`: 1:1 macOS 27 Liquid Glass popovers and context menus (`RUSTYOS-087`).
@@ -94,7 +94,7 @@ pub(crate) const fn palette_for(theme: FilesThemeMode) -> Palette {
             is_dark: false,
         },
         FilesThemeMode::Dark => Palette {
-            window_bg: rgba(30, 30, 32, 255),
+            window_bg: rgba(28, 28, 29, 255),
             window_border: rgba(255, 255, 255, 22),
             sidebar_bg: rgba(38, 38, 40, 255),
             sidebar_border: rgba(54, 54, 58, 255),
@@ -238,7 +238,7 @@ mod tests {
     use std::fs;
 
     #[test]
-    fn renders_golden_gate_light_and_dark_themes_cleanly() {
+    fn renders_rustyos_light_and_dark_themes_cleanly() {
         let root =
             std::env::temp_dir().join(format!("rustyos-files-render-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
@@ -302,11 +302,11 @@ mod tests {
         let bg_idx = ((120 * w + 650) * 4) as usize;
         assert_eq!(&buf[bg_idx..bg_idx + 4], &[255, 255, 255, 255]);
 
-        // Toggle to Dark and re-render (`#1E1E20` -> BGRA [32, 30, 30, 255])
+        // Toggle to Dark and re-render (`#1C1C1D` -> BGRA [29, 28, 28, 255])
         state.toggle_theme();
         let layout_dark = compute_layout(&state, w, h);
         render_window_pixels(&mut buf, w, h, &state, &layout_dark);
-        assert_eq!(&buf[bg_idx..bg_idx + 4], &[32, 30, 30, 255]);
+        assert_eq!(&buf[bg_idx..bg_idx + 4], &[29, 28, 28, 255]);
 
         // Liquid Glass sidebar leaves sidebar translucent while keeping content opaque,
         // and unfocused window dims traffic lights to inactive grey.

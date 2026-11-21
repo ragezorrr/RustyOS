@@ -1,4 +1,4 @@
-//! macOS 27 Golden Gate Liquid Glass popover and context menu rendering for `rusty-files`
+//! RustyOS Liquid Glass popover and context menu rendering for `rusty-files`
 //! (`RUSTYOS-087`, `RUSTYOS-107`, ADR-0043, ADR-0058).
 //!
 //! Provides 1:1 visual parity with compositor-managed popovers (`crates/rusty-compositor/src/shell_render/context_menu.rs`):
@@ -226,7 +226,7 @@ fn render_popup_with_chrome(
 
         let hovered = hover_idx == Some(idx);
         if hovered {
-            // Inset floating hover pill (macOS 27 Golden Gate 1:1)
+            // Inset floating hover pill (RustyOS 1:1)
             let pill = Rect::new(
                 item.rect.x + HOVER_PILL_INSET_H,
                 item.rect.y + HOVER_PILL_INSET_V,

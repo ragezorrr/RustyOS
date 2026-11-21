@@ -12,7 +12,7 @@ use crate::render::sidebar::draw_glass_pill;
 use crate::render::{Palette, rgba};
 use crate::state::{FilesAppState, SearchScope};
 
-/// Renders the Golden Gate segmented `Tabs` bar beneath the toolbar.
+/// Renders the RustyOS segmented `Tabs` bar beneath the toolbar.
 pub(crate) fn render_tab_bar(c: &mut Canvas<'_>, tb: &TabBarLayout, pal: &Palette) {
     let track_bg = if pal.is_dark {
         rgba(48, 48, 54, 255)
@@ -88,7 +88,7 @@ pub(crate) fn render_path_bar(c: &mut Canvas<'_>, crumbs: &[PathCrumbLayout], pa
         if is_last {
             c.fill_rounded_rect(crumb.rect, 6, pal.row_alt);
         }
-        // Mini Golden Gate folder glyph before label
+        // Mini RustyOS folder glyph before label
         let icon_col = if pal.is_dark {
             rgba(72, 164, 255, 255)
         } else {

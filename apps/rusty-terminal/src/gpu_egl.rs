@@ -393,7 +393,7 @@ impl GpuRenderer {
         }
     }
 
-    /// Renders complete macOS Tahoe window + cells via 2 batched passes and presents via `eglSwapBuffers`.
+    /// Renders complete RustyOS window + cells via 2 batched passes and presents via `eglSwapBuffers`.
     pub(crate) fn render(&mut self, app: &TerminalAppState) -> Result<(), String> {
         // SAFETY: Valid current EGL context.
         unsafe {

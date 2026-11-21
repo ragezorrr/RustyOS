@@ -6,5 +6,5 @@ command = "/usr/bin/rustyos-session --drm"
 user = "liveuser"
 
 [default_session]
-command = "/usr/local/bin/rustyos-greeter-fallback"
+command = "/usr/bin/rusty-greeter --session-cmd \"/usr/bin/rustyos-session --drm\""
 user = "greeter"

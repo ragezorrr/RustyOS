@@ -11,7 +11,7 @@ use rusty_services::file_manager::RUSTYOS_ACCENT_SWATCHES;
 pub(crate) const WINDOW_CORNER_RADIUS: i32 = rusty_ui::WINDOW_RADIUS as i32;
 pub(crate) const CARD_CORNER_RADIUS: i32 = 12;
 pub(crate) const PILL_CORNER_RADIUS: i32 = 16;
-pub(crate) const HEADER_HEIGHT: i32 = 44;
+pub(crate) const HEADER_HEIGHT: i32 = 40;
 pub(crate) const FOOTER_HEIGHT: i32 = 58;
 pub(crate) const MIN_WIDTH: i32 = 700;
 pub(crate) const MIN_HEIGHT: i32 = 500;

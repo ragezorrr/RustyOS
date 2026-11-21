@@ -177,7 +177,7 @@ tmpfs /run tmpfs rw,nosuid,nodev 0 0
         assert!(validate_single_component_name("..").is_err());
 
         let doc = work.join("hello world.txt");
-        fs::write(&doc, b"golden gate")?;
+        fs::write(&doc, b"rustyos")?;
         let trashed_doc = move_to_trash(&doc, &trash)?;
         assert!(!doc.exists());
         assert!(trashed_doc.exists());
@@ -189,7 +189,7 @@ tmpfs /run tmpfs rw,nosuid,nodev 0 0
 
         let restored = restore_from_trash("hello world.txt", &trash)?;
         assert_eq!(restored, doc);
-        assert_eq!(fs::read(&doc)?, b"golden gate");
+        assert_eq!(fs::read(&doc)?, b"rustyos");
         assert_eq!(list_trash_entries(&trash)?, []);
 
         move_to_trash(&f2, &trash)?;

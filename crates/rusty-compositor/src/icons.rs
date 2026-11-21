@@ -109,7 +109,7 @@ pub enum BuiltinAppIcon {
     Terminal,
     /// Iconic two-tone macOS Finder face squircle (`Files`).
     Files,
-    /// Free-standing macOS 27 Golden Gate folder (for Desktop & directories).
+    /// Free-standing RustyOS folder (for Desktop & directories).
     Folder,
     /// Silver frosted App Overview / Launcher 3x3 grid squircle.
     Overview,
@@ -127,7 +127,7 @@ pub enum BuiltinAppIcon {
     TrashFull,
     /// Original amethyst-glass RustyOS crest squircle for system notifications (`RUSTYOS-051`).
     RustySystem,
-    /// Golden Gate azure Software Update squircle (`RUSTYOS-077`).
+    /// RustyOS azure Software Update squircle (`RUSTYOS-077`).
     Updater,
     /// Frosted jewel-tone window card squircle for windows lacking an XDG PNG or SHM icon.
     WindowFallback {
@@ -966,7 +966,7 @@ mod tests {
         // Argb8888 premultiplied pixel order is `[B, G, R, A]`.
         assert!(
             rusty_bg[0] > rusty_bg[1] && rusty_bg[0] > rusty_bg[2],
-            "RustySystem icon background must use Golden Gate blue, got {rusty_bg:?}"
+            "RustySystem icon background must use RustyOS blue, got {rusty_bg:?}"
         );
         assert_ne!(updater_center, notes_center);
         assert_ne!(downloads_center, trash_center);

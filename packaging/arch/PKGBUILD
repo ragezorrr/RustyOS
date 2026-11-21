@@ -22,11 +22,14 @@ depends=(
   'dbus'
   'fontconfig'
   'ttf-jetbrains-mono'
+  'noto-fonts'
+  'noto-fonts-emoji'
   'xorg-xwayland'
   'pipewire'
   'xdg-desktop-portal'
   'polkit'
   'pacman-contrib'
+  'squashfs-tools'
 )
 makedepends=('rust' 'cargo' 'git' 'pkgconf')
 optdepends=(

@@ -1674,8 +1674,7 @@ impl SettingsAppState {
                     _ => "en",
                 };
                 next.clone_into(&mut self.clock_locale);
-                let quoted = format!("\"{next}\"");
-                let _ = update_config_entries(&[("top_bar", "clock_locale", &quoted)]);
+                let _ = update_config_entries(&[("top_bar", "clock_locale", next)]);
             }
             RowControlId::UpdatesEnabledToggle => {
                 self.updates_enabled = !self.updates_enabled;

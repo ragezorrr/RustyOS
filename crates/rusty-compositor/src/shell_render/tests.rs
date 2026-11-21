@@ -1044,7 +1044,7 @@ fn macos27_traffic_hover_notifications_and_osd_routing() {
         None
     );
 
-    // 4. Notifications (344 px Golden Gate card, squircle icon choice) & OSD SDF glyph routing
+    // 4. Notifications (344 px RustyOS card, squircle icon choice) & OSD SDF glyph routing
     let notif_rects = notification_toast_rects(size, 1);
     assert_eq!(notif_rects[0].size.w, 344);
     assert_eq!(

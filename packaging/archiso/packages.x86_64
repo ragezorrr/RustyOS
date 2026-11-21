@@ -16,6 +16,8 @@ mesa
 mkinitcpio
 mkinitcpio-archiso
 networkmanager
+noto-fonts
+noto-fonts-emoji
 os-prober
 pacman-contrib
 parted
@@ -24,6 +26,7 @@ pipewire-pulse
 polkit
 rustyos-git
 seatd
+squashfs-tools
 sudo
 syslinux
 systemd-resolvconf

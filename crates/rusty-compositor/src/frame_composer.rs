@@ -34,7 +34,7 @@ use crate::{
     state::RustyCompositorState,
 };
 
-/// Background clear color matching `background = "#141518"` from `DESIGN.md` (Golden Gate).
+/// Background clear color matching `background = "#141518"` from `DESIGN.md` (RustyOS).
 pub(crate) const BACKGROUND_COLOR: Color32F = Color32F::new(0.078, 0.082, 0.094, 1.0);
 
 /// Controls cursor inclusion and hardware cursor plane candidacy per output frame (`RUSTYOS-046`).

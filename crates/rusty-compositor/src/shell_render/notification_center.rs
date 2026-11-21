@@ -1,4 +1,4 @@
-//! Right-edge macOS 27 Golden Gate `Notification Center` overlay (`RUSTYOS-109`).
+//! Right-edge RustyOS `Notification Center` overlay (`RUSTYOS-109`).
 //!
 //! Renders delivered notification cards (`Lead + Notification Center stack`), interactive
 //! `Clear All` / dismiss buttons, the gradient `Weather` forecast card, interactive `Reminders`
@@ -173,7 +173,7 @@ fn card_slot(
     }
 }
 
-/// Computes Golden Gate layout for [`ShellOverlayView::NotificationCenter`] (`RUSTYOS-109`).
+/// Computes RustyOS layout for [`ShellOverlayView::NotificationCenter`] (`RUSTYOS-109`).
 #[must_use]
 pub fn compute_notification_center_layout(
     screen_size: Size<i32, Physical>,

@@ -1885,7 +1885,7 @@ impl RustyCompositorState {
         crate::shell_render::dock_label_for_key(key)
     }
 
-    /// Builds ordered macOS 27 Golden Gate Dock tiles with app grouping (`RUSTYOS-073`).
+    /// Builds ordered RustyOS Dock tiles with app grouping (`RUSTYOS-073`).
     #[must_use]
     pub fn build_dock_tiles(&self) -> Vec<crate::shell_render::DockAppTile> {
         let records = self.collect_dock_window_records();

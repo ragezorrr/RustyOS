@@ -7,8 +7,8 @@ use std::process::Command;
 
 use fontdue::{Font, FontSettings};
 
-static UI_REGULAR_BYTES: &[u8] = include_bytes!("../../../assets/fonts/Inter-Regular.ttf");
-static UI_SEMIBOLD_BYTES: &[u8] = include_bytes!("../../../assets/fonts/Inter-SemiBold.ttf");
+static UI_REGULAR_BYTES: &[u8] = rusty_ui::text::INTER_REGULAR_BYTES;
+static UI_SEMIBOLD_BYTES: &[u8] = rusty_ui::text::INTER_SEMIBOLD_BYTES;
 
 /// Which font slot is queried for rasterization and atlas caching.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -281,6 +281,13 @@ fn load_system_monospace(ui_reg: &Font, ui_bold: &Font) -> (Font, Option<Font>) 
     {
         let bold = fc_match_path("monospace:bold").and_then(|bp| load_font_file(Path::new(&bp)));
         return (reg, bold);
+    }
+
+    if let Ok(bundled) = Font::from_bytes(
+        rusty_ui::text::JETBRAINS_MONO_REGULAR_BYTES,
+        FontSettings::default(),
+    ) {
+        return (bundled, None);
     }
 
     (ui_reg.clone(), Some(ui_bold.clone()))
@@ -685,7 +692,7 @@ fn rasterize_powerline(ch: char, w: i32, h: i32) -> RasterizedGlyph {
     new_bitmap_glyph(w, h, buf)
 }
 
-/// Crisp anti-aliased 14x14 procedural UI icons for Tahoe header pills (Glass, Search, New Tab).
+/// Crisp anti-aliased 14x14 procedural UI icons for RustyOS header pills (Glass, Search, New Tab).
 fn rasterize_ui_icon(ch: char) -> Option<RasterizedGlyph> {
     if !matches!(ch, '\u{E001}' | '\u{E002}' | '\u{E003}') {
         return None;

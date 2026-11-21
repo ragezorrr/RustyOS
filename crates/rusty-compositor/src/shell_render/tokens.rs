@@ -68,7 +68,7 @@ pub(crate) fn active_accent_index() -> u8 {
     ACTIVE_ACCENT_INDEX.with(std::cell::Cell::get)
 }
 
-/// Dynamic Golden Gate Light/Dark color palette (`RUSTYOS-067`).
+/// Dynamic RustyOS Light/Dark color palette (`RUSTYOS-067`).
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ThemePalette {
     pub is_dark: bool,
@@ -88,7 +88,7 @@ pub(crate) struct ThemePalette {
 }
 
 impl ThemePalette {
-    /// Returns the Golden Gate [`ThemePalette`] for the currently active [`crate::config::AppearanceMode`].
+    /// Returns the RustyOS [`ThemePalette`] for the currently active [`crate::config::AppearanceMode`].
     #[must_use]
     pub(crate) const fn current_for(mode: crate::config::AppearanceMode) -> Self {
         match mode {
@@ -127,7 +127,7 @@ impl ThemePalette {
         }
     }
 
-    /// Returns the Golden Gate [`ThemePalette`] for `mode` and explicit `[ui].accent_index` (`RUSTYOS-114`).
+    /// Returns the RustyOS [`ThemePalette`] for `mode` and explicit `[ui].accent_index` (`RUSTYOS-114`).
     #[must_use]
     pub(crate) const fn current_for_styled(
         mode: crate::config::AppearanceMode,
@@ -228,7 +228,7 @@ pub const DOCK_PADDING: i32 = 8;
 /// Dock corner radius in logical pixels (`RUSTYOS-094`: flat frosted glass container matching reference, radius 18px).
 pub const DOCK_RADIUS: i32 = 18;
 
-/// Computes dynamic Dock corner radius calibrated to `CutefishOS` standard (`thickness * 28 / 86`) (`RUSTYOS-098`).
+/// Computes dynamic Dock corner radius calibrated to `RustyOS` standard (`thickness * 28 / 86`) (`RUSTYOS-098`).
 #[must_use]
 pub fn compute_dock_radius(thickness: i32) -> i32 {
     let raw = (thickness * 28 + 43) / 86;
@@ -268,7 +268,7 @@ pub(super) const fn premul(r: f32, g: f32, b: f32, a: f32) -> Color32F {
     Color32F::new(r * a, g * a, b * a, a)
 }
 
-// Design tokens from `DESIGN.md` (Version 3.0 "Golden Gate Light & Dark")
+// Design tokens from `DESIGN.md` (Version 3.0 "RustyOS Light & Dark")
 // Smithay Color32F requires premultiplied RGBA components.
 pub const COLOR_BACKGROUND: Color32F = Color32F::new(0.078, 0.082, 0.094, 1.0); // #141518
 pub const COLOR_SURFACE: Color32F = Color32F::new(0.118, 0.118, 0.129, 1.0); // #1E1E21

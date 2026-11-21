@@ -1,4 +1,4 @@
-//! macOS 27 Golden Gate desktop canvas icon grid and interaction (`RUSTYOS-081`).
+//! RustyOS desktop canvas icon grid and interaction (`RUSTYOS-081`).
 //!
 //! Renders interactive file, folder, and application icons directly on the desktop
 //! wallpaper layer, arranged in vertical columns from top-right down, with dual-layer
@@ -18,7 +18,7 @@ use super::tokens::truncate_ascii;
 pub(crate) const DESKTOP_ITEM_W: i32 = 88;
 /// Height of each desktop canvas icon grid cell in logical pixels.
 pub(crate) const DESKTOP_ITEM_H: i32 = 92;
-/// Icon edge size in logical pixels (48x48 macOS Golden Gate standard).
+/// Icon edge size in logical pixels (48x48 RustyOS standard).
 pub(crate) const DESKTOP_ICON_SIZE: i32 = 48;
 /// Margin from screen right edge in logical pixels.
 pub(crate) const DESKTOP_MARGIN_RIGHT: i32 = 24;

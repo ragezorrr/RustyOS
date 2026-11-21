@@ -108,7 +108,7 @@ fn split_known_other(networks: &[WifiAccessPoint]) -> (Vec<usize>, Vec<usize>) {
     (known, other)
 }
 
-/// Computes `Golden Gate` `Liquid Glass` popover geometry below the `TopBar` Wi-Fi/Ethernet glyph (`RUSTYOS-108`).
+/// Computes `RustyOS` `Liquid Glass` popover geometry below the `TopBar` Wi-Fi/Ethernet glyph (`RUSTYOS-108`).
 #[must_use]
 pub fn compute_wifi_popover_layout(
     screen_size: Size<i32, Physical>,

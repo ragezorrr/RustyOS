@@ -23,7 +23,7 @@ use super::LiquidGlassElement;
 
 const MAX_SHADOW_SLOTS: usize = 256;
 
-/// GLSL ES 1.00 fragment shader for seamless macOS Golden Gate rounded-box drop shadows.
+/// GLSL ES 1.00 fragment shader for seamless RustyOS rounded-box drop shadows.
 pub(crate) const WINDOW_SHADOW_FRAG: &str = r"#version 100
 
 //_DEFINES_

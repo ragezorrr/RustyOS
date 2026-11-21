@@ -1046,7 +1046,7 @@ impl UiShapeCache {
     }
 
     /// Returns a GPU-cached wallpaper scaled cleanly to `screen_size`, preferring `custom_path` (`.png`)
-    /// from `[ui] wallpaper` and falling back to the built-in Golden Gate silk gradient (`RUSTYOS-034`, `RUSTYOS-067`).
+    /// from `[ui] wallpaper` and falling back to the built-in RustyOS silk gradient (`RUSTYOS-034`, `RUSTYOS-067`).
     pub fn wallpaper_element(
         &mut self,
         renderer: &mut GlesRenderer,

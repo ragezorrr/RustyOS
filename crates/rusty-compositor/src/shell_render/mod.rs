@@ -1,7 +1,7 @@
 //! Visual shell elements rendering (`TopBar`, `Dock`, Desktop background) (`RUSTYOS-012`, ADR-0007).
 //!
 //! Renders macOS-inspired top status bar and bottom floating dock using Smithay's
-//! solid color render elements, adhering to design tokens in `DESIGN.md` ("Golden Gate Light & Dark").
+//! solid color render elements, adhering to design tokens in `DESIGN.md` ("RustyOS Light & Dark").
 
 use smithay::backend::renderer::element::memory::MemoryRenderBufferRenderElement;
 use smithay::backend::renderer::element::solid::SolidColorRenderElement;

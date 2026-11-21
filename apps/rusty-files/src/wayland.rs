@@ -957,7 +957,7 @@ const fn map_resize_edge(zone: ResizeEdgeZone) -> ResizeEdge {
     }
 }
 
-/// Connects to Wayland compositor, maps the Golden Gate CSD window, and runs the event loop.
+/// Connects to Wayland compositor, maps the RustyOS CSD window, and runs the event loop.
 ///
 /// # Errors
 /// Returns `WaylandAppError` on Wayland connection, protocol binding, or rendering failure.

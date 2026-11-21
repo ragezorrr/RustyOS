@@ -1,4 +1,4 @@
-//! Pure-CPU `ARGB8888` premultiplied `wl_shm` fallback renderer matching macOS Tahoe GPU styling.
+//! Pure-CPU `ARGB8888` premultiplied `wl_shm` fallback renderer matching RustyOS GPU styling.
 
 use std::collections::HashMap;
 

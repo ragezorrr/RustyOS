@@ -17,7 +17,7 @@ pub enum DialogAction {
     Confirm,
 }
 
-/// Modal dialog configuration matching Golden Gate sheets (`r = 14`, scrim + `ShadowElevation::Popup`).
+/// Modal dialog configuration matching RustyOS sheets (`r = 14`, scrim + `ShadowElevation::Popup`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct DialogSheet {
     pub title: String,

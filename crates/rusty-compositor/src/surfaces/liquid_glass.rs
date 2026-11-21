@@ -150,7 +150,7 @@ void main() {
 }
 ";
 
-/// GLSL ES 1.00 Liquid Glass composite fragment shader (`CutefishOS` superellipse model for Dock + Popover/ControlModule).
+/// GLSL ES 1.00 Liquid Glass composite fragment shader (`RustyOS` superellipse model for Dock + Popover/ControlModule).
 pub(crate) const LIQUID_GLASS_FRAG: &str = r"#version 100
 
 //_DEFINES_
@@ -381,7 +381,7 @@ void main() {
 }
 ";
 
-/// Computed Liquid Glass material uniforms derived from `CutefishOS` Light/Dark style + opacity.
+/// Computed Liquid Glass material uniforms derived from `RustyOS` Light/Dark style + opacity.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct GlassMaterialUniforms {
     /// Target frosted tint RGB and blend weight `a` in `[0.0, 1.0]`.
@@ -391,7 +391,7 @@ pub(crate) struct GlassMaterialUniforms {
     pub sat_refract_rim_sheen: [f32; 4],
 }
 
-/// Computes unified `CutefishOS` Liquid Glass shader material parameters for `style`, `glass_opacity`, and polarity.
+/// Computes unified `RustyOS` Liquid Glass shader material parameters for `style`, `glass_opacity`, and polarity.
 #[must_use]
 pub(crate) fn compute_glass_material(
     style: GlassPanelStyle,
