@@ -2527,6 +2527,18 @@ hardware/software context и низкие накладные расходы.
   - Все 38 встроенных PNG-спрайтов (15 sidebar + 13 toolbar + 10 file/folder) декодируются чисто; `Ctrl+Click`/`Shift+Click`/`Ctrl+A`, сворачивание секций сайдбара и `hovered_hit` покрыты unit-тестами; `cargo fmt`, `clippy -D warnings`, `cargo test --workspace` и живая визуальная проверка проходят чисто.
 - **Risks:** Низкие; изменения локализованы в `apps/rusty-files`.
 
+### RUSTYOS-151 — Фирменный `@2x` курсор RustyOS, настройка `cursor_size` и `wp-cursor-shape-v1` в приложениях
+- **Status:** Done
+- **Goal:** Создать встроенный `@2x` SVG→PNG набор курсоров `"RustyOS"` (14 форм с точными hotspot) в `assets/icons/cursors/{svg,png}/` и сделать его темой по умолчанию в `rusty-compositor`, добавить `cursor_size` (`16..=64`) в `config.toml` и на страницу `Cursor Style` в `rusty-settings`, и подключить клиентский `wp-cursor-shape-v1` в `rusty-files`, `rusty-settings` и `rusty-terminal`.
+- **Dependencies:** `RUSTYOS-146`, `RUSTYOS-150`.
+- **Scope:**
+  - `assets/icons/cursors/{svg,png}/`: 14 `@2x` (64×64) SVG→PNG курсоров (`default`, `pointer`, `text`, `crosshair`, `move`, `grab`, `grabbing`, `ew_resize`, `ns_resize`, `nwse_resize`, `nesw_resize`, `not_allowed`, `wait`, `progress`).
+  - `crates/rusty-compositor/src/{surfaces/builtin_cursors.rs, surfaces/xcursor.rs, surfaces/mod.rs, config.rs, frame_composer.rs, state/shell_actions.rs}`.
+  - `apps/rusty-settings/src/{state.rs, layout.rs, wayland.rs}`, `apps/rusty-files/src/wayland.rs`, `apps/rusty-terminal/src/wayland.rs`.
+- **Acceptance Criteria:**
+  - Все 14 встроенных курсоров декодируются и масштабируются с валидными hotspot; `cursor_size` сохраняется в `[ui]` и передаётся в `ThemeSyncService` и композитор; клиентский `wp-cursor-shape-v1` меняет форму курсора (`Resize`, `Text`, `Pointer`, `Grabbing`) в `rusty-files`, `rusty-settings`, `rusty-terminal`; `cargo fmt`, `clippy -D warnings`, `cargo test --workspace` и живая проверка проходят чисто.
+- **Risks:** Низкие; ноль новых зависимостей в `Cargo.lock`.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

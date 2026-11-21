@@ -282,6 +282,8 @@ pub(crate) enum RowControlId {
     VolumeUp,
     ToggleMute,
     CursorThemeCycle,
+    CursorSizeDown,
+    CursorSizeUp,
     WifiEnabledToggle,
     WifiConnectIndex(usize),
     NetworkRefresh,
@@ -622,6 +624,7 @@ pub(crate) struct SettingsAppState {
     pub(crate) lock_on_sleep: bool,
     pub(crate) enable_polkit_agent: bool,
     pub(crate) cursor_theme: String,
+    pub(crate) cursor_size: u32,
     pub(crate) power_low_power_mode: String,
     pub(crate) power_display_sleep_minutes: u32,
     pub(crate) power_auto_lock_minutes: u32,
@@ -755,7 +758,8 @@ impl SettingsAppState {
             require_password_on_lock: true,
             lock_on_sleep: true,
             enable_polkit_agent: true,
-            cursor_theme: String::from("Adwaita"),
+            cursor_theme: String::from("RustyOS"),
+            cursor_size: 24,
             power_low_power_mode: String::from("never"),
             power_display_sleep_minutes: 10,
             power_auto_lock_minutes: 0,
@@ -1781,13 +1785,23 @@ impl SettingsAppState {
                 let _ = update_config_entries(&[("security", "enable_polkit_agent", v)]);
             }
             RowControlId::CursorThemeCycle => {
-                if self.cursor_theme == "Adwaita" {
-                    "breeze_cursors"
-                } else {
-                    "Adwaita"
+                match self.cursor_theme.as_str() {
+                    "RustyOS" => "Adwaita",
+                    "Adwaita" => "Bibata-Modern-Classic",
+                    _ => "RustyOS",
                 }
                 .clone_into(&mut self.cursor_theme);
                 let _ = update_config_entries(&[("ui", "cursor_theme", &self.cursor_theme)]);
+            }
+            RowControlId::CursorSizeDown => {
+                self.cursor_size = self.cursor_size.saturating_sub(4).clamp(16, 64);
+                let v = self.cursor_size.to_string();
+                let _ = update_config_entries(&[("ui", "cursor_size", &v)]);
+            }
+            RowControlId::CursorSizeUp => {
+                self.cursor_size = (self.cursor_size + 4).clamp(16, 64);
+                let v = self.cursor_size.to_string();
+                let _ = update_config_entries(&[("ui", "cursor_size", &v)]);
             }
             other => self.apply_notification_action(other),
         }
@@ -2315,7 +2329,16 @@ impl SettingsAppState {
                     self.clock_locale = norm;
                 }
             }
-            ("ui", "cursor_theme") if !val.is_empty() => val.clone_into(&mut self.cursor_theme),
+            ("ui", "cursor_theme") if !val.is_empty() => {
+                val.trim()
+                    .trim_matches('"')
+                    .clone_into(&mut self.cursor_theme);
+            }
+            ("ui", "cursor_size") => {
+                if let Ok(v) = val.trim().parse::<u32>() {
+                    self.cursor_size = v.clamp(16, 64);
+                }
+            }
             ("updates", "enabled") => self.updates_enabled = parse_bool(val),
             ("notifications", "allow") => self.notif_allow = parse_bool(val),
             ("notifications", "show_previews") => {

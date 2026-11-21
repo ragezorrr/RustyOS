@@ -91,10 +91,18 @@ pub(super) fn xcursor_target_size() -> u32 {
 }
 
 /// Computes the target `XCursor` pixel size for an output scale factor (`RUSTYOS-046`).
+#[cfg(test)]
 #[must_use]
 pub(crate) fn xcursor_target_pixel_size(output_scale: f64) -> u32 {
+    xcursor_target_pixel_size_for_base(xcursor_target_size(), output_scale)
+}
+
+/// Computes the target cursor pixel size from an explicit logical base size (`16..=64`) and scale (`RUSTYOS-151`).
+#[must_use]
+pub(crate) fn xcursor_target_pixel_size_for_base(base_size: u32, output_scale: f64) -> u32 {
+    let clamped_base = base_size.clamp(16, 64);
     let clamped = crate::config::clamp_display_scale(output_scale);
-    let px = (f64::from(xcursor_target_size()) * clamped)
+    let px = (f64::from(clamped_base) * clamped)
         .round()
         .clamp(16.0, 128.0);
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -254,6 +262,12 @@ pub(super) fn load_xcursor_for_icon(
     target_size: u32,
     output_scale: f64,
 ) -> Option<CachedCursor> {
+    if super::builtin_cursors::is_builtin_rustyos_theme(theme_override)
+        && let Some(builtin) =
+            super::builtin_cursors::load_builtin_cursor(icon, target_size, output_scale)
+    {
+        return Some(builtin);
+    }
     let mut themes: Vec<String> = Vec::new();
     if let Some(t) = theme_override.map(str::trim).filter(|t| !t.is_empty()) {
         themes.push(t.to_owned());
@@ -339,7 +353,7 @@ pub(super) fn load_xcursor_for_icon(
             }
         }
     }
-    None
+    super::builtin_cursors::load_builtin_cursor(icon, target_size, output_scale)
 }
 
 /// Parses a freedesktop/X11 binary `Xcur` cursor file, choosing the frame closest to `target_size`

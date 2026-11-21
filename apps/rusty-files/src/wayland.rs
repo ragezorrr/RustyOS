@@ -23,9 +23,14 @@ use smithay_client_toolkit::{
         calloop::{EventLoop, LoopHandle, ping},
         calloop_wayland_source::WaylandSource,
         csd_frame::WindowState,
-        protocols::xdg::shell::client::{
-            xdg_positioner::{Anchor, ConstraintAdjustment, Gravity},
-            xdg_toplevel::ResizeEdge,
+        protocols::{
+            wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::{
+                Shape as CursorShape, WpCursorShapeDeviceV1,
+            },
+            xdg::shell::client::{
+                xdg_positioner::{Anchor, ConstraintAdjustment, Gravity},
+                xdg_toplevel::ResizeEdge,
+            },
         },
     },
     registry::{ProvidesRegistryState, RegistryState},
@@ -35,6 +40,7 @@ use smithay_client_toolkit::{
         keyboard::{KeyEvent, KeyboardHandler, Keysym, Modifiers},
         pointer::{
             AxisScroll, BTN_LEFT, BTN_RIGHT, PointerEvent, PointerEventKind, PointerHandler,
+            cursor_shape::CursorShapeManager,
         },
     },
     shell::{
@@ -191,6 +197,10 @@ struct WaylandClientData {
     popup_trigger_serial: Option<u32>,
     seat: Option<wl_seat::WlSeat>,
     pointer: Option<wl_pointer::WlPointer>,
+    cursor_shape_manager: Option<CursorShapeManager>,
+    cursor_shape_device: Option<WpCursorShapeDeviceV1>,
+    pointer_enter_serial: u32,
+    last_cursor_shape: Option<CursorShape>,
     keyboard: Option<wl_keyboard::WlKeyboard>,
     modifiers: Modifiers,
     width: u32,
@@ -837,6 +847,62 @@ impl WaylandClientData {
         self.app.dirty = true;
     }
 
+    fn apply_cursor_shape(&mut self, shape: CursorShape) {
+        if self.last_cursor_shape == Some(shape) {
+            return;
+        }
+        if let Some(dev) = &self.cursor_shape_device {
+            dev.set_shape(self.pointer_enter_serial, shape);
+            self.last_cursor_shape = Some(shape);
+        }
+    }
+
+    fn update_cursor_shape(&mut self, hit: Option<&FilesHit>, layout: &FilesLayout) {
+        let shape = match hit {
+            Some(FilesHit::ResizeEdge(ResizeEdgeZone::Left | ResizeEdgeZone::Right)) => {
+                CursorShape::EwResize
+            }
+            Some(FilesHit::ResizeEdge(ResizeEdgeZone::Top | ResizeEdgeZone::Bottom)) => {
+                CursorShape::NsResize
+            }
+            Some(FilesHit::ResizeEdge(ResizeEdgeZone::TopLeft | ResizeEdgeZone::BottomRight)) => {
+                CursorShape::NwseResize
+            }
+            Some(FilesHit::ResizeEdge(ResizeEdgeZone::TopRight | ResizeEdgeZone::BottomLeft)) => {
+                CursorShape::NeswResize
+            }
+            Some(FilesHit::SearchToggle) if layout.search_pill_rect.w >= 72 => CursorShape::Text,
+            Some(
+                FilesHit::TrafficClose
+                | FilesHit::TrafficMinimize
+                | FilesHit::TrafficMaximize
+                | FilesHit::NavBack
+                | FilesHit::NavForward
+                | FilesHit::ViewMode(_)
+                | FilesHit::SortButton
+                | FilesHit::ActionPrimary
+                | FilesHit::ActionTagPicker
+                | FilesHit::ActionMoreMenu
+                | FilesHit::SearchToggle
+                | FilesHit::SearchClear
+                | FilesHit::SearchScope(_)
+                | FilesHit::SearchScopeClear
+                | FilesHit::EmptyTrashBanner
+                | FilesHit::SidebarSectionHeader(_)
+                | FilesHit::SidebarItem(_)
+                | FilesHit::SidebarRemovableMount(_)
+                | FilesHit::SidebarRemovableEject(_)
+                | FilesHit::ListHeaderSort(_)
+                | FilesHit::TabAdd
+                | FilesHit::TabSelect(_)
+                | FilesHit::TabClose(_)
+                | FilesHit::PathCrumb(_),
+            ) => CursorShape::Pointer,
+            _ => CursorShape::Default,
+        };
+        self.apply_cursor_shape(shape);
+    }
+
     fn execute_popup_command(&mut self, cmd: PopupCommand) {
         self.active_popup = None;
         self.app.popup = None;
@@ -1065,6 +1131,10 @@ pub(crate) fn run(options: &StartupOptions) -> Result<(), WaylandAppError> {
         popup_trigger_serial: None,
         seat: None,
         pointer: None,
+        cursor_shape_manager: CursorShapeManager::bind(&globals, &qh).ok(),
+        cursor_shape_device: None,
+        pointer_enter_serial: 0,
+        last_cursor_shape: None,
         keyboard: None,
         modifiers: Modifiers::default(),
         width: DEFAULT_WIDTH,
@@ -1432,6 +1502,10 @@ impl SeatHandler for WaylandClientData {
             && self.pointer.is_none()
             && let Ok(ptr) = self.seat_state.get_pointer(qh, &seat)
         {
+            self.cursor_shape_device = self
+                .cursor_shape_manager
+                .as_ref()
+                .map(|m| m.get_shape_device(&ptr, qh));
             self.pointer = Some(ptr);
         }
         if cap == Capability::Keyboard
@@ -1576,6 +1650,7 @@ impl PopupHandler for WaylandClientData {
 }
 
 impl PointerHandler for WaylandClientData {
+    #[allow(clippy::too_many_lines)]
     fn pointer_frame(
         &mut self,
         _: &Connection,
@@ -1600,19 +1675,34 @@ impl PointerHandler for WaylandClientData {
                 self.app.dirty = true;
             }
             match ev.kind {
+                PointerEventKind::Enter { serial } => {
+                    self.pointer_enter_serial = serial;
+                    self.last_cursor_shape = None;
+                    let layout = compute_layout(&self.app, self.width, self.height);
+                    let hit = hit_test(&layout, px, py);
+                    self.update_cursor_shape(hit.as_ref(), &layout);
+                    self.app.set_hovered_hit(hit);
+                }
                 PointerEventKind::Motion { .. } => {
                     if self.update_active_text_drag(px) {
+                        self.apply_cursor_shape(CursorShape::Text);
                         self.app.dirty = true;
                     } else if self.pointer_pressed
                         && let Some(drag) = self.app.file_drag.as_mut()
                     {
                         drag.copy_mode = self.modifiers.ctrl;
+                        let is_active = drag.active;
                         if drag.update_pos((px, py)) {
                             self.app.dirty = true;
                         }
+                        if is_active {
+                            self.apply_cursor_shape(CursorShape::Grabbing);
+                        }
                     } else {
                         let layout = compute_layout(&self.app, self.width, self.height);
-                        self.app.set_hovered_hit(hit_test(&layout, px, py));
+                        let hit = hit_test(&layout, px, py);
+                        self.update_cursor_shape(hit.as_ref(), &layout);
+                        self.app.set_hovered_hit(hit);
                     }
                 }
                 PointerEventKind::Leave { .. } => {
@@ -1620,6 +1710,7 @@ impl PointerHandler for WaylandClientData {
                         self.app.traffic_hovered = false;
                         self.app.dirty = true;
                     }
+                    self.last_cursor_shape = None;
                     self.app.set_hovered_hit(None);
                 }
                 PointerEventKind::Press { button, serial, .. } => {
@@ -1673,7 +1764,7 @@ impl PointerHandler for WaylandClientData {
                         source,
                     );
                 }
-                _ => {}
+                PointerEventKind::Release { .. } => {}
             }
         }
     }

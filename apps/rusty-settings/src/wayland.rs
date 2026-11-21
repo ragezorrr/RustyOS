@@ -23,14 +23,22 @@ use smithay_client_toolkit::{
         calloop::{EventLoop, LoopHandle, ping},
         calloop_wayland_source::WaylandSource,
         csd_frame::WindowState,
-        protocols::xdg::shell::client::xdg_toplevel::ResizeEdge,
+        protocols::{
+            wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::{
+                Shape as CursorShape, WpCursorShapeDeviceV1,
+            },
+            xdg::shell::client::xdg_toplevel::ResizeEdge,
+        },
     },
     registry::{ProvidesRegistryState, RegistryState},
     registry_handlers,
     seat::{
         Capability, SeatHandler, SeatState,
         keyboard::{KeyEvent, KeyboardHandler, Keysym, Modifiers},
-        pointer::{AxisScroll, BTN_LEFT, PointerEvent, PointerEventKind, PointerHandler},
+        pointer::{
+            AxisScroll, BTN_LEFT, PointerEvent, PointerEventKind, PointerHandler,
+            cursor_shape::CursorShapeManager,
+        },
     },
     shell::{
         WaylandSurface,
@@ -156,6 +164,10 @@ struct SettingsClient {
     frame_sent_at: Option<Instant>,
     seat: Option<wl_seat::WlSeat>,
     pointer: Option<wl_pointer::WlPointer>,
+    cursor_shape_manager: Option<CursorShapeManager>,
+    cursor_shape_device: Option<WpCursorShapeDeviceV1>,
+    pointer_enter_serial: u32,
+    last_cursor_shape: Option<CursorShape>,
     keyboard: Option<wl_keyboard::WlKeyboard>,
     modifiers: Modifiers,
     width: u32,
@@ -309,6 +321,48 @@ impl SettingsClient {
             {
                 self.layout_cache = None;
             }
+        }
+    }
+
+    fn sync_cursor_shape(&mut self) {
+        let shape = match self.hover_hit {
+            Some(SettingsHit::ResizeEdge(ResizeEdgeZone::Left | ResizeEdgeZone::Right)) => {
+                CursorShape::EwResize
+            }
+            Some(SettingsHit::ResizeEdge(ResizeEdgeZone::Top | ResizeEdgeZone::Bottom)) => {
+                CursorShape::NsResize
+            }
+            Some(SettingsHit::ResizeEdge(
+                ResizeEdgeZone::TopLeft | ResizeEdgeZone::BottomRight,
+            )) => CursorShape::NwseResize,
+            Some(SettingsHit::ResizeEdge(
+                ResizeEdgeZone::TopRight | ResizeEdgeZone::BottomLeft,
+            )) => CursorShape::NeswResize,
+            Some(SettingsHit::SearchField) => CursorShape::Text,
+            Some(
+                SettingsHit::TrafficClose
+                | SettingsHit::TrafficMinimize
+                | SettingsHit::TrafficMaximize
+                | SettingsHit::NavBack
+                | SettingsHit::NavForward
+                | SettingsHit::SidebarItem(_)
+                | SettingsHit::SelectTheme(_)
+                | SettingsHit::SelectAccent(_)
+                | SettingsHit::Control(_)
+                | SettingsHit::StepperMinus(_)
+                | SettingsHit::StepperPlus(_)
+                | SettingsHit::PushPage(_)
+                | SettingsHit::DockPosTile(_)
+                | SettingsHit::BatteryTab(_)
+                | SettingsHit::LowPowerDropdownTrigger,
+            ) => CursorShape::Pointer,
+            _ => CursorShape::Default,
+        };
+        if self.last_cursor_shape != Some(shape)
+            && let Some(dev) = &self.cursor_shape_device
+        {
+            dev.set_shape(self.pointer_enter_serial, shape);
+            self.last_cursor_shape = Some(shape);
         }
     }
 
@@ -677,6 +731,10 @@ pub(crate) fn run(opts: &StartupOptions) -> Result<(), WaylandAppError> {
         frame_sent_at: None,
         seat: None,
         pointer: None,
+        cursor_shape_manager: CursorShapeManager::bind(&globals, &qh).ok(),
+        cursor_shape_device: None,
+        pointer_enter_serial: 0,
+        last_cursor_shape: None,
         keyboard: None,
         modifiers: Modifiers::default(),
         width: DEFAULT_WIDTH,
@@ -1186,6 +1244,10 @@ impl SeatHandler for SettingsClient {
                 self.seat = Some(seat.clone());
             }
             if let Ok(ptr) = self.seat_state.get_pointer(qh, &seat) {
+                self.cursor_shape_device = self
+                    .cursor_shape_manager
+                    .as_ref()
+                    .map(|m| m.get_shape_device(&ptr, qh));
                 self.pointer = Some(ptr);
             }
         } else if capability == Capability::Keyboard && self.keyboard.is_none() {
@@ -1263,7 +1325,18 @@ impl PointerHandler for SettingsClient {
         for ev in events {
             self.pointer_pos = ev.position;
             match ev.kind {
-                PointerEventKind::Enter { .. } | PointerEventKind::Motion { .. } => {
+                PointerEventKind::Enter { serial } => {
+                    self.pointer_enter_serial = serial;
+                    self.last_cursor_shape = None;
+                    self.pointer_inside = true;
+                    if !self.handle_modal_pointer_motion(ev.position.0, ev.position.1)
+                        && !self.update_scrollbar_drag(ev.position.1)
+                    {
+                        self.handle_page_pointer_motion(ev.position.0, ev.position.1);
+                    }
+                    self.sync_cursor_shape();
+                }
+                PointerEventKind::Motion { .. } => {
                     self.pointer_inside = true;
                     if self.handle_modal_pointer_motion(ev.position.0, ev.position.1)
                         || self.update_scrollbar_drag(ev.position.1)
@@ -1271,9 +1344,11 @@ impl PointerHandler for SettingsClient {
                         continue;
                     }
                     self.handle_page_pointer_motion(ev.position.0, ev.position.1);
+                    self.sync_cursor_shape();
                 }
                 PointerEventKind::Leave { .. } => {
                     self.pointer_inside = false;
+                    self.last_cursor_shape = None;
                     if let Some(prev) = self.hover_hit.take() {
                         let scope = hit_damage_scope(Some(&prev));
                         if scope != DamageScope::None {

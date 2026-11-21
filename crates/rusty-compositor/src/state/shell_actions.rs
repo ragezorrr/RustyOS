@@ -2513,7 +2513,7 @@ impl RustyCompositorState {
                 prefer_dark,
                 icon_theme: None,
                 cursor_theme: self.user_config.cursor_theme.clone(),
-                cursor_size: 24,
+                cursor_size: self.user_config.cursor_size,
                 font_name: None,
             });
         }

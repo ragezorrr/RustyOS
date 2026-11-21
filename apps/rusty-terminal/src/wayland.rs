@@ -24,7 +24,12 @@ use smithay_client_toolkit::{
     reexports::{
         calloop::{EventLoop, LoopHandle, ping::make_ping},
         calloop_wayland_source::WaylandSource,
-        protocols::xdg::shell::client::xdg_toplevel::ResizeEdge,
+        protocols::{
+            wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::{
+                Shape as CursorShape, WpCursorShapeDeviceV1,
+            },
+            xdg::shell::client::xdg_toplevel::ResizeEdge,
+        },
     },
     registry::{ProvidesRegistryState, RegistryState},
     registry_handlers,
@@ -33,6 +38,7 @@ use smithay_client_toolkit::{
         keyboard::{KeyEvent, KeyboardHandler, Keysym, Modifiers},
         pointer::{
             AxisScroll, BTN_LEFT, BTN_MIDDLE, PointerEvent, PointerEventKind, PointerHandler,
+            cursor_shape::CursorShapeManager,
         },
     },
     shell::{
@@ -151,6 +157,10 @@ struct TerminalWaylandApp {
     window: Window,
     keyboard: Option<wl_keyboard::WlKeyboard>,
     pointer: Option<wl_pointer::WlPointer>,
+    cursor_shape_manager: Option<CursorShapeManager>,
+    cursor_shape_device: Option<WpCursorShapeDeviceV1>,
+    pointer_enter_serial: u32,
+    last_cursor_shape: Option<CursorShape>,
     active_seat: Option<wl_seat::WlSeat>,
     last_input_serial: u32,
     configured: bool,
@@ -251,6 +261,10 @@ pub(crate) fn run(opts: StartupOptions) -> Result<(), WaylandAppError> {
         window,
         keyboard: None,
         pointer: None,
+        cursor_shape_manager: CursorShapeManager::bind(&globals, &qh).ok(),
+        cursor_shape_device: None,
+        pointer_enter_serial: 0,
+        last_cursor_shape: None,
         active_seat: initial_seat,
         last_input_serial: 0,
         configured: false,
@@ -430,6 +444,30 @@ impl TerminalWaylandApp {
     fn drain_paste_results(&mut self) {
         while let Ok(text) = self.paste_rx.try_recv() {
             self.app.paste_text(&text);
+        }
+    }
+
+    fn sync_cursor_shape(&mut self, px: f64, py: f64) {
+        let shape = if let Some(edge) = self.resize_edge_at(px, py) {
+            match edge {
+                ResizeEdge::Left | ResizeEdge::Right => CursorShape::EwResize,
+                ResizeEdge::Top | ResizeEdge::Bottom => CursorShape::NsResize,
+                ResizeEdge::TopLeft | ResizeEdge::BottomRight => CursorShape::NwseResize,
+                ResizeEdge::TopRight | ResizeEdge::BottomLeft => CursorShape::NeswResize,
+                _ => CursorShape::Default,
+            }
+        } else if py >= f64::from(crate::layout::HEADER_HEIGHT) {
+            CursorShape::Text
+        } else if self.app.hover.is_some() {
+            CursorShape::Pointer
+        } else {
+            CursorShape::Default
+        };
+        if self.last_cursor_shape != Some(shape)
+            && let Some(dev) = &self.cursor_shape_device
+        {
+            dev.set_shape(self.pointer_enter_serial, shape);
+            self.last_cursor_shape = Some(shape);
         }
     }
 
@@ -685,8 +723,15 @@ impl SeatHandler for TerminalWaylandApp {
         {
             self.keyboard = Some(kbd);
         }
-        if capability == Capability::Pointer && self.pointer.is_none() {
-            self.pointer = self.seat_state.get_pointer(qh, &seat).ok();
+        if capability == Capability::Pointer
+            && self.pointer.is_none()
+            && let Ok(ptr) = self.seat_state.get_pointer(qh, &seat)
+        {
+            self.cursor_shape_device = self
+                .cursor_shape_manager
+                .as_ref()
+                .map(|m| m.get_shape_device(&ptr, qh));
+            self.pointer = Some(ptr);
         }
     }
 
@@ -792,10 +837,18 @@ impl PointerHandler for TerminalWaylandApp {
             }
             let (px, py) = ev.position;
             match ev.kind {
-                PointerEventKind::Enter { .. } | PointerEventKind::Motion { .. } => {
+                PointerEventKind::Enter { serial } => {
+                    self.pointer_enter_serial = serial;
+                    self.last_cursor_shape = None;
                     self.app.handle_pointer_motion(px, py);
+                    self.sync_cursor_shape(px, py);
+                }
+                PointerEventKind::Motion { .. } => {
+                    self.app.handle_pointer_motion(px, py);
+                    self.sync_cursor_shape(px, py);
                 }
                 PointerEventKind::Leave { .. } => {
+                    self.last_cursor_shape = None;
                     self.app.hover = None;
                 }
                 PointerEventKind::Press { button, serial, .. } => {

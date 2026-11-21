@@ -13,6 +13,7 @@ use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::input::pointer::CursorIcon;
 use smithay::utils::{Buffer as BufferCoord, Logical, Point, Rectangle, Size, Transform};
 
+mod builtin_cursors;
 mod glyphs;
 mod liquid_glass;
 mod sdf;
@@ -37,10 +38,10 @@ use sdf::{
     sample_dock_icon_shadow_pixel, sample_fallback_avatar_pixel, sample_glass_panel_pixel_themed,
     sample_traffic_light_pixel,
 };
-use xcursor::{load_xcursor_for_icon, rasterize_cursor_arrow_buffer};
-pub(crate) use xcursor::{
-    resolve_cursor_element_kind, scaled_cursor_physical_origin, xcursor_target_pixel_size,
+use xcursor::{
+    load_xcursor_for_icon, rasterize_cursor_arrow_buffer, xcursor_target_pixel_size_for_base,
 };
+pub(crate) use xcursor::{resolve_cursor_element_kind, scaled_cursor_physical_origin};
 
 /// Corner quadrant identifier for 9-slice rounded boxes and shadows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1226,6 +1227,7 @@ impl UiShapeCache {
             renderer,
             icon,
             theme_override,
+            24,
             pointer_loc,
             1.0,
             None,
@@ -1241,13 +1243,14 @@ impl UiShapeCache {
         renderer: &mut GlesRenderer,
         icon: CursorIcon,
         theme_override: Option<&str>,
+        cursor_size: u32,
         pointer_loc: Point<i32, Logical>,
         output_scale: f64,
         plane_limit: Option<Size<u32, BufferCoord>>,
         kind: Kind,
     ) -> Option<MemoryRenderBufferRenderElement<GlesRenderer>> {
         let clamped_scale = crate::config::clamp_display_scale(output_scale);
-        let target_px = xcursor_target_pixel_size(clamped_scale);
+        let target_px = xcursor_target_pixel_size_for_base(cursor_size, clamped_scale);
         let icon_name = icon.name();
         let cache_key = (theme_override.map(str::to_owned), icon_name, target_px);
         if !self.xcursors.contains_key(&cache_key) {

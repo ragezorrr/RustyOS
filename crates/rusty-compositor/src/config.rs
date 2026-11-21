@@ -987,8 +987,10 @@ pub struct UserConfig {
     pub output_rotations: BTreeMap<String, DisplayRotation>,
     /// Optional custom desktop wallpaper `.png` path (`~/` expanded).
     pub wallpaper: Option<PathBuf>,
-    /// Optional `XCursor` theme override (falls back to `XCURSOR_THEME` and system themes).
+    /// Optional `XCursor` theme override (`"RustyOS"` uses built-in `@2x` SVG cursors).
     pub cursor_theme: Option<String>,
+    /// Logical cursor size in pixels (`16..=64`, default `24`) (`RUSTYOS-151`).
+    pub cursor_size: u32,
     /// Commands launched automatically once the Wayland socket is ready.
     pub autostart: Vec<String>,
     /// Require PAM password verification (`unix_chkpwd`) to unlock the Lock Screen (`RUSTYOS-056`).
@@ -1095,6 +1097,7 @@ impl Default for UserConfig {
             output_rotations: BTreeMap::new(),
             wallpaper: None,
             cursor_theme: None,
+            cursor_size: 24,
             autostart: Vec::new(),
             require_password_on_lock: true,
             lock_on_sleep: true,
@@ -1586,6 +1589,11 @@ impl UserConfig {
                     }
                 }
             }
+            "cursor_size" => {
+                if let Ok(v) = val.parse::<u32>() {
+                    self.cursor_size = v.clamp(16, 64);
+                }
+            }
             "glass_opacity" => {
                 if let Ok(v) = val.parse::<f32>() {
                     self.glass_opacity = clamp_glass_opacity(v);
@@ -1728,6 +1736,7 @@ impl UserConfig {
                 let _ = writeln!(out, "cursor_theme = \"{}\"", escape_toml_string(trimmed));
             }
         }
+        let _ = writeln!(out, "cursor_size = {}", self.cursor_size.clamp(16, 64));
 
         let _ = writeln!(out, "\n[top_bar]");
         let _ = writeln!(out, "show_wifi = {}", self.menubar_show_wifi);

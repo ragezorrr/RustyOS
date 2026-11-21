@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <defs>
+    <filter id="sh" x="-25%" y="-25%" width="150%" height="150%">
+      <feDropShadow dx="0" dy="1.1" stdDeviation="1.0" flood-color="#000000" flood-opacity="0.30"/>
+    </filter>
+  </defs>
+  <path filter="url(#sh)"
+        d="M16 3.5 L20.5 8.5 H17.6 V14.4 H23.5 V11.5 L28.5 16 L23.5 20.5 V17.6 H17.6 V23.5 H20.5 L16 28.5 L11.5 23.5 H14.4 V17.6 H8.5 V20.5 L3.5 16 L8.5 11.5 V14.4 H14.4 V8.5 H11.5 Z"
+        fill="#121215" stroke="#FFFFFF" stroke-width="1.4" stroke-linejoin="round"/>
+</svg>

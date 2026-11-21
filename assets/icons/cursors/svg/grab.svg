@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <defs>
+    <filter id="sh" x="-25%" y="-25%" width="150%" height="150%">
+      <feDropShadow dx="0" dy="1.1" stdDeviation="1.0" flood-color="#000000" flood-opacity="0.30"/>
+    </filter>
+  </defs>
+  <path filter="url(#sh)"
+        d="M11.5 7.5 C10.4 7.5 9.6 8.3 9.6 9.4 V16.2 L7.8 14.6 C6.9 13.8 5.5 14.0 4.9 15.0 C4.4 15.9 4.6 17.0 5.3 17.7 L10.6 23.9 C11.8 25.3 13.5 26.2 15.4 26.2 H20.2 C23.3 26.2 25.6 23.9 25.6 20.7 V11.8 C25.6 10.7 24.8 9.9 23.7 9.9 C22.7 9.9 21.9 10.7 21.9 11.8 V9.2 C21.9 8.1 21.1 7.3 20.0 7.3 C18.9 7.3 18.1 8.1 18.1 9.2 V7.8 C18.1 6.7 17.3 5.9 16.2 5.9 C15.1 5.9 14.3 6.7 14.3 7.8 V9.4 C14.3 8.3 13.4 7.5 11.5 7.5 Z"
+        fill="#FFFFFF" stroke="#121215" stroke-width="1.6" stroke-linejoin="round"/>
+  <line x1="13.8" y1="12.5" x2="13.8" y2="17.2" stroke="#121215" stroke-width="1.15" stroke-linecap="round"/>
+  <line x1="17.9" y1="11.8" x2="17.9" y2="17.2" stroke="#121215" stroke-width="1.15" stroke-linecap="round"/>
+  <line x1="21.9" y1="12.5" x2="21.9" y2="17.4" stroke="#121215" stroke-width="1.15" stroke-linecap="round"/>
+</svg>

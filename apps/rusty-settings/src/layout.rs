@@ -1977,7 +1977,16 @@ fn build_style_page_sections(
                     RowControlId::CursorThemeCycle,
                     app.cursor_theme.clone(),
                 ),
-                row_info("Cursor Size", String::from("24 px (HiDPI-aware)")),
+                row_stepper(
+                    "Cursor Size",
+                    RowControlId::CursorSizeDown,
+                    RowControlId::CursorSizeUp,
+                    format!("{} px", app.cursor_size),
+                ),
+                row_info(
+                    "Built-in Shapes",
+                    String::from("14 HiDPI SVG Cursors (Default, Pointer, Text, Resize, Grab)"),
+                ),
             ],
         )],
         _ => Vec::new(),
