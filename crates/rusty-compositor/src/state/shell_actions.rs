@@ -187,15 +187,7 @@ impl RustyCompositorState {
         let right = crate::shell_render::compute_top_bar_right_layout_with_options(
             output_width,
             clock_text,
-            crate::shell_render::TopBarLayoutOptions {
-                has_battery: tel.power.has_battery,
-                notification_count: self.notification_count,
-                show_volume: self.menubar_show_volume,
-                show_input_source: self.menubar_show_input_source,
-                show_workspaces: self.menubar_show_workspaces,
-                show_tray: self.menubar_show_tray,
-                show_updates: self.should_show_top_bar_updates(),
-            },
+            self.top_bar_layout_options_for(&tel),
         );
         let anchor_right_x = right
             .updates_x
@@ -256,6 +248,142 @@ impl RustyCompositorState {
         self.open_settings_page(Some("wifi"));
     }
 
+    /// Builds [`crate::shell_render::TopBarLayoutOptions`] reflecting active config and telemetry (`RUSTYOS-141`, `RUSTYOS-142`).
+    #[must_use]
+    pub fn top_bar_layout_options_for(
+        &self,
+        tel: &crate::telemetry::SystemTelemetry,
+    ) -> crate::shell_render::TopBarLayoutOptions {
+        crate::shell_render::TopBarLayoutOptions {
+            has_battery: tel.power.has_battery,
+            notification_count: self.notification_count,
+            show_wifi: self.user_config.menubar_show_wifi,
+            show_battery: self.user_config.menubar_show_battery,
+            show_battery_percentage: self.user_config.menubar_show_battery_percentage,
+            show_bluetooth: self.user_config.menubar_show_bluetooth,
+            show_volume: self.menubar_show_volume,
+            show_input_source: self.menubar_show_input_source,
+            show_workspaces: self.menubar_show_workspaces,
+            show_tray: self.menubar_show_tray,
+            show_updates: self.should_show_top_bar_updates(),
+            mic_active: tel.device_usage.mic_active,
+            camera_active: tel.device_usage.camera_active,
+            recording_active: !self.active_screencasts.is_empty(),
+        }
+    }
+
+    /// Toggles a compact `TopBar` popover (`Volume`, `Battery`, `Bluetooth`) (`RUSTYOS-141`).
+    pub fn toggle_top_bar_quick_popover(
+        &mut self,
+        kind: crate::shell_render::TopBarQuickPopoverKind,
+    ) {
+        if self.top_bar_quick_popover == Some(kind) {
+            self.close_top_bar_quick_popover();
+            return;
+        }
+        if self.is_session_locked() {
+            return;
+        }
+        self.close_wifi_popover();
+        self.close_updates_popover();
+        self.close_notification_center();
+        self.close_dock_stack();
+        self.close_context_menu();
+        self.active_top_bar_menu = None;
+        self.top_bar_menu_hover_row = None;
+        self.quick_settings_active = false;
+        self.top_bar_quick_popover = Some(kind);
+        self.top_bar_quick_popover_hover = None;
+        self.sync_telemetry_active_ui();
+        self.shell_redraw_needed = true;
+    }
+
+    /// Closes the active compact `TopBar` quick popover (`RUSTYOS-141`).
+    pub fn close_top_bar_quick_popover(&mut self) {
+        if self.top_bar_quick_popover.is_some() || self.top_bar_quick_popover_hover.is_some() {
+            self.top_bar_quick_popover = None;
+            self.top_bar_quick_popover_hover = None;
+            self.sync_telemetry_active_ui();
+            self.shell_redraw_needed = true;
+        }
+    }
+
+    /// Toggles visibility of a right-side `TopBar` indicator and persists `[top_bar]` to `config.toml` (`RUSTYOS-141`).
+    pub fn toggle_top_bar_control_visibility(&mut self, control: &str) {
+        match control {
+            "wifi" => self.user_config.menubar_show_wifi = !self.user_config.menubar_show_wifi,
+            "battery" => {
+                self.user_config.menubar_show_battery = !self.user_config.menubar_show_battery;
+            }
+            "sound" | "volume" => {
+                self.menubar_show_volume = !self.menubar_show_volume;
+                self.user_config.menubar_show_volume = self.menubar_show_volume;
+            }
+            "bluetooth" => {
+                self.user_config.menubar_show_bluetooth = !self.user_config.menubar_show_bluetooth;
+            }
+            "battery_percentage" => {
+                self.user_config.menubar_show_battery_percentage =
+                    !self.user_config.menubar_show_battery_percentage;
+            }
+            _ => return,
+        }
+        if let Some(path) = self.config_path.as_ref() {
+            let _ = self.user_config.save_to_path(path);
+        }
+        self.shell_redraw_needed = true;
+    }
+
+    /// Stops all active portal screencast / screen-recording sessions (`RUSTYOS-142`).
+    pub fn stop_active_screen_recording(&mut self) {
+        if !self.active_screencasts.is_empty() {
+            self.active_screencasts.clear();
+            self.shell_redraw_needed = true;
+        }
+    }
+
+    /// Builds [`crate::shell_render::TopBarQuickPopoverState`] anchored below the clicked `TopBar` icon (`RUSTYOS-141`).
+    #[must_use]
+    pub fn top_bar_quick_popover_render_state<'a>(
+        &self,
+        output_width: i32,
+        kind: crate::shell_render::TopBarQuickPopoverKind,
+        tel: &'a crate::telemetry::SystemTelemetry,
+    ) -> crate::shell_render::TopBarQuickPopoverState<'a> {
+        let clock_text = if self.clock_24h {
+            tel.clock_date_24h.as_str()
+        } else {
+            tel.clock_date_hhmm.as_str()
+        };
+        let right = crate::shell_render::compute_top_bar_right_layout_with_options(
+            output_width,
+            clock_text,
+            self.top_bar_layout_options_for(tel),
+        );
+        let anchor_right_x = match kind {
+            crate::shell_render::TopBarQuickPopoverKind::Volume => {
+                right.volume_x.map_or(right.wifi_x, |x| x + 18)
+            }
+            crate::shell_render::TopBarQuickPopoverKind::Battery => {
+                right.battery_x.map_or(right.wifi_x, |x| x + 26)
+            }
+            crate::shell_render::TopBarQuickPopoverKind::Bluetooth => {
+                right.bluetooth_x.map_or(right.wifi_x, |x| x + 18)
+            }
+        };
+        crate::shell_render::TopBarQuickPopoverState {
+            kind,
+            anchor_right_x,
+            glass_opacity: self.glass_opacity,
+            reduce_transparency: self.reduce_transparency,
+            audio: &tel.audio,
+            power: &tel.power,
+            bluetooth: &tel.bluetooth,
+            show_battery_percentage: self.user_config.menubar_show_battery_percentage,
+            hovered_hit: self.top_bar_quick_popover_hover,
+        }
+    }
+
     /// Builds [`crate::shell_render::WifiPopoverRenderState`] anchored below the `TopBar` network glyph (`RUSTYOS-108`).
     #[must_use]
     pub fn wifi_render_state<'a>(
@@ -272,15 +400,7 @@ impl RustyCompositorState {
         let right = crate::shell_render::compute_top_bar_right_layout_with_options(
             output_width,
             clock_text,
-            crate::shell_render::TopBarLayoutOptions {
-                has_battery: tel.power.has_battery,
-                notification_count: self.notification_count,
-                show_volume: self.menubar_show_volume,
-                show_input_source: self.menubar_show_input_source,
-                show_workspaces: self.menubar_show_workspaces,
-                show_tray: self.menubar_show_tray,
-                show_updates: self.should_show_top_bar_updates(),
-            },
+            self.top_bar_layout_options_for(&tel),
         );
         crate::shell_render::WifiPopoverRenderState {
             glass_opacity: self.glass_opacity,
@@ -2358,6 +2478,8 @@ impl RustyCompositorState {
         }
 
         self.user_config = cfg;
+        self.telemetry
+            .set_clock_locale(&self.user_config.clock_locale);
         if power_mode_changed {
             let pwr = self.telemetry.snapshot().power;
             let profile = self

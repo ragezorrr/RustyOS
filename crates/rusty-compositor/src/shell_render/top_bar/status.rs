@@ -291,11 +291,84 @@ pub fn check_top_bar_wifi_click_for_options(
     x: f64,
     y: f64,
 ) -> bool {
-    if y < 0.0 || y > f64::from(TOP_BAR_HEIGHT) {
+    if !opts.show_wifi || y < 0.0 || y > f64::from(TOP_BAR_HEIGHT) {
         return false;
     }
     let right = compute_top_bar_right_layout_with_options(screen_width, clock_text, opts);
-    x >= f64::from(right.wifi_x - 3) && x < f64::from(right.wifi_x + 20 + 3)
+    right.wifi_visible && x >= f64::from(right.wifi_x - 3) && x < f64::from(right.wifi_x + 20 + 3)
+}
+
+/// Option-aware hit-test for the right `TopBar` Volume indicator (`RUSTYOS-141`).
+#[must_use]
+pub fn check_top_bar_volume_click_for_options(
+    screen_width: i32,
+    clock_text: &str,
+    opts: TopBarLayoutOptions,
+    x: f64,
+    y: f64,
+) -> bool {
+    if !opts.show_volume || y < 0.0 || y > f64::from(TOP_BAR_HEIGHT) {
+        return false;
+    }
+    let right = compute_top_bar_right_layout_with_options(screen_width, clock_text, opts);
+    right
+        .volume_x
+        .is_some_and(|vx| x >= f64::from(vx - 3) && x < f64::from(vx + 18 + 3))
+}
+
+/// Option-aware hit-test for the right `TopBar` Battery indicator (`RUSTYOS-141`).
+#[must_use]
+pub fn check_top_bar_battery_click_for_options(
+    screen_width: i32,
+    clock_text: &str,
+    opts: TopBarLayoutOptions,
+    x: f64,
+    y: f64,
+) -> bool {
+    if !opts.has_battery || !opts.show_battery || y < 0.0 || y > f64::from(TOP_BAR_HEIGHT) {
+        return false;
+    }
+    let right = compute_top_bar_right_layout_with_options(screen_width, clock_text, opts);
+    let bw = if opts.show_battery_percentage { 56 } else { 26 };
+    right
+        .battery_x
+        .is_some_and(|bx| x >= f64::from(bx - 3) && x < f64::from(bx + bw + 3))
+}
+
+/// Option-aware hit-test for the right `TopBar` Bluetooth indicator (`RUSTYOS-141`).
+#[must_use]
+pub fn check_top_bar_bluetooth_click_for_options(
+    screen_width: i32,
+    clock_text: &str,
+    opts: TopBarLayoutOptions,
+    x: f64,
+    y: f64,
+) -> bool {
+    if !opts.show_bluetooth || y < 0.0 || y > f64::from(TOP_BAR_HEIGHT) {
+        return false;
+    }
+    let right = compute_top_bar_right_layout_with_options(screen_width, clock_text, opts);
+    right
+        .bluetooth_x
+        .is_some_and(|btx| x >= f64::from(btx - 3) && x < f64::from(btx + 18 + 3))
+}
+
+/// Option-aware hit-test for the right `TopBar` active Recording stop pill (`RUSTYOS-142`).
+#[must_use]
+pub fn check_top_bar_recording_click_for_options(
+    screen_width: i32,
+    clock_text: &str,
+    opts: TopBarLayoutOptions,
+    x: f64,
+    y: f64,
+) -> bool {
+    if !opts.recording_active || y < 0.0 || y > f64::from(TOP_BAR_HEIGHT) {
+        return false;
+    }
+    let right = compute_top_bar_right_layout_with_options(screen_width, clock_text, opts);
+    right
+        .recording_x
+        .is_some_and(|rx| x >= f64::from(rx - 2) && x < f64::from(rx + right.recording_w + 2))
 }
 
 /// Option-aware hit-test for the right `TopBar` Software Updates indicator (`RUSTYOS-076`).
@@ -463,6 +536,7 @@ fn push_top_bar_network_glyph(
 }
 
 /// Draws monochrome macOS Menu Bar glyphs (`[Volume] · [Battery] · Wi-Fi · Search · Control Center`) (`RUSTYOS-036`, `RUSTYOS-049`).
+#[allow(clippy::too_many_lines)]
 pub(crate) fn push_top_bar_right_glyphs(
     out: &mut Vec<CompositorRenderElement>,
     shape_cache: &mut crate::surfaces::UiShapeCache,
@@ -474,12 +548,61 @@ pub(crate) fn push_top_bar_right_glyphs(
 
     let light_opaque =
         t.reduce_transparency && !crate::shell_render::tokens::ThemePalette::active().is_dark;
-    let white = if light_opaque {
-        [28, 29, 34, 255]
-    } else {
+    let use_light_ink = t.backdrop.map_or(!light_opaque, |b| b.prefer_light_text);
+    let white = if use_light_ink {
         [255, 255, 255, 255]
+    } else {
+        [28, 29, 34, 255]
     };
 
+    if let Some(rx) = right.recording_x {
+        if let Some(dot) = shape_cache.circle_element(
+            renderer,
+            6,
+            [255, 255, 255, 255],
+            None,
+            Point::from((rx + 5, TOP_BAR_ITEM_Y + 7)),
+        ) {
+            out.push(CompositorRenderElement::Memory(dot));
+        }
+        crate::shell_render::tokens::push_rounded_glass_box(
+            out,
+            shape_cache,
+            renderer,
+            smithay::utils::Rectangle::new(
+                Point::from((rx, TOP_BAR_ITEM_Y + 2)),
+                smithay::utils::Size::from((right.recording_w, 16)),
+            ),
+            8,
+            [255, 59, 48, 235],
+            None,
+        );
+    }
+    if let Some(mut px) = right.privacy_x {
+        if t.mic_active {
+            if let Some(dot) = shape_cache.circle_element(
+                renderer,
+                7,
+                [255, 159, 10, 255],
+                None,
+                Point::from((px, TOP_BAR_ITEM_Y + 6)),
+            ) {
+                out.push(CompositorRenderElement::Memory(dot));
+            }
+            px += 10;
+        }
+        if t.camera_active
+            && let Some(dot) = shape_cache.circle_element(
+                renderer,
+                7,
+                [52, 199, 89, 255],
+                None,
+                Point::from((px, TOP_BAR_ITEM_Y + 6)),
+            )
+        {
+            out.push(CompositorRenderElement::Memory(dot));
+        }
+    }
     if let Some(ux) = right.updates_x
         && let Some(el) = shape_cache.ui_glyph_element(
             renderer,
@@ -507,6 +630,24 @@ pub(crate) fn push_top_bar_right_glyphs(
     {
         out.push(CompositorRenderElement::Memory(el));
     }
+    if let Some(btx) = right.bluetooth_x {
+        let bt_tint = if t.bluetooth_powered {
+            white
+        } else if use_light_ink {
+            [255, 255, 255, 130]
+        } else {
+            [28, 29, 34, 130]
+        };
+        if let Some(el) = shape_cache.ui_glyph_element(
+            renderer,
+            UiGlyphKind::Bluetooth,
+            18,
+            bt_tint,
+            Point::from((btx, TOP_BAR_ITEM_Y + 1)),
+        ) {
+            out.push(CompositorRenderElement::Memory(el));
+        }
+    }
     if let Some(bx) = right.battery_x
         && let Some(el) = shape_cache.ui_glyph_rect_element(
             renderer,
@@ -522,7 +663,9 @@ pub(crate) fn push_top_bar_right_glyphs(
     {
         out.push(CompositorRenderElement::Memory(el));
     }
-    push_top_bar_network_glyph(out, shape_cache, renderer, right, t, white, light_opaque);
+    if right.wifi_visible {
+        push_top_bar_network_glyph(out, shape_cache, renderer, right, t, white, !use_light_ink);
+    }
     if let Some(el) = shape_cache.ui_glyph_element(
         renderer,
         UiGlyphKind::Search,

@@ -13,9 +13,10 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use rusty_services::{
-    AudioStatus, BluetoothStatus, BrightnessStatus, MediaAction, MediaStatus, NetworkStatus,
-    PowerProfile, PowerStatus, ServiceRegistry, SessionAction, UserAccount, local_clock_hhmm,
-    local_clock_lock_date, local_clock_lock_hhmm, local_clock_short_datetime_fmt,
+    AudioStatus, BluetoothStatus, BrightnessStatus, DeviceUsageService, DeviceUsageSnapshot,
+    MediaAction, MediaStatus, NetworkStatus, PowerProfile, PowerStatus, ServiceRegistry,
+    SessionAction, UserAccount, local_clock_hhmm, local_clock_lock_date, local_clock_lock_hhmm,
+    local_clock_short_datetime_localized,
 };
 
 const POLL_INTERVAL_ACTIVE: Duration = Duration::from_secs(3);
@@ -38,6 +39,8 @@ pub struct SystemTelemetry {
     pub media: MediaStatus,
     /// Local user accounts for Lock Screen user switcher (`RUSTYOS-054`).
     pub users: Vec<UserAccount>,
+    /// Active microphone and camera privacy telemetry (`RUSTYOS-142`).
+    pub device_usage: DeviceUsageSnapshot,
     /// Local wall-clock time formatted as `HH:MM`.
     pub clock_hhmm: String,
     /// Compact macOS-style `TopBar` date + 12h time label (`"Wed Apr 1  9:41 AM"`).
@@ -62,6 +65,7 @@ impl Default for SystemTelemetry {
             brightness: BrightnessStatus::default(),
             media: MediaStatus::default(),
             users: Vec::new(),
+            device_usage: DeviceUsageSnapshot::default(),
             clock_hhmm: "12:00".to_owned(),
             clock_date_hhmm: "Wed Apr 1  9:41 AM".to_owned(),
             clock_date_24h: "Wed Apr 1  09:41".to_owned(),
@@ -89,6 +93,7 @@ enum TelemetryCmd {
 struct SharedState {
     latest: Mutex<Arc<SystemTelemetry>>,
     queue: Mutex<VecDeque<TelemetryCmd>>,
+    clock_locale: Mutex<String>,
     cvar: Condvar,
     stop: AtomicBool,
     active_ui: AtomicBool,
@@ -136,6 +141,7 @@ impl SystemMetricsHandle {
             shared: Arc::new(SharedState {
                 latest: Mutex::new(Arc::new(initial)),
                 queue: Mutex::new(VecDeque::new()),
+                clock_locale: Mutex::new("en".to_owned()),
                 cvar: Condvar::new(),
                 stop: AtomicBool::new(false),
                 active_ui: AtomicBool::new(false),
@@ -150,6 +156,7 @@ impl SystemMetricsHandle {
         let shared = Arc::new(SharedState {
             latest: Mutex::new(Arc::new(SystemTelemetry::default())),
             queue: Mutex::new(VecDeque::new()),
+            clock_locale: Mutex::new("en".to_owned()),
             cvar: Condvar::new(),
             stop: AtomicBool::new(false),
             active_ui: AtomicBool::new(false),
@@ -424,9 +431,19 @@ impl SystemMetricsHandle {
         }
         self.shared.cvar.notify_all();
     }
+    /// Updates the session clock locale (`"en"`, `"ru"`, `"uk"`) and triggers refresh (`RUSTYOS-141`).
+    pub fn set_clock_locale(&self, locale: &str) {
+        if let Ok(mut guard) = self.shared.clock_locale.lock()
+            && *guard != locale
+        {
+            locale.clone_into(&mut guard);
+            drop(guard);
+            self.request_refresh();
+        }
+    }
 }
 
-fn poll_once(services: &ServiceRegistry) -> SystemTelemetry {
+fn poll_once(services: &ServiceRegistry, clock_locale: &str) -> SystemTelemetry {
     SystemTelemetry {
         power: services.power.query_status(),
         network: services.network.query_status(),
@@ -435,9 +452,10 @@ fn poll_once(services: &ServiceRegistry) -> SystemTelemetry {
         brightness: services.brightness.query_status(),
         media: services.media.query_status(),
         users: services.users.query_users(),
+        device_usage: DeviceUsageService.query_snapshot(),
         clock_hhmm: local_clock_hhmm(),
-        clock_date_hhmm: local_clock_short_datetime_fmt(false),
-        clock_date_24h: local_clock_short_datetime_fmt(true),
+        clock_date_hhmm: local_clock_short_datetime_localized(clock_locale, false),
+        clock_date_24h: local_clock_short_datetime_localized(clock_locale, true),
         lock_date: local_clock_lock_date(),
         lock_time_hhmm: local_clock_lock_hhmm(false),
         lock_time_24h: local_clock_lock_hhmm(true),
@@ -448,7 +466,11 @@ fn telemetry_worker_loop(shared: &SharedState) {
     let services = ServiceRegistry::new();
 
     // Perform initial snapshot outside lock
-    let initial = poll_once(&services);
+    let locale = shared
+        .clock_locale
+        .lock()
+        .map_or_else(|_| "en".to_owned(), |g| g.clone());
+    let initial = poll_once(&services, &locale);
     if let Ok(mut latest) = shared.latest.lock() {
         *latest = Arc::new(initial);
     }
@@ -510,7 +532,11 @@ fn telemetry_worker_loop(shared: &SharedState) {
             }
         }
 
-        let snap = poll_once(&services);
+        let locale = shared
+            .clock_locale
+            .lock()
+            .map_or_else(|_| "en".to_owned(), |g| g.clone());
+        let snap = poll_once(&services, &locale);
         if let Ok(mut latest) = shared.latest.lock() {
             *latest = Arc::new(snap);
         }

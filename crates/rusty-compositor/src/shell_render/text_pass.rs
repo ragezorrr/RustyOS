@@ -190,6 +190,15 @@ pub(super) fn append_foreground_overlay_text(
         ShellOverlayView::Wifi(wifi) => {
             render_wifi_popover_text(text_cache, renderer, screen_size, wifi, elements);
         }
+        ShellOverlayView::TopBarQuickPopover(pop) => {
+            super::topbar_popovers::render_topbar_quick_popover_text(
+                text_cache,
+                renderer,
+                screen_size,
+                pop,
+                elements,
+            );
+        }
         ShellOverlayView::NotificationCenter(nc) => {
             render_notification_center_text(text_cache, renderer, screen_size, nc, elements);
         }
@@ -305,10 +314,13 @@ pub(super) fn append_chrome_text(
         Size::from((left_layout.app_w, ws_btn_height)),
     );
     let light_opaque_bar = top_telemetry.reduce_transparency && !pal.is_dark;
-    let bar_fg = if light_opaque_bar {
-        [28, 29, 34, 255]
-    } else {
+    let use_light_bar_ink = top_telemetry
+        .backdrop
+        .map_or(!light_opaque_bar, |b| b.prefer_light_text);
+    let bar_fg = if use_light_bar_ink {
         [255, 255, 255, 255]
+    } else {
+        [28, 29, 34, 255]
     };
     if let Some(el) = text_cache.render_label_centered_weighted(
         renderer,
@@ -321,10 +333,10 @@ pub(super) fn append_chrome_text(
         elements.push(el);
     }
 
-    let text_menu = if light_opaque_bar {
-        [28, 29, 34, 240]
-    } else {
+    let text_menu = if use_light_bar_ink {
         [246, 247, 250, 245]
+    } else {
+        [28, 29, 34, 240]
     };
     for (menu_kind, name, x, w) in [
         (
@@ -502,6 +514,38 @@ pub(super) fn append_chrome_text(
         clock_bounds,
     ) {
         elements.push(el);
+    }
+
+    if top_telemetry.show_battery_percentage
+        && let Some(bx) = right_layout.battery_x
+    {
+        let pct_text = format!("{}%", top_telemetry.battery_percent);
+        let pct_bounds = Rectangle::new(
+            Point::from((bx + 27, ws_y)),
+            Size::from((30, ws_btn_height)),
+        );
+        if let Some(el) =
+            text_cache.render_label_centered(renderer, &pct_text, 10.5, bar_fg, pct_bounds)
+        {
+            elements.push(el);
+        }
+    }
+
+    if let Some(rx) = right_layout.recording_x {
+        let rec_bounds = Rectangle::new(
+            Point::from((rx + 12, ws_y)),
+            Size::from((right_layout.recording_w - 14, ws_btn_height)),
+        );
+        if let Some(el) = text_cache.render_label_centered_weighted(
+            renderer,
+            "REC",
+            crate::text::FontWeight::Bold,
+            9.5,
+            [255, 255, 255, 255],
+            rec_bounds,
+        ) {
+            elements.push(el);
+        }
     }
 
     if let Some(kbd_x) = right_layout.kbd_x {

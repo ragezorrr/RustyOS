@@ -589,6 +589,12 @@ pub struct RustyCompositorState {
     pub wifi_popover_open: bool,
     /// Currently hovered row or control inside the open Wi-Fi popover (`RUSTYOS-108`).
     pub wifi_popover_hover: Option<crate::shell_render::WifiPopoverHit>,
+    /// Active compact `TopBar` popover (`Volume`, `Battery`, `Bluetooth`) (`RUSTYOS-141`).
+    pub top_bar_quick_popover: Option<crate::shell_render::TopBarQuickPopoverKind>,
+    /// Currently hovered row inside the open compact `TopBar` popover (`RUSTYOS-141`).
+    pub top_bar_quick_popover_hover: Option<crate::shell_render::TopBarQuickPopoverHit>,
+    /// Background D-Bus `com.canonical.AppMenu.Registrar` handle (`RUSTYOS-143`).
+    pub app_menu: crate::app_menu::AppMenuHandle,
     /// Whether the right-edge `Notification Center` drawer is open (`RUSTYOS-109`).
     pub notification_center_open: bool,
     /// Currently hovered interactive region inside `Notification Center` (`RUSTYOS-109`).
@@ -991,6 +997,9 @@ impl RustyCompositorState {
             updates_popover_hover: None,
             wifi_popover_open: false,
             wifi_popover_hover: None,
+            top_bar_quick_popover: None,
+            top_bar_quick_popover_hover: None,
+            app_menu: crate::app_menu::AppMenuHandle::noop(),
             notification_center_open: false,
             notification_center_hover: None,
             notification_center_tasks: [false; 4],
@@ -1419,6 +1428,7 @@ impl RustyCompositorState {
             || self.quick_settings_active
             || self.updates_popover_open
             || self.wifi_popover_open
+            || self.top_bar_quick_popover.is_some()
             || self.notification_center_open
             || self.dock_stack.is_some()
             || self.context_menu.is_some()
@@ -1465,6 +1475,7 @@ impl RustyCompositorState {
             && !self.quick_settings_active
             && !self.updates_popover_open
             && !self.wifi_popover_open
+            && self.top_bar_quick_popover.is_none()
             && !self.notification_center_open
             && self.window_switcher.is_none()
             && self.active_window_drag.is_none()
@@ -2001,6 +2012,7 @@ impl RustyCompositorState {
                 || self.quick_settings_active
                 || self.updates_popover_open
                 || self.wifi_popover_open
+                || self.top_bar_quick_popover.is_some()
                 || self.notification_center_open
                 || self.overview_active
                 || self
@@ -2042,6 +2054,7 @@ impl RustyCompositorState {
                 || self.quick_settings_active
                 || self.updates_popover_open
                 || self.wifi_popover_open
+                || self.top_bar_quick_popover.is_some()
                 || self.notification_center_open
                 || self.overview_active
                 || self.window_switcher.is_some()

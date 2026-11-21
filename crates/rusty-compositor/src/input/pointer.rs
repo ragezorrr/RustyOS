@@ -580,6 +580,10 @@ impl RustyCompositorState {
                 self.handle_wifi_popover_pointer_click(button);
                 return;
             }
+            if self.top_bar_quick_popover.is_some() {
+                self.handle_top_bar_quick_popover_pointer_click(button);
+                return;
+            }
             if self.notification_center_open {
                 self.handle_notification_center_pointer_click(button);
                 return;

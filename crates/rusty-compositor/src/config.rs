@@ -940,7 +940,7 @@ pub struct UserConfig {
     pub repeat_rate: i32,
     /// System UI theme (`Light` or `Dark`, default `Light`) (`RUSTYOS-067`).
     pub appearance: AppearanceMode,
-    /// System UI accent color index (`0..=6`, default `0` = Golden Gate Blue) (`RUSTYOS-114`).
+    /// System UI accent color index (`0..=6`, default `0` = RustyOS Blue) (`RUSTYOS-114`).
     pub ui_accent_index: u8,
     /// Prefer instant transitions (`reduced_motion`).
     pub reduced_motion: bool,
@@ -956,8 +956,20 @@ pub struct UserConfig {
     pub menubar_show_input_source: bool,
     /// Show standalone volume speaker glyph next to Wi-Fi in Menu Bar (`RUSTYOS-049`, default `false`).
     pub menubar_show_volume: bool,
-    /// Format Menu Bar clock using 24-hour time (`RUSTYOS-049`, default `false` = macOS 12h AM/PM).
+    /// Show Wi-Fi / Ethernet indicator in Menu Bar (`RUSTYOS-141`, default `true`).
+    pub menubar_show_wifi: bool,
+    /// Show Battery indicator in Menu Bar (`RUSTYOS-141`, default `true`).
+    pub menubar_show_battery: bool,
+    /// Show standalone Bluetooth indicator in Menu Bar (`RUSTYOS-141`, default `false`).
+    pub menubar_show_bluetooth: bool,
+    /// Show numeric battery percentage beside the Battery glyph (`RUSTYOS-141`, default `false`).
+    pub menubar_show_battery_percentage: bool,
+    /// Automatically adapt Menu Bar foreground contrast to the top wallpaper strip (`RUSTYOS-141`, default `true`).
+    pub menubar_adaptive_contrast: bool,
+    /// Format Menu Bar clock using 24-hour time (`RUSTYOS-049`, default `false` = 12h AM/PM).
     pub clock_24h: bool,
+    /// Session clock locale (`"en"`, `"ru"`, `"uk"`) (`RUSTYOS-141`, default `"en"`).
+    pub clock_locale: String,
     /// Window drop shadow profile (`Subtle` [default], `Normal`, `None`) (`RUSTYOS-080`).
     pub window_shadow: WindowShadowMode,
     /// Prefer the highest supported refresh rate (60/120/144/240 Hz) at the display's native
@@ -1067,7 +1079,13 @@ impl Default for UserConfig {
             menubar_show_tray: false,
             menubar_show_input_source: false,
             menubar_show_volume: false,
+            menubar_show_wifi: true,
+            menubar_show_battery: true,
+            menubar_show_bluetooth: false,
+            menubar_show_battery_percentage: false,
+            menubar_adaptive_contrast: true,
             clock_24h: false,
+            clock_locale: "en".to_owned(),
             window_shadow: WindowShadowMode::Subtle,
             prefer_max_refresh: true,
             vrr_mode: VrrMode::Fullscreen,
@@ -1251,6 +1269,7 @@ impl UserConfig {
             }
             ("security", _) => self.apply_security_kv(key, val),
             ("dock", _) => self.apply_dock_kv(key, val),
+            ("top_bar", _) => self.apply_top_bar_kv(key, val),
             ("updates", _) => self.apply_updates_kv(key, val),
             ("notifications", _) => self.apply_notifications_kv(key, val),
             ("power", _) => self.apply_power_kv(key, val),
@@ -1260,6 +1279,55 @@ impl UserConfig {
                     self.apply_output_kv(strip_toml_quotes(raw_output), key, val);
                 }
             }
+        }
+    }
+
+    fn apply_top_bar_kv(&mut self, key: &str, val: &str) {
+        match key {
+            "show_wifi" => {
+                if let Ok(b) = val.parse::<bool>() {
+                    self.menubar_show_wifi = b;
+                }
+            }
+            "show_battery" => {
+                if let Ok(b) = val.parse::<bool>() {
+                    self.menubar_show_battery = b;
+                }
+            }
+            "show_sound" | "show_volume" => {
+                if let Ok(b) = val.parse::<bool>() {
+                    self.menubar_show_volume = b;
+                }
+            }
+            "show_bluetooth" => {
+                if let Ok(b) = val.parse::<bool>() {
+                    self.menubar_show_bluetooth = b;
+                }
+            }
+            "show_battery_percentage" => {
+                if let Ok(b) = val.parse::<bool>() {
+                    self.menubar_show_battery_percentage = b;
+                }
+            }
+            "adaptive_contrast" => {
+                if let Ok(b) = val.parse::<bool>() {
+                    self.menubar_adaptive_contrast = b;
+                }
+            }
+            "clock_24h" => {
+                if let Ok(b) = val.parse::<bool>() {
+                    self.clock_24h = b;
+                }
+            }
+            "clock_locale" => {
+                if let Some(s) = parse_toml_string(val) {
+                    let norm = s.trim().to_ascii_lowercase();
+                    if !norm.is_empty() && norm.len() <= 16 {
+                        self.clock_locale = norm;
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
@@ -1598,6 +1666,7 @@ impl UserConfig {
 
     /// Serializes [`UserConfig`] to canonical TOML matching [`Self::parse_toml`] (`RUSTYOS-061`).
     #[must_use]
+    #[allow(clippy::too_many_lines)]
     pub fn to_toml_string(&self) -> String {
         use std::collections::BTreeSet;
         use std::fmt::Write as _;
@@ -1659,6 +1728,28 @@ impl UserConfig {
                 let _ = writeln!(out, "cursor_theme = \"{}\"", escape_toml_string(trimmed));
             }
         }
+
+        let _ = writeln!(out, "\n[top_bar]");
+        let _ = writeln!(out, "show_wifi = {}", self.menubar_show_wifi);
+        let _ = writeln!(out, "show_battery = {}", self.menubar_show_battery);
+        let _ = writeln!(out, "show_sound = {}", self.menubar_show_volume);
+        let _ = writeln!(out, "show_bluetooth = {}", self.menubar_show_bluetooth);
+        let _ = writeln!(
+            out,
+            "show_battery_percentage = {}",
+            self.menubar_show_battery_percentage
+        );
+        let _ = writeln!(
+            out,
+            "adaptive_contrast = {}",
+            self.menubar_adaptive_contrast
+        );
+        let _ = writeln!(out, "clock_24h = {}", self.clock_24h);
+        let _ = writeln!(
+            out,
+            "clock_locale = \"{}\"",
+            escape_toml_string(&self.clock_locale)
+        );
 
         let _ = writeln!(out, "\n[display]");
         let _ = writeln!(out, "prefer_max_refresh = {}", self.prefer_max_refresh);

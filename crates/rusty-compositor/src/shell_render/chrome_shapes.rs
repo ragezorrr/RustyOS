@@ -449,6 +449,18 @@ fn build_chrome_shapes(
             Rectangle::new(Point::from((0, 0)), Size::from((width, TOP_BAR_HEIGHT))),
             bar_fill,
         )));
+    } else if let Some(backdrop) = top_telemetry.backdrop
+        && backdrop.scrim_alpha > 0
+    {
+        let scrim = if backdrop.dark_scrim {
+            rgba_to_premul_color32f([0, 0, 0, backdrop.scrim_alpha])
+        } else {
+            rgba_to_premul_color32f([255, 255, 255, backdrop.scrim_alpha])
+        };
+        out.push(CompositorRenderElement::Solid(make_solid_element(
+            Rectangle::new(Point::from((0, 0)), Size::from((width, TOP_BAR_HEIGHT))),
+            scrim,
+        )));
     }
 
     // 4. Dock macOS glass container, 4x4 SSAA/XDG icons, local hover, drag overlay & indicators (`RUSTYOS-050`/`073`)

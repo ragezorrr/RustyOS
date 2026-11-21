@@ -10,6 +10,7 @@ pub mod installer_service;
 pub mod logind;
 pub mod polkit;
 pub mod portal;
+pub mod privacy;
 pub mod storage;
 pub mod theme_sync;
 pub mod updates;
@@ -55,9 +56,10 @@ pub use connectivity::{
 };
 pub use display_session::{
     BrightnessService, BrightnessStatus, CurrentUserDetails, SessionAction, SessionService,
-    UserAccount, UserService, calc_backlight_percent, calc_backlight_raw, local_clock_hhmm,
-    local_clock_lock_date, local_clock_lock_hhmm, local_clock_short_datetime,
-    local_clock_short_datetime_fmt, parse_etc_group_for_user, parse_passwd_users,
+    UserAccount, UserService, calc_backlight_percent, calc_backlight_raw,
+    format_localized_short_datetime, local_clock_hhmm, local_clock_lock_date,
+    local_clock_lock_hhmm, local_clock_short_datetime, local_clock_short_datetime_fmt,
+    local_clock_short_datetime_localized, parse_etc_group_for_user, parse_passwd_users,
 };
 pub use media::{
     AudioService, AudioStatus, MediaAction, MediaService, MediaStatus, format_wpctl_volume,
@@ -67,6 +69,7 @@ pub use power::{
     BatteryCondition, BatteryState, PowerDetails, PowerProfile, PowerService, PowerStatus,
     parse_powerprofilesctl_list,
 };
+pub use privacy::{DeviceUsageService, DeviceUsageSnapshot, parse_pipewire_dump_usage};
 pub use storage::{
     RemovableVolume, StorageService, is_valid_block_device_path, parse_lsblk_removable_volumes,
 };

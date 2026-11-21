@@ -1128,6 +1128,19 @@
                            STEP/DONE/FAIL, --dry-run и
                            --detect-source) + упаковка в PKGBUILD
                            и проверка в Arch CI
+
+  D-096  2026-11-21        TopBar Adaptive Backdrop, Popovers,     accepted (ADR-0082)
+                           Privacy Indicators & D-Bus AppMenu:
+                           `BarBackdropStyle` (анализ верхней
+                           полосы обоев), секция `[top_bar]` в
+                           `config.toml` + ПКМ-видимость иконок,
+                           локализованные часы (`en`/`ru`/`uk`,
+                           `12h`/`24h`), `TopBarQuickPopover`
+                           (`Volume`/`Battery`/`Bluetooth`),
+                           PipeWire `DeviceUsageService` + точки
+                           приватности/чип `REC` и фоновый D-Bus
+                           `com.canonical.AppMenu.Registrar`
+                           (`app_menu.rs`)
   -----------------------------------------------------------------------
 
 ## Открытые решения

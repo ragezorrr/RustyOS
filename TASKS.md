@@ -2430,6 +2430,36 @@ hardware/software context и низкие накладные расходы.
 - **Tests:** 348 пройденных unit-тестов workspace (`13` в `rusty_installer`; `2 ignored` doc-теста в `rusty_ui`).
 - **Risks:** Низкие; `Dual-Boot` и `--oobe` сохранены без регрессий.
 
+### RUSTYOS-141 — Адаптивный контраст `TopBar`, `[top_bar]` в `config.toml`, локализованные часы и поповеры Volume/Battery/Bluetooth
+- **Status:** Done
+- **Goal:** Добавить адаптивный контраст `TopBar` по верхней полосе обоев (`BarBackdropStyle`), секцию `[top_bar]` в `config.toml` с ПКМ-настройкой видимости иконок, локализованные часы (`en`/`ru`/`uk`, `12h`/`24h`) и отдельные Liquid Glass поповеры `Volume`, `Battery` и `Bluetooth`.
+- **Dependencies:** `RUSTYOS-140`, `ADR-0082`.
+- **Scope:**
+  - `crates/rusty-compositor/src/shell_render/top_bar/{backdrop.rs, panel.rs, status.rs}`, `shell_render/topbar_popovers.rs`, `config.rs`, `surfaces/mod.rs`, `state/shell_actions.rs`, `input/shell_pointer.rs`, `crates/rusty-services/src/display_session.rs`.
+- **Acceptance Criteria:**
+  - `analyze_top_bar_backdrop_bgra`, `TopBarQuickPopover`, `[top_bar]` и `format_localized_short_datetime` покрыты unit-тестами; `cargo fmt`, `clippy -D warnings` и `cargo test --workspace` проходят чисто.
+- **Risks:** Низкие; при отсутствии кастомных обоев сохраняется стандартный контраст темы.
+
+### RUSTYOS-142 — Индикаторы приватности (микрофон/камера через PipeWire) и чип остановки записи экрана в `TopBar`
+- **Status:** Done
+- **Goal:** Отображать в `TopBar` живые точки приватности при активном микрофоне (оранжевая) и камере (зелёная) через фоновый опрос PipeWire, а также кликабельный красный чип `REC` при активной записи экрана.
+- **Dependencies:** `RUSTYOS-141`, `ADR-0082`.
+- **Scope:**
+  - `crates/rusty-services/src/privacy.rs`, `crates/rusty-compositor/src/{telemetry.rs, frame_composer.rs, shell_render/top_bar/status.rs, shell_render/text_pass.rs, state/shell_actions.rs, input/shell_pointer.rs}`.
+- **Acceptance Criteria:**
+  - Парсер `parse_pipewire_dump_usage` покрыт unit-тестами; фоновый опрос не блокирует event loop; клик по `REC` останавливает активные screencast-сессии.
+- **Risks:** Низкие; при отсутствии `pw-dump` возвращается пустой снимок без ошибок.
+
+### RUSTYOS-143 — Фоновый D-Bus сервис глобального меню `com.canonical.AppMenu.Registrar`
+- **Status:** Done
+- **Goal:** Реализовать фоновый D-Bus сервис `com.canonical.AppMenu.Registrar` + клиент `com.canonical.dbusmenu` в `rusty-compositor` с неблокирующим чтением дерева меню (`try_lock`) и автоматическим fallback на `TopBarAppProfile`.
+- **Dependencies:** `RUSTYOS-142`, `ADR-0082`.
+- **Scope:**
+  - `crates/rusty-compositor/src/app_menu.rs`, `state/mod.rs`, `state/system_bridges.rs`, `docs/adr/0082-topbar-adaptive-backdrop-popovers-and-appmenu.md`, `DECISIONS.md` (`D-096`), `ARCHITECTURE.md` §7.
+- **Acceptance Criteria:**
+  - `AppMenuHandle` запускается в отдельном потоке, корректно деградирует при занятом D-Bus имени и покрыт unit-тестами; `cargo fmt`, `clippy -D warnings`, `cargo test --workspace` и живой `--winit` прогон проходят чисто.
+- **Risks:** Низкие; event loop композитора полностью изолирован от D-Bus I/O.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

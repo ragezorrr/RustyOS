@@ -15,13 +15,21 @@ use super::menus::TopBarMenuHit;
 use super::status::{TopBarTrayItem, status_pill_rect};
 
 /// Visibility and telemetry flags controlling optional items in the `TopBar` (`RUSTYOS-049`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct TopBarLayoutOptions {
     /// Whether a hardware battery is present.
     pub has_battery: bool,
     /// Active unread desktop notification count.
     pub notification_count: u32,
+    /// Show Wi-Fi / Ethernet glyph (`RUSTYOS-141`, default `true`).
+    pub show_wifi: bool,
+    /// Show Battery glyph when a battery is present (`RUSTYOS-141`, default `true`).
+    pub show_battery: bool,
+    /// Show numeric battery percentage next to the Battery glyph (`RUSTYOS-141`).
+    pub show_battery_percentage: bool,
+    /// Show standalone Bluetooth glyph (`RUSTYOS-141`).
+    pub show_bluetooth: bool,
     /// Show standalone volume glyph left of Battery/Wi-Fi.
     pub show_volume: bool,
     /// Show keyboard input source indicator (`EN`/`RU`).
@@ -32,6 +40,33 @@ pub struct TopBarLayoutOptions {
     pub show_tray: bool,
     /// Show Software Updates indicator icon (`RUSTYOS-076`).
     pub show_updates: bool,
+    /// True when microphone capture is active (`RUSTYOS-142`).
+    pub mic_active: bool,
+    /// True when camera capture is active (`RUSTYOS-142`).
+    pub camera_active: bool,
+    /// True when screen recording / screencast is active (`RUSTYOS-142`).
+    pub recording_active: bool,
+}
+
+impl Default for TopBarLayoutOptions {
+    fn default() -> Self {
+        Self {
+            has_battery: false,
+            notification_count: 0,
+            show_wifi: true,
+            show_battery: true,
+            show_battery_percentage: false,
+            show_bluetooth: false,
+            show_volume: false,
+            show_input_source: false,
+            show_workspaces: false,
+            show_tray: false,
+            show_updates: false,
+            mic_active: false,
+            camera_active: false,
+            recording_active: false,
+        }
+    }
 }
 
 /// Live hardware/session telemetry displayed inside `TopBar` (`RUSTYOS-021`, `RUSTYOS-048`, `RUSTYOS-049`).
@@ -104,6 +139,26 @@ pub struct TopBarTelemetry<'a> {
     pub show_input_source: bool,
     /// Show standalone speaker volume icon in Menu Bar (`RUSTYOS-049`, default `false`).
     pub show_volume: bool,
+    /// Show Wi-Fi / Ethernet indicator in Menu Bar (`RUSTYOS-141`, default `true`).
+    pub show_wifi: bool,
+    /// Show Battery indicator in Menu Bar (`RUSTYOS-141`, default `true`).
+    pub show_battery: bool,
+    /// Show numeric battery percentage beside the Battery glyph (`RUSTYOS-141`).
+    pub show_battery_percentage: bool,
+    /// Show standalone Bluetooth indicator in Menu Bar (`RUSTYOS-141`).
+    pub show_bluetooth: bool,
+    /// Whether Bluetooth adapter is powered on (`RUSTYOS-141`).
+    pub bluetooth_powered: bool,
+    /// True when at least one application is actively capturing from a microphone (`RUSTYOS-142`).
+    pub mic_active: bool,
+    /// True when at least one application is actively capturing from a camera (`RUSTYOS-142`).
+    pub camera_active: bool,
+    /// True when screen recording / screencast is active (`RUSTYOS-142`).
+    pub recording_active: bool,
+    /// Adaptive `TopBar` contrast style computed from the wallpaper strip (`RUSTYOS-141`).
+    pub backdrop: Option<super::BarBackdropStyle>,
+    /// Active compact status popover (`Volume`, `Battery`, `Bluetooth`) if open (`RUSTYOS-141`).
+    pub quick_popover: Option<crate::shell_render::TopBarQuickPopoverKind>,
 }
 
 impl TopBarTelemetry<'_> {
@@ -113,11 +168,18 @@ impl TopBarTelemetry<'_> {
         TopBarLayoutOptions {
             has_battery: self.has_battery,
             notification_count: self.notification_count,
+            show_wifi: self.show_wifi,
+            show_battery: self.show_battery,
+            show_battery_percentage: self.show_battery_percentage,
+            show_bluetooth: self.show_bluetooth,
             show_volume: self.show_volume,
             show_input_source: self.show_input_source,
             show_workspaces: self.show_workspaces,
             show_tray: self.show_tray,
             show_updates: self.show_updates,
+            mic_active: self.mic_active,
+            camera_active: self.camera_active,
+            recording_active: self.recording_active,
         }
     }
 }
@@ -158,6 +220,16 @@ impl Default for TopBarTelemetry<'static> {
             show_tray: false,
             show_input_source: false,
             show_volume: false,
+            show_wifi: true,
+            show_battery: true,
+            show_battery_percentage: false,
+            show_bluetooth: false,
+            bluetooth_powered: false,
+            mic_active: false,
+            camera_active: false,
+            recording_active: false,
+            backdrop: None,
+            quick_popover: None,
         }
     }
 }
@@ -281,8 +353,13 @@ pub struct TopBarRightLayout {
     pub search_x: i32,
     pub search_w: i32,
     pub wifi_x: i32,
+    pub wifi_visible: bool,
     pub volume_x: Option<i32>,
     pub battery_x: Option<i32>,
+    pub bluetooth_x: Option<i32>,
+    pub privacy_x: Option<i32>,
+    pub recording_x: Option<i32>,
+    pub recording_w: i32,
     pub control_center_x: i32,
     pub control_center_w: i32,
     pub clock_x: i32,
@@ -321,6 +398,7 @@ pub fn compute_top_bar_right_layout(
 
 /// Computes right-aligned `TopBar` geometry from exact `Inter` text width and visibility options (`RUSTYOS-049`).
 #[must_use]
+#[allow(clippy::too_many_lines)]
 pub fn compute_top_bar_right_layout_with_options(
     screen_width: i32,
     clock_text: &str,
@@ -342,14 +420,27 @@ pub fn compute_top_bar_right_layout_with_options(
     let search_x = control_center_x - 10 - search_w;
 
     let wifi_w = 20;
-    let wifi_x = search_x - 10 - wifi_w;
-    let mut left_cursor = wifi_x;
+    let (wifi_x, mut left_cursor) = if opts.show_wifi {
+        let wx = search_x - 10 - wifi_w;
+        (wx, wx)
+    } else {
+        (search_x, search_x)
+    };
 
-    let battery_w = 26;
-    let battery_x = if opts.has_battery {
+    let battery_w = if opts.show_battery_percentage { 56 } else { 26 };
+    let battery_x = if opts.has_battery && opts.show_battery {
         let bx = left_cursor - 10 - battery_w;
         left_cursor = bx;
         Some(bx)
+    } else {
+        None
+    };
+
+    let bluetooth_w = 18;
+    let bluetooth_x = if opts.show_bluetooth {
+        let btx = left_cursor - 10 - bluetooth_w;
+        left_cursor = btx;
+        Some(btx)
     } else {
         None
     };
@@ -359,6 +450,28 @@ pub fn compute_top_bar_right_layout_with_options(
         let vx = left_cursor - 10 - volume_w;
         left_cursor = vx;
         Some(vx)
+    } else {
+        None
+    };
+
+    let privacy_w = match (opts.mic_active, opts.camera_active) {
+        (true, true) => 22,
+        (true, false) | (false, true) => 12,
+        (false, false) => 0,
+    };
+    let privacy_x = if privacy_w > 0 {
+        let px = left_cursor - 8 - privacy_w;
+        left_cursor = px;
+        Some(px)
+    } else {
+        None
+    };
+
+    let recording_w = 46;
+    let recording_x = if opts.recording_active {
+        let rx = left_cursor - 8 - recording_w;
+        left_cursor = rx;
+        Some(rx)
     } else {
         None
     };
@@ -394,8 +507,13 @@ pub fn compute_top_bar_right_layout_with_options(
         search_x,
         search_w,
         wifi_x,
+        wifi_visible: opts.show_wifi,
         volume_x,
         battery_x,
+        bluetooth_x,
+        privacy_x,
+        recording_x,
+        recording_w,
         control_center_x,
         control_center_w,
         clock_x,

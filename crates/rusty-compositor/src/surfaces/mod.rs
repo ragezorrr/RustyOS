@@ -242,6 +242,7 @@ struct CachedWallpaper {
     revision: u64,
     custom_key: Option<(PathBuf, Size<i32, Logical>)>,
     custom_buffer: Option<MemoryRenderBuffer>,
+    custom_backdrop: Option<crate::shell_render::BarBackdropStyle>,
     fallback_buffer_light: Option<MemoryRenderBuffer>,
     fallback_buffer_dark: Option<MemoryRenderBuffer>,
 }
@@ -1030,9 +1031,18 @@ impl UiShapeCache {
         if self.wallpaper.revision != revision {
             self.wallpaper.custom_key = None;
             self.wallpaper.custom_buffer = None;
+            self.wallpaper.custom_backdrop = None;
             self.wallpaper.revision = revision;
             self.liquid_glass.invalidate_all();
         }
+    }
+
+    /// Returns the adaptive `TopBar` contrast style computed from the active custom wallpaper (`RUSTYOS-141`).
+    #[must_use]
+    pub const fn wallpaper_top_bar_backdrop(
+        &self,
+    ) -> Option<crate::shell_render::BarBackdropStyle> {
+        self.wallpaper.custom_backdrop
     }
 
     /// Returns a GPU-cached wallpaper scaled cleanly to `screen_size`, preferring `custom_path` (`.png`)
@@ -1065,11 +1075,17 @@ impl UiShapeCache {
         if let Some(path) = custom_path {
             let desired_key = (path.to_path_buf(), screen_size);
             if self.wallpaper.custom_key.as_ref() != Some(&desired_key) {
+                let mut backdrop = None;
                 let loaded = usize::try_from(screen_size.w)
                     .ok()
                     .zip(usize::try_from(screen_size.h).ok())
-                    .and_then(|(w, h)| crate::icons::load_png_wallpaper_bgra(path, w, h))
-                    .map(|bgra| {
+                    .and_then(|(w, h)| {
+                        crate::icons::load_png_wallpaper_bgra(path, w, h).map(|bgra| (w, h, bgra))
+                    })
+                    .map(|(w, h, bgra)| {
+                        backdrop = Some(crate::shell_render::analyze_top_bar_backdrop_bgra(
+                            &bgra, w, h, 28,
+                        ));
                         MemoryRenderBuffer::from_slice(
                             &bgra,
                             Fourcc::Argb8888,
@@ -1080,6 +1096,7 @@ impl UiShapeCache {
                         )
                     });
                 self.wallpaper.custom_buffer = loaded;
+                self.wallpaper.custom_backdrop = backdrop;
                 self.wallpaper.custom_key = Some(desired_key);
             }
             if let Some(buf) = self.wallpaper.custom_buffer.as_ref() {
@@ -1097,6 +1114,7 @@ impl UiShapeCache {
         } else if self.wallpaper.custom_key.is_some() || self.wallpaper.custom_buffer.is_some() {
             self.wallpaper.custom_key = None;
             self.wallpaper.custom_buffer = None;
+            self.wallpaper.custom_backdrop = None;
         }
 
         let is_dark = crate::shell_render::active_appearance().is_dark();

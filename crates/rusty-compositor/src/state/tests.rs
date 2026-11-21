@@ -369,6 +369,7 @@ fn keyboard_settings_wallpaper_reload_and_menubar_click_roundtrip() -> Result<()
         show_workspaces: compositor.menubar_show_workspaces,
         show_tray: compositor.menubar_show_tray,
         show_updates: compositor.should_show_top_bar_updates(),
+        ..TopBarLayoutOptions::default()
     };
     let right = compute_top_bar_right_layout_with_options(1280, clock_text, opts);
     let kbd_x = f64::from(right.kbd_x.ok_or("missing TopBar kbd rect")? + 10);
@@ -1478,6 +1479,7 @@ fn updates_popover_and_topbar_menu_workflow_persist_settings()
             show_workspaces: compositor.menubar_show_workspaces,
             show_tray: compositor.menubar_show_tray,
             show_updates: true,
+            ..crate::shell_render::TopBarLayoutOptions::default()
         },
     );
     let ux = right.updates_x.ok_or("missing updates_x")?;

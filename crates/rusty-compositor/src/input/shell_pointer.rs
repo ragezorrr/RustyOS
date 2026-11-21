@@ -303,6 +303,7 @@ impl RustyCompositorState {
         self.update_dock_stack_hover(is_on_primary, chrome_hidden, local_x, local_y);
         self.update_updates_popover_hover(is_on_primary, chrome_hidden, local_x, local_y);
         self.update_wifi_popover_hover(is_on_primary, chrome_hidden, local_x, local_y);
+        self.update_top_bar_quick_popover_hover(is_on_primary, chrome_hidden, local_x, local_y);
         self.update_notification_center_hover(is_on_primary, chrome_hidden, local_x, local_y);
         let fullscreen_active = self
             .topmost_fullscreen_window_on(self.output_map.primary().id)
@@ -458,6 +459,91 @@ impl RustyCompositorState {
         }
     }
 
+    fn update_top_bar_quick_popover_hover(
+        &mut self,
+        is_on_primary: bool,
+        chrome_hidden: bool,
+        local_x: f64,
+        local_y: f64,
+    ) {
+        let Some(kind) = self.top_bar_quick_popover else {
+            return;
+        };
+        if !is_on_primary || chrome_hidden {
+            return;
+        }
+        let logical_size = self.primary_output_logical_size();
+        let tel = self.telemetry.snapshot();
+        let state = self.top_bar_quick_popover_render_state(logical_size.w, kind, &tel);
+        let next_hover = match crate::shell_render::hit_test_topbar_quick_popover(
+            logical_size.w,
+            &state,
+            local_x,
+            local_y,
+        ) {
+            crate::shell_render::TopBarQuickPopoverHit::InsidePopover
+            | crate::shell_render::TopBarQuickPopoverHit::OutsidePopover => None,
+            hit => Some(hit),
+        };
+        if self.top_bar_quick_popover_hover != next_hover {
+            self.top_bar_quick_popover_hover = next_hover;
+            self.shell_redraw_needed = true;
+        }
+    }
+
+    pub(crate) fn handle_top_bar_quick_popover_pointer_click(&mut self, _button: u32) {
+        let Some(kind) = self.top_bar_quick_popover else {
+            return;
+        };
+        let logical_size = self.primary_output_logical_size();
+        let tel = self.telemetry.snapshot();
+        let state = self.top_bar_quick_popover_render_state(logical_size.w, kind, &tel);
+        let hit = crate::shell_render::hit_test_topbar_quick_popover(
+            logical_size.w,
+            &state,
+            self.pointer_location.x,
+            self.pointer_location.y,
+        );
+        match hit {
+            crate::shell_render::TopBarQuickPopoverHit::ToggleMute => {
+                self.telemetry.toggle_mute();
+                self.shell_redraw_needed = true;
+            }
+            crate::shell_render::TopBarQuickPopoverHit::VolumeDown => {
+                self.telemetry.step_volume(-10);
+                self.shell_redraw_needed = true;
+            }
+            crate::shell_render::TopBarQuickPopoverHit::VolumeUp => {
+                self.telemetry.step_volume(10);
+                self.shell_redraw_needed = true;
+            }
+            crate::shell_render::TopBarQuickPopoverHit::ToggleBatteryPercentage => {
+                self.toggle_top_bar_control_visibility("battery_percentage");
+            }
+            crate::shell_render::TopBarQuickPopoverHit::SetPowerProfile(profile) => {
+                self.telemetry.set_power_profile(profile);
+                self.shell_redraw_needed = true;
+            }
+            crate::shell_render::TopBarQuickPopoverHit::ToggleBluetooth => {
+                self.telemetry.toggle_bluetooth();
+                self.shell_redraw_needed = true;
+            }
+            crate::shell_render::TopBarQuickPopoverHit::OpenSettings => {
+                self.close_top_bar_quick_popover();
+                let page = match kind {
+                    crate::shell_render::TopBarQuickPopoverKind::Volume => Some("sound"),
+                    crate::shell_render::TopBarQuickPopoverKind::Battery => Some("battery"),
+                    crate::shell_render::TopBarQuickPopoverKind::Bluetooth => Some("bluetooth"),
+                };
+                self.open_settings_page(page);
+            }
+            crate::shell_render::TopBarQuickPopoverHit::InsidePopover => {}
+            crate::shell_render::TopBarQuickPopoverHit::OutsidePopover => {
+                self.close_top_bar_quick_popover();
+            }
+        }
+    }
+
     fn update_notification_center_hover(
         &mut self,
         is_on_primary: bool,
@@ -569,6 +655,7 @@ impl RustyCompositorState {
         was_menu_open
     }
 
+    #[allow(clippy::too_many_lines)]
     pub(super) fn handle_top_bar_right_cluster_click(
         &mut self,
         output_width: i32,
@@ -582,16 +669,18 @@ impl RustyCompositorState {
         } else {
             tel.clock_date_hhmm.as_str()
         };
-        let opts = crate::shell_render::TopBarLayoutOptions {
-            has_battery: tel.power.has_battery,
-            notification_count: self.notification_count,
-            show_volume: self.menubar_show_volume,
-            show_input_source: self.menubar_show_input_source,
-            show_workspaces: self.menubar_show_workspaces,
-            show_tray: self.menubar_show_tray,
-            show_updates: self.should_show_top_bar_updates(),
-        };
+        let opts = self.top_bar_layout_options_for(&tel);
 
+        if crate::shell_render::check_top_bar_recording_click_for_options(
+            output_width,
+            clock_text,
+            opts,
+            x,
+            y,
+        ) {
+            self.stop_active_screen_recording();
+            return true;
+        }
         if crate::shell_render::check_top_bar_search_click_for_options(
             output_width,
             clock_text,
@@ -609,7 +698,59 @@ impl RustyCompositorState {
             x,
             y,
         ) {
-            self.toggle_wifi_popover();
+            if button == 0x111 {
+                self.toggle_top_bar_control_visibility("wifi");
+            } else {
+                self.toggle_wifi_popover();
+            }
+            return true;
+        }
+        if crate::shell_render::check_top_bar_volume_click_for_options(
+            output_width,
+            clock_text,
+            opts,
+            x,
+            y,
+        ) {
+            if button == 0x111 {
+                self.toggle_top_bar_control_visibility("sound");
+            } else {
+                self.toggle_top_bar_quick_popover(
+                    crate::shell_render::TopBarQuickPopoverKind::Volume,
+                );
+            }
+            return true;
+        }
+        if crate::shell_render::check_top_bar_battery_click_for_options(
+            output_width,
+            clock_text,
+            opts,
+            x,
+            y,
+        ) {
+            if button == 0x111 {
+                self.toggle_top_bar_control_visibility("battery");
+            } else {
+                self.toggle_top_bar_quick_popover(
+                    crate::shell_render::TopBarQuickPopoverKind::Battery,
+                );
+            }
+            return true;
+        }
+        if crate::shell_render::check_top_bar_bluetooth_click_for_options(
+            output_width,
+            clock_text,
+            opts,
+            x,
+            y,
+        ) {
+            if button == 0x111 {
+                self.toggle_top_bar_control_visibility("bluetooth");
+            } else {
+                self.toggle_top_bar_quick_popover(
+                    crate::shell_render::TopBarQuickPopoverKind::Bluetooth,
+                );
+            }
             return true;
         }
         if crate::shell_render::check_top_bar_status_click_for_options(

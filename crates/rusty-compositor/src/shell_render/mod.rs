@@ -52,6 +52,7 @@ mod text_pass;
 mod tokens;
 mod top_bar;
 mod top_bar_menus;
+mod topbar_popovers;
 mod updates_popover;
 mod wifi_popover;
 
@@ -130,35 +131,44 @@ pub use tokens::{
     compute_dock_radius, usable_work_area, usable_work_area_with_dock,
 };
 pub use top_bar::{
+    BarBackdropStyle, analyze_top_bar_backdrop_bgra, prefers_light_foreground, relative_luminance,
+};
+pub use top_bar::{
     MAX_TOP_BAR_TRAY_ITEMS, MAX_VISIBLE_NOTIFICATIONS, MENU_POPOVER_RADIUS, NotificationToastView,
     OsdRenderState, TopBarLayoutOptions, TopBarLeftLayout, TopBarMenuAction, TopBarMenuEntry,
     TopBarMenuHit, TopBarMenuPopoverClick, TopBarRightLayout, TopBarTelemetry, TopBarTrayItem,
-    check_notification_click, check_top_bar_clock_click_for_options, check_top_bar_kbd_click,
-    check_top_bar_kbd_click_for_options, check_top_bar_kbd_click_for_telemetry,
-    check_top_bar_layout_click, check_top_bar_layout_click_for_app,
-    check_top_bar_layout_click_for_profile, check_top_bar_layout_click_with_options,
-    check_top_bar_menu_click, check_top_bar_menu_click_for_app,
-    check_top_bar_menu_click_for_profile, check_top_bar_menu_popover_click,
-    check_top_bar_menu_popover_click_for_profile, check_top_bar_menu_popover_hover_row,
-    check_top_bar_menu_popover_hover_row_for_profile, check_top_bar_notification_click,
-    check_top_bar_notification_click_for_options, check_top_bar_notification_click_for_telemetry,
+    check_notification_click, check_top_bar_battery_click_for_options,
+    check_top_bar_bluetooth_click_for_options, check_top_bar_clock_click_for_options,
+    check_top_bar_kbd_click, check_top_bar_kbd_click_for_options,
+    check_top_bar_kbd_click_for_telemetry, check_top_bar_layout_click,
+    check_top_bar_layout_click_for_app, check_top_bar_layout_click_for_profile,
+    check_top_bar_layout_click_with_options, check_top_bar_menu_click,
+    check_top_bar_menu_click_for_app, check_top_bar_menu_click_for_profile,
+    check_top_bar_menu_popover_click, check_top_bar_menu_popover_click_for_profile,
+    check_top_bar_menu_popover_hover_row, check_top_bar_menu_popover_hover_row_for_profile,
+    check_top_bar_notification_click, check_top_bar_notification_click_for_options,
+    check_top_bar_notification_click_for_telemetry, check_top_bar_recording_click_for_options,
     check_top_bar_search_click_for_options, check_top_bar_search_click_for_telemetry,
     check_top_bar_status_click, check_top_bar_status_click_for_options,
     check_top_bar_status_click_for_telemetry, check_top_bar_tray_click,
     check_top_bar_tray_click_for_options, check_top_bar_tray_click_for_telemetry,
-    check_top_bar_updates_click_for_options, check_top_bar_wifi_click_for_options,
-    check_top_bar_workspace_click, check_top_bar_workspace_click_for_app,
-    check_top_bar_workspace_click_for_profile, check_top_bar_workspace_click_with_options,
-    compute_top_bar_left_layout, compute_top_bar_left_layout_for_profile,
-    compute_top_bar_left_layout_with_options, compute_top_bar_right_layout,
-    compute_top_bar_right_layout_with_options, generate_osd_elements, notification_toast_rects,
-    osd_pill_rect, top_bar_menu_entries, top_bar_menu_items, top_bar_menu_popover_rect,
-    top_bar_menu_popover_rect_for_profile, tray_slot_rects, tray_slot_rects_with_layout,
-    tray_slot_rects_with_options,
+    check_top_bar_updates_click_for_options, check_top_bar_volume_click_for_options,
+    check_top_bar_wifi_click_for_options, check_top_bar_workspace_click,
+    check_top_bar_workspace_click_for_app, check_top_bar_workspace_click_for_profile,
+    check_top_bar_workspace_click_with_options, compute_top_bar_left_layout,
+    compute_top_bar_left_layout_for_profile, compute_top_bar_left_layout_with_options,
+    compute_top_bar_right_layout, compute_top_bar_right_layout_with_options, generate_osd_elements,
+    notification_toast_rects, osd_pill_rect, top_bar_menu_entries, top_bar_menu_items,
+    top_bar_menu_popover_rect, top_bar_menu_popover_rect_for_profile, tray_slot_rects,
+    tray_slot_rects_with_layout, tray_slot_rects_with_options,
 };
 pub use top_bar_menus::{
     AppShortcutAction, ResolvedTopBarMenuItem, TopBarAppProfile, classify_top_bar_app,
     resolve_top_bar_menu_entries,
+};
+pub use topbar_popovers::{
+    TopBarQuickPopoverHit, TopBarQuickPopoverKind, TopBarQuickPopoverLayout,
+    TopBarQuickPopoverState, compute_topbar_quick_popover_layout, hit_test_topbar_quick_popover,
 };
 pub use updates_popover::{
     MAX_POPOVER_UPDATE_ITEMS, UpdatesPopoverHit, UpdatesPopoverLayout, UpdatesRenderState,
@@ -207,6 +217,8 @@ pub enum ShellOverlayView<'a> {
     Updates(&'a UpdatesRenderState<'a>),
     /// Wi-Fi & Ethernet `Liquid Glass` popover anchored to `TopBar` (`RUSTYOS-108`).
     Wifi(&'a WifiPopoverRenderState<'a>),
+    /// Compact `TopBar` popover for Volume, Battery, or Bluetooth (`RUSTYOS-141`).
+    TopBarQuickPopover(&'a TopBarQuickPopoverState<'a>),
     /// Right-edge `Notification Center` stack and widgets (`RUSTYOS-109`).
     NotificationCenter(&'a NotificationCenterRenderState<'a>),
 }
@@ -256,6 +268,7 @@ pub fn generate_shell_render_elements(
         | ShellOverlayView::DockStack(_)
         | ShellOverlayView::Updates(_)
         | ShellOverlayView::Wifi(_)
+        | ShellOverlayView::TopBarQuickPopover(_)
         | ShellOverlayView::NotificationCenter(_) => {}
         ShellOverlayView::Spotlight(spot) => {
             render_spotlight_modal(&mut elements, width, height, spot, has_text);
@@ -283,6 +296,7 @@ pub(super) const fn notifications_hidden_by_overlay(overlay: ShellOverlayView<'_
             | ShellOverlayView::DockStack(_)
             | ShellOverlayView::Updates(_)
             | ShellOverlayView::Wifi(_)
+            | ShellOverlayView::TopBarQuickPopover(_)
             | ShellOverlayView::NotificationCenter(_)
     )
 }
@@ -299,6 +313,7 @@ pub(super) const fn dock_tooltip_hidden_by_overlay(overlay: ShellOverlayView<'_>
             | ShellOverlayView::DockStack(_)
             | ShellOverlayView::Updates(_)
             | ShellOverlayView::Wifi(_)
+            | ShellOverlayView::TopBarQuickPopover(_)
             | ShellOverlayView::NotificationCenter(_)
     )
 }

@@ -804,6 +804,7 @@ fn macos27_top_bar_dynamic_left_right_and_menu_popover_hit_testing() {
             show_workspaces: true,
             show_tray: true,
             show_updates: true,
+            ..TopBarLayoutOptions::default()
         },
     );
     assert!(all_opts.volume_x.is_some());

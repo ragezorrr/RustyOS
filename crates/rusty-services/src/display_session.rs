@@ -223,6 +223,72 @@ pub fn local_clock_lock_hhmm(use_24h: bool) -> String {
     run_c_locale_date(fmt_arg, 8).unwrap_or_else(local_clock_hhmm)
 }
 
+/// Formats a compact localized `TopBar` date + time label (`RUSTYOS-141`).
+///
+/// Supports `"en"`, `"ru"`, and `"uk"` (case-insensitive prefix match, falling back to `"en"`).
+#[must_use]
+pub fn format_localized_short_datetime(
+    wday_sun0: u8,
+    month_1_12: u8,
+    day: u8,
+    hour24: u8,
+    minute: u8,
+    locale: &str,
+    use_24h: bool,
+) -> String {
+    const EN_DAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    const EN_MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    const RU_DAYS: [&str; 7] = ["Вс", "Пн", "Вт", "Ср", "Чт", "Пт", "Сб"];
+    const RU_MONTHS: [&str; 12] = [
+        "янв", "фев", "мар", "апр", "май", "июн", "июл", "авг", "сен", "окт", "ноя", "дек",
+    ];
+    const UK_DAYS: [&str; 7] = ["Нд", "Пн", "Вт", "Ср", "Чт", "Пт", "Сб"];
+    const UK_MONTHS: [&str; 12] = [
+        "січ", "лют", "бер", "кві", "тра", "чер", "лип", "сер", "вер", "жов", "лис", "гру",
+    ];
+
+    let lang = locale.trim().to_ascii_lowercase();
+    let (days, months) = if lang.starts_with("ru") {
+        (&RU_DAYS, &RU_MONTHS)
+    } else if lang.starts_with("uk") || lang.starts_with("ua") {
+        (&UK_DAYS, &UK_MONTHS)
+    } else {
+        (&EN_DAYS, &EN_MONTHS)
+    };
+    let wd = days[usize::from(wday_sun0 % 7)];
+    let mo = months[usize::from(month_1_12.clamp(1, 12) - 1)];
+    if use_24h {
+        format!("{wd} {mo} {day}  {hour24:02}:{minute:02}")
+    } else {
+        let suffix = if hour24 >= 12 { "PM" } else { "AM" };
+        let h12 = match hour24 % 12 {
+            0 => 12,
+            h => h,
+        };
+        format!("{wd} {mo} {day}  {h12}:{minute:02} {suffix}")
+    }
+}
+
+/// Returns compact localized `TopBar` date + time for `locale` (`"en"`, `"ru"`, `"uk"`) (`RUSTYOS-141`).
+#[must_use]
+pub fn local_clock_short_datetime_localized(locale: &str, use_24h: bool) -> String {
+    if let Some(raw) = run_c_locale_date("+%w %m %-d %H %M", 24) {
+        let mut parts = raw.split_whitespace();
+        if let (Some(w), Some(m), Some(d), Some(h), Some(min)) = (
+            parts.next().and_then(|s| s.parse::<u8>().ok()),
+            parts.next().and_then(|s| s.parse::<u8>().ok()),
+            parts.next().and_then(|s| s.parse::<u8>().ok()),
+            parts.next().and_then(|s| s.parse::<u8>().ok()),
+            parts.next().and_then(|s| s.parse::<u8>().ok()),
+        ) {
+            return format_localized_short_datetime(w, m, d, h, min, locale, use_24h);
+        }
+    }
+    local_clock_short_datetime_fmt(use_24h)
+}
+
 /// Returns compact macOS-style `TopBar` date + time (`"Wed Apr 1  9:41 AM"`), falling back to `HH:MM` (`RUSTYOS-048`/`049`).
 #[must_use]
 pub fn local_clock_short_datetime() -> String {

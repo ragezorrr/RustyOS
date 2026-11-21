@@ -344,6 +344,15 @@ fn build_foreground_overlay_shapes(
         ShellOverlayView::Wifi(wifi) => {
             render_wifi_popover_composite(&mut out, shape_cache, renderer, screen_size, wifi);
         }
+        ShellOverlayView::TopBarQuickPopover(pop) => {
+            super::topbar_popovers::render_topbar_quick_popover_composite(
+                &mut out,
+                shape_cache,
+                renderer,
+                screen_size,
+                pop,
+            );
+        }
         ShellOverlayView::NotificationCenter(nc) => {
             render_notification_center_composite(&mut out, shape_cache, renderer, screen_size, nc);
         }

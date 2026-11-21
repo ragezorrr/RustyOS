@@ -1828,6 +1828,20 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
             show_tray: state.menubar_show_tray,
             show_input_source: state.menubar_show_input_source,
             show_volume: state.menubar_show_volume,
+            show_wifi: state.user_config.menubar_show_wifi,
+            show_battery: state.user_config.menubar_show_battery,
+            show_battery_percentage: state.user_config.menubar_show_battery_percentage,
+            show_bluetooth: state.user_config.menubar_show_bluetooth,
+            bluetooth_powered: tel.bluetooth.powered,
+            mic_active: tel.device_usage.mic_active,
+            camera_active: tel.device_usage.camera_active,
+            recording_active: !state.active_screencasts.is_empty(),
+            backdrop: state
+                .user_config
+                .menubar_adaptive_contrast
+                .then(|| shape_cache.wallpaper_top_bar_backdrop())
+                .flatten(),
+            quick_popover: state.top_bar_quick_popover,
         };
 
         let lock_hidden_preview = matches!(
@@ -2048,6 +2062,9 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
         let wifi_view = state
             .wifi_popover_open
             .then(|| state.wifi_render_state(logical_size.w, &tel.network));
+        let quick_pop_view = state
+            .top_bar_quick_popover
+            .map(|kind| state.top_bar_quick_popover_render_state(logical_size.w, kind, &tel));
         let nc_items = state.build_notification_center_items();
         let nc_view = state
             .notification_center_open
@@ -2067,6 +2084,8 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
             ShellOverlayView::Updates(up)
         } else if let Some(wifi) = wifi_view.as_ref() {
             ShellOverlayView::Wifi(wifi)
+        } else if let Some(qpop) = quick_pop_view.as_ref() {
+            ShellOverlayView::TopBarQuickPopover(qpop)
         } else if let Some(nc) = nc_view.as_ref() {
             ShellOverlayView::NotificationCenter(nc)
         } else if let Some(ctx) = context_menu_view {

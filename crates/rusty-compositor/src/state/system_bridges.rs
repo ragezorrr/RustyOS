@@ -16,6 +16,9 @@ impl RustyCompositorState {
     /// Starts non-blocking background system integration threads shared across Winit and DRM (`RUSTYOS-056`).
     pub fn start_background_services(&mut self) {
         self.telemetry = crate::telemetry::SystemMetricsHandle::start_background();
+        self.telemetry
+            .set_clock_locale(&self.user_config.clock_locale);
+        self.app_menu = crate::app_menu::AppMenuHandle::spawn();
         self.dbus_notifications =
             crate::dbus_notifications::DbusNotificationHandle::start_background();
         self.tray = crate::tray::TrayWatcherHandle::start_background();
