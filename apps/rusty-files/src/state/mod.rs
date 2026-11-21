@@ -771,34 +771,7 @@ impl FilesAppState {
         self.dirty = true;
         let tx = self.archive_tx.clone();
         std::thread::spawn(move || {
-            let is_zip = archive_path
-                .extension()
-                .is_some_and(|ext| ext.eq_ignore_ascii_case("zip"));
-            let outcome = if is_zip {
-                run_archive_command(
-                    "unzip",
-                    &[
-                        "-o",
-                        &archive_path.to_string_lossy(),
-                        "-d",
-                        &parent_dir.to_string_lossy(),
-                    ],
-                    &parent_dir,
-                    format!("Extracted {name}"),
-                )
-            } else {
-                run_archive_command(
-                    "tar",
-                    &[
-                        "-xf",
-                        &archive_path.to_string_lossy(),
-                        "-C",
-                        &parent_dir.to_string_lossy(),
-                    ],
-                    &parent_dir,
-                    format!("Extracted {name}"),
-                )
-            };
+            let outcome = extract_archive_to_dir(&archive_path, &parent_dir, &name);
             let _ = tx.send(ArchiveJobResult {
                 target_dir: parent_dir,
                 outcome,
@@ -825,27 +798,97 @@ impl FilesAppState {
         self.dirty = true;
         let tx = self.archive_tx.clone();
         std::thread::spawn(move || {
-            let zip_str = zip_path.to_string_lossy().into_owned();
-            let outcome = match run_archive_command(
-                "zip",
-                &["-r", "-q", &zip_str, &item_name],
-                &parent_dir,
-                format!("Created {zip_name}"),
-            ) {
-                Ok(msg) => Ok(msg),
-                Err(_) => run_archive_command(
-                    "python3",
-                    &["-m", "zipfile", "-c", &zip_str, &item_name],
-                    &parent_dir,
-                    format!("Created {zip_name}"),
-                ),
-            };
+            let outcome = compress_to_zip_archive(&parent_dir, &zip_path, &item_name, &zip_name);
             let _ = tx.send(ArchiveJobResult {
                 target_dir: parent_dir,
                 outcome,
             });
         });
     }
+}
+
+fn extract_archive_to_dir(
+    archive_path: &Path,
+    parent_dir: &Path,
+    name: &str,
+) -> Result<String, String> {
+    let archive_str = archive_path.to_string_lossy();
+    let dir_str = parent_dir.to_string_lossy();
+    let ok_msg = format!("Extracted {name}");
+    let is_zip = archive_path
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("zip"));
+    if is_zip {
+        run_archive_command(
+            "unzip",
+            &["-o", &archive_str, "-d", &dir_str],
+            parent_dir,
+            ok_msg.clone(),
+        )
+        .or_else(|_| {
+            run_archive_command(
+                "bsdtar",
+                &["-xf", &archive_str, "-C", &dir_str],
+                parent_dir,
+                ok_msg.clone(),
+            )
+        })
+        .or_else(|_| {
+            run_archive_command(
+                "python3",
+                &["-m", "zipfile", "-e", &archive_str, &dir_str],
+                parent_dir,
+                ok_msg,
+            )
+        })
+    } else {
+        run_archive_command(
+            "tar",
+            &["-xf", &archive_str, "-C", &dir_str],
+            parent_dir,
+            ok_msg.clone(),
+        )
+        .or_else(|_| {
+            run_archive_command(
+                "bsdtar",
+                &["-xf", &archive_str, "-C", &dir_str],
+                parent_dir,
+                ok_msg,
+            )
+        })
+    }
+}
+
+fn compress_to_zip_archive(
+    parent_dir: &Path,
+    zip_path: &Path,
+    item_name: &str,
+    zip_name: &str,
+) -> Result<String, String> {
+    let zip_str = zip_path.to_string_lossy();
+    let ok_msg = format!("Created {zip_name}");
+    run_archive_command(
+        "zip",
+        &["-r", "-q", &zip_str, item_name],
+        parent_dir,
+        ok_msg.clone(),
+    )
+    .or_else(|_| {
+        run_archive_command(
+            "bsdtar",
+            &["-a", "-cf", &zip_str, item_name],
+            parent_dir,
+            ok_msg.clone(),
+        )
+    })
+    .or_else(|_| {
+        run_archive_command(
+            "python3",
+            &["-m", "zipfile", "-c", &zip_str, item_name],
+            parent_dir,
+            ok_msg,
+        )
+    })
 }
 
 /// Returns true when `path` has a supported archive extension for `"Extract Here"`.
@@ -1405,6 +1448,30 @@ mod tests {
         let save_paths = state.resolve_picker_selection();
         assert_eq!(save_paths.len(), 1);
         assert!(save_paths[0].ends_with("export.zip"));
+        Ok(())
+    }
+
+    #[test]
+    fn compress_and_extract_zip_archive_roundtrip() -> Result<(), Box<dyn std::error::Error>> {
+        let guard = TestHomeGuard::new("zip-roundtrip")?;
+        let src_dir = guard.root.join("src");
+        let dst_dir = guard.root.join("dst");
+        fs::create_dir_all(&src_dir)?;
+        fs::create_dir_all(&dst_dir)?;
+        let sample = src_dir.join("hello.txt");
+        fs::write(&sample, b"rustyos zip test")?;
+        let zip_path = src_dir.join("hello.txt.zip");
+
+        compress_to_zip_archive(&src_dir, &zip_path, "hello.txt", "hello.txt.zip")
+            .map_err(std::io::Error::other)?;
+        assert!(zip_path.is_file());
+
+        extract_archive_to_dir(&zip_path, &dst_dir, "hello.txt.zip")
+            .map_err(std::io::Error::other)?;
+        assert_eq!(
+            fs::read_to_string(dst_dir.join("hello.txt"))?,
+            "rustyos zip test"
+        );
         Ok(())
     }
 }

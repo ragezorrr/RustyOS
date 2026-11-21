@@ -24,6 +24,7 @@ mod window_minimize;
 mod window_shadow;
 mod xcursor;
 
+pub use builtin_cursors::ensure_user_xcursor_theme_installed;
 pub use liquid_glass::LiquidGlassElement;
 pub use sdf::ShadowEdgeSide;
 pub use window_clip::ClippedSurfaceElement;

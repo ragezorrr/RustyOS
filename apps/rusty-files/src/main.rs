@@ -50,15 +50,53 @@ where
                 let Some(dir) = iter.next() else {
                     return Err(String::from("--path requires a directory argument"));
                 };
-                opts.initial_path = Some(PathBuf::from(dir));
+                opts.initial_path = Some(normalize_cli_target_path(&dir));
             }
             other if !other.starts_with('-') && opts.initial_path.is_none() => {
-                opts.initial_path = Some(PathBuf::from(other));
+                opts.initial_path = Some(normalize_cli_target_path(other));
             }
             other => return Err(format!("unknown argument '{other}'")),
         }
     }
     Ok(Some(opts))
+}
+
+/// Converts a raw CLI path or `file://` URI into a local directory [`PathBuf`].
+/// If the target points to an existing regular file, navigates to its parent folder.
+fn normalize_cli_target_path(raw: &str) -> PathBuf {
+    let decoded = if let Some(rest) = raw.strip_prefix("file://") {
+        let path_part = rest.strip_prefix("localhost").unwrap_or(rest);
+        percent_decode_uri_path(path_part)
+    } else {
+        raw.to_owned()
+    };
+    let candidate = PathBuf::from(decoded);
+    if candidate.is_file()
+        && let Some(parent) = candidate.parent()
+    {
+        return parent.to_path_buf();
+    }
+    candidate
+}
+
+fn percent_decode_uri_path(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let Ok(hex) = std::str::from_utf8(&bytes[i + 1..i + 3])
+            && let Ok(val) = u8::from_str_radix(hex, 16)
+        {
+            out.push(val);
+            i += 3;
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 fn main() -> ExitCode {
@@ -155,5 +193,21 @@ mod tests {
             }))
         );
         assert!(parse_args(["--path".to_owned()]).is_err());
+    }
+
+    #[test]
+    fn normalizes_file_uris_and_resolves_regular_file_to_parent_dir() -> std::io::Result<()> {
+        assert_eq!(
+            normalize_cli_target_path("file:///tmp/My%20Downloads"),
+            PathBuf::from("/tmp/My Downloads")
+        );
+        let dir = env::temp_dir().join(format!("rusty-files-uri-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        let file = dir.join("sample.txt");
+        std::fs::write(&file, b"ok")?;
+        let uri = format!("file://{}", file.display());
+        assert_eq!(normalize_cli_target_path(&uri), dir);
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
     }
 }

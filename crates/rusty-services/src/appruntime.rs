@@ -226,19 +226,69 @@ pub fn ensure_xdg_user_directories(home: &Path, config_home: &Path) -> io::Resul
     Ok(())
 }
 
-/// Idempotently writes `config_home/rustyos-mimeapps.list` so `XDG_CURRENT_DESKTOP=RustyOS`
-/// resolves `inode/directory` and `x-scheme-handler/file` to `org.rustyos.files.desktop`.
+/// Idempotently writes `config_home/rustyos-mimeapps.list` and ensures `config_home/mimeapps.list`
+/// maps `inode/directory` and `x-scheme-handler/file` to `org.rustyos.files.desktop` when unset.
 ///
 /// # Errors
 ///
-/// Returns an [`io::Error`] if creating `config_home` or writing `rustyos-mimeapps.list` fails.
+/// Returns an [`io::Error`] if creating `config_home` or writing `mimeapps.list` fails.
 pub fn ensure_rustyos_mimeapps_list(config_home: &Path) -> io::Result<()> {
     fs::create_dir_all(config_home)?;
     let mimeapps_path = config_home.join("rustyos-mimeapps.list");
     if !mimeapps_path.exists() {
         fs::write(&mimeapps_path, DEFAULT_RUSTYOS_MIMEAPPS_LIST)?;
     }
+    let generic_path = config_home.join("mimeapps.list");
+    if !generic_path.exists() {
+        fs::write(&generic_path, DEFAULT_RUSTYOS_MIMEAPPS_LIST)?;
+    } else if let Ok(existing) = fs::read_to_string(&generic_path) {
+        let merged = ensure_default_file_manager_in_mimeapps(&existing);
+        if merged != existing {
+            fs::write(&generic_path, merged)?;
+        }
+    }
     Ok(())
+}
+
+fn ensure_default_file_manager_in_mimeapps(existing: &str) -> String {
+    let has_dir = existing
+        .lines()
+        .any(|l| l.trim_start().starts_with("inode/directory="));
+    let has_file_scheme = existing
+        .lines()
+        .any(|l| l.trim_start().starts_with("x-scheme-handler/file="));
+    if has_dir && has_file_scheme {
+        return existing.to_owned();
+    }
+    let mut additions = String::new();
+    if !has_dir {
+        additions.push_str("inode/directory=org.rustyos.files.desktop;\n");
+    }
+    if !has_file_scheme {
+        additions.push_str("x-scheme-handler/file=org.rustyos.files.desktop;\n");
+    }
+    if let Some(pos) = existing.find("[Default Applications]") {
+        let after_header = existing[pos..]
+            .find('\n')
+            .map_or(existing.len(), |n| pos + n + 1);
+        let mut out = String::with_capacity(existing.len() + additions.len() + 2);
+        out.push_str(&existing[..after_header]);
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str(&additions);
+        out.push_str(&existing[after_header..]);
+        out
+    } else {
+        let mut out = String::with_capacity(existing.len() + additions.len() + 32);
+        out.push_str("[Default Applications]\n");
+        out.push_str(&additions);
+        if !existing.is_empty() {
+            out.push('\n');
+            out.push_str(existing);
+        }
+        out
+    }
 }
 
 /// Bootstraps XDG user directories and `rustyos-mimeapps.list` for the current user session.
@@ -360,6 +410,19 @@ mod tests {
 
         let mimeapps = fs::read_to_string(config.join("rustyos-mimeapps.list"))?;
         assert!(mimeapps.contains("inode/directory=org.rustyos.files.desktop;"));
+        let generic = fs::read_to_string(config.join("mimeapps.list"))?;
+        assert!(generic.contains("inode/directory=org.rustyos.files.desktop;"));
+
+        // Existing user mimeapps.list entries are preserved when adding missing directory/file defaults.
+        fs::write(
+            config.join("mimeapps.list"),
+            "[Default Applications]\ntext/html=google-chrome.desktop;\n",
+        )?;
+        ensure_rustyos_mimeapps_list(&config)?;
+        let merged = fs::read_to_string(config.join("mimeapps.list"))?;
+        assert!(merged.contains("text/html=google-chrome.desktop;"));
+        assert!(merged.contains("inode/directory=org.rustyos.files.desktop;"));
+        assert!(merged.contains("x-scheme-handler/file=org.rustyos.files.desktop;"));
 
         let _ = fs::remove_dir_all(&root);
         Ok(())

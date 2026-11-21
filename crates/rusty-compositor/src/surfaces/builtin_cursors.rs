@@ -157,6 +157,220 @@ fn resample_rgba_to_premul_bgra(
     }
 }
 
+const XCURSOR_IMAGE_TYPE: u32 = 0xfffd_0002;
+const XCURSOR_THEME_SIZES: &[u32] = &[24, 32, 48];
+
+/// Canonical `XCursor` file names and standard X11/Wayland aliases for the 14 built-in RustyOS cursors.
+const XCURSOR_EXPORT_SPECS: &[(&str, CursorIcon, &[&str])] = &[
+    (
+        "default",
+        CursorIcon::Default,
+        &["left_ptr", "arrow", "top_left_arrow", "right_ptr"],
+    ),
+    (
+        "pointer",
+        CursorIcon::Pointer,
+        &["hand", "hand1", "hand2", "pointing_hand", "link"],
+    ),
+    (
+        "text",
+        CursorIcon::Text,
+        &["xterm", "ibeam", "vertical-text"],
+    ),
+    (
+        "crosshair",
+        CursorIcon::Crosshair,
+        &["cross", "tcross", "cell"],
+    ),
+    (
+        "move",
+        CursorIcon::Move,
+        &["fleur", "all-scroll", "size_all"],
+    ),
+    ("grab", CursorIcon::Grab, &["openhand"]),
+    (
+        "grabbing",
+        CursorIcon::Grabbing,
+        &["closedhand", "dnd-move"],
+    ),
+    (
+        "ew-resize",
+        CursorIcon::EwResize,
+        &[
+            "sb_h_double_arrow",
+            "h_double_arrow",
+            "size_hor",
+            "col-resize",
+            "e-resize",
+            "w-resize",
+        ],
+    ),
+    (
+        "ns-resize",
+        CursorIcon::NsResize,
+        &[
+            "sb_v_double_arrow",
+            "v_double_arrow",
+            "size_ver",
+            "row-resize",
+            "n-resize",
+            "s-resize",
+        ],
+    ),
+    (
+        "nwse-resize",
+        CursorIcon::NwseResize,
+        &[
+            "bd_double_arrow",
+            "size_fdiag",
+            "nw-resize",
+            "se-resize",
+            "top_left_corner",
+            "bottom_right_corner",
+        ],
+    ),
+    (
+        "nesw-resize",
+        CursorIcon::NeswResize,
+        &[
+            "fd_double_arrow",
+            "size_bdiag",
+            "ne-resize",
+            "sw-resize",
+            "top_right_corner",
+            "bottom_left_corner",
+        ],
+    ),
+    (
+        "not-allowed",
+        CursorIcon::NotAllowed,
+        &["crossed_circle", "no-drop", "forbidden"],
+    ),
+    ("wait", CursorIcon::Wait, &["watch"]),
+    (
+        "progress",
+        CursorIcon::Progress,
+        &["left_ptr_watch", "half-busy"],
+    ),
+];
+
+/// Encodes one built-in PNG cursor into a valid multi-size binary `Xcur` (`v1.0`) file.
+#[must_use]
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::similar_names
+)]
+fn encode_xcursor_bytes(
+    png_bytes: &[u8],
+    hot_x_norm: f64,
+    hot_y_norm: f64,
+    sizes: &[u32],
+) -> Option<Vec<u8>> {
+    let (src_w, src_h, rgba) = rusty_services::image_decode::decode_png_rgba(png_bytes)?;
+    if src_w == 0 || src_h == 0 || sizes.is_empty() {
+        return None;
+    }
+    let ntoc = u32::try_from(sizes.len()).ok()?;
+    let header_and_toc = 16_usize + sizes.len() * 12;
+    let mut chunks: Vec<(u32, Vec<u8>)> = Vec::with_capacity(sizes.len());
+    for &dim_u32 in sizes {
+        let dim = usize::try_from(dim_u32.clamp(16, 128)).ok()?;
+        let mut pixels = vec![0_u8; dim * dim * 4];
+        resample_rgba_to_premul_bgra(&rgba, src_w, src_h, &mut pixels, dim);
+        let xhot = (hot_x_norm * f64::from(dim_u32))
+            .round()
+            .clamp(0.0, f64::from(dim_u32.saturating_sub(1))) as u32;
+        let yhot = (hot_y_norm * f64::from(dim_u32))
+            .round()
+            .clamp(0.0, f64::from(dim_u32.saturating_sub(1))) as u32;
+        let mut chunk = Vec::with_capacity(36 + pixels.len());
+        chunk.extend_from_slice(&36_u32.to_le_bytes());
+        chunk.extend_from_slice(&XCURSOR_IMAGE_TYPE.to_le_bytes());
+        chunk.extend_from_slice(&dim_u32.to_le_bytes());
+        chunk.extend_from_slice(&1_u32.to_le_bytes());
+        chunk.extend_from_slice(&dim_u32.to_le_bytes());
+        chunk.extend_from_slice(&dim_u32.to_le_bytes());
+        chunk.extend_from_slice(&xhot.to_le_bytes());
+        chunk.extend_from_slice(&yhot.to_le_bytes());
+        chunk.extend_from_slice(&0_u32.to_le_bytes());
+        chunk.extend_from_slice(&pixels);
+        chunks.push((dim_u32, chunk));
+    }
+
+    let total_size: usize = header_and_toc + chunks.iter().map(|(_, c)| c.len()).sum::<usize>();
+    let mut out = Vec::with_capacity(total_size);
+    out.extend_from_slice(b"Xcur");
+    out.extend_from_slice(&16_u32.to_le_bytes());
+    out.extend_from_slice(&0x0001_0000_u32.to_le_bytes());
+    out.extend_from_slice(&ntoc.to_le_bytes());
+
+    let mut offset = header_and_toc;
+    for (dim_u32, chunk) in &chunks {
+        let pos = u32::try_from(offset).ok()?;
+        out.extend_from_slice(&XCURSOR_IMAGE_TYPE.to_le_bytes());
+        out.extend_from_slice(&dim_u32.to_le_bytes());
+        out.extend_from_slice(&pos.to_le_bytes());
+        offset += chunk.len();
+    }
+    for (_, chunk) in chunks {
+        out.extend_from_slice(&chunk);
+    }
+    Some(out)
+}
+
+/// Materializes the built-in `"RustyOS"` `XCursor` theme under `icons_root/RustyOS/`
+/// so third-party clients (Firefox, Chromium, GTK, Qt, XWayland) load the exact same
+/// RustyOS cursor set as the compositor.
+pub(crate) fn install_rustyos_xcursor_theme_to(
+    icons_root: &std::path::Path,
+) -> std::io::Result<()> {
+    let theme_dir = icons_root.join("RustyOS");
+    let cursors_dir = theme_dir.join("cursors");
+    if cursors_dir.join("default").is_file() && cursors_dir.join("pointer").is_file() {
+        return Ok(());
+    }
+    std::fs::create_dir_all(&cursors_dir)?;
+    let index_path = theme_dir.join("index.theme");
+    if !index_path.exists() {
+        std::fs::write(
+            &index_path,
+            "[Icon Theme]\nName=RustyOS\nComment=RustyOS Built-in HiDPI Cursor Theme\n",
+        )?;
+    }
+    for &(canonical, icon, aliases) in XCURSOR_EXPORT_SPECS {
+        let (png_bytes, hx, hy) = builtin_cursor_spec(icon);
+        if let Some(xcur_bytes) = encode_xcursor_bytes(png_bytes, hx, hy, XCURSOR_THEME_SIZES) {
+            let target = cursors_dir.join(canonical);
+            std::fs::write(&target, xcur_bytes)?;
+            for &alias in aliases {
+                let link_path = cursors_dir.join(alias);
+                if !link_path.exists() {
+                    let _ = std::os::unix::fs::symlink(canonical, &link_path);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Idempotently installs the `"RustyOS"` `XCursor` theme into `~/.local/share/icons/RustyOS`
+/// and sets `~/.icons/default/index.theme` (`Inherits=RustyOS`) if unset.
+pub fn ensure_user_xcursor_theme_installed() {
+    let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
+        return;
+    };
+    let data_home = std::env::var_os("XDG_DATA_HOME")
+        .map_or_else(|| home.join(".local/share"), std::path::PathBuf::from);
+    let _ = install_rustyos_xcursor_theme_to(&data_home.join("icons"));
+
+    let default_icons_dir = home.join(".icons/default");
+    let default_index = default_icons_dir.join("index.theme");
+    if !default_index.exists() && std::fs::create_dir_all(&default_icons_dir).is_ok() {
+        let _ = std::fs::write(&default_index, "[Icon Theme]\nInherits=RustyOS\n");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -201,5 +415,20 @@ mod tests {
         assert!(is_builtin_rustyos_theme(None));
         assert!(is_builtin_rustyos_theme(Some("RustyOS")));
         assert!(!is_builtin_rustyos_theme(Some("Adwaita")));
+    }
+
+    #[test]
+    fn exports_valid_binary_xcursor_theme_files_and_aliases() -> std::io::Result<()> {
+        let root =
+            std::env::temp_dir().join(format!("rustyos-xcursor-export-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        install_rustyos_xcursor_theme_to(&root)?;
+        let default_bytes = std::fs::read(root.join("RustyOS/cursors/default"))?;
+        assert!(default_bytes.starts_with(b"Xcur"));
+        assert!(root.join("RustyOS/cursors/left_ptr").exists());
+        assert!(root.join("RustyOS/cursors/hand2").exists());
+        assert!(root.join("RustyOS/index.theme").is_file());
+        let _ = std::fs::remove_dir_all(&root);
+        Ok(())
     }
 }

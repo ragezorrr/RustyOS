@@ -125,6 +125,10 @@ impl XdgActivationHandler for RustyCompositorState {
         if !within_ttl || self.is_session_locked() {
             return;
         }
+        // Prevent background windows (e.g. Chromium/Chrome) from stealing focus without a user input serial.
+        if token_data.serial.is_none() && self.wm.focused_window().is_some() {
+            return;
+        }
         let serial = smithay::utils::SERIAL_COUNTER.next_serial();
         let _ = self.activate_window_surface(&surface, serial);
     }

@@ -1,11 +1,11 @@
 [Desktop Entry]
 Name=Files
 Comment=Browse local folders, tags, and files in RustyOS
-Exec=rusty-files %f
+Exec=rusty-files %U
 Icon=system-file-manager
 Terminal=false
 Type=Application
 Categories=System;FileTools;FileManager;
-MimeType=inode/directory;
+MimeType=inode/directory;x-scheme-handler/file;
 StartupWMClass=org.rustyos.files
 Keywords=files;finder;folder;directory;rustyos;

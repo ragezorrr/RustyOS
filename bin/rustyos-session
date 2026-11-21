@@ -15,7 +15,9 @@ export XDG_SESSION_TYPE=wayland
 : "${SDL_VIDEODRIVER:=wayland,x11}"
 : "${CLUTTER_BACKEND:=wayland}"
 : "${_JAVA_AWT_WM_NONREPARENTING:=1}"
-export QT_QPA_PLATFORM QT_WAYLAND_DISABLE_WINDOWDECORATION GDK_BACKEND MOZ_ENABLE_WAYLAND ELECTRON_OZONE_PLATFORM_HINT SDL_VIDEODRIVER CLUTTER_BACKEND _JAVA_AWT_WM_NONREPARENTING
+: "${XCURSOR_THEME:=RustyOS}"
+: "${XCURSOR_SIZE:=24}"
+export QT_QPA_PLATFORM QT_WAYLAND_DISABLE_WINDOWDECORATION GDK_BACKEND MOZ_ENABLE_WAYLAND ELECTRON_OZONE_PLATFORM_HINT SDL_VIDEODRIVER CLUTTER_BACKEND _JAVA_AWT_WM_NONREPARENTING XCURSOR_THEME XCURSOR_SIZE
 
 # Find bin directory (sibling install -> PATH -> local cargo release/debug)
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -349,6 +351,7 @@ if [ "$BACKEND_FLAG" = "--drm" ] || [ "$BACKEND_FLAG" = "--kms" ]; then
             QT_QPA_PLATFORM QT_WAYLAND_DISABLE_WINDOWDECORATION \
             GDK_BACKEND MOZ_ENABLE_WAYLAND ELECTRON_OZONE_PLATFORM_HINT \
             SDL_VIDEODRIVER CLUTTER_BACKEND _JAVA_AWT_WM_NONREPARENTING \
+            XCURSOR_THEME XCURSOR_SIZE \
             ${XDG_DESKTOP_PORTAL_DIR:+XDG_DESKTOP_PORTAL_DIR} \
             >/dev/null 2>&1 || true
     fi
@@ -358,6 +361,7 @@ if [ "$BACKEND_FLAG" = "--drm" ] || [ "$BACKEND_FLAG" = "--kms" ]; then
             QT_QPA_PLATFORM QT_WAYLAND_DISABLE_WINDOWDECORATION \
             GDK_BACKEND MOZ_ENABLE_WAYLAND ELECTRON_OZONE_PLATFORM_HINT \
             SDL_VIDEODRIVER CLUTTER_BACKEND _JAVA_AWT_WM_NONREPARENTING \
+            XCURSOR_THEME XCURSOR_SIZE \
             >/dev/null 2>&1 || true
         systemctl --user try-restart xdg-desktop-portal.service >/dev/null 2>&1 || true
         systemctl --user start pipewire.service pipewire-pulse.service wireplumber.service >/dev/null 2>&1 || true

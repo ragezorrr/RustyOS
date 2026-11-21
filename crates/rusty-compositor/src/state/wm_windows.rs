@@ -289,18 +289,57 @@ impl RustyCompositorState {
         }
     }
 
-    /// Finds the topmost window and surface under the given logical point.
+    /// Finds the topmost window and surface under the given logical point,
+    /// matching [`WindowManager::visible_windows`] top-to-bottom stacking order so
+    /// foreground windows (e.g. `rusty-files` over fullscreen/maximized browsers)
+    /// can never have clicks stolen by windows behind them.
     #[must_use]
     pub fn surface_under_pointer(
         &self,
         point: Point<f64, Logical>,
     ) -> Option<(Window, WlSurface, Point<f64, Logical>)> {
-        let (window, window_loc) = self.space.element_under(point)?;
-        let relative_point = point - window_loc.to_f64();
-        let (surface, surface_offset) =
-            window.surface_under(relative_point, WindowSurfaceType::ALL)?;
-        let surface_origin = (window_loc + surface_offset).to_f64();
-        Some((window.clone(), surface, surface_origin))
+        // 1. Override-redirect X11 popups/menus float above managed windows.
+        for elem in self.space.elements().rev() {
+            if elem
+                .x11_surface()
+                .is_some_and(X11Surface::is_override_redirect)
+                && let Some(window_loc) = self.space.element_location(elem)
+            {
+                let render_loc = window_loc - elem.geometry().loc;
+                let relative_point = point - render_loc.to_f64();
+                if let Some((surface, surface_offset)) =
+                    elem.surface_under(relative_point, WindowSurfaceType::ALL)
+                {
+                    let surface_origin = (render_loc + surface_offset).to_f64();
+                    return Some((elem.clone(), surface, surface_origin));
+                }
+            }
+        }
+
+        // 2. Managed windows in exact top-to-bottom WM stacking order.
+        for wm_win in self.wm.visible_windows().into_iter().rev() {
+            if self.is_window_minimized(wm_win.id) {
+                continue;
+            }
+            let Some(window) = self.smithay_window_for_id(wm_win.id) else {
+                continue;
+            };
+            let Some(window_loc) = self.space.element_location(&window) else {
+                continue;
+            };
+            // Smithay's `Space::element_location` is the geometry origin; subtract `window.geometry().loc`
+            // (e.g. GTK3/Firefox CSD shadow insets) to get the surface render origin.
+            let render_loc = window_loc - window.geometry().loc;
+            let relative_point = point - render_loc.to_f64();
+            if let Some((surface, surface_offset)) =
+                window.surface_under(relative_point, WindowSurfaceType::ALL)
+            {
+                let surface_origin = (render_loc + surface_offset).to_f64();
+                return Some((window, surface, surface_origin));
+            }
+        }
+
+        None
     }
 
     /// Finds the topmost surface (layer shell or window) under the given logical point,
@@ -1431,7 +1470,9 @@ impl RustyCompositorState {
                 if let Some(root_ws) = WaylandFocus::wl_surface(&window) {
                     Self::apply_surface_scale(&root_ws, output_scale);
                 }
-                self.space.map_element(window, content_origin, is_focused);
+                self.space
+                    .map_element(window.clone(), content_origin, is_focused);
+                self.space.raise_element(&window, false);
             }
         }
 

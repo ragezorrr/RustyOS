@@ -827,6 +827,7 @@ impl RustyCompositorState {
             crate::config::UserConfig::default()
         } else {
             let _ = rusty_services::appruntime::bootstrap_user_session_environment();
+            crate::surfaces::ensure_user_xcursor_theme_installed();
             crate::config::UserConfig::load_default()
         };
         let initial_scale = user_config.scale_for_output("winit-0");

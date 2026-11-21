@@ -293,27 +293,48 @@ impl XwmHandler for RustyCompositorState {
 
     fn maximize_request(&mut self, _xwm: XwmId, window: X11Surface) {
         if let Some(win_id) = find_bound_window_id(self, window.window_id()) {
+            if self.wm.window(win_id).is_some_and(|w| w.maximized) {
+                return;
+            }
+            let prev_focus = self.wm.focused_window();
             self.wm.focus_and_raise(win_id);
-            if !self.wm.window(win_id).is_some_and(|w| w.maximized) {
-                let serial = SERIAL_COUNTER.next_serial();
-                self.apply_wm_action(rusty_wm::WmAction::ToggleMaximizeFocused, serial);
+            let serial = SERIAL_COUNTER.next_serial();
+            self.apply_wm_action(rusty_wm::WmAction::ToggleMaximizeFocused, serial);
+            if let Some(prev) = prev_focus
+                && prev != win_id
+            {
+                self.wm.focus_and_raise(prev);
+                self.sync_space_with_wm(serial);
             }
         }
     }
 
     fn unmaximize_request(&mut self, _xwm: XwmId, window: X11Surface) {
         if let Some(win_id) = find_bound_window_id(self, window.window_id()) {
+            if !self.wm.window(win_id).is_some_and(|w| w.maximized) {
+                return;
+            }
+            let prev_focus = self.wm.focused_window();
             self.wm.focus_and_raise(win_id);
-            if self.wm.window(win_id).is_some_and(|w| w.maximized) {
-                let serial = SERIAL_COUNTER.next_serial();
-                self.apply_wm_action(rusty_wm::WmAction::ToggleMaximizeFocused, serial);
+            let serial = SERIAL_COUNTER.next_serial();
+            self.apply_wm_action(rusty_wm::WmAction::ToggleMaximizeFocused, serial);
+            if let Some(prev) = prev_focus
+                && prev != win_id
+            {
+                self.wm.focus_and_raise(prev);
+                self.sync_space_with_wm(serial);
             }
         }
     }
 
     fn fullscreen_request(&mut self, _xwm: XwmId, window: X11Surface) {
         if let Some(win_id) = find_bound_window_id(self, window.window_id()) {
-            self.wm.focus_and_raise(win_id);
+            if self.wm.window(win_id).is_some_and(|w| w.fullscreen) {
+                return;
+            }
+            if self.wm.focused_window().is_none() || self.wm.focused_window() == Some(win_id) {
+                self.wm.focus_and_raise(win_id);
+            }
             self.wm.set_window_fullscreen(win_id, true);
             let serial = SERIAL_COUNTER.next_serial();
             self.sync_space_with_wm(serial);
@@ -322,7 +343,12 @@ impl XwmHandler for RustyCompositorState {
 
     fn unfullscreen_request(&mut self, _xwm: XwmId, window: X11Surface) {
         if let Some(win_id) = find_bound_window_id(self, window.window_id()) {
-            self.wm.focus_and_raise(win_id);
+            if !self.wm.window(win_id).is_some_and(|w| w.fullscreen) {
+                return;
+            }
+            if self.wm.focused_window().is_none() || self.wm.focused_window() == Some(win_id) {
+                self.wm.focus_and_raise(win_id);
+            }
             self.wm.set_window_fullscreen(win_id, false);
             let serial = SERIAL_COUNTER.next_serial();
             self.sync_space_with_wm(serial);
