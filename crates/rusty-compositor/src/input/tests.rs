@@ -82,6 +82,17 @@ fn shortcut_mapping_covers_focus_workspaces_and_layouts() {
     );
     assert_eq!(
         match_shortcut(ModifiersState::default(), Keysym::Escape),
+        None
+    );
+    assert_eq!(
+        match_shortcut(
+            ModifiersState {
+                ctrl: true,
+                alt: true,
+                ..ModifiersState::default()
+            },
+            Keysym::BackSpace,
+        ),
         Some(KeyIntercept::ExitCompositor)
     );
     assert_eq!(

@@ -12,8 +12,10 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use rusty_ipc::Urgency;
+use smithay::reexports::calloop::ping::Ping;
 use tracing::{info, warn};
 use zbus::interface;
+use zbus::object_server::SignalEmitter;
 use zbus::zvariant::OwnedValue;
 
 /// Commands emitted asynchronously from the D-Bus thread into the compositor.
@@ -46,6 +48,7 @@ pub enum DbusNotificationCommand {
 pub struct DbusNotificationHandle {
     rx: Mutex<mpsc::Receiver<DbusNotificationCommand>>,
     stop_flag: Arc<AtomicBool>,
+    waker: Arc<Mutex<Option<Ping>>>,
     _thread: Option<JoinHandle<()>>,
 }
 
@@ -55,6 +58,7 @@ impl Default for DbusNotificationHandle {
         Self {
             rx: Mutex::new(rx),
             stop_flag: Arc::new(AtomicBool::new(true)),
+            waker: Arc::new(Mutex::new(None)),
             _thread: None,
         }
     }
@@ -76,16 +80,26 @@ impl DbusNotificationHandle {
         let (tx, rx) = mpsc::channel();
         let stop_flag = Arc::new(AtomicBool::new(false));
         let thread_stop = Arc::clone(&stop_flag);
+        let waker: Arc<Mutex<Option<Ping>>> = Arc::new(Mutex::new(None));
+        let thread_waker = Arc::clone(&waker);
 
         let handle = thread::Builder::new()
             .name("rusty-dbus-notif".to_owned())
-            .spawn(move || run_dbus_server_loop(&tx, &thread_stop))
+            .spawn(move || run_dbus_server_loop(&tx, &thread_stop, &thread_waker))
             .ok();
 
         Self {
             rx: Mutex::new(rx),
             stop_flag,
+            waker,
             _thread: handle,
+        }
+    }
+
+    /// Registers the compositor event-loop waker so incoming D-Bus notifications trigger an immediate redraw.
+    pub(crate) fn set_waker(&self, ping: Ping) {
+        if let Ok(mut guard) = self.waker.lock() {
+            *guard = Some(ping);
         }
     }
 
@@ -106,13 +120,30 @@ impl DbusNotificationHandle {
 struct NotificationsInterface {
     tx: mpsc::Sender<DbusNotificationCommand>,
     next_id: AtomicU32,
+    waker: Arc<Mutex<Option<Ping>>>,
+}
+
+impl NotificationsInterface {
+    fn wake_compositor(&self) {
+        if let Ok(guard) = self.waker.lock()
+            && let Some(ping) = guard.as_ref()
+        {
+            ping.ping();
+        }
+    }
 }
 
 #[interface(name = "org.freedesktop.Notifications")]
 impl NotificationsInterface {
     #[allow(clippy::unused_self)]
     fn get_capabilities(&self) -> Vec<&'static str> {
-        vec!["body", "persistence"]
+        vec![
+            "actions",
+            "body",
+            "body-markup",
+            "icon-static",
+            "persistence",
+        ]
     }
 
     #[allow(clippy::unused_self)]
@@ -155,21 +186,39 @@ impl NotificationsInterface {
             body: clean_body,
             expire_after,
         });
+        self.wake_compositor();
         id
     }
 
     fn close_notification(&self, id: u32) {
         let _ = self.tx.send(DbusNotificationCommand::Close { id });
+        self.wake_compositor();
     }
+
+    #[zbus(signal)]
+    async fn notification_closed(
+        emitter: &SignalEmitter<'_>,
+        id: u32,
+        reason: u32,
+    ) -> zbus::Result<()>;
+
+    #[zbus(signal)]
+    async fn action_invoked(
+        emitter: &SignalEmitter<'_>,
+        id: u32,
+        action_key: &str,
+    ) -> zbus::Result<()>;
 }
 
 fn try_bind_notification_bus(
     tx: &mpsc::Sender<DbusNotificationCommand>,
+    waker: &Arc<Mutex<Option<Ping>>>,
     bus_name: &str,
 ) -> Result<zbus::blocking::Connection, zbus::Error> {
     let iface = NotificationsInterface {
         tx: tx.clone(),
         next_id: AtomicU32::new(100),
+        waker: Arc::clone(waker),
     };
     zbus::blocking::connection::Builder::session()?
         .serve_at("/org/freedesktop/Notifications", iface)?
@@ -177,27 +226,37 @@ fn try_bind_notification_bus(
         .build()
 }
 
-fn run_dbus_server_loop(tx: &mpsc::Sender<DbusNotificationCommand>, stop_flag: &AtomicBool) {
+fn run_dbus_server_loop(
+    tx: &mpsc::Sender<DbusNotificationCommand>,
+    stop_flag: &AtomicBool,
+    waker: &Arc<Mutex<Option<Ping>>>,
+) {
     // Prefer standard `org.freedesktop.Notifications`; fall back to
     // `org.rustyos.Notifications` in nested sessions where KDE/GNOME already owns it.
-    let (conn, bus_name) = match try_bind_notification_bus(tx, "org.freedesktop.Notifications") {
+    let (conn, bus_name) = match try_bind_notification_bus(
+        tx,
+        waker,
+        "org.freedesktop.Notifications",
+    ) {
         Ok(c) => (c, "org.freedesktop.Notifications"),
-        Err(primary_err) => match try_bind_notification_bus(tx, "org.rustyos.Notifications") {
-            Ok(c) => {
-                info!(
-                    reason = %primary_err,
-                    "Host notification daemon owns org.freedesktop.Notifications; listening on org.rustyos.Notifications"
-                );
-                (c, "org.rustyos.Notifications")
+        Err(primary_err) => {
+            match try_bind_notification_bus(tx, waker, "org.rustyos.Notifications") {
+                Ok(c) => {
+                    info!(
+                        reason = %primary_err,
+                        "Host notification daemon owns org.freedesktop.Notifications; listening on org.rustyos.Notifications"
+                    );
+                    (c, "org.rustyos.Notifications")
+                }
+                Err(fallback_err) => {
+                    warn!(
+                        error = %fallback_err,
+                        "Unable to bind D-Bus notification service; falling back to IPC-only HUD"
+                    );
+                    return;
+                }
             }
-            Err(fallback_err) => {
-                warn!(
-                    error = %fallback_err,
-                    "Unable to bind D-Bus notification service; falling back to IPC-only HUD"
-                );
-                return;
-            }
-        },
+        }
     };
 
     info!(

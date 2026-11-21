@@ -1652,6 +1652,7 @@ fn try_run_native_drm_session_once(
     let (ping, ping_source) = make_ping().map_err(|err| {
         CompositorError::EventLoop(format!("failed to initialize event loop ping: {err}"))
     })?;
+    state.dbus_notifications.set_waker(ping.clone());
     state.loop_waker = Some(ping);
 
     let rt_ping = Rc::clone(&runtime);

@@ -92,6 +92,7 @@ pub fn run_nested_winit(config: &CompositorConfig) -> Result<BootstrapReport, Co
     let (ping, ping_source) = make_ping().map_err(|err| {
         CompositorError::EventLoop(format!("failed to initialize event loop ping: {err}"))
     })?;
+    state.dbus_notifications.set_waker(ping.clone());
     state.loop_waker = Some(ping);
     loop_handle
         .insert_source(ping_source, move |_event, _metadata, _app_state| {})

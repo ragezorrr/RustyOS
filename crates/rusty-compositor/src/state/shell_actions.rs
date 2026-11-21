@@ -1187,11 +1187,13 @@ impl RustyCompositorState {
                         body,
                         expire_after,
                     );
+                    self.shell_redraw_needed = true;
                 }
                 crate::dbus_notifications::DbusNotificationCommand::Close { id } => {
                     self.notifications.retain(|n| n.dbus_id != Some(id));
                     self.notification_history.retain(|n| n.dbus_id != Some(id));
                     self.sync_notification_count();
+                    self.shell_redraw_needed = true;
                 }
             }
         }

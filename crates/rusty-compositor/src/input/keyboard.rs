@@ -735,9 +735,7 @@ pub(super) fn match_shortcut_with_config(
     sym: Keysym,
     shortcuts: &ShortcutBindings,
 ) -> Option<KeyIntercept> {
-    if sym.raw() == Keysym::Escape.raw()
-        || (modifiers.ctrl && modifiers.alt && sym.raw() == Keysym::BackSpace.raw())
-    {
+    if modifiers.ctrl && modifiers.alt && sym.raw() == Keysym::BackSpace.raw() {
         return Some(KeyIntercept::ExitCompositor);
     }
     if let Some(hw) = match_hardware_shortcut(modifiers, sym) {
