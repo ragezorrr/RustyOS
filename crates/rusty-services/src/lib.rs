@@ -9,6 +9,8 @@ pub mod image_decode;
 pub mod logind;
 pub mod polkit;
 pub mod portal;
+pub mod storage;
+pub mod theme_sync;
 pub mod updates;
 
 pub use auth::{
@@ -59,6 +61,10 @@ pub use power::{
     BatteryCondition, BatteryState, PowerDetails, PowerProfile, PowerService, PowerStatus,
     parse_powerprofilesctl_list,
 };
+pub use storage::{
+    RemovableVolume, StorageService, is_valid_block_device_path, parse_lsblk_removable_volumes,
+};
+pub use theme_sync::{ThemeSyncConfig, ThemeSyncService, merge_gtk_settings_ini};
 pub use updates::{
     PackageUpdateItem, UpdateCheckState, UpdateCheckerHandle, UpdateStatusSnapshot,
     is_rustyos_package, package_requires_restart, parse_checkupdates_output,

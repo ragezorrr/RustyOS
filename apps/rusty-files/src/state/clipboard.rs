@@ -170,7 +170,31 @@ impl FilesAppState {
         self.start_background_transfer(vec![entry.path], dest_dir, TransferKind::Copy);
     }
 
-    fn start_background_transfer(
+    /// Drops dragged file paths onto `dest_dir` via the background transfer worker (`RUSTYOS-134`).
+    pub(crate) fn action_drop_paths(
+        &mut self,
+        sources: Vec<PathBuf>,
+        dest_dir: PathBuf,
+        copy_mode: bool,
+    ) {
+        if self.active_transfer.is_some() || sources.is_empty() {
+            return;
+        }
+        if sources
+            .iter()
+            .any(|src| src == &dest_dir || dest_dir.starts_with(src))
+        {
+            return;
+        }
+        let kind = if copy_mode {
+            TransferKind::Copy
+        } else {
+            TransferKind::Move
+        };
+        self.start_background_transfer(sources, dest_dir, kind);
+    }
+
+    pub(crate) fn start_background_transfer(
         &mut self,
         sources: Vec<PathBuf>,
         dest_dir: PathBuf,

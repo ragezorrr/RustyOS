@@ -2337,6 +2337,51 @@ hardware/software context и низкие накладные расходы.
 - **Tests:** 342 пройденных unit-теста workspace (`206` в `rusty_compositor`, включая `screenshot_hud_hit_test_and_selection_normalization`; `2 ignored` doc-теста в `rusty_ui`).
 - **Risks:** Низкие; при отсутствии `wl-copy` режим `Copy` автоматически сохраняет PNG в `~/Pictures/Screenshots/`.
 
+### RUSTYOS-134 — Сервис съёмных носителей (`StorageService`) и внутренний drag-and-drop в `apps/rusty-files`
+- **Status:** Done
+- **Goal:** Добавить непривилегированный сервис съёмных носителей `StorageService` (`UDisks2` / `lsblk`) в `crates/rusty-services` и внутренний drag-and-drop файлов в `apps/rusty-files` поверх существующих `TransferProgress` и `QuickLook`.
+- **Dependencies:** `RUSTYOS-130`, `ADR-0078`, `D-092`.
+- **Scope:**
+  - `crates/rusty-services/src/storage.rs` + `lib.rs`: `RemovableVolume`, `is_valid_block_device_path`, `parse_lsblk_removable_volumes`, `StorageService::{list_removable_volumes, mount_volume, unmount_and_eject}` и unit-тест `storage_service_parses_lsblk_removable_volumes_and_validates_device_paths`.
+  - `apps/rusty-files/src/{state/types.rs, state/clipboard.rs, state/mod.rs, wayland.rs}`: `FileDragState` (порог 6 px + защита от self/descendant drop), `action_drop_paths`, `refresh_removable_volumes` / `eject_removable_volume` / `mount_or_open_removable_volume` и unit-тест `file_drag_activation_and_drop_guards_work`.
+  - Документация: `docs/adr/0078-files-udisks2-progress-dnd-quicklook.md`, `DECISIONS.md` (`D-092`), `ARCHITECTURE.md` §7.
+- **Acceptance Criteria:**
+  - `StorageService` безопасно парсит `lsblk -P -b`, отбрасывает невалидные пути устройств и поддерживает `mount_volume` / `unmount_and_eject` с graceful fallback.
+  - Внутренний drag-and-drop активируется после порога `6 px`, защищён от self/child drop и переиспользует фоновый `start_background_transfer`.
+  - `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --offline -- -D warnings` и `cargo test --workspace` проходят без ошибок.
+- **Tests:** 344 пройденных unit-теста workspace (`48` в `rusty_services`, `19` в `rusty_files`, `206` в `rusty_compositor`; `2 ignored` doc-теста в `rusty_ui`).
+- **Risks:** Низкие; при отсутствии `udisksctl` или подключённых флешек операции возвращают информативный статус без паники.
+
+### RUSTYOS-135 — Синхронизация темы RustyOS со сторонними приложениями (`GTK 3/4` и `gsettings`)
+- **Status:** Done
+- **Goal:** Обеспечить автоматическую синхронизацию `Appearance` (`Light / Dark`), `IconTheme` и `CursorStyle` из `config.toml` в `gtk-3.0/settings.ini`, `gtk-4.0/settings.ini` и `gsettings org.gnome.desktop.interface` без блокировки композитора.
+- **Dependencies:** `RUSTYOS-131`, `ADR-0079`, `D-093`.
+- **Scope:**
+  - `crates/rusty-services/src/theme_sync.rs` + `lib.rs`: `ThemeSyncConfig`, `merge_gtk_settings_ini`, `ThemeSyncService::{write_gtk_settings_to_dir, apply_async}` и 2 unit-теста (`merge_gtk_settings_ini_preserves_user_keys_and_updates_theme_fields`, `write_gtk_settings_creates_gtk3_and_gtk4_files_atomically`).
+  - `crates/rusty-compositor/src/state/shell_actions.rs`: вызов `ThemeSyncService::apply_async` из `apply_user_config` при смене оформления и наличии `config_path`.
+  - Документация: `docs/adr/0079-third-party-theme-sync-gtk-portal.md`, `DECISIONS.md` (`D-093`), `ARCHITECTURE.md` §7.
+- **Acceptance Criteria:**
+  - `merge_gtk_settings_ini` сохраняет пользовательские секции и ключи и корректно обновляет управляемые GTK-параметры.
+  - `gtk-3.0/settings.ini` и `gtk-4.0/settings.ini` записываются атомарно; `gsettings` выполняется в фоновом потоке с graceful fallback.
+  - `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --offline -- -D warnings` и `cargo test --workspace` проходят без ошибок.
+- **Tests:** 346 пройденных unit-тестов workspace (`50` в `rusty_services`, `206` в `rusty_compositor`, `19` в `rusty_files`; `2 ignored` doc-теста в `rusty_ui`).
+- **Risks:** Низкие; в unit-тестах с `config_path == None` синхронизация не затрагивает файлы пользователя.
+
+### RUSTYOS-136 — Нативный экран входа `apps/rusty-greeter` (`greetd` JSON-IPC)
+- **Status:** Done
+- **Goal:** Реализовать нативный Wayland greeter `apps/rusty-greeter` на базе `crates/rusty-ui` с протоколом `greetd` (`GREETD_SOCK`), режимом `--demo` и упаковкой в `PKGBUILD` / CI.
+- **Dependencies:** `RUSTYOS-130`, `ADR-0080`, `D-094`.
+- **Scope:**
+  - `apps/rusty-greeter/src/greetd.rs`: `GreetdRequest`, `GreetdResponse`, `encode_greetd_frame`, `decode_greetd_json`, `GreetdClient::{connect, roundtrip, authenticate_and_start}` и unit-тест `greetd_json_ipc_roundtrips_all_request_and_response_variants`.
+  - `apps/rusty-greeter/src/main.rs`: Wayland-окно входа на `crates/rusty-ui` (`TextField`, `TextField::password`, `PushButton`, `UiDrawList`/`UiPainter`, `--demo`, `--light`/`--dark`, `--user`, `--session-cmd`).
+  - `Cargo.toml`, `packaging/arch/PKGBUILD`, `.github/workflows/ci.yml`, `docs/adr/0080-rusty-greeter-greetd-ipc.md`, `DECISIONS.md` (`D-094`), `ARCHITECTURE.md` §7.
+- **Acceptance Criteria:**
+  - Протокол `greetd` проходит unit-тест включая реальный `UnixStream::pair` roundtrip.
+  - `rusty-greeter --demo` запускается и отрисовывается в живом `--winit` прогоне.
+  - `cargo check --workspace --locked`, `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --offline -- -D warnings`, `cargo test --workspace` и `bash -n packaging/arch/PKGBUILD` проходят без ошибок.
+- **Tests:** 347 пройденных unit-тестов workspace (`1` в `rusty_greeter`, `50` в `rusty_services`, `206` в `rusty_compositor`, `19` в `rusty_files`; `2 ignored` doc-теста в `rusty_ui`).
+- **Risks:** Низкие; системные сервисы хоста не затрагиваются.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

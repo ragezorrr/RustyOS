@@ -266,6 +266,13 @@ RustyOS/
     - `TopBarMenuAction::{TileLeftFocused, TileRightFocused, MoveToNextWorkspace, MoveToPrevWorkspace, MoveToNextDisplay}` в `shell_render/top_bar/menus.rs` и маршрутизация `AboutRustyOs` / `ShowShortcuts` в `open_settings_page` (`state/shell_actions.rs`).
   - Интерактивный `ScreenshotHud` (`RUSTYOS-133`, `ADR-0077`, `D-091`):
     - `crates/rusty-compositor`: `shell_render/modals/screenshot_hud.rs` (`ScreenshotMode`, `ScreenshotHudState`, `ScreenshotHudHit`, `hit_test_screenshot_hud`, `normalize_selection_rect`), `ShellOverlayView::ScreenshotHud`, `ScreenshotRequest::{FullScreenCopyOnly, Region}` и `spawn_copy_screenshot_only` (`screenshot.rs`), перехват pointer/keyboard (`Super+Shift+4`, `Esc`/`Enter`/`1`/`2`/`3`, `TopBarMenuAction::OpenScreenshotHud`).
+  - Съёмные носители (`StorageService`) и внутренний drag-and-drop в `rusty-files` (`RUSTYOS-134`, `ADR-0078`, `D-092`):
+    - `crates/rusty-services/src/storage.rs`: `RemovableVolume`, `is_valid_block_device_path`, `parse_lsblk_removable_volumes`, `StorageService::{list_removable_volumes, mount_volume, unmount_and_eject}` (`lsblk` + `udisksctl`);
+    - `apps/rusty-files/src/{state/types.rs, state/clipboard.rs, state/mod.rs, wayland.rs}`: `FileDragState`, `action_drop_paths` (поверх фонового `TransferProgress`), `refresh_removable_volumes` / `eject_removable_volume` / `mount_or_open_removable_volume`.
+  - Синхронизация темы со сторонними приложениями (`RUSTYOS-135`, `ADR-0079`, `D-093`):
+    - `crates/rusty-services/src/theme_sync.rs`: `ThemeSyncConfig`, `merge_gtk_settings_ini`, `ThemeSyncService::{write_gtk_settings_to_dir, apply_async}` (`gtk-3.0/settings.ini`, `gtk-4.0/settings.ini`, `gsettings` `color-scheme`/`icon-theme`/`cursor-theme`), вызывается из `apply_user_config` (`crates/rusty-compositor/src/state/shell_actions.rs`).
+  - Нативный экран входа `apps/rusty-greeter` (`RUSTYOS-136`, `ADR-0080`, `D-094`):
+    - `apps/rusty-greeter/src/{greetd.rs, main.rs}`: zero-dependency JSON-IPC клиент `greetd` (`GREETD_SOCK`), интерфейс входа на `crates/rusty-ui` (`--demo`, `--light`/`--dark`, `--user`, `--session-cmd`), упаковка `/usr/bin/rusty-greeter` в `packaging/arch/PKGBUILD` и проверка в `.github/workflows/ci.yml`.
   - Сайдбар `#ECEDF1`/`#262628`, активный пункт `r = 10` (`#D9DADD`/`#3E3E41`), холст `#F5F6FA`/`#1C1C1D`, карточки (`CARD_CORNER_RADIUS = 12`, `#FFFFFF`/`#2C2C2D`) и капсулы тулбара/фильтров без серых рамок.
 - **Нетривиальные сигнатуры и lint-правила:**
   - `KeyboardHandle::change_repeat_info(&self, rate: i32, delay: i32)` (порядок `(rate, delay)`, обратный к `seat.add_keyboard(xkb, delay, rate)`).

@@ -2368,6 +2368,19 @@ impl RustyCompositorState {
         }
         crate::shell_render::set_active_appearance(self.user_config.appearance);
         crate::shell_render::set_active_accent_index(self.user_config.ui_accent_index);
+        if appearance_changed && self.config_path.is_some() {
+            let prefer_dark = !matches!(
+                self.user_config.appearance,
+                crate::config::AppearanceMode::Light
+            );
+            rusty_services::ThemeSyncService::apply_async(rusty_services::ThemeSyncConfig {
+                prefer_dark,
+                icon_theme: None,
+                cursor_theme: self.user_config.cursor_theme.clone(),
+                cursor_size: 24,
+                font_name: None,
+            });
+        }
         if updates_changed {
             self.updates_checker.reconfigure(
                 self.updates_enabled,

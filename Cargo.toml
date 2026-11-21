@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "apps/rusty-files",
+    "apps/rusty-greeter",
     "apps/rusty-installer",
     "apps/rusty-settings",
     "apps/rusty-terminal",

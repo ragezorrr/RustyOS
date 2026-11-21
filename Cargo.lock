@@ -1703,6 +1703,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusty-greeter"
+version = "0.1.0"
+dependencies = [
+ "rusty-ui",
+ "smithay-client-toolkit",
+ "wayland-client",
+]
+
+[[package]]
 name = "rusty-installer"
 version = "0.1.0"
 dependencies = [

@@ -1071,6 +1071,48 @@
                            (wl-copy image/png с fallback в файл),
                            запуск по Super+Shift+4 и из File ->
                            Screenshot...
+
+    D-092                  Фаза 7/8 Сервис съёмных носителей     accepted
+                           StorageService и внутренний
+                           drag-and-drop в rusty-files
+                           (RUSTYOS-134, ADR-0078):
+                           crates/rusty-services/src/storage.rs
+                           (RemovableVolume,
+                           is_valid_block_device_path,
+                           parse_lsblk_removable_volumes,
+                           StorageService::{list_removable_volumes,
+                           mount_volume, unmount_and_eject}),
+                           FileDragState (порог 6 px + защита от
+                           self/child drop) и action_drop_paths
+                           поверх фонового TransferProgress
+                           worker в apps/rusty-files
+
+    D-093                  Фаза 7/8 Синхронизация темы RustyOS   accepted
+                           со сторонними приложениями (GTK 3/4,
+                           gsettings) (RUSTYOS-135, ADR-0079):
+                           crates/rusty-services/src/theme_sync.rs
+                           (ThemeSyncConfig,
+                           merge_gtk_settings_ini с сохранением
+                           пользовательских ключей, атомарная
+                           запись gtk-3.0/gtk-4.0 settings.ini,
+                           фоновый gsettings color-scheme /
+                           icon-theme / cursor-theme) и вызов
+                           ThemeSyncService::apply_async из
+                           apply_user_config в rusty-compositor
+
+    D-094                  Фаза 10 Нативный Wayland greeter      accepted
+                           apps/rusty-greeter для greetd
+                           (RUSTYOS-136, ADR-0080): клиент на
+                           crates/rusty-ui (TextField /
+                           PasswordField / PushButton /
+                           UiDrawList) с zero-dependency
+                           JSON-IPC клиентом greetd (GREETD_SOCK:
+                           create_session /
+                           post_auth_message_response /
+                           start_session / cancel_session),
+                           режимом --demo для --winit проверки и
+                           включением /usr/bin/rusty-greeter в
+                           PKGBUILD и Arch CI
   -----------------------------------------------------------------------
 
 ## Открытые решения

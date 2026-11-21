@@ -299,6 +299,61 @@ pub(crate) struct ClipboardItemSet {
     pub paths: Vec<PathBuf>,
 }
 
+/// Active internal file drag-and-drop state (`RUSTYOS-134`).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct FileDragState {
+    /// Paths being dragged.
+    pub sources: Vec<PathBuf>,
+    /// Pointer press origin `(x, y)`.
+    pub start_pos: (f64, f64),
+    /// Current pointer `(x, y)`.
+    pub current_pos: (f64, f64),
+    /// Becomes `true` once pointer moves at least `6 px` from `start_pos`.
+    pub active: bool,
+    /// Optional hovered destination directory.
+    pub target_dir: Option<PathBuf>,
+    /// When `true`, copy instead of move.
+    pub copy_mode: bool,
+}
+
+impl FileDragState {
+    /// Creates a pending drag state from `sources` at `start_pos`.
+    #[must_use]
+    pub(crate) fn start(sources: Vec<PathBuf>, start_pos: (f64, f64)) -> Self {
+        Self {
+            sources,
+            start_pos,
+            current_pos: start_pos,
+            active: false,
+            target_dir: None,
+            copy_mode: false,
+        }
+    }
+
+    /// Updates pointer coordinates and activates drag once threshold (`6 px`) is crossed.
+    pub(crate) fn update_pos(&mut self, pos: (f64, f64)) -> bool {
+        self.current_pos = pos;
+        if !self.active {
+            let dx = pos.0 - self.start_pos.0;
+            let dy = pos.1 - self.start_pos.1;
+            if dx * dx + dy * dy >= 36.0 {
+                self.active = true;
+            }
+        }
+        self.active
+    }
+
+    /// Returns `true` if dropping `self.sources` onto `dest` is valid (not onto itself or a child).
+    #[must_use]
+    pub(crate) fn can_drop_on(&self, dest: &std::path::Path) -> bool {
+        !self.sources.is_empty()
+            && self
+                .sources
+                .iter()
+                .all(|src| src != dest && !dest.starts_with(src))
+    }
+}
+
 /// Active `Quick Look` overlay state (`Space`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct QuickLookState {

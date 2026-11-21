@@ -1577,6 +1577,13 @@ impl PointerHandler for WaylandClientData {
                 PointerEventKind::Motion { .. } => {
                     if self.update_active_text_drag(px) {
                         self.app.dirty = true;
+                    } else if self.pointer_pressed
+                        && let Some(drag) = self.app.file_drag.as_mut()
+                    {
+                        drag.copy_mode = self.modifiers.ctrl;
+                        if drag.update_pos((px, py)) {
+                            self.app.dirty = true;
+                        }
                     }
                 }
                 PointerEventKind::Leave { .. } => {
@@ -1590,6 +1597,15 @@ impl PointerHandler for WaylandClientData {
                     if button == BTN_LEFT {
                         self.pointer_pressed = true;
                         self.execute_left_click(px, py, serial);
+                        if self.app.popup.is_none()
+                            && self.app.quick_look.is_none()
+                            && let Some(entry) = self.app.selected_entry()
+                        {
+                            self.app.file_drag = Some(crate::state::FileDragState::start(
+                                vec![entry.path.clone()],
+                                (px, py),
+                            ));
+                        }
                     } else if button == BTN_RIGHT {
                         self.execute_right_click(px, py, serial);
                     }
@@ -1601,6 +1617,14 @@ impl PointerHandler for WaylandClientData {
                     self.app.search_field.on_pointer_up();
                     self.app.rename_field.on_pointer_up();
                     self.app.goto_field.on_pointer_up();
+                    if let Some(drag) = self.app.file_drag.take()
+                        && drag.active
+                        && let Some(dest) = drag.target_dir.clone()
+                        && drag.can_drop_on(&dest)
+                    {
+                        self.app
+                            .action_drop_paths(drag.sources, dest, drag.copy_mode);
+                    }
                 }
                 PointerEventKind::Axis {
                     horizontal,

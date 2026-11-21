@@ -38,6 +38,8 @@ pub(crate) struct FilesAppState {
     pub locations: UserFileLocations,
     pub tags_config: FileTagsConfig,
     pub volumes: Vec<VolumeInfo>,
+    pub removable_volumes: Vec<rusty_services::RemovableVolume>,
+    pub file_drag: Option<FileDragState>,
     pub sidebar_items: Vec<SidebarRowItem>,
     pub active_sidebar: Option<SidebarLocation>,
     pub view_mode: FileViewMode,
@@ -195,6 +197,8 @@ impl FilesAppState {
             go_to_folder: None,
             inline_rename: None,
             active_transfer: None,
+            removable_volumes: rusty_services::StorageService::list_removable_volumes(),
+            file_drag: None,
             status_message: None,
             window_title: String::from("Files"),
             window_size: WindowSizeState::Normal,
@@ -478,6 +482,54 @@ pub(crate) fn parse_desktop_exec_tokens(exec_line: &str) -> Option<Vec<String>> 
         .map(ToOwned::to_owned)
         .collect();
     (!tokens.is_empty()).then_some(tokens)
+}
+
+impl FilesAppState {
+    /// Refreshes removable volumes from `StorageService` (`UDisks2` / `lsblk`, `RUSTYOS-134`).
+    #[allow(dead_code)]
+    pub(crate) fn refresh_removable_volumes(&mut self) {
+        self.removable_volumes = rusty_services::StorageService::list_removable_volumes();
+        self.dirty = true;
+    }
+
+    /// Safely unmounts and ejects a removable block device (`RUSTYOS-134`).
+    #[allow(dead_code)]
+    pub(crate) fn eject_removable_volume(&mut self, device: &str) {
+        match rusty_services::StorageService::unmount_and_eject(device) {
+            Ok(msg) => {
+                self.status_message = Some(msg);
+                self.refresh_removable_volumes();
+            }
+            Err(err) => {
+                self.status_message = Some(format!("Eject failed: {err}"));
+                self.dirty = true;
+            }
+        }
+    }
+
+    /// Mounts (if needed) and navigates to a removable volume (`RUSTYOS-134`).
+    #[allow(dead_code)]
+    pub(crate) fn mount_or_open_removable_volume(&mut self, device: &str) {
+        if let Some(mp) = self
+            .removable_volumes
+            .iter()
+            .find(|v| v.device == device)
+            .and_then(|v| v.mount_point.clone())
+        {
+            self.navigate_to_directory(mp);
+            return;
+        }
+        match rusty_services::StorageService::mount_volume(device) {
+            Ok(mp) => {
+                self.refresh_removable_volumes();
+                self.navigate_to_directory(mp);
+            }
+            Err(err) => {
+                self.status_message = Some(format!("Mount failed: {err}"));
+                self.dirty = true;
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -848,5 +900,15 @@ mod tests {
         ));
         assert!(state.go_to_folder.is_none());
         Ok(())
+    }
+
+    #[test]
+    fn file_drag_activation_and_drop_guards_work() {
+        let mut drag = FileDragState::start(vec![PathBuf::from("/tmp/folder_a")], (100.0, 100.0));
+        assert!(!drag.update_pos((102.0, 103.0)));
+        assert!(drag.update_pos((108.0, 100.0)));
+        assert!(!drag.can_drop_on(std::path::Path::new("/tmp/folder_a")));
+        assert!(!drag.can_drop_on(std::path::Path::new("/tmp/folder_a/sub")));
+        assert!(drag.can_drop_on(std::path::Path::new("/tmp/folder_b")));
     }
 }
