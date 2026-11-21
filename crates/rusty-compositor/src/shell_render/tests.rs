@@ -84,6 +84,7 @@ fn generate_shell_render_elements_produces_non_empty_layout() {
         brightness_percent: 100,
         volume_percent: 75,
         audio_muted: false,
+        audio_output_name: "Speakers",
         media_active: false,
         media_playing: false,
         media_title: "",
@@ -2182,18 +2183,21 @@ fn notification_center_layout_and_hit_testing_work() {
             urgency: rusty_ipc::Urgency::Normal,
             title: "Backup Complete",
             body: "Snapshot stored safely.",
+            age_label: "now".to_owned(),
         },
         NotificationCenterItemView {
             id: 102,
             urgency: rusty_ipc::Urgency::Low,
             title: "Messages",
             body: "Ready for review.",
+            age_label: "2m ago".to_owned(),
         },
         NotificationCenterItemView {
             id: 103,
             urgency: rusty_ipc::Urgency::Critical,
             title: "Software Update",
             body: "2 packages pending.",
+            age_label: "1h ago".to_owned(),
         },
     ];
     let state = NotificationCenterRenderState {
@@ -2205,6 +2209,9 @@ fn notification_center_layout_and_hit_testing_work() {
         task_labels: DEFAULT_NOTIFICATION_TASKS,
         hovered_hit: None,
         location_name: "Local Station",
+        system_summary: "75% Vol • 88% Bat".to_owned(),
+        show_weather_widget: true,
+        show_reminders_widget: true,
     };
     let layout = compute_notification_center_layout(screen, &state);
     assert!(layout.lead_card.is_some());

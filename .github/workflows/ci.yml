@@ -70,8 +70,9 @@ jobs:
             git rust pkgconf gnupg \
             wayland libxkbcommon mesa libglvnd libinput systemd-libs seatd \
             dbus fontconfig ttf-jetbrains-mono noto-fonts noto-fonts-emoji \
-            xorg-xwayland pipewire xdg-desktop-portal polkit pacman-contrib \
-            squashfs-tools desktop-file-utils libxml2
+            xorg-xwayland pipewire pipewire-alsa pipewire-pulse wireplumber \
+            alsa-utils alsa-ucm-conf sof-firmware xdg-desktop-portal polkit \
+            pacman-contrib squashfs-tools desktop-file-utils libxml2
 
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -218,7 +219,8 @@ jobs:
             git rust pkgconf archiso pacman-contrib squashfs-tools \
             wayland libxkbcommon mesa libglvnd libinput systemd-libs seatd \
             dbus fontconfig ttf-jetbrains-mono noto-fonts noto-fonts-emoji \
-            xorg-xwayland pipewire xdg-desktop-portal polkit
+            xorg-xwayland pipewire pipewire-alsa pipewire-pulse wireplumber \
+            alsa-utils alsa-ucm-conf sof-firmware xdg-desktop-portal polkit
 
       - name: Checkout repository
         uses: actions/checkout@v4

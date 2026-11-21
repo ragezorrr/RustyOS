@@ -26,6 +26,12 @@ depends=(
   'noto-fonts-emoji'
   'xorg-xwayland'
   'pipewire'
+  'pipewire-alsa'
+  'pipewire-pulse'
+  'wireplumber'
+  'alsa-utils'
+  'alsa-ucm-conf'
+  'sof-firmware'
   'xdg-desktop-portal'
   'polkit'
   'pacman-contrib'
@@ -39,8 +45,6 @@ optdepends=(
   'networkmanager: Wi-Fi status and network toggles in Control Center'
   'bluez: Bluetooth toggle and device status in Control Center'
   'upower: battery and power supply status in TopBar'
-  'wireplumber: PipeWire session management for audio and ScreenCast'
-  'pipewire-pulse: PulseAudio compatibility for desktop applications'
   'xdg-desktop-portal-gtk: file chooser and portal fallback backend'
 )
 provides=('rustyos')

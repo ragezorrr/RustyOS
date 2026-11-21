@@ -1,4 +1,6 @@
 amd-ucode
+alsa-ucm-conf
+alsa-utils
 arch-install-scripts
 base
 base-devel
@@ -22,10 +24,12 @@ os-prober
 pacman-contrib
 parted
 pipewire
+pipewire-alsa
 pipewire-pulse
 polkit
 rustyos-git
 seatd
+sof-firmware
 squashfs-tools
 sudo
 syslinux

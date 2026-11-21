@@ -360,6 +360,7 @@ if [ "$BACKEND_FLAG" = "--drm" ] || [ "$BACKEND_FLAG" = "--kms" ]; then
             SDL_VIDEODRIVER CLUTTER_BACKEND _JAVA_AWT_WM_NONREPARENTING \
             >/dev/null 2>&1 || true
         systemctl --user try-restart xdg-desktop-portal.service >/dev/null 2>&1 || true
+        systemctl --user start pipewire.service pipewire-pulse.service wireplumber.service >/dev/null 2>&1 || true
         systemctl --user start rustyos-session.target >/dev/null 2>&1 || true
     fi
     trap cleanup_session EXIT INT TERM HUP

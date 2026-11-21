@@ -69,8 +69,9 @@ pub use display_session::{
     local_clock_short_datetime_localized, parse_etc_group_for_user, parse_passwd_users,
 };
 pub use media::{
-    AudioService, AudioStatus, MediaAction, MediaService, MediaStatus, format_wpctl_volume,
-    parse_playerctl_status_line,
+    AudioOutputDevice, AudioService, AudioStatus, MediaAction, MediaService, MediaStatus,
+    format_wpctl_volume, parse_pactl_short_sinks, parse_playerctl_status_line,
+    parse_wpctl_status_sinks,
 };
 pub use power::{
     BatteryCondition, BatteryState, PowerDetails, PowerProfile, PowerService, PowerStatus,
@@ -474,5 +475,45 @@ video:x:986:alice,bob
         assert!(det.is_admin);
         assert_eq!(det.groups, vec!["wheel", "alice", "video"]);
         assert_eq!(det.session_type, "Wayland");
+    }
+
+    #[test]
+    fn parses_wpctl_and_pactl_audio_output_sinks() {
+        let wpctl_out = "\
+PipeWire 'pipewire-0' [1.2.6, user@rustyos, cookie:1234]
+ └─ Clients:
+        32. WirePlumber                         [1.2.6, user@rustyos, pid:742]
+
+Audio
+ ├─ Devices:
+ │      42. Built-in Audio                      [alsa]
+ │
+ ├─ Sinks:
+ │  *   48. Built-in Audio Analog Stereo        [vol: 0.75]
+ │      54. Navi 31 HDMI/DP Audio Digital Stereo (HDMI) [vol: 0.40 MUTED]
+ │
+ ├─ Sources:
+ │  *   49. Built-in Audio Analog Stereo        [vol: 1.00]
+";
+        let sinks = parse_wpctl_status_sinks(wpctl_out);
+        assert_eq!(sinks.len(), 2);
+        assert_eq!(sinks[0].id, "48");
+        assert_eq!(sinks[0].name, "Built-in Audio Analog Stereo");
+        assert!(sinks[0].is_default);
+        assert_eq!(sinks[1].id, "54");
+        assert_eq!(sinks[1].name, "Navi 31 HDMI/DP Audio Digital Stereo (HDMI)");
+        assert!(!sinks[1].is_default);
+
+        let pactl_out = "\
+48\talsa_output.pci-0000_00_1f.3.analog-stereo\tPipeWire\ts32le 2ch 48000Hz\tRUNNING
+54\talsa_output.pci-0000_03_00.1.hdmi-stereo\tPipeWire\ts32le 2ch 48000Hz\tSUSPENDED
+";
+        let pactl_sinks =
+            parse_pactl_short_sinks(pactl_out, "alsa_output.pci-0000_03_00.1.hdmi-stereo");
+        assert_eq!(pactl_sinks.len(), 2);
+        assert_eq!(pactl_sinks[0].name, "Built-in Speakers");
+        assert!(!pactl_sinks[0].is_default);
+        assert_eq!(pactl_sinks[1].name, "HDMI / DisplayPort Audio");
+        assert!(pactl_sinks[1].is_default);
     }
 }

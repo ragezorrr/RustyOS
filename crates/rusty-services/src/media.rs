@@ -4,7 +4,18 @@ use std::process::Command;
 
 use zbus::zvariant::Value;
 
-/// Audio volume and mute status.
+/// Single discovered audio output sink (`RUSTYOS-156`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AudioOutputDevice {
+    /// `WirePlumber` node ID (`"48"`) or `PulseAudio` sink name (`"alsa_output..."`).
+    pub id: String,
+    /// Human-readable device label (`"Built-in Audio Analog Stereo"`).
+    pub name: String,
+    /// True when this sink is the active default audio output.
+    pub is_default: bool,
+}
+
+/// Audio volume, mute, and output device status.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AudioStatus {
     /// Output master volume percentage (0..=100).
@@ -13,6 +24,10 @@ pub struct AudioStatus {
     pub muted: bool,
     /// Backend service identified (e.g., "pipewire", "wireplumber", "alsa").
     pub backend: String,
+    /// Active output sink label (`"Speakers"`).
+    pub active_output_name: String,
+    /// Available audio output sinks discovered from `wpctl` or `pactl` (`RUSTYOS-156`).
+    pub outputs: Vec<AudioOutputDevice>,
 }
 
 impl Default for AudioStatus {
@@ -21,6 +36,8 @@ impl Default for AudioStatus {
             volume_percent: 75,
             muted: false,
             backend: "default".to_owned(),
+            active_output_name: "Speakers".to_owned(),
+            outputs: Vec::new(),
         }
     }
 }
@@ -86,6 +103,15 @@ impl AudioService {
                 }
                 status.muted = text.contains("[MUTED]");
                 "wireplumber".clone_into(&mut status.backend);
+                status.outputs = self.list_outputs();
+                if let Some(def) = status
+                    .outputs
+                    .iter()
+                    .find(|o| o.is_default)
+                    .or_else(|| status.outputs.first())
+                {
+                    def.name.clone_into(&mut status.active_output_name);
+                }
                 return status;
             }
         }
@@ -106,9 +132,106 @@ impl AudioService {
                     "pulseaudio".clone_into(&mut status.backend);
                 }
             }
+            status.outputs = self.list_outputs();
+            if let Some(def) = status
+                .outputs
+                .iter()
+                .find(|o| o.is_default)
+                .or_else(|| status.outputs.first())
+            {
+                def.name.clone_into(&mut status.active_output_name);
+            }
         }
 
         status
+    }
+
+    /// Lists available audio output sinks via `wpctl status` or `pactl list short sinks` (`RUSTYOS-156`).
+    #[must_use]
+    pub fn list_outputs(&self) -> Vec<AudioOutputDevice> {
+        if let Ok(output) = Command::new("wpctl").arg("status").output()
+            && output.status.success()
+        {
+            let text = String::from_utf8_lossy(&output.stdout);
+            let parsed = parse_wpctl_status_sinks(&text);
+            if !parsed.is_empty() {
+                return parsed;
+            }
+        }
+
+        let default_sink = Command::new("pactl")
+            .arg("get-default-sink")
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+            .unwrap_or_default();
+
+        if let Ok(output) = Command::new("pactl")
+            .args(["list", "short", "sinks"])
+            .output()
+            && output.status.success()
+        {
+            let text = String::from_utf8_lossy(&output.stdout);
+            let parsed = parse_pactl_short_sinks(&text, &default_sink);
+            if !parsed.is_empty() {
+                return parsed;
+            }
+        }
+        Vec::new()
+    }
+
+    /// Switches the default audio output sink by `WirePlumber` node ID or `PulseAudio` sink name (`RUSTYOS-156`).
+    #[must_use]
+    pub fn set_default_output(&self, id: &str) -> bool {
+        let trimmed = id.trim();
+        if trimmed.is_empty() {
+            return false;
+        }
+        if trimmed.chars().all(|c| c.is_ascii_digit())
+            && Command::new("wpctl")
+                .args(["set-default", trimmed])
+                .status()
+                .is_ok_and(|s| s.success())
+        {
+            return true;
+        }
+        Command::new("pactl")
+            .args(["set-default-sink", trimmed])
+            .status()
+            .is_ok_and(|s| s.success())
+    }
+
+    /// Cycles to the next available audio output sink and returns the newly selected device (`RUSTYOS-156`).
+    #[must_use]
+    pub fn cycle_next_output(&self) -> Option<AudioOutputDevice> {
+        let outputs = self.list_outputs();
+        if outputs.len() < 2 {
+            return outputs.into_iter().next();
+        }
+        let cur_idx = outputs.iter().position(|o| o.is_default).unwrap_or(0);
+        let next = outputs[(cur_idx + 1) % outputs.len()].clone();
+        if self.set_default_output(&next.id) {
+            Some(AudioOutputDevice {
+                is_default: true,
+                ..next
+            })
+        } else {
+            None
+        }
+    }
+
+    /// Ensures hardware ALSA mixer channels (`Master`, `Speaker`, `Headphone`, `PCM`) are unmuted
+    /// on session startup so fresh Arch/RustyOS installations have working audio immediately (`RUSTYOS-156`).
+    pub fn ensure_session_audio_ready(&self) {
+        use std::process::Stdio;
+        for channel in ["Master", "Speaker", "Headphone", "PCM"] {
+            let _ = Command::new("amixer")
+                .args(["-q", "sset", channel, "unmute"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
     }
 
     /// Sets master output volume (`0..=100`) via `wpctl` or `pactl`.
@@ -332,4 +455,105 @@ fn dispatch_mpris_via_dbus(action: MediaAction) -> bool {
 pub fn format_wpctl_volume(percent: u8) -> String {
     let clamped = percent.min(100);
     format!("{:.2}", f32::from(clamped) / 100.0)
+}
+
+/// Parses `wpctl status` output and extracts audio output sinks under `Audio` -> `Sinks:` (`RUSTYOS-156`).
+#[must_use]
+pub fn parse_wpctl_status_sinks(output: &str) -> Vec<AudioOutputDevice> {
+    let mut in_audio = false;
+    let mut in_sinks = false;
+    let mut sinks = Vec::new();
+
+    for raw_line in output.lines() {
+        let trimmed = raw_line.trim();
+        if trimmed == "Audio" {
+            in_audio = true;
+            in_sinks = false;
+            continue;
+        }
+        if in_audio && (trimmed == "Video" || trimmed == "Settings") {
+            break;
+        }
+        if !in_audio {
+            continue;
+        }
+        let cleaned = trimmed.trim_start_matches(['│', '├', '└', '─', ' ']).trim();
+        if cleaned.starts_with("Sinks:") {
+            in_sinks = true;
+            continue;
+        }
+        if in_sinks
+            && (cleaned.starts_with("Sources:")
+                || cleaned.starts_with("Sink endpoints:")
+                || cleaned.starts_with("Source endpoints:")
+                || cleaned.starts_with("Filters:")
+                || cleaned.starts_with("Streams:")
+                || cleaned.starts_with("Devices:"))
+        {
+            in_sinks = false;
+            continue;
+        }
+        if !in_sinks || cleaned.is_empty() {
+            continue;
+        }
+
+        let is_default = cleaned.starts_with('*');
+        let after_star = cleaned.trim_start_matches('*').trim();
+        let Some((id_str, rest)) = after_star.split_once('.') else {
+            continue;
+        };
+        let id = id_str.trim();
+        if id.is_empty() || !id.chars().all(|c| c.is_ascii_digit()) {
+            continue;
+        }
+        let name_part = rest.split(" [vol:").next().unwrap_or(rest).trim();
+        if name_part.is_empty() {
+            continue;
+        }
+        sinks.push(AudioOutputDevice {
+            id: id.to_owned(),
+            name: name_part.to_owned(),
+            is_default,
+        });
+    }
+    sinks
+}
+
+/// Parses `pactl list short sinks` tab-delimited lines (`RUSTYOS-156`).
+#[must_use]
+pub fn parse_pactl_short_sinks(output: &str, default_sink: &str) -> Vec<AudioOutputDevice> {
+    let mut sinks = Vec::new();
+    for line in output.lines() {
+        let mut cols = line.split('\t');
+        let _idx = cols.next();
+        let Some(sink_name) = cols.next().map(str::trim).filter(|s| !s.is_empty()) else {
+            continue;
+        };
+        let is_default = !default_sink.is_empty() && sink_name == default_sink.trim();
+        let pretty = humanize_pactl_sink_name(sink_name);
+        sinks.push(AudioOutputDevice {
+            id: sink_name.to_owned(),
+            name: pretty,
+            is_default,
+        });
+    }
+    if !sinks.is_empty() && !sinks.iter().any(|s| s.is_default) {
+        sinks[0].is_default = true;
+    }
+    sinks
+}
+
+fn humanize_pactl_sink_name(sink_name: &str) -> String {
+    let lower = sink_name.to_ascii_lowercase();
+    if lower.contains("hdmi") {
+        "HDMI / DisplayPort Audio".to_owned()
+    } else if lower.contains("bluez") || lower.contains("bluetooth") {
+        "Bluetooth Audio".to_owned()
+    } else if lower.contains("usb") {
+        "USB Audio Output".to_owned()
+    } else if lower.contains("analog") || lower.contains("speaker") {
+        "Built-in Speakers".to_owned()
+    } else {
+        sink_name.to_owned()
+    }
 }

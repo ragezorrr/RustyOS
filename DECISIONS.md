@@ -1163,6 +1163,19 @@
                            для Chromium/Electron, автосоздание XDG-папок
                            `user-dirs.dirs` и `rustyos-mimeapps.list`) и
                            упаковка `/usr/share/applications/rustyos-mimeapps.list`
+
+  D-099    Accepted        ADR-0085 (`RUSTYOS-156`): полный аудиостек для
+                           установленной системы и Live ISO (`pipewire-alsa`,
+                           `pipewire-pulse`, `wireplumber`, `alsa-utils`,
+                           `alsa-ucm-conf`, `sof-firmware` в `PKGBUILD`,
+                           `packages.x86_64`, `rustyos-install.sh` и `ci.yml`,
+                           автозапуск в `rustyos-session.target` + auto-unmute
+                           ALSA), перечисление и переключение аудиовыходов в
+                           `AudioService`, `TopBar` Volume Popover и `Control Center`
+                           (`CycleAudioOutput`, `ToggleDarkMode`, `OpenSettings`),
+                           сохранение `reminders_done`/видимости виджетов в
+                           `config.toml` и таймстемпы уведомлений в
+                           `Notification Center`
   -----------------------------------------------------------------------
 
 ## Открытые решения

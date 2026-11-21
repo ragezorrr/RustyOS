@@ -66,7 +66,7 @@ pub enum NotificationCenterHit {
 }
 
 /// Read-only view of a single delivered notification inside Notification Center (`RUSTYOS-109`).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct NotificationCenterItemView<'a> {
     /// Monotonic compositor notification ID.
     pub id: u64,
@@ -76,10 +76,13 @@ pub struct NotificationCenterItemView<'a> {
     pub title: &'a str,
     /// Sanitized body text.
     pub body: &'a str,
+    /// Concise relative age label (`"now"`, `"2m ago"`, `"1h ago"`) (`RUSTYOS-156`).
+    pub age_label: String,
 }
 
 /// Live view state driving [`ShellOverlayView::NotificationCenter`] (`RUSTYOS-109`).
 #[derive(Debug, Clone)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct NotificationCenterRenderState<'a> {
     /// Global shell glass opacity (`0.35..=1.0`).
     pub glass_opacity: f32,
@@ -95,8 +98,14 @@ pub struct NotificationCenterRenderState<'a> {
     pub task_labels: [&'static str; 4],
     /// Currently hovered control inside Notification Center.
     pub hovered_hit: Option<NotificationCenterHit>,
-    /// Weather card location heading.
+    /// Weather card location / date heading.
     pub location_name: &'a str,
+    /// Live system telemetry summary line rendered inside the top widget (`RUSTYOS-156`).
+    pub system_summary: String,
+    /// Show the top Weather & System widget (`RUSTYOS-156`).
+    pub show_weather_widget: bool,
+    /// Show the bottom Reminders checklist widget (`RUSTYOS-156`).
+    pub show_reminders_widget: bool,
 }
 
 /// Positioned notification card slot in [`NotificationCenterLayout`] (`RUSTYOS-109`).
@@ -183,7 +192,9 @@ pub fn compute_notification_center_layout(
     let px = (screen_size.w - w - NC_RIGHT_MARGIN).max(14);
     let top_y = TOP_BAR_HEIGHT + NC_TOP_MARGIN;
     let max_bottom = (screen_size.h - DOCK_HEIGHT - DOCK_MARGIN_BOTTOM - 16).max(520);
-    let widgets_block_h = NC_WEATHER_HEIGHT + 12 + NC_REMINDERS_HEIGHT + 12 + NC_EDIT_BAR_HEIGHT;
+    let weather_block = i32::from(state.show_weather_widget) * (NC_WEATHER_HEIGHT + 12);
+    let reminders_block = i32::from(state.show_reminders_widget) * (NC_REMINDERS_HEIGHT + 12);
+    let widgets_block_h = weather_block + reminders_block + NC_EDIT_BAR_HEIGHT;
     let cards_budget = (max_bottom - top_y - widgets_block_h - 14).max(110);
 
     let mut cur_y = top_y;
@@ -231,21 +242,32 @@ pub fn compute_notification_center_layout(
         }
     }
 
-    let weather_rect = Rectangle::new(Point::from((px, cur_y)), Size::from((w, NC_WEATHER_HEIGHT)));
-    cur_y += NC_WEATHER_HEIGHT + 12;
+    let weather_rect = if state.show_weather_widget {
+        let r = Rectangle::new(Point::from((px, cur_y)), Size::from((w, NC_WEATHER_HEIGHT)));
+        cur_y += NC_WEATHER_HEIGHT + 12;
+        r
+    } else {
+        Rectangle::new(Point::from((px, cur_y)), Size::from((0, 0)))
+    };
 
-    let reminders_rect = Rectangle::new(
-        Point::from((px, cur_y)),
-        Size::from((w, NC_REMINDERS_HEIGHT)),
-    );
-    let task_x = px + 124;
-    let task_w = (w - 134).max(80);
-    let task_rows = std::array::from_fn(|idx| {
-        #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-        let ry = reminders_rect.loc.y + 10 + (idx as i32) * 29;
-        Rectangle::new(Point::from((task_x, ry)), Size::from((task_w, 29)))
-    });
-    cur_y += NC_REMINDERS_HEIGHT + 12;
+    let (reminders_rect, task_rows) = if state.show_reminders_widget {
+        let rem_rect = Rectangle::new(
+            Point::from((px, cur_y)),
+            Size::from((w, NC_REMINDERS_HEIGHT)),
+        );
+        let task_x = px + 124;
+        let task_w = (w - 134).max(80);
+        let rows = std::array::from_fn(|idx| {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+            let ry = rem_rect.loc.y + 10 + (idx as i32) * 29;
+            Rectangle::new(Point::from((task_x, ry)), Size::from((task_w, 29)))
+        });
+        cur_y += NC_REMINDERS_HEIGHT + 12;
+        (rem_rect, rows)
+    } else {
+        let empty = Rectangle::new(Point::from((px, cur_y)), Size::from((0, 0)));
+        (empty, [empty; 4])
+    };
 
     let edit_w = 104;
     let close_w = NC_EDIT_BAR_HEIGHT;
@@ -459,7 +481,7 @@ fn render_notification_card_text(
     text_cache: &mut crate::text::TextCache,
     renderer: &mut GlesRenderer,
     slot: NotificationCardSlot,
-    item: NotificationCenterItemView<'_>,
+    item: &NotificationCenterItemView<'_>,
     hide_previews: bool,
     pal: &ThemePalette,
     elements: &mut Vec<MemoryRenderBufferRenderElement<GlesRenderer>>,
@@ -485,6 +507,7 @@ fn render_weather_widget_text(
     renderer: &mut GlesRenderer,
     rect: Rectangle<i32, Physical>,
     location_name: &str,
+    system_summary: &str,
     elements: &mut Vec<MemoryRenderBufferRenderElement<GlesRenderer>>,
 ) {
     const HOURS: [(&str, &str); 6] = [
@@ -531,12 +554,16 @@ fn render_weather_widget_text(
         (x + w - 16 - cw, y + 40),
         elements,
     );
-    let hl = "H:24° L:15°";
-    let (hw, _) = text_cache.measure_text(hl, 10.5);
+    let hl = if system_summary.trim().is_empty() {
+        "H:24° L:15°".to_owned()
+    } else {
+        truncate_ascii(system_summary.trim(), 24)
+    };
+    let (hw, _) = text_cache.measure_text(&hl, 10.5);
     push_label(
         text_cache,
         renderer,
-        hl,
+        &hl,
         10.5,
         soft,
         (x + w - 16 - hw, y + 57),
@@ -637,7 +664,7 @@ pub(super) fn render_notification_center_text(
     let pal = ThemePalette::active();
 
     if let Some(lead) = layout.lead_card
-        && let Some(&item) = state.notifications.get(lead.notif_index)
+        && let Some(item) = state.notifications.get(lead.notif_index)
     {
         render_notification_card_text(
             text_cache,
@@ -676,7 +703,7 @@ pub(super) fn render_notification_center_text(
     }
 
     for &slot in &layout.stack_cards {
-        if let Some(&item) = state.notifications.get(slot.notif_index) {
+        if let Some(item) = state.notifications.get(slot.notif_index) {
             render_notification_card_text(
                 text_cache,
                 renderer,
@@ -689,14 +716,19 @@ pub(super) fn render_notification_center_text(
         }
     }
 
-    render_weather_widget_text(
-        text_cache,
-        renderer,
-        layout.weather_rect,
-        state.location_name,
-        elements,
-    );
-    render_reminders_widget_text(text_cache, renderer, &layout, state, &pal, elements);
+    if state.show_weather_widget {
+        render_weather_widget_text(
+            text_cache,
+            renderer,
+            layout.weather_rect,
+            state.location_name,
+            &state.system_summary,
+            elements,
+        );
+    }
+    if state.show_reminders_widget {
+        render_reminders_widget_text(text_cache, renderer, &layout, state, &pal, elements);
+    }
 
     let edit_fg = if state.hovered_hit == Some(NotificationCenterHit::EditWidgets) {
         [255, 255, 255, 255]
@@ -729,7 +761,7 @@ fn push_notification_card_composite(
     shape_cache: &mut crate::surfaces::UiShapeCache,
     renderer: &mut GlesRenderer,
     slot: NotificationCardSlot,
-    item: NotificationCenterItemView<'_>,
+    item: &NotificationCenterItemView<'_>,
     state: &NotificationCenterRenderState<'_>,
     pal: &ThemePalette,
 ) {
@@ -1015,7 +1047,7 @@ pub(super) fn render_notification_center_composite(
     let pal = ThemePalette::active();
 
     if let Some(lead) = layout.lead_card
-        && let Some(&item) = state.notifications.get(lead.notif_index)
+        && let Some(item) = state.notifications.get(lead.notif_index)
     {
         push_notification_card_composite(out, shape_cache, renderer, lead, item, state, &pal);
     }
@@ -1075,12 +1107,16 @@ pub(super) fn render_notification_center_composite(
     }
 
     for &slot in &layout.stack_cards {
-        if let Some(&item) = state.notifications.get(slot.notif_index) {
+        if let Some(item) = state.notifications.get(slot.notif_index) {
             push_notification_card_composite(out, shape_cache, renderer, slot, item, state, &pal);
         }
     }
 
-    push_weather_widget_composite(out, shape_cache, renderer, layout.weather_rect, pal.is_dark);
-    push_reminders_widget_composite(out, shape_cache, renderer, &layout, state, &pal);
+    if state.show_weather_widget {
+        push_weather_widget_composite(out, shape_cache, renderer, layout.weather_rect, pal.is_dark);
+    }
+    if state.show_reminders_widget {
+        push_reminders_widget_composite(out, shape_cache, renderer, &layout, state, &pal);
+    }
     push_clear_and_bottom_bars_composite(out, shape_cache, renderer, &layout, state, &pal);
 }

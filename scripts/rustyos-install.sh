@@ -548,7 +548,8 @@ EOF
     emit_step 45 pacstrap "Installing base system, Wayland desktop, and RustyOS packages"
     # shellcheck disable=SC2086
     pacstrap -K "${pacstrap_conf_arg[@]}" "${MOUNT_ROOT}" \
-        base linux linux-firmware networkmanager pipewire wireplumber \
+        base linux linux-firmware sof-firmware alsa-ucm-conf alsa-utils \
+        networkmanager pipewire pipewire-alsa pipewire-pulse wireplumber \
         seatd polkit mesa xorg-xwayland ttf-jetbrains-mono git base-devel greetd sudo \
         ${boot_pkg} rustyos-git
 

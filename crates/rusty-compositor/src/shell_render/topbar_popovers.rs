@@ -9,7 +9,7 @@ use crate::surfaces::GlassPanelStyle;
 use super::CompositorRenderElement;
 use super::tokens::{
     MENU_POPOVER_RADIUS, TOP_BAR_HEIGHT, ThemePalette, make_solid_element,
-    push_liquid_glass_panel_elevation, push_rounded_glass_box,
+    push_liquid_glass_panel_elevation, push_rounded_glass_box, truncate_ascii,
 };
 
 const POPOVER_WIDTH: i32 = 264;
@@ -35,6 +35,8 @@ pub enum TopBarQuickPopoverHit {
     VolumeDown,
     /// Step master volume up (`+10%`).
     VolumeUp,
+    /// Select audio output sink at index `0..N` (`RUSTYOS-156`).
+    SelectAudioOutput(usize),
     /// Toggle numeric battery percentage beside the `TopBar` battery glyph.
     ToggleBatteryPercentage,
     /// Switch active system power profile.
@@ -104,40 +106,51 @@ pub fn compute_topbar_quick_popover_layout(
         match state.kind {
             TopBarQuickPopoverKind::Volume => {
                 let status = if state.audio.muted {
-                    "Muted".to_owned()
+                    format!(
+                        "Muted • {}",
+                        truncate_ascii(&state.audio.active_output_name, 22)
+                    )
                 } else {
-                    format!("{}% Output Volume", state.audio.volume_percent)
+                    format!(
+                        "{}% • {}",
+                        state.audio.volume_percent,
+                        truncate_ascii(&state.audio.active_output_name, 22)
+                    )
                 };
-                (
-                    "Sound".to_owned(),
-                    status,
-                    vec![
-                        (
-                            TopBarQuickPopoverHit::ToggleMute,
-                            if state.audio.muted {
-                                "Unmute Audio".to_owned()
-                            } else {
-                                "Mute Audio".to_owned()
-                            },
-                            state.audio.muted,
-                        ),
-                        (
-                            TopBarQuickPopoverHit::VolumeDown,
-                            "Volume -10%".to_owned(),
-                            false,
-                        ),
-                        (
-                            TopBarQuickPopoverHit::VolumeUp,
-                            "Volume +10%".to_owned(),
-                            false,
-                        ),
-                        (
-                            TopBarQuickPopoverHit::OpenSettings,
-                            "Sound Settings...".to_owned(),
-                            false,
-                        ),
-                    ],
-                )
+                let mut rows = vec![
+                    (
+                        TopBarQuickPopoverHit::ToggleMute,
+                        if state.audio.muted {
+                            "Unmute Audio".to_owned()
+                        } else {
+                            "Mute Audio".to_owned()
+                        },
+                        state.audio.muted,
+                    ),
+                    (
+                        TopBarQuickPopoverHit::VolumeDown,
+                        "Volume -10%".to_owned(),
+                        false,
+                    ),
+                    (
+                        TopBarQuickPopoverHit::VolumeUp,
+                        "Volume +10%".to_owned(),
+                        false,
+                    ),
+                ];
+                for (idx, dev) in state.audio.outputs.iter().take(6).enumerate() {
+                    rows.push((
+                        TopBarQuickPopoverHit::SelectAudioOutput(idx),
+                        truncate_ascii(&dev.name, 28),
+                        dev.is_default,
+                    ));
+                }
+                rows.push((
+                    TopBarQuickPopoverHit::OpenSettings,
+                    "Sound Settings...".to_owned(),
+                    false,
+                ));
+                ("Sound".to_owned(), status, rows)
             }
             TopBarQuickPopoverKind::Battery => {
                 let status = if state.power.has_battery {

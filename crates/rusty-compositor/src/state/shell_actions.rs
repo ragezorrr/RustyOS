@@ -457,12 +457,35 @@ impl RustyCompositorState {
         }
     }
 
-    /// Toggles completion state of task `idx` inside the Reminders widget (`RUSTYOS-109`).
+    /// Toggles completion state of task `idx` inside the Reminders widget (`RUSTYOS-109`, `RUSTYOS-156`).
     pub fn toggle_notification_center_task(&mut self, idx: usize) {
         if let Some(done) = self.notification_center_tasks.get_mut(idx) {
             *done = !*done;
+            self.user_config.notifications_reminders_done = self.notification_center_tasks;
+            if let Some(path) = self.config_path.as_ref() {
+                let _ = self.user_config.save_to_path(path);
+            }
             self.shell_redraw_needed = true;
         }
+    }
+
+    /// Cycles the visible Notification Center widgets (`All` -> `Reminders Only` -> `Weather Only`)
+    /// and saves the layout to `config.toml` (`RUSTYOS-156`).
+    pub fn cycle_notification_center_widgets(&mut self) {
+        let (next_weather, next_reminders) = match (
+            self.user_config.notifications_show_weather_widget,
+            self.user_config.notifications_show_reminders_widget,
+        ) {
+            (true, true) => (false, true),
+            (false, true) => (true, false),
+            _ => (true, true),
+        };
+        self.user_config.notifications_show_weather_widget = next_weather;
+        self.user_config.notifications_show_reminders_widget = next_reminders;
+        if let Some(path) = self.config_path.as_ref() {
+            let _ = self.user_config.save_to_path(path);
+        }
+        self.shell_redraw_needed = true;
     }
 
     /// Opens `rusty-settings --page notifications` from `Edit Widgets` (`RUSTYOS-109`, `RUSTYOS-128`).
@@ -476,14 +499,26 @@ impl RustyCompositorState {
     pub fn build_notification_center_items(
         &self,
     ) -> Vec<crate::shell_render::NotificationCenterItemView<'_>> {
+        let now = self.start_time.elapsed();
         self.notification_history
             .iter()
             .rev()
-            .map(|n| crate::shell_render::NotificationCenterItemView {
-                id: n.id,
-                urgency: n.urgency,
-                title: &n.title,
-                body: &n.body,
+            .map(|n| {
+                let age_secs = now.saturating_sub(n.created_at).as_secs();
+                let age_label = if age_secs < 60 {
+                    "now".to_owned()
+                } else if age_secs < 3600 {
+                    format!("{}m ago", age_secs / 60)
+                } else {
+                    format!("{}h ago", age_secs / 3600)
+                };
+                crate::shell_render::NotificationCenterItemView {
+                    id: n.id,
+                    urgency: n.urgency,
+                    title: &n.title,
+                    body: &n.body,
+                    age_label,
+                }
             })
             .collect()
     }
@@ -495,6 +530,11 @@ impl RustyCompositorState {
         items: &'a [crate::shell_render::NotificationCenterItemView<'a>],
         hide_previews: bool,
     ) -> crate::shell_render::NotificationCenterRenderState<'a> {
+        let tel = self.telemetry.snapshot_arc();
+        let system_summary = format!(
+            "{}% Vol • {}% Bat",
+            tel.audio.volume_percent, tel.power.percentage
+        );
         crate::shell_render::NotificationCenterRenderState {
             glass_opacity: self.glass_opacity,
             reduce_transparency: self.reduce_transparency,
@@ -504,6 +544,9 @@ impl RustyCompositorState {
             task_labels: crate::shell_render::DEFAULT_NOTIFICATION_TASKS,
             hovered_hit: self.notification_center_hover,
             location_name: "Local Station",
+            system_summary,
+            show_weather_widget: self.user_config.notifications_show_weather_widget,
+            show_reminders_widget: self.user_config.notifications_show_reminders_widget,
         }
     }
 
@@ -939,6 +982,20 @@ impl RustyCompositorState {
             self.lock_screen_anim.snap_to_target();
             self.dock_hover_anim.snap_to_target();
         }
+    }
+
+    /// Toggles system appearance (`Light <-> Dark`) immediately, updating wallpapers, open XDG windows,
+    /// GTK/Qt theme sync, and `config.toml` (`RUSTYOS-156`).
+    pub fn toggle_appearance_mode(&mut self) {
+        let mut next = self.user_config.clone();
+        next.appearance = match next.appearance {
+            crate::config::AppearanceMode::Light => crate::config::AppearanceMode::Dark,
+            crate::config::AppearanceMode::Dark => crate::config::AppearanceMode::Light,
+        };
+        if let Some(path) = self.config_path.as_ref() {
+            let _ = next.save_to_path(path);
+        }
+        self.apply_user_config(next);
     }
 
     pub(in crate::state) fn retarget_launcher_anim(&mut self) {
@@ -2460,6 +2517,7 @@ impl RustyCompositorState {
         self.menubar_show_updates = cfg.updates_show_in_menu_bar;
         self.updates_enabled = cfg.updates_enabled;
         self.clock_24h = cfg.clock_24h;
+        self.notification_center_tasks = cfg.notifications_reminders_done;
 
         self.sync_output_configs(&cfg);
 

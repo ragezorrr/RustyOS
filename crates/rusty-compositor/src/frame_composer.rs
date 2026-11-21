@@ -1963,6 +1963,7 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
             brightness_percent: tel.brightness.percentage,
             volume_percent: tel.audio.volume_percent,
             audio_muted: tel.audio.muted,
+            audio_output_name: &tel.audio.active_output_name,
             media_active: tel.media.active,
             media_playing: tel.media.playing,
             media_title: &tel.media.title,

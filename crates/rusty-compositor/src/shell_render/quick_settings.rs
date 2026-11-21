@@ -56,6 +56,8 @@ pub struct QuickSettingsRenderState<'a> {
     pub volume_percent: u8,
     /// Master audio mute flag.
     pub audio_muted: bool,
+    /// Human-readable active audio output sink name (`"Speakers"`, `"HDMI"`, etc.) (`RUSTYOS-156`).
+    pub audio_output_name: &'a str,
     /// Whether an active MPRIS2 media player is registered (`RUSTYOS-053`).
     pub media_active: bool,
     /// Whether active MPRIS2 media playback is currently playing (`RUSTYOS-053`).
@@ -122,6 +124,12 @@ pub enum QuickSettingsHit {
     ToggleBluetooth,
     /// Engage desktop Lock Screen from Quick Settings (`RUSTYOS-027`).
     LockSession,
+    /// Cycle or open audio output device selector from the Sound card (`RUSTYOS-156`).
+    CycleAudioOutput,
+    /// Toggle Light / Dark system appearance from Control Center (`RUSTYOS-156`).
+    ToggleDarkMode,
+    /// Open System Settings from Control Center (`RUSTYOS-156`).
+    OpenSettings,
     /// Click inside popover frame (absorb event, keep open).
     InsidePopover,
     /// Click outside popover (dismiss Quick Settings).
@@ -157,10 +165,13 @@ pub(super) struct QuickSettingsLayout {
     pub(super) display_card: Rectangle<i32, smithay::utils::Physical>,
     pub(super) display_track: Rectangle<i32, smithay::utils::Physical>,
     pub(super) sound_card: Rectangle<i32, smithay::utils::Physical>,
+    pub(super) sound_header_zone: Rectangle<i32, smithay::utils::Physical>,
     pub(super) sound_track: Rectangle<i32, smithay::utils::Physical>,
     pub(super) sound_mute_zone: Rectangle<i32, smithay::utils::Physical>,
     pub(super) sound_left_mute_zone: Rectangle<i32, smithay::utils::Physical>,
+    pub(super) dark_mode_btn: Rectangle<i32, smithay::utils::Physical>,
     pub(super) lock_btn: Rectangle<i32, smithay::utils::Physical>,
+    pub(super) settings_btn: Rectangle<i32, smithay::utils::Physical>,
 }
 
 pub(super) fn quick_settings_layout(width: i32, height: i32, anim_dy: i32) -> QuickSettingsLayout {
@@ -184,7 +195,9 @@ pub(super) fn quick_settings_layout(width: i32, height: i32, anim_dy: i32) -> Qu
 
     let media_btn_y = py + 104;
     let media_btn_w = ((right_w - 16) / 3).max(28);
-    let lock_w = 118.min(pw);
+    let footer_gap = 8;
+    let footer_btn_w = ((pw - footer_gap * 2) / 3).max(76);
+    let lock_x = px + footer_btn_w + footer_gap;
 
     QuickSettingsLayout {
         px,
@@ -227,6 +240,10 @@ pub(super) fn quick_settings_layout(width: i32, height: i32, anim_dy: i32) -> Qu
             Size::from(((pw - 72).max(24), 20)),
         ),
         sound_card: Rectangle::new(Point::from((px, y_snd)), Size::from((pw, slider_card_h))),
+        sound_header_zone: Rectangle::new(
+            Point::from((px + 12, y_snd + 4)),
+            Size::from(((pw - 24).max(40), 24)),
+        ),
         sound_track: Rectangle::new(
             Point::from((px + 36, y_snd + 35)),
             Size::from(((pw - 110).max(24), 20)),
@@ -239,9 +256,14 @@ pub(super) fn quick_settings_layout(width: i32, height: i32, anim_dy: i32) -> Qu
             Point::from((px + 10, y_snd + 33)),
             Size::from((24, 24)),
         ),
+        dark_mode_btn: Rectangle::new(Point::from((px, y_lock)), Size::from((footer_btn_w, 28))),
         lock_btn: Rectangle::new(
-            Point::from((px + (pw - lock_w) / 2, y_lock)),
-            Size::from((lock_w, 28)),
+            Point::from((lock_x, y_lock)),
+            Size::from((footer_btn_w, 28)),
+        ),
+        settings_btn: Rectangle::new(
+            Point::from((lock_x + footer_btn_w + footer_gap, y_lock)),
+            Size::from((footer_btn_w, 28)),
         ),
     }
 }
@@ -323,8 +345,17 @@ pub fn check_quick_settings_click(
             x,
         ));
     }
+    if rect_contains(layout.sound_header_zone, x, y) {
+        return QuickSettingsHit::CycleAudioOutput;
+    }
+    if rounded_rect_contains(layout.dark_mode_btn, layout.dark_mode_btn.size.h / 2, x, y) {
+        return QuickSettingsHit::ToggleDarkMode;
+    }
     if rounded_rect_contains(layout.lock_btn, layout.lock_btn.size.h / 2, x, y) {
         return QuickSettingsHit::LockSession;
+    }
+    if rounded_rect_contains(layout.settings_btn, layout.settings_btn.size.h / 2, x, y) {
+        return QuickSettingsHit::OpenSettings;
     }
 
     QuickSettingsHit::InsidePopover
@@ -419,7 +450,9 @@ pub(super) fn render_quick_settings_popover(
         (layout.motion_btn, qs.reduced_motion),
         (layout.transparency_btn, qs.reduce_transparency),
         (layout.focus_pill, qs.focus_mode),
+        (layout.dark_mode_btn, ThemePalette::active().is_dark),
         (layout.lock_btn, false),
+        (layout.settings_btn, false),
     ];
     for (rect, active) in solid_tiles {
         elements.push(make_solid_element(
@@ -631,18 +664,45 @@ pub(super) fn render_cc_secondary_labels(
         }
     }
 
-    if let Some(el) = text_cache.render_label_centered_weighted(
+    let out_name = if qs.audio_output_name.trim().is_empty() {
+        "Speakers"
+    } else {
+        qs.audio_output_name.trim()
+    };
+    let out_badge = format!("{} ›", truncate_ascii(out_name, 20));
+    let (bw, _) = text_cache.measure_text(&out_badge, 10.5);
+    if let Some(el) = text_cache.render_label(
         renderer,
-        "Lock Screen",
-        crate::text::FontWeight::Bold,
-        11.0,
-        pal.popover_text_primary,
-        Rectangle::new(
-            Point::from((layout.lock_btn.loc.x, layout.lock_btn.loc.y)),
-            Size::from((layout.lock_btn.size.w, layout.lock_btn.size.h)),
-        ),
+        &out_badge,
+        10.5,
+        pal.popover_text_secondary,
+        Point::from((
+            layout.sound_card.loc.x + layout.sound_card.size.w - 16 - bw,
+            layout.sound_card.loc.y + 12,
+        )),
     ) {
         elements.push(el);
+    }
+
+    let dark_label = if pal.is_dark { "Light" } else { "Dark" };
+    for (btn, label) in [
+        (layout.dark_mode_btn, dark_label),
+        (layout.lock_btn, "Lock Screen"),
+        (layout.settings_btn, "Settings"),
+    ] {
+        if let Some(el) = text_cache.render_label_centered_weighted(
+            renderer,
+            label,
+            crate::text::FontWeight::Bold,
+            11.0,
+            pal.popover_text_primary,
+            Rectangle::new(
+                Point::from((btn.loc.x, btn.loc.y)),
+                Size::from((btn.size.w, btn.size.h)),
+            ),
+        ) {
+            elements.push(el);
+        }
     }
 }
 
@@ -1213,7 +1273,9 @@ pub(super) fn render_quick_settings_composite(
         (layout.focus_pill, layout.focus_pill.size.h / 2),
         (layout.display_card, 26),
         (layout.sound_card, 26),
+        (layout.dark_mode_btn, layout.dark_mode_btn.size.h / 2),
         (layout.lock_btn, layout.lock_btn.size.h / 2),
+        (layout.settings_btn, layout.settings_btn.size.h / 2),
     ] {
         push_liquid_glass_panel_elevation(
             out,

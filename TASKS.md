@@ -2586,6 +2586,19 @@ hardware/software context и низкие накладные расходы.
   - Все unit-тесты `appruntime` и `rusty-compositor` проходят; `cargo fmt`, `clippy -D warnings`, `cargo test --workspace` и `bash -n packaging/arch/PKGBUILD` проходят без ошибок.
 - **Risks:** Низкие; при отсутствии `systemd --user` сокета автоматически используется прямой спавн `Command::new`.
 
+### RUSTYOS-156 — Починка звука на установленной системе, переключение аудиовыходов и апгрейд `Control Center` / `Notification Center`
+- **Status:** Done
+- **Goal:** Обеспечить работу звука на установленной системе и Live ISO (`pipewire-alsa`, `pipewire-pulse`, `wireplumber`, `alsa-utils`, `alsa-ucm-conf`, `sof-firmware`, автозапуск `pipewire`/`pipewire-pulse`/`wireplumber` и auto-unmute ALSA), добавить обнаружение и переключение аудиовыходов в `AudioService`, `TopBar` Volume Popover и `Control Center` (вместе с быстрыми кнопками `Dark`/`Light` и `Settings`), а также сохранение чеклиста `Reminders`/видимости виджетов в `config.toml` и таймстемпы уведомлений в `Notification Center`.
+- **Dependencies:** `RUSTYOS-109`, `RUSTYOS-141`, `RUSTYOS-155`.
+- **Scope:**
+  - `crates/rusty-services/src/{media.rs, lib.rs}`.
+  - `crates/rusty-compositor/src/{config.rs, telemetry.rs, frame_composer.rs, state/{mod.rs, shell_actions.rs}, input/shell_pointer.rs, shell_render/{quick_settings.rs, topbar_popovers.rs, notification_center.rs, tests.rs}}`.
+  - `packaging/arch/PKGBUILD`, `packaging/archiso/packages.x86_64`, `packaging/systemd/user/rustyos-session.target`, `scripts/rustyos-install.sh`, `bin/rustyos-session`, `.github/workflows/ci.yml`.
+  - `docs/adr/0085-audio-pipeline-and-control-notification-centers.md`, `DECISIONS.md` (`D-099`), `ARCHITECTURE.md` §7.
+- **Acceptance Criteria:**
+  - `parse_wpctl_status_sinks` и `parse_pactl_short_sinks` корректно парсят аудиовыходы; `TopBar` Volume Popover и `Control Center` отображают и переключают активный аудиовыход; `Control Center` переключает тему `Light ↔ Dark` и открывает `rusty-settings`; `Notification Center` сохраняет `reminders_done` и видимость виджетов в `config.toml`; все тесты и `clippy -D warnings` проходят чисто.
+- **Risks:** Низкие; ноль новых Cargo-зависимостей.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

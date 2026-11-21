@@ -81,6 +81,8 @@ enum TelemetryCmd {
     RefreshNow,
     SetVolume(u8),
     ToggleMute,
+    SetAudioOutput(String),
+    CycleAudioOutput,
     SetBluetoothPowered(bool),
     SetPowerProfile(PowerProfile),
     SetWifiEnabled(bool),
@@ -425,6 +427,49 @@ impl SystemMetricsHandle {
         self.push_cmd(TelemetryCmd::SetPowerProfile(profile));
     }
 
+    /// Switches the default audio output sink by index into `snapshot().audio.outputs` (`RUSTYOS-156`).
+    pub fn select_audio_output_index(&self, idx: usize) {
+        let mut target_id = None;
+        if let Ok(mut guard) = self.shared.latest.lock()
+            && idx < guard.audio.outputs.len()
+        {
+            let state = Arc::make_mut(&mut guard);
+            for (i, dev) in state.audio.outputs.iter_mut().enumerate() {
+                dev.is_default = i == idx;
+                if dev.is_default {
+                    dev.name.clone_into(&mut state.audio.active_output_name);
+                    target_id = Some(dev.id.clone());
+                }
+            }
+        }
+        if let Some(id) = target_id {
+            self.push_cmd(TelemetryCmd::SetAudioOutput(id));
+        }
+    }
+
+    /// Cycles to the next available audio output sink optimistically (`RUSTYOS-156`).
+    pub fn cycle_audio_output(&self) {
+        if let Ok(mut guard) = self.shared.latest.lock()
+            && guard.audio.outputs.len() >= 2
+        {
+            let state = Arc::make_mut(&mut guard);
+            let cur = state
+                .audio
+                .outputs
+                .iter()
+                .position(|o| o.is_default)
+                .unwrap_or(0);
+            let next = (cur + 1) % state.audio.outputs.len();
+            for (i, dev) in state.audio.outputs.iter_mut().enumerate() {
+                dev.is_default = i == next;
+                if dev.is_default {
+                    dev.name.clone_into(&mut state.audio.active_output_name);
+                }
+            }
+        }
+        self.push_cmd(TelemetryCmd::CycleAudioOutput);
+    }
+
     fn push_cmd(&self, cmd: TelemetryCmd) {
         if let Ok(mut q) = self.shared.queue.lock() {
             q.push_back(cmd);
@@ -464,6 +509,7 @@ fn poll_once(services: &ServiceRegistry, clock_locale: &str) -> SystemTelemetry 
 
 fn telemetry_worker_loop(shared: &SharedState) {
     let services = ServiceRegistry::new();
+    services.audio.ensure_session_audio_ready();
 
     // Perform initial snapshot outside lock
     let locale = shared
@@ -507,6 +553,12 @@ fn telemetry_worker_loop(shared: &SharedState) {
                 }
                 TelemetryCmd::ToggleMute => {
                     let _ = services.audio.toggle_mute();
+                }
+                TelemetryCmd::SetAudioOutput(id) => {
+                    let _ = services.audio.set_default_output(&id);
+                }
+                TelemetryCmd::CycleAudioOutput => {
+                    let _ = services.audio.cycle_next_output();
                 }
                 TelemetryCmd::SetBluetoothPowered(enabled) => {
                     let _ = services.bluetooth.set_powered(enabled);

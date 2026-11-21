@@ -888,6 +888,7 @@ impl RustyCompositorState {
         let initial_menubar_show_updates = user_config.updates_show_in_menu_bar;
         let initial_clock_24h = user_config.clock_24h;
         let initial_updates_enabled = user_config.updates_enabled;
+        let initial_nc_tasks = user_config.notifications_reminders_done;
 
         let mut state = Self {
             start_time: Instant::now(),
@@ -1003,7 +1004,7 @@ impl RustyCompositorState {
             app_menu: crate::app_menu::AppMenuHandle::noop(),
             notification_center_open: false,
             notification_center_hover: None,
-            notification_center_tasks: [false; 4],
+            notification_center_tasks: initial_nc_tasks,
             updates_notified_count: 0,
             launcher_active: false,
             launcher_anim: AnimatedValue::new_settled(0.0),

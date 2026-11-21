@@ -1039,6 +1039,12 @@ pub struct UserConfig {
     pub notifications_when_locked: bool,
     /// Suppress notifications while mirroring or screen sharing (`RUSTYOS-109`).
     pub notifications_mirroring_off: bool,
+    /// Persisted completion state of the 4 Reminders checklist items (`RUSTYOS-156`).
+    pub notifications_reminders_done: [bool; 4],
+    /// Show the top Weather & System widget inside Notification Center (`RUSTYOS-156`).
+    pub notifications_show_weather_widget: bool,
+    /// Show the bottom Reminders checklist widget inside Notification Center (`RUSTYOS-156`).
+    pub notifications_show_reminders_widget: bool,
     /// `[power].low_power_mode` power-profile policy (`RUSTYOS-131`).
     pub power_low_power_mode: LowPowerMode,
     /// `[power].display_sleep_minutes` inactivity display sleep hint (`0` = Never, `0..=180`) (`RUSTYOS-131`).
@@ -1122,6 +1128,9 @@ impl Default for UserConfig {
             notifications_when_sleeping: false,
             notifications_when_locked: true,
             notifications_mirroring_off: true,
+            notifications_reminders_done: [false; 4],
+            notifications_show_weather_widget: true,
+            notifications_show_reminders_widget: true,
             power_low_power_mode: LowPowerMode::Never,
             power_display_sleep_minutes: 10,
             power_auto_lock_minutes: 0,
@@ -1533,6 +1542,24 @@ impl UserConfig {
                     self.notifications_mirroring_off = b;
                 }
             }
+            "reminders_done" => {
+                let inner = val.trim().trim_start_matches('[').trim_end_matches(']');
+                for (idx, part) in inner.split(',').take(4).enumerate() {
+                    if let Ok(b) = part.trim().parse::<bool>() {
+                        self.notifications_reminders_done[idx] = b;
+                    }
+                }
+            }
+            "show_weather_widget" => {
+                if let Ok(b) = val.parse::<bool>() {
+                    self.notifications_show_weather_widget = b;
+                }
+            }
+            "show_reminders_widget" => {
+                if let Ok(b) = val.parse::<bool>() {
+                    self.notifications_show_reminders_widget = b;
+                }
+            }
             _ => {}
         }
     }
@@ -1843,6 +1870,24 @@ impl UserConfig {
         let _ = writeln!(out, "when_sleeping = {}", self.notifications_when_sleeping);
         let _ = writeln!(out, "when_locked = {}", self.notifications_when_locked);
         let _ = writeln!(out, "mirroring_off = {}", self.notifications_mirroring_off);
+        let _ = writeln!(
+            out,
+            "reminders_done = [{}, {}, {}, {}]",
+            self.notifications_reminders_done[0],
+            self.notifications_reminders_done[1],
+            self.notifications_reminders_done[2],
+            self.notifications_reminders_done[3]
+        );
+        let _ = writeln!(
+            out,
+            "show_weather_widget = {}",
+            self.notifications_show_weather_widget
+        );
+        let _ = writeln!(
+            out,
+            "show_reminders_widget = {}",
+            self.notifications_show_reminders_widget
+        );
     }
 
     fn append_power_toml(&self, out: &mut String) {

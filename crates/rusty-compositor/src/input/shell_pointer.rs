@@ -517,6 +517,10 @@ impl RustyCompositorState {
                 self.telemetry.step_volume(10);
                 self.shell_redraw_needed = true;
             }
+            crate::shell_render::TopBarQuickPopoverHit::SelectAudioOutput(idx) => {
+                self.telemetry.select_audio_output_index(idx);
+                self.shell_redraw_needed = true;
+            }
             crate::shell_render::TopBarQuickPopoverHit::ToggleBatteryPercentage => {
                 self.toggle_top_bar_control_visibility("battery_percentage");
             }
@@ -937,6 +941,24 @@ impl RustyCompositorState {
             crate::shell_render::QuickSettingsHit::LockSession => {
                 self.set_screen_locked(true, serial);
             }
+            crate::shell_render::QuickSettingsHit::CycleAudioOutput => {
+                if button == 273 {
+                    self.close_quick_settings();
+                    self.toggle_top_bar_quick_popover(
+                        crate::shell_render::TopBarQuickPopoverKind::Volume,
+                    );
+                } else {
+                    self.telemetry.cycle_audio_output();
+                    self.shell_redraw_needed = true;
+                }
+            }
+            crate::shell_render::QuickSettingsHit::ToggleDarkMode => {
+                self.toggle_appearance_mode();
+            }
+            crate::shell_render::QuickSettingsHit::OpenSettings => {
+                self.close_quick_settings();
+                self.open_settings_page(None);
+            }
             crate::shell_render::QuickSettingsHit::InsidePopover => {}
             crate::shell_render::QuickSettingsHit::OutsidePopover => {
                 self.close_quick_settings();
@@ -1028,6 +1050,9 @@ impl RustyCompositorState {
             }
             crate::shell_render::NotificationCenterHit::EditWidgets if button == 272 => {
                 self.open_notification_settings_action();
+            }
+            crate::shell_render::NotificationCenterHit::EditWidgets if button == 273 => {
+                self.cycle_notification_center_widgets();
             }
             crate::shell_render::NotificationCenterHit::ClosePanel if button == 272 => {
                 self.close_notification_center();
