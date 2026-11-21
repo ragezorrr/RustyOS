@@ -1040,6 +1040,37 @@
                            DropdownSelect / SegmentedTabs /
                            DialogSheet и read-only Users
                            (AccountsService/Polkit отдельно)
+
+    D-090                  Фаза 6/8 Живые GPU-превью окон в      accepted
+                           Workspace Overview (Exposé) и
+                           расширенные действия TopBar
+                           (RUSTYOS-132, ADR-0076):
+                           переиспользование commit_sig-кэша
+                           lifecycle_snapshots в
+                           WindowMinimizePipeline с
+                           compute_aspect_fit_rect и 4-tap RGSS
+                           (render_overview_thumbnail_element)
+                           + fallback для окон без буфера;
+                           пункты Tile Left/Right, Move to
+                           Next/Prev Workspace и Move to Next
+                           Display в MENU_WINDOW; переход
+                           AboutRustyOs / ShowShortcuts в
+                           rusty-settings --page about/shortcuts
+
+    D-091                  Фаза 6/8 Интерактивный Screenshot     accepted
+                           HUD (RUSTYOS-133, ADR-0077):
+                           встроенный shell-оверлей
+                           ShellOverlayView::ScreenshotHud
+                           (Region с перетаскиванием, 4-частым
+                           скримом и бейджем W×H, Window с
+                           подсветкой окна под курсором, Full
+                           Screen; нижняя стеклянная капсула
+                           Save/Copy/Capture/Cancel), расширение
+                           ScreenshotRequest::{FullScreenCopyOnly,
+                           Region} и spawn_copy_screenshot_only
+                           (wl-copy image/png с fallback в файл),
+                           запуск по Super+Shift+4 и из File ->
+                           Screenshot...
   -----------------------------------------------------------------------
 
 ## Открытые решения

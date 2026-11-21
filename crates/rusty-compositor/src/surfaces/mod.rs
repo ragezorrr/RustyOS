@@ -660,6 +660,30 @@ impl UiShapeCache {
             .lifecycle_snapshot_matches_sig(window_id, commit_sig)
     }
 
+    /// Returns `true` if a cached lifecycle snapshot exists for `window_id` (`RUSTYOS-132`).
+    #[must_use]
+    pub(crate) fn has_lifecycle_snapshot(&self, window_id: u64) -> bool {
+        self.window_minimize.has_lifecycle_snapshot(window_id)
+    }
+
+    /// Emits a live scaled thumbnail element for `Workspace Overview` (`RUSTYOS-132`).
+    pub(crate) fn render_overview_thumbnail_element(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        window_id: u64,
+        slot: Rectangle<i32, Logical>,
+        output_scale: f64,
+        alpha: f32,
+    ) -> Option<LiquidGlassElement> {
+        self.window_minimize.render_overview_thumbnail_element(
+            renderer,
+            window_id,
+            slot,
+            output_scale,
+            alpha,
+        )
+    }
+
     /// Retains only open/close lifecycle snapshot textures matching `keep`.
     pub(crate) fn retain_lifecycle_snapshots(&mut self, keep: impl FnMut(u64) -> bool) {
         self.window_minimize.retain_lifecycle_snapshots(keep);

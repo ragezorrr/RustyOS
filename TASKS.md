@@ -2306,6 +2306,37 @@ hardware/software context и низкие накладные расходы.
 - **Tests:** 340 пройденных unit-тестов workspace (`4` `rusty_animation`, `204` `rusty_compositor`, `18` `rusty_files`, `13` `rusty_installer`, `3` `rusty_ipc`, `47` `rusty_services`, `15` `rusty_settings`, `15` `rusty_terminal`, `14` `rusty_ui`, `7` `rusty_wm`; 2 ignored doc-теста в сгенерированных `egl_bindings.rs`/`gl_bindings.rs`).
 - **Risks:** На машинах без `org.bluez` / `power-profiles-daemon` соответствующие действия переходят в информативный graceful fallback; редактирование/создание пользователей (`Users`) остаётся read-only до отдельной задачи на `org.freedesktop.Accounts` + Polkit.
 
+### RUSTYOS-132 — Живые GPU-превью окон в Workspace Overview (Exposé) и расширенные действия TopBar
+- **Status:** Done
+- **Goal:** Заменить текстовые заглушки в карточках `Workspace Overview` на живые масштабированные GPU-текстуры окон (с aspect-fit и 4-tap RGSS сэмплингом) и довести живые действия глобального меню `TopBar` (`Window`, `About RustyOS`, `Keyboard Shortcuts`).
+- **Dependencies:** `RUSTYOS-128`, `RUSTYOS-131`, `ADR-0076`, `D-090`.
+- **Scope:**
+  - `crates/rusty-compositor/src/surfaces/{window_minimize.rs, mod.rs}`: `compute_aspect_fit_rect`, `has_lifecycle_snapshot`, `render_overview_thumbnail_element` (переиспользование `commit_sig`-кэша `lifecycle_snapshots` без лишних FBO-проходов на статичных окнах).
+  - `crates/rusty-compositor/src/{frame_composer.rs, shell_render/chrome_shapes.rs, shell_render/spotlight_overview.rs, shell_render/text_pass.rs}`: `capture_overview_window_snapshots`, рендер живых миниатюр поверх стеклянных карточек Overview и сохранение текстовой заглушки как fallback для окон без буфера.
+  - `crates/rusty-compositor/src/{shell_render/top_bar/menus.rs, state/shell_actions.rs}`: новые действия `TopBarMenuAction::{TileLeftFocused, TileRightFocused, MoveToNextWorkspace, MoveToPrevWorkspace, MoveToNextDisplay}` в `MENU_WINDOW` и открытие `rusty-settings --page about` / `--page shortcuts` из `AboutRustyOs` / `ShowShortcuts`.
+  - Документация: `docs/adr/0076-live-overview-thumbnails-and-topbar-actions.md`, `DECISIONS.md` (`D-090`), `ARCHITECTURE.md` §7.
+- **Acceptance Criteria:**
+  - В `Workspace Overview` отображаются живые масштабированные превью открытых окон с сохранением пропорций и синей рамкой фокуса; для окон без буфера сохраняется fallback.
+  - Меню `Window` в `TopBar` содержит и выполняет `Tile Left/Right`, `Move to Next/Previous Workspace`, `Move to Next Display`, а `About RustyOS` / `Keyboard Shortcuts` открывают соответствующие страницы `rusty-settings`.
+  - `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --offline -- -D warnings`, `cargo test --workspace` и живые `--winit` прогоны (Wayland Light + X11 Dark) проходят чисто.
+- **Tests:** 341 пройденный unit-тест workspace (`205` в `rusty_compositor`, включая `aspect_fit_rect_preserves_ratio_and_centers_cleanly`; `2 ignored` doc-теста в `rusty_ui`).
+- **Risks:** Низкие; минимизированные или ещё не закоммиченные окна используют текстовый fallback без падений.
+
+### RUSTYOS-133 — Интерактивный Screenshot HUD (`Region / Window / Full Screen`, буфер обмена и сохранение)
+- **Status:** Done
+- **Goal:** Добавить встроенный интерактивный оверлей скриншотов в `rusty-compositor` с выделением прямоугольной области (`Region`), подсветкой окна (`Window`), полным экраном (`Full Screen`), переключением `Save` / `Copy` (`image/png`) и запуском по `Super+Shift+4` / из `TopBar`.
+- **Dependencies:** `RUSTYOS-031`, `RUSTYOS-132`, `ADR-0077`, `D-091`.
+- **Scope:**
+  - `crates/rusty-compositor/src/screenshot.rs`: `ScreenshotRequest::{FullScreenCopyOnly, Region { rect, copy_only }}` и `spawn_copy_screenshot_only` (`wl-copy --type image/png` с fallback на файл).
+  - `crates/rusty-compositor/src/shell_render/modals/screenshot_hud.rs` + `shell_render/{mod.rs, overlay_shapes.rs, text_pass.rs}` + `frame_composer.rs`: `ShellOverlayView::ScreenshotHud`, нижняя стеклянная Liquid Glass капсула, 4-частный скрим с бейджем `W × H`, подсветка окна под курсором, unit-тест `screenshot_hud_hit_test_and_selection_normalization`.
+  - `crates/rusty-compositor/src/{state/mod.rs, state/shell_actions.rs, input/mod.rs, input/keyboard.rs, input/pointer.rs, shell_render/top_bar/menus.rs}`: перехват pointer/keyboard, хоткей `Super+Shift+4`, пункт `File -> Screenshot...` и закрытие HUD до захвата кадра.
+  - Документация: `docs/adr/0077-interactive-screenshot-hud.md`, `DECISIONS.md` (`D-091`), `ARCHITECTURE.md` §7.
+- **Acceptance Criteria:**
+  - Открытие HUD по `Super+Shift+4` или `File -> Screenshot...`, переключение режимов `Region / Window / Full Screen`, `Save / Copy`, отмена по `Esc`, захват по `Enter` / кнопке `Capture` / клику без попадания HUD в итоговый снимок.
+  - `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --offline -- -D warnings`, `cargo test --workspace` и живые `--winit` прогоны (Wayland + X11) проходят чисто.
+- **Tests:** 342 пройденных unit-теста workspace (`206` в `rusty_compositor`, включая `screenshot_hud_hit_test_and_selection_normalization`; `2 ignored` doc-теста в `rusty_ui`).
+- **Risks:** Низкие; при отсутствии `wl-copy` режим `Copy` автоматически сохраняет PNG в `~/Pictures/Screenshots/`.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

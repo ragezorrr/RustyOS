@@ -7,6 +7,7 @@ use super::context_menu::render_context_menu_composite;
 use super::dock_stack::render_dock_stack_composite;
 use super::modals::{
     render_pick_color_composite, render_polkit_composite, render_portal_composite,
+    render_screenshot_hud_composite,
 };
 use super::notification_center::render_notification_center_composite;
 use super::quick_settings::render_quick_settings_composite;
@@ -302,6 +303,16 @@ fn build_foreground_overlay_shapes(
                 renderer,
                 screen_size,
                 top_telemetry,
+            );
+        }
+        ShellOverlayView::ScreenshotHud(hud) => {
+            render_screenshot_hud_composite(
+                &mut out,
+                shape_cache,
+                renderer,
+                screen_size,
+                top_telemetry,
+                hud,
             );
         }
         ShellOverlayView::ContextMenu(ctx) => {

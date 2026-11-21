@@ -652,6 +652,8 @@ pub struct RustyCompositorState {
     pub portal_prompt: Option<PortalPromptState>,
     /// Active `PickColor` interactive sampling banner state (`RUSTYOS-057`).
     pub portal_pick_color: Option<PendingPickColorState>,
+    /// Active interactive `ScreenshotHud` overlay state (`RUSTYOS-133`).
+    pub screenshot_hud: Option<crate::shell_render::ScreenshotHudState>,
     /// Queued portal GPU capture / pixel sample executed during the next frame (`RUSTYOS-057`).
     pub pending_portal_capture: Option<PendingPortalCapture>,
     /// Active PipeWire screencast worker sessions (`RUSTYOS-057`).
@@ -1018,6 +1020,7 @@ impl RustyCompositorState {
             portal: rusty_services::PortalHandle::default(),
             portal_prompt: None,
             portal_pick_color: None,
+            screenshot_hud: None,
             pending_portal_capture: None,
             active_screencasts: Vec::new(),
             shell_redraw_needed: false,
@@ -2045,6 +2048,7 @@ impl RustyCompositorState {
                 || self.polkit_prompt.is_some()
                 || self.portal_prompt.is_some()
                 || self.portal_pick_color.is_some()
+                || self.screenshot_hud.is_some()
                 || self.osd.is_some()
                 || !self.notifications.is_empty()
                 || self.launcher_anim.current() > 0.01

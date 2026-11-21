@@ -53,6 +53,8 @@ pub(super) enum KeyIntercept {
     ToggleLauncher,
     ToggleQuickSettings,
     ToggleOverview,
+    OpenScreenshotHud,
+    ScreenshotHudKey(u32),
     MinimizeFocused,
     TriggerNotification,
     ClearNotifications,

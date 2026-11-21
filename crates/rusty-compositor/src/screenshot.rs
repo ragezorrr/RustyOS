@@ -26,13 +26,22 @@ use smithay::utils::{Buffer as BufferCoord, Physical, Point, Rectangle, Size, Tr
 use crate::frame_composer::BACKGROUND_COLOR;
 use crate::shell_render::CompositorRenderElement;
 
-/// Requested region for an on-demand compositor screenshot capture (`RUSTYOS-031`).
+/// Requested region for an on-demand compositor screenshot capture (`RUSTYOS-031`, `RUSTYOS-133`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScreenshotRequest {
-    /// Capture the entire compositor output.
+    /// Capture the entire compositor output (save PNG + copy to clipboard).
     FullScreen,
+    /// Capture the entire compositor output to clipboard only (fallback to file if `wl-copy` fails).
+    FullScreenCopyOnly,
     /// Capture the active/focused window bounds (falls back to full output if none).
     FocusedWindow,
+    /// Capture an explicit rectangle selected via the interactive `ScreenshotHud` (`RUSTYOS-133`).
+    Region {
+        /// Logical/physical crop bounds within the active output.
+        rect: Rect,
+        /// When `true`, copy PNG to clipboard only (with file fallback if `wl-copy` is unavailable).
+        copy_only: bool,
+    },
 }
 
 /// Asynchronous screenshot save completion queue polled by the event loop without blocking.
@@ -311,7 +320,45 @@ fn save_screenshot_sync(
     Ok(path)
 }
 
-fn copy_png_to_clipboard(png_bytes: &[u8], wayland_socket: &str) {
+/// Spawns PNG encoding and clipboard-only copy (`wl-copy --type image/png`) on a background thread (`RUSTYOS-133`).
+/// Falls back to saving a PNG file if `wl-copy` is unavailable.
+pub fn spawn_copy_screenshot_only(
+    width: u32,
+    height: u32,
+    rgba: Vec<u8>,
+    wayland_socket: String,
+    results: &ScreenshotResultQueue,
+) {
+    let queue = results.clone();
+    let _ = thread::Builder::new()
+        .name("rustyos-screenshot-copy".to_owned())
+        .spawn(move || {
+            let res = copy_screenshot_only_sync(width, height, &rgba, &wayland_socket);
+            queue.push(res);
+        });
+}
+
+fn copy_screenshot_only_sync(
+    width: u32,
+    height: u32,
+    rgba: &[u8],
+    wayland_socket: &str,
+) -> Result<PathBuf, String> {
+    let png_bytes = encode_png_rgba(width, height, rgba)?;
+    if copy_png_to_clipboard(&png_bytes, wayland_socket) {
+        return Ok(PathBuf::from("clipboard://image/png"));
+    }
+    let path = default_screenshot_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|err| format!("failed to create {}: {err}", parent.display()))?;
+    }
+    fs::write(&path, &png_bytes)
+        .map_err(|err| format!("failed to write {}: {err}", path.display()))?;
+    Ok(path)
+}
+
+fn copy_png_to_clipboard(png_bytes: &[u8], wayland_socket: &str) -> bool {
     if let Ok(mut child) = Command::new("wl-copy")
         .args(["--type", "image/png"])
         .env("WAYLAND_DISPLAY", wayland_socket)
@@ -323,8 +370,9 @@ fn copy_png_to_clipboard(png_bytes: &[u8], wayland_socket: &str) {
         if let Some(mut stdin) = child.stdin.take() {
             let _ = stdin.write_all(png_bytes);
         }
-        let _ = child.wait();
+        return child.wait().is_ok_and(|s| s.success());
     }
+    false
 }
 
 /// Computes a collision-free screenshot path (`~/Pictures/Screenshots/RustyOS_<ts>[_seq].png`).

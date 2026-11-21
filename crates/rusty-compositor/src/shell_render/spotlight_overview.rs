@@ -521,6 +521,7 @@ pub(super) fn render_overview_text(
     renderer: &mut GlesRenderer,
     screen_size: Size<i32, smithay::utils::Physical>,
     ov: &OverviewRenderState<'_>,
+    has_live_thumb: impl Fn(u64) -> bool,
     elements: &mut Vec<MemoryRenderBufferRenderElement<GlesRenderer>>,
 ) {
     let text_bright = [242, 242, 247, 255];
@@ -606,19 +607,21 @@ pub(super) fn render_overview_text(
         ) {
             elements.push(el);
         }
-        let body_bounds = Rectangle::new(
-            Point::from((card.loc.x + 12, card.loc.y + 12 + card_dy)),
-            Size::from((card.size.w - 24, card.size.h - 24)),
-        );
-        let center_badge = format!("{}  •  {}", win.badge, win.dimensions);
-        if let Some(el) = text_cache.render_label_centered(
-            renderer,
-            &center_badge,
-            11.5,
-            if win.focused { text_bright } else { text_muted },
-            body_bounds,
-        ) {
-            elements.push(el);
+        if !has_live_thumb(win.id.0) {
+            let body_bounds = Rectangle::new(
+                Point::from((card.loc.x + 12, card.loc.y + 12 + card_dy)),
+                Size::from((card.size.w - 24, card.size.h - 24)),
+            );
+            let center_badge = format!("{}  •  {}", win.badge, win.dimensions);
+            if let Some(el) = text_cache.render_label_centered(
+                renderer,
+                &center_badge,
+                11.5,
+                if win.focused { text_bright } else { text_muted },
+                body_bounds,
+            ) {
+                elements.push(el);
+            }
         }
     }
 }

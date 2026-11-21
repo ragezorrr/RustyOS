@@ -469,13 +469,7 @@ impl RustyCompositorState {
 
         self.close_top_bar_menu();
         match action {
-            TopBarMenuAction::AboutRustyOs => {
-                let _ = self.push_notification(
-                    Urgency::Low,
-                    "RustyOS Desktop".to_owned(),
-                    "Wayland compositor • RustyOS UI".to_owned(),
-                );
-            }
+            TopBarMenuAction::AboutRustyOs => self.open_settings_page(Some("about")),
             TopBarMenuAction::AboutActiveApp => self.dispatch_about_active_app(),
             TopBarMenuAction::OpenOverview => self.toggle_overview(),
             TopBarMenuAction::OpenControlCenter => self.toggle_quick_settings(),
@@ -485,6 +479,7 @@ impl RustyCompositorState {
                 let _ = self.reload_user_config();
             }
             TopBarMenuAction::OpenSpotlight => self.toggle_launcher(),
+            TopBarMenuAction::OpenScreenshotHud => self.open_screenshot_hud(),
             TopBarMenuAction::NewTerminal => {
                 self.launch_dock_app_new_instance("terminal", true);
             }
@@ -521,13 +516,7 @@ impl RustyCompositorState {
             TopBarMenuAction::LogOut => {
                 self.loop_signal.stop();
             }
-            TopBarMenuAction::ShowShortcuts => {
-                let _ = self.push_notification(
-                    Urgency::Low,
-                    "RustyOS Shortcuts".to_owned(),
-                    "Super+Space: Search • Super+Tab: Switcher • Super+1..9: Workspaces".to_owned(),
-                );
-            }
+            TopBarMenuAction::ShowShortcuts => self.open_settings_page(Some("shortcuts")),
             other => self.dispatch_top_bar_window_action(other, serial),
         }
     }
@@ -553,6 +542,37 @@ impl RustyCompositorState {
             }
             TopBarMenuAction::ToggleFullscreenFocused => {
                 self.apply_wm_action(WmAction::ToggleFullscreen, serial);
+            }
+            TopBarMenuAction::TileLeftFocused => {
+                self.apply_wm_action(
+                    WmAction::SnapFocused(rusty_wm::SnapTarget::LeftHalf),
+                    serial,
+                );
+            }
+            TopBarMenuAction::TileRightFocused => {
+                self.apply_wm_action(
+                    WmAction::SnapFocused(rusty_wm::SnapTarget::RightHalf),
+                    serial,
+                );
+            }
+            TopBarMenuAction::MoveToNextWorkspace => {
+                let cur = self.wm.active_workspace_id().0;
+                let next = if cur >= 9 { 1 } else { cur + 1 };
+                self.apply_wm_action(
+                    WmAction::MoveFocusedToWorkspace(rusty_wm::WorkspaceId::new_clamped(next)),
+                    serial,
+                );
+            }
+            TopBarMenuAction::MoveToPrevWorkspace => {
+                let cur = self.wm.active_workspace_id().0;
+                let prev = if cur <= 1 { 9 } else { cur - 1 };
+                self.apply_wm_action(
+                    WmAction::MoveFocusedToWorkspace(rusty_wm::WorkspaceId::new_clamped(prev)),
+                    serial,
+                );
+            }
+            TopBarMenuAction::MoveToNextDisplay => {
+                self.apply_wm_action(WmAction::MoveFocusedToNextOutput, serial);
             }
             TopBarMenuAction::MinimizeFocused | TopBarMenuAction::HideActiveApp => {
                 if let Some(focused) = self
@@ -1102,6 +1122,219 @@ impl RustyCompositorState {
 
     pub(in crate::state) fn sync_notification_count(&mut self) {
         self.notification_count = u32::try_from(self.notifications.len()).unwrap_or(u32::MAX);
+    }
+
+    /// Opens the interactive `ScreenshotHud` overlay (`RUSTYOS-133`).
+    pub fn open_screenshot_hud(&mut self) {
+        self.close_overview();
+        self.close_dock_stack();
+        self.close_context_menu();
+        self.close_launcher();
+        self.close_quick_settings();
+        self.close_updates_popover();
+        self.close_wifi_popover();
+        self.close_notification_center();
+        self.close_top_bar_menu();
+        self.screenshot_hud = Some(crate::shell_render::ScreenshotHudState::default());
+        self.shell_redraw_needed = true;
+    }
+
+    /// Closes the interactive `ScreenshotHud` overlay (`RUSTYOS-133`).
+    pub fn close_screenshot_hud(&mut self) {
+        if self.screenshot_hud.take().is_some() {
+            self.shell_redraw_needed = true;
+        }
+    }
+
+    /// Executes the active `ScreenshotHud` capture and closes the HUD so it is excluded from the PNG (`RUSTYOS-133`).
+    pub fn trigger_screenshot_hud_capture(&mut self) {
+        let Some(hud) = self.screenshot_hud.take() else {
+            return;
+        };
+        let req = match hud.mode {
+            crate::shell_render::ScreenshotMode::FullScreen => {
+                if hud.copy_only {
+                    crate::screenshot::ScreenshotRequest::FullScreenCopyOnly
+                } else {
+                    crate::screenshot::ScreenshotRequest::FullScreen
+                }
+            }
+            crate::shell_render::ScreenshotMode::Window => {
+                if let Some((_, rect)) = hud.hovered_window {
+                    crate::screenshot::ScreenshotRequest::Region {
+                        rect,
+                        copy_only: hud.copy_only,
+                    }
+                } else {
+                    crate::screenshot::ScreenshotRequest::FocusedWindow
+                }
+            }
+            crate::shell_render::ScreenshotMode::Region => {
+                if let Some(rect) = hud.active_region_rect() {
+                    crate::screenshot::ScreenshotRequest::Region {
+                        rect,
+                        copy_only: hud.copy_only,
+                    }
+                } else if hud.copy_only {
+                    crate::screenshot::ScreenshotRequest::FullScreenCopyOnly
+                } else {
+                    crate::screenshot::ScreenshotRequest::FullScreen
+                }
+            }
+        };
+        self.pending_screenshot = Some(req);
+        self.shell_redraw_needed = true;
+    }
+
+    /// Updates hover/drag state while `ScreenshotHud` is active (`RUSTYOS-133`).
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn handle_screenshot_hud_motion(
+        &mut self,
+        loc: smithay::utils::Point<f64, smithay::utils::Logical>,
+    ) {
+        let Some(hud) = self.screenshot_hud.as_mut() else {
+            return;
+        };
+        let output_phys = self
+            .space
+            .output_geometry(&self.output)
+            .map_or_else(|| smithay::utils::Size::from((1280, 800)), |geo| geo.size)
+            .to_physical(1);
+        let px = loc.x.round() as i32;
+        let py = loc.y.round() as i32;
+        let next_hover = crate::shell_render::hit_test_screenshot_hud(
+            output_phys,
+            smithay::utils::Point::from((px, py)),
+        );
+        if hud.hover_hit != next_hover {
+            hud.hover_hit = next_hover;
+            self.shell_redraw_needed = true;
+        }
+        if hud.mode == crate::shell_render::ScreenshotMode::Region && hud.drag_start.is_some() {
+            hud.drag_current = Some((px, py));
+            self.shell_redraw_needed = true;
+        } else if hud.mode == crate::shell_render::ScreenshotMode::Window {
+            let hovered = self
+                .wm
+                .visible_windows()
+                .into_iter()
+                .rev()
+                .find(|w| {
+                    !self.is_window_minimized(w.id)
+                        && px >= w.geometry.x
+                        && px < w.geometry.x + w.geometry.width
+                        && py >= w.geometry.y
+                        && py < w.geometry.y + w.geometry.height
+                })
+                .map(|w| (w.id, w.geometry));
+            if let Some(hud) = self.screenshot_hud.as_mut()
+                && hud.hovered_window != hovered
+            {
+                hud.hovered_window = hovered;
+                self.shell_redraw_needed = true;
+            }
+        }
+    }
+
+    /// Handles pointer press/release while `ScreenshotHud` is active (`RUSTYOS-133`).
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn handle_screenshot_hud_button(&mut self, pressed: bool) {
+        let output_phys = self
+            .space
+            .output_geometry(&self.output)
+            .map_or_else(|| smithay::utils::Size::from((1280, 800)), |geo| geo.size)
+            .to_physical(1);
+        let px = self.pointer_location.x.round() as i32;
+        let py = self.pointer_location.y.round() as i32;
+        if pressed {
+            if let Some(hit) = crate::shell_render::hit_test_screenshot_hud(
+                output_phys,
+                smithay::utils::Point::from((px, py)),
+            ) {
+                match hit {
+                    crate::shell_render::ScreenshotHudHit::ModeRegion => {
+                        if let Some(hud) = self.screenshot_hud.as_mut() {
+                            hud.mode = crate::shell_render::ScreenshotMode::Region;
+                            self.shell_redraw_needed = true;
+                        }
+                    }
+                    crate::shell_render::ScreenshotHudHit::ModeWindow => {
+                        if let Some(hud) = self.screenshot_hud.as_mut() {
+                            hud.mode = crate::shell_render::ScreenshotMode::Window;
+                            self.shell_redraw_needed = true;
+                        }
+                    }
+                    crate::shell_render::ScreenshotHudHit::ModeFullScreen => {
+                        if let Some(hud) = self.screenshot_hud.as_mut() {
+                            hud.mode = crate::shell_render::ScreenshotMode::FullScreen;
+                            self.shell_redraw_needed = true;
+                        }
+                    }
+                    crate::shell_render::ScreenshotHudHit::ToggleCopyOnly => {
+                        if let Some(hud) = self.screenshot_hud.as_mut() {
+                            hud.copy_only = !hud.copy_only;
+                            self.shell_redraw_needed = true;
+                        }
+                    }
+                    crate::shell_render::ScreenshotHudHit::Capture => {
+                        self.trigger_screenshot_hud_capture();
+                    }
+                    crate::shell_render::ScreenshotHudHit::Cancel => {
+                        self.close_screenshot_hud();
+                    }
+                }
+                return;
+            }
+            let mode = self.screenshot_hud.as_ref().map(|h| h.mode);
+            match mode {
+                Some(crate::shell_render::ScreenshotMode::Region) => {
+                    if let Some(hud) = self.screenshot_hud.as_mut() {
+                        hud.drag_start = Some((px, py));
+                        hud.drag_current = Some((px, py));
+                        hud.selection = None;
+                        self.shell_redraw_needed = true;
+                    }
+                }
+                Some(
+                    crate::shell_render::ScreenshotMode::Window
+                    | crate::shell_render::ScreenshotMode::FullScreen,
+                ) => {
+                    self.trigger_screenshot_hud_capture();
+                }
+                None => {}
+            }
+        } else if let Some(hud) = self.screenshot_hud.as_mut()
+            && hud.mode == crate::shell_render::ScreenshotMode::Region
+            && let Some(start) = hud.drag_start.take()
+        {
+            hud.drag_current = None;
+            hud.selection = crate::shell_render::normalize_selection_rect(start, (px, py));
+            self.shell_redraw_needed = true;
+        }
+    }
+
+    /// Handles keyboard input while `ScreenshotHud` is active (`RUSTYOS-133`).
+    pub fn handle_screenshot_hud_key(&mut self, raw_sym: u32) {
+        use smithay::input::keyboard::Keysym;
+        if raw_sym == Keysym::Escape.raw() {
+            self.close_screenshot_hud();
+        } else if raw_sym == Keysym::Return.raw()
+            || raw_sym == Keysym::KP_Enter.raw()
+            || raw_sym == Keysym::space.raw()
+        {
+            self.trigger_screenshot_hud_capture();
+        } else if let Some(hud) = self.screenshot_hud.as_mut() {
+            if raw_sym == Keysym::_1.raw() {
+                hud.mode = crate::shell_render::ScreenshotMode::Region;
+                self.shell_redraw_needed = true;
+            } else if raw_sym == Keysym::_2.raw() {
+                hud.mode = crate::shell_render::ScreenshotMode::Window;
+                self.shell_redraw_needed = true;
+            } else if raw_sym == Keysym::_3.raw() {
+                hud.mode = crate::shell_render::ScreenshotMode::FullScreen;
+                self.shell_redraw_needed = true;
+            }
+        }
     }
 
     /// Toggles Workspace Overview / Expose mode (`RUSTYOS-023`).

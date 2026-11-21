@@ -50,6 +50,8 @@ pub enum TopBarMenuAction {
     OpenControlCenter,
     /// Toggle Spotlight Search.
     OpenSpotlight,
+    /// Open interactive Screenshot HUD (`Region / Window / Full Screen`, `RUSTYOS-133`).
+    OpenScreenshotHud,
     /// Launch preferred terminal emulator.
     NewTerminal,
     /// Launch preferred file manager (`rusty-files`).
@@ -98,6 +100,16 @@ pub enum TopBarMenuAction {
     ToggleMaximizeFocused,
     /// Minimize focused window.
     MinimizeFocused,
+    /// Tile focused window to the left half of the screen (`RUSTYOS-132`).
+    TileLeftFocused,
+    /// Tile focused window to the right half of the screen (`RUSTYOS-132`).
+    TileRightFocused,
+    /// Move focused window to the next workspace (`RUSTYOS-132`).
+    MoveToNextWorkspace,
+    /// Move focused window to the previous workspace (`RUSTYOS-132`).
+    MoveToPrevWorkspace,
+    /// Move focused window to the next display output (`RUSTYOS-132`).
+    MoveToNextDisplay,
     /// Hide active application window (`RUSTYOS-127`).
     HideActiveApp,
     /// Hide all other windows in the active workspace (`RUSTYOS-127`).
@@ -256,6 +268,13 @@ pub(crate) const MENU_FILE: &[TopBarMenuEntry] = &[
         action: TopBarMenuAction::OpenSpotlight,
         enabled: true,
     },
+    TopBarMenuEntry::Item {
+        label: "Screenshot...",
+        icon: None,
+        shortcut: Some("⇧⌘4"),
+        action: TopBarMenuAction::OpenScreenshotHud,
+        enabled: true,
+    },
     TopBarMenuEntry::Separator,
     TopBarMenuEntry::Item {
         label: "Close Window",
@@ -407,10 +426,46 @@ pub(crate) const MENU_WINDOW: &[TopBarMenuEntry] = &[
         enabled: true,
     },
     TopBarMenuEntry::Item {
+        label: "Tile Window to Left",
+        icon: None,
+        shortcut: Some("⌘←"),
+        action: TopBarMenuAction::TileLeftFocused,
+        enabled: true,
+    },
+    TopBarMenuEntry::Item {
+        label: "Tile Window to Right",
+        icon: None,
+        shortcut: Some("⌘→"),
+        action: TopBarMenuAction::TileRightFocused,
+        enabled: true,
+    },
+    TopBarMenuEntry::Item {
         label: "Toggle Float / Tile",
         icon: None,
         shortcut: Some("⌥L"),
         action: TopBarMenuAction::ToggleLayout,
+        enabled: true,
+    },
+    TopBarMenuEntry::Separator,
+    TopBarMenuEntry::Item {
+        label: "Move to Next Workspace",
+        icon: None,
+        shortcut: None,
+        action: TopBarMenuAction::MoveToNextWorkspace,
+        enabled: true,
+    },
+    TopBarMenuEntry::Item {
+        label: "Move to Previous Workspace",
+        icon: None,
+        shortcut: None,
+        action: TopBarMenuAction::MoveToPrevWorkspace,
+        enabled: true,
+    },
+    TopBarMenuEntry::Item {
+        label: "Move to Next Display",
+        icon: None,
+        shortcut: None,
+        action: TopBarMenuAction::MoveToNextDisplay,
         enabled: true,
     },
     TopBarMenuEntry::Separator,
@@ -488,6 +543,7 @@ pub const fn top_bar_menu_items(
             ("New Desktop Folder", TopBarMenuAction::NewDesktopFolder),
             ("New Terminal", TopBarMenuAction::NewTerminal),
             ("Spotlight Search", TopBarMenuAction::OpenSpotlight),
+            ("Screenshot...", TopBarMenuAction::OpenScreenshotHud),
             ("Close Window", TopBarMenuAction::CloseFocused),
         ],
         TopBarMenuHit::Edit => &[
@@ -524,7 +580,18 @@ pub const fn top_bar_menu_items(
                 TopBarMenuAction::ToggleMaximizeFocused,
             ),
             ("Minimize Window", TopBarMenuAction::MinimizeFocused),
+            ("Tile Window to Left", TopBarMenuAction::TileLeftFocused),
+            ("Tile Window to Right", TopBarMenuAction::TileRightFocused),
             ("Toggle Float / Tile", TopBarMenuAction::ToggleLayout),
+            (
+                "Move to Next Workspace",
+                TopBarMenuAction::MoveToNextWorkspace,
+            ),
+            (
+                "Move to Previous Workspace",
+                TopBarMenuAction::MoveToPrevWorkspace,
+            ),
+            ("Move to Next Display", TopBarMenuAction::MoveToNextDisplay),
             ("Close Window", TopBarMenuAction::CloseFocused),
         ],
         TopBarMenuHit::Help => &[

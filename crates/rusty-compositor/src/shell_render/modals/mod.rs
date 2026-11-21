@@ -10,10 +10,12 @@ use smithay::utils::{Point, Rectangle, Size};
 pub(crate) mod magnifier;
 pub(crate) mod polkit;
 pub(crate) mod portal;
+pub(crate) mod screenshot_hud;
 
 pub(crate) use magnifier::*;
 pub use polkit::*;
 pub use portal::*;
+pub use screenshot_hud::*;
 
 pub(crate) fn phys_to_logical_rect(
     rect: Rectangle<i32, smithay::utils::Physical>,

@@ -125,11 +125,30 @@ pub fn run_nested_winit(config: &CompositorConfig) -> Result<BootstrapReport, Co
                 }
 
                 if let Ok(menu_test) = std::env::var("RUSTYOS_TEST_CAPTURE_MENU") {
-                    let (cap_frame, exit_frame) = if menu_test == "windows" {
-                        (50_u64, 58_u64)
+                    let (cap_frame, exit_frame) = if matches!(
+                        menu_test.as_str(),
+                        "windows" | "overview" | "window" | "screenshot_hud"
+                    ) {
+                        (50_u64, 90_u64)
                     } else {
                         (5_u64, 12_u64)
                     };
+                    if menu_test == "overview" && rendered_frames == 45 {
+                        app_state.toggle_overview();
+                        app_state.overview_anim.snap_to_target();
+                        app_state.shell_redraw_needed = true;
+                    } else if menu_test == "screenshot_hud" && rendered_frames == 45 {
+                        app_state.open_screenshot_hud();
+                        if let Some(hud) = app_state.screenshot_hud.as_mut() {
+                            hud.selection = Some(rusty_wm::Rect {
+                                x: 180,
+                                y: 96,
+                                width: 640,
+                                height: 390,
+                            });
+                        }
+                        app_state.shell_redraw_needed = true;
+                    }
                     if rendered_frames == cap_frame {
                         if menu_test == "desktop" {
                             app_state.active_top_bar_menu =
@@ -139,6 +158,10 @@ pub fn run_nested_winit(config: &CompositorConfig) -> Result<BootstrapReport, Co
                             app_state.active_top_bar_menu =
                                 Some(crate::shell_render::TopBarMenuHit::SystemLogo);
                             app_state.top_bar_menu_hover_row = Some(0);
+                        } else if menu_test == "window" {
+                            app_state.active_top_bar_menu =
+                                Some(crate::shell_render::TopBarMenuHit::Window);
+                            app_state.top_bar_menu_hover_row = Some(2);
                         }
                         app_state.pending_screenshot =
                             Some(crate::screenshot::ScreenshotRequest::FullScreen);

@@ -81,7 +81,14 @@ pub fn generate_shell_overview_elements(
     let mut out = Vec::new();
     let mut ov_text = Vec::new();
     if text_cache.has_font() {
-        render_overview_text(text_cache, renderer, screen_size, ov, &mut ov_text);
+        render_overview_text(
+            text_cache,
+            renderer,
+            screen_size,
+            ov,
+            |id| shape_cache.has_lifecycle_snapshot(id),
+            &mut ov_text,
+        );
     }
     out.extend(ov_text.into_iter().map(CompositorRenderElement::Memory));
     out.extend(build_overview_shapes(
@@ -800,11 +807,22 @@ fn build_overview_shapes(
     }
 
     let cards = overview_card_rects(screen_size, ov.windows.len());
+    #[allow(clippy::cast_possible_truncation)]
+    let card_alpha = ov.progress.clamp(0.0, 1.0) as f32;
     for (win, base_card) in ov.windows.iter().zip(cards) {
         let card = Rectangle::new(
             Point::from((base_card.loc.x, base_card.loc.y + card_dy)),
             base_card.size,
         );
+        let thumb_slot = Rectangle::new(
+            Point::from((card.loc.x + 8, card.loc.y + 8)),
+            Size::from(((card.size.w - 16).max(1), (card.size.h - 16).max(1))),
+        );
+        if let Some(thumb_el) = shape_cache
+            .render_overview_thumbnail_element(renderer, win.id.0, thumb_slot, 1.0, card_alpha)
+        {
+            out.push(CompositorRenderElement::ShaderTexture(thumb_el));
+        }
         push_liquid_glass_panel(
             &mut out,
             shape_cache,

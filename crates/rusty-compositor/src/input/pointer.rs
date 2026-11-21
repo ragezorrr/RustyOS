@@ -172,6 +172,12 @@ impl RustyCompositorState {
             self.wm.set_focused_output(out_id);
         }
 
+        if self.screenshot_hud.is_some() {
+            self.handle_screenshot_hud_motion(pos);
+            self.dispatch_pointer_motion_to_surface(pos, None, time);
+            return;
+        }
+
         if self.ext_session_locked
             || self.screen_locked
             || self.polkit_prompt.is_some()
@@ -349,6 +355,10 @@ impl RustyCompositorState {
         let button_state = event.state();
 
         if button_state == ButtonState::Released {
+            if self.screenshot_hud.is_some() {
+                self.handle_screenshot_hud_button(false);
+                return;
+            }
             let ended_drag = self.active_window_drag.take().is_some();
             let ended_resize = self.active_window_resize.take().is_some();
             self.qs_slider_drag = None;
@@ -501,6 +511,11 @@ impl RustyCompositorState {
 
             if self.portal_pick_color.is_some() {
                 self.trigger_pick_color_sample(self.pointer_location);
+                return;
+            }
+
+            if self.screenshot_hud.is_some() {
+                self.handle_screenshot_hud_button(true);
                 return;
             }
 

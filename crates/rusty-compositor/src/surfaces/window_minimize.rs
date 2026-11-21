@@ -403,6 +403,44 @@ impl WindowMinimizePipeline {
             .is_some_and(|entry| entry.commit_sig == commit_sig)
     }
 
+    #[must_use]
+    pub(crate) fn has_lifecycle_snapshot(&self, window_id: u64) -> bool {
+        self.lifecycle_snapshots.contains_key(&window_id)
+    }
+
+    /// Emits a live scaled thumbnail element for `Workspace Overview` (`RUSTYOS-132`),
+    /// reusing the `commit_sig`-cached lifecycle snapshot texture and 4-tap RGSS downsampling.
+    pub(crate) fn render_overview_thumbnail_element(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        window_id: u64,
+        slot: Rectangle<i32, Logical>,
+        output_scale: f64,
+        alpha: f32,
+    ) -> Option<LiquidGlassElement> {
+        if !self.ensure_program(renderer) {
+            return None;
+        }
+        let program = self.program.clone()?;
+        let entry = self.lifecycle_snapshots.get_mut(&window_id)?;
+        self.lifecycle_tick = self.lifecycle_tick.saturating_add(1);
+        entry.last_used_frame = self.lifecycle_tick;
+        let tex_size = entry.snap.texture.size();
+        let target_rect = compute_aspect_fit_rect(slot, tex_size.w, tex_size.h);
+        Some(build_snapshot_warp_element(
+            renderer,
+            program,
+            &mut entry.snap,
+            target_rect,
+            target_rect,
+            output_scale,
+            1.0,
+            2.0,
+            0,
+            alpha.clamp(0.0, 1.0),
+        ))
+    }
+
     pub(crate) fn retain_lifecycle_snapshots(&mut self, mut keep: impl FnMut(u64) -> bool) {
         self.lifecycle_snapshots.retain(|&win_id, _| keep(win_id));
     }
@@ -647,6 +685,30 @@ pub(crate) fn compute_warp_bounds_and_uvs(
     (bounds, win_uv, dock_uv)
 }
 
+/// Computes an aspect-preserving centered rectangle inside `slot` for source dimensions `(src_w, src_h)`.
+#[must_use]
+#[allow(clippy::cast_possible_truncation)]
+pub(crate) fn compute_aspect_fit_rect(
+    slot: Rectangle<i32, Logical>,
+    src_w: i32,
+    src_h: i32,
+) -> Rectangle<i32, Logical> {
+    if slot.size.w <= 0 || slot.size.h <= 0 || src_w <= 0 || src_h <= 0 {
+        return slot;
+    }
+    let scale =
+        (f64::from(slot.size.w) / f64::from(src_w)).min(f64::from(slot.size.h) / f64::from(src_h));
+    let fit_w = ((f64::from(src_w) * scale).round() as i32).clamp(1, slot.size.w);
+    let fit_h = ((f64::from(src_h) * scale).round() as i32).clamp(1, slot.size.h);
+    Rectangle::new(
+        Point::from((
+            slot.loc.x + (slot.size.w - fit_w) / 2,
+            slot.loc.y + (slot.size.h - fit_h) / 2,
+        )),
+        Size::from((fit_w, fit_h)),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -681,5 +743,22 @@ mod tests {
         let scaled = centered_scaled_rect(win, 0.93);
         assert_eq!(scaled.size, Size::from((930, 558)));
         assert_eq!(scaled.loc, Point::from((135, 101)));
+    }
+
+    #[test]
+    fn aspect_fit_rect_preserves_ratio_and_centers_cleanly() {
+        let slot = Rectangle::new((40, 60).into(), (300, 180).into());
+        // Wide window (16:9 -> 1600x900) fills width 300, height ~169, centered vertically.
+        let wide = compute_aspect_fit_rect(slot, 1600, 900);
+        assert_eq!(wide.size, Size::from((300, 169)));
+        assert_eq!(wide.loc, Point::from((40, 65)));
+
+        // Tall window (600x900) fills height 180, width 120, centered horizontally.
+        let tall = compute_aspect_fit_rect(slot, 600, 900);
+        assert_eq!(tall.size, Size::from((120, 180)));
+        assert_eq!(tall.loc, Point::from((130, 60)));
+
+        // Invalid/zero source dimensions fall back to the full slot safely.
+        assert_eq!(compute_aspect_fit_rect(slot, 0, 100), slot);
     }
 }

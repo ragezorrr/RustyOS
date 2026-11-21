@@ -7,7 +7,9 @@ use smithay::utils::{Point, Rectangle, Size};
 use super::context_menu::render_context_menu_text;
 use super::dock::dock_tooltip_rect_and_label;
 use super::dock_stack::render_dock_stack_text;
-use super::modals::{render_pick_color_text, render_polkit_text, render_portal_text};
+use super::modals::{
+    render_pick_color_text, render_polkit_text, render_portal_text, render_screenshot_hud_text,
+};
 use super::notification_center::render_notification_center_text;
 use super::quick_settings::render_quick_settings_text;
 use super::spotlight_overview::{
@@ -173,6 +175,9 @@ pub(super) fn append_foreground_overlay_text(
         ShellOverlayView::PickColor(app_id) => {
             render_pick_color_text(text_cache, renderer, screen_size, app_id, elements);
         }
+        ShellOverlayView::ScreenshotHud(hud) => {
+            render_screenshot_hud_text(text_cache, renderer, screen_size, hud, elements);
+        }
         ShellOverlayView::ContextMenu(ctx) => {
             render_context_menu_text(text_cache, renderer, screen_size, ctx, true, elements);
         }
@@ -236,7 +241,14 @@ pub fn generate_shell_text_elements(
         &mut elements,
     );
     if let ShellOverlayView::Overview(ov) = overlay {
-        render_overview_text(text_cache, renderer, screen_size, ov, &mut elements);
+        render_overview_text(
+            text_cache,
+            renderer,
+            screen_size,
+            ov,
+            |id| shape_cache.has_lifecycle_snapshot(id),
+            &mut elements,
+        );
     }
     append_chrome_text(
         text_cache,

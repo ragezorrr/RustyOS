@@ -295,6 +295,12 @@ impl RustyCompositorState {
             KeyIntercept::TakeScreenshot(req) => {
                 self.pending_screenshot = Some(req);
             }
+            KeyIntercept::OpenScreenshotHud => {
+                self.open_screenshot_hud();
+            }
+            KeyIntercept::ScreenshotHudKey(raw_sym) => {
+                self.handle_screenshot_hud_key(raw_sym);
+            }
             KeyIntercept::Wm(wm_action) => {
                 self.apply_wm_action(wm_action, serial);
             }
@@ -483,6 +489,12 @@ pub(super) fn classify_keyboard_input(
             return FilterResult::Intercept(KeyIntercept::Portal(PortalKeyAction::PickColorCancel));
         }
         return FilterResult::Intercept(KeyIntercept::Portal(PortalKeyAction::Consume));
+    }
+    if state.screenshot_hud.is_some() {
+        if key_state == KeyState::Pressed {
+            return FilterResult::Intercept(KeyIntercept::ScreenshotHudKey(sym.raw()));
+        }
+        return FilterResult::Intercept(KeyIntercept::ScreenshotHudKey(0));
     }
     if shortcuts_inhibited && !state.has_blocking_shell_overlay() {
         if key_state == KeyState::Pressed && modifiers.logo && sym.raw() == Keysym::Escape.raw() {
@@ -1031,6 +1043,9 @@ pub(super) const fn match_hardware_shortcut(
         Keysym::Sys_Req => Some(KeyIntercept::TakeScreenshot(
             crate::screenshot::ScreenshotRequest::FocusedWindow,
         )),
+        Keysym::_4 | Keysym::dollar if modifiers.logo && modifiers.shift && !modifiers.ctrl => {
+            Some(KeyIntercept::OpenScreenshotHud)
+        }
         Keysym::s | Keysym::S if modifiers.logo && modifiers.shift => Some(
             KeyIntercept::TakeScreenshot(crate::screenshot::ScreenshotRequest::FocusedWindow),
         ),

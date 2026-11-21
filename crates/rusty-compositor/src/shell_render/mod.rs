@@ -91,7 +91,9 @@ pub use lock_screen::{
 };
 pub use modals::{
     PolkitHit, PolkitPromptRenderState, PortalHit, PortalPromptRenderState, PortalSourceRow,
-    hit_test_polkit_dialog, hit_test_portal_dialog,
+    ScreenshotHudHit, ScreenshotHudState, ScreenshotMode, hit_test_polkit_dialog,
+    hit_test_portal_dialog, hit_test_screenshot_hud, normalize_selection_rect,
+    screenshot_hud_pill_rect,
 };
 pub use notification_center::{
     DEFAULT_NOTIFICATION_TASKS, NotificationCardSlot, NotificationCenterHit,
@@ -195,6 +197,8 @@ pub enum ShellOverlayView<'a> {
     Portal(&'a PortalPromptRenderState<'a>),
     /// Non-dimming interactive `PickColor` sampling banner pill (`RUSTYOS-057`).
     PickColor(&'a str),
+    /// Interactive Screenshot HUD (`Region / Window / Full Screen`, `RUSTYOS-133`).
+    ScreenshotHud(&'a ScreenshotHudState),
     /// Context menu rendered with Liquid Glass (`RUSTYOS-064`).
     ContextMenu(&'a ContextMenuState),
     /// Graphical Downloads Stack popover (`RUSTYOS-073`).
@@ -247,6 +251,7 @@ pub fn generate_shell_render_elements(
         | ShellOverlayView::Polkit(_)
         | ShellOverlayView::Portal(_)
         | ShellOverlayView::PickColor(_)
+        | ShellOverlayView::ScreenshotHud(_)
         | ShellOverlayView::ContextMenu(_)
         | ShellOverlayView::DockStack(_)
         | ShellOverlayView::Updates(_)

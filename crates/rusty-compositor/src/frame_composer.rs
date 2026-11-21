@@ -959,6 +959,59 @@ fn capture_window_local_elements(
     )
 }
 
+/// Captures/refreshes live GPU window snapshots for `Workspace Overview` cards (`RUSTYOS-132`).
+/// Skips re-rendering windows whose `commit_sig` has not changed since the last capture.
+#[allow(clippy::too_many_arguments)]
+fn capture_overview_window_snapshots(
+    renderer: &mut GlesRenderer,
+    text_cache: &mut crate::text::TextCache,
+    shape_cache: &mut crate::surfaces::UiShapeCache,
+    state: &RustyCompositorState,
+    output_loc: Point<i32, Logical>,
+    output_windows: &[(rusty_wm::WindowId, rusty_wm::Rect)],
+    focused_win: Option<rusty_wm::WindowId>,
+    output_scale: f64,
+    overview_windows: &[crate::shell_render::DockWindowEntry],
+) {
+    for entry in overview_windows {
+        let win_id = entry.id;
+        let Some(rect) = output_windows
+            .iter()
+            .find(|(id, _)| *id == win_id)
+            .map(|(_, r)| *r)
+            .or_else(|| state.wm.window(win_id).map(|w| w.geometry))
+        else {
+            continue;
+        };
+        if state.is_window_minimized(win_id) {
+            continue;
+        }
+        let is_focused = focused_win == Some(win_id);
+        let probe_rect = state.resolved_window_global_rect(win_id).unwrap_or(rect);
+        let sig = window_lifecycle_commit_sig(state, win_id, probe_rect, is_focused);
+        if shape_cache.lifecycle_snapshot_matches_sig(win_id.0, sig) {
+            continue;
+        }
+        let (actual_rect, scaled) = capture_window_local_elements(
+            renderer,
+            text_cache,
+            shape_cache,
+            state,
+            (win_id, rect, is_focused),
+            output_loc,
+            output_scale,
+        );
+        let _ = shape_cache.capture_lifecycle_snapshot(
+            renderer,
+            win_id.0,
+            Size::from((actual_rect.width.max(1), actual_rect.height.max(1))),
+            output_scale,
+            sig,
+            &scaled,
+        );
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn capture_pending_open_lifecycle_snapshots(
     renderer: &mut GlesRenderer,
@@ -2024,6 +2077,8 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
             ShellOverlayView::Overview(ov)
         } else if let Some(pick) = state.portal_pick_color.as_ref() {
             ShellOverlayView::PickColor(&pick.app_id)
+        } else if let Some(hud) = state.screenshot_hud.as_ref() {
+            ShellOverlayView::ScreenshotHud(hud)
         } else {
             ShellOverlayView::None
         };
@@ -2076,6 +2131,19 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
         } else {
             overlay
         };
+        if let ShellOverlayView::Overview(ov) = overview_overlay {
+            capture_overview_window_snapshots(
+                renderer,
+                text_cache,
+                shape_cache,
+                state,
+                output_loc,
+                &output_windows,
+                focused_win,
+                output_scale,
+                ov.windows,
+            );
+        }
         render_list.extend(crate::shell_render::generate_shell_overview_elements(
             text_cache,
             shape_cache,
@@ -2175,13 +2243,18 @@ pub(crate) fn process_pending_screenshot(
     } else {
         fallback_size
     };
-    let crop = match req {
-        crate::screenshot::ScreenshotRequest::FullScreen => None,
-        crate::screenshot::ScreenshotRequest::FocusedWindow => state
-            .wm
-            .focused_window()
-            .and_then(|id| state.wm.window(id))
-            .map(|w| w.geometry),
+    let (crop, copy_only) = match req {
+        crate::screenshot::ScreenshotRequest::FullScreen => (None, false),
+        crate::screenshot::ScreenshotRequest::FullScreenCopyOnly => (None, true),
+        crate::screenshot::ScreenshotRequest::FocusedWindow => (
+            state
+                .wm
+                .focused_window()
+                .and_then(|id| state.wm.window(id))
+                .map(|w| w.geometry),
+            false,
+        ),
+        crate::screenshot::ScreenshotRequest::Region { rect, copy_only } => (Some(rect), copy_only),
     };
     match crate::screenshot::capture_render_list_rgba(
         renderer,
@@ -2195,6 +2268,14 @@ pub(crate) fn process_pending_screenshot(
                 if let Ok(bytes) = crate::screenshot::encode_png_rgba(width, height, &rgba) {
                     let _ = std::fs::write(&dest, bytes);
                 }
+            } else if copy_only {
+                crate::screenshot::spawn_copy_screenshot_only(
+                    width,
+                    height,
+                    rgba,
+                    state.socket_name.clone(),
+                    &state.screenshot_results,
+                );
             } else {
                 crate::screenshot::spawn_save_screenshot(
                     width,
