@@ -159,6 +159,8 @@ pub struct TopBarTelemetry<'a> {
     pub backdrop: Option<super::BarBackdropStyle>,
     /// Active compact status popover (`Volume`, `Battery`, `Bluetooth`) if open (`RUSTYOS-141`).
     pub quick_popover: Option<crate::shell_render::TopBarQuickPopoverKind>,
+    /// Live D-Bus `AppMenuTree` exported by the focused window if any (`RUSTYOS-145`).
+    pub app_menu_tree: Option<&'a crate::app_menu::AppMenuTree>,
 }
 
 impl TopBarTelemetry<'_> {
@@ -230,6 +232,7 @@ impl Default for TopBarTelemetry<'static> {
             recording_active: false,
             backdrop: None,
             quick_popover: None,
+            app_menu_tree: None,
         }
     }
 }

@@ -584,15 +584,17 @@ impl RustyCompositorState {
         button: u32,
     ) -> bool {
         let (active_app_name, app_profile) = self.active_top_bar_app_context();
+        let live_app_menu = self.active_app_menu_tree();
         let x = self.pointer_location.x;
         let y = self.pointer_location.y;
         let was_menu_open = self.active_top_bar_menu.is_some();
 
         if let Some(open_menu) = self.active_top_bar_menu {
-            match crate::shell_render::check_top_bar_menu_popover_click_for_profile(
+            match crate::shell_render::check_top_bar_menu_popover_click_with_app_menu(
                 app_profile,
                 &active_app_name,
                 open_menu,
+                live_app_menu.as_ref(),
                 x,
                 y,
             ) {
@@ -612,9 +614,10 @@ impl RustyCompositorState {
             }
         }
 
-        if let Some(menu_hit) = crate::shell_render::check_top_bar_menu_click_for_profile(
+        if let Some(menu_hit) = crate::shell_render::check_top_bar_menu_click_with_app_menu(
             app_profile,
             &active_app_name,
+            live_app_menu.as_ref(),
             x,
             y,
         ) {

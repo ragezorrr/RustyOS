@@ -334,6 +334,14 @@ impl RustyCompositorState {
         self.shell_redraw_needed = true;
     }
 
+    /// Returns the live D-Bus `AppMenuTree` for the currently focused window, if registered (`RUSTYOS-145`).
+    #[must_use]
+    pub fn active_app_menu_tree(&self) -> Option<crate::app_menu::AppMenuTree> {
+        let wid = self.wm.focused_window()?;
+        let id = u32::try_from(wid.0).ok()?;
+        self.app_menu.menu_for_window(id)
+    }
+
     /// Stops all active portal screencast / screen-recording sessions (`RUSTYOS-142`).
     pub fn stop_active_screen_recording(&mut self) {
         if !self.active_screencasts.is_empty() {
@@ -637,6 +645,12 @@ impl RustyCompositorState {
                 self.loop_signal.stop();
             }
             TopBarMenuAction::ShowShortcuts => self.open_settings_page(Some("shortcuts")),
+            TopBarMenuAction::DbusMenuItem(item_id) => {
+                if let Some(tree) = self.active_app_menu_tree() {
+                    self.app_menu
+                        .activate_item(tree.service_name, tree.object_path, item_id);
+                }
+            }
             other => self.dispatch_top_bar_window_action(other, serial),
         }
     }

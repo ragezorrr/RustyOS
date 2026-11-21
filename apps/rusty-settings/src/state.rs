@@ -53,7 +53,10 @@ pub(crate) enum SettingsPage {
     Appearance,
     Wallpaper,
     DockDesktop,
+    MenuBar,
     Notifications,
+    DateTime,
+    Language,
     SoftwareUpdate,
     Display,
     Sound,
@@ -67,17 +70,20 @@ pub(crate) enum SettingsPage {
 }
 
 impl SettingsPage {
-    pub(crate) const SIDEBAR: [Self; 17] = [
+    pub(crate) const SIDEBAR: [Self; 20] = [
         Self::Wifi,
         Self::Bluetooth,
         Self::Network,
         Self::About,
         Self::Battery,
         Self::Users,
+        Self::DateTime,
+        Self::Language,
         Self::SoftwareUpdate,
         Self::Appearance,
         Self::Wallpaper,
         Self::DockDesktop,
+        Self::MenuBar,
         Self::Notifications,
         Self::Display,
         Self::Sound,
@@ -99,7 +105,10 @@ impl SettingsPage {
             "updates" | "update" | "softwareupdate" | "software-update" => Self::SoftwareUpdate,
             "wallpaper" | "background" => Self::Wallpaper,
             "dock" | "desktop" => Self::DockDesktop,
+            "menubar" | "menu-bar" | "topbar" | "top-bar" => Self::MenuBar,
             "notifications" => Self::Notifications,
+            "datetime" | "date" | "time" | "clock" => Self::DateTime,
+            "language" | "region" | "locale" => Self::Language,
             "display" | "displays" => Self::Display,
             "sound" | "audio" => Self::Sound,
             "keyboard" => Self::Keyboard,
@@ -125,7 +134,10 @@ impl SettingsPage {
             Self::Appearance => "Appearance",
             Self::Wallpaper => "Wallpaper",
             Self::DockDesktop => "Dock & Desktop",
+            Self::MenuBar => "Menu Bar",
             Self::Notifications => "Notifications",
+            Self::DateTime => "Date & Time",
+            Self::Language => "Language & Region",
             Self::SoftwareUpdate => "Software Update",
             Self::Display => "Display",
             Self::Sound => "Sound",
@@ -143,10 +155,17 @@ impl SettingsPage {
     pub(crate) const fn category(self) -> Option<&'static str> {
         match self {
             Self::Wifi | Self::Bluetooth | Self::Network => Some("Network"),
-            Self::About | Self::Battery | Self::Users | Self::SoftwareUpdate => Some("System"),
-            Self::Appearance | Self::Wallpaper | Self::DockDesktop | Self::Notifications => {
-                Some("Desktop")
-            }
+            Self::About
+            | Self::Battery
+            | Self::Users
+            | Self::DateTime
+            | Self::Language
+            | Self::SoftwareUpdate => Some("System"),
+            Self::Appearance
+            | Self::Wallpaper
+            | Self::DockDesktop
+            | Self::MenuBar
+            | Self::Notifications => Some("Desktop"),
             Self::Display
             | Self::Sound
             | Self::Keyboard
@@ -175,7 +194,9 @@ impl SettingsPage {
             Self::Wallpaper => [0x34, 0xB4, 0xA7, 0xFF],
             Self::DockDesktop => [0x58, 0x56, 0xD6, 0xFF],
             Self::Notifications => [0xFF, 0x3B, 0x30, 0xFF],
-            Self::SoftwareUpdate | Self::Display => [0x00, 0x87, 0xED, 0xFF],
+            Self::SoftwareUpdate | Self::Display | Self::MenuBar => [0x00, 0x87, 0xED, 0xFF],
+            Self::DateTime => [0x41, 0x8C, 0xFF, 0xFF],
+            Self::Language => [0x20, 0xA7, 0xFF, 0xFF],
             Self::Sound => [0xF1, 0x68, 0x84, 0xFF],
             Self::Keyboard => [0x5E, 0x6A, 0xD2, 0xFF],
             Self::Shortcuts => [0x63, 0x63, 0x66, 0xFF],
@@ -197,7 +218,10 @@ impl SettingsPage {
             Self::Appearance => "theme dark light auto accent color",
             Self::Wallpaper => "background picture desktop image wallpaper",
             Self::DockDesktop => "dock position size auto hide glass effect transparency motion",
-            Self::Notifications => "alerts banners menubar clock workspaces tray",
+            Self::MenuBar => "menubar topbar wifi battery volume bluetooth clock contrast tray",
+            Self::Notifications => "alerts banners do not disturb previews",
+            Self::DateTime => "date time clock timezone 24-hour ntp sync",
+            Self::Language => "language region locale english russian ukrainian formats",
             Self::SoftwareUpdate => "updates packages upgrade software check version pacman",
             Self::Display => "monitor screen scale hidpi refresh rate vrr rotation",
             Self::Sound => "audio volume speakers mute microphone",
@@ -232,7 +256,13 @@ pub(crate) enum RowControlId {
     MenubarTrayToggle,
     MenubarInputToggle,
     MenubarVolumeToggle,
+    MenubarWifiToggle,
+    MenubarBatteryToggle,
+    MenubarBatteryPercentageToggle,
+    MenubarBluetoothToggle,
+    MenubarAdaptiveContrastToggle,
     Clock24hToggle,
+    ClockLocaleCycle,
     UpdatesEnabledToggle,
     ScaleDown,
     ScaleUp,
@@ -566,7 +596,13 @@ pub(crate) struct SettingsAppState {
     pub(crate) menubar_tray: bool,
     pub(crate) menubar_input: bool,
     pub(crate) menubar_volume: bool,
+    pub(crate) menubar_wifi: bool,
+    pub(crate) menubar_battery: bool,
+    pub(crate) menubar_battery_percentage: bool,
+    pub(crate) menubar_bluetooth: bool,
+    pub(crate) menubar_adaptive_contrast: bool,
     pub(crate) clock_24h: bool,
+    pub(crate) clock_locale: String,
     pub(crate) updates_enabled: bool,
     pub(crate) notif_allow: bool,
     pub(crate) notif_show_previews: String,
@@ -643,6 +679,7 @@ impl SettingsAppState {
         state
     }
 
+    #[allow(clippy::too_many_lines)]
     fn defaults_with_page(initial_page: SettingsPage) -> Self {
         let epoch = Instant::now();
         let (focus, focus_search_id, search_field) = default_search_controls();
@@ -693,7 +730,13 @@ impl SettingsAppState {
             menubar_tray: false,
             menubar_input: true,
             menubar_volume: false,
+            menubar_wifi: true,
+            menubar_battery: true,
+            menubar_battery_percentage: false,
+            menubar_bluetooth: false,
+            menubar_adaptive_contrast: true,
             clock_24h: true,
+            clock_locale: String::from("en"),
             updates_enabled: true,
             notif_allow: true,
             notif_show_previews: String::from("When Unlocked"),
@@ -1567,6 +1610,7 @@ impl SettingsAppState {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     fn apply_system_action(&mut self, action: RowControlId) {
         match action {
             RowControlId::MenubarWorkspacesToggle => {
@@ -1587,12 +1631,51 @@ impl SettingsAppState {
             RowControlId::MenubarVolumeToggle => {
                 self.menubar_volume = !self.menubar_volume;
                 let v = bool_str(self.menubar_volume);
-                let _ = update_config_entries(&[("ui", "menubar_show_volume", v)]);
+                let _ = update_config_entries(&[
+                    ("ui", "menubar_show_volume", v),
+                    ("top_bar", "show_sound", v),
+                ]);
+            }
+            RowControlId::MenubarWifiToggle => {
+                self.menubar_wifi = !self.menubar_wifi;
+                let v = bool_str(self.menubar_wifi);
+                let _ = update_config_entries(&[("top_bar", "show_wifi", v)]);
+            }
+            RowControlId::MenubarBatteryToggle => {
+                self.menubar_battery = !self.menubar_battery;
+                let v = bool_str(self.menubar_battery);
+                let _ = update_config_entries(&[("top_bar", "show_battery", v)]);
+            }
+            RowControlId::MenubarBatteryPercentageToggle => {
+                self.menubar_battery_percentage = !self.menubar_battery_percentage;
+                let v = bool_str(self.menubar_battery_percentage);
+                let _ = update_config_entries(&[("top_bar", "show_battery_percentage", v)]);
+            }
+            RowControlId::MenubarBluetoothToggle => {
+                self.menubar_bluetooth = !self.menubar_bluetooth;
+                let v = bool_str(self.menubar_bluetooth);
+                let _ = update_config_entries(&[("top_bar", "show_bluetooth", v)]);
+            }
+            RowControlId::MenubarAdaptiveContrastToggle => {
+                self.menubar_adaptive_contrast = !self.menubar_adaptive_contrast;
+                let v = bool_str(self.menubar_adaptive_contrast);
+                let _ = update_config_entries(&[("top_bar", "adaptive_contrast", v)]);
             }
             RowControlId::Clock24hToggle => {
                 self.clock_24h = !self.clock_24h;
                 let v = bool_str(self.clock_24h);
-                let _ = update_config_entries(&[("ui", "clock_24h", v)]);
+                let _ =
+                    update_config_entries(&[("ui", "clock_24h", v), ("top_bar", "clock_24h", v)]);
+            }
+            RowControlId::ClockLocaleCycle => {
+                let next = match self.clock_locale.as_str() {
+                    "en" => "ru",
+                    "ru" => "uk",
+                    _ => "en",
+                };
+                next.clone_into(&mut self.clock_locale);
+                let quoted = format!("\"{next}\"");
+                let _ = update_config_entries(&[("top_bar", "clock_locale", &quoted)]);
             }
             RowControlId::UpdatesEnabledToggle => {
                 self.updates_enabled = !self.updates_enabled;
@@ -2216,8 +2299,23 @@ impl SettingsAppState {
             ("ui", "menubar_show_workspaces") => self.menubar_workspaces = parse_bool(val),
             ("ui", "menubar_show_tray") => self.menubar_tray = parse_bool(val),
             ("ui", "menubar_show_input_source") => self.menubar_input = parse_bool(val),
-            ("ui", "menubar_show_volume") => self.menubar_volume = parse_bool(val),
-            ("ui", "clock_24h") => self.clock_24h = parse_bool(val),
+            ("ui", "menubar_show_volume") | ("top_bar", "show_sound") => {
+                self.menubar_volume = parse_bool(val);
+            }
+            ("top_bar", "show_wifi") => self.menubar_wifi = parse_bool(val),
+            ("top_bar", "show_battery") => self.menubar_battery = parse_bool(val),
+            ("top_bar", "show_battery_percentage") => {
+                self.menubar_battery_percentage = parse_bool(val);
+            }
+            ("top_bar", "show_bluetooth") => self.menubar_bluetooth = parse_bool(val),
+            ("top_bar", "adaptive_contrast") => self.menubar_adaptive_contrast = parse_bool(val),
+            ("ui" | "top_bar", "clock_24h") => self.clock_24h = parse_bool(val),
+            ("top_bar", "clock_locale") => {
+                let norm = val.trim().trim_matches('"').to_ascii_lowercase();
+                if matches!(norm.as_str(), "en" | "ru" | "uk") {
+                    self.clock_locale = norm;
+                }
+            }
             ("ui", "cursor_theme") if !val.is_empty() => val.clone_into(&mut self.cursor_theme),
             ("updates", "enabled") => self.updates_enabled = parse_bool(val),
             ("notifications", "allow") => self.notif_allow = parse_bool(val),

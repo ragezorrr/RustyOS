@@ -19,7 +19,7 @@ use super::tokens::{ThemePalette, anim_offset};
 use super::top_bar::{
     MENU_ITEM_HEIGHT, MENU_POPOVER_PAD_Y, MENU_SEPARATOR_HEIGHT, push_notification_card_text_lines,
 };
-use super::top_bar_menus::{ResolvedTopBarMenuItem, resolve_top_bar_menu_entries};
+use super::top_bar_menus::ResolvedTopBarMenuItem;
 use super::updates_popover::render_updates_text;
 use super::wifi_popover::render_wifi_popover_text;
 use super::{
@@ -27,8 +27,7 @@ use super::{
     TOP_BAR_ITEM_H, TOP_BAR_ITEM_Y, TopBarMenuHit, TopBarTelemetry, WS_BTN_STRIDE, WS_BTN_WIDTH,
     compute_dock_layout, compute_top_bar_left_layout_for_profile,
     compute_top_bar_right_layout_with_options, dock_tooltip_hidden_by_overlay,
-    notification_toast_rects, notifications_hidden_by_overlay,
-    top_bar_menu_popover_rect_for_profile, tray_slot_rects_with_options,
+    notification_toast_rects, notifications_hidden_by_overlay, tray_slot_rects_with_options,
 };
 
 #[allow(clippy::too_many_lines)]
@@ -338,72 +337,101 @@ pub(super) fn append_chrome_text(
     } else {
         [28, 29, 34, 240]
     };
-    for (menu_kind, name, x, w) in [
-        (
-            TopBarMenuHit::File,
-            "File",
-            left_layout.file_x,
-            left_layout.file_w,
-        ),
-        (
-            TopBarMenuHit::Edit,
-            "Edit",
-            left_layout.edit_x,
-            left_layout.edit_w,
-        ),
-        (
-            TopBarMenuHit::View,
-            "View",
-            left_layout.view_x,
-            left_layout.view_w,
-        ),
-        (TopBarMenuHit::Go, "Go", left_layout.go_x, left_layout.go_w),
-        (
-            TopBarMenuHit::Window,
-            "Window",
-            left_layout.win_x,
-            left_layout.win_w,
-        ),
-        (
-            TopBarMenuHit::Help,
-            "Help",
-            left_layout.help_x,
-            left_layout.help_w,
-        ),
-    ] {
-        if menu_kind == TopBarMenuHit::Go && !left_layout.has_go {
-            continue;
+    if let Some(tree) = top_telemetry.app_menu_tree {
+        for (idx, title, x, w) in super::dynamic_app_menu_slots(&left_layout, tree) {
+            let color = if top_telemetry.active_menu == Some(TopBarMenuHit::Dynamic(idx)) {
+                bar_fg
+            } else {
+                text_menu
+            };
+            let bounds = Rectangle::new(Point::from((x, ws_y)), Size::from((w, ws_btn_height)));
+            if let Some(el) = text_cache.render_label_centered_weighted(
+                renderer,
+                title,
+                crate::text::FontWeight::Regular,
+                TOP_BAR_FONT_SIZE,
+                color,
+                bounds,
+            ) {
+                elements.push(el);
+            }
         }
-        let color = if top_telemetry.active_menu == Some(menu_kind) {
-            bar_fg
-        } else {
-            text_menu
-        };
-        let bounds = Rectangle::new(Point::from((x, ws_y)), Size::from((w, ws_btn_height)));
-        if let Some(el) = text_cache.render_label_centered_weighted(
-            renderer,
-            name,
-            crate::text::FontWeight::Regular,
-            TOP_BAR_FONT_SIZE,
-            color,
-            bounds,
-        ) {
-            elements.push(el);
+    } else {
+        for (menu_kind, name, x, w) in [
+            (
+                TopBarMenuHit::File,
+                "File",
+                left_layout.file_x,
+                left_layout.file_w,
+            ),
+            (
+                TopBarMenuHit::Edit,
+                "Edit",
+                left_layout.edit_x,
+                left_layout.edit_w,
+            ),
+            (
+                TopBarMenuHit::View,
+                "View",
+                left_layout.view_x,
+                left_layout.view_w,
+            ),
+            (TopBarMenuHit::Go, "Go", left_layout.go_x, left_layout.go_w),
+            (
+                TopBarMenuHit::Window,
+                "Window",
+                left_layout.win_x,
+                left_layout.win_w,
+            ),
+            (
+                TopBarMenuHit::Help,
+                "Help",
+                left_layout.help_x,
+                left_layout.help_w,
+            ),
+        ] {
+            if menu_kind == TopBarMenuHit::Go && !left_layout.has_go {
+                continue;
+            }
+            let color = if top_telemetry.active_menu == Some(menu_kind) {
+                bar_fg
+            } else {
+                text_menu
+            };
+            let bounds = Rectangle::new(Point::from((x, ws_y)), Size::from((w, ws_btn_height)));
+            if let Some(el) = text_cache.render_label_centered_weighted(
+                renderer,
+                name,
+                crate::text::FontWeight::Regular,
+                TOP_BAR_FONT_SIZE,
+                color,
+                bounds,
+            ) {
+                elements.push(el);
+            }
         }
     }
 
-    // Active TopBar left dropdown menu labels + right-aligned real shortcuts (`RUSTYOS-048`/`049`/`051`/`068`)
+    // Active TopBar left dropdown menu labels + right-aligned real shortcuts (`RUSTYOS-048`/`049`/`051`/`068`/`145`)
     if let Some(open_menu) = top_telemetry
         .active_menu
         .filter(|m| *m != TopBarMenuHit::Go || left_layout.has_go)
     {
-        let (mx, my, mw, _) =
-            top_bar_menu_popover_rect_for_profile(app_profile, active_app_name, open_menu);
+        let (mx, my, mw, _) = super::top_bar_menu_popover_rect_with_app_menu(
+            app_profile,
+            active_app_name,
+            open_menu,
+            top_telemetry.app_menu_tree,
+        );
         let mut row_y = my + MENU_POPOVER_PAD_Y;
-        for (entry_idx, entry) in
-            resolve_top_bar_menu_entries(app_profile, active_app_name, open_menu)
-                .into_iter()
-                .enumerate()
+        for (entry_idx, entry) in super::resolve_top_bar_menu_entries_with_app_menu(
+            app_profile,
+            active_app_name,
+            open_menu,
+            top_telemetry.app_menu_tree,
+        )
+        .into_iter()
+        .enumerate()
         {
             match entry {
                 ResolvedTopBarMenuItem::Item {

@@ -1790,6 +1790,7 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
             &tel.clock_date_hhmm
         };
         let (active_app_name, app_profile) = state.active_top_bar_app_context();
+        let live_app_menu = state.active_app_menu_tree();
         let active_top_bar_menu = state
             .active_top_bar_menu
             .filter(|m| *m != crate::shell_render::TopBarMenuHit::Go || app_profile.has_go_menu());
@@ -1842,6 +1843,7 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
                 .then(|| shape_cache.wallpaper_top_bar_backdrop())
                 .flatten(),
             quick_popover: state.top_bar_quick_popover,
+            app_menu_tree: live_app_menu.as_ref(),
         };
 
         let lock_hidden_preview = matches!(

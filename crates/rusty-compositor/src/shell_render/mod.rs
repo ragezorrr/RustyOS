@@ -131,7 +131,10 @@ pub use tokens::{
     compute_dock_radius, usable_work_area, usable_work_area_with_dock,
 };
 pub use top_bar::{
-    BarBackdropStyle, analyze_top_bar_backdrop_bgra, prefers_light_foreground, relative_luminance,
+    BarBackdropStyle, analyze_top_bar_backdrop_bgra, check_top_bar_menu_click_with_app_menu,
+    check_top_bar_menu_popover_click_with_app_menu, dynamic_app_menu_slots,
+    prefers_light_foreground, relative_luminance, resolve_top_bar_menu_entries_with_app_menu,
+    top_bar_menu_popover_rect_with_app_menu,
 };
 pub use top_bar::{
     MAX_TOP_BAR_TRAY_ITEMS, MAX_VISIBLE_NOTIFICATIONS, MENU_POPOVER_RADIUS, NotificationToastView,

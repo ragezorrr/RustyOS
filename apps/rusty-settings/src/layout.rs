@@ -713,7 +713,10 @@ fn build_standard_page_sections(
     let mut cur_y = 56;
     match page {
         SettingsPage::Wallpaper
+        | SettingsPage::MenuBar
         | SettingsPage::Notifications
+        | SettingsPage::DateTime
+        | SettingsPage::Language
         | SettingsPage::SoftwareUpdate
         | SettingsPage::Wifi
         | SettingsPage::Bluetooth
@@ -740,6 +743,7 @@ fn build_standard_page_sections(
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn build_system_page_sections(
     app: &SettingsAppState,
     page: SettingsPage,
@@ -767,6 +771,140 @@ fn build_system_page_sections(
                             .as_deref()
                             .unwrap_or("Built-in RustyOS Wallpaper")
                             .to_owned(),
+                    ),
+                ],
+            )]
+        }
+        SettingsPage::MenuBar => {
+            vec![
+                place_card_section(
+                    Some("Status Icons"),
+                    content_x,
+                    cur_y,
+                    content_w,
+                    vec![
+                        row_switch(
+                            "Show Wi-Fi Indicator",
+                            RowControlId::MenubarWifiToggle,
+                            app.menubar_wifi,
+                        ),
+                        row_switch(
+                            "Show Battery Indicator",
+                            RowControlId::MenubarBatteryToggle,
+                            app.menubar_battery,
+                        ),
+                        row_switch(
+                            "Show Battery Percentage",
+                            RowControlId::MenubarBatteryPercentageToggle,
+                            app.menubar_battery_percentage,
+                        ),
+                        row_switch(
+                            "Show Volume Indicator",
+                            RowControlId::MenubarVolumeToggle,
+                            app.menubar_volume,
+                        ),
+                        row_switch(
+                            "Show Bluetooth Indicator",
+                            RowControlId::MenubarBluetoothToggle,
+                            app.menubar_bluetooth,
+                        ),
+                        row_switch(
+                            "Show Input Source Badge",
+                            RowControlId::MenubarInputToggle,
+                            app.menubar_input,
+                        ),
+                        row_switch(
+                            "Show Workspace Strip",
+                            RowControlId::MenubarWorkspacesToggle,
+                            app.menubar_workspaces,
+                        ),
+                        row_switch(
+                            "Show System Tray Applets",
+                            RowControlId::MenubarTrayToggle,
+                            app.menubar_tray,
+                        ),
+                    ],
+                ),
+                place_card_section(
+                    Some("Appearance & Clock"),
+                    content_x,
+                    cur_y,
+                    content_w,
+                    vec![
+                        row_switch(
+                            "Adaptive Wallpaper Contrast",
+                            RowControlId::MenubarAdaptiveContrastToggle,
+                            app.menubar_adaptive_contrast,
+                        ),
+                        row_switch(
+                            "Use 24-Hour Clock",
+                            RowControlId::Clock24hToggle,
+                            app.clock_24h,
+                        ),
+                        row_choice(
+                            "Clock Language",
+                            RowControlId::ClockLocaleCycle,
+                            match app.clock_locale.as_str() {
+                                "ru" => "Русский",
+                                "uk" => "Українська",
+                                _ => "English",
+                            }
+                            .to_owned(),
+                        ),
+                    ],
+                ),
+            ]
+        }
+        SettingsPage::DateTime => {
+            let now_label = rusty_services::local_clock_short_datetime_localized(
+                &app.clock_locale,
+                app.clock_24h,
+            );
+            vec![place_card_section(
+                Some("Clock & Time Format"),
+                content_x,
+                cur_y,
+                content_w,
+                vec![
+                    row_info("Current Time", now_label),
+                    row_switch(
+                        "Use 24-Hour Clock",
+                        RowControlId::Clock24hToggle,
+                        app.clock_24h,
+                    ),
+                    row_choice(
+                        "Clock Language",
+                        RowControlId::ClockLocaleCycle,
+                        match app.clock_locale.as_str() {
+                            "ru" => "Русский",
+                            "uk" => "Українська",
+                            _ => "English",
+                        }
+                        .to_owned(),
+                    ),
+                ],
+            )]
+        }
+        SettingsPage::Language => {
+            vec![place_card_section(
+                Some("Preferred Language"),
+                content_x,
+                cur_y,
+                content_w,
+                vec![
+                    row_choice(
+                        "System & Clock Language",
+                        RowControlId::ClockLocaleCycle,
+                        match app.clock_locale.as_str() {
+                            "ru" => "Русский",
+                            "uk" => "Українська",
+                            _ => "English",
+                        }
+                        .to_owned(),
+                    ),
+                    row_info(
+                        "Supported Languages",
+                        "English • Русский • Українська".to_owned(),
                     ),
                 ],
             )]
@@ -1292,6 +1430,7 @@ fn build_shortcuts_page_sections(
     ]
 }
 
+#[allow(clippy::too_many_lines)]
 fn build_notifications_page_sections(
     app: &SettingsAppState,
     content_x: i32,
@@ -1381,9 +1520,49 @@ fn build_notifications_page_sections(
                 app.menubar_input,
             ),
             row_switch(
+                "Show Wi-Fi Indicator",
+                RowControlId::MenubarWifiToggle,
+                app.menubar_wifi,
+            ),
+            row_switch(
+                "Show Battery Indicator",
+                RowControlId::MenubarBatteryToggle,
+                app.menubar_battery,
+            ),
+            row_switch(
+                "Show Battery Percentage",
+                RowControlId::MenubarBatteryPercentageToggle,
+                app.menubar_battery_percentage,
+            ),
+            row_switch(
                 "Show Volume Indicator",
                 RowControlId::MenubarVolumeToggle,
                 app.menubar_volume,
+            ),
+            row_switch(
+                "Show Bluetooth Indicator",
+                RowControlId::MenubarBluetoothToggle,
+                app.menubar_bluetooth,
+            ),
+            row_switch(
+                "Adaptive Wallpaper Contrast",
+                RowControlId::MenubarAdaptiveContrastToggle,
+                app.menubar_adaptive_contrast,
+            ),
+            row_switch(
+                "Use 24-Hour Clock",
+                RowControlId::Clock24hToggle,
+                app.clock_24h,
+            ),
+            row_choice(
+                "Clock Language",
+                RowControlId::ClockLocaleCycle,
+                match app.clock_locale.as_str() {
+                    "ru" => "Русский",
+                    "uk" => "Українська",
+                    _ => "English",
+                }
+                .to_owned(),
             ),
         ],
     ));
@@ -2305,7 +2484,7 @@ mod tests {
         let mut app = SettingsAppState::new(&StartupOptions::default());
         let l = compute_layout(&app, 882, 600);
         assert_eq!(l.sidebar_rect.w, 230);
-        assert_eq!(l.sidebar_items.len(), 17);
+        assert_eq!(l.sidebar_items.len(), 20);
         assert!(l.max_page_scroll > 0);
         assert!(l.page_scrollbar_thumb.is_some());
         assert_eq!(hit_test(&l, 20.0, 20.0), Some(SettingsHit::TrafficClose));

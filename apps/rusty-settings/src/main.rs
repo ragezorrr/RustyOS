@@ -4,6 +4,7 @@ mod layout;
 pub(crate) mod liquid_glass;
 mod render;
 mod state;
+mod svg_icons;
 mod wayland;
 
 use std::env;

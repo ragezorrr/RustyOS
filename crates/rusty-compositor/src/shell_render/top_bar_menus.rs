@@ -774,5 +774,6 @@ pub fn resolve_top_bar_menu_entries(
             .iter()
             .map(ResolvedTopBarMenuItem::from)
             .collect(),
+        TopBarMenuHit::Dynamic(_) => Vec::new(),
     }
 }

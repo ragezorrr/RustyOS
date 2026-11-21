@@ -2460,6 +2460,38 @@ hardware/software context и низкие накладные расходы.
   - `AppMenuHandle` запускается в отдельном потоке, корректно деградирует при занятом D-Bus имени и покрыт unit-тестами; `cargo fmt`, `clippy -D warnings`, `cargo test --workspace` и живой `--winit` прогон проходят чисто.
 - **Risks:** Низкие; event loop композитора полностью изолирован от D-Bus I/O.
 
+### RUSTYOS-144 — Секция `Menu Bar` (`[top_bar]`) в `apps/rusty-settings`
+- **Status:** Done
+- **Goal:** Вывести все ключи `[top_bar]` (`show_wifi`, `show_battery`, `show_battery_percentage`, `show_sound`, `show_bluetooth`, `adaptive_contrast`, `clock_24h`, `clock_locale` EN/RU/UK) в карточку `Menu Bar` в `apps/rusty-settings` с мгновенным сохранением в `config.toml` и `RELOAD_CONFIG`.
+- **Dependencies:** `RUSTYOS-141`, `ADR-0082`.
+- **Scope:**
+  - `apps/rusty-settings/src/{state.rs, layout.rs}`: новые `RowControlId::{MenubarWifiToggle, MenubarBatteryToggle, MenubarBatteryPercentageToggle, MenubarBluetoothToggle, MenubarAdaptiveContrastToggle, ClockLocaleCycle}`, парсинг/запись `[top_bar]` и синхронизация с `[ui]`.
+- **Acceptance Criteria:**
+  - Все 8 контролов отображаются и переключаются в `rusty-settings`, `cargo fmt`, `clippy -D warnings` и `cargo test --workspace` проходят чисто.
+- **Risks:** Низкие; сохранена полная обратная совместимость с `[ui]`.
+
+### RUSTYOS-145 — Живой рендер и клики D-Bus `AppMenuTree` в выпадающем меню `TopBar`
+- **Status:** Done
+- **Goal:** Подключить живое дерево `AppMenuTree` (из `AppMenuHandle`) в рендер и клики выпадающих меню `TopBar` с отправкой `com.canonical.dbusmenu.Event("clicked")` и автоматическим fallback на `TopBarAppProfile`.
+- **Dependencies:** `RUSTYOS-143`, `ADR-0082`.
+- **Scope:**
+  - `crates/rusty-compositor/src/shell_render/{top_bar/menus.rs, top_bar/panel.rs, top_bar_menus.rs, chrome_shapes.rs, text_pass.rs, mod.rs}`, `frame_composer.rs`, `state/shell_actions.rs`, `input/shell_pointer.rs`.
+- **Acceptance Criteria:**
+  - При наличии `AppMenuTree` у активного окна `TopBar` показывает его секции и пункты (`TopBarMenuHit::Dynamic(usize)`) и отправляет `TopBarMenuAction::DbusMenuItem(id)`; при отсутствии работает fallback на `TopBarAppProfile`.
+  - Unit-тест `dynamic_app_menu_slots_and_clicks_resolve_dbus_item_id`, `cargo fmt`, `clippy -D warnings`, `cargo test --workspace` и живой `--winit` прогон проходят чисто.
+- **Risks:** Низкие; существующие статические меню и тесты не затронуты.
+
+### RUSTYOS-146 — SVG-иконки, иллюстрации и новые страницы (`Menu Bar`, `Date & Time`, `Language & Region`) в `apps/rusty-settings`
+- **Status:** Done
+- **Goal:** Подключить BSD-3-Clause SVG-иконки сайдбара и иллюстрации режимов (`Light`/`Dark`/`Auto`) в `assets/icons/settings/` (предрастрированные в `@2x` PNG без новых Cargo-зависимостей), выделить отдельную страницу `Menu Bar` и добавить страницы `Date & Time` и `Language & Region` в `apps/rusty-settings`.
+- **Dependencies:** `RUSTYOS-144`.
+- **Scope:**
+  - `assets/icons/settings/{LICENSE, svg/, png/}`: 34 векторных SVG-исходника + `@2x` PNG-спрайты.
+  - `apps/rusty-settings/src/{svg_icons.rs, main.rs, state.rs, layout.rs, render.rs}`: встроенные PNG-спрайты `include_bytes!`, `blit_rgba_sprite_rounded`, новые страницы `SettingsPage::{MenuBar, DateTime, Language}` и unit-тест декодирования всех спрайтов.
+- **Acceptance Criteria:**
+  - Все 20 иконок сайдбара и 3 иллюстрации тем декодируются и рендерятся без новых зависимостей в `Cargo.lock`; `cargo fmt`, `clippy -D warnings`, `cargo test` и живой просмотр проходят чисто.
+- **Risks:** Низкие; сохранена полная совместимость с существующими страницами и тестами.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

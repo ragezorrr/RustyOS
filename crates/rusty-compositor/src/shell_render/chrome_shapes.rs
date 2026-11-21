@@ -14,7 +14,7 @@ use super::tokens::{
 use super::top_bar::{
     MENU_ITEM_HEIGHT, MENU_POPOVER_PAD_Y, MENU_SEPARATOR_HEIGHT, push_top_bar_right_glyphs,
 };
-use super::top_bar_menus::{ResolvedTopBarMenuItem, resolve_top_bar_menu_entries};
+use super::top_bar_menus::ResolvedTopBarMenuItem;
 use super::{
     COLOR_ACCENT, COLOR_BORDER, COLOR_DANGER, CompositorRenderElement, DockAppTile, DockSection,
     DockViewState, MENU_POPOVER_RADIUS, OverviewRenderState, ShellOverlayView, TOP_BAR_HEIGHT,
@@ -22,7 +22,7 @@ use super::{
     WS_BTN_STRIDE, WS_BTN_WIDTH, compute_dock_layout, compute_dock_radius,
     compute_top_bar_left_layout_for_profile, compute_top_bar_right_layout_with_options,
     dock_tooltip_hidden_by_overlay, make_solid_element, overview_card_rects, overview_space_rects,
-    top_bar_menu_popover_rect_for_profile, tray_slot_rects_with_options,
+    tray_slot_rects_with_options,
 };
 
 /// Generates persistent desktop chrome (`TopBar`, dropdown menu, and `Dock`) sorted front-to-back (`RUSTYOS-060`).
@@ -165,6 +165,15 @@ fn build_chrome_shapes(
             TopBarMenuHit::Go => (left_layout.go_x - 2, left_layout.go_w + 4),
             TopBarMenuHit::Window => (left_layout.win_x - 2, left_layout.win_w + 4),
             TopBarMenuHit::Help => (left_layout.help_x - 2, left_layout.help_w + 4),
+            TopBarMenuHit::Dynamic(idx) => top_telemetry
+                .app_menu_tree
+                .and_then(|tree| {
+                    super::dynamic_app_menu_slots(&left_layout, tree)
+                        .into_iter()
+                        .find(|(i, _, _, _)| *i == idx)
+                        .map(|(_, _, x, w)| (x - 2, w + 4))
+                })
+                .unwrap_or((left_layout.file_x - 2, left_layout.file_w + 4)),
         };
         let plate_bg = if pal.is_dark {
             [255, 255, 255, 51]
@@ -183,14 +192,22 @@ fn build_chrome_shapes(
             plate_bg,
             None,
         );
-        let (mx, my, mw, mh) =
-            top_bar_menu_popover_rect_for_profile(app_profile, active_app_name, open_menu);
+        let (mx, my, mw, mh) = super::top_bar_menu_popover_rect_with_app_menu(
+            app_profile,
+            active_app_name,
+            open_menu,
+            top_telemetry.app_menu_tree,
+        );
         let menu_rect = Rectangle::new(Point::from((mx, my)), Size::from((mw, mh)));
         let mut row_y = my + MENU_POPOVER_PAD_Y;
-        for (entry_idx, entry) in
-            resolve_top_bar_menu_entries(app_profile, active_app_name, open_menu)
-                .into_iter()
-                .enumerate()
+        for (entry_idx, entry) in super::resolve_top_bar_menu_entries_with_app_menu(
+            app_profile,
+            active_app_name,
+            open_menu,
+            top_telemetry.app_menu_tree,
+        )
+        .into_iter()
+        .enumerate()
         {
             match entry {
                 ResolvedTopBarMenuItem::Item { icon, enabled, .. } => {

@@ -965,7 +965,67 @@ fn render_theme_preview_artwork(c: &mut Canvas<'_>, art: Rect, choice: ThemeChoi
     clippy::cast_precision_loss,
     clippy::cast_sign_loss
 )]
+fn blit_rgba_sprite_rounded(
+    c: &mut Canvas<'_>,
+    dst: Rect,
+    src_w: usize,
+    src_h: usize,
+    rgba: &[u8],
+    radius: f32,
+    tint_white: bool,
+) {
+    if dst.w <= 0 || dst.h <= 0 || src_w == 0 || src_h == 0 {
+        return;
+    }
+    let cx = dst.x as f32 + dst.w as f32 * 0.5;
+    let cy = dst.y as f32 + dst.h as f32 * 0.5;
+    let rw = dst.w as f32;
+    let rh = dst.h as f32;
+    for py in dst.y..dst.bottom() {
+        let sy = ((py - dst.y) as usize * src_h / dst.h as usize).min(src_h - 1);
+        for px in dst.x..dst.right() {
+            let sx = ((px - dst.x) as usize * src_w / dst.w as usize).min(src_w - 1);
+            let off = (sy * src_w + sx) * 4;
+            let src_a = rgba[off + 3];
+            if src_a == 0 {
+                continue;
+            }
+            let cov = if radius > 0.0 {
+                let d = sd_rounded_box(px as f32 + 0.5 - cx, py as f32 + 0.5 - cy, rw, rh, radius);
+                if d >= 0.6 {
+                    continue;
+                }
+                ((0.6 - d).clamp(0.0, 1.0) * 255.0).round() as u8
+            } else {
+                255
+            };
+            let color = if tint_white {
+                [255, 255, 255, src_a]
+            } else {
+                [rgba[off], rgba[off + 1], rgba[off + 2], src_a]
+            };
+            c.blend_px(px, py, color, cov);
+        }
+    }
+}
+
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
 fn render_theme_preview_direct(c: &mut Canvas<'_>, art: Rect, choice: ThemeChoice) {
+    let key = match choice {
+        ThemeChoice::Light => "light",
+        ThemeChoice::Dark => "dark",
+        ThemeChoice::Auto => "auto",
+    };
+    if let Some((sw, sh, rgba)) =
+        crate::svg_icons::theme_illustration_png(key).and_then(crate::svg_icons::decode_png)
+    {
+        blit_rgba_sprite_rounded(c, art, sw, sh, &rgba, 10.0, false);
+        return;
+    }
     let cx = art.x as f32 + art.w as f32 * 0.5;
     let cy = art.y as f32 + art.h as f32 * 0.5;
     let rw = art.w as f32;
@@ -1970,7 +2030,20 @@ fn render_row_icon(c: &mut Canvas<'_>, rect: Rect, page: SettingsPage) {
 
 fn render_row_icon_direct(c: &mut Canvas<'_>, rect: Rect, page: SettingsPage) {
     c.fill_gradient_squircle(rect, 6, page.icon_tint());
-    draw_sidebar_glyph(c, rect, page);
+    if let Some((sw, sh, rgba)) =
+        crate::svg_icons::decode_png(crate::svg_icons::sidebar_icon_png(page))
+    {
+        let pad = (rect.w / 6).max(3);
+        let glyph_rect = Rect::new(
+            rect.x + pad,
+            rect.y + pad,
+            (rect.w - pad * 2).max(8),
+            (rect.h - pad * 2).max(8),
+        );
+        blit_rgba_sprite_rounded(c, glyph_rect, sw, sh, &rgba, 0.0, true);
+    } else {
+        draw_sidebar_glyph(c, rect, page);
+    }
 }
 
 #[allow(clippy::cast_precision_loss)]
@@ -1988,7 +2061,10 @@ fn draw_sidebar_glyph(c: &mut Canvas<'_>, rect: Rect, page: SettingsPage) {
         | SettingsPage::Battery
         | SettingsPage::About
         | SettingsPage::Users
-        | SettingsPage::Shortcuts => draw_extra_sidebar_glyph(c, rect, page),
+        | SettingsPage::Shortcuts
+        | SettingsPage::MenuBar
+        | SettingsPage::DateTime
+        | SettingsPage::Language => draw_extra_sidebar_glyph(c, rect, page),
         SettingsPage::Network => {
             c.stroke_rounded_rect(Rect::new(rect.x + 5, rect.y + 5, 14, 14), 7.0, 1.3, w);
             c.stroke_rounded_rect(Rect::new(rect.x + 9, rect.y + 5, 6, 14), 3.0, 1.1, w);

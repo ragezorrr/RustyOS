@@ -29,6 +29,8 @@ pub enum TopBarMenuHit {
     Window,
     /// Global Help menu (`RUSTYOS-049`).
     Help,
+    /// Live D-Bus `AppMenu` section index (`RUSTYOS-145`).
+    Dynamic(usize),
 }
 
 /// Action triggered from an open `TopBar` menu dropdown popover (`RUSTYOS-048`/`049`).
@@ -44,6 +46,8 @@ pub enum TopBarMenuAction {
     ReloadConfig,
     /// Show concise keyboard shortcuts reference card (`RUSTYOS-049`).
     ShowShortcuts,
+    /// Activate a live `com.canonical.dbusmenu` item by protocol id (`RUSTYOS-145`).
+    DbusMenuItem(i32),
     /// Toggle Workspace Overview.
     OpenOverview,
     /// Toggle Control Center (`QuickSettings`).
@@ -515,6 +519,7 @@ pub const fn top_bar_menu_entries(menu: TopBarMenuHit) -> &'static [TopBarMenuEn
         TopBarMenuHit::Go => MENU_GO,
         TopBarMenuHit::Window => MENU_WINDOW,
         TopBarMenuHit::Help => MENU_HELP,
+        TopBarMenuHit::Dynamic(_) => &[],
     }
 }
 
@@ -599,6 +604,7 @@ pub const fn top_bar_menu_items(
             ("Keyboard Shortcuts", TopBarMenuAction::ShowShortcuts),
             ("Refresh Metrics", TopBarMenuAction::RefreshMetrics),
         ],
+        TopBarMenuHit::Dynamic(_) => &[],
     }
 }
 
@@ -631,7 +637,7 @@ pub fn top_bar_menu_popover_rect_for_profile(
     let anchor_x = match menu {
         TopBarMenuHit::SystemLogo => TOP_BAR_LOGO_X,
         TopBarMenuHit::ActiveApp => left.app_x,
-        TopBarMenuHit::File => left.file_x,
+        TopBarMenuHit::File | TopBarMenuHit::Dynamic(_) => left.file_x,
         TopBarMenuHit::Edit => left.edit_x,
         TopBarMenuHit::View => left.view_x,
         TopBarMenuHit::Go => left.go_x,
@@ -841,4 +847,248 @@ pub fn check_top_bar_menu_click_for_profile(
         }
     }
     None
+}
+
+/// Computes horizontal `(section_idx, title, x, w)` slots for live D-Bus `AppMenuTree` sections (`RUSTYOS-145`).
+#[must_use]
+pub fn dynamic_app_menu_slots<'a>(
+    left: &super::TopBarLeftLayout,
+    tree: &'a crate::app_menu::AppMenuTree,
+) -> Vec<(usize, &'a str, i32, i32)> {
+    let mut cursor = left.app_x + left.app_w + 10;
+    let mut slots = Vec::with_capacity(tree.sections.len());
+    for (idx, sec) in tree.sections.iter().enumerate() {
+        let w = (crate::text::measure_ui_text_width(
+            &sec.title,
+            crate::shell_render::TOP_BAR_FONT_SIZE,
+            crate::text::FontWeight::Regular,
+        ) + 14)
+            .clamp(34, 140);
+        slots.push((idx, sec.title.as_str(), cursor, w));
+        cursor += w + 4;
+    }
+    slots
+}
+
+/// Resolves dropdown entries for either a live D-Bus `AppMenuSection` or static `TopBarAppProfile` (`RUSTYOS-145`).
+#[must_use]
+pub fn resolve_top_bar_menu_entries_with_app_menu(
+    profile: TopBarAppProfile,
+    active_app_name: &str,
+    menu: TopBarMenuHit,
+    app_menu: Option<&crate::app_menu::AppMenuTree>,
+) -> Vec<ResolvedTopBarMenuItem> {
+    if let (TopBarMenuHit::Dynamic(idx), Some(tree)) = (menu, app_menu)
+        && let Some(section) = tree.sections.get(idx)
+    {
+        return section
+            .items
+            .iter()
+            .map(|item| {
+                if item.separator {
+                    ResolvedTopBarMenuItem::Separator
+                } else {
+                    let label = if item.checked == Some(true) {
+                        format!("✓ {}", item.label)
+                    } else {
+                        item.label.clone()
+                    };
+                    ResolvedTopBarMenuItem::Item {
+                        label: label.into(),
+                        icon: None,
+                        shortcut: None,
+                        action: TopBarMenuAction::DbusMenuItem(item.id),
+                        enabled: item.enabled,
+                    }
+                }
+            })
+            .collect();
+    }
+    resolve_top_bar_menu_entries(profile, active_app_name, menu)
+}
+
+/// Computes popover rectangle for either a live D-Bus `AppMenu` section or static profile menu (`RUSTYOS-145`).
+#[must_use]
+pub fn top_bar_menu_popover_rect_with_app_menu(
+    profile: TopBarAppProfile,
+    active_app_name: &str,
+    menu: TopBarMenuHit,
+    app_menu: Option<&crate::app_menu::AppMenuTree>,
+) -> (i32, i32, i32, i32) {
+    let left = compute_top_bar_left_layout_for_profile(profile, active_app_name, false);
+    let anchor_x = if let (TopBarMenuHit::Dynamic(idx), Some(tree)) = (menu, app_menu) {
+        dynamic_app_menu_slots(&left, tree)
+            .into_iter()
+            .find(|(i, _, _, _)| *i == idx)
+            .map_or(left.file_x, |(_, _, x, _)| x)
+    } else {
+        return top_bar_menu_popover_rect_for_profile(profile, active_app_name, menu);
+    };
+    let entries =
+        resolve_top_bar_menu_entries_with_app_menu(profile, active_app_name, menu, app_menu);
+    let mut content_h = 0;
+    let mut pop_w = 220;
+    for entry in &entries {
+        match entry {
+            ResolvedTopBarMenuItem::Item { label, .. } => {
+                content_h += MENU_ITEM_HEIGHT;
+                let label_w = crate::text::measure_ui_text_width(
+                    label,
+                    13.0,
+                    crate::text::FontWeight::Regular,
+                );
+                pop_w = pop_w.max(14 + label_w + 24);
+            }
+            ResolvedTopBarMenuItem::Separator => {
+                content_h += MENU_SEPARATOR_HEIGHT;
+            }
+        }
+    }
+    let pop_h = content_h + MENU_POPOVER_PAD_Y * 2;
+    (anchor_x.max(4), TOP_BAR_HEIGHT + 2, pop_w, pop_h)
+}
+
+/// Hit-tests `TopBar` left menu headers using live `AppMenuTree` when present (`RUSTYOS-145`).
+#[must_use]
+pub fn check_top_bar_menu_click_with_app_menu(
+    profile: TopBarAppProfile,
+    active_app_name: &str,
+    app_menu: Option<&crate::app_menu::AppMenuTree>,
+    x: f64,
+    y: f64,
+) -> Option<TopBarMenuHit> {
+    if y < 0.0 || y > f64::from(TOP_BAR_HEIGHT) {
+        return None;
+    }
+    let Some(tree) = app_menu else {
+        return check_top_bar_menu_click_for_profile(profile, active_app_name, x, y);
+    };
+    let left = compute_top_bar_left_layout_for_profile(profile, active_app_name, false);
+    if x >= f64::from(TOP_BAR_LOGO_X) && x < f64::from(TOP_BAR_LOGO_X + TOP_BAR_LOGO_W) {
+        return Some(TopBarMenuHit::SystemLogo);
+    }
+    if x >= f64::from(left.app_x) && x < f64::from(left.app_x + left.app_w) {
+        return Some(TopBarMenuHit::ActiveApp);
+    }
+    for (idx, _, bx, bw) in dynamic_app_menu_slots(&left, tree) {
+        if x >= f64::from(bx) && x < f64::from(bx + bw) {
+            return Some(TopBarMenuHit::Dynamic(idx));
+        }
+    }
+    None
+}
+
+/// Hit-tests an open `TopBar` dropdown popover using live `AppMenuTree` when present (`RUSTYOS-145`).
+#[must_use]
+pub fn check_top_bar_menu_popover_click_with_app_menu(
+    profile: TopBarAppProfile,
+    active_app_name: &str,
+    menu: TopBarMenuHit,
+    app_menu: Option<&crate::app_menu::AppMenuTree>,
+    x: f64,
+    y: f64,
+) -> TopBarMenuPopoverClick {
+    if !matches!(menu, TopBarMenuHit::Dynamic(_)) || app_menu.is_none() {
+        return check_top_bar_menu_popover_click_for_profile(profile, active_app_name, menu, x, y);
+    }
+    let (px, py, pw, ph) =
+        top_bar_menu_popover_rect_with_app_menu(profile, active_app_name, menu, app_menu);
+    if x < f64::from(px) || x >= f64::from(px + pw) || y < f64::from(py) || y >= f64::from(py + ph)
+    {
+        return TopBarMenuPopoverClick::Outside;
+    }
+    let mut row_y = py + MENU_POPOVER_PAD_Y;
+    for entry in
+        resolve_top_bar_menu_entries_with_app_menu(profile, active_app_name, menu, app_menu)
+    {
+        match entry {
+            ResolvedTopBarMenuItem::Item {
+                action, enabled, ..
+            } => {
+                if y >= f64::from(row_y) && y < f64::from(row_y + MENU_ITEM_HEIGHT) {
+                    return if enabled {
+                        TopBarMenuPopoverClick::Action(action)
+                    } else {
+                        TopBarMenuPopoverClick::Inside
+                    };
+                }
+                row_y += MENU_ITEM_HEIGHT;
+            }
+            ResolvedTopBarMenuItem::Separator => {
+                row_y += MENU_SEPARATOR_HEIGHT;
+            }
+        }
+    }
+    TopBarMenuPopoverClick::Inside
+}
+
+#[cfg(test)]
+mod dynamic_app_menu_tests {
+    use super::*;
+    use crate::app_menu::{AppMenuItem, AppMenuSection, AppMenuTree};
+
+    #[test]
+    fn dynamic_app_menu_slots_and_clicks_resolve_dbus_item_id() {
+        let tree = AppMenuTree {
+            service_name: ":1.99".to_owned(),
+            object_path: "/MenuBar/1".to_owned(),
+            sections: vec![AppMenuSection {
+                id: 1,
+                title: "Document".to_owned(),
+                items: vec![
+                    AppMenuItem {
+                        id: 42,
+                        label: "Save".to_owned(),
+                        shortcut: Some("Ctrl+S".to_owned()),
+                        enabled: true,
+                        separator: false,
+                        checked: Some(true),
+                    },
+                    AppMenuItem {
+                        id: 43,
+                        label: String::new(),
+                        shortcut: None,
+                        enabled: true,
+                        separator: true,
+                        checked: None,
+                    },
+                ],
+            }],
+        };
+        let left =
+            compute_top_bar_left_layout_for_profile(TopBarAppProfile::Files, "Editor", false);
+        let slots = dynamic_app_menu_slots(&left, &tree);
+        assert_eq!(slots.len(), 1);
+        let (_, title, sx, sw) = slots[0];
+        assert_eq!(title, "Document");
+        assert!(sw >= 34);
+
+        let hit = check_top_bar_menu_click_with_app_menu(
+            TopBarAppProfile::Files,
+            "Editor",
+            Some(&tree),
+            f64::from(sx + 6),
+            12.0,
+        );
+        assert_eq!(hit, Some(TopBarMenuHit::Dynamic(0)));
+
+        let (px, py, _, _) = top_bar_menu_popover_rect_with_app_menu(
+            TopBarAppProfile::Files,
+            "Editor",
+            TopBarMenuHit::Dynamic(0),
+            Some(&tree),
+        );
+        let click = check_top_bar_menu_popover_click_with_app_menu(
+            TopBarAppProfile::Files,
+            "Editor",
+            TopBarMenuHit::Dynamic(0),
+            Some(&tree),
+            f64::from(px + 20),
+            f64::from(py + MENU_POPOVER_PAD_Y + 8),
+        );
+        assert_eq!(
+            click,
+            TopBarMenuPopoverClick::Action(TopBarMenuAction::DbusMenuItem(42))
+        );
+    }
 }
