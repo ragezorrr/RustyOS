@@ -577,8 +577,11 @@ impl XdgDecorationHandler for RustyCompositorState {
         self.apply_xdg_decoration_mode(&toplevel, false);
     }
 
-    fn request_mode(&mut self, toplevel: ToplevelSurface, mode: DecorationMode) {
-        self.apply_xdg_decoration_mode(&toplevel, mode == DecorationMode::ClientSide);
+    fn request_mode(&mut self, toplevel: ToplevelSurface, _mode: DecorationMode) {
+        // Enforce unified RustyOS Server-Side Decorations (macOS traffic lights) for clients
+        // negotiating `zxdg_toplevel_decoration_v1` (Chrome/PWAs, Electron, Qt, etc.).
+        // Pure-CSD apps (RustyOS native apps, GTK4/libadwaita) do not bind this protocol.
+        self.apply_xdg_decoration_mode(&toplevel, false);
     }
 
     fn unset_mode(&mut self, toplevel: ToplevelSurface) {

@@ -329,8 +329,17 @@ pub fn format_dbus_notification(app_name: &str, summary: &str, body: &str) -> (S
     (title, clean_body)
 }
 
+fn is_unsupported_emoji_char(ch: char) -> bool {
+    let cp = ch as u32;
+    cp >= 0x1_F000 || matches!(cp, 0x200D | 0x20E3 | 0x2600..=0x27BF | 0xFE0E | 0xFE0F)
+}
+
 fn sanitize_single_line(raw: &str) -> String {
-    raw.split_whitespace().collect::<Vec<_>>().join(" ")
+    let filtered: String = raw
+        .chars()
+        .filter(|&c| !is_unsupported_emoji_char(c))
+        .collect();
+    filtered.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 #[cfg(test)]
@@ -369,5 +378,15 @@ mod tests {
 
         let (fallback_title, _) = format_dbus_notification("", "", "Empty");
         assert_eq!(fallback_title, "Notification");
+
+        let (_, clean_emoji) = format_dbus_notification(
+            "Google Chrome",
+            "Chat приветствует вас!",
+            "chat.google.com\nТак выглядят уведомления на рабочем столе 👍",
+        );
+        assert_eq!(
+            clean_emoji,
+            "chat.google.com Так выглядят уведомления на рабочем столе"
+        );
     }
 }

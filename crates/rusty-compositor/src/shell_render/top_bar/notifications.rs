@@ -367,6 +367,31 @@ fn push_osd_level_bar(
     );
 }
 
+fn notification_xdg_icon_name(title: &str) -> Option<&'static str> {
+    let lower = title.to_ascii_lowercase();
+    if lower.contains("google chrome") || lower.contains("chrome") {
+        Some("google-chrome")
+    } else if lower.contains("chromium") {
+        Some("chromium")
+    } else if lower.contains("firefox") {
+        Some("firefox")
+    } else if lower.contains("telegram") {
+        Some("telegram")
+    } else if lower.contains("discord") {
+        Some("discord")
+    } else if lower.contains("slack") {
+        Some("slack")
+    } else if lower.contains("spotify") {
+        Some("spotify")
+    } else if lower.contains("steam") {
+        Some("steam")
+    } else if lower.contains("visual studio code") || lower.contains("vs code") {
+        Some("code")
+    } else {
+        None
+    }
+}
+
 /// Appends unified RustyOS chrome (hover close circle, app squircle, `NotificationCard` glass)
 /// for both floating HUD toasts and Notification Center stack cards (`RUSTYOS-110`).
 #[allow(clippy::too_many_arguments)]
@@ -408,16 +433,27 @@ pub(crate) fn push_notification_card_chrome(
         }
     }
 
-    let app_icon = notification_app_icon(title);
-    if let Some(icon_el) = shape_cache.icons.builtin_squircle_icon_element(
-        renderer,
-        app_icon,
-        NOTIFICATION_ICON_SIZE,
-        Point::from((
-            card_rect.loc.x + NOTIFICATION_ICON_OFFSET_X,
-            card_rect.loc.y + NOTIFICATION_ICON_OFFSET_Y,
-        )),
-    ) {
+    let icon_loc = Point::from((
+        card_rect.loc.x + NOTIFICATION_ICON_OFFSET_X,
+        card_rect.loc.y + NOTIFICATION_ICON_OFFSET_Y,
+    ));
+    let xdg_icon_el = notification_xdg_icon_name(title).and_then(|xdg_name| {
+        shape_cache.icons.framed_xdg_squircle_icon_element(
+            renderer,
+            xdg_name,
+            NOTIFICATION_ICON_SIZE,
+            icon_loc,
+        )
+    });
+    if let Some(icon_el) = xdg_icon_el.or_else(|| {
+        let app_icon = notification_app_icon(title);
+        shape_cache.icons.builtin_squircle_icon_element(
+            renderer,
+            app_icon,
+            NOTIFICATION_ICON_SIZE,
+            icon_loc,
+        )
+    }) {
         out.push(CompositorRenderElement::Memory(icon_el));
     }
 
@@ -564,6 +600,8 @@ pub(crate) fn push_notification_card_text_lines(
     let ty = card_rect.loc.y;
     let max_w =
         (card_rect.size.w - NOTIFICATION_TEXT_OFFSET_X - NOTIFICATION_TEXT_RIGHT_PAD).max(80);
+    // Reserve right clearance for the 20x20 hover close button on the title row.
+    let title_max_w = (card_rect.size.w - NOTIFICATION_TEXT_OFFSET_X - 38).max(80);
     let body_lines = wrap_notification_lines(text_cache, body, 11.5, max_w, 2);
 
     let (title_size, title_y) = match body_lines.len() {
@@ -576,7 +614,7 @@ pub(crate) fn push_notification_card_text_lines(
         title,
         crate::text::FontWeight::Bold,
         title_size,
-        max_w,
+        title_max_w,
     );
     if !title_fit.is_empty()
         && let Some(el) = text_cache.render_label_weighted(
