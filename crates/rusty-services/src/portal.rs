@@ -1772,6 +1772,229 @@ impl PortalHandle {
     }
 }
 
+struct FileChooserPortalIface;
+
+impl FileChooserPortalIface {
+    fn run_picker(args: &[String]) -> (u32, HashMap<String, OwnedValue>) {
+        let mut candidates = Vec::new();
+        if let Ok(exe) = env::current_exe()
+            && let Some(dir) = exe.parent()
+        {
+            candidates.push(dir.join("rusty-files"));
+        }
+        candidates.push(PathBuf::from("/usr/bin/rusty-files"));
+        candidates.push(PathBuf::from("rusty-files"));
+
+        for bin in candidates {
+            if let Ok(output) = Command::new(&bin)
+                .args(args)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .output()
+            {
+                if !output.status.success() {
+                    return (PORTAL_RESPONSE_CANCELLED, HashMap::new());
+                }
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let uris = parse_picker_stdout_to_uris(&stdout);
+                if uris.is_empty() {
+                    return (PORTAL_RESPONSE_CANCELLED, HashMap::new());
+                }
+                let mut results = HashMap::new();
+                if let Ok(val) = OwnedValue::try_from(Value::from(uris)) {
+                    results.insert("uris".to_owned(), val);
+                }
+                return (PORTAL_RESPONSE_OK, results);
+            }
+        }
+        (PORTAL_RESPONSE_OTHER, HashMap::new())
+    }
+}
+
+/// Parses newline-separated absolute paths printed by `rusty-files` picker mode into `file://` URIs (`RUSTYOS-154`).
+#[must_use]
+pub fn parse_picker_stdout_to_uris(stdout: &str) -> Vec<String> {
+    stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with('/'))
+        .map(|line| path_to_file_uri(Path::new(line)))
+        .collect()
+}
+
+/// Builds `rusty-files` CLI arguments for a `FileChooser` `OpenFile` or `SaveFile` D-Bus request (`RUSTYOS-154`).
+#[must_use]
+pub fn build_file_chooser_cli_args<S: std::hash::BuildHasher>(
+    is_save: bool,
+    is_save_files: bool,
+    title: &str,
+    options: &HashMap<String, OwnedValue, S>,
+) -> Vec<String> {
+    let mut args = Vec::new();
+    if is_save {
+        let current_name = options
+            .get("current_name")
+            .and_then(|v| <&str>::try_from(v).ok())
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or("Untitled");
+        args.push("--save-file".to_owned());
+        args.push(current_name.to_owned());
+    } else if is_save_files {
+        args.push("--pick-folder".to_owned());
+    } else {
+        let directory = options
+            .get("directory")
+            .and_then(|v| bool::try_from(v).ok())
+            .unwrap_or(false);
+        let multiple = options
+            .get("multiple")
+            .and_then(|v| bool::try_from(v).ok())
+            .unwrap_or(false);
+        if directory {
+            args.push("--pick-folder".to_owned());
+        } else if multiple {
+            args.push("--pick-files".to_owned());
+        } else {
+            args.push("--pick-file".to_owned());
+        }
+    }
+    if !title.trim().is_empty() {
+        args.push("--title".to_owned());
+        args.push(title.trim().to_owned());
+    }
+    args
+}
+
+#[interface(name = "org.freedesktop.impl.portal.FileChooser")]
+#[allow(clippy::unused_self, clippy::needless_pass_by_value)]
+impl FileChooserPortalIface {
+    fn open_file(
+        &self,
+        handle: OwnedObjectPath,
+        app_id: String,
+        parent_window: String,
+        title: String,
+        options: HashMap<String, OwnedValue>,
+    ) -> (u32, HashMap<String, OwnedValue>) {
+        let _ = (handle, app_id, parent_window);
+        let args = build_file_chooser_cli_args(false, false, &title, &options);
+        Self::run_picker(&args)
+    }
+
+    fn save_file(
+        &self,
+        handle: OwnedObjectPath,
+        app_id: String,
+        parent_window: String,
+        title: String,
+        options: HashMap<String, OwnedValue>,
+    ) -> (u32, HashMap<String, OwnedValue>) {
+        let _ = (handle, app_id, parent_window);
+        let args = build_file_chooser_cli_args(true, false, &title, &options);
+        Self::run_picker(&args)
+    }
+
+    fn save_files(
+        &self,
+        handle: OwnedObjectPath,
+        app_id: String,
+        parent_window: String,
+        title: String,
+        options: HashMap<String, OwnedValue>,
+    ) -> (u32, HashMap<String, OwnedValue>) {
+        let _ = (handle, app_id, parent_window);
+        let args = build_file_chooser_cli_args(false, true, &title, &options);
+        Self::run_picker(&args)
+    }
+
+    #[zbus(property)]
+    fn version(&self) -> u32 {
+        3
+    }
+}
+
+/// Reads the active `org.freedesktop.appearance` `color-scheme` value (`1` = Dark, `2` = Light)
+/// from `~/.config/rustyos/config.toml` (`RUSTYOS-154`).
+#[must_use]
+pub fn detect_portal_color_scheme() -> u32 {
+    let base = env::var_os("XDG_CONFIG_HOME")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")));
+    let Some(cfg_dir) = base else {
+        return 1;
+    };
+    let Ok(text) = std::fs::read_to_string(cfg_dir.join("rustyos/config.toml")) else {
+        return 1;
+    };
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if let Some((k, v)) = trimmed.split_once('=')
+            && k.trim() == "theme"
+        {
+            let val = v.trim().trim_matches('"').to_ascii_lowercase();
+            if val == "light" {
+                return 2;
+            }
+            if val == "dark" {
+                return 1;
+            }
+        }
+    }
+    1
+}
+
+struct SettingsPortalIface;
+
+#[interface(name = "org.freedesktop.impl.portal.Settings")]
+#[allow(clippy::unused_self, clippy::needless_pass_by_value)]
+impl SettingsPortalIface {
+    fn read_one(&self, namespace: &str, key: &str) -> zbus::fdo::Result<OwnedValue> {
+        if namespace == "org.freedesktop.appearance" {
+            match key {
+                "color-scheme" => {
+                    return Ok(OwnedValue::from(detect_portal_color_scheme()));
+                }
+                "contrast" => {
+                    return Ok(OwnedValue::from(0_u32));
+                }
+                _ => {}
+            }
+        }
+        Err(zbus::fdo::Error::Failed(format!(
+            "Unsupported setting {namespace}.{key}"
+        )))
+    }
+
+    fn read(&self, namespace: &str, key: &str) -> zbus::fdo::Result<OwnedValue> {
+        self.read_one(namespace, key)
+    }
+
+    fn read_all(&self, namespaces: Vec<String>) -> HashMap<String, HashMap<String, OwnedValue>> {
+        let include_appearance = namespaces.is_empty()
+            || namespaces.iter().any(|ns| {
+                ns.is_empty() || ns == "org.freedesktop.appearance" || ns == "org.freedesktop.*"
+            });
+        let mut out = HashMap::new();
+        if include_appearance {
+            let mut app_map = HashMap::new();
+            app_map.insert(
+                "color-scheme".to_owned(),
+                OwnedValue::from(detect_portal_color_scheme()),
+            );
+            app_map.insert("contrast".to_owned(), OwnedValue::from(0_u32));
+            out.insert("org.freedesktop.appearance".to_owned(), app_map);
+        }
+        out
+    }
+
+    #[zbus(property)]
+    fn version(&self) -> u32 {
+        2
+    }
+}
+
 fn run_portal_worker(
     shared: &Arc<PortalSharedState>,
     conn_slot: &Arc<Mutex<Option<zbus::Connection>>>,
@@ -1787,6 +2010,8 @@ fn run_portal_worker(
         zbus::connection::Builder::session()?
             .serve_at(PORTAL_OBJECT_PATH, screenshot_iface)?
             .serve_at(PORTAL_OBJECT_PATH, screencast_iface)?
+            .serve_at(PORTAL_OBJECT_PATH, FileChooserPortalIface)?
+            .serve_at(PORTAL_OBJECT_PATH, SettingsPortalIface)?
             .name(PORTAL_DBUS_NAME)?
             .build()
             .await
@@ -1944,6 +2169,36 @@ mod tests {
 
         let wrong_ver = OwnedValue::try_from(Value::from(("RustyOS", 2u32, "output:eDP-1")))?;
         assert_eq!(parse_restore_data(Some(&wrong_ver)), None);
+        Ok(())
+    }
+
+    #[test]
+    fn file_chooser_cli_args_and_stdout_uri_parser_work() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let mut opts = HashMap::new();
+        opts.insert("multiple".to_owned(), OwnedValue::from(true));
+        let open_args = build_file_chooser_cli_args(false, false, "Open Photos", &opts);
+        assert_eq!(open_args, vec!["--pick-files", "--title", "Open Photos"]);
+
+        let mut save_opts = HashMap::new();
+        save_opts.insert(
+            "current_name".to_owned(),
+            OwnedValue::try_from(Value::from("doc.pdf"))?,
+        );
+        let save_args = build_file_chooser_cli_args(true, false, "Save PDF", &save_opts);
+        assert_eq!(
+            save_args,
+            vec!["--save-file", "doc.pdf", "--title", "Save PDF"]
+        );
+
+        let uris = parse_picker_stdout_to_uris("/home/alice/a.txt\n/home/alice/my file.png\n");
+        assert_eq!(
+            uris,
+            vec![
+                "file:///home/alice/a.txt",
+                "file:///home/alice/my%20file.png"
+            ]
+        );
         Ok(())
     }
 }

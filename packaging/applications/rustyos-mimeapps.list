@@ -1,0 +1,7 @@
+[Default Applications]
+inode/directory=org.rustyos.files.desktop;
+x-scheme-handler/file=org.rustyos.files.desktop;
+
+[Added Associations]
+inode/directory=org.rustyos.files.desktop;
+x-scheme-handler/file=org.rustyos.files.desktop;

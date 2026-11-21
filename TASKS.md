@@ -2561,6 +2561,31 @@ hardware/software context и низкие накладные расходы.
   - Переключение `Light ↔ Dark` и пресетов обоев не блокирует compositor event loop и не сбрасывает уже декодированные слоты обоев; `cargo fmt`, `clippy -D warnings`, `cargo test --workspace` и живая проверка проходят чисто.
 - **Risks:** Низкие; малые тестовые PNG (`<=256 KB`) и `#[cfg(test)]` декодируются детерминированно в первом кадре.
 
+### RUSTYOS-154 — Нативный портал `FileChooser` + `Settings` на базе `rusty-files` и синхронизация тем Qt 5/6
+- **Status:** Done
+- **Goal:** Реализовать режим файлового пикера (`--pick-file`, `--pick-files`, `--pick-folder`, `--save-file`, `--title`) с нижней панелью `Cancel` / `Open` / `Select` / `Save` в `apps/rusty-files`, экспортировать D-Bus интерфейсы `org.freedesktop.impl.portal.FileChooser` (v3) и `org.freedesktop.impl.portal.Settings` (v2) в `crates/rusty-services/src/portal.rs` и `packaging/portals/`, и добавить синхронизацию тем для Qt 5/6 (`kdeglobals`, `qt5ct.conf`, `qt6ct.conf`) в `crates/rusty-services/src/theme_sync.rs`.
+- **Dependencies:** `RUSTYOS-057`, `RUSTYOS-135`, `RUSTYOS-150`.
+- **Scope:**
+  - `apps/rusty-files/src/{main.rs, state/{types.rs, mod.rs, navigation.rs}, layout.rs, render/views.rs, wayland.rs}`.
+  - `crates/rusty-services/src/{portal.rs, theme_sync.rs}`, `packaging/portals/{rustyos.portal, rustyos-portals.conf}`.
+  - `docs/adr/0083-native-filechooser-portal-and-qt-theme-sync.md`, `DECISIONS.md` (`D-097`), `ARCHITECTURE.md` §7.
+- **Acceptance Criteria:**
+  - `rusty-files` поддерживает все 4 режима пикера с отрисовкой нижней панели и корректным выводом путей в `stdout`; `portal.rs` регистрирует `FileChooser` и `Settings`; `theme_sync.rs` атомарно записывает `kdeglobals` и `qt5ct`/`qt6ct`; `cargo fmt`, `clippy -D warnings`, `cargo test --workspace` и живая проверка проходят чисто.
+- **Risks:** Низкие; ноль новых зависимостей в `Cargo.lock`.
+
+### RUSTYOS-155 — Изоляция приложений в `systemd --user` scopes, авто-флаги Wayland для Chromium/Electron и бутстрап XDG-папок / `rustyos-mimeapps.list`
+- **Status:** Done
+- **Goal:** Создать модуль `crates/rusty-services/src/appruntime.rs` для запуска приложений в `systemd --user` transient scopes (`app-rustyos-<appid>-<seq>.scope`) с прозрачным fallback, автоматической инжекции Wayland-флагов (`--ozone-platform-hint=auto`, `--enable-features=WaylandWindowDecorations`) для Chromium/Electron, идемпотентного создания стандартных XDG-папок (`user-dirs.dirs`) и `rustyos-mimeapps.list`, подключить в `crates/rusty-compositor/src/launcher.rs` и старте сессии, а также упаковать `packaging/applications/rustyos-mimeapps.list` в `PKGBUILD`.
+- **Dependencies:** `RUSTYOS-084`, `RUSTYOS-154`.
+- **Scope:**
+  - `crates/rusty-services/src/{appruntime.rs, lib.rs}`.
+  - `crates/rusty-compositor/src/{launcher.rs, state/mod.rs}`.
+  - `packaging/applications/rustyos-mimeapps.list`, `packaging/arch/PKGBUILD`.
+  - `docs/adr/0084-appruntime-systemd-scopes-and-wayland-flags.md`, `DECISIONS.md` (`D-098`), `ARCHITECTURE.md` §7.
+- **Acceptance Criteria:**
+  - Все unit-тесты `appruntime` и `rusty-compositor` проходят; `cargo fmt`, `clippy -D warnings`, `cargo test --workspace` и `bash -n packaging/arch/PKGBUILD` проходят без ошибок.
+- **Risks:** Низкие; при отсутствии `systemd --user` сокета автоматически используется прямой спавн `Command::new`.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

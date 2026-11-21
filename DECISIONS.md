@@ -1141,6 +1141,28 @@
                            приватности/чип `REC` и фоновый D-Bus
                            `com.canonical.AppMenu.Registrar`
                            (`app_menu.rs`)
+
+  D-097    Accepted        ADR-0083 (`RUSTYOS-154`): нативные D-Bus
+                           порталы `org.freedesktop.impl.portal.FileChooser`
+                           (v3, поверх режима пикера `rusty-files`
+                           `--pick-file`/`--pick-files`/`--pick-folder`/
+                           `--save-file` с нижней панелью `Cancel`/`Open`/
+                           `Save`) и `org.freedesktop.impl.portal.Settings`
+                           (v2, `org.freedesktop.appearance` `color-scheme`)
+                           в `crates/rusty-services/src/portal.rs`, плюс
+                           атомарная синхронизация Qt 5/6 (`kdeglobals`,
+                           `qt5ct.conf`, `qt6ct.conf`) в `theme_sync.rs`
+
+  D-098    Accepted        ADR-0084 (`RUSTYOS-155`): модуль
+                           `crates/rusty-services/src/appruntime.rs`
+                           (изоляция приложений в `systemd --user` transient
+                           scopes `app-rustyos-<appid>-<seq>.scope` с
+                           fallback на прямой спавн, авто-инжекция
+                           Wayland-флагов `--ozone-platform-hint=auto` и
+                           `--enable-features=WaylandWindowDecorations`
+                           для Chromium/Electron, автосоздание XDG-папок
+                           `user-dirs.dirs` и `rustyos-mimeapps.list`) и
+                           упаковка `/usr/share/applications/rustyos-mimeapps.list`
   -----------------------------------------------------------------------
 
 ## Открытые решения

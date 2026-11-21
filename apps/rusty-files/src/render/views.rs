@@ -514,6 +514,10 @@ pub(crate) fn render_status_bar(
         ),
         pal.divider,
     );
+    if let Some(mode) = &state.picker_mode {
+        render_file_picker_bar(c, state, layout, mode, pal);
+        return;
+    }
     let summary = state.status_summary();
     let status_right = layout.status_bar_rect.right() - 8;
     if layout.path_crumbs.is_empty() {
@@ -557,6 +561,90 @@ pub(crate) fn render_status_bar(
                 layout.status_bar_rect,
             );
         }
+    }
+}
+
+fn render_file_picker_bar(
+    c: &mut Canvas<'_>,
+    state: &FilesAppState,
+    layout: &FilesLayout,
+    mode: &crate::state::FilePickerMode,
+    pal: &Palette,
+) {
+    let bar = layout.status_bar_rect;
+    let confirm_label = match mode {
+        crate::state::FilePickerMode::OpenFile | crate::state::FilePickerMode::OpenFiles => "Open",
+        crate::state::FilePickerMode::OpenFolder => "Select",
+        crate::state::FilePickerMode::SaveFile { .. } => "Save",
+    };
+    let left_limit = layout
+        .picker_cancel_rect
+        .map_or(bar.right() - 180, |r| r.x - 12);
+    if let crate::state::FilePickerMode::SaveFile { .. } = mode {
+        c.draw_text(
+            "Save As:",
+            bar.x + 10,
+            bar.y + 11,
+            12.5,
+            true,
+            pal.text_secondary,
+            bar,
+        );
+        let box_x = bar.x + 72;
+        let box_w = (left_limit - box_x).clamp(80, 280);
+        let input_rect = Rect::new(box_x, bar.y + 6, box_w, 26);
+        c.fill_rounded_rect(input_rect, 8, pal.pill_bg);
+        let shown = Canvas::fit_text(&state.picker_filename, box_w - 16, 12.5, false);
+        c.draw_text(
+            &shown,
+            input_rect.x + 8,
+            input_rect.y + 5,
+            12.5,
+            false,
+            pal.text_primary,
+            input_rect,
+        );
+    } else {
+        let prompt = state
+            .status_message
+            .as_deref()
+            .unwrap_or_else(|| state.picker_title.as_deref().unwrap_or("Choose an item"));
+        let fitted = Canvas::fit_text(prompt, (left_limit - bar.x - 12).max(40), 12.0, false);
+        c.draw_text(
+            &fitted,
+            bar.x + 10,
+            bar.y + 11,
+            12.0,
+            false,
+            pal.text_secondary,
+            bar,
+        );
+    }
+    if let Some(cancel_r) = layout.picker_cancel_rect {
+        c.fill_rounded_rect(cancel_r, 8, pal.pill_bg);
+        let tw = Canvas::measure_text("Cancel", 12.5, true);
+        c.draw_text(
+            "Cancel",
+            cancel_r.x + (cancel_r.w - tw) / 2,
+            cancel_r.y + 5,
+            12.5,
+            true,
+            pal.text_primary,
+            cancel_r,
+        );
+    }
+    if let Some(confirm_r) = layout.picker_confirm_rect {
+        c.fill_rounded_rect(confirm_r, 8, pal.accent);
+        let tw = Canvas::measure_text(confirm_label, 12.5, true);
+        c.draw_text(
+            confirm_label,
+            confirm_r.x + (confirm_r.w - tw) / 2,
+            confirm_r.y + 5,
+            12.5,
+            true,
+            pal.accent_text,
+            confirm_r,
+        );
     }
 }
 

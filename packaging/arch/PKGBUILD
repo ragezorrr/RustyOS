@@ -145,6 +145,8 @@ package() {
     "${pkgdir}/usr/share/applications/org.rustyos.updater.desktop"
   install -m644 "${root}/packaging/applications/org.rustyos.installer.desktop" \
     "${pkgdir}/usr/share/applications/org.rustyos.installer.desktop"
+  install -m644 "${root}/packaging/applications/rustyos-mimeapps.list" \
+    "${pkgdir}/usr/share/applications/rustyos-mimeapps.list"
   install -m644 "${root}/packaging/polkit/org.rustyos.updater.policy" \
     "${pkgdir}/usr/share/polkit-1/actions/org.rustyos.updater.policy"
   install -m644 "${root}/packaging/polkit/org.rustyos.installer.policy" \

@@ -258,6 +258,8 @@ pub(crate) enum FilesHit {
     PreviewTrashOrRestore,
     PreviewTag { path: PathBuf, color: FileTagColor },
     PopupItem(PopupCommand),
+    PickerCancel,
+    PickerConfirm,
 }
 
 /// Complete computed UI geometry for one frame.
@@ -296,6 +298,8 @@ pub(crate) struct FilesLayout {
     pub list_headers: Vec<(FileSortField, Rect)>,
     pub list_rows: Vec<(usize, Rect)>,
     pub status_bar_rect: Rect,
+    pub picker_cancel_rect: Option<Rect>,
+    pub picker_confirm_rect: Option<Rect>,
     pub path_crumbs: Vec<PathCrumbLayout>,
     pub tab_bar: Option<TabBarLayout>,
     pub icons_grid: Option<IconsGridLayout>,
@@ -377,10 +381,22 @@ pub(crate) fn compute_layout(state: &FilesAppState, surface_w: u32, surface_h: u
         (None, None, after_search_top)
     };
 
-    let status_bar_rect = Rect::new(toolbar_x, height - 28, width - toolbar_x - 10, 24);
+    let (status_bar_rect, picker_cancel_rect, picker_confirm_rect) = if state.picker_mode.is_some()
+    {
+        let bar = Rect::new(toolbar_x, height - 42, width - toolbar_x - 10, 38);
+        let cancel = Rect::new(bar.right() - 172, bar.y + 6, 78, 26);
+        let confirm = Rect::new(bar.right() - 86, bar.y + 6, 78, 26);
+        (bar, Some(cancel), Some(confirm))
+    } else {
+        (
+            Rect::new(toolbar_x, height - 28, width - toolbar_x - 10, 24),
+            None,
+            None,
+        )
+    };
     let status_w = crate::render::Canvas::measure_text(&state.status_summary(), 11.5, false);
     let crumbs_limit_x = (status_bar_rect.right() - status_w - 22).max(status_bar_rect.x + 12);
-    let path_crumbs = if state.show_path_bar {
+    let path_crumbs = if state.show_path_bar && state.picker_mode.is_none() {
         compute_path_breadcrumbs_layout(state, status_bar_rect, crumbs_limit_x)
     } else {
         Vec::new()
@@ -430,6 +446,8 @@ pub(crate) fn compute_layout(state: &FilesAppState, surface_w: u32, surface_h: u
         list_headers: content.list_headers,
         list_rows: content.list_rows,
         status_bar_rect,
+        picker_cancel_rect,
+        picker_confirm_rect,
         path_crumbs,
         tab_bar,
         icons_grid: content.icons_grid,
@@ -1358,6 +1376,16 @@ pub(crate) fn hit_test(layout: &FilesLayout, px: f64, py: f64) -> Option<FilesHi
 }
 
 fn hit_test_chrome(layout: &FilesLayout, px: f64, py: f64) -> Option<FilesHit> {
+    if let Some(cancel) = layout.picker_cancel_rect
+        && cancel.contains_f64(px, py)
+    {
+        return Some(FilesHit::PickerCancel);
+    }
+    if let Some(confirm) = layout.picker_confirm_rect
+        && confirm.contains_f64(px, py)
+    {
+        return Some(FilesHit::PickerConfirm);
+    }
     if layout.traffic_close.contains_f64(px, py) {
         return Some(FilesHit::TrafficClose);
     }

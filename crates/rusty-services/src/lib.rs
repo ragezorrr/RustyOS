@@ -3,6 +3,7 @@
 //! Provides zero-panic, least-privilege adapters for power/battery, network,
 //! audio, and session management with graceful fallback if services are absent.
 
+pub mod appruntime;
 pub mod auth;
 pub mod file_manager;
 pub mod image_decode;
@@ -15,6 +16,12 @@ pub mod storage;
 pub mod theme_sync;
 pub mod updates;
 
+pub use appruntime::{
+    DEFAULT_RUSTYOS_MIMEAPPS_LIST, DEFAULT_USER_DIRS_CONFIG, DEFAULT_XDG_USER_SUBDIRS,
+    bootstrap_user_session_environment, build_scoped_launch_command, ensure_rustyos_mimeapps_list,
+    ensure_xdg_user_directories, inject_wayland_browser_flags, is_chromium_or_electron_binary,
+    is_systemd_user_scope_available, sanitize_systemd_app_id,
+};
 pub use auth::{
     AsyncAuthHandle, AuthCheckResult, AuthOutcome, SecretText, is_valid_unix_username,
     verify_current_user_password,

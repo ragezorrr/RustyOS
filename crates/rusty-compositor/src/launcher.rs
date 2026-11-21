@@ -58,6 +58,8 @@ pub struct LauncherState {
     pub catalog: Vec<LauncherApp>,
     /// Optional active `XWayland` `DISPLAY` string (e.g. `:0`) exported to child apps (`RUSTYOS-026`).
     pub x11_display: Option<String>,
+    /// Monotonic sequence counter for `systemd --user` transient scopes (`RUSTYOS-155`).
+    launch_seq: u64,
     /// Spawned child processes reaped non-blockingly via `try_wait`.
     children: Vec<Child>,
 }
@@ -80,6 +82,7 @@ impl LauncherState {
             selected_index: 0,
             catalog,
             x11_display: None,
+            launch_seq: 0,
             children: Vec::new(),
         }
     }
@@ -93,6 +96,7 @@ impl LauncherState {
             selected_index: 0,
             catalog,
             x11_display: None,
+            launch_seq: 0,
             children: Vec::new(),
         }
     }
@@ -548,8 +552,18 @@ impl LauncherState {
     ) -> Result<u32, String> {
         let resolved = resolve_program_path(program);
         let program_path = resolved.as_deref().unwrap_or_else(|| Path::new(program));
-        let mut cmd = Command::new(program_path);
-        cmd.args(args)
+        self.launch_seq = self.launch_seq.wrapping_add(1);
+        let use_systemd_scope =
+            !cfg!(test) && rusty_services::appruntime::is_systemd_user_scope_available();
+        let (launch_bin, launch_args) = rusty_services::appruntime::build_scoped_launch_command(
+            program_path,
+            args,
+            self.launch_seq,
+            use_systemd_scope,
+        );
+
+        let mut cmd = Command::new(&launch_bin);
+        cmd.args(&launch_args)
             .env("WAYLAND_DISPLAY", wayland_display)
             .env("RUSTYOS_IPC_SOCKET", ipc_socket)
             .stdin(Stdio::null())
@@ -558,14 +572,43 @@ impl LauncherState {
         if let Some(disp) = &self.x11_display {
             cmd.env("DISPLAY", disp);
         }
-        let child = cmd
-            .spawn()
-            .map_err(|err| format!("failed to launch '{program}': {err}"))?;
+        let child = match cmd.spawn() {
+            Ok(child) => child,
+            Err(err) if use_systemd_scope => {
+                warn!(
+                    program = %program,
+                    error = %err,
+                    "systemd-run scope spawn failed, falling back to direct process spawn"
+                );
+                let (_, fallback_args) = rusty_services::appruntime::build_scoped_launch_command(
+                    program_path,
+                    args,
+                    self.launch_seq,
+                    false,
+                );
+                let mut fallback_cmd = Command::new(program_path);
+                fallback_cmd
+                    .args(&fallback_args)
+                    .env("WAYLAND_DISPLAY", wayland_display)
+                    .env("RUSTYOS_IPC_SOCKET", ipc_socket)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null());
+                if let Some(disp) = &self.x11_display {
+                    fallback_cmd.env("DISPLAY", disp);
+                }
+                fallback_cmd
+                    .spawn()
+                    .map_err(|e| format!("failed to launch '{program}': {e}"))?
+            }
+            Err(err) => return Err(format!("failed to launch '{program}': {err}")),
+        };
 
         let pid = child.id();
         info!(
             program = %program,
             resolved = %program_path.display(),
+            scoped = use_systemd_scope,
             pid,
             wayland_display = %wayland_display,
             "Launched application"

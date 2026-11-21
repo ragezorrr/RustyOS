@@ -453,6 +453,12 @@ impl FilesAppState {
             return;
         }
 
+        if matches!(self.picker_mode, Some(FilePickerMode::SaveFile { .. }))
+            && !entry.is_navigable_dir()
+        {
+            self.picker_filename.clone_from(&entry.name);
+        }
+
         if self.view_mode == FileViewMode::Columns {
             self.columns.truncate(col_idx + 1);
             if entry.is_navigable_dir() && !self.is_trash_view() {
@@ -462,7 +468,11 @@ impl FilesAppState {
                 self.window_title.clone_from(&self.columns[0].title);
                 self.spawn_load_job(col_idx + 1, child_target);
             } else if double_click {
-                self.launch_entry(&entry);
+                if self.picker_mode.is_some() {
+                    self.confirm_file_picker();
+                } else {
+                    self.launch_entry(&entry);
+                }
             }
         } else if double_click {
             if entry.is_navigable_dir() && !self.is_trash_view() {
@@ -472,6 +482,8 @@ impl FilesAppState {
                     None,
                     true,
                 );
+            } else if self.picker_mode.is_some() {
+                self.confirm_file_picker();
             } else {
                 self.launch_entry(&entry);
             }

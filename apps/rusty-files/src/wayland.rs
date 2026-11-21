@@ -567,6 +567,8 @@ impl WaylandClientData {
             FilesHit::PreviewTrashOrRestore => self.app.action_move_selected_to_trash(),
             FilesHit::PreviewTag { path, color } => self.app.toggle_tag_on_path(&path, color),
             FilesHit::PopupItem(cmd) => self.execute_popup_command(cmd),
+            FilesHit::PickerCancel => self.app.cancel_file_picker(),
+            FilesHit::PickerConfirm => self.app.confirm_file_picker(),
             other => self.handle_stage_b_hit(other, double_click, layout, px, py),
         }
     }
@@ -896,7 +898,9 @@ impl WaylandClientData {
                 | FilesHit::TabAdd
                 | FilesHit::TabSelect(_)
                 | FilesHit::TabClose(_)
-                | FilesHit::PathCrumb(_),
+                | FilesHit::PathCrumb(_)
+                | FilesHit::PickerCancel
+                | FilesHit::PickerConfirm,
             ) => CursorShape::Pointer,
             _ => CursorShape::Default,
         };

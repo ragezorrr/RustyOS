@@ -541,6 +541,15 @@ pub(crate) enum TransferWorkerMsg {
     },
 }
 
+/// File chooser portal mode when `rusty-files` is launched as an XDG `FileChooser` dialog (`RUSTYOS-154`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum FilePickerMode {
+    OpenFile,
+    OpenFiles,
+    OpenFolder,
+    SaveFile { default_name: String },
+}
+
 /// Startup options parsed from CLI flags.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 #[allow(clippy::struct_excessive_bools)]
@@ -551,6 +560,8 @@ pub(crate) struct StartupOptions {
     pub theme_override: Option<FilesThemeMode>,
     pub open_test_popup: bool,
     pub no_gpu: bool,
+    pub picker_mode: Option<FilePickerMode>,
+    pub picker_title: Option<String>,
 }
 
 /// Window maximize state requested by compositor or traffic-light toggle.

@@ -100,6 +100,10 @@ pub(crate) struct FilesAppState {
     pub active_transfer: Option<ActiveTransferState>,
     pub status_message: Option<String>,
     pub active_dir_avail_bytes: Option<u64>,
+    pub picker_mode: Option<FilePickerMode>,
+    pub picker_title: Option<String>,
+    pub picker_filename: String,
+    pub picker_cancelled: bool,
     pub window_title: String,
     pub window_size: WindowSizeState,
     pub focused: bool,
@@ -211,7 +215,17 @@ impl FilesAppState {
             file_drag: None,
             status_message: None,
             active_dir_avail_bytes: None,
-            window_title: String::from("Files"),
+            picker_mode: opts.picker_mode.clone(),
+            picker_title: opts.picker_title.clone(),
+            picker_filename: match &opts.picker_mode {
+                Some(FilePickerMode::SaveFile { default_name }) => default_name.clone(),
+                _ => String::new(),
+            },
+            picker_cancelled: false,
+            window_title: opts
+                .picker_title
+                .clone()
+                .unwrap_or_else(|| String::from("Files")),
             window_size: WindowSizeState::Normal,
             focused: true,
             reduce_transparency,
@@ -616,6 +630,75 @@ impl FilesAppState {
             self.hovered_hit = hit;
             self.dirty = true;
         }
+    }
+
+    /// Resolves the paths chosen in `FilePickerMode` without exiting (testable helper, `RUSTYOS-154`).
+    #[must_use]
+    pub(crate) fn resolve_picker_selection(&self) -> Vec<PathBuf> {
+        let Some(mode) = &self.picker_mode else {
+            return Vec::new();
+        };
+        match mode {
+            FilePickerMode::OpenFile => self
+                .selected_entry()
+                .filter(|e| !e.is_navigable_dir())
+                .map(|e| vec![e.path.clone()])
+                .unwrap_or_default(),
+            FilePickerMode::OpenFiles => self
+                .selected_entries()
+                .into_iter()
+                .filter(|e| !e.is_navigable_dir())
+                .map(|e| e.path)
+                .collect(),
+            FilePickerMode::OpenFolder => {
+                if let Some(entry) = self.selected_entry()
+                    && entry.is_navigable_dir()
+                {
+                    return vec![entry.path.clone()];
+                }
+                self.active_directory_path().into_iter().collect()
+            }
+            FilePickerMode::SaveFile { .. } => {
+                let name = self.picker_filename.trim();
+                if name.is_empty() {
+                    return Vec::new();
+                }
+                self.active_directory_path()
+                    .map(|dir| vec![dir.join(name)])
+                    .unwrap_or_default()
+            }
+        }
+    }
+
+    /// Confirms the active `FileChooser` dialog: navigates into a selected folder in OpenFile/OpenFiles mode,
+    /// or prints chosen paths to `stdout` and requests clean exit (`RUSTYOS-154`).
+    pub(crate) fn confirm_file_picker(&mut self) {
+        if matches!(
+            self.picker_mode,
+            Some(FilePickerMode::OpenFile | FilePickerMode::OpenFiles)
+        ) && let Some(entry) = self.selected_entry().cloned()
+            && entry.is_navigable_dir()
+        {
+            self.navigate_to_directory(entry.path);
+            return;
+        }
+        let chosen = self.resolve_picker_selection();
+        if chosen.is_empty() {
+            self.status_message = Some(String::from("Please select a target first"));
+            self.dirty = true;
+            return;
+        }
+        for path in chosen {
+            println!("{}", path.display());
+        }
+        self.picker_cancelled = false;
+        self.run_state = AppRunState::Exiting;
+    }
+
+    /// Cancels the active `FileChooser` dialog and exits with status 1 (`RUSTYOS-154`).
+    pub(crate) fn cancel_file_picker(&mut self) {
+        self.picker_cancelled = true;
+        self.run_state = AppRunState::Exiting;
     }
 
     /// Returns the filesystem path of the active column when it displays a real directory.
@@ -1313,6 +1396,15 @@ mod tests {
         state.dirty = false;
         state.set_hovered_hit(Some(crate::layout::FilesHit::SortButton));
         assert!(!state.dirty);
+
+        // FileChooser picker modes resolve selected files or save target path
+        state.picker_mode = Some(FilePickerMode::SaveFile {
+            default_name: String::from("export.zip"),
+        });
+        state.picker_filename = String::from("export.zip");
+        let save_paths = state.resolve_picker_selection();
+        assert_eq!(save_paths.len(), 1);
+        assert!(save_paths[0].ends_with("export.zip"));
         Ok(())
     }
 }
