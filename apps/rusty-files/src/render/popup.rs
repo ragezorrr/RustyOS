@@ -58,6 +58,8 @@ pub(crate) fn shortcut_for_command(cmd: &PopupCommand) -> Option<&'static str> {
         | PopupCommand::GoToFolder
         | PopupCommand::ToggleTheme
         | PopupCommand::OpenEntry(_)
+        | PopupCommand::RunExecutable(_)
+        | PopupCommand::RunInTerminal(_)
         | PopupCommand::RestoreEntry(_)
         | PopupCommand::EmptyTrash
         | PopupCommand::OpenInTerminal(_)

@@ -532,7 +532,8 @@ impl FilesAppState {
         }
     }
 
-    /// Launches a `.desktop` application or opens a regular document with `xdg-open`.
+    /// Launches a `.desktop` application, runs an executable program directly,
+    /// or opens a regular document with `xdg-open`.
     pub(crate) fn launch_entry(&mut self, entry: &FileEntry) {
         if entry.kind == FileEntryKind::Application
             && let Some(exec_line) = &entry.desktop_exec
@@ -555,6 +556,21 @@ impl FilesAppState {
             return;
         }
         if !entry.is_navigable_dir() {
+            match classify_executable_file(&entry.path) {
+                ExecutableFileState::Runnable => {
+                    self.launch_executable_path(&entry.path, false);
+                    return;
+                }
+                ExecutableFileState::BinaryMissingExecBit => {
+                    self.status_message = Some(format!(
+                        "{} is not executable — right-click → Allow Executing & Run",
+                        entry.name
+                    ));
+                    self.dirty = true;
+                    return;
+                }
+                ExecutableFileState::ScriptMissingExecBit | ExecutableFileState::NotExecutable => {}
+            }
             let res = Command::new("xdg-open")
                 .arg(&entry.path)
                 .stdin(Stdio::null())
@@ -567,6 +583,90 @@ impl FilesAppState {
             });
             self.dirty = true;
         }
+    }
+
+    /// Runs an executable binary or script directly, optionally granting `+x` first
+    /// when invoked explicitly from the context menu.
+    pub(crate) fn launch_executable_path(&mut self, path: &Path, grant_exec_if_needed: bool) {
+        let label = path.file_name().map_or_else(
+            || path.display().to_string(),
+            |n| n.to_string_lossy().into_owned(),
+        );
+        if grant_exec_if_needed && let Err(e) = ensure_executable_permission(path) {
+            self.status_message = Some(format!("Failed to make {label} executable: {e}"));
+            self.dirty = true;
+            return;
+        }
+        let extra_args = rusty_services::appruntime::inject_wayland_browser_flags(path, &[]);
+        let mut cmd = Command::new(path);
+        cmd.args(&extra_args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        if let Some(parent) = path.parent()
+            && parent.is_dir()
+        {
+            cmd.current_dir(parent);
+        }
+        let res = cmd.spawn();
+        self.status_message = Some(match res {
+            Ok(_) => format!("Running {label}"),
+            Err(e) => format!("Failed to run {label}: {e}"),
+        });
+        self.dirty = true;
+    }
+
+    /// Runs an executable binary or script inside `rusty-terminal` (or fallback terminal),
+    /// granting `+x` first if needed so both CLI tools and interactive scripts work smoothly.
+    pub(crate) fn action_run_in_terminal(&mut self, path: &Path) {
+        let label = path.file_name().map_or_else(
+            || path.display().to_string(),
+            |n| n.to_string_lossy().into_owned(),
+        );
+        if let Err(e) = ensure_executable_permission(path) {
+            self.status_message = Some(format!("Failed to make {label} executable: {e}"));
+            self.dirty = true;
+            return;
+        }
+        let target_dir = path
+            .parent()
+            .filter(|p| p.is_dir())
+            .map_or_else(|| self.locations.home.clone(), Path::to_path_buf);
+
+        let mut candidates: Vec<PathBuf> = Vec::new();
+        if let Ok(exe) = std::env::current_exe()
+            && let Some(parent) = exe.parent()
+        {
+            let sibling = parent.join("rusty-terminal");
+            if sibling.is_file() {
+                candidates.push(sibling);
+            }
+        }
+        candidates.push(PathBuf::from("rusty-terminal"));
+        if let Ok(term) = std::env::var("TERMINAL")
+            && !term.trim().is_empty()
+        {
+            candidates.push(PathBuf::from(term));
+        }
+        candidates.push(PathBuf::from("alacritty"));
+        candidates.push(PathBuf::from("foot"));
+        candidates.push(PathBuf::from("xterm"));
+
+        for bin in &candidates {
+            if Command::new(bin)
+                .current_dir(&target_dir)
+                .arg("-e")
+                .arg(path)
+                .spawn()
+                .is_ok()
+            {
+                self.status_message = Some(format!("Running {label} in terminal"));
+                self.dirty = true;
+                return;
+            }
+        }
+        self.status_message = Some(String::from("No terminal emulator found"));
+        self.dirty = true;
     }
 
     /// Changes view mode (`Icons`, `List`, `Columns`, `Gallery`) and persists preference.

@@ -351,7 +351,14 @@ pub(crate) fn render_get_info_tags_and_general(
 
     let mut rows: Vec<(&'static str, String)> = Vec::new();
     if let Some(info) = &gs.info {
-        rows.push(("Kind", info.kind_label.clone()));
+        let kind_label = match crate::state::classify_executable_file(&gs.target_path) {
+            crate::state::ExecutableFileState::Runnable
+            | crate::state::ExecutableFileState::BinaryMissingExecBit => {
+                String::from("Unix Executable")
+            }
+            _ => info.kind_label.clone(),
+        };
+        rows.push(("Kind", kind_label));
         rows.push(("Where", info.where_parent.clone()));
         if let Some(cnt) = info.item_count {
             rows.push(("Items", cnt.to_string()));

@@ -947,6 +947,12 @@ impl WaylandClientData {
                     self.app.launch_entry(&entry);
                 }
             }
+            PopupCommand::RunExecutable(path) => {
+                self.app.launch_executable_path(&path, true);
+            }
+            PopupCommand::RunInTerminal(path) => {
+                self.app.action_run_in_terminal(&path);
+            }
             PopupCommand::MoveToTrash(entry) => self.app.trash_entry(&entry),
             PopupCommand::RestoreEntry(entry) => self.app.restore_entry(&entry),
             PopupCommand::EmptyTrash => self.app.action_empty_trash(),

@@ -948,6 +948,75 @@ fn run_archive_command(
     }
 }
 
+/// Classification of a regular file for direct program execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExecutableFileState {
+    /// ELF binary or `#!` script that already has an execute permission bit (`+x`).
+    Runnable,
+    /// ELF binary or `.AppImage`/`.run` executable missing the execute permission bit.
+    BinaryMissingExecBit,
+    /// `#!` or `.sh` script missing the execute permission bit (opens in editor by default,
+    /// offers "Allow Executing & Run" in the context menu).
+    ScriptMissingExecBit,
+    /// Ordinary document or non-executable file.
+    NotExecutable,
+}
+
+/// Inspects metadata and the first 4 magic bytes to classify whether `path` can be
+/// launched directly as a program (safely ignoring `+x` flags on non-executable FAT/NTFS files).
+#[must_use]
+pub(crate) fn classify_executable_file(path: &Path) -> ExecutableFileState {
+    use std::io::Read as _;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let Ok(meta) = std::fs::metadata(path) else {
+        return ExecutableFileState::NotExecutable;
+    };
+    if !meta.is_file() {
+        return ExecutableFileState::NotExecutable;
+    }
+    let has_exec_bit = meta.permissions().mode() & 0o111 != 0;
+
+    let mut header = [0_u8; 4];
+    let n = std::fs::File::open(path)
+        .and_then(|mut f| f.read(&mut header))
+        .unwrap_or(0);
+    let is_elf = n >= 4 && header == [0x7f, b'E', b'L', b'F'];
+    let is_shebang = n >= 2 && header[0] == b'#' && header[1] == b'!';
+
+    let lower_ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase);
+    let is_binary_ext = matches!(lower_ext.as_deref(), Some("appimage" | "run" | "bin"));
+    let is_script_ext = matches!(lower_ext.as_deref(), Some("sh" | "bash" | "zsh"));
+
+    if has_exec_bit && (is_elf || is_shebang) {
+        ExecutableFileState::Runnable
+    } else if is_elf || is_binary_ext {
+        ExecutableFileState::BinaryMissingExecBit
+    } else if is_shebang || is_script_ext {
+        ExecutableFileState::ScriptMissingExecBit
+    } else {
+        ExecutableFileState::NotExecutable
+    }
+}
+
+/// Grants execute permission bits matching existing read bits (at minimum owner `+x`).
+pub(crate) fn ensure_executable_permission(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let meta = std::fs::metadata(path)?;
+    let mode = meta.permissions().mode();
+    if mode & 0o111 != 0 {
+        return Ok(());
+    }
+    let exec_bits = ((mode & 0o444) >> 2) | 0o100;
+    let mut perms = meta.permissions();
+    perms.set_mode(mode | exec_bits);
+    std::fs::set_permissions(path, perms)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1471,6 +1540,49 @@ mod tests {
         assert_eq!(
             fs::read_to_string(dst_dir.join("hello.txt"))?,
             "rustyos zip test"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn classifies_and_grants_executable_files() -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let guard = TestHomeGuard::new("exec-classify")?;
+        let elf_no_exec = guard.root.join("my-tool");
+        fs::write(&elf_no_exec, b"\x7fELF\x02\x01\x01\x00")?;
+        fs::set_permissions(&elf_no_exec, fs::Permissions::from_mode(0o644))?;
+        assert_eq!(
+            classify_executable_file(&elf_no_exec),
+            ExecutableFileState::BinaryMissingExecBit
+        );
+
+        ensure_executable_permission(&elf_no_exec)?;
+        assert_eq!(
+            classify_executable_file(&elf_no_exec),
+            ExecutableFileState::Runnable
+        );
+
+        let script = guard.root.join("launch.sh");
+        fs::write(&script, b"#!/bin/sh\necho hi\n")?;
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o644))?;
+        assert_eq!(
+            classify_executable_file(&script),
+            ExecutableFileState::ScriptMissingExecBit
+        );
+        ensure_executable_permission(&script)?;
+        assert_eq!(
+            classify_executable_file(&script),
+            ExecutableFileState::Runnable
+        );
+
+        // Plain text file with +x (e.g. FAT32 mount) must NOT be treated as runnable.
+        let doc = guard.root.join("notes.txt");
+        fs::write(&doc, b"just a text file")?;
+        fs::set_permissions(&doc, fs::Permissions::from_mode(0o755))?;
+        assert_eq!(
+            classify_executable_file(&doc),
+            ExecutableFileState::NotExecutable
         );
         Ok(())
     }

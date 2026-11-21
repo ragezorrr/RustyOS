@@ -142,6 +142,8 @@ pub(crate) enum PopupCommand {
     ToggleShowHidden,
     ToggleTheme,
     OpenEntry(FileEntry),
+    RunExecutable(PathBuf),
+    RunInTerminal(PathBuf),
     MoveToTrash(FileEntry),
     RestoreEntry(FileEntry),
     EmptyTrash,
@@ -1232,13 +1234,74 @@ fn context_menu_rows(state: &FilesAppState, entry: Option<&FileEntry>) -> Vec<Po
     rows
 }
 
+fn append_primary_open_rows(state: &FilesAppState, item: &FileEntry, rows: &mut Vec<PopupRowSpec>) {
+    let exec_state = if item.is_navigable_dir() || state.is_trash_view() {
+        crate::state::ExecutableFileState::NotExecutable
+    } else {
+        crate::state::classify_executable_file(&item.path)
+    };
+    match exec_state {
+        crate::state::ExecutableFileState::Runnable => {
+            rows.push((
+                String::from("Run as Program"),
+                false,
+                None,
+                Some(PopupCommand::RunExecutable(item.path.clone())),
+            ));
+            rows.push((
+                String::from("Run in Terminal"),
+                false,
+                None,
+                Some(PopupCommand::RunInTerminal(item.path.clone())),
+            ));
+        }
+        crate::state::ExecutableFileState::BinaryMissingExecBit => {
+            rows.push((
+                String::from("Allow Executing & Run"),
+                false,
+                None,
+                Some(PopupCommand::RunExecutable(item.path.clone())),
+            ));
+            rows.push((
+                String::from("Run in Terminal"),
+                false,
+                None,
+                Some(PopupCommand::RunInTerminal(item.path.clone())),
+            ));
+        }
+        crate::state::ExecutableFileState::ScriptMissingExecBit => {
+            rows.push((
+                String::from("Open"),
+                false,
+                None,
+                Some(PopupCommand::OpenEntry(item.clone())),
+            ));
+            rows.push((
+                String::from("Allow Executing & Run"),
+                false,
+                None,
+                Some(PopupCommand::RunExecutable(item.path.clone())),
+            ));
+            rows.push((
+                String::from("Run in Terminal"),
+                false,
+                None,
+                Some(PopupCommand::RunInTerminal(item.path.clone())),
+            ));
+        }
+        crate::state::ExecutableFileState::NotExecutable => {
+            rows.push((
+                String::from("Open"),
+                false,
+                None,
+                Some(PopupCommand::OpenEntry(item.clone())),
+            ));
+        }
+    }
+}
+
 fn append_context_item_rows(state: &FilesAppState, item: &FileEntry, rows: &mut Vec<PopupRowSpec>) {
-    rows.push((
-        String::from("Open"),
-        false,
-        None,
-        Some(PopupCommand::OpenEntry(item.clone())),
-    ));
+    append_primary_open_rows(state, item, rows);
     if item.is_navigable_dir() {
         rows.push((
             String::from("Open in New Tab"),
