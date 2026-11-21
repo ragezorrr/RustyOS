@@ -238,14 +238,58 @@ struct GlyphKey {
     tint_rgba: [u8; 4],
 }
 
-#[derive(Debug, Default)]
+const MAX_WALLPAPER_CACHE_SLOTS: usize = 4;
+const SYNC_WALLPAPER_MAX_BYTES: u64 = 256 * 1024;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct WallpaperCacheKey {
+    path: PathBuf,
+    size: (i32, i32),
+    mtime: Option<std::time::SystemTime>,
+}
+
+#[derive(Debug)]
+struct WallpaperCacheSlot {
+    key: WallpaperCacheKey,
+    buffer: Option<MemoryRenderBuffer>,
+    backdrop: Option<crate::shell_render::BarBackdropStyle>,
+}
+
+#[derive(Debug)]
+struct DecodedWallpaperMsg {
+    key: WallpaperCacheKey,
+    bgra: Option<Vec<u8>>,
+    backdrop: Option<crate::shell_render::BarBackdropStyle>,
+}
+
+#[derive(Debug)]
 struct CachedWallpaper {
     revision: u64,
-    custom_key: Option<(PathBuf, Size<i32, Logical>)>,
-    custom_buffer: Option<MemoryRenderBuffer>,
-    custom_backdrop: Option<crate::shell_render::BarBackdropStyle>,
+    slots: Vec<WallpaperCacheSlot>,
+    pending: std::collections::HashSet<WallpaperCacheKey>,
+    tx: std::sync::mpsc::Sender<DecodedWallpaperMsg>,
+    rx: std::sync::mpsc::Receiver<DecodedWallpaperMsg>,
+    active_backdrop: Option<crate::shell_render::BarBackdropStyle>,
+    last_good_buffer: Option<MemoryRenderBuffer>,
     fallback_buffer_light: Option<MemoryRenderBuffer>,
     fallback_buffer_dark: Option<MemoryRenderBuffer>,
+}
+
+impl Default for CachedWallpaper {
+    fn default() -> Self {
+        let (tx, rx) = std::sync::mpsc::channel();
+        Self {
+            revision: 0,
+            slots: Vec::with_capacity(MAX_WALLPAPER_CACHE_SLOTS),
+            pending: std::collections::HashSet::new(),
+            tx,
+            rx,
+            active_backdrop: None,
+            last_good_buffer: None,
+            fallback_buffer_light: None,
+            fallback_buffer_dark: None,
+        }
+    }
 }
 
 const SHAPE_GLYPH_PRUNE_THRESHOLD: usize = 256;
@@ -1027,15 +1071,83 @@ impl UiShapeCache {
         .ok()
     }
 
-    /// Invalidates cached custom wallpaper and Liquid Glass GPU textures when compositor `wallpaper_revision` changes (`RUSTYOS-062`).
+    /// Invalidates Liquid Glass GPU textures when compositor `wallpaper_revision` changes (`RUSTYOS-062`, `RUSTYOS-153`).
+    /// Decoded wallpaper slots in `self.wallpaper.slots` are preserved by `(path, size, mtime)` for instant theme switching.
     pub fn sync_wallpaper_revision(&mut self, revision: u64) {
         if self.wallpaper.revision != revision {
-            self.wallpaper.custom_key = None;
-            self.wallpaper.custom_buffer = None;
-            self.wallpaper.custom_backdrop = None;
             self.wallpaper.revision = revision;
             self.liquid_glass.invalidate_all();
         }
+    }
+
+    /// Polls completed background 4K wallpaper decode jobs and returns `true` when a new texture landed (`RUSTYOS-153`).
+    pub fn poll_background_wallpapers(&mut self) -> bool {
+        let mut landed = false;
+        while let Ok(msg) = self.wallpaper.rx.try_recv() {
+            self.wallpaper.pending.remove(&msg.key);
+            let buffer = msg.bgra.map(|bgra| {
+                MemoryRenderBuffer::from_slice(
+                    &bgra,
+                    Fourcc::Argb8888,
+                    msg.key.size,
+                    1,
+                    Transform::Normal,
+                    None,
+                )
+            });
+            self.insert_wallpaper_slot(WallpaperCacheSlot {
+                key: msg.key,
+                buffer,
+                backdrop: msg.backdrop,
+            });
+            landed = true;
+        }
+        if landed {
+            self.liquid_glass.invalidate_all();
+        }
+        landed
+    }
+
+    fn insert_wallpaper_slot(&mut self, slot: WallpaperCacheSlot) {
+        if let Some(pos) = self.wallpaper.slots.iter().position(|s| s.key == slot.key) {
+            self.wallpaper.slots.remove(pos);
+        } else if self.wallpaper.slots.len() >= MAX_WALLPAPER_CACHE_SLOTS {
+            self.wallpaper.slots.remove(0);
+        }
+        if let Some(buf) = slot.buffer.as_ref() {
+            self.wallpaper.last_good_buffer = Some(buf.clone());
+        }
+        self.wallpaper.slots.push(slot);
+    }
+
+    fn spawn_wallpaper_decode(&mut self, key: WallpaperCacheKey) {
+        if self.wallpaper.pending.contains(&key)
+            || self.wallpaper.slots.iter().any(|s| s.key == key)
+        {
+            return;
+        }
+        let Ok(w) = usize::try_from(key.size.0) else {
+            return;
+        };
+        let Ok(h) = usize::try_from(key.size.1) else {
+            return;
+        };
+        self.wallpaper.pending.insert(key.clone());
+        let tx = self.wallpaper.tx.clone();
+        std::thread::spawn(move || {
+            let mut backdrop = None;
+            let bgra = crate::icons::load_png_wallpaper_bgra(&key.path, w, h);
+            if let Some(ref bytes) = bgra {
+                backdrop = Some(crate::shell_render::analyze_top_bar_backdrop_bgra(
+                    bytes, w, h, 28,
+                ));
+            }
+            let _ = tx.send(DecodedWallpaperMsg {
+                key,
+                bgra,
+                backdrop,
+            });
+        });
     }
 
     /// Returns the adaptive `TopBar` contrast style computed from the active custom wallpaper (`RUSTYOS-141`).
@@ -1043,7 +1155,7 @@ impl UiShapeCache {
     pub const fn wallpaper_top_bar_backdrop(
         &self,
     ) -> Option<crate::shell_render::BarBackdropStyle> {
-        self.wallpaper.custom_backdrop
+        self.wallpaper.active_backdrop
     }
 
     /// Returns a GPU-cached wallpaper scaled cleanly to `screen_size`, preferring `custom_path` (`.png`)
@@ -1057,7 +1169,8 @@ impl UiShapeCache {
         self.wallpaper_element_with_alpha(renderer, screen_size, custom_path, 1.0)
     }
 
-    /// Returns a GPU-cached wallpaper element scaled to `screen_size` with explicit opacity (`RUSTYOS-054`).
+    /// Returns a GPU-cached wallpaper element scaled to `screen_size` with explicit opacity (`RUSTYOS-054`, `RUSTYOS-153`).
+    #[allow(clippy::too_many_lines)]
     pub fn wallpaper_element_with_alpha(
         &mut self,
         renderer: &mut GlesRenderer,
@@ -1072,39 +1185,98 @@ impl UiShapeCache {
             return None;
         }
         let alpha_opt = (alpha < 0.999).then_some(alpha);
+        let _ = self.poll_background_wallpapers();
 
-        if let Some(path) = custom_path {
-            let desired_key = (path.to_path_buf(), screen_size);
-            if self.wallpaper.custom_key.as_ref() != Some(&desired_key) {
-                let mut backdrop = None;
-                let loaded = usize::try_from(screen_size.w)
-                    .ok()
-                    .zip(usize::try_from(screen_size.h).ok())
-                    .and_then(|(w, h)| {
-                        crate::icons::load_png_wallpaper_bgra(path, w, h).map(|bgra| (w, h, bgra))
-                    })
-                    .map(|(w, h, bgra)| {
-                        backdrop = Some(crate::shell_render::analyze_top_bar_backdrop_bgra(
-                            &bgra, w, h, 28,
-                        ));
-                        MemoryRenderBuffer::from_slice(
-                            &bgra,
-                            Fourcc::Argb8888,
-                            (screen_size.w, screen_size.h),
-                            1,
-                            Transform::Normal,
-                            None,
-                        )
+        let is_dark = crate::shell_render::active_appearance().is_dark();
+        let resolved_path = resolve_runtime_wallpaper_path(custom_path, is_dark);
+
+        #[cfg(not(test))]
+        if custom_path.is_none()
+            && let Some(opposite) = resolve_builtin_wallpaper_path(!is_dark)
+        {
+            let opp_mtime = std::fs::metadata(&opposite)
+                .ok()
+                .and_then(|m| m.modified().ok());
+            self.spawn_wallpaper_decode(WallpaperCacheKey {
+                path: opposite,
+                size: (screen_size.w, screen_size.h),
+                mtime: opp_mtime,
+            });
+        }
+
+        if let Some(path) = resolved_path {
+            let meta = std::fs::metadata(&path).ok();
+            let mtime = meta.as_ref().and_then(|m| m.modified().ok());
+            let file_len = meta.as_ref().map_or(0, std::fs::Metadata::len);
+            let desired_key = WallpaperCacheKey {
+                path: path.clone(),
+                size: (screen_size.w, screen_size.h),
+                mtime,
+            };
+
+            if !self.wallpaper.slots.iter().any(|s| s.key == desired_key) {
+                if cfg!(test) || file_len <= SYNC_WALLPAPER_MAX_BYTES {
+                    let mut backdrop = None;
+                    let buffer = usize::try_from(screen_size.w)
+                        .ok()
+                        .zip(usize::try_from(screen_size.h).ok())
+                        .and_then(|(w, h)| {
+                            crate::icons::load_png_wallpaper_bgra(&path, w, h)
+                                .map(|bgra| (w, h, bgra))
+                        })
+                        .map(|(w, h, bgra)| {
+                            backdrop = Some(crate::shell_render::analyze_top_bar_backdrop_bgra(
+                                &bgra, w, h, 28,
+                            ));
+                            MemoryRenderBuffer::from_slice(
+                                &bgra,
+                                Fourcc::Argb8888,
+                                (screen_size.w, screen_size.h),
+                                1,
+                                Transform::Normal,
+                                None,
+                            )
+                        });
+                    self.insert_wallpaper_slot(WallpaperCacheSlot {
+                        key: desired_key.clone(),
+                        buffer,
+                        backdrop,
                     });
-                self.wallpaper.custom_buffer = loaded;
-                self.wallpaper.custom_backdrop = backdrop;
-                self.wallpaper.custom_key = Some(desired_key);
+                } else {
+                    self.spawn_wallpaper_decode(desired_key.clone());
+                }
             }
-            if let Some(buf) = self.wallpaper.custom_buffer.as_ref() {
+
+            if let Some(slot_idx) = self
+                .wallpaper
+                .slots
+                .iter()
+                .position(|s| s.key == desired_key)
+            {
+                let slot = self.wallpaper.slots.remove(slot_idx);
+                self.wallpaper.active_backdrop = slot.backdrop;
+                let buf_opt = slot.buffer.clone();
+                if let Some(ref b) = buf_opt {
+                    self.wallpaper.last_good_buffer = Some(b.clone());
+                }
+                self.wallpaper.slots.push(slot);
+                if let Some(buf) = buf_opt.as_ref() {
+                    return MemoryRenderBufferRenderElement::from_buffer(
+                        renderer,
+                        Point::<f64, smithay::utils::Physical>::from((0.0, 0.0)),
+                        buf,
+                        alpha_opt,
+                        None,
+                        None,
+                        Kind::Unspecified,
+                    )
+                    .ok();
+                }
+            } else if let Some(prev_buf) = self.wallpaper.last_good_buffer.as_ref() {
                 return MemoryRenderBufferRenderElement::from_buffer(
                     renderer,
                     Point::<f64, smithay::utils::Physical>::from((0.0, 0.0)),
-                    buf,
+                    prev_buf,
                     alpha_opt,
                     None,
                     None,
@@ -1112,13 +1284,10 @@ impl UiShapeCache {
                 )
                 .ok();
             }
-        } else if self.wallpaper.custom_key.is_some() || self.wallpaper.custom_buffer.is_some() {
-            self.wallpaper.custom_key = None;
-            self.wallpaper.custom_buffer = None;
-            self.wallpaper.custom_backdrop = None;
+        } else {
+            self.wallpaper.active_backdrop = None;
         }
 
-        let is_dark = crate::shell_render::active_appearance().is_dark();
         let slot = if is_dark {
             &mut self.wallpaper.fallback_buffer_dark
         } else {
@@ -1391,4 +1560,51 @@ impl UiShapeCache {
         )
         .ok()
     }
+}
+
+/// Resolves the built-in 4K RustyOS wallpaper path (`rustyos-light-4k.png` or `rustyos-dark-4k.png`)
+/// from the workspace `assets/wallpapers/` or system `/usr/share/rustyos/wallpapers/` (`RUSTYOS-152`).
+#[must_use]
+pub(crate) fn resolve_builtin_wallpaper_path(is_dark: bool) -> Option<PathBuf> {
+    let filename = if is_dark {
+        "rustyos-dark-4k.png"
+    } else {
+        "rustyos-light-4k.png"
+    };
+    let manifest_rel = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../assets/wallpapers")
+        .join(filename);
+    if manifest_rel.is_file() {
+        return Some(manifest_rel);
+    }
+    let cwd_rel = Path::new("assets/wallpapers").join(filename);
+    if cwd_rel.is_file() {
+        return Some(cwd_rel);
+    }
+    let sys_path = Path::new("/usr/share/rustyos/wallpapers").join(filename);
+    if sys_path.is_file() {
+        return Some(sys_path);
+    }
+    None
+}
+
+/// Resolves a configured `wallpaper` value (`None`, `"rustyos-dynamic"`, `"rustyos-light"`,
+/// `"rustyos-dark"`, or a custom file path) into an active PNG path (`RUSTYOS-152`).
+#[must_use]
+pub(crate) fn resolve_effective_wallpaper_path(
+    custom_path: Option<&Path>,
+    is_dark: bool,
+) -> Option<PathBuf> {
+    match custom_path.and_then(Path::to_str).map(str::trim) {
+        None | Some("" | "rustyos-dynamic") => resolve_builtin_wallpaper_path(is_dark),
+        Some("rustyos-light") => resolve_builtin_wallpaper_path(false),
+        Some("rustyos-dark") => resolve_builtin_wallpaper_path(true),
+        _ => custom_path.map(Path::to_path_buf),
+    }
+}
+
+fn resolve_runtime_wallpaper_path(custom_path: Option<&Path>, is_dark: bool) -> Option<PathBuf> {
+    #[cfg(test)]
+    custom_path?;
+    resolve_effective_wallpaper_path(custom_path, is_dark)
 }

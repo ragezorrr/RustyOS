@@ -2539,6 +2539,28 @@ hardware/software context и низкие накладные расходы.
   - Все 14 встроенных курсоров декодируются и масштабируются с валидными hotspot; `cursor_size` сохраняется в `[ui]` и передаётся в `ThemeSyncService` и композитор; клиентский `wp-cursor-shape-v1` меняет форму курсора (`Resize`, `Text`, `Pointer`, `Grabbing`) в `rusty-files`, `rusty-settings`, `rusty-terminal`; `cargo fmt`, `clippy -D warnings`, `cargo test --workspace` и живая проверка проходят чисто.
 - **Risks:** Низкие; ноль новых зависимостей в `Cargo.lock`.
 
+### RUSTYOS-152 — Фирменные 4K-обои RustyOS (`Light` & `Dark`) с авто-переключением и пресетами в `rusty-settings`
+- **Status:** Done
+- **Goal:** Сгенерировать и добавить парные фирменные 4K (`3840×2160`) PNG-обои `assets/wallpapers/{rustyos-light-4k.png, rustyos-dark-4k.png}` (с установкой в `/usr/share/rustyos/wallpapers/` в `PKGBUILD`), подключить автоматическую подгрузку светлых/тёмных 4K-обоев по текущей теме в `rusty-compositor` и добавить пресеты `Dynamic (Light & Dark 4K)` / `RustyOS Light (4K)` / `RustyOS Dark (4K)` на страницу `Wallpaper` в `rusty-settings`.
+- **Dependencies:** `RUSTYOS-151`.
+- **Scope:**
+  - `assets/wallpapers/{rustyos-light-4k.png, rustyos-dark-4k.png}`, `packaging/arch/PKGBUILD`.
+  - `crates/rusty-compositor/src/{surfaces/mod.rs, surfaces/tests.rs, state/shell_actions.rs}`, `apps/rusty-settings/src/{layout.rs, state.rs}`.
+- **Acceptance Criteria:**
+  - Оба 4K-файла (`3840×2160`) резолвятся и декодируются без ошибок; `resolve_effective_wallpaper_path` поддерживает `None`/`"rustyos-dynamic"`/`"rustyos-light"`/`"rustyos-dark"` и кастомные пути; `cargo fmt`, `clippy -D warnings`, `cargo test --workspace` и живой `--winit` прогон в Light/Dark темах проходят чисто.
+- **Risks:** Низкие; при отсутствии файлов на диске сохраняется бесшовный fallback на процедурный градиент.
+
+### RUSTYOS-153 — Мгновенная смена темы и 4K-обоев (фоновый декодер, 4-слотовый LRU-кэш, неблокирующий IPC и пробуждение клиентов)
+- **Status:** Done
+- **Goal:** Устранить задержку при переключении `Light ↔ Dark` и смене 4K-обоев: вынести декодирование крупных PNG-обоев (`>256 KB`) в фоновый рабочий поток (`poll_background_wallpapers`) с предзагрузкой обеих системных 4K-тем и 4-слотовым LRU-кэшем по `(path, size, mtime)` в `UiShapeCache`, включить `opt-level = 3` для `rusty-services` в dev-профиле, сделать `notify_compositor_reload` в `rusty-settings` неблокирующим и будить открытые XDG-окна через `toplevel.send_configure()` при смене темы.
+- **Dependencies:** `RUSTYOS-152`.
+- **Scope:**
+  - `Cargo.toml` (`[profile.dev.package.rusty-services] opt-level = 3`).
+  - `crates/rusty-compositor/src/{surfaces/mod.rs, surfaces/tests.rs, state/shell_actions.rs, winit_backend.rs, drm_backend.rs}`, `apps/rusty-settings/src/state.rs`.
+- **Acceptance Criteria:**
+  - Переключение `Light ↔ Dark` и пресетов обоев не блокирует compositor event loop и не сбрасывает уже декодированные слоты обоев; `cargo fmt`, `clippy -D warnings`, `cargo test --workspace` и живая проверка проходят чисто.
+- **Risks:** Низкие; малые тестовые PNG (`<=256 KB`) и `#[cfg(test)]` декодируются детерминированно в первом кадре.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

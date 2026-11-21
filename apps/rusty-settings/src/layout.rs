@@ -755,10 +755,14 @@ fn build_system_page_sections(
 ) -> Vec<CardSectionLayout> {
     match page {
         SettingsPage::Wallpaper => {
-            let mode = if app.custom_wallpaper.is_some() {
-                "Custom PNG"
-            } else {
-                "RustyOS Default"
+            let (mode, source) = match app.custom_wallpaper.as_deref() {
+                None | Some("rustyos-dynamic") => (
+                    "Dynamic (4K)",
+                    "Auto-switches rustyos-light-4k.png / rustyos-dark-4k.png",
+                ),
+                Some("rustyos-light") => ("Light (4K)", "assets/wallpapers/rustyos-light-4k.png"),
+                Some("rustyos-dark") => ("Dark (4K)", "assets/wallpapers/rustyos-dark-4k.png"),
+                Some(custom) => ("Custom PNG", custom),
             };
             vec![place_card_section(
                 Some("Desktop Picture"),
@@ -767,13 +771,8 @@ fn build_system_page_sections(
                 content_w,
                 vec![
                     row_choice("Wallpaper", RowControlId::ToggleWallpaper, mode.to_owned()),
-                    row_info(
-                        "Source",
-                        app.custom_wallpaper
-                            .as_deref()
-                            .unwrap_or("Built-in RustyOS Wallpaper")
-                            .to_owned(),
-                    ),
+                    row_info("Source", source.to_owned()),
+                    row_info("Resolution", String::from("3840 × 2160 (4K UHD, 16:9)")),
                 ],
             )]
         }

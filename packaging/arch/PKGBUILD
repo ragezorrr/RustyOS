@@ -113,6 +113,7 @@ package() {
     "${pkgdir}/usr/share/polkit-1/actions" \
     "${pkgdir}/usr/share/wayland-sessions" \
     "${pkgdir}/usr/share/xdg-desktop-portal/portals" \
+    "${pkgdir}/usr/share/rustyos/wallpapers" \
     "${pkgdir}/usr/share/doc/${pkgname}"
 
   install -m755 "${target_dir}/rusty-compositor" "${pkgdir}/usr/bin/rusty-compositor"
@@ -163,6 +164,11 @@ package() {
     "${root}/packaging/wayland-sessions/rustyos.desktop" \
     > "${pkgdir}/usr/share/wayland-sessions/rustyos.desktop"
   chmod 644 "${pkgdir}/usr/share/wayland-sessions/rustyos.desktop"
+
+  install -m644 "${root}/assets/wallpapers/rustyos-light-4k.png" \
+    "${pkgdir}/usr/share/rustyos/wallpapers/rustyos-light-4k.png"
+  install -m644 "${root}/assets/wallpapers/rustyos-dark-4k.png" \
+    "${pkgdir}/usr/share/rustyos/wallpapers/rustyos-dark-4k.png"
 
   install -m644 "${root}/README.md" "${pkgdir}/usr/share/doc/${pkgname}/README.md"
 }

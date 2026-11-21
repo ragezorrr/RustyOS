@@ -2432,6 +2432,7 @@ impl RustyCompositorState {
     }
 
     /// Applies an updated [`crate::config::UserConfig`] to live compositor subsystems without writing disk (`RUSTYOS-061`/`062`).
+    #[allow(clippy::too_many_lines)]
     pub fn apply_user_config(&mut self, cfg: crate::config::UserConfig) {
         let repeat_changed = cfg.repeat_delay != self.user_config.repeat_delay
             || cfg.repeat_rate != self.user_config.repeat_rate;
@@ -2480,8 +2481,10 @@ impl RustyCompositorState {
         }
 
         if wallpaper_changed || appearance_changed {
+            let is_dark = !matches!(cfg.appearance, crate::config::AppearanceMode::Light);
             if let Some(ref wp) = cfg.wallpaper
-                && !wp.exists()
+                && crate::surfaces::resolve_effective_wallpaper_path(Some(wp.as_path()), is_dark)
+                    .is_none_or(|p| !p.exists())
             {
                 tracing::warn!(
                     path = %wp.display(),
@@ -2504,6 +2507,17 @@ impl RustyCompositorState {
         }
         crate::shell_render::set_active_appearance(self.user_config.appearance);
         crate::shell_render::set_active_accent_index(self.user_config.ui_accent_index);
+        if appearance_changed {
+            for toplevel in self
+                .window_bindings
+                .iter()
+                .filter_map(|(_, sw)| sw.toplevel())
+            {
+                if toplevel.alive() && toplevel.is_initial_configure_sent() {
+                    toplevel.send_configure();
+                }
+            }
+        }
         if appearance_changed && self.config_path.is_some() {
             let prefer_dark = !matches!(
                 self.user_config.appearance,

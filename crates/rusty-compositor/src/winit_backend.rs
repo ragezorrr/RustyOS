@@ -171,6 +171,9 @@ pub fn run_nested_winit(config: &CompositorConfig) -> Result<BootstrapReport, Co
                     }
                 }
 
+                if shape_cache.poll_background_wallpapers() {
+                    app_state.shell_redraw_needed = true;
+                }
                 sync_winit_window_cursor(
                     &backend,
                     &app_state.cursor_status,

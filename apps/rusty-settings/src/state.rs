@@ -2,7 +2,7 @@
 
 use std::env;
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
+use std::io::Write;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -1539,16 +1539,22 @@ impl SettingsAppState {
                 let v = format!("{:.2}", self.glass_opacity);
                 let _ = update_config_entries(&[("ui", "glass_opacity", &v)]);
             }
-            RowControlId::ToggleWallpaper => {
-                if self.custom_wallpaper.is_some() {
+            RowControlId::ToggleWallpaper => match self.custom_wallpaper.as_deref() {
+                None | Some("rustyos-dynamic") => {
+                    let next = String::from("rustyos-light");
+                    self.custom_wallpaper = Some(next.clone());
+                    let _ = update_config_entries(&[("ui", "wallpaper", &next)]);
+                }
+                Some("rustyos-light") => {
+                    let next = String::from("rustyos-dark");
+                    self.custom_wallpaper = Some(next.clone());
+                    let _ = update_config_entries(&[("ui", "wallpaper", &next)]);
+                }
+                _ => {
                     self.custom_wallpaper = None;
                     let _ = update_config_entries(&[("ui", "wallpaper", "")]);
-                } else {
-                    let fallback = String::from("/usr/share/backgrounds/rustyos-default.png");
-                    self.custom_wallpaper = Some(fallback.clone());
-                    let _ = update_config_entries(&[("ui", "wallpaper", &fallback)]);
                 }
-            }
+            },
             other => self.apply_device_action(other),
         }
         self.last_config_mtime = current_config_mtime();
@@ -2572,17 +2578,16 @@ fn notify_compositor_reload() {
     let Some(sock_path) = resolve_ipc_socket_path() else {
         return;
     };
-    let Ok(mut stream) = UnixStream::connect(sock_path) else {
-        return;
-    };
-    let timeout = Some(Duration::from_millis(150));
-    let _ = stream.set_read_timeout(timeout);
-    let _ = stream.set_write_timeout(timeout);
-    if stream.write_all(b"v1|RELOAD_CONFIG\n").is_ok() && stream.flush().is_ok() {
-        let mut reader = BufReader::new(stream);
-        let mut line = String::new();
-        let _ = reader.read_line(&mut line);
-    }
+    std::thread::spawn(move || {
+        let Ok(mut stream) = UnixStream::connect(sock_path) else {
+            return;
+        };
+        let timeout = Some(Duration::from_millis(120));
+        let _ = stream.set_read_timeout(timeout);
+        let _ = stream.set_write_timeout(timeout);
+        let _ = stream.write_all(b"v1|RELOAD_CONFIG\n");
+        let _ = stream.flush();
+    });
 }
 
 #[allow(clippy::cast_possible_truncation)]

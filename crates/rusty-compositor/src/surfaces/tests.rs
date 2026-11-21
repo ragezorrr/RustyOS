@@ -761,3 +761,44 @@ fn ui_shape_cache_evicts_stale_glyphs_and_keeps_active_entries() {
     assert_eq!(cache.glyphs.len(), 1);
     assert!(cache.glyphs.contains_key(&active_key));
 }
+
+#[test]
+fn builtin_4k_wallpapers_resolve_for_light_dark_and_dynamic_modes() {
+    let light = super::resolve_builtin_wallpaper_path(false);
+    let dark = super::resolve_builtin_wallpaper_path(true);
+    assert!(light.is_some());
+    assert!(dark.is_some());
+    assert_ne!(light, dark);
+    assert_eq!(super::resolve_effective_wallpaper_path(None, false), light);
+    assert_eq!(super::resolve_effective_wallpaper_path(None, true), dark);
+    assert_eq!(
+        super::resolve_effective_wallpaper_path(Some(std::path::Path::new("rustyos-light")), true),
+        light
+    );
+    assert_eq!(
+        super::resolve_effective_wallpaper_path(Some(std::path::Path::new("rustyos-dark")), false),
+        dark
+    );
+    let custom = std::path::Path::new("/tmp/custom-wp.png");
+    assert_eq!(
+        super::resolve_effective_wallpaper_path(Some(custom), false),
+        Some(custom.to_path_buf())
+    );
+
+    let mut cache = super::UiShapeCache::new();
+    let key = super::WallpaperCacheKey {
+        path: std::path::PathBuf::from("/tmp/light.png"),
+        size: (1280, 800),
+        mtime: None,
+    };
+    let _ = cache.wallpaper.tx.send(super::DecodedWallpaperMsg {
+        key: key.clone(),
+        bgra: Some(vec![0_u8; 1280 * 800 * 4]),
+        backdrop: None,
+    });
+    assert!(cache.poll_background_wallpapers());
+    assert_eq!(cache.wallpaper.slots.len(), 1);
+    cache.sync_wallpaper_revision(42);
+    assert_eq!(cache.wallpaper.slots.len(), 1);
+    assert_eq!(cache.wallpaper.slots[0].key, key);
+}

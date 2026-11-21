@@ -763,6 +763,10 @@ impl DrmRuntime {
     }
 
     fn process_portal(&mut self, state: &mut RustyCompositorState) {
+        if self.shape_cache.poll_background_wallpapers() {
+            state.shell_redraw_needed = true;
+            self.mark_all_dirty();
+        }
         if !state.running || self.paused || state.is_session_locked() {
             return;
         }
