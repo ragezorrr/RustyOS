@@ -69,8 +69,9 @@ jobs:
           pacman -Syu --noconfirm \
             git rust pkgconf gnupg \
             wayland libxkbcommon mesa libglvnd libinput systemd-libs seatd \
-            dbus fontconfig ttf-jetbrains-mono xorg-xwayland pipewire \
-            xdg-desktop-portal polkit pacman-contrib desktop-file-utils libxml2
+            dbus fontconfig ttf-jetbrains-mono noto-fonts noto-fonts-emoji \
+            xorg-xwayland pipewire xdg-desktop-portal polkit pacman-contrib \
+            squashfs-tools desktop-file-utils libxml2
 
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -214,10 +215,10 @@ jobs:
       - name: Install Arch ISO builder and package build dependencies
         run: |
           pacman -Syu --noconfirm \
-            git rust pkgconf archiso pacman-contrib \
+            git rust pkgconf archiso pacman-contrib squashfs-tools \
             wayland libxkbcommon mesa libglvnd libinput systemd-libs seatd \
-            dbus fontconfig ttf-jetbrains-mono xorg-xwayland pipewire \
-            xdg-desktop-portal polkit
+            dbus fontconfig ttf-jetbrains-mono noto-fonts noto-fonts-emoji \
+            xorg-xwayland pipewire xdg-desktop-portal polkit
 
       - name: Checkout repository
         uses: actions/checkout@v4
