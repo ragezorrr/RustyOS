@@ -1252,6 +1252,17 @@
                            расширение `DesktopDragState` и `SpotlightDragState` drag-to-Dock
                            и экспорт `text/uri-list` через `wl_data_device.start_drag` в
                            `apps/rusty-files` (`0` новых крейтов, `rusty-compositor` без `unsafe`)
+
+  D-107    Accepted        ADR-0093 (`RUSTYOS-164`): реактивные системные D-Bus подписки
+                           (`UPower`, `NetworkManager`, `BlueZ`) в `crates/rusty-services/src/system_signals.rs`
+                           с `80 ms` coalesce-дебаунсом, таргетированным быстрым обновлением,
+                           `revision` + `calloop::ping` пробуждением `TopBar` в `telemetry.rs`,
+                           оценкой оставшегося времени работы/заряда батареи в `Battery` popover
+                           и одноразовыми уведомлениями `Low Battery` (`<=20%`) / `Critically Low Battery`
+                           (`<=10%`), а также фоновый `inotify`-монитор `.desktop` каталогов
+                           (`$XDG_DATA_DIRS` + Flatpak, debounce `250 ms`) в
+                           `crates/rusty-services/src/app_catalog_monitor.rs` для живого обновления
+                           Spotlight и кэша Dock без рестарта (`0` новых крейтов, `rusty-compositor` без `unsafe`)
   -----------------------------------------------------------------------
 
 ## Открытые решения

@@ -64,6 +64,8 @@ pub(crate) fn dispatch_and_refresh_clients(
     app_state.drain_screenshot_results();
     app_state.drain_trash_empty_results();
     app_state.drain_trash_monitor_updates();
+    app_state.drain_telemetry_updates();
+    app_state.drain_app_catalog_updates();
     app_state.drain_dock_dnd_events();
     let _ = app_state.drain_system_integration_events(smithay::utils::SERIAL_COUNTER.next_serial());
     if let Some(ipc) = ipc_server {

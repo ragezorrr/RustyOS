@@ -139,6 +139,8 @@ pub struct PowerStatus {
     pub ac_online: bool,
     /// True if a hardware battery was detected.
     pub has_battery: bool,
+    /// Estimated minutes to empty (discharging) or full (charging), when power rate is known (`RUSTYOS-164`).
+    pub time_remaining_minutes: Option<u32>,
 }
 
 impl Default for PowerStatus {
@@ -148,7 +150,21 @@ impl Default for PowerStatus {
             state: BatteryState::Full,
             ac_online: true,
             has_battery: false,
+            time_remaining_minutes: None,
         }
+    }
+}
+
+/// Formats battery time remaining as a compact human-readable label (e.g. `"2h 15m left"`, `"45m to full"`) (`RUSTYOS-164`).
+#[must_use]
+pub fn format_battery_time_remaining(minutes: u32, charging: bool) -> String {
+    let suffix = if charging { "to full" } else { "left" };
+    let hours = minutes / 60;
+    let mins = minutes % 60;
+    match (hours, mins) {
+        (0, m) => format!("{}m {suffix}", m.max(1)),
+        (h, 0) => format!("{h}h {suffix}"),
+        (h, m) => format!("{h}h {m}m {suffix}"),
     }
 }
 
@@ -220,6 +236,8 @@ impl PowerService {
                         _ => BatteryState::Unknown,
                     };
                 }
+                status.time_remaining_minutes =
+                    estimate_sysfs_time_remaining_minutes(&path, status.state);
             }
         }
 
@@ -348,23 +366,57 @@ fn populate_battery_entry_details(
         }
     }
 
-    if let (Some(uw), Some(now), Some(full)) = (power_uw, now_uwh, full_uwh)
-        && uw >= 200_000
-    {
-        let target_uwh = match battery_state {
-            BatteryState::Discharging => Some(now),
-            BatteryState::Charging => Some(full.saturating_sub(now)),
-            _ => None,
-        };
-        if let Some(rem_uwh) = target_uwh {
-            let mins = (rem_uwh.saturating_mul(60)) / uw;
-            if let Ok(m) = u32::try_from(mins)
-                && m > 0
-            {
-                details.time_remaining_minutes = Some(m);
-            }
-        }
+    details.time_remaining_minutes =
+        estimate_sysfs_time_remaining_from_readings(battery_state, power_uw, now_uwh, full_uwh);
+}
+
+fn estimate_sysfs_time_remaining_minutes(path: &Path, battery_state: BatteryState) -> Option<u32> {
+    if !matches!(
+        battery_state,
+        BatteryState::Charging | BatteryState::Discharging
+    ) {
+        return None;
     }
+    let voltage_uv = read_sysfs_u64(path, "voltage_now");
+    let (now_uwh, full_uwh) = if let Some(full) = read_sysfs_u64(path, "energy_full") {
+        (read_sysfs_u64(path, "energy_now"), Some(full))
+    } else if let Some(c_full) = read_sysfs_u64(path, "charge_full") {
+        let scale_uwh =
+            |uah: u64| -> u64 { voltage_uv.map_or(uah, |uv| (uah.saturating_mul(uv)) / 1_000_000) };
+        (
+            read_sysfs_u64(path, "charge_now").map(scale_uwh),
+            Some(scale_uwh(c_full)),
+        )
+    } else {
+        (None, None)
+    };
+    let power_uw = read_sysfs_u64(path, "power_now").or_else(|| {
+        let cur_ua = read_sysfs_u64(path, "current_now")?;
+        let v_uv = voltage_uv?;
+        Some(cur_ua.saturating_mul(v_uv) / 1_000_000)
+    });
+    estimate_sysfs_time_remaining_from_readings(battery_state, power_uw, now_uwh, full_uwh)
+}
+
+fn estimate_sysfs_time_remaining_from_readings(
+    battery_state: BatteryState,
+    power_uw: Option<u64>,
+    now_uwh: Option<u64>,
+    full_uwh: Option<u64>,
+) -> Option<u32> {
+    let (Some(uw), Some(now), Some(full)) = (power_uw, now_uwh, full_uwh) else {
+        return None;
+    };
+    if uw < 200_000 {
+        return None;
+    }
+    let rem_uwh = match battery_state {
+        BatteryState::Discharging => now,
+        BatteryState::Charging => full.saturating_sub(now),
+        _ => return None,
+    };
+    let mins = (rem_uwh.saturating_mul(60)) / uw;
+    u32::try_from(mins).ok().filter(|&m| m > 0)
 }
 
 /// Parses `powerprofilesctl list` text output into active and available profiles (`RUSTYOS-131`).
@@ -526,4 +578,54 @@ fn set_power_profile_impl(profile: PowerProfile) -> bool {
         .args(["set", profile.as_str()])
         .status()
         .is_ok_and(|s| s.success())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        BatteryState, estimate_sysfs_time_remaining_from_readings, format_battery_time_remaining,
+    };
+
+    #[test]
+    fn format_battery_time_remaining_handles_hours_and_minutes() {
+        assert_eq!(format_battery_time_remaining(135, false), "2h 15m left");
+        assert_eq!(format_battery_time_remaining(120, false), "2h left");
+        assert_eq!(format_battery_time_remaining(45, true), "45m to full");
+        assert_eq!(format_battery_time_remaining(65, true), "1h 5m to full");
+        assert_eq!(format_battery_time_remaining(0, false), "1m left");
+    }
+
+    #[test]
+    fn estimate_sysfs_time_remaining_discharging_and_charging() {
+        // 40 Wh remaining at 10 W => 240 min
+        assert_eq!(
+            estimate_sysfs_time_remaining_from_readings(
+                BatteryState::Discharging,
+                Some(10_000_000),
+                Some(40_000_000),
+                Some(60_000_000),
+            ),
+            Some(240)
+        );
+        // 20 Wh to full at 20 W => 60 min
+        assert_eq!(
+            estimate_sysfs_time_remaining_from_readings(
+                BatteryState::Charging,
+                Some(20_000_000),
+                Some(40_000_000),
+                Some(60_000_000),
+            ),
+            Some(60)
+        );
+        // Very low power rate (< 0.2 W) returns None to avoid noisy estimates
+        assert_eq!(
+            estimate_sysfs_time_remaining_from_readings(
+                BatteryState::Discharging,
+                Some(100_000),
+                Some(40_000_000),
+                Some(60_000_000),
+            ),
+            None
+        );
+    }
 }

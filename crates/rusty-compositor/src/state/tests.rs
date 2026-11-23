@@ -2366,3 +2366,187 @@ fn dock_dnd_desktop_file_pin_and_spotlight_pin_at_index_work() -> Result<(), Box
     let _ = std::fs::remove_dir_all(&tmp);
     Ok(())
 }
+
+#[test]
+fn telemetry_drain_triggers_redraw_and_one_shot_low_battery_notifications()
+-> Result<(), Box<dyn Error>> {
+    use crate::telemetry::SystemTelemetry;
+    use rusty_ipc::Urgency;
+    use rusty_services::{BatteryState, PowerStatus};
+
+    let display: Display<RustyCompositorState> = Display::new()?;
+    let event_loop: EventLoop<RustyCompositorState> = EventLoop::try_new()?;
+    let mut compositor = RustyCompositorState::new(
+        &display,
+        "rusty-test-telemetry-drain".to_owned(),
+        event_loop.get_signal(),
+        event_loop.handle(),
+        (1280, 800).into(),
+    )?;
+
+    compositor.shell_redraw_needed = false;
+    compositor.drain_telemetry_updates();
+    assert!(!compositor.shell_redraw_needed);
+
+    // 1. Discharging at 18% with time remaining emits Normal "Low Battery" once and sets redraw.
+    let low = SystemTelemetry {
+        power: PowerStatus {
+            percentage: 18,
+            state: BatteryState::Discharging,
+            ac_online: false,
+            has_battery: true,
+            time_remaining_minutes: Some(42),
+        },
+        ..SystemTelemetry::default()
+    };
+    assert!(compositor.telemetry.replace_snapshot(low));
+    compositor.drain_telemetry_updates();
+    assert!(compositor.shell_redraw_needed);
+    assert_eq!(compositor.last_battery_warn_level, 1);
+    assert_eq!(compositor.notifications.len(), 1);
+    assert_eq!(compositor.notifications[0].urgency, Urgency::Normal);
+    assert_eq!(compositor.notifications[0].title, "Low Battery");
+    assert!(compositor.notifications[0].body.contains("42m left"));
+
+    // 2. Dropping to 15% does not spam another Low Battery notification.
+    let still_low = SystemTelemetry {
+        power: PowerStatus {
+            percentage: 15,
+            state: BatteryState::Discharging,
+            ac_online: false,
+            has_battery: true,
+            time_remaining_minutes: Some(33),
+        },
+        ..SystemTelemetry::default()
+    };
+    assert!(compositor.telemetry.replace_snapshot(still_low));
+    compositor.drain_telemetry_updates();
+    assert_eq!(compositor.notifications.len(), 1);
+
+    // 3. Dropping to 9% emits Critical "Critically Low Battery".
+    let critical = SystemTelemetry {
+        power: PowerStatus {
+            percentage: 9,
+            state: BatteryState::Discharging,
+            ac_online: false,
+            has_battery: true,
+            time_remaining_minutes: Some(14),
+        },
+        ..SystemTelemetry::default()
+    };
+    assert!(compositor.telemetry.replace_snapshot(critical));
+    compositor.drain_telemetry_updates();
+    assert_eq!(compositor.last_battery_warn_level, 2);
+    assert_eq!(compositor.notifications.len(), 2);
+    assert_eq!(compositor.notifications[1].urgency, Urgency::Critical);
+    assert_eq!(compositor.notifications[1].title, "Critically Low Battery");
+
+    // 4. Plugging AC back in resets warning tier to 0 so future discharges alert again.
+    let charging = SystemTelemetry {
+        power: PowerStatus {
+            percentage: 10,
+            state: BatteryState::Charging,
+            ac_online: true,
+            has_battery: true,
+            time_remaining_minutes: Some(90),
+        },
+        ..SystemTelemetry::default()
+    };
+    assert!(compositor.telemetry.replace_snapshot(charging));
+    compositor.drain_telemetry_updates();
+    assert_eq!(compositor.last_battery_warn_level, 0);
+    assert_eq!(compositor.notifications.len(), 2);
+    Ok(())
+}
+
+#[test]
+fn live_app_catalog_monitor_updates_spotlight_and_dock_metadata_without_restart()
+-> Result<(), Box<dyn Error>> {
+    use std::time::{Duration, Instant};
+
+    let display: Display<RustyCompositorState> = Display::new()?;
+    let event_loop: EventLoop<RustyCompositorState> = EventLoop::try_new()?;
+    let mut compositor = RustyCompositorState::new(
+        &display,
+        "rusty-test-live-catalog".to_owned(),
+        event_loop.get_signal(),
+        event_loop.handle(),
+        (1280, 800).into(),
+    )?;
+
+    let tmp =
+        std::env::temp_dir().join(format!("rustyos-live-catalog-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp)?;
+
+    // Start with empty catalog and watch the temporary applications directory.
+    compositor.launcher = crate::launcher::LauncherState::with_catalog(Vec::new());
+    compositor
+        .user_config
+        .dock_pinned_apps
+        .push("org.example.hotapp".to_owned());
+    compositor.refresh_dock_pin_metadata_cache();
+    assert!(
+        compositor
+            .dock_pin_meta_cache
+            .get("org.example.hotapp")
+            .and_then(|m| m.icon_name.as_deref())
+            .is_none()
+    );
+
+    compositor.app_catalog_monitor =
+        rusty_services::AppCatalogMonitorHandle::start_with_dirs(vec![tmp.clone()], None);
+    assert!(compositor.app_catalog_monitor.is_active());
+
+    // Simulate installing a new package dropping a `.desktop` entry while the session runs.
+    let desktop_path = tmp.join("org.example.hotapp.desktop");
+    std::fs::write(
+        &desktop_path,
+        "[Desktop Entry]\nType=Application\nName=HotInstalledApp\nComment=Installed live\nExec=/usr/bin/hotapp\nIcon=hotapp-icon\nKeywords=hot;live;\n",
+    )?;
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline && !compositor.app_catalog_monitor.take_dirty() {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    compositor
+        .launcher
+        .request_async_reload_dirs(vec![tmp.clone()]);
+
+    let reload_deadline = Instant::now() + Duration::from_secs(3);
+    compositor.shell_redraw_needed = false;
+    while Instant::now() < reload_deadline {
+        compositor.drain_app_catalog_updates();
+        if compositor
+            .launcher
+            .catalog
+            .iter()
+            .any(|app| app.id == "org.example.hotapp.desktop")
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(15));
+    }
+
+    assert!(compositor.shell_redraw_needed);
+    compositor.launcher.query = "HotInstalled".to_owned();
+    let results = compositor.launcher.filtered_candidates();
+    assert!(results.iter().any(|c| c.name == "HotInstalledApp"));
+    assert_eq!(
+        compositor
+            .dock_pin_meta_cache
+            .get("org.example.hotapp")
+            .and_then(|m| m.icon_name.as_deref()),
+        Some("hotapp-icon")
+    );
+    assert_eq!(
+        compositor
+            .dock_pin_meta_cache
+            .get("org.example.hotapp")
+            .and_then(|m| m.missing_since),
+        None
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp);
+    Ok(())
+}

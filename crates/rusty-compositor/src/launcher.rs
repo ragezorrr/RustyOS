@@ -2,14 +2,23 @@
 
 use std::collections::HashSet;
 use std::env;
+use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
+use std::thread;
 
 use tracing::{info, warn};
 
-const MAX_DESKTOP_FILES: usize = 512;
+const MAX_DESKTOP_FILES: usize = 1024;
 const MAX_QUERY_CHARS: usize = 128;
+
+/// Callback invoked when a background `.desktop` catalog rescan finishes (`RUSTYOS-164`).
+pub type CatalogReloadCallback = Arc<dyn Fn() + Send + Sync>;
 
 /// Single discovered or built-in desktop application entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,7 +61,6 @@ pub struct LauncherCandidate {
 }
 
 /// Live state for the Spotlight launcher inside `rusty-compositor`.
-#[derive(Debug)]
 pub struct LauncherState {
     /// Current UTF-8 search query.
     pub query: String,
@@ -66,6 +74,26 @@ pub struct LauncherState {
     launch_seq: u64,
     /// Spawned child processes reaped non-blockingly via `try_wait`.
     children: Vec<Child>,
+    /// Prevents overlapping background `.desktop` rescan threads (`RUSTYOS-164`).
+    reload_in_flight: Arc<AtomicBool>,
+    /// Pending catalog produced by a background rescan thread (`RUSTYOS-164`).
+    reloaded_catalog: Arc<Mutex<Option<Vec<LauncherApp>>>>,
+    /// Optional event-loop wakeup callback invoked once a background rescan finishes (`RUSTYOS-164`).
+    reload_waker: Arc<Mutex<Option<CatalogReloadCallback>>>,
+}
+
+impl fmt::Debug for LauncherState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LauncherState")
+            .field("query", &self.query)
+            .field("selected_index", &self.selected_index)
+            .field("catalog_len", &self.catalog.len())
+            .field(
+                "reload_in_flight",
+                &self.reload_in_flight.load(Ordering::Relaxed),
+            )
+            .finish_non_exhaustive()
+    }
 }
 
 impl Default for LauncherState {
@@ -88,6 +116,9 @@ impl LauncherState {
             x11_display: None,
             launch_seq: 0,
             children: Vec::new(),
+            reload_in_flight: Arc::new(AtomicBool::new(false)),
+            reloaded_catalog: Arc::new(Mutex::new(None)),
+            reload_waker: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -102,7 +133,74 @@ impl LauncherState {
             x11_display: None,
             launch_seq: 0,
             children: Vec::new(),
+            reload_in_flight: Arc::new(AtomicBool::new(false)),
+            reloaded_catalog: Arc::new(Mutex::new(None)),
+            reload_waker: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Registers a wakeup callback invoked when a background `.desktop` rescan completes (`RUSTYOS-164`).
+    pub fn set_reload_waker(&self, waker: CatalogReloadCallback) {
+        if let Ok(mut guard) = self.reload_waker.lock() {
+            *guard = Some(waker);
+        }
+    }
+
+    /// Triggers a non-blocking background `.desktop` rescan across all XDG/Flatpak directories (`RUSTYOS-164`).
+    pub fn request_async_reload(&self) {
+        self.request_async_reload_dirs(rusty_services::discover_application_dirs());
+    }
+
+    /// Triggers a non-blocking background `.desktop` rescan over explicit `dirs` (`RUSTYOS-164`).
+    pub fn request_async_reload_dirs(&self, dirs: Vec<PathBuf>) {
+        if self.reload_in_flight.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let in_flight = Arc::clone(&self.reload_in_flight);
+        let slot = Arc::clone(&self.reloaded_catalog);
+        let waker = Arc::clone(&self.reload_waker);
+        let spawned = thread::Builder::new()
+            .name("rustyos-app-scan".to_owned())
+            .spawn(move || {
+                let mut catalog = discover_desktop_apps_in_dirs(&dirs);
+                merge_builtin_fallbacks(&mut catalog);
+                sort_catalog(&mut catalog);
+                if let Ok(mut guard) = slot.lock() {
+                    *guard = Some(catalog);
+                }
+                in_flight.store(false, Ordering::Release);
+                let cb = waker.lock().ok().and_then(|g| g.clone());
+                if let Some(wake) = cb {
+                    wake();
+                }
+            });
+        if spawned.is_err() {
+            self.reload_in_flight.store(false, Ordering::Release);
+        }
+    }
+
+    /// Atomically applies a completed background `.desktop` rescan without blocking the event loop (`RUSTYOS-164`).
+    pub fn take_reloaded_catalog(&mut self) -> bool {
+        let next = self
+            .reloaded_catalog
+            .try_lock()
+            .ok()
+            .and_then(|mut guard| guard.take());
+        next.is_some_and(|catalog| self.replace_catalog(catalog))
+    }
+
+    /// Replaces the live catalog if it changed and keeps `selected_index` within bounds (`RUSTYOS-164`).
+    pub fn replace_catalog(&mut self, mut catalog: Vec<LauncherApp>) -> bool {
+        sort_catalog(&mut catalog);
+        if self.catalog == catalog {
+            return false;
+        }
+        self.catalog = catalog;
+        let max_idx = self.filtered_candidates().len().saturating_sub(1);
+        if self.selected_index > max_idx {
+            self.selected_index = max_idx;
+        }
+        true
     }
 
     /// Clears the current search query and resets selection to the top item.
@@ -997,24 +1095,15 @@ fn resolve_program_path_with(
 }
 
 fn discover_desktop_apps() -> Vec<LauncherApp> {
-    let mut dirs: Vec<PathBuf> = Vec::new();
-    if let Ok(xdg_data_home) = env::var("XDG_DATA_HOME") {
-        if !xdg_data_home.trim().is_empty() {
-            dirs.push(PathBuf::from(xdg_data_home).join("applications"));
-        }
-    } else if let Ok(home) = env::var("HOME")
-        && !home.trim().is_empty()
-    {
-        dirs.push(PathBuf::from(home).join(".local/share/applications"));
-    }
-    dirs.push(PathBuf::from("/usr/local/share/applications"));
-    dirs.push(PathBuf::from("/usr/share/applications"));
+    discover_desktop_apps_in_dirs(&rusty_services::discover_application_dirs())
+}
 
+pub(crate) fn discover_desktop_apps_in_dirs(dirs: &[PathBuf]) -> Vec<LauncherApp> {
     let mut seen_keys: HashSet<String> = HashSet::new();
     let mut apps: Vec<LauncherApp> = Vec::new();
 
     for dir in dirs {
-        let Ok(entries) = fs::read_dir(&dir) else {
+        let Ok(entries) = fs::read_dir(dir) else {
             continue;
         };
         for entry in entries.flatten() {

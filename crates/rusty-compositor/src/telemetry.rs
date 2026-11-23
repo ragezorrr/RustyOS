@@ -7,20 +7,24 @@ use std::collections::VecDeque;
 use std::fmt;
 use std::sync::{
     Arc, Condvar, Mutex,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
 };
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rusty_services::{
     AudioStatus, BluetoothStatus, BrightnessStatus, DeviceUsageService, DeviceUsageSnapshot,
     MediaAction, MediaStatus, NetworkStatus, PowerProfile, PowerStatus, ServiceRegistry,
-    SessionAction, UserAccount, local_clock_hhmm, local_clock_lock_date, local_clock_lock_hhmm,
-    local_clock_short_datetime_localized,
+    SessionAction, SystemSignalMask, SystemSignalMonitorHandle, UserAccount, local_clock_hhmm,
+    local_clock_lock_date, local_clock_lock_hhmm, local_clock_short_datetime_localized,
 };
 
 const POLL_INTERVAL_ACTIVE: Duration = Duration::from_secs(3);
 const POLL_INTERVAL_IDLE: Duration = Duration::from_secs(12);
+const SIGNAL_COALESCE_DEBOUNCE: Duration = Duration::from_millis(80);
+
+/// Callback invoked from the background telemetry thread when a live snapshot changes (`RUSTYOS-164`).
+pub type TelemetryChangeCallback = Arc<dyn Fn() + Send + Sync>;
 
 /// Snapshot of system hardware and service status rendered in `TopBar` and `QuickSettings`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -99,12 +103,67 @@ struct SharedState {
     cvar: Condvar,
     stop: AtomicBool,
     active_ui: AtomicBool,
+    revision: AtomicU64,
+    pending_signals: AtomicU8,
+    on_change: Mutex<Option<TelemetryChangeCallback>>,
+}
+
+impl SharedState {
+    fn new(initial: SystemTelemetry) -> Self {
+        Self {
+            latest: Mutex::new(Arc::new(initial)),
+            queue: Mutex::new(VecDeque::new()),
+            clock_locale: Mutex::new("en".to_owned()),
+            cvar: Condvar::new(),
+            stop: AtomicBool::new(false),
+            active_ui: AtomicBool::new(false),
+            revision: AtomicU64::new(0),
+            pending_signals: AtomicU8::new(0),
+            on_change: Mutex::new(None),
+        }
+    }
+
+    fn notify_change(&self) {
+        self.revision.fetch_add(1, Ordering::AcqRel);
+        let cb = self.on_change.lock().ok().and_then(|g| g.clone());
+        if let Some(wake) = cb {
+            wake();
+        }
+    }
+
+    fn update_snapshot_if_changed(&self, snap: SystemTelemetry) -> bool {
+        let changed = if let Ok(mut latest) = self.latest.lock() {
+            if **latest == snap {
+                false
+            } else {
+                *latest = Arc::new(snap);
+                true
+            }
+        } else {
+            false
+        };
+        if changed {
+            self.notify_change();
+        }
+        changed
+    }
+
+    fn enqueue_signal(&self, mask: SystemSignalMask) {
+        if mask.is_empty() {
+            return;
+        }
+        self.pending_signals.fetch_or(mask.bits(), Ordering::AcqRel);
+        if let Ok(_guard) = self.queue.lock() {
+            self.cvar.notify_all();
+        }
+    }
 }
 
 /// Non-blocking handle to live system telemetry and async audio controls.
 pub struct SystemMetricsHandle {
     shared: Arc<SharedState>,
     worker: Option<JoinHandle<()>>,
+    _signal_monitor: Option<SystemSignalMonitorHandle>,
 }
 
 impl fmt::Debug for SystemMetricsHandle {
@@ -112,6 +171,7 @@ impl fmt::Debug for SystemMetricsHandle {
         f.debug_struct("SystemMetricsHandle")
             .field("has_worker", &self.worker.is_some())
             .field("active_ui", &self.is_active_ui())
+            .field("revision", &self.revision())
             .finish_non_exhaustive()
     }
 }
@@ -125,7 +185,9 @@ impl Default for SystemMetricsHandle {
 impl Drop for SystemMetricsHandle {
     fn drop(&mut self) {
         self.shared.stop.store(true, Ordering::Release);
-        self.shared.cvar.notify_all();
+        if let Ok(_guard) = self.shared.queue.lock() {
+            self.shared.cvar.notify_all();
+        }
     }
 }
 
@@ -140,29 +202,22 @@ impl SystemMetricsHandle {
     #[must_use]
     pub fn with_initial(initial: SystemTelemetry) -> Self {
         Self {
-            shared: Arc::new(SharedState {
-                latest: Mutex::new(Arc::new(initial)),
-                queue: Mutex::new(VecDeque::new()),
-                clock_locale: Mutex::new("en".to_owned()),
-                cvar: Condvar::new(),
-                stop: AtomicBool::new(false),
-                active_ui: AtomicBool::new(false),
-            }),
+            shared: Arc::new(SharedState::new(initial)),
             worker: None,
+            _signal_monitor: None,
         }
     }
 
-    /// Spawns a background poller thread refreshing `Power`, `Network`, `Audio`, and clock every 3s (active) or 12s (idle).
+    /// Spawns a background telemetry worker plus reactive system D-Bus signal subscriptions
+    /// (`UPower`, `NetworkManager`, `BlueZ`) with 3s active / 12s idle fallback polling (`RUSTYOS-164`).
     #[must_use]
     pub fn start_background() -> Self {
-        let shared = Arc::new(SharedState {
-            latest: Mutex::new(Arc::new(SystemTelemetry::default())),
-            queue: Mutex::new(VecDeque::new()),
-            clock_locale: Mutex::new("en".to_owned()),
-            cvar: Condvar::new(),
-            stop: AtomicBool::new(false),
-            active_ui: AtomicBool::new(false),
-        });
+        let shared = Arc::new(SharedState::new(SystemTelemetry::default()));
+
+        let signal_shared = Arc::clone(&shared);
+        let signal_monitor = SystemSignalMonitorHandle::start_background(Arc::new(move |mask| {
+            signal_shared.enqueue_signal(mask);
+        }));
 
         let thread_shared = Arc::clone(&shared);
         let worker = thread::Builder::new()
@@ -170,7 +225,35 @@ impl SystemMetricsHandle {
             .spawn(move || telemetry_worker_loop(&thread_shared))
             .ok();
 
-        Self { shared, worker }
+        Self {
+            shared,
+            worker,
+            _signal_monitor: Some(signal_monitor),
+        }
+    }
+
+    /// Installs or replaces the wakeup callback invoked whenever cached telemetry changes (`RUSTYOS-164`).
+    pub fn set_on_change(&self, cb: TelemetryChangeCallback) {
+        if let Ok(mut guard) = self.shared.on_change.lock() {
+            *guard = Some(cb);
+        }
+    }
+
+    /// Returns the monotonic revision incremented whenever the telemetry snapshot changes (`RUSTYOS-164`).
+    #[must_use]
+    pub fn revision(&self) -> u64 {
+        self.shared.revision.load(Ordering::Acquire)
+    }
+
+    /// Notifies the background telemetry worker that one or more system D-Bus domains changed (`RUSTYOS-164`).
+    pub fn notify_system_signal(&self, mask: SystemSignalMask) {
+        self.shared.enqueue_signal(mask);
+    }
+
+    /// Replaces the cached telemetry snapshot and fires the change callback if it differs (`RUSTYOS-164`).
+    #[must_use]
+    pub fn replace_snapshot(&self, snap: SystemTelemetry) -> bool {
+        self.shared.update_snapshot_if_changed(snap)
     }
 
     /// Returns a shared read-only handle to the latest cached telemetry without cloning strings or lists (`RUSTYOS-119`).
@@ -488,8 +571,17 @@ impl SystemMetricsHandle {
     }
 }
 
+fn refresh_clock_fields(snap: &mut SystemTelemetry, clock_locale: &str) {
+    snap.clock_hhmm = local_clock_hhmm();
+    snap.clock_date_hhmm = local_clock_short_datetime_localized(clock_locale, false);
+    snap.clock_date_24h = local_clock_short_datetime_localized(clock_locale, true);
+    snap.lock_date = local_clock_lock_date();
+    snap.lock_time_hhmm = local_clock_lock_hhmm(false);
+    snap.lock_time_24h = local_clock_lock_hhmm(true);
+}
+
 fn poll_once(services: &ServiceRegistry, clock_locale: &str) -> SystemTelemetry {
-    SystemTelemetry {
+    let mut snap = SystemTelemetry {
         power: services.power.query_status(),
         network: services.network.query_status(),
         bluetooth: services.bluetooth.query_status(),
@@ -498,13 +590,114 @@ fn poll_once(services: &ServiceRegistry, clock_locale: &str) -> SystemTelemetry 
         media: services.media.query_status(),
         users: services.users.query_users(),
         device_usage: DeviceUsageService.query_snapshot(),
-        clock_hhmm: local_clock_hhmm(),
-        clock_date_hhmm: local_clock_short_datetime_localized(clock_locale, false),
-        clock_date_24h: local_clock_short_datetime_localized(clock_locale, true),
-        lock_date: local_clock_lock_date(),
-        lock_time_hhmm: local_clock_lock_hhmm(false),
-        lock_time_24h: local_clock_lock_hhmm(true),
+        ..SystemTelemetry::default()
+    };
+    refresh_clock_fields(&mut snap, clock_locale);
+    snap
+}
+
+fn poll_targeted(
+    services: &ServiceRegistry,
+    shared: &SharedState,
+    mask: SystemSignalMask,
+    clock_locale: &str,
+) -> SystemTelemetry {
+    let mut snap = shared
+        .latest
+        .lock()
+        .map_or_else(|_| SystemTelemetry::default(), |g| (**g).clone());
+    if mask.has_power() {
+        snap.power = services.power.query_status();
     }
+    if mask.has_network() {
+        snap.network = services.network.query_status();
+    }
+    if mask.has_bluetooth() {
+        snap.bluetooth = services.bluetooth.query_status();
+    }
+    refresh_clock_fields(&mut snap, clock_locale);
+    snap
+}
+
+fn apply_telemetry_cmd(services: &ServiceRegistry, cmd: TelemetryCmd) {
+    match cmd {
+        TelemetryCmd::RefreshNow => {}
+        TelemetryCmd::SetVolume(pct) => {
+            let _ = services.audio.set_volume(pct);
+        }
+        TelemetryCmd::ToggleMute => {
+            let _ = services.audio.toggle_mute();
+        }
+        TelemetryCmd::SetAudioOutput(id) => {
+            let _ = services.audio.set_default_output(&id);
+        }
+        TelemetryCmd::CycleAudioOutput => {
+            let _ = services.audio.cycle_next_output();
+        }
+        TelemetryCmd::SetBluetoothPowered(enabled) => {
+            let _ = services.bluetooth.set_powered(enabled);
+        }
+        TelemetryCmd::SetPowerProfile(profile) => {
+            let _ = services.power.set_power_profile(profile);
+        }
+        TelemetryCmd::SetWifiEnabled(enabled) => {
+            let _ = services.network.set_wifi_enabled(enabled);
+        }
+        TelemetryCmd::ConnectWifi(ssid) => {
+            if let Err(err) = services.network.connect_wifi_with_password(&ssid, None) {
+                tracing::warn!(ssid = %ssid, error = %err, "Wi-Fi connection failed");
+            }
+        }
+        TelemetryCmd::SetBrightness(pct) => {
+            let _ = services.brightness.set_percent(pct);
+        }
+        TelemetryCmd::MediaControl(action) => {
+            let _ = services.media.dispatch(action);
+        }
+        TelemetryCmd::Session(action) => {
+            let _ = services.session.dispatch(action);
+        }
+    }
+}
+
+fn wait_coalesced_signals(
+    shared: &SharedState,
+    initial_bits: u8,
+    cmds: &mut Vec<TelemetryCmd>,
+) -> SystemSignalMask {
+    let mut combined = initial_bits;
+    let deadline = Instant::now() + SIGNAL_COALESCE_DEBOUNCE;
+    if let Ok(mut guard) = shared.queue.lock() {
+        loop {
+            if shared.stop.load(Ordering::Acquire) || !guard.is_empty() {
+                break;
+            }
+            let Some(rem) = deadline.checked_duration_since(Instant::now()) else {
+                break;
+            };
+            if rem.is_zero() {
+                break;
+            }
+            let Ok((new_guard, _)) = shared.cvar.wait_timeout(guard, rem) else {
+                combined |= shared.pending_signals.swap(0, Ordering::AcqRel);
+                return SystemSignalMask::from_bits(combined);
+            };
+            guard = new_guard;
+            combined |= shared.pending_signals.swap(0, Ordering::AcqRel);
+        }
+        while let Some(c) = guard.pop_front() {
+            cmds.push(c);
+        }
+    }
+    combined |= shared.pending_signals.swap(0, Ordering::AcqRel);
+    SystemSignalMask::from_bits(combined)
+}
+
+fn read_clock_locale(shared: &SharedState) -> String {
+    shared
+        .clock_locale
+        .lock()
+        .map_or_else(|_| "en".to_owned(), |g| g.clone())
 }
 
 fn telemetry_worker_loop(shared: &SharedState) {
@@ -512,19 +705,14 @@ fn telemetry_worker_loop(shared: &SharedState) {
     services.audio.ensure_session_audio_ready();
 
     // Perform initial snapshot outside lock
-    let locale = shared
-        .clock_locale
-        .lock()
-        .map_or_else(|_| "en".to_owned(), |g| g.clone());
+    let locale = read_clock_locale(shared);
     let initial = poll_once(&services, &locale);
-    if let Ok(mut latest) = shared.latest.lock() {
-        *latest = Arc::new(initial);
-    }
+    let _ = shared.update_snapshot_if_changed(initial);
 
     while !shared.stop.load(Ordering::Acquire) {
         let mut cmds = Vec::new();
         if let Ok(mut guard) = shared.queue.lock() {
-            if guard.is_empty() {
+            if guard.is_empty() && shared.pending_signals.load(Ordering::Acquire) == 0 {
                 let interval = if shared.active_ui.load(Ordering::Relaxed) {
                     POLL_INTERVAL_ACTIVE
                 } else {
@@ -545,55 +733,27 @@ fn telemetry_worker_loop(shared: &SharedState) {
             break;
         }
 
-        for cmd in cmds {
-            match cmd {
-                TelemetryCmd::RefreshNow => {}
-                TelemetryCmd::SetVolume(pct) => {
-                    let _ = services.audio.set_volume(pct);
-                }
-                TelemetryCmd::ToggleMute => {
-                    let _ = services.audio.toggle_mute();
-                }
-                TelemetryCmd::SetAudioOutput(id) => {
-                    let _ = services.audio.set_default_output(&id);
-                }
-                TelemetryCmd::CycleAudioOutput => {
-                    let _ = services.audio.cycle_next_output();
-                }
-                TelemetryCmd::SetBluetoothPowered(enabled) => {
-                    let _ = services.bluetooth.set_powered(enabled);
-                }
-                TelemetryCmd::SetPowerProfile(profile) => {
-                    let _ = services.power.set_power_profile(profile);
-                }
-                TelemetryCmd::SetWifiEnabled(enabled) => {
-                    let _ = services.network.set_wifi_enabled(enabled);
-                }
-                TelemetryCmd::ConnectWifi(ssid) => {
-                    if let Err(err) = services.network.connect_wifi_with_password(&ssid, None) {
-                        tracing::warn!(ssid = %ssid, error = %err, "Wi-Fi connection failed");
-                    }
-                }
-                TelemetryCmd::SetBrightness(pct) => {
-                    let _ = services.brightness.set_percent(pct);
-                }
-                TelemetryCmd::MediaControl(action) => {
-                    let _ = services.media.dispatch(action);
-                }
-                TelemetryCmd::Session(action) => {
-                    let _ = services.session.dispatch(action);
-                }
+        let signal_bits = shared.pending_signals.swap(0, Ordering::AcqRel);
+        if cmds.is_empty() && signal_bits != 0 {
+            let mask = wait_coalesced_signals(shared, signal_bits, &mut cmds);
+            if shared.stop.load(Ordering::Acquire) {
+                break;
+            }
+            if cmds.is_empty() {
+                let locale = read_clock_locale(shared);
+                let snap = poll_targeted(&services, shared, mask, &locale);
+                let _ = shared.update_snapshot_if_changed(snap);
+                continue;
             }
         }
 
-        let locale = shared
-            .clock_locale
-            .lock()
-            .map_or_else(|_| "en".to_owned(), |g| g.clone());
-        let snap = poll_once(&services, &locale);
-        if let Ok(mut latest) = shared.latest.lock() {
-            *latest = Arc::new(snap);
+        for cmd in cmds {
+            apply_telemetry_cmd(&services, cmd);
         }
+
+        let locale = read_clock_locale(shared);
+        let snap = poll_once(&services, &locale);
+        let _ = shared.update_snapshot_if_changed(snap);
     }
 }
 
@@ -694,5 +854,37 @@ mod tests {
         assert!(handle.is_active_ui());
         handle.set_active_ui(false);
         assert!(!handle.is_active_ui());
+    }
+
+    #[test]
+    fn replace_snapshot_bumps_revision_and_fires_on_change_only_on_delta() {
+        let handle = SystemMetricsHandle::static_default();
+        let wakes = Arc::new(AtomicU64::new(0));
+        let wakes_cb = Arc::clone(&wakes);
+        handle.set_on_change(Arc::new(move || {
+            wakes_cb.fetch_add(1, Ordering::AcqRel);
+        }));
+        assert_eq!(handle.revision(), 0);
+
+        // Identical snapshot must not bump revision or wake the compositor.
+        assert!(!handle.replace_snapshot(SystemTelemetry::default()));
+        assert_eq!(handle.revision(), 0);
+        assert_eq!(wakes.load(Ordering::Acquire), 0);
+
+        // Changed power state bumps revision and invokes the wakeup callback.
+        let mut unplugged = SystemTelemetry::default();
+        unplugged.power.has_battery = true;
+        unplugged.power.ac_online = false;
+        unplugged.power.percentage = 78;
+        unplugged.power.state = rusty_services::BatteryState::Discharging;
+        unplugged.power.time_remaining_minutes = Some(135);
+        assert!(handle.replace_snapshot(unplugged.clone()));
+        assert_eq!(handle.revision(), 1);
+        assert_eq!(wakes.load(Ordering::Acquire), 1);
+
+        // Repeating the same unplugged snapshot stays silent.
+        assert!(!handle.replace_snapshot(unplugged));
+        assert_eq!(handle.revision(), 1);
+        assert_eq!(wakes.load(Ordering::Acquire), 1);
     }
 }

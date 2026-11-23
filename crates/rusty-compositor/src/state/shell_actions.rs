@@ -43,6 +43,9 @@ impl RustyCompositorState {
             self.close_wifi_popover();
             self.close_notification_center();
             self.close_overview();
+            if !self.app_catalog_monitor.is_active() {
+                self.launcher.request_async_reload();
+            }
         }
         self.launcher.reset();
         self.retarget_launcher_anim();

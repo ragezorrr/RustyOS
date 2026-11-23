@@ -1652,19 +1652,15 @@ fn try_run_native_drm_session_once(
     let (ping, ping_source) = make_ping().map_err(|err| {
         CompositorError::EventLoop(format!("failed to initialize event loop ping: {err}"))
     })?;
-    state.dbus_notifications.set_waker(ping.clone());
-    let trash_ping = ping.clone();
-    state
-        .trash_monitor
-        .set_on_change(std::sync::Arc::new(move || trash_ping.ping()));
-    let dnd_ping = ping.clone();
-    state.set_dock_dnd_waker(std::sync::Arc::new(move || dnd_ping.ping()));
-    state.loop_waker = Some(ping);
+    state.attach_event_loop_waker(ping);
 
     let rt_ping = Rc::clone(&runtime);
     loop_handle
         .insert_source(ping_source, move |_event, _metadata, app_state| {
             app_state.drain_dock_dnd_events();
+            app_state.drain_telemetry_updates();
+            app_state.drain_app_catalog_updates();
+            app_state.drain_trash_monitor_updates();
             let now = Instant::now();
             let mut rt = rt_ping.borrow_mut();
             let client_committed =

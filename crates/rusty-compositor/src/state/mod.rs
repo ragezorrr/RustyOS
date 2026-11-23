@@ -633,6 +633,12 @@ pub struct RustyCompositorState {
     pub trash_has_items: bool,
     /// Non-blocking background `inotify` + `/proc/self/mountinfo` Trash monitor (`RUSTYOS-162`).
     pub trash_monitor: rusty_services::TrashMonitorHandle,
+    /// Last applied telemetry snapshot revision for reactive `TopBar` redraws (`RUSTYOS-164`).
+    pub last_telemetry_revision: u64,
+    /// Last emitted low-battery warning tier (`0` = none, `1` = low `<=20%`, `2` = critical `<=10%`) (`RUSTYOS-164`).
+    pub last_battery_warn_level: u8,
+    /// Non-blocking background `inotify` `.desktop` application catalog monitor (`RUSTYOS-164`).
+    pub app_catalog_monitor: rusty_services::AppCatalogMonitorHandle,
     /// Last clicked desktop canvas item and timestamp for double-click detection (`RUSTYOS-081`).
     pub last_desktop_click: Option<(std::path::PathBuf, std::time::Instant)>,
     /// Last time desktop directory was scanned for canvas items (`RUSTYOS-081`).
@@ -1095,6 +1101,9 @@ impl RustyCompositorState {
             trash_has_items: crate::state::context_menu_actions::resolve_trash_root()
                 .is_some_and(|r| crate::state::context_menu_actions::trash_item_count(&r) > 0),
             trash_monitor: rusty_services::TrashMonitorHandle::default(),
+            last_telemetry_revision: 0,
+            last_battery_warn_level: 0,
+            app_catalog_monitor: rusty_services::AppCatalogMonitorHandle::default(),
             last_desktop_click: None,
             desktop_last_scan: std::time::Instant::now(),
             top_bar_menu_hover_row: None,
@@ -1564,6 +1573,87 @@ impl RustyCompositorState {
             && self.trash_has_items != has_items
         {
             self.trash_has_items = has_items;
+            self.shell_redraw_needed = true;
+        }
+    }
+
+    /// Non-blockingly drains reactive `SystemTelemetry` updates and checks low-battery alerts (`RUSTYOS-164`).
+    pub fn drain_telemetry_updates(&mut self) {
+        let rev = self.telemetry.revision();
+        if rev != self.last_telemetry_revision {
+            self.last_telemetry_revision = rev;
+            self.shell_redraw_needed = true;
+            let power = self.telemetry.snapshot_arc().power.clone();
+            self.evaluate_low_battery_alert(&power);
+        }
+    }
+
+    fn evaluate_low_battery_alert(&mut self, power: &rusty_services::PowerStatus) {
+        if !power.has_battery
+            || power.ac_online
+            || matches!(
+                power.state,
+                rusty_services::BatteryState::Charging | rusty_services::BatteryState::Full
+            )
+        {
+            self.last_battery_warn_level = 0;
+            return;
+        }
+        if power.percentage <= 10 {
+            if self.last_battery_warn_level < 2 {
+                self.last_battery_warn_level = 2;
+                let body = power.time_remaining_minutes.map_or_else(
+                    || format!("{}% remaining. Plug in power now.", power.percentage),
+                    |mins| {
+                        format!(
+                            "{}% remaining ({}). Plug in power now.",
+                            power.percentage,
+                            rusty_services::format_battery_time_remaining(mins, false)
+                        )
+                    },
+                );
+                let _ = self.push_notification(
+                    rusty_ipc::Urgency::Critical,
+                    "Critically Low Battery".to_owned(),
+                    body,
+                );
+            }
+        } else if power.percentage <= 20 {
+            if self.last_battery_warn_level < 1 {
+                self.last_battery_warn_level = 1;
+                let body = power.time_remaining_minutes.map_or_else(
+                    || {
+                        format!(
+                            "{}% remaining. Connect your charger soon.",
+                            power.percentage
+                        )
+                    },
+                    |mins| {
+                        format!(
+                            "{}% remaining ({}). Connect your charger soon.",
+                            power.percentage,
+                            rusty_services::format_battery_time_remaining(mins, false)
+                        )
+                    },
+                );
+                let _ = self.push_notification(
+                    rusty_ipc::Urgency::Normal,
+                    "Low Battery".to_owned(),
+                    body,
+                );
+            }
+        } else if power.percentage >= 25 {
+            self.last_battery_warn_level = 0;
+        }
+    }
+
+    /// Non-blockingly drains live `inotify` `.desktop` catalog events and completed rescans (`RUSTYOS-164`).
+    pub fn drain_app_catalog_updates(&mut self) {
+        if self.app_catalog_monitor.take_dirty() {
+            self.launcher.request_async_reload();
+        }
+        if self.launcher.take_reloaded_catalog() {
+            self.refresh_dock_pin_metadata_cache();
             self.shell_redraw_needed = true;
         }
     }

@@ -41,6 +41,27 @@ impl RustyCompositorState {
             self.trash_has_items = trash_full;
             self.shell_redraw_needed = true;
         }
+        self.app_catalog_monitor = rusty_services::AppCatalogMonitorHandle::start_background(None);
+    }
+
+    /// Attaches the compositor event-loop `calloop::ping` waker to all reactive background services (`RUSTYOS-164`).
+    pub fn attach_event_loop_waker(&mut self, ping: smithay::reexports::calloop::ping::Ping) {
+        self.dbus_notifications.set_waker(ping.clone());
+        let trash_ping = ping.clone();
+        self.trash_monitor
+            .set_on_change(std::sync::Arc::new(move || trash_ping.ping()));
+        let telemetry_ping = ping.clone();
+        self.telemetry
+            .set_on_change(std::sync::Arc::new(move || telemetry_ping.ping()));
+        let catalog_ping = ping.clone();
+        self.app_catalog_monitor
+            .set_on_change(std::sync::Arc::new(move || catalog_ping.ping()));
+        let launcher_ping = ping.clone();
+        self.launcher
+            .set_reload_waker(std::sync::Arc::new(move || launcher_ping.ping()));
+        let dnd_ping = ping.clone();
+        self.set_dock_dnd_waker(std::sync::Arc::new(move || dnd_ping.ping()));
+        self.loop_waker = Some(ping);
     }
 
     /// Returns `true` and clears the pending shell redraw flag when async security events updated UI state.

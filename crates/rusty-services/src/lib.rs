@@ -3,6 +3,7 @@
 //! Provides zero-panic, least-privilege adapters for power/battery, network,
 //! audio, and session management with graceful fallback if services are absent.
 
+pub mod app_catalog_monitor;
 pub mod appruntime;
 pub mod auth;
 pub mod file_manager;
@@ -13,10 +14,16 @@ pub mod polkit;
 pub mod portal;
 pub mod privacy;
 pub mod storage;
+pub mod system_signals;
 pub mod theme_sync;
 pub mod timedate;
 pub mod trash_monitor;
 pub mod updates;
+
+pub use app_catalog_monitor::{
+    APP_CATALOG_DEBOUNCE, AppCatalogMonitorHandle, discover_application_dirs,
+    discover_application_dirs_from,
+};
 
 pub use appruntime::{
     DEFAULT_RUSTYOS_MIMEAPPS_LIST, DEFAULT_USER_DIRS_CONFIG, DEFAULT_XDG_USER_SUBDIRS,
@@ -77,11 +84,14 @@ pub use media::{
 };
 pub use power::{
     BatteryCondition, BatteryState, PowerDetails, PowerProfile, PowerService, PowerStatus,
-    parse_powerprofilesctl_list,
+    format_battery_time_remaining, parse_powerprofilesctl_list,
 };
 pub use privacy::{DeviceUsageService, DeviceUsageSnapshot, parse_pipewire_dump_usage};
 pub use storage::{
     RemovableVolume, StorageService, is_valid_block_device_path, parse_lsblk_removable_volumes,
+};
+pub use system_signals::{
+    SystemSignalMask, SystemSignalMonitorHandle, classify_system_signal_path,
 };
 pub use theme_sync::{ThemeSyncConfig, ThemeSyncService, merge_gtk_settings_ini};
 pub use timedate::{

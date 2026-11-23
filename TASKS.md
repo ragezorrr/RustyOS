@@ -2700,6 +2700,20 @@ hardware/software context и низкие накладные расходы.
   - `read_fd_bounded_with_timeout` (EOF, `max_bytes`, timeout stall), `parse_uri_list` (percent-decoding, отклонение удалённых хостов и NUL, дедупликация), `mime_for_path`/`desktop_mime_matches`/`expand_exec_argv_with_paths`, `resolve_dock_drop_target_at`, `DockDropHighlight::PinInsert`, `.desktop` pin-drop, Spotlight `pin_app_at_index` и `encode_paths_uri_list` покрыты unit-тестами (`69` в `rusty-services`, `228` в `rusty-compositor`, `27` в `rusty-files`); `cargo fmt --check`, `clippy -D warnings` и живые `--winit` Light (`rusty-files` + `Move to Trash` halo) / Dark (`PinInsert` gap + `Pin Terminal` + floating dragged icon) прогоны проходят чисто с 0 WARN/ERROR.
 - **Risks:** Низкие; 0 новых внешних Cargo-зависимостей, `crates/rusty-compositor` без `unsafe`.
 
+### RUSTYOS-164 — Реактивная системная D-Bus телеметрия `TopBar` и живой `inotify`-каталог `.desktop` для Spotlight и Dock
+- **Status:** Done
+- **Goal:** Устранить задержку обновления индикаторов батареи и Wi-Fi/Bluetooth в `TopBar` за счёт реактивных системных D-Bus подписок (`UPower`, `NetworkManager`, `BlueZ`) с `80 ms` coalesce-дебаунсом, таргетированного быстрого обновления, `revision` и `calloop::ping` пробуждения перерисовки; добавить время до разряда/заряда в `Battery` popover и одноразовые уведомления о низком заряде (`<=20%`/`<=10%`); реализовать фоновый `inotify`-монитор всех XDG + `$XDG_DATA_DIRS` + Flatpak каталогов `.desktop` (`250 ms` debounce) для живого обновления Spotlight и кэша Dock без перезапуска сессии.
+- **Dependencies:** `RUSTYOS-021`, `RUSTYOS-131`, `RUSTYOS-141`, `RUSTYOS-162`.
+- **Scope:**
+  - `crates/rusty-services/src/{system_signals.rs, app_catalog_monitor.rs, power.rs, lib.rs}`.
+  - `crates/rusty-compositor/src/{telemetry.rs, launcher.rs, drm_backend.rs, winit_backend.rs, frame_composer.rs}`.
+  - `crates/rusty-compositor/src/shell_render/topbar_popovers.rs`.
+  - `crates/rusty-compositor/src/state/{mod.rs, system_bridges.rs, shell_actions.rs, tests.rs}`.
+  - `docs/adr/0093-reactive-topbar-dbus-telemetry-and-live-launcher-catalog.md`, `DECISIONS.md` (`D-107`), `ARCHITECTURE.md` §7.
+- **Acceptance Criteria:**
+  - `classify_system_signal_path`, `format_battery_time_remaining`, `estimate_sysfs_time_remaining_from_readings`, `discover_application_dirs_from` (включая `$XDG_DATA_DIRS` и Flatpak), живой `inotify` тест `AppCatalogMonitorHandle`, `SystemMetricsHandle::replace_snapshot` (`revision` + `on_change` только на реальную дельту), `format_battery_popover_status`, `drain_telemetry_updates` (одноразовые `Low Battery` / `Critically Low Battery` + сброс на AC) и живое обновление Spotlight + `dock_pin_meta_cache` без рестарта покрыты unit-тестами (`74` в `rusty-services`, `232` в `rusty-compositor`); `cargo fmt --check`, `clippy -D warnings` и живые `--winit` Light/Dark прогоны `Battery` popover (`68% • 2h 15m left`) проходят чисто с 0 WARN/ERROR.
+- **Risks:** Низкие; 0 новых внешних Cargo-зависимостей, `crates/rusty-compositor` без `unsafe`.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

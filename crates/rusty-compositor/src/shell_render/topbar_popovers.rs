@@ -1,6 +1,9 @@
 //! Compact `TopBar` Liquid Glass popovers for Volume, Battery, and Bluetooth (`RUSTYOS-141`, ADR-0082).
 
-use rusty_services::{AudioStatus, BluetoothStatus, PowerProfile, PowerStatus};
+use rusty_services::{
+    AudioStatus, BatteryState, BluetoothStatus, PowerProfile, PowerStatus,
+    format_battery_time_remaining,
+};
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::utils::{Physical, Point, Rectangle, Size};
 
@@ -153,19 +156,7 @@ pub fn compute_topbar_quick_popover_layout(
                 ("Sound".to_owned(), status, rows)
             }
             TopBarQuickPopoverKind::Battery => {
-                let status = if state.power.has_battery {
-                    format!(
-                        "{}% • {}",
-                        state.power.percentage,
-                        if state.power.ac_online {
-                            "Plugged In"
-                        } else {
-                            "On Battery"
-                        }
-                    )
-                } else {
-                    "AC Power".to_owned()
-                };
+                let status = format_battery_popover_status(state.power);
                 (
                     "Battery".to_owned(),
                     status,
@@ -397,9 +388,87 @@ pub(super) fn render_topbar_quick_popover_composite(
     );
 }
 
+/// Formats the compact Battery popover subtitle including time remaining when available (`RUSTYOS-164`).
+#[must_use]
+pub(crate) fn format_battery_popover_status(power: &PowerStatus) -> String {
+    if !power.has_battery {
+        return "AC Power".to_owned();
+    }
+    match power.state {
+        BatteryState::Charging => power.time_remaining_minutes.map_or_else(
+            || format!("{}% • Charging", power.percentage),
+            |mins| {
+                format!(
+                    "{}% • Charging • {}",
+                    power.percentage,
+                    format_battery_time_remaining(mins, true)
+                )
+            },
+        ),
+        BatteryState::Discharging => power.time_remaining_minutes.map_or_else(
+            || format!("{}% • On Battery", power.percentage),
+            |mins| {
+                format!(
+                    "{}% • {}",
+                    power.percentage,
+                    format_battery_time_remaining(mins, false)
+                )
+            },
+        ),
+        BatteryState::Full | BatteryState::Unknown => format!(
+            "{}% • {}",
+            power.percentage,
+            if power.ac_online {
+                "Plugged In"
+            } else {
+                "On Battery"
+            }
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn battery_popover_status_formats_time_remaining_and_fallback_states() {
+        let discharging = PowerStatus {
+            percentage: 82,
+            state: BatteryState::Discharging,
+            ac_online: false,
+            has_battery: true,
+            time_remaining_minutes: Some(135),
+        };
+        assert_eq!(
+            format_battery_popover_status(&discharging),
+            "82% • 2h 15m left"
+        );
+
+        let charging = PowerStatus {
+            percentage: 64,
+            state: BatteryState::Charging,
+            ac_online: true,
+            has_battery: true,
+            time_remaining_minutes: Some(45),
+        };
+        assert_eq!(
+            format_battery_popover_status(&charging),
+            "64% • Charging • 45m to full"
+        );
+
+        let ac_full = PowerStatus {
+            percentage: 100,
+            state: BatteryState::Full,
+            ac_online: true,
+            has_battery: true,
+            time_remaining_minutes: None,
+        };
+        assert_eq!(format_battery_popover_status(&ac_full), "100% • Plugged In");
+
+        let desktop = PowerStatus::default();
+        assert_eq!(format_battery_popover_status(&desktop), "AC Power");
+    }
 
     #[test]
     fn volume_and_battery_popovers_layout_and_hit_test_cleanly() {

@@ -92,17 +92,13 @@ pub fn run_nested_winit(config: &CompositorConfig) -> Result<BootstrapReport, Co
     let (ping, ping_source) = make_ping().map_err(|err| {
         CompositorError::EventLoop(format!("failed to initialize event loop ping: {err}"))
     })?;
-    state.dbus_notifications.set_waker(ping.clone());
-    let trash_ping = ping.clone();
-    state
-        .trash_monitor
-        .set_on_change(std::sync::Arc::new(move || trash_ping.ping()));
-    let dnd_ping = ping.clone();
-    state.set_dock_dnd_waker(std::sync::Arc::new(move || dnd_ping.ping()));
-    state.loop_waker = Some(ping);
+    state.attach_event_loop_waker(ping);
     loop_handle
         .insert_source(ping_source, move |_event, _metadata, app_state| {
             app_state.drain_dock_dnd_events();
+            app_state.drain_telemetry_updates();
+            app_state.drain_app_catalog_updates();
+            app_state.drain_trash_monitor_updates();
         })
         .map_err(|err| CompositorError::EventLoop(err.to_string()))?;
 
@@ -220,6 +216,20 @@ pub fn run_nested_winit(config: &CompositorConfig) -> Result<BootstrapReport, Co
                             app_state.active_top_bar_menu =
                                 Some(crate::shell_render::TopBarMenuHit::Window);
                             app_state.top_bar_menu_hover_row = Some(2);
+                        } else if menu_test == "battery_popover" {
+                            let mut snap = app_state.telemetry.snapshot();
+                            snap.power = rusty_services::PowerStatus {
+                                percentage: 68,
+                                state: rusty_services::BatteryState::Discharging,
+                                ac_online: false,
+                                has_battery: true,
+                                time_remaining_minutes: Some(135),
+                            };
+                            let _ = app_state.telemetry.replace_snapshot(snap);
+                            app_state.drain_telemetry_updates();
+                            app_state.toggle_top_bar_quick_popover(
+                                crate::shell_render::TopBarQuickPopoverKind::Battery,
+                            );
                         }
                         app_state.pending_screenshot =
                             Some(crate::screenshot::ScreenshotRequest::FullScreen);
