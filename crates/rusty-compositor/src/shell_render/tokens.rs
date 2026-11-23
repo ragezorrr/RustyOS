@@ -195,17 +195,17 @@ pub(super) fn resolved_icon_to_element(
 /// Resize grab border thickness in logical pixels (`RUSTYOS-022`).
 pub const RESIZE_GRAB_BORDER: f64 = 6.0;
 
-/// `TopBar` height in logical pixels (`macOS` standard 24 px Menu Bar, `RUSTYOS-049`).
-pub const TOP_BAR_HEIGHT: i32 = 24;
+/// `TopBar` height in logical pixels (`macOS` Menu Bar, `RUSTYOS-049`).
+pub const TOP_BAR_HEIGHT: i32 = 30;
 
 /// Vertical offset of `TopBar` pills/labels inside the bar (`RUSTYOS-036`/`049`).
-pub const TOP_BAR_ITEM_Y: i32 = 2;
+pub const TOP_BAR_ITEM_Y: i32 = 4;
 
 /// Height of `TopBar` pills/labels (`RUSTYOS-036`).
-pub const TOP_BAR_ITEM_H: i32 = 20;
+pub const TOP_BAR_ITEM_H: i32 = 22;
 
 /// Unified font size in logical pixels for Menu Bar active app, menu items, and clock (`RUSTYOS-049`).
-pub const TOP_BAR_FONT_SIZE: f32 = 13.0;
+pub const TOP_BAR_FONT_SIZE: f32 = 14.0;
 
 /// Server-Side Decoration (SSD) titlebar height in logical pixels (`RUSTYOS-019`).
 pub const TITLEBAR_HEIGHT: i32 = 28;
@@ -214,7 +214,7 @@ pub const TITLEBAR_HEIGHT: i32 = 28;
 pub const DOCK_HEIGHT: i32 = 68;
 
 /// Dock bottom margin from screen edge.
-pub const DOCK_MARGIN_BOTTOM: i32 = 8;
+pub const DOCK_MARGIN_BOTTOM: i32 = 4;
 
 /// Dock hit-slot width/height in logical pixels (`RUSTYOS-050`).
 pub const DOCK_ITEM_SIZE: i32 = 52;
