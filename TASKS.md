@@ -2684,6 +2684,22 @@ hardware/software context и низкие накладные расходы.
   - `TrashMonitorHandle` (`parse_mountinfo_local_mounts`, `scan_trash_state`, живой `inotify` тест создания/удаления файла, реактивный `drain_trash_monitor_updates`), `CountBadge` (парсинг Unity `LauncherEntry::Update`, приоритет Unity над уведомлениями, автосброс при фокусе, `browser`/`firefox` merge, геометрия `dock_count_badge_rect` для `1`/`42`/`99+`), удержание GPU-снапшотов и drag-to-reorder свёрнутых окон (`minimized_dock_order`, `commit_dock_minimized_reorder`) покрыты unit-тестами (`68` в `rusty-services`, `225` в `rusty-compositor`); `cargo fmt --check`, `clippy -D warnings` и живые `--winit` Light/Dark прогоны (с живой миниатюрой `rusty-settings`, бейджами `3`/`1`/`99+` и `TrashFull` через `inotify`) проходят чисто с 0 WARN/ERROR.
 - **Risks:** Низкие; 0 новых внешних Cargo-зависимостей, `crates/rusty-compositor` без `unsafe`.
 
+### RUSTYOS-163 — Dock: системный Wayland `DnD`, drop файлов на приложения/корзину и drag-to-pin из Desktop/Spotlight (Фаза C)
+- **Status:** Done
+- **Goal:** Реализовать серверный Wayland `wl_data_device` drop-target (`text/uri-list`) для Dock в `crates/rusty-compositor` (перехват `WlDataSource`, авто-раскрытие `SmartHide`/`AlwaysHide`, неблокирующее чтение pipe с лимитом `256 KiB` и таймаутом `1500 ms`, MIME/`Exec` запуск приложений с файлами `%f`/`%F`/`%u`/`%U`, фоновые drop в `Trash` и `Downloads`, закрепление `.desktop` по позиции), добавить экспорт `text/uri-list` через `wl_data_device.start_drag` в `apps/rusty-files` и расширить Desktop Canvas и Spotlight drag-to-Dock с единой визуальной подсветкой `DockDropHighlight` (`Slot`/`PinInsert` + плавный `DockPresentation` gap).
+- **Dependencies:** `RUSTYOS-073`, `RUSTYOS-134`, `RUSTYOS-161`, `RUSTYOS-162`.
+- **Scope:**
+  - `crates/rusty-services/src/{trash_monitor.rs, lib.rs}` (`read_fd_bounded_with_timeout`).
+  - `crates/rusty-compositor/src/{launcher.rs, drm_backend.rs, winit_backend.rs, frame_composer.rs}`.
+  - `crates/rusty-compositor/src/state/{dock_dnd.rs, mod.rs, dock_state.rs, shell_actions.rs, wayland_handlers/selection.rs, tests.rs}`.
+  - `crates/rusty-compositor/src/shell_render/{dock.rs, dock_presentation.rs, chrome_shapes.rs, desktop_canvas.rs, mod.rs, tests.rs}`.
+  - `crates/rusty-compositor/src/input/{pointer.rs, shell_pointer.rs}`.
+  - `apps/rusty-files/src/wayland.rs` (`encode_paths_uri_list`, `start_wayland_file_drag`, `DataSourceHandler`).
+  - `docs/adr/0092-dock-wayland-dnd-and-file-drop.md`, `DECISIONS.md` (`D-106`), `ARCHITECTURE.md` §7.
+- **Acceptance Criteria:**
+  - `read_fd_bounded_with_timeout` (EOF, `max_bytes`, timeout stall), `parse_uri_list` (percent-decoding, отклонение удалённых хостов и NUL, дедупликация), `mime_for_path`/`desktop_mime_matches`/`expand_exec_argv_with_paths`, `resolve_dock_drop_target_at`, `DockDropHighlight::PinInsert`, `.desktop` pin-drop, Spotlight `pin_app_at_index` и `encode_paths_uri_list` покрыты unit-тестами (`69` в `rusty-services`, `228` в `rusty-compositor`, `27` в `rusty-files`); `cargo fmt --check`, `clippy -D warnings` и живые `--winit` Light (`rusty-files` + `Move to Trash` halo) / Dark (`PinInsert` gap + `Pin Terminal` + floating dragged icon) прогоны проходят чисто с 0 WARN/ERROR.
+- **Risks:** Низкие; 0 новых внешних Cargo-зависимостей, `crates/rusty-compositor` без `unsafe`.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

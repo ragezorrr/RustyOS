@@ -165,6 +165,22 @@ enum RenderBackend {
     Cpu,
 }
 
+struct ActiveWaylandDragSource {
+    source: wl_data_source::WlDataSource,
+    uri_list: Vec<u8>,
+    plain_text: Vec<u8>,
+    selected_action: DndAction,
+}
+
+pub(crate) fn encode_paths_uri_list(paths: &[std::path::PathBuf]) -> String {
+    let mut out = String::new();
+    for p in paths {
+        out.push_str(&rusty_services::path_to_file_uri(p));
+        out.push_str("\r\n");
+    }
+    out
+}
+
 #[allow(clippy::struct_excessive_bools)]
 struct WaylandClientData {
     conn: Connection,
@@ -178,6 +194,7 @@ struct WaylandClientData {
     data_device_manager: Option<DataDeviceManagerState>,
     data_device: Option<DataDevice>,
     clipboard: rusty_ui::WaylandClipboardBridge,
+    active_dnd_source: Option<ActiveWaylandDragSource>,
     paste_ping: ping::Ping,
     last_input_serial: u32,
     xdg_shell: XdgShell,
@@ -692,6 +709,38 @@ impl WaylandClientData {
         self.app.dirty = true;
     }
 
+    fn start_wayland_file_drag(&mut self, sources: &[std::path::PathBuf]) -> bool {
+        if sources.is_empty() {
+            return false;
+        }
+        let (Some(ddm), Some(dd), Some(win)) =
+            (&self.data_device_manager, &self.data_device, &self.window)
+        else {
+            return false;
+        };
+        let uri_list = encode_paths_uri_list(sources).into_bytes();
+        let plain_text = sources
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join("\n")
+            .into_bytes();
+        let drag_source = ddm.create_drag_and_drop_source(
+            &self.qh,
+            ["text/uri-list", "text/plain;charset=utf-8", "text/plain"],
+            DndAction::Copy | DndAction::Move,
+        );
+        drag_source.start_drag(dd, win.wl_surface(), None, self.last_input_serial);
+        let _ = self.conn.flush();
+        self.active_dnd_source = Some(ActiveWaylandDragSource {
+            source: drag_source.inner().clone(),
+            uri_list,
+            plain_text,
+            selected_action: DndAction::None,
+        });
+        true
+    }
+
     fn sync_clipboard_io(&mut self) {
         if let Some(text) = self.clipboard.take_pending_copy()
             && let (Some(ddm), Some(dd)) = (&self.data_device_manager, &self.data_device)
@@ -1122,6 +1171,7 @@ pub(crate) fn run(options: &StartupOptions) -> Result<(), WaylandAppError> {
         data_device_manager: DataDeviceManagerState::bind(&globals, &qh).ok(),
         data_device: None,
         clipboard: rusty_ui::WaylandClipboardBridge::new(),
+        active_dnd_source: None,
         paste_ping,
         last_input_serial: 0,
         xdg_shell,
@@ -1705,6 +1755,19 @@ impl PointerHandler for WaylandClientData {
                         if drag.update_pos((px, py)) {
                             self.app.dirty = true;
                         }
+                        let near_or_outside_edge = px <= 4.0
+                            || py <= 4.0
+                            || px >= f64::from(self.width) - 4.0
+                            || py >= f64::from(self.height) - 4.0;
+                        if drag.active && near_or_outside_edge {
+                            let drag_sources = drag.sources.clone();
+                            if self.start_wayland_file_drag(&drag_sources) {
+                                self.app.file_drag = None;
+                                self.pointer_pressed = false;
+                                self.app.dirty = true;
+                                continue;
+                            }
+                        }
                         if is_active {
                             self.apply_cursor_shape(CursorShape::Grabbing);
                         }
@@ -1716,6 +1779,17 @@ impl PointerHandler for WaylandClientData {
                     }
                 }
                 PointerEventKind::Leave { .. } => {
+                    if self.pointer_pressed
+                        && let Some(drag) = self.app.file_drag.as_ref()
+                        && drag.active
+                    {
+                        let drag_sources = drag.sources.clone();
+                        if self.start_wayland_file_drag(&drag_sources) {
+                            self.app.file_drag = None;
+                            self.pointer_pressed = false;
+                            self.app.dirty = true;
+                        }
+                    }
                     if self.app.traffic_hovered {
                         self.app.traffic_hovered = false;
                         self.app.dirty = true;
@@ -1927,8 +2001,24 @@ impl DataSourceHandler for WaylandClientData {
         _: &QueueHandle<Self>,
         source: &wl_data_source::WlDataSource,
         mime: String,
-        write_pipe: WritePipe,
+        mut write_pipe: WritePipe,
     ) {
+        if let Some(active) = self.active_dnd_source.as_ref()
+            && active.source == *source
+        {
+            let payload = if mime.eq_ignore_ascii_case("text/uri-list") {
+                active.uri_list.clone()
+            } else {
+                active.plain_text.clone()
+            };
+            let _ = std::thread::Builder::new()
+                .name("rusty-files-dnd-send".to_owned())
+                .spawn(move || {
+                    use std::io::Write;
+                    let _ = write_pipe.write_all(&payload);
+                });
+            return;
+        }
         self.clipboard
             .serve_send_request(source, &mime, OwnedFd::from(write_pipe));
     }
@@ -1938,6 +2028,14 @@ impl DataSourceHandler for WaylandClientData {
         _: &QueueHandle<Self>,
         source: &wl_data_source::WlDataSource,
     ) {
+        if self
+            .active_dnd_source
+            .as_ref()
+            .is_some_and(|active| active.source == *source)
+        {
+            self.active_dnd_source = None;
+            source.destroy();
+        }
         self.clipboard.remove_source(source);
     }
     fn dnd_dropped(
@@ -1951,16 +2049,32 @@ impl DataSourceHandler for WaylandClientData {
         &mut self,
         _: &Connection,
         _: &QueueHandle<Self>,
-        _: &wl_data_source::WlDataSource,
+        source: &wl_data_source::WlDataSource,
     ) {
+        if let Some(active) = self.active_dnd_source.take() {
+            if active.source == *source {
+                source.destroy();
+                if active.selected_action == DndAction::Move {
+                    self.app.reload_active_column();
+                    self.app.dirty = true;
+                }
+            } else {
+                self.active_dnd_source = Some(active);
+            }
+        }
     }
     fn action(
         &mut self,
         _: &Connection,
         _: &QueueHandle<Self>,
-        _: &wl_data_source::WlDataSource,
-        _: DndAction,
+        source: &wl_data_source::WlDataSource,
+        action: DndAction,
     ) {
+        if let Some(active) = self.active_dnd_source.as_mut()
+            && active.source == *source
+        {
+            active.selected_action = action;
+        }
     }
 }
 
@@ -2007,4 +2121,22 @@ fn keysym_to_name_and_text(keysym: Keysym, utf8: Option<&str>) -> (&'static str,
         .filter(|c| !c.is_control())
         .or_else(|| keysym.key_char().filter(|c| !c.is_control()));
     (name, ch)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::encode_paths_uri_list;
+    use std::path::PathBuf;
+
+    #[test]
+    fn encodes_paths_as_rfc2483_crlf_uri_list() {
+        let encoded = encode_paths_uri_list(&[
+            PathBuf::from("/home/alice/My Report #1.pdf"),
+            PathBuf::from("/tmp/notes.txt"),
+        ]);
+        assert_eq!(
+            encoded,
+            "file:///home/alice/My%20Report%20%231.pdf\r\nfile:///tmp/notes.txt\r\n"
+        );
+    }
 }

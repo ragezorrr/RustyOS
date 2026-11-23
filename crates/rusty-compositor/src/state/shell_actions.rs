@@ -51,6 +51,9 @@ impl RustyCompositorState {
     /// Closes the Spotlight overlay and clears its active search query.
     pub fn close_launcher(&mut self) {
         self.launcher_active = false;
+        if self.spotlight_drag.as_ref().is_some_and(|d| !d.active_drag) {
+            self.spotlight_drag = None;
+        }
         self.launcher.reset();
         self.retarget_launcher_anim();
     }
@@ -2012,6 +2015,7 @@ impl RustyCompositorState {
             drag_preview: self.dock_drag_preview(),
             top_inset: crate::shell_render::TOP_BAR_HEIGHT,
             presented_layout: None,
+            drop_highlight: self.dock_drop_highlight_for_output(primary_id),
         }
     }
 

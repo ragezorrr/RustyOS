@@ -105,11 +105,17 @@ impl ClientData for ClientState {
 }
 
 pub(crate) mod context_menu_actions;
+pub mod dock_dnd;
 mod dock_state;
 mod shell_actions;
 mod system_bridges;
 mod wayland_handlers;
 mod wm_windows;
+pub use dock_dnd::{
+    DND_URI_MAX_BYTES, DND_URI_READ_TIMEOUT, DockDndMailbox, DockDropTarget, ExternalDndState,
+    MAX_DND_DROP_PATHS, PendingExternalDndDrop, SpotlightDragState, is_desktop_file_drop,
+    parse_uri_list, resolve_dock_drop_target_at,
+};
 pub(in crate::state) use wayland_handlers::desktop_protocols::ToplevelIconEntry;
 pub(crate) use wayland_handlers::liquid_glass;
 
@@ -780,6 +786,14 @@ pub struct RustyCompositorState {
     pub window_switcher: Option<WindowSwitcherState>,
     /// Active client Drag-and-Drop icon surface attached during `wl_data_device.start_drag` (`RUSTYOS-033`).
     pub dnd_icon: Option<WlSurface>,
+    /// Active external client Wayland `text/uri-list` drag session tracked for Dock drop targets (`RUSTYOS-163`).
+    pub external_dnd: Option<ExternalDndState>,
+    /// In-flight async pipe read for an external Wayland drop onto the Dock (`RUSTYOS-163`).
+    pub pending_external_dnd_drop: Option<PendingExternalDndDrop>,
+    /// Event-loop wakeup + background Trash/Downloads completion mailbox for Dock `DnD` (`RUSTYOS-163`).
+    pub dock_dnd_mailbox: DockDndMailbox,
+    /// Active drag-to-pin gesture initiated from a Spotlight application row (`RUSTYOS-163`).
+    pub spotlight_drag: Option<SpotlightDragState>,
     /// `zwp_pointer_gestures_v1` swipe/pinch/hold gesture global state (`RUSTYOS-047`).
     pub pointer_gestures_state: PointerGesturesState,
     /// `zwp_text_input_manager_v3` global state for client IME text input (`RUSTYOS-047`).
@@ -1155,6 +1169,10 @@ impl RustyCompositorState {
             pending_vt_switch: None,
             window_switcher: None,
             dnd_icon: None,
+            external_dnd: None,
+            pending_external_dnd_drop: None,
+            dock_dnd_mailbox: DockDndMailbox::default(),
+            spotlight_drag: None,
             pointer_gestures_state,
             text_input_manager_state,
             input_method_manager_state,
@@ -1933,6 +1951,24 @@ impl RustyCompositorState {
         }
         if self.dock_drag.as_ref().is_some_and(|d| d.output_id == id) {
             self.dock_drag = None;
+        }
+        if self
+            .external_dnd
+            .as_ref()
+            .and_then(|d| d.active_target.as_ref())
+            .is_some_and(|t| t.output_id() == id)
+            && let Some(ref mut dnd) = self.external_dnd
+        {
+            dnd.active_target = None;
+        }
+        if self
+            .spotlight_drag
+            .as_ref()
+            .and_then(|d| d.target.as_ref())
+            .is_some_and(|t| t.output_id() == id)
+            && let Some(ref mut spot) = self.spotlight_drag
+        {
+            spot.target = None;
         }
 
         if removed.is_primary {

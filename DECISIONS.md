@@ -1239,6 +1239,19 @@
                            фоновый `TrashMonitorHandle` (`inotify` + `/proc/self/mountinfo`
                            + debounce `150 ms` на workspace `libc`) в `rusty-services`
                            (`0` новых внешних крейтов, `rusty-compositor` без `unsafe`)
+
+  D-106    Accepted        ADR-0092 (`RUSTYOS-163`): модернизация Dock (Фаза C) —
+                           серверный Wayland `wl_data_device` drop-target (`text/uri-list`)
+                           для Dock в `crates/rusty-compositor/src/state/dock_dnd.rs`
+                           (перехват `WlDataSource`, авто-раскрытие `SmartHide`/`AlwaysHide`,
+                           неблокирующее чтение pipe через `read_fd_bounded_with_timeout`
+                           с лимитом `256 KiB` и таймаутом `1500 ms`, MIME/`Exec` запуск
+                           `launch_by_dock_key_with_paths`, фоновые drop в `Trash`/`Downloads`,
+                           закрепление `.desktop` по индексу), единый визуальный
+                           `DockDropHighlight` (`Slot`/`PinInsert` + `DockPresentation` gap),
+                           расширение `DesktopDragState` и `SpotlightDragState` drag-to-Dock
+                           и экспорт `text/uri-list` через `wl_data_device.start_drag` в
+                           `apps/rusty-files` (`0` новых крейтов, `rusty-compositor` без `unsafe`)
   -----------------------------------------------------------------------
 
 ## Открытые решения

@@ -98,6 +98,32 @@ pub struct DockDragPreview<'a> {
     pub pulled_outside: bool,
 }
 
+/// Semantic drop action kind displayed on the Dock drop tooltip pill (`RUSTYOS-163`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DockDropKind {
+    /// Open dropped file(s) inside the target application.
+    OpenInApp,
+    /// Move dropped file(s) into `FreeDesktop` Trash.
+    MoveToTrash,
+    /// Copy dropped file(s) safely into `~/Downloads`.
+    CopyToDownloads,
+    /// Pin a dropped `.desktop` file or Spotlight app at the insertion gap.
+    PinToDock,
+}
+
+/// Visual drop-target feedback inside the Dock during Wayland, Desktop, or Spotlight drag (`RUSTYOS-163`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DockDropHighlight<'a> {
+    /// Highlight a specific slot (`App`, `Trash`, or `Downloads`) with a ring and action pill.
+    Slot {
+        slot_idx: usize,
+        kind: DockDropKind,
+        label: &'a str,
+    },
+    /// Open an insertion placeholder gap inside the `Pinned` section at `insert_idx`.
+    PinInsert { insert_idx: usize, label: &'a str },
+}
+
 /// Computes a concise 2-character badge from a window title (`RUSTYOS-023`).
 #[must_use]
 pub fn make_window_badge(title: &str) -> String {
@@ -372,6 +398,8 @@ pub struct DockViewState<'a> {
     pub top_inset: i32,
     /// Optional pre-animated layout from [`super::DockPresentation`] (`RUSTYOS-161`).
     pub presented_layout: Option<&'a ComputedDockLayout>,
+    /// Active external/desktop/Spotlight drop-target visual highlight (`RUSTYOS-163`).
+    pub drop_highlight: Option<DockDropHighlight<'a>>,
 }
 
 impl Default for DockViewState<'_> {
@@ -392,6 +420,7 @@ impl Default for DockViewState<'_> {
             drag_preview: None,
             top_inset: TOP_BAR_HEIGHT,
             presented_layout: None,
+            drop_highlight: None,
         }
     }
 }
@@ -453,6 +482,8 @@ pub struct ComputedDockLayout {
     pub drag_remove_badge: Option<Rectangle<i32, smithay::utils::Physical>>,
     /// Floating dragged icon bounds centered on the pointer (when dragging a pinned icon).
     pub dragged_icon: Option<(DockAppTile, Rectangle<i32, smithay::utils::Physical>)>,
+    /// Placeholder slot bounds opened inside `Pinned` during a `.desktop` / Spotlight pin-drop (`RUSTYOS-163`).
+    pub drop_insert_rect: Option<Rectangle<i32, smithay::utils::Physical>>,
 }
 
 /// Builds legacy fallback tiles from `[Files..Settings] + windows + [Downloads, Trash]`
@@ -718,10 +749,16 @@ fn build_dock_slots_along_axis(
             .iter()
             .find(|(k, _)| *k == tile.app_key)
             .map_or(0.0, |(_, px)| *px);
-        let hovered = dock_view.hover_slot == Some(i);
+        let drop_targeted = matches!(
+            dock_view.drop_highlight,
+            Some(DockDropHighlight::Slot { slot_idx, .. }) if slot_idx == i
+        );
+        let hovered = dock_view.hover_slot == Some(i) || drop_targeted;
         let (hover_scale_px, hover_lift_px) = if hovered {
             if dock_view.reduced_motion {
                 (0.0, 2.0)
+            } else if drop_targeted {
+                (6.0, 5.0)
             } else {
                 let hp = dock_view.hover_progress.clamp(0.35, 1.0);
                 (8.0 * hp, 6.0 * hp)
@@ -772,6 +809,40 @@ fn build_dock_slots_along_axis(
     (dividers, slots)
 }
 
+fn insert_pin_drop_placeholder(
+    tiles: &mut Vec<DockAppTile>,
+    drop_highlight: Option<DockDropHighlight<'_>>,
+) -> Option<usize> {
+    let Some(DockDropHighlight::PinInsert { insert_idx, .. }) = drop_highlight else {
+        return None;
+    };
+    let pinned_count = tiles
+        .iter()
+        .take_while(|t| t.section == DockSection::Pinned)
+        .count();
+    let pos_idx = insert_idx.min(pinned_count);
+    tiles.insert(
+        pos_idx,
+        DockAppTile {
+            section: DockSection::Pinned,
+            app_key: "__dnd_pin_gap__".to_owned(),
+            label: String::new(),
+            hit: DockHit::PinnedApp(usize::MAX),
+            builtin_icon: None,
+            representative_win: None,
+            window_count: 0,
+            has_minimized: false,
+            is_active: false,
+            has_indicator: false,
+            icon_name: None,
+            toplevel_icon: None,
+            fallback_title: String::new(),
+            badge_count: 0,
+        },
+    );
+    Some(pos_idx)
+}
+
 /// Computes single-source-of-truth Dock geometry across `Bottom`/`Left`/`Right`, local icon hover,
 /// auto-hide offset, bounces, and drag preview (`RUSTYOS-073`).
 #[must_use]
@@ -788,7 +859,8 @@ pub fn compute_dock_layout(
         dock_view.tiles
     };
 
-    let (tiles, dragged_tile) = reorder_tiles_for_drag(raw_tiles, dock_view.drag_preview);
+    let (mut tiles, dragged_tile) = reorder_tiles_for_drag(raw_tiles, dock_view.drag_preview);
+    let inserted_gap_pos = insert_pin_drop_placeholder(&mut tiles, dock_view.drop_highlight);
     let base_icon = clamp_dock_icon_size(dock_view.icon_size);
     let base_slot = base_icon + 2;
     let thickness = base_icon + DOCK_PADDING * 2 + 2;
@@ -836,7 +908,17 @@ pub fn compute_dock_layout(
         scale_fit,
         divider_before: &divider_before,
     };
-    let (dividers, slots) = build_dock_slots_along_axis(&tiles, &geom, dock_view);
+    let (dividers, mut slots) = build_dock_slots_along_axis(&tiles, &geom, dock_view);
+    let mut drop_insert_rect = None;
+    if let Some(gap_idx) = inserted_gap_pos
+        && gap_idx < slots.len()
+    {
+        let gap_slot = slots.remove(gap_idx);
+        drop_insert_rect = Some(gap_slot.icon_rect);
+        for (new_idx, slot) in slots.iter_mut().enumerate() {
+            slot.slot_idx = new_idx;
+        }
+    }
     let capsule_rect = map_axis_rect(
         pos,
         capsule_axis_start,
@@ -853,6 +935,7 @@ pub fn compute_dock_layout(
         slots,
         drag_remove_badge,
         dragged_icon,
+        drop_insert_rect,
     }
 }
 
@@ -981,7 +1064,6 @@ pub(super) fn dock_tooltip_rect_and_label(
     if dock_view.auto_hide_reveal < 0.35 || dock_view.drag_preview.is_some() {
         return None;
     }
-    let slot_idx = dock_view.hover_slot?;
     let owned_layout;
     let layout = if let Some(presented) = dock_view.presented_layout {
         presented
@@ -989,28 +1071,56 @@ pub(super) fn dock_tooltip_rect_and_label(
         owned_layout = compute_dock_layout(Size::from((width, height)), dock_view);
         &owned_layout
     };
-    let slot = layout.slots.iter().find(|s| s.slot_idx == slot_idx)?;
-    let label = slot.tile.label.clone();
+    let (anchor_rect, label) = match dock_view.drop_highlight {
+        Some(DockDropHighlight::Slot {
+            slot_idx,
+            kind,
+            label,
+        }) => {
+            let slot = layout.slots.iter().find(|s| s.slot_idx == slot_idx)?;
+            let text = match kind {
+                DockDropKind::OpenInApp => format!("Open in {label}"),
+                DockDropKind::MoveToTrash => "Move to Trash".to_owned(),
+                DockDropKind::CopyToDownloads => "Copy to Downloads".to_owned(),
+                DockDropKind::PinToDock => "Pin to Dock".to_owned(),
+            };
+            (slot.icon_rect, text)
+        }
+        Some(DockDropHighlight::PinInsert { label, .. }) => {
+            let anchor = layout.drop_insert_rect.unwrap_or(layout.capsule_rect);
+            let text = if label.is_empty() {
+                "Pin to Dock".to_owned()
+            } else {
+                format!("Pin {label}")
+            };
+            (anchor, text)
+        }
+        None => {
+            let slot_idx = dock_view.hover_slot?;
+            let slot = layout.slots.iter().find(|s| s.slot_idx == slot_idx)?;
+            (slot.icon_rect, slot.tile.label.clone())
+        }
+    };
     let text_w = crate::text::measure_ui_text_width(&label, 12.0, crate::text::FontWeight::Bold);
-    let pill_w = (text_w + 22).clamp(48, 220);
+    let pill_w = (text_w + 22).clamp(48, 240);
     let pill_h = 26;
     let min_top = dock_view.top_inset.max(0) + 8;
     let rect = match dock_view.position {
         DockPosition::Bottom => {
-            let cx = slot.icon_rect.loc.x + slot.icon_rect.size.w / 2;
+            let cx = anchor_rect.loc.x + anchor_rect.size.w / 2;
             let pill_x = (cx - pill_w / 2).clamp(12, (width - pill_w - 12).max(12));
             let pill_y = (layout.capsule_rect.loc.y - pill_h - 14).max(min_top);
             Rectangle::new(Point::from((pill_x, pill_y)), Size::from((pill_w, pill_h)))
         }
         DockPosition::Left => {
-            let cy = slot.icon_rect.loc.y + slot.icon_rect.size.h / 2;
+            let cy = anchor_rect.loc.y + anchor_rect.size.h / 2;
             let pill_x = (layout.capsule_rect.loc.x + layout.capsule_rect.size.w + 14)
                 .clamp(12, (width - pill_w - 12).max(12));
             let pill_y = (cy - pill_h / 2).clamp(min_top, (height - pill_h - 12).max(min_top));
             Rectangle::new(Point::from((pill_x, pill_y)), Size::from((pill_w, pill_h)))
         }
         DockPosition::Right => {
-            let cy = slot.icon_rect.loc.y + slot.icon_rect.size.h / 2;
+            let cy = anchor_rect.loc.y + anchor_rect.size.h / 2;
             let pill_x = (layout.capsule_rect.loc.x - pill_w - 14).max(12);
             let pill_y = (cy - pill_h / 2).clamp(min_top, (height - pill_h - 12).max(min_top));
             Rectangle::new(Point::from((pill_x, pill_y)), Size::from((pill_w, pill_h)))
@@ -1031,6 +1141,7 @@ pub fn dock_obstruction_region(
         hover_slot: None,
         drag_preview: None,
         presented_layout: None,
+        drop_highlight: None,
         ..*dock_view
     };
     let cap = compute_dock_layout(screen_size, &rest_view).capsule_rect;

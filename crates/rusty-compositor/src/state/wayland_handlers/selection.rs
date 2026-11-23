@@ -79,15 +79,15 @@ impl DataControlHandler for RustyCompositorState {
 impl ClientDndGrabHandler for RustyCompositorState {
     fn started(
         &mut self,
-        _source: Option<WlDataSource>,
+        source: Option<WlDataSource>,
         icon: Option<WlSurface>,
         _seat: Seat<Self>,
     ) {
-        self.dnd_icon = icon;
+        self.on_external_dnd_started(source, icon);
     }
 
     fn dropped(&mut self, _target: Option<WlSurface>, _validated: bool, _seat: Seat<Self>) {
-        self.dnd_icon = None;
+        self.on_external_dnd_dropped();
     }
 }
 

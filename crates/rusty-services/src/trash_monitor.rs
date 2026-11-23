@@ -634,6 +634,89 @@ mod linux_watch {
         }
         PollEvents(mask)
     }
+
+    pub(super) fn read_fd_bounded_with_timeout(
+        fd: &OwnedFd,
+        max_bytes: usize,
+        timeout: std::time::Duration,
+    ) -> Result<Vec<u8>, String> {
+        let deadline = std::time::Instant::now() + timeout;
+        let mut out = Vec::new();
+        let mut chunk = [0_u8; 4096];
+        loop {
+            if out.len() >= max_bytes {
+                break;
+            }
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                return Err("timed out waiting for data transfer".to_owned());
+            }
+            let rem_ms = i32::try_from(deadline.saturating_duration_since(now).as_millis())
+                .unwrap_or(i32::MAX)
+                .max(1);
+            let mut pfd = libc::pollfd {
+                fd: fd.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            // SAFETY: `pfd` is a valid initialized `pollfd` pointing to open `fd`.
+            let rc = unsafe { libc::poll(&raw mut pfd, 1, rem_ms) };
+            if rc < 0 {
+                let err = std::io::Error::last_os_error();
+                if err.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(format!("poll failed: {err}"));
+            }
+            if rc == 0 {
+                return Err("timed out waiting for data transfer".to_owned());
+            }
+            if pfd.revents & (libc::POLLERR | libc::POLLNVAL) != 0
+                && pfd.revents & libc::POLLIN == 0
+            {
+                return Err("data transfer pipe error".to_owned());
+            }
+            let want = (max_bytes - out.len()).min(chunk.len());
+            // SAFETY: `fd` is open and `chunk[..want]` is valid writable stack memory.
+            let n = unsafe { libc::read(fd.as_raw_fd(), chunk.as_mut_ptr().cast(), want) };
+            if n < 0 {
+                let err = std::io::Error::last_os_error();
+                if err.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                if err.kind() == std::io::ErrorKind::WouldBlock {
+                    continue;
+                }
+                return Err(format!("read failed: {err}"));
+            }
+            if n == 0 {
+                break;
+            }
+            let count = usize::try_from(n).unwrap_or(0);
+            out.extend_from_slice(&chunk[..count]);
+            if pfd.revents & libc::POLLHUP != 0 && count < want {
+                // Continue one more iteration so EOF (`n == 0`) or trailing buffered bytes drain cleanly.
+            }
+        }
+        Ok(out)
+    }
+}
+
+/// Reads from a Unix pipe/file descriptor up to `max_bytes` until EOF or `timeout` (`RUSTYOS-163`).
+///
+/// Never blocks past `timeout` even if the peer keeps the write end open without sending bytes.
+///
+/// # Errors
+///
+/// Returns an error string if the descriptor times out or fails with an OS error.
+pub fn read_fd_bounded_with_timeout(
+    fd: std::os::unix::io::OwnedFd,
+    max_bytes: usize,
+    timeout: Duration,
+) -> Result<Vec<u8>, String> {
+    let result = linux_watch::read_fd_bounded_with_timeout(&fd, max_bytes, timeout);
+    drop(fd);
+    result
 }
 
 #[cfg(test)]
@@ -740,6 +823,28 @@ mod tests {
 
         drop(monitor);
         let _ = fs::remove_dir_all(&root);
+        Ok(())
+    }
+
+    #[test]
+    fn read_fd_bounded_with_timeout_handles_eof_cap_and_stall()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::io::Write;
+        use std::os::unix::io::OwnedFd;
+
+        // 1. Normal payload + max_bytes cap.
+        let (rx, mut tx) = std::io::pipe()?;
+        tx.write_all(b"file:///tmp/a.txt\r\nfile:///tmp/b.txt\r\n")?;
+        drop(tx);
+        let got = read_fd_bounded_with_timeout(OwnedFd::from(rx), 17, Duration::from_millis(500))?;
+        assert_eq!(got, b"file:///tmp/a.txt");
+
+        // 2. Stalled writer hits timeout without hanging.
+        let (rx2, _tx2) = std::io::pipe()?;
+        let started = Instant::now();
+        let err = read_fd_bounded_with_timeout(OwnedFd::from(rx2), 1024, Duration::from_millis(60));
+        assert!(err.is_err());
+        assert!(started.elapsed() < Duration::from_secs(1));
         Ok(())
     }
 }

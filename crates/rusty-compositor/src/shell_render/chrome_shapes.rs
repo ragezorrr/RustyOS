@@ -755,6 +755,23 @@ fn push_dock_chrome_shapes_with_glass(
         );
     }
 
+    if let Some(insert_rect) = layout.drop_insert_rect {
+        let (fill, border) = if pal.is_dark {
+            ([10, 132, 255, 58], [10, 132, 255, 225])
+        } else {
+            ([0, 122, 255, 42], [0, 122, 255, 215])
+        };
+        push_rounded_glass_box(
+            &mut dock_icons,
+            shape_cache,
+            renderer,
+            insert_rect,
+            13,
+            fill,
+            Some(border),
+        );
+    }
+
     out.extend(dock_badges);
     out.extend(dock_icons);
     out.extend(dock_dots_and_divider);
@@ -846,6 +863,31 @@ fn push_dock_slot_shape(
         Point::from((slot.icon_rect.loc.x, slot.icon_rect.loc.y)),
     ) {
         dock_icons.push(el);
+    }
+
+    if let Some(super::DockDropHighlight::Slot { slot_idx, kind, .. }) = dock_view.drop_highlight
+        && slot_idx == slot.slot_idx
+    {
+        let danger = kind == super::DockDropKind::MoveToTrash;
+        let (fill, border) = match (pal.is_dark, danger) {
+            (true, true) => ([255, 69, 58, 62], [255, 69, 58, 235]),
+            (false, true) => ([255, 59, 48, 48], [255, 59, 48, 225]),
+            (true, false) => ([10, 132, 255, 58], [10, 132, 255, 230]),
+            (false, false) => ([0, 122, 255, 42], [0, 122, 255, 220]),
+        };
+        let ring = Rectangle::new(
+            Point::from((slot.icon_rect.loc.x - 4, slot.icon_rect.loc.y - 4)),
+            Size::from((slot.icon_rect.size.w + 8, slot.icon_rect.size.h + 8)),
+        );
+        push_rounded_glass_box(
+            dock_icons,
+            shape_cache,
+            renderer,
+            ring,
+            14,
+            fill,
+            Some(border),
+        );
     }
 }
 

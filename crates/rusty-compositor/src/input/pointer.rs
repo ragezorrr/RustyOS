@@ -256,7 +256,61 @@ impl RustyCompositorState {
             return;
         }
 
+        if self.spotlight_drag.is_some() {
+            let mut activated_now = false;
+            let mut active = false;
+            if let Some(ref mut drag) = self.spotlight_drag {
+                drag.current_pointer = pos;
+                let dist = (pos.x - drag.start_pointer.x).hypot(pos.y - drag.start_pointer.y);
+                if !drag.active_drag && dist > 6.0 {
+                    drag.active_drag = true;
+                    activated_now = true;
+                }
+                active = drag.active_drag;
+            }
+            if activated_now && self.launcher_active {
+                self.close_launcher();
+            }
+            if active {
+                let (out_id, is_primary, out_size, lx, ly) = self.output_local_coords(pos);
+                let reveal = self.dock_reveal_for_output(out_id);
+                let target = if reveal > 0.15 {
+                    let tiles = self.build_dock_tiles();
+                    let rest_view = crate::shell_render::DockViewState {
+                        tiles: &tiles,
+                        icon_size: self.user_config.dock_icon_size,
+                        position: self.user_config.dock_position,
+                        auto_hide_reveal: reveal,
+                        show_indicators: self.user_config.dock_show_indicators,
+                        top_inset: if is_primary {
+                            crate::shell_render::TOP_BAR_HEIGHT
+                        } else {
+                            0
+                        },
+                        ..crate::shell_render::DockViewState::default()
+                    };
+                    let layout = crate::shell_render::compute_dock_layout(out_size, &rest_view);
+                    crate::state::resolve_dock_drop_target_at(
+                        &layout,
+                        self.user_config.dock_position,
+                        out_id,
+                        lx,
+                        ly,
+                        true,
+                    )
+                } else {
+                    None
+                };
+                if let Some(ref mut drag) = self.spotlight_drag {
+                    drag.target = target;
+                }
+                self.shell_redraw_needed = true;
+            }
+            return;
+        }
+
         if self.desktop_drag.is_some() {
+            let (out_id, is_primary, out_size, dock_x, dock_y) = self.output_local_coords(pos);
             let primary_entry = self.output_map.primary();
             let primary_geo = primary_entry.logical_geometry();
             let local_pos = Point::from((
@@ -264,12 +318,41 @@ impl RustyCompositorState {
                 pos.y - f64::from(primary_geo.loc.y),
             ));
             let screen_size = primary_geo.size;
-            let tiles = self.build_dock_tiles();
-            let layout = self.dock_layout_for_output(primary_entry.id, &tiles);
-            let drop_to_trash =
-                crate::shell_render::check_dock_layout_slot(&layout, local_pos.x, local_pos.y)
-                    .and_then(|idx| layout.slots.iter().find(|s| s.slot_idx == idx))
-                    .is_some_and(|slot| slot.tile.hit == crate::shell_render::DockHit::PinnedTrash);
+            let dragged_is_desktop = self.desktop_drag.as_ref().is_some_and(|d| {
+                crate::state::is_desktop_file_drop(std::slice::from_ref(&d.dragged_path))
+            });
+            let dock_reveal = self.dock_reveal_for_output(out_id);
+            let dock_drop_target = if dock_reveal > 0.15 {
+                let tiles = self.build_dock_tiles();
+                let rest_view = crate::shell_render::DockViewState {
+                    tiles: &tiles,
+                    icon_size: self.user_config.dock_icon_size,
+                    position: self.user_config.dock_position,
+                    auto_hide_reveal: dock_reveal,
+                    show_indicators: self.user_config.dock_show_indicators,
+                    top_inset: if is_primary {
+                        crate::shell_render::TOP_BAR_HEIGHT
+                    } else {
+                        0
+                    },
+                    ..crate::shell_render::DockViewState::default()
+                };
+                let layout = crate::shell_render::compute_dock_layout(out_size, &rest_view);
+                crate::state::resolve_dock_drop_target_at(
+                    &layout,
+                    self.user_config.dock_position,
+                    out_id,
+                    dock_x,
+                    dock_y,
+                    dragged_is_desktop,
+                )
+            } else {
+                None
+            };
+            let drop_to_trash = matches!(
+                dock_drop_target,
+                Some(crate::state::DockDropTarget::Trash { .. })
+            );
 
             if let Some(ref mut drag) = self.desktop_drag {
                 drag.current_pointer = pos;
@@ -279,18 +362,23 @@ impl RustyCompositorState {
                     drag.is_active = true;
                 }
                 if drag.is_active {
-                    let hit_folder = crate::shell_render::hit_test_desktop_item(
-                        &self.desktop_items,
-                        screen_size,
-                        crate::shell_render::DOCK_HEIGHT,
-                        local_pos,
-                    )
-                    .and_then(|idx| self.desktop_items.get(idx))
-                    .filter(|it| it.is_dir && it.path != drag.dragged_path)
-                    .map(|it| it.path.clone());
+                    let hit_folder = if dock_drop_target.is_none() {
+                        crate::shell_render::hit_test_desktop_item(
+                            &self.desktop_items,
+                            screen_size,
+                            crate::shell_render::DOCK_HEIGHT,
+                            local_pos,
+                        )
+                        .and_then(|idx| self.desktop_items.get(idx))
+                        .filter(|it| it.is_dir && it.path != drag.dragged_path)
+                        .map(|it| it.path.clone())
+                    } else {
+                        None
+                    };
 
                     drag.target_hover_dir = hit_folder;
                     drag.drop_to_trash = drop_to_trash;
+                    drag.dock_drop_target = dock_drop_target;
                 }
             }
             self.shell_redraw_needed = true;
@@ -326,9 +414,13 @@ impl RustyCompositorState {
             return;
         }
 
-        let under = self
-            .target_surface_under(pos)
-            .map(|(_win, surface, origin)| (surface, origin));
+        let over_dock_dnd = self.update_external_dnd_dock_hover(pos);
+        let under = if over_dock_dnd {
+            None
+        } else {
+            self.target_surface_under(pos)
+                .map(|(_win, surface, origin)| (surface, origin))
+        };
         self.dispatch_pointer_motion_to_surface(pos, under, time);
     }
 
@@ -354,7 +446,32 @@ impl RustyCompositorState {
         let button = event.button_code();
         let button_state = event.state();
 
+        if button_state == ButtonState::Pressed && self.pending_external_dnd_drop.is_some() {
+            self.cancel_pending_external_dnd_drop();
+        }
+
         if button_state == ButtonState::Released {
+            if button == 272
+                && self.begin_external_dnd_dock_drop(button, serial, Event::time_msec(event))
+            {
+                return;
+            }
+            if button == 272
+                && let Some(spot) = self.spotlight_drag.take()
+            {
+                if spot.active_drag {
+                    if let Some(crate::state::DockDropTarget::PinInsert { insert_idx, .. }) =
+                        spot.target
+                    {
+                        self.pin_app_at_index(&spot.app_key, insert_idx);
+                    }
+                    self.sync_dock_auto_hide_target();
+                    self.shell_redraw_needed = true;
+                } else {
+                    self.launch_spotlight_row(spot.row_idx);
+                }
+                return;
+            }
             if self.screenshot_hud.is_some() {
                 self.handle_screenshot_hud_button(false);
                 return;
@@ -391,6 +508,12 @@ impl RustyCompositorState {
                 && let Some(drag) = self.desktop_drag.take()
                 && drag.is_active
             {
+                if let Some(target) = drag.dock_drop_target {
+                    self.execute_dock_drop(&target, vec![drag.dragged_path], true);
+                    self.sync_dock_auto_hide_target();
+                    self.shell_redraw_needed = true;
+                    return;
+                }
                 if drag.drop_to_trash {
                     if let Some(trash_root) =
                         crate::state::context_menu_actions::resolve_trash_root()
@@ -886,6 +1009,7 @@ impl RustyCompositorState {
                                 is_active: false,
                                 target_hover_dir: None,
                                 drop_to_trash: false,
+                                dock_drop_target: None,
                             });
                             self.last_desktop_click = Some((item.path, now));
                             self.shell_redraw_needed = true;

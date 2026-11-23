@@ -1657,17 +1657,20 @@ fn try_run_native_drm_session_once(
     state
         .trash_monitor
         .set_on_change(std::sync::Arc::new(move || trash_ping.ping()));
+    let dnd_ping = ping.clone();
+    state.set_dock_dnd_waker(std::sync::Arc::new(move || dnd_ping.ping()));
     state.loop_waker = Some(ping);
 
     let rt_ping = Rc::clone(&runtime);
     loop_handle
         .insert_source(ping_source, move |_event, _metadata, app_state| {
+            app_state.drain_dock_dnd_events();
             let now = Instant::now();
             let mut rt = rt_ping.borrow_mut();
             let client_committed =
                 app_state.take_client_surface_committed() || app_state.take_syncobj_unblocked();
             let delayed_ready = rt.has_ready_delayed_requeue(now);
-            if client_committed || delayed_ready {
+            if client_committed || delayed_ready || app_state.shell_redraw_needed {
                 rt.clear_requeue_delays();
                 rt.mark_all_dirty();
                 rt.render_ready_outputs(app_state, false);

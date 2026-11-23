@@ -90,7 +90,8 @@ pub use timedate::{
 };
 pub use trash_monitor::{
     TRASH_MONITOR_DEBOUNCE, TrashMonitorHandle, TrashScanState, parse_mountinfo_local_mounts,
-    resolve_home_trash_root, scan_trash_state, unescape_mountinfo_path,
+    read_fd_bounded_with_timeout, resolve_home_trash_root, scan_trash_state,
+    unescape_mountinfo_path,
 };
 pub use updates::{
     PackageUpdateItem, UpdateCheckState, UpdateCheckerHandle, UpdateStatusSnapshot,

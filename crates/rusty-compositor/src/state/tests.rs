@@ -739,6 +739,7 @@ fn desktop_grid_drag_drop_and_rubber_band() -> Result<(), Box<dyn Error>> {
         is_active: true,
         target_hover_dir: Some(folder_a.clone()),
         drop_to_trash: false,
+        dock_drop_target: None,
     };
     if let Some(dest_dir) = drag.target_hover_dir {
         let dest = dest_dir.join(drag.dragged_path.file_name().ok_or("file name")?);
@@ -1553,6 +1554,7 @@ fn firefox_window_merges_into_pinned_browser_dock_slot() -> Result<(), Box<dyn E
             keywords: vec!["browser".to_owned()],
             badge: "FF".to_owned(),
             icon: Some("firefox".to_owned()),
+            mime_types: vec!["text/html".to_owned()],
         });
     compositor.recent_unpinned_apps.push(super::RecentDockApp {
         app_key: "firefox".to_owned(),
@@ -2158,5 +2160,209 @@ fn dock_trash_monitor_drain_updates_trash_full_icon_reactively() -> Result<(), B
     );
 
     let _ = std::fs::remove_dir_all(&tmp_root);
+    Ok(())
+}
+
+#[test]
+fn dock_dnd_uri_list_parser_mime_matching_and_exec_expansion_work() {
+    use crate::launcher::{
+        desktop_mime_matches, expand_exec_argv_with_paths, mime_for_path, parse_desktop_entry,
+    };
+    use std::path::{Path, PathBuf};
+
+    let raw = b"# comment line\r\n\
+        file:///home/alice/My%20Doc%20%231.pdf\r\n\
+        file://localhost/tmp/notes.txt\r\n\
+        file:///home/alice/My%20Doc%20%231.pdf\r\n\
+        file://evil.example/etc/passwd\r\n\
+        file:///tmp/bad%00name.txt\r\n\
+        https://example.com/ignored\r\n";
+    let parsed = super::parse_uri_list(raw);
+    assert_eq!(
+        parsed,
+        vec![
+            PathBuf::from("/home/alice/My Doc #1.pdf"),
+            PathBuf::from("/tmp/notes.txt"),
+        ]
+    );
+
+    assert_eq!(mime_for_path(Path::new("/tmp/a.pdf")), "application/pdf");
+    assert_eq!(mime_for_path(Path::new("/tmp/pic.png")), "image/png");
+    assert_eq!(
+        mime_for_path(Path::new("/tmp/app.desktop")),
+        "application/x-desktop"
+    );
+    assert!(desktop_mime_matches("image/*", "image/png"));
+    assert!(!desktop_mime_matches("image/*", "application/pdf"));
+    assert!(desktop_mime_matches("text/plain", "text/plain"));
+
+    let entry = parse_desktop_entry(
+        "[Desktop Entry]\nType=Application\nName=Viewer\nExec=viewer --open %F\nMimeType=image/*;application/pdf;\n",
+        "viewer.desktop",
+    );
+    let app = entry.as_ref();
+    assert!(app.is_some());
+    assert_eq!(
+        app.map(|a| a.mime_types.clone()).unwrap_or_default(),
+        vec!["image/*".to_owned(), "application/pdf".to_owned()]
+    );
+
+    let paths = vec![
+        PathBuf::from("/tmp/a b.pdf"),
+        PathBuf::from("/tmp/second.png"),
+    ];
+    assert_eq!(
+        expand_exec_argv_with_paths("viewer --open %F", &paths),
+        vec!["viewer", "--open", "/tmp/a b.pdf", "/tmp/second.png"]
+    );
+    assert_eq!(
+        expand_exec_argv_with_paths("browser %u", &paths),
+        vec!["browser", "file:///tmp/a%20b.pdf"]
+    );
+    assert_eq!(
+        expand_exec_argv_with_paths("editor --new-window", &paths),
+        vec!["editor", "--new-window", "/tmp/a b.pdf", "/tmp/second.png"]
+    );
+}
+
+#[test]
+fn dock_dnd_target_resolution_pin_gap_desktop_drop_and_spotlight_pin_work()
+-> Result<(), Box<dyn Error>> {
+    use crate::config::DockPosition;
+    use crate::shell_render::{DockDropHighlight, DockHit, DockViewState, compute_dock_layout};
+    use smithay::utils::Size;
+
+    let display: Display<RustyCompositorState> = Display::new()?;
+    let event_loop: EventLoop<RustyCompositorState> = EventLoop::try_new()?;
+    let compositor = RustyCompositorState::new(
+        &display,
+        "rusty-test-dock-dnd".to_owned(),
+        event_loop.get_signal(),
+        event_loop.handle(),
+        (1280, 800).into(),
+    )?;
+
+    let out_id = compositor.output_map.primary().id;
+    let tiles = compositor.build_dock_tiles();
+    let rest_view = DockViewState {
+        tiles: &tiles,
+        ..DockViewState::default()
+    };
+    let layout = compute_dock_layout(Size::from((1280, 800)), &rest_view);
+
+    // 1. Trash slot resolves to DockDropTarget::Trash.
+    let trash_slot = layout
+        .slots
+        .iter()
+        .find(|s| s.tile.hit == DockHit::PinnedTrash)
+        .ok_or("missing Trash slot")?;
+    let tx = f64::from(trash_slot.hit_rect.loc.x + trash_slot.hit_rect.size.w / 2);
+    let ty = f64::from(trash_slot.hit_rect.loc.y + trash_slot.hit_rect.size.h / 2);
+    assert_eq!(
+        super::resolve_dock_drop_target_at(&layout, DockPosition::Bottom, out_id, tx, ty, false),
+        Some(super::DockDropTarget::Trash {
+            output_id: out_id,
+            slot_idx: trash_slot.slot_idx,
+        })
+    );
+
+    // 2. Files slot resolves to DockDropTarget::App, and Settings/Overview are rejected.
+    let files_slot = layout
+        .slots
+        .iter()
+        .find(|s| s.tile.hit == DockHit::PinnedFiles)
+        .ok_or("missing Files slot")?;
+    let fx = f64::from(files_slot.hit_rect.loc.x + files_slot.hit_rect.size.w / 2);
+    let fy = f64::from(files_slot.hit_rect.loc.y + files_slot.hit_rect.size.h / 2);
+    assert!(matches!(
+        super::resolve_dock_drop_target_at(&layout, DockPosition::Bottom, out_id, fx, fy, false),
+        Some(super::DockDropTarget::App { ref app_key, .. }) if app_key == "files"
+    ));
+
+    let settings_slot = layout
+        .slots
+        .iter()
+        .find(|s| s.tile.hit == DockHit::PinnedSettings)
+        .ok_or("missing Settings slot")?;
+    let sx = f64::from(settings_slot.hit_rect.loc.x + settings_slot.hit_rect.size.w / 2);
+    let sy = f64::from(settings_slot.hit_rect.loc.y + settings_slot.hit_rect.size.h / 2);
+    assert!(
+        super::resolve_dock_drop_target_at(&layout, DockPosition::Bottom, out_id, sx, sy, false)
+            .is_none()
+    );
+
+    // 3. PinInsert highlight opens an insertion placeholder rect inside Pinned.
+    let gap_view = DockViewState {
+        tiles: &tiles,
+        drop_highlight: Some(DockDropHighlight::PinInsert {
+            insert_idx: 2,
+            label: "DemoApp",
+        }),
+        ..DockViewState::default()
+    };
+    let gap_layout = compute_dock_layout(Size::from((1280, 800)), &gap_view);
+    assert!(gap_layout.drop_insert_rect.is_some());
+    assert_eq!(gap_layout.slots.len(), layout.slots.len());
+    assert!(gap_layout.capsule_rect.size.w > layout.capsule_rect.size.w);
+    Ok(())
+}
+
+#[test]
+fn dock_dnd_desktop_file_pin_and_spotlight_pin_at_index_work() -> Result<(), Box<dyn Error>> {
+    use crate::shell_render::DockSection;
+
+    let display: Display<RustyCompositorState> = Display::new()?;
+    let event_loop: EventLoop<RustyCompositorState> = EventLoop::try_new()?;
+    let mut compositor = RustyCompositorState::new(
+        &display,
+        "rusty-test-dock-dnd-pin".to_owned(),
+        event_loop.get_signal(),
+        event_loop.handle(),
+        (1280, 800).into(),
+    )?;
+    let out_id = compositor.output_map.primary().id;
+
+    let tmp = std::env::temp_dir().join(format!("rustyos-dnd-desktop-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp)?;
+    let desktop_file = tmp.join("org.example.demoapp.desktop");
+    std::fs::write(
+        &desktop_file,
+        "[Desktop Entry]\nType=Application\nName=DemoApp\nExec=/bin/true %F\nIcon=applications-other\nMimeType=text/plain;\n",
+    )?;
+    compositor.execute_dock_drop(
+        &super::DockDropTarget::PinInsert {
+            output_id: out_id,
+            insert_idx: 1,
+        },
+        vec![desktop_file],
+        false,
+    );
+    assert_eq!(
+        compositor
+            .user_config
+            .dock_pinned_apps
+            .get(1)
+            .map(String::as_str),
+        Some("org.example.demoapp")
+    );
+    assert!(
+        compositor
+            .build_dock_tiles()
+            .iter()
+            .any(|t| t.section == DockSection::Pinned && t.app_key == "org.example.demoapp")
+    );
+
+    assert!(compositor.pin_app_at_index("org.example.demoapp", 3));
+    assert_eq!(
+        compositor
+            .user_config
+            .dock_pinned_apps
+            .get(3)
+            .map(String::as_str),
+        Some("org.example.demoapp")
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp);
     Ok(())
 }

@@ -181,7 +181,8 @@ impl RustyCompositorState {
         let has_drag = self
             .dock_drag
             .as_ref()
-            .is_some_and(|d| d.output_id == output_id);
+            .is_some_and(|d| d.output_id == output_id)
+            || self.dock_drop_highlight_for_output(output_id).is_some();
         let has_menu = self.context_menu.as_ref().is_some_and(|ctx| {
             ctx.output_id == output_id && matches!(ctx.target, ContextMenuTarget::DockSlot(_))
         });
@@ -368,6 +369,7 @@ impl RustyCompositorState {
             drag_preview,
             top_inset: if is_primary { TOP_BAR_HEIGHT } else { 0 },
             presented_layout,
+            drop_highlight: self.dock_drop_highlight_for_output(output_id),
         }
     }
 

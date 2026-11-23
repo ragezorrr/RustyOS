@@ -318,6 +318,7 @@ impl DockPresentation {
             slots,
             drag_remove_badge: target.drag_remove_badge,
             dragged_icon: target.dragged_icon.clone(),
+            drop_insert_rect: target.drop_insert_rect,
         }
     }
 

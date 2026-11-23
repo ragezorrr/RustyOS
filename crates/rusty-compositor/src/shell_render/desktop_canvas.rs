@@ -84,6 +84,8 @@ pub struct DesktopDragState {
     pub target_hover_dir: Option<PathBuf>,
     /// True when hovering over the Trash icon in Dock to drop and delete (`RUSTYOS-083`).
     pub drop_to_trash: bool,
+    /// Resolved Dock drop target (App / Trash / Downloads / `PinInsert`) during desktop drag (`RUSTYOS-163`).
+    pub dock_drop_target: Option<crate::state::DockDropTarget>,
 }
 
 /// In-place text renaming state for a desktop canvas file or folder (`RUSTYOS-083`).

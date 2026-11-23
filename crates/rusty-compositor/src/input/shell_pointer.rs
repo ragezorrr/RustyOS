@@ -22,7 +22,8 @@ impl RustyCompositorState {
 
     pub(super) fn update_dock_hover_slot(&mut self, pos: Point<f64, Logical>) {
         let (output_id, is_primary, logical_size, local_x, local_y) = self.output_local_coords(pos);
-        let chrome_allowed = !self.launcher_active
+        let drag_reveal_active = self.is_any_dock_drop_drag_active();
+        let chrome_allowed = (!self.launcher_active || drag_reveal_active)
             && !self.quick_settings_active
             && !self.updates_popover_open
             && !self.wifi_popover_open
@@ -962,7 +963,23 @@ impl RustyCompositorState {
             self.pointer_location.y,
         ) {
             crate::shell_render::SpotlightHit::Row(row_idx) => {
-                self.launch_spotlight_row(row_idx);
+                let (_, visible) = self.launcher.visible_window(5);
+                if let Some(cand) = visible.get(row_idx)
+                    && let Some(app_key) = cand.app_key.clone()
+                {
+                    self.spotlight_drag = Some(crate::state::SpotlightDragState {
+                        row_idx,
+                        app_key,
+                        label: cand.name.clone(),
+                        icon_name: cand.icon.clone(),
+                        start_pointer: self.pointer_location,
+                        current_pointer: self.pointer_location,
+                        active_drag: false,
+                        target: None,
+                    });
+                } else {
+                    self.launch_spotlight_row(row_idx);
+                }
             }
             crate::shell_render::SpotlightHit::InsideModal => {}
             crate::shell_render::SpotlightHit::OutsideModal => {

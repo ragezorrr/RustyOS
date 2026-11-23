@@ -38,6 +38,7 @@ fn generate_shell_render_elements_produces_non_empty_layout() {
     assert!(!elements.is_empty());
 
     let sample_items = [crate::launcher::LauncherCandidate {
+        app_key: Some("terminal".to_owned()),
         name: "Terminal".to_owned(),
         subtitle: "foot".to_owned(),
         exec: "foot".to_owned(),

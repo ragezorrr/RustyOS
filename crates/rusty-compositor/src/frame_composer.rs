@@ -64,6 +64,7 @@ pub(crate) fn dispatch_and_refresh_clients(
     app_state.drain_screenshot_results();
     app_state.drain_trash_empty_results();
     app_state.drain_trash_monitor_updates();
+    app_state.drain_dock_dnd_events();
     let _ = app_state.drain_system_integration_events(smithay::utils::SERIAL_COUNTER.next_serial());
     if let Some(ipc) = ipc_server {
         ipc.poll_requests(|req| app_state.handle_ipc_request(req));
@@ -1671,6 +1672,42 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
             .into_iter()
             .map(CompositorRenderElement::Surface),
         );
+    }
+
+    if let Some(ref spot_drag) = state.spotlight_drag
+        && spot_drag.active_drag
+        && let Some(ptr) = local_ptr
+    {
+        let sz = (state.user_config.dock_icon_size + 4).clamp(40, 68);
+        let icon_loc = Point::<i32, Logical>::from((ptr.x - sz / 2, ptr.y - sz / 2));
+        let builtin = crate::shell_render::dock_builtin_for_key(&spot_drag.app_key);
+        let resolved = builtin
+            .and_then(|b| {
+                shape_cache
+                    .icons
+                    .builtin_squircle_icon_element(renderer, b, sz, icon_loc)
+            })
+            .or_else(|| {
+                spot_drag.icon_name.as_deref().and_then(|name| {
+                    shape_cache
+                        .icons
+                        .icon_element_by_name(renderer, name, sz, icon_loc)
+                })
+            })
+            .or_else(|| {
+                shape_cache.icons.builtin_squircle_icon_element(
+                    renderer,
+                    crate::icons::BuiltinAppIcon::WindowFallback {
+                        hue_seed: 0x5A,
+                        active: true,
+                    },
+                    sz,
+                    icon_loc,
+                )
+            });
+        if let Some(el) = resolved {
+            render_list.push(CompositorRenderElement::Memory(el));
+        }
     }
 
     shape_cache.sync_wallpaper_revision(state.wallpaper_revision);

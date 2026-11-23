@@ -97,9 +97,13 @@ pub fn run_nested_winit(config: &CompositorConfig) -> Result<BootstrapReport, Co
     state
         .trash_monitor
         .set_on_change(std::sync::Arc::new(move || trash_ping.ping()));
+    let dnd_ping = ping.clone();
+    state.set_dock_dnd_waker(std::sync::Arc::new(move || dnd_ping.ping()));
     state.loop_waker = Some(ping);
     loop_handle
-        .insert_source(ping_source, move |_event, _metadata, _app_state| {})
+        .insert_source(ping_source, move |_event, _metadata, app_state| {
+            app_state.drain_dock_dnd_events();
+        })
         .map_err(|err| CompositorError::EventLoop(err.to_string()))?;
 
     // 2. Register Winit window/input event source.
@@ -132,7 +136,13 @@ pub fn run_nested_winit(config: &CompositorConfig) -> Result<BootstrapReport, Co
                 if let Ok(menu_test) = std::env::var("RUSTYOS_TEST_CAPTURE_MENU") {
                     let (cap_frame, exit_frame) = if matches!(
                         menu_test.as_str(),
-                        "windows" | "overview" | "window" | "screenshot_hud" | "dock_minimize"
+                        "windows"
+                            | "overview"
+                            | "window"
+                            | "screenshot_hud"
+                            | "dock_minimize"
+                            | "dock_dnd_slot"
+                            | "dock_dnd_pin"
                     ) {
                         (70_u64, 95_u64)
                     } else {
@@ -144,6 +154,43 @@ pub fn run_nested_winit(config: &CompositorConfig) -> Result<BootstrapReport, Co
                     {
                         let serial = smithay::utils::SERIAL_COUNTER.next_serial();
                         app_state.minimize_window(win_id, serial);
+                    } else if menu_test == "dock_dnd_slot" && rendered_frames == 45 {
+                        let out_id = app_state.output_map.primary().id;
+                        let tiles = app_state.build_dock_tiles();
+                        let trash_idx = tiles
+                            .iter()
+                            .position(|t| t.hit == crate::shell_render::DockHit::PinnedTrash)
+                            .unwrap_or(tiles.len().saturating_sub(1));
+                        app_state.desktop_drag = Some(crate::shell_render::DesktopDragState {
+                            start_pointer: smithay::utils::Point::from((200.0, 200.0)),
+                            current_pointer: smithay::utils::Point::from((840.0, 740.0)),
+                            dragged_path: std::path::PathBuf::from("/tmp/demo.txt"),
+                            is_active: true,
+                            target_hover_dir: None,
+                            drop_to_trash: true,
+                            dock_drop_target: Some(crate::state::DockDropTarget::Trash {
+                                output_id: out_id,
+                                slot_idx: trash_idx,
+                            }),
+                        });
+                        app_state.shell_redraw_needed = true;
+                    } else if menu_test == "dock_dnd_pin" && rendered_frames == 45 {
+                        let out_id = app_state.output_map.primary().id;
+                        app_state.pointer_location = smithay::utils::Point::from((505.0, 585.0));
+                        app_state.spotlight_drag = Some(crate::state::SpotlightDragState {
+                            row_idx: 0,
+                            app_key: "terminal".to_owned(),
+                            label: "Terminal".to_owned(),
+                            icon_name: Some("utilities-terminal".to_owned()),
+                            start_pointer: smithay::utils::Point::from((640.0, 260.0)),
+                            current_pointer: smithay::utils::Point::from((505.0, 585.0)),
+                            active_drag: true,
+                            target: Some(crate::state::DockDropTarget::PinInsert {
+                                output_id: out_id,
+                                insert_idx: 2,
+                            }),
+                        });
+                        app_state.shell_redraw_needed = true;
                     } else if menu_test == "overview" && rendered_frames == 45 {
                         app_state.toggle_overview();
                         app_state.overview_anim.snap_to_target();

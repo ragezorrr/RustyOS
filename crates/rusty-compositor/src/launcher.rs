@@ -28,11 +28,15 @@ pub struct LauncherApp {
     pub badge: String,
     /// Optional XDG icon name or filesystem path from `Icon=`.
     pub icon: Option<String>,
+    /// Supported MIME types from `.desktop` `MimeType=` (`RUSTYOS-163`).
+    pub mime_types: Vec<String>,
 }
 
 /// Filtered candidate ready for rendering or launching in Spotlight.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LauncherCandidate {
+    /// Canonical Dock application key for drag-to-pin (`None` for raw custom commands) (`RUSTYOS-163`).
+    pub app_key: Option<String>,
     /// Display title.
     pub name: String,
     /// Display subtitle.
@@ -141,6 +145,11 @@ impl LauncherState {
                 .catalog
                 .iter()
                 .map(|app| LauncherCandidate {
+                    app_key: Some(crate::shell_render::canonical_dock_app_key(
+                        Some(&app.id),
+                        &app.name,
+                        rusty_wm::WindowId(0),
+                    )),
                     name: app.name.clone(),
                     subtitle: app.subtitle.clone(),
                     exec: app.exec.clone(),
@@ -172,6 +181,11 @@ impl LauncherState {
         let mut results: Vec<LauncherCandidate> = scored
             .into_iter()
             .map(|(_, app)| LauncherCandidate {
+                app_key: Some(crate::shell_render::canonical_dock_app_key(
+                    Some(&app.id),
+                    &app.name,
+                    rusty_wm::WindowId(0),
+                )),
                 name: app.name.clone(),
                 subtitle: app.subtitle.clone(),
                 exec: app.exec.clone(),
@@ -185,6 +199,7 @@ impl LauncherState {
             let trimmed = self.query.trim();
             if !trimmed.is_empty() {
                 results.push(LauncherCandidate {
+                    app_key: None,
                     name: format!("Run \"{trimmed}\""),
                     subtitle: "Execute command in RustyOS session".to_owned(),
                     exec: trimmed.to_owned(),
@@ -481,6 +496,164 @@ impl LauncherState {
         })
     }
 
+    /// Resolves `(raw_exec_template, supported_mime_types)` for `app_key` (`RUSTYOS-163`).
+    #[must_use]
+    pub(crate) fn find_exec_and_mimes_for_dock_key(
+        &self,
+        app_key: &str,
+    ) -> Option<(String, Vec<String>)> {
+        let key = app_key.trim().to_ascii_lowercase();
+        if key.is_empty() {
+            return None;
+        }
+        let dot_suffix = format!(".{key}");
+        let preferred_bins = Self::canonical_preferred_bins(&key);
+        for app in &self.catalog {
+            let id_lower = app.id.trim_end_matches(".desktop").to_ascii_lowercase();
+            let bin = exec_basename(&app.exec);
+            let matched_bin = preferred_bins
+                .is_some_and(|bins| bins.iter().any(|b| b.eq_ignore_ascii_case(&bin)));
+            let matched = matched_bin
+                || app.id.eq_ignore_ascii_case(&key)
+                || id_lower == key
+                || id_lower.ends_with(&dot_suffix)
+                || bin.eq_ignore_ascii_case(&key)
+                || app.name.eq_ignore_ascii_case(&key);
+            if matched && command_exists_on_path(&app.exec) {
+                return Some((app.exec.clone(), app.mime_types.clone()));
+            }
+        }
+        self.find_command_for_dock_key(&key)
+            .map(|cmd| (cmd, Vec::new()))
+    }
+
+    /// Returns `true` if dropping `paths` onto Dock slot `app_key` is supported (`RUSTYOS-163`).
+    #[must_use]
+    pub(crate) fn app_accepts_dropped_paths(&self, app_key: &str, paths: &[PathBuf]) -> bool {
+        if paths.is_empty() {
+            return false;
+        }
+        let key = app_key.trim().to_ascii_lowercase();
+        if matches!(
+            key.as_str(),
+            "overview" | "settings" | "updater" | "downloads" | "trash"
+        ) {
+            return false;
+        }
+        if matches!(
+            key.as_str(),
+            "files" | "terminal" | "browser" | "firefox" | "google-chrome" | "notes"
+        ) {
+            return true;
+        }
+        let Some((exec_tpl, mimes)) = self.find_exec_and_mimes_for_dock_key(&key) else {
+            return false;
+        };
+        if mimes.is_empty() {
+            // Allow custom/untagged apps whose `Exec=` accepts files/URLs or any local binary.
+            return exec_tpl.contains("%f")
+                || exec_tpl.contains("%F")
+                || exec_tpl.contains("%u")
+                || exec_tpl.contains("%U")
+                || !exec_tpl.is_empty();
+        }
+        paths.iter().any(|path| {
+            let file_mime = mime_for_path(path);
+            mimes
+                .iter()
+                .any(|supported| desktop_mime_matches(supported, file_mime))
+        })
+    }
+
+    /// Launches a Dock application with dropped file `paths`, honoring `.desktop` `%f`/`%F`/`%u`/`%U`
+    /// field codes and setting working directory for terminal apps (`RUSTYOS-163`).
+    pub(crate) fn launch_by_dock_key_with_paths(
+        &mut self,
+        app_key: &str,
+        paths: &[PathBuf],
+        wayland_display: &str,
+        ipc_socket: &Path,
+    ) -> bool {
+        if paths.is_empty() {
+            return self.launch_by_dock_key(app_key, wayland_display, ipc_socket);
+        }
+        let key = app_key.trim().to_ascii_lowercase();
+        let Some((exec_tpl, _)) = self.find_exec_and_mimes_for_dock_key(&key) else {
+            return false;
+        };
+
+        if key == "terminal" {
+            let target_dir = paths.first().and_then(|p| {
+                if p.is_dir() {
+                    Some(p.as_path())
+                } else {
+                    p.parent()
+                }
+            });
+            let tokens = parse_exec_argv(&exec_tpl);
+            let Some((program, args)) = tokens.split_first() else {
+                return false;
+            };
+            self.reap_children();
+            return self
+                .spawn_resolved_program_in_dir(
+                    program,
+                    args,
+                    target_dir,
+                    wayland_display,
+                    ipc_socket,
+                )
+                .is_ok();
+        }
+
+        let effective_paths: Vec<PathBuf> = if key == "files" {
+            paths
+                .iter()
+                .take(1)
+                .map(|p| {
+                    if p.is_dir() {
+                        p.clone()
+                    } else {
+                        p.parent().map_or_else(|| p.clone(), Path::to_path_buf)
+                    }
+                })
+                .collect()
+        } else {
+            paths.to_vec()
+        };
+        let tokens = expand_exec_argv_with_paths(&exec_tpl, &effective_paths);
+        let Some((program, args)) = tokens.split_first() else {
+            return false;
+        };
+        self.reap_children();
+        self.spawn_resolved_program_in_dir(program, args, None, wayland_display, ipc_socket)
+            .is_ok()
+    }
+
+    /// Parses a dropped `.desktop` file, registers it in the in-memory catalog if missing,
+    /// and returns `(canonical_dock_key, LauncherApp)` (`RUSTYOS-163`).
+    pub(crate) fn resolve_desktop_file_to_dock_key(
+        &mut self,
+        desktop_path: &Path,
+    ) -> Option<(String, LauncherApp)> {
+        let contents = fs::read_to_string(desktop_path).ok()?;
+        let id = desktop_path.file_name()?.to_string_lossy().into_owned();
+        let app = parse_desktop_entry(&contents, &id)?;
+        let key = crate::shell_render::canonical_dock_app_key(
+            Some(&app.id),
+            &app.name,
+            rusty_wm::WindowId(0),
+        );
+        if !self
+            .catalog
+            .iter()
+            .any(|c| c.id.eq_ignore_ascii_case(&app.id))
+        {
+            self.catalog.push(app.clone());
+        }
+        Some((key, app))
+    }
+
     /// Returns `true` when `app_key` resolves to an installed `.desktop` entry or executable on `PATH` (`RUSTYOS-161`).
     #[must_use]
     pub(crate) fn has_installed_dock_entry(&self, app_key: &str) -> bool {
@@ -579,6 +752,17 @@ impl LauncherState {
         wayland_display: &str,
         ipc_socket: &Path,
     ) -> Result<u32, String> {
+        self.spawn_resolved_program_in_dir(program, args, None, wayland_display, ipc_socket)
+    }
+
+    fn spawn_resolved_program_in_dir(
+        &mut self,
+        program: &str,
+        args: &[String],
+        working_dir: Option<&Path>,
+        wayland_display: &str,
+        ipc_socket: &Path,
+    ) -> Result<u32, String> {
         let resolved = resolve_program_path(program);
         let program_path = resolved.as_deref().unwrap_or_else(|| Path::new(program));
         self.launch_seq = self.launch_seq.wrapping_add(1);
@@ -598,6 +782,11 @@ impl LauncherState {
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
+        if let Some(dir) = working_dir
+            && dir.is_dir()
+        {
+            cmd.current_dir(dir);
+        }
         if let Some(disp) = &self.x11_display {
             cmd.env("DISPLAY", disp);
         }
@@ -623,6 +812,11 @@ impl LauncherState {
                     .stdin(Stdio::null())
                     .stdout(Stdio::null())
                     .stderr(Stdio::null());
+                if let Some(dir) = working_dir
+                    && dir.is_dir()
+                {
+                    fallback_cmd.current_dir(dir);
+                }
                 if let Some(disp) = &self.x11_display {
                     fallback_cmd.env("DISPLAY", disp);
                 }
@@ -873,6 +1067,7 @@ fn merge_builtin_fallbacks(catalog: &mut Vec<LauncherApp>) {
             ],
             badge: ">_".to_owned(),
             icon: Some("utilities-terminal".to_owned()),
+            mime_types: vec!["inode/directory".to_owned()],
         },
         LauncherApp {
             id: "org.rustyos.files".to_owned(),
@@ -882,6 +1077,7 @@ fn merge_builtin_fallbacks(catalog: &mut Vec<LauncherApp>) {
             keywords: vec!["folder".to_owned(), "manager".to_owned()],
             badge: "Fi".to_owned(),
             icon: Some("system-file-manager".to_owned()),
+            mime_types: vec!["inode/directory".to_owned()],
         },
         LauncherApp {
             id: "org.rustyos.updater".to_owned(),
@@ -896,6 +1092,7 @@ fn merge_builtin_fallbacks(catalog: &mut Vec<LauncherApp>) {
             ],
             badge: "Up".to_owned(),
             icon: Some("system-software-update".to_owned()),
+            mime_types: Vec::new(),
         },
         LauncherApp {
             id: "org.rustyos.settings".to_owned(),
@@ -911,6 +1108,7 @@ fn merge_builtin_fallbacks(catalog: &mut Vec<LauncherApp>) {
             ],
             badge: "Se".to_owned(),
             icon: Some("preferences-system".to_owned()),
+            mime_types: Vec::new(),
         },
         LauncherApp {
             id: "org.rustyos.installer".to_owned(),
@@ -926,6 +1124,7 @@ fn merge_builtin_fallbacks(catalog: &mut Vec<LauncherApp>) {
             ],
             badge: "In".to_owned(),
             icon: Some("system-software-install".to_owned()),
+            mime_types: Vec::new(),
         },
         LauncherApp {
             id: "org.rustyos.gears".to_owned(),
@@ -935,6 +1134,7 @@ fn merge_builtin_fallbacks(catalog: &mut Vec<LauncherApp>) {
             keywords: vec!["opengl".to_owned(), "gl".to_owned(), "benchmark".to_owned()],
             badge: "GL".to_owned(),
             icon: Some("glxgears".to_owned()),
+            mime_types: Vec::new(),
         },
     ];
 
@@ -956,6 +1156,7 @@ pub fn parse_desktop_entry(contents: &str, id: &str) -> Option<LauncherApp> {
     let mut exec: Option<String> = None;
     let mut icon: Option<String> = None;
     let mut keywords: Vec<String> = Vec::new();
+    let mut mime_types: Vec<String> = Vec::new();
     let mut no_display = false;
     let mut hidden = false;
 
@@ -994,6 +1195,13 @@ pub fn parse_desktop_entry(contents: &str, id: &str) -> Option<LauncherApp> {
                     .map(ToOwned::to_owned)
                     .collect();
             }
+            "MimeType" => {
+                mime_types = val
+                    .split(';')
+                    .map(|s| s.trim().to_ascii_lowercase())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+            }
             "NoDisplay" => no_display = val.eq_ignore_ascii_case("true"),
             "Hidden" => hidden = val.eq_ignore_ascii_case("true"),
             _ => {}
@@ -1022,12 +1230,20 @@ pub fn parse_desktop_entry(contents: &str, id: &str) -> Option<LauncherApp> {
         keywords,
         badge,
         icon,
+        mime_types,
     })
 }
 
 /// Splits an XDG `Exec=` command string into program + arguments, stripping `%f`/`%u`/etc. field codes.
 #[must_use]
 pub fn parse_exec_argv(exec: &str) -> Vec<String> {
+    expand_exec_argv_with_paths(exec, &[])
+}
+
+/// Splits an XDG `Exec=` command string and substitutes `%f`/`%F`/`%u`/`%U` field codes with `paths`
+/// (appending `paths` as positional arguments when no file/URL field code is present) (`RUSTYOS-163`).
+#[must_use]
+pub fn expand_exec_argv_with_paths(exec: &str, paths: &[PathBuf]) -> Vec<String> {
     let mut raw_tokens = Vec::new();
     let mut current = String::new();
     let mut in_single = false;
@@ -1071,31 +1287,104 @@ pub fn parse_exec_argv(exec: &str) -> Vec<String> {
         raw_tokens.push(current);
     }
 
-    raw_tokens
-        .into_iter()
-        .filter_map(|tok| {
-            if matches!(
-                tok.as_str(),
-                "%f" | "%F"
-                    | "%u"
-                    | "%U"
-                    | "%d"
-                    | "%D"
-                    | "%n"
-                    | "%N"
-                    | "%i"
-                    | "%c"
-                    | "%k"
-                    | "@@u"
-                    | "@@"
-            ) {
-                None
-            } else {
-                let cleaned = tok.replace("%%", "%");
-                (!cleaned.is_empty()).then_some(cleaned)
+    let mut out = Vec::with_capacity(raw_tokens.len() + paths.len());
+    let mut expanded_paths = false;
+    for tok in raw_tokens {
+        match tok.as_str() {
+            "%f" => {
+                expanded_paths = true;
+                if let Some(first) = paths.first() {
+                    out.push(first.to_string_lossy().into_owned());
+                }
             }
-        })
-        .collect()
+            "%F" => {
+                expanded_paths = true;
+                for p in paths {
+                    out.push(p.to_string_lossy().into_owned());
+                }
+            }
+            "%u" => {
+                expanded_paths = true;
+                if let Some(first) = paths.first() {
+                    out.push(rusty_services::path_to_file_uri(first));
+                }
+            }
+            "%U" => {
+                expanded_paths = true;
+                for p in paths {
+                    out.push(rusty_services::path_to_file_uri(p));
+                }
+            }
+            "%d" | "%D" | "%n" | "%N" | "%i" | "%c" | "%k" | "@@u" | "@@" => {}
+            _ => {
+                let cleaned = tok.replace("%%", "%");
+                if !cleaned.is_empty() {
+                    out.push(cleaned);
+                }
+            }
+        }
+    }
+    if !expanded_paths && !paths.is_empty() && !out.is_empty() {
+        for p in paths {
+            out.push(p.to_string_lossy().into_owned());
+        }
+    }
+    out
+}
+
+/// Infers a lightweight MIME type from a local filesystem path (`RUSTYOS-163`).
+#[must_use]
+pub fn mime_for_path(path: &Path) -> &'static str {
+    if path.is_dir() {
+        return "inode/directory";
+    }
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase);
+    match ext.as_deref() {
+        Some("desktop") => "application/x-desktop",
+        Some("html" | "htm" | "xhtml") => "text/html",
+        Some("pdf") => "application/pdf",
+        Some("png") => "image/png",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("webp") => "image/webp",
+        Some("gif") => "image/gif",
+        Some("svg") => "image/svg+xml",
+        Some("mp4" | "m4v") => "video/mp4",
+        Some("mkv") => "video/x-matroska",
+        Some("webm") => "video/webm",
+        Some("mp3") => "audio/mpeg",
+        Some("flac") => "audio/flac",
+        Some("ogg" | "opus") => "audio/ogg",
+        Some("wav") => "audio/wav",
+        Some("zip") => "application/zip",
+        Some("tar" | "gz" | "xz" | "zst" | "bz2") => "application/x-archive",
+        Some(
+            "txt" | "md" | "rs" | "toml" | "json" | "yaml" | "yml" | "ini" | "conf" | "cfg" | "log"
+            | "py" | "js" | "ts" | "c" | "h" | "cpp" | "hpp" | "sh" | "css" | "xml" | "csv",
+        ) => "text/plain",
+        _ => "application/octet-stream",
+    }
+}
+
+/// Checks whether a `.desktop` `MimeType=` entry accepts `file_mime` (`RUSTYOS-163`).
+#[must_use]
+pub fn desktop_mime_matches(supported: &str, file_mime: &str) -> bool {
+    let s = supported.trim().to_ascii_lowercase();
+    let f = file_mime.trim().to_ascii_lowercase();
+    if s.is_empty() || f.is_empty() {
+        return false;
+    }
+    if s == f || s == "*/*" || s == "application/octet-stream" {
+        return true;
+    }
+    if let Some(prefix) = s.strip_suffix("/*") {
+        return f
+            .split_once('/')
+            .is_some_and(|(f_type, _)| f_type == prefix);
+    }
+    false
 }
 
 fn make_badge(name: &str, exec: &str) -> String {
@@ -1181,6 +1470,7 @@ Exec=firefox --private-window
                 keywords: vec!["folder".to_owned()],
                 badge: "Fi".to_owned(),
                 icon: Some("system-file-manager".to_owned()),
+                mime_types: vec!["inode/directory".to_owned()],
             },
             LauncherApp {
                 id: "2".to_owned(),
@@ -1190,6 +1480,7 @@ Exec=firefox --private-window
                 keywords: vec!["console".to_owned()],
                 badge: ">_".to_owned(),
                 icon: Some("utilities-terminal".to_owned()),
+                mime_types: Vec::new(),
             },
             LauncherApp {
                 id: "3".to_owned(),
@@ -1199,6 +1490,7 @@ Exec=firefox --private-window
                 keywords: vec!["opengl".to_owned()],
                 badge: "EG".to_owned(),
                 icon: None,
+                mime_types: Vec::new(),
             },
             LauncherApp {
                 id: "4".to_owned(),
@@ -1208,6 +1500,7 @@ Exec=firefox --private-window
                 keywords: vec!["sound".to_owned()],
                 badge: "AM".to_owned(),
                 icon: None,
+                mime_types: Vec::new(),
             },
         ]);
 
@@ -1279,6 +1572,7 @@ Exec=firefox --private-window
                 keywords: Vec::new(),
                 badge: "GC".to_owned(),
                 icon: Some("chrome-pommaclcbfghclhalboakcipcmmndhcj-Default".to_owned()),
+                mime_types: Vec::new(),
             },
             LauncherApp {
                 id: "google-chrome.desktop".to_owned(),
@@ -1288,6 +1582,7 @@ Exec=firefox --private-window
                 keywords: Vec::new(),
                 badge: "GC".to_owned(),
                 icon: Some("google-chrome".to_owned()),
+                mime_types: vec!["text/html".to_owned()],
             },
         ];
 
@@ -1315,6 +1610,7 @@ Exec=firefox --private-window
                 keywords: Vec::new(),
                 badge: ">_".to_owned(),
                 icon: Some("Alacritty".to_owned()),
+                mime_types: Vec::new(),
             },
             LauncherApp {
                 id: "foot.desktop".to_owned(),
@@ -1324,6 +1620,7 @@ Exec=firefox --private-window
                 keywords: Vec::new(),
                 badge: ">_".to_owned(),
                 icon: Some("foot".to_owned()),
+                mime_types: Vec::new(),
             },
             LauncherApp {
                 id: "org.rustyos.terminal.desktop".to_owned(),
@@ -1333,6 +1630,7 @@ Exec=firefox --private-window
                 keywords: vec!["terminal".to_owned()],
                 badge: ">_".to_owned(),
                 icon: Some("utilities-terminal".to_owned()),
+                mime_types: Vec::new(),
             },
         ]);
         assert_eq!(
