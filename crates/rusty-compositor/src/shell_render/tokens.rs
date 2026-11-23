@@ -457,11 +457,11 @@ pub(super) fn truncate_ascii(text: &str, max_chars: usize) -> String {
     }
 }
 
-pub(super) const RGBA_SURFACE_ELEVATED: [u8; 4] = [38, 38, 42, 245]; // #26262A @ 0.96
-pub(super) const RGBA_SURFACE_OVERLAY: [u8; 4] = [48, 48, 54, 250]; // #303036 @ 0.98
+pub(super) const RGBA_SURFACE_ELEVATED: [u8; 4] = [28, 28, 30, 246]; // #1C1C1E @ 0.96
+pub(super) const RGBA_SURFACE_OVERLAY: [u8; 4] = [34, 34, 36, 250]; // #222224 @ 0.98
 pub(super) const RGBA_ACCENT: [u8; 4] = [10, 132, 255, 255]; // #0A84FF
-pub(super) const RGBA_BORDER: [u8; 4] = [255, 255, 255, 31];
-pub(super) const RGBA_BORDER_HIGHLIGHT: [u8; 4] = [255, 255, 255, 56];
+pub(super) const RGBA_BORDER: [u8; 4] = [255, 255, 255, 18];
+pub(super) const RGBA_BORDER_HIGHLIGHT: [u8; 4] = [255, 255, 255, 28];
 pub(super) const RGBA_DANGER: [u8; 4] = [255, 69, 58, 255];
 
 pub(super) fn rgba_to_premul_color32f(rgba: [u8; 4]) -> Color32F {

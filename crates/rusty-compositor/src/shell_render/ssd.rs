@@ -283,6 +283,7 @@ fn ssd_title_pill_color(pal: &super::tokens::ThemePalette, is_focused: bool) -> 
 
 const fn ssd_frame_colors(is_dark: bool, is_focused: bool) -> ([u8; 4], [u8; 4]) {
     if is_dark {
+        // Neutral macOS Dark header tones matching RustyOS Dark (#1C1C1D) & Chromium (#202124).
         let titlebar = if is_focused {
             RGBA_SURFACE_OVERLAY
         } else {
@@ -296,14 +297,14 @@ const fn ssd_frame_colors(is_dark: bool, is_focused: bool) -> ([u8; 4], [u8; 4])
         (titlebar, border)
     } else {
         let titlebar = if is_focused {
-            [245, 246, 250, 248]
+            [246, 246, 248, 250]
         } else {
-            [236, 237, 241, 244]
+            [236, 237, 240, 246]
         };
         let border = if is_focused {
-            [0, 0, 0, 28]
+            [0, 0, 0, 24]
         } else {
-            [0, 0, 0, 18]
+            [0, 0, 0, 15]
         };
         (titlebar, border)
     }
@@ -330,7 +331,14 @@ pub fn generate_ssd_title_element(
         Point::from((rect.x + 70, rect.y)),
         Size::from((rect.width - 140, TITLEBAR_HEIGHT)),
     );
-    text_cache.render_label_centered(renderer, title, 12.0, color, bounds)
+    text_cache.render_label_centered_weighted(
+        renderer,
+        title,
+        crate::text::FontWeight::Bold,
+        12.5,
+        color,
+        bounds,
+    )
 }
 
 /// Generates rounded SSD titlebar, gel-lit macOS traffic lights (with optional hover glyphs),

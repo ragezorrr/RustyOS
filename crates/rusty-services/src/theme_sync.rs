@@ -44,6 +44,10 @@ pub fn merge_gtk_settings_ini(existing: &str, cfg: &ThemeSyncConfig) -> String {
             "gtk-cursor-theme-size",
             cfg.cursor_size.clamp(16, 64).to_string(),
         ),
+        (
+            "gtk-decoration-layout",
+            "close,minimize,maximize:".to_owned(),
+        ),
     ];
     if let Some(icon) = cfg
         .icon_theme
@@ -287,6 +291,12 @@ fn apply_gsettings_best_effort(cfg: &ThemeSyncConfig) {
         "prefer-light"
     };
     run_gsettings(&["set", "org.gnome.desktop.interface", "color-scheme", scheme]);
+    run_gsettings(&[
+        "set",
+        "org.gnome.desktop.wm.preferences",
+        "button-layout",
+        "close,minimize,maximize:",
+    ]);
     if let Some(icon) = cfg
         .icon_theme
         .as_deref()
@@ -335,6 +345,7 @@ mod tests {
         assert!(merged.contains("gtk-icon-theme-name=Papirus-Dark"));
         assert!(merged.contains("gtk-cursor-theme-name=Adwaita"));
         assert!(merged.contains("gtk-cursor-theme-size=24"));
+        assert!(merged.contains("gtk-decoration-layout=close,minimize,maximize:"));
         assert!(merged.contains("gtk-font-name=Inter 10"));
     }
 
