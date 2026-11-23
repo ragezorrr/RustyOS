@@ -512,6 +512,22 @@ impl TerminalAppState {
                 self.handle_selection_button(&layout, ix, iy, pressed);
             } else if !pressed && button == 1 {
                 self.pending_actions.push(TerminalAction::RequestPaste);
+            } else if !pressed && button == 2 {
+                let copied = self.active_tab().and_then(|tab| {
+                    let sel = tab.selection?;
+                    let text = tab.engine.extract_selection_text(sel);
+                    (!text.is_empty()).then_some(text)
+                });
+                if let Some(text) = copied {
+                    if let Some(tab) = self.active_tab_mut() {
+                        tab.selection = None;
+                    }
+                    self.pending_actions
+                        .push(TerminalAction::CopyClipboard(text));
+                    self.mark_damage(DamageLevel::Full);
+                } else {
+                    self.pending_actions.push(TerminalAction::RequestPaste);
+                }
             }
         } else if !pressed
             && button == 0
@@ -826,7 +842,8 @@ impl TerminalAppState {
 
     fn handle_shortcut(&mut self, keysym: Keysym) -> bool {
         let ctrl_shift = self.modifiers.ctrl && self.modifiers.shift;
-        if ctrl_shift && matches!(keysym, Keysym::c | Keysym::C)
+        let super_only = self.modifiers.logo && !self.modifiers.ctrl && !self.modifiers.alt;
+        if (ctrl_shift || super_only) && is_copy_keysym(keysym)
             || (self.modifiers.ctrl && keysym == Keysym::Insert)
         {
             if let Some(tab) = self.active_tab()
@@ -840,25 +857,26 @@ impl TerminalAppState {
             }
             return true;
         }
-        if ctrl_shift && matches!(keysym, Keysym::v | Keysym::V)
+        if (ctrl_shift || super_only) && is_paste_keysym(keysym)
             || (self.modifiers.shift && keysym == Keysym::Insert)
+            || (self.search.open && self.modifiers.ctrl && is_paste_keysym(keysym))
         {
             self.pending_actions.push(TerminalAction::RequestPaste);
             return true;
         }
-        if ctrl_shift && matches!(keysym, Keysym::t | Keysym::T) {
+        if (ctrl_shift || super_only) && is_new_tab_keysym(keysym) {
             self.spawn_tab(None);
             return true;
         }
-        if ctrl_shift && matches!(keysym, Keysym::w | Keysym::W) {
+        if ctrl_shift && is_close_tab_keysym(keysym) {
             self.close_tab(self.active_tab);
             return true;
         }
-        if ctrl_shift && matches!(keysym, Keysym::f | Keysym::F) {
+        if (ctrl_shift || super_only) && is_search_keysym(keysym) {
             self.toggle_search();
             return true;
         }
-        if ctrl_shift && matches!(keysym, Keysym::k | Keysym::K) {
+        if (ctrl_shift || super_only) && is_clear_keysym(keysym) {
             if let Some(tab) = self.active_tab_mut() {
                 tab.engine.clear_scrollback_and_reset_view();
                 tab.scroll_target = 0.0;
@@ -1175,6 +1193,48 @@ pub(crate) fn encode_mouse_sgr(
     format!("\x1b[<{};{};{}{}", cb, col_0 + 1, row_0 + 1, suffix).into_bytes()
 }
 
+const fn is_copy_keysym(keysym: Keysym) -> bool {
+    matches!(
+        keysym,
+        Keysym::c | Keysym::C | Keysym::Cyrillic_es | Keysym::Cyrillic_ES
+    )
+}
+
+const fn is_paste_keysym(keysym: Keysym) -> bool {
+    matches!(
+        keysym,
+        Keysym::v | Keysym::V | Keysym::Cyrillic_em | Keysym::Cyrillic_EM
+    )
+}
+
+const fn is_new_tab_keysym(keysym: Keysym) -> bool {
+    matches!(
+        keysym,
+        Keysym::t | Keysym::T | Keysym::Cyrillic_ie | Keysym::Cyrillic_IE
+    )
+}
+
+const fn is_close_tab_keysym(keysym: Keysym) -> bool {
+    matches!(
+        keysym,
+        Keysym::w | Keysym::W | Keysym::Cyrillic_tse | Keysym::Cyrillic_TSE
+    )
+}
+
+const fn is_search_keysym(keysym: Keysym) -> bool {
+    matches!(
+        keysym,
+        Keysym::f | Keysym::F | Keysym::Cyrillic_a | Keysym::Cyrillic_A
+    )
+}
+
+const fn is_clear_keysym(keysym: Keysym) -> bool {
+    matches!(
+        keysym,
+        Keysym::k | Keysym::K | Keysym::Cyrillic_el | Keysym::Cyrillic_EL
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1242,5 +1302,30 @@ mod tests {
         // Immediate second click at the same spot toggles maximize.
         app.handle_pointer_button(422.0, 18.0, 0, true);
         assert_eq!(app.pending_actions, vec![TerminalAction::ToggleMaximize]);
+    }
+
+    #[test]
+    fn paste_shortcuts_work_across_en_ru_super_and_right_click() {
+        let mut app = TerminalAppState::new(900, 560, None, Vec::new(), None, None, None, false);
+
+        // Ctrl+Shift+V on Russian layout (`Cyrillic_EM`)
+        app.modifiers.ctrl = true;
+        app.modifiers.shift = true;
+        app.handle_key_press(Keysym::Cyrillic_EM, Some("М"));
+        assert_eq!(app.pending_actions, vec![TerminalAction::RequestPaste]);
+        app.pending_actions.clear();
+
+        // Super+V (macOS style)
+        app.modifiers.ctrl = false;
+        app.modifiers.shift = false;
+        app.modifiers.logo = true;
+        app.handle_key_press(Keysym::v, Some("v"));
+        assert_eq!(app.pending_actions, vec![TerminalAction::RequestPaste]);
+        app.pending_actions.clear();
+
+        // Right-click release on terminal grid pastes when nothing is selected
+        app.modifiers.logo = false;
+        app.handle_pointer_button(200.0, 200.0, 2, false);
+        assert_eq!(app.pending_actions, vec![TerminalAction::RequestPaste]);
     }
 }

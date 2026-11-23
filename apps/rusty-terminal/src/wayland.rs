@@ -66,7 +66,13 @@ use crate::liquid_glass::{GlassStyle, RustyosLiquidGlassManagerV1, RustyosSurfac
 use crate::renderer_shm::ShmFallbackRenderer;
 use crate::state::{DamageLevel, TerminalAction, TerminalAppState};
 
-const CLIPBOARD_MIMES: &[&str] = &["text/plain;charset=utf-8", "text/plain", "UTF8_STRING"];
+const CLIPBOARD_MIMES: &[&str] = &[
+    "text/plain;charset=utf-8",
+    "text/plain; charset=utf-8",
+    "UTF8_STRING",
+    "text/plain",
+    "STRING",
+];
 const RESIZE_BORDER_PX: f64 = 5.0;
 
 /// Startup configuration passed from CLI arguments.
@@ -512,23 +518,22 @@ impl TerminalWaylandApp {
 
     fn request_clipboard_paste(&self) {
         let Some(dd) = &self.data_device else {
+            self.paste_from_local_fallback();
             return;
         };
         let Some(offer) = dd.data().selection_offer() else {
+            self.paste_from_local_fallback();
             return;
         };
-        let mime = offer.with_mime_types(|mimes| {
-            for candidate in CLIPBOARD_MIMES {
-                if mimes.iter().any(|m| m == candidate) {
-                    return Some((*candidate).to_owned());
-                }
-            }
-            mimes.iter().find(|m| m.starts_with("text/")).cloned()
-        });
+        let mime = offer.with_mime_types(pick_clipboard_mime);
         let Some(mime) = mime else {
+            tracing::debug!("Clipboard selection offer contained no plain-text MIME type");
+            self.paste_from_local_fallback();
             return;
         };
         let Ok(mut read_pipe) = offer.receive(mime) else {
+            tracing::debug!("Failed to create Wayland clipboard receive pipe");
+            self.paste_from_local_fallback();
             return;
         };
         let _ = self.conn.flush();
@@ -546,6 +551,15 @@ impl TerminalWaylandApp {
                 ping.ping();
             }
         });
+    }
+
+    fn paste_from_local_fallback(&self) {
+        if let Some((_, text)) = self.copy_sources.last()
+            && !text.is_empty()
+        {
+            let _ = self.paste_tx.send(text.clone());
+            self.paste_ping.ping();
+        }
     }
 
     fn resize_edge_at(&self, px: f64, py: f64) -> Option<ResizeEdge> {
@@ -1068,3 +1082,45 @@ delegate_xdg_shell!(TerminalWaylandApp);
 delegate_xdg_window!(TerminalWaylandApp);
 delegate_data_device!(TerminalWaylandApp);
 delegate_registry!(TerminalWaylandApp);
+
+fn pick_clipboard_mime(mimes: &[String]) -> Option<String> {
+    for candidate in CLIPBOARD_MIMES {
+        if mimes.iter().any(|m| m == candidate) {
+            return Some((*candidate).to_owned());
+        }
+    }
+    mimes
+        .iter()
+        .find(|m| m.starts_with("text/plain"))
+        .cloned()
+        .or_else(|| {
+            mimes
+                .iter()
+                .find(|m| {
+                    m.starts_with("text/")
+                        && !m.starts_with("text/html")
+                        && !m.starts_with("text/rtf")
+                })
+                .cloned()
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pick_clipboard_mime;
+
+    #[test]
+    fn picks_utf8_plain_text_over_html_and_supports_spaced_charset() {
+        let mimes = vec![
+            String::from("text/html"),
+            String::from("text/plain; charset=utf-8"),
+        ];
+        assert_eq!(
+            pick_clipboard_mime(&mimes).as_deref(),
+            Some("text/plain; charset=utf-8")
+        );
+
+        let html_only = vec![String::from("text/html"), String::from("image/png")];
+        assert_eq!(pick_clipboard_mime(&html_only), None);
+    }
+}

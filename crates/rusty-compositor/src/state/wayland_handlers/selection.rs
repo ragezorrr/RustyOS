@@ -47,10 +47,13 @@ impl SelectionHandler for RustyCompositorState {
         _seat: Seat<Self>,
         _user_data: &Self::SelectionUserData,
     ) {
-        if let (Some(xwm), Some(loop_handle)) = (self.xwm.as_mut(), self.x11_loop_handle.clone())
-            && let Err(err) = xwm.send_selection(ty, mime_type, fd, loop_handle)
-        {
-            warn!(?ty, error = ?err, "Failed to transfer XWayland selection to Wayland");
+        if let (Some(xwm), Some(loop_handle)) = (self.xwm.as_mut(), self.x11_loop_handle.clone()) {
+            if let Err(err) = xwm.send_selection(ty, mime_type, fd, loop_handle) {
+                warn!(?ty, error = ?err, "Failed to transfer XWayland selection to Wayland");
+            } else {
+                // Ensure buffered `ConvertSelection` reaches XWayland immediately.
+                let _ = xwm.get_randr_primary_output();
+            }
         }
     }
 }
