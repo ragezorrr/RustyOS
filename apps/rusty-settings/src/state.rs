@@ -16,8 +16,10 @@ use rusty_services::updates::{
     check_all_pending_updates,
 };
 use rusty_services::{
-    AudioService, BluetoothService, BluetoothSnapshot, CurrentUserDetails, NetworkService,
-    NetworkStatus, PowerDetails, PowerProfile, PowerService, UserAccount, UserService,
+    AudioService, BluetoothService, BluetoothSnapshot, COMMON_TIMEZONES, CurrentUserDetails,
+    NetworkService, NetworkStatus, PowerDetails, PowerProfile, PowerService, TimeDateService,
+    TimeDateStatus, UserAccount, UserService, is_valid_iana_timezone, match_timezone_suggestions,
+    parse_manual_datetime_input,
 };
 
 /// Predefined accent color palette shared across RustyOS (`RUSTYOS-114`).
@@ -311,6 +313,10 @@ pub(crate) enum RowControlId {
     AboutMoreInfoOpen,
     ShortcutEditIndex(usize),
     ShortcutsResetDefaults,
+    DateTimeNtpToggle,
+    DateTimeTimezoneOpen,
+    DateTimeTimezoneCycle,
+    DateTimeManualOpen,
 }
 
 /// Coalesced UI damage scope for partial `wl_surface::damage_buffer` updates (`RUSTYOS-112`).
@@ -512,6 +518,12 @@ pub(crate) enum SettingsModal {
         validated_combo: Option<String>,
         sheet: rusty_ui::DialogSheet,
     },
+    TimezoneEdit {
+        sheet: rusty_ui::DialogSheet,
+    },
+    ManualDateTime {
+        sheet: rusty_ui::DialogSheet,
+    },
 }
 
 impl SettingsModal {
@@ -522,7 +534,9 @@ impl SettingsModal {
             | Self::WifiPassword { sheet, .. }
             | Self::WifiNetworkInfo { sheet, .. }
             | Self::InfoSheet { sheet }
-            | Self::ShortcutEdit { sheet, .. } => sheet,
+            | Self::ShortcutEdit { sheet, .. }
+            | Self::TimezoneEdit { sheet }
+            | Self::ManualDateTime { sheet } => sheet,
         }
     }
 
@@ -532,7 +546,9 @@ impl SettingsModal {
             | Self::WifiPassword { sheet, .. }
             | Self::WifiNetworkInfo { sheet, .. }
             | Self::InfoSheet { sheet }
-            | Self::ShortcutEdit { sheet, .. } => sheet,
+            | Self::ShortcutEdit { sheet, .. }
+            | Self::TimezoneEdit { sheet }
+            | Self::ManualDateTime { sheet } => sheet,
         }
     }
 
@@ -577,18 +593,20 @@ pub(crate) struct WifiActionOutcome {
     pub(crate) result: Result<(), String>,
 }
 
-/// Snapshot of live NetworkManager, BlueZ, power, and audio service status (`RUSTYOS-112`, `RUSTYOS-131`).
+/// Snapshot of live NetworkManager, BlueZ, power, timedated, and audio service status (`RUSTYOS-112`, `RUSTYOS-131`, `RUSTYOS-160`).
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ServiceSnapshot {
     pub(crate) network: NetworkStatus,
     pub(crate) bluetooth: BluetoothSnapshot,
     pub(crate) power: PowerDetails,
+    pub(crate) timedate: TimeDateStatus,
+    pub(crate) timedate_error: Option<String>,
     pub(crate) volume_percent: u8,
     pub(crate) muted: bool,
     pub(crate) wifi_action_result: Option<WifiActionOutcome>,
 }
 
-/// Asynchronous service command executed off the Wayland GUI thread (`RUSTYOS-112`, `RUSTYOS-131`).
+/// Asynchronous service command executed off the Wayland GUI thread (`RUSTYOS-112`, `RUSTYOS-131`, `RUSTYOS-160`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ServiceCommand {
     Refresh,
@@ -607,6 +625,9 @@ pub(crate) enum ServiceCommand {
     PairBluetooth(String),
     RemoveBluetooth(String),
     SetPowerProfile(PowerProfile),
+    SetNtpEnabled(bool),
+    SetTimezone(String),
+    SetManualDateTime(String),
 }
 
 /// Mutable state backing the System Settings window.
@@ -705,6 +726,9 @@ pub(crate) struct SettingsAppState {
     pub(crate) bluetooth: BluetoothSnapshot,
     pub(crate) bluetooth_status_hint: String,
     pub(crate) power: PowerDetails,
+    pub(crate) timedate: TimeDateStatus,
+    pub(crate) timedate_hint: String,
+    pub(crate) available_timezones: Vec<String>,
     pub(crate) about_info: SystemAboutInfo,
     pub(crate) user_details: Option<CurrentUserDetails>,
     pub(crate) all_users: Vec<UserAccount>,
@@ -839,6 +863,9 @@ impl SettingsAppState {
             bluetooth: BluetoothSnapshot::default(),
             bluetooth_status_hint: String::new(),
             power: PowerDetails::default(),
+            timedate: TimeDateStatus::default(),
+            timedate_hint: String::new(),
+            available_timezones: Vec::new(),
             about_info: SystemAboutInfo::default(),
             user_details: None,
             all_users: Vec::new(),
@@ -1260,11 +1287,15 @@ impl SettingsAppState {
     pub(crate) fn apply_service_snapshot(&mut self, snap: ServiceSnapshot) -> bool {
         let clamped_vol = snap.volume_percent.clamp(0, 100);
         let has_wifi_outcome = snap.wifi_action_result.is_some();
+        let tz_changed = self.timedate.timezone != snap.timedate.timezone;
+        let next_td_hint = snap.timedate_error.unwrap_or_default();
         let changed = has_wifi_outcome
             || self.network_status != snap.network.status_label
             || self.network != snap.network
             || self.bluetooth != snap.bluetooth
             || self.power != snap.power
+            || self.timedate != snap.timedate
+            || self.timedate_hint != next_td_hint
             || self.volume_percent != clamped_vol
             || self.muted != snap.muted;
         if !changed {
@@ -1275,8 +1306,13 @@ impl SettingsAppState {
         self.bluetooth = snap.bluetooth;
         self.bluetooth_status_hint.clear();
         self.power = snap.power;
+        self.timedate = snap.timedate;
+        self.timedate_hint = next_td_hint;
         self.volume_percent = clamped_vol;
         self.muted = snap.muted;
+        if tz_changed {
+            notify_compositor_reload();
+        }
         if let Some(outcome) = snap.wifi_action_result
             && let Err(err) = outcome.result
         {
@@ -1565,8 +1601,48 @@ impl SettingsAppState {
         true
     }
 
+    fn try_apply_timedate_service_action(&mut self, action: RowControlId) -> bool {
+        match action {
+            RowControlId::DateTimeNtpToggle => {
+                let next = !self.timedate.ntp_enabled;
+                self.timedate.ntp_enabled = next;
+                self.timedate_hint = String::from(if next {
+                    "Enabling NTP synchronization..."
+                } else {
+                    "Disabling NTP synchronization..."
+                });
+                self.pending_service_cmds
+                    .push(ServiceCommand::SetNtpEnabled(next));
+            }
+            RowControlId::DateTimeTimezoneOpen => self.open_timezone_modal(),
+            RowControlId::DateTimeTimezoneCycle => {
+                let idx = COMMON_TIMEZONES
+                    .iter()
+                    .position(|z| z.eq_ignore_ascii_case(&self.timedate.timezone))
+                    .map_or(0, |i| (i + 1) % COMMON_TIMEZONES.len());
+                let next = String::from(COMMON_TIMEZONES[idx]);
+                self.timedate.timezone.clone_from(&next);
+                self.timedate_hint = format!("Setting timezone to {next}...");
+                self.pending_service_cmds
+                    .push(ServiceCommand::SetTimezone(next));
+            }
+            RowControlId::DateTimeManualOpen => {
+                if self.timedate.ntp_enabled {
+                    self.timedate_hint =
+                        String::from("Turn off Automatic Date & Time before setting time manually");
+                } else {
+                    self.open_manual_datetime_modal();
+                }
+            }
+            _ => return false,
+        }
+        true
+    }
+
     fn try_apply_service_action(&mut self, action: RowControlId) -> bool {
-        if self.try_apply_wifi_service_action(action) {
+        if self.try_apply_wifi_service_action(action)
+            || self.try_apply_timedate_service_action(action)
+        {
             return true;
         }
         match action {
@@ -2249,6 +2325,74 @@ impl SettingsAppState {
         self.mark_dirty(DamageScope::Full);
     }
 
+    pub(crate) fn open_timezone_modal(&mut self) {
+        if self.available_timezones.is_empty() {
+            self.available_timezones = TimeDateService::new().list_timezones();
+        }
+        let current = self.timedate.timezone.clone();
+        let mut sheet = rusty_ui::DialogSheet::prompt(
+            "Set Time Zone",
+            format!("Current: {current} · Enter IANA zone (e.g. Europe/Kyiv)"),
+            "Apply",
+            "Europe/Kyiv",
+            current,
+        );
+        sheet.width = 450;
+        let mut modal = SettingsModal::TimezoneEdit { sheet };
+        self.refresh_modal_validation(&mut modal);
+        self.active_modal = Some(modal);
+        self.mark_dirty(DamageScope::Full);
+    }
+
+    pub(crate) fn open_manual_datetime_modal(&mut self) {
+        let now_seed = current_local_iso_datetime_seed();
+        let mut sheet = rusty_ui::DialogSheet::prompt(
+            "Set Date & Time",
+            "Format: YYYY-MM-DD HH:MM (local time)",
+            "Set",
+            "2026-11-23 15:30",
+            now_seed,
+        );
+        sheet.width = 430;
+        let mut modal = SettingsModal::ManualDateTime { sheet };
+        self.refresh_modal_validation(&mut modal);
+        self.active_modal = Some(modal);
+        self.mark_dirty(DamageScope::Full);
+    }
+
+    fn refresh_modal_validation(&self, modal: &mut SettingsModal) {
+        match modal {
+            SettingsModal::ShortcutEdit { .. } => self.refresh_shortcut_modal_validation(modal),
+            SettingsModal::TimezoneEdit { sheet } => {
+                let raw = sheet.input.as_ref().map_or("", |tf| tf.buffer.as_str());
+                let trimmed = raw.trim();
+                let suggestions = match_timezone_suggestions(trimmed, &self.available_timezones, 3);
+                if trimmed.is_empty() {
+                    sheet.message = format!("Presets: {}", suggestions.join(", "));
+                } else if is_valid_iana_timezone(trimmed)
+                    && self.available_timezones.iter().any(|z| z == trimmed)
+                {
+                    sheet.message = format!("Valid IANA timezone: {trimmed}");
+                } else if !suggestions.is_empty() {
+                    sheet.message = format!("Matches: {}", suggestions.join(", "));
+                } else {
+                    sheet.message = String::from("No matching IANA timezone (e.g. Europe/Kyiv)");
+                }
+            }
+            SettingsModal::ManualDateTime { sheet } => {
+                let raw = sheet.input.as_ref().map_or("", |tf| tf.buffer.as_str());
+                sheet.message = match parse_manual_datetime_input(raw) {
+                    Ok(canon) => format!("Valid local time: {canon}"),
+                    Err(err) => err,
+                };
+            }
+            SettingsModal::BluetoothDeviceInfo { .. }
+            | SettingsModal::WifiPassword { .. }
+            | SettingsModal::WifiNetworkInfo { .. }
+            | SettingsModal::InfoSheet { .. } => {}
+        }
+    }
+
     pub(crate) fn toggle_wifi_password_visibility(&mut self) {
         if let Some(SettingsModal::WifiPassword {
             show_password,
@@ -2354,8 +2498,53 @@ impl SettingsAppState {
                 self.last_config_mtime = current_config_mtime();
                 notify_compositor_reload();
             }
+            SettingsModal::TimezoneEdit { sheet } => self.confirm_timezone_modal(sheet),
+            SettingsModal::ManualDateTime { sheet } => self.confirm_manual_datetime_modal(sheet),
         }
         self.mark_dirty(DamageScope::Full);
+    }
+
+    fn confirm_timezone_modal(&mut self, mut sheet: rusty_ui::DialogSheet) {
+        let raw = sheet
+            .input
+            .as_ref()
+            .map_or_default(|tf| tf.buffer.as_str().trim().to_owned());
+        let resolved = if is_valid_iana_timezone(&raw)
+            && (self.available_timezones.is_empty()
+                || self.available_timezones.iter().any(|z| z == &raw))
+        {
+            Some(raw)
+        } else {
+            let matches = match_timezone_suggestions(&raw, &self.available_timezones, 2);
+            (matches.len() == 1).then(|| matches[0].clone())
+        };
+        let Some(tz) = resolved else {
+            sheet.message = String::from("Enter an exact IANA timezone (e.g. Europe/Kyiv)");
+            self.active_modal = Some(SettingsModal::TimezoneEdit { sheet });
+            return;
+        };
+        self.timedate.timezone.clone_from(&tz);
+        self.timedate_hint = format!("Setting timezone to {tz}...");
+        self.pending_service_cmds
+            .push(ServiceCommand::SetTimezone(tz));
+    }
+
+    fn confirm_manual_datetime_modal(&mut self, mut sheet: rusty_ui::DialogSheet) {
+        let raw = sheet
+            .input
+            .as_ref()
+            .map_or_default(|tf| tf.buffer.as_str().trim().to_owned());
+        match parse_manual_datetime_input(&raw) {
+            Ok(canonical) => {
+                self.timedate_hint = format!("Setting time to {canonical}...");
+                self.pending_service_cmds
+                    .push(ServiceCommand::SetManualDateTime(canonical));
+            }
+            Err(err) => {
+                sheet.message = err;
+                self.active_modal = Some(SettingsModal::ManualDateTime { sheet });
+            }
+        }
     }
 
     pub(crate) fn handle_modal_text_key(
@@ -2392,7 +2581,7 @@ impl SettingsAppState {
                 return true;
             }
             rusty_ui::TextInputEvent::Changed => {
-                self.refresh_shortcut_modal_validation(&mut modal);
+                self.refresh_modal_validation(&mut modal);
             }
             rusty_ui::TextInputEvent::CaretMoved | rusty_ui::TextInputEvent::Ignored => {}
         }
@@ -2426,7 +2615,7 @@ impl SettingsAppState {
                 fonts,
                 &mut mem,
             );
-            self.refresh_shortcut_modal_validation(&mut modal);
+            self.refresh_modal_validation(&mut modal);
             self.active_modal = Some(modal);
             self.mark_dirty(DamageScope::Full);
             return true;
@@ -2831,24 +3020,36 @@ fn step_scroll_axis(
     false
 }
 
-/// Queries live NetworkManager, BlueZ, power, and audio status (`RUSTYOS-112`, `RUSTYOS-131`).
+fn current_local_iso_datetime_seed() -> String {
+    Command::new("date")
+        .arg("+%Y-%m-%d %H:%M")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map_or_default(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+}
+
+/// Queries live NetworkManager, BlueZ, power, timedated, and audio status (`RUSTYOS-112`, `RUSTYOS-131`, `RUSTYOS-160`).
 #[must_use]
 pub(crate) fn query_service_snapshot() -> ServiceSnapshot {
     let network = NetworkService::new().query_status();
     let bluetooth = BluetoothService::new().query_snapshot();
     let power = PowerService::new().query_details();
+    let timedate = TimeDateService::new().query_status();
     let audio = AudioService::new().query_status();
     ServiceSnapshot {
         network,
         bluetooth,
         power,
+        timedate,
+        timedate_error: None,
         volume_percent: audio.volume_percent.clamp(0, 100),
         muted: audio.muted,
         wifi_action_result: None,
     }
 }
 
-/// Collapses redundant queued service commands before worker execution (`RUSTYOS-112`, `RUSTYOS-159`).
+/// Collapses redundant queued service commands before worker execution (`RUSTYOS-112`, `RUSTYOS-159`, `RUSTYOS-160`).
 #[must_use]
 pub(crate) fn coalesce_service_commands(cmds: Vec<ServiceCommand>) -> Vec<ServiceCommand> {
     let mut had_refresh = false;
@@ -2861,6 +3062,9 @@ pub(crate) fn coalesce_service_commands(cmds: Vec<ServiceCommand>) -> Vec<Servic
     let mut bt_discover = None;
     let mut bt_device_op: Option<ServiceCommand> = None;
     let mut power_profile = None;
+    let mut set_ntp = None;
+    let mut set_tz = None;
+    let mut set_manual_time = None;
 
     for cmd in cmds {
         match cmd {
@@ -2892,6 +3096,14 @@ pub(crate) fn coalesce_service_commands(cmds: Vec<ServiceCommand>) -> Vec<Servic
             | ServiceCommand::PairBluetooth(_)
             | ServiceCommand::RemoveBluetooth(_)) => bt_device_op = Some(op),
             ServiceCommand::SetPowerProfile(p) => power_profile = Some(p),
+            ServiceCommand::SetNtpEnabled(en) => {
+                set_ntp = Some(en);
+                if en {
+                    set_manual_time = None;
+                }
+            }
+            ServiceCommand::SetTimezone(tz) => set_tz = Some(tz),
+            ServiceCommand::SetManualDateTime(dt) => set_manual_time = Some(dt),
         }
     }
 
@@ -2917,6 +3129,15 @@ pub(crate) fn coalesce_service_commands(cmds: Vec<ServiceCommand>) -> Vec<Servic
     if let Some(p) = power_profile {
         out.push(ServiceCommand::SetPowerProfile(p));
     }
+    if let Some(en) = set_ntp {
+        out.push(ServiceCommand::SetNtpEnabled(en));
+    }
+    if let Some(tz) = set_tz {
+        out.push(ServiceCommand::SetTimezone(tz));
+    }
+    if let Some(dt) = set_manual_time {
+        out.push(ServiceCommand::SetManualDateTime(dt));
+    }
     if let Some(v) = set_volume {
         out.push(ServiceCommand::SetVolume(v));
     }
@@ -2929,12 +3150,14 @@ pub(crate) fn coalesce_service_commands(cmds: Vec<ServiceCommand>) -> Vec<Servic
     out
 }
 
-/// Executes a coalesced batch of service commands and queries fresh snapshot (`RUSTYOS-112`, `RUSTYOS-131`, `RUSTYOS-159`).
+/// Executes a coalesced batch of service commands and queries fresh snapshot (`RUSTYOS-112`, `RUSTYOS-131`, `RUSTYOS-159`, `RUSTYOS-160`).
 #[must_use]
 pub(crate) fn execute_coalesced_service_batch(cmds: Vec<ServiceCommand>) -> ServiceSnapshot {
     let bt = BluetoothService::new();
     let net = NetworkService::new();
+    let td = TimeDateService::new();
     let mut wifi_action_result: Option<WifiActionOutcome> = None;
+    let mut timedate_error: Option<String> = None;
     let mut rescanned_networks: Option<Vec<rusty_services::WifiAccessPoint>> = None;
     for cmd in coalesce_service_commands(cmds) {
         match cmd {
@@ -3004,6 +3227,21 @@ pub(crate) fn execute_coalesced_service_batch(cmds: Vec<ServiceCommand>) -> Serv
             ServiceCommand::SetPowerProfile(profile) => {
                 let _ = PowerService::new().set_power_profile(profile);
             }
+            ServiceCommand::SetNtpEnabled(en) => {
+                if let Err(err) = td.set_ntp(en) {
+                    timedate_error = Some(err);
+                }
+            }
+            ServiceCommand::SetTimezone(tz) => {
+                if let Err(err) = td.set_timezone(&tz) {
+                    timedate_error = Some(err);
+                }
+            }
+            ServiceCommand::SetManualDateTime(dt) => {
+                if let Err(err) = td.set_manual_datetime(&dt) {
+                    timedate_error = Some(err);
+                }
+            }
         }
     }
     let mut snap = query_service_snapshot();
@@ -3013,6 +3251,7 @@ pub(crate) fn execute_coalesced_service_batch(cmds: Vec<ServiceCommand>) -> Serv
         snap.network.wifi_networks = fresh;
     }
     snap.wifi_action_result = wifi_action_result;
+    snap.timedate_error = timedate_error;
     snap
 }
 
@@ -3503,6 +3742,8 @@ mod tests {
             },
             bluetooth: BluetoothSnapshot::default(),
             power: PowerDetails::default(),
+            timedate: TimeDateStatus::default(),
+            timedate_error: None,
             volume_percent: 50,
             muted: false,
             wifi_action_result: Some(WifiActionOutcome {
@@ -3541,6 +3782,62 @@ mod tests {
             vec![
                 ServiceCommand::DisconnectWifi(String::from("Home-WiFi")),
                 ServiceCommand::RescanWifi,
+            ]
+        );
+    }
+
+    #[test]
+    fn datetime_ntp_timezone_and_manual_time_modals_work() {
+        let mut st = SettingsAppState::defaults_with_page(SettingsPage::DateTime);
+        st.available_timezones = vec![
+            String::from("UTC"),
+            String::from("Europe/Kyiv"),
+            String::from("Europe/Berlin"),
+        ];
+
+        // Toggle NTP on
+        assert!(st.try_apply_service_action(RowControlId::DateTimeNtpToggle));
+        assert!(st.timedate.ntp_enabled);
+        assert_eq!(
+            st.pending_service_cmds,
+            vec![ServiceCommand::SetNtpEnabled(true)]
+        );
+        // Manual time blocked while NTP enabled
+        assert!(st.try_apply_service_action(RowControlId::DateTimeManualOpen));
+        assert!(st.active_modal.is_none());
+        assert!(st.timedate_hint.contains("Automatic"));
+
+        // Disable NTP and open manual date/time modal
+        st.pending_service_cmds.clear();
+        assert!(st.try_apply_service_action(RowControlId::DateTimeNtpToggle));
+        assert!(st.try_apply_service_action(RowControlId::DateTimeManualOpen));
+        assert!(matches!(
+            st.active_modal,
+            Some(SettingsModal::ManualDateTime { .. })
+        ));
+        if let Some(modal) = &mut st.active_modal
+            && let Some(tf) = modal.sheet_mut().input.as_mut()
+        {
+            tf.buffer.set_text("2026-11-23 18:45");
+        }
+        st.confirm_active_modal();
+        assert!(st.active_modal.is_none());
+
+        // Timezone modal resolves unique partial match ("kyiv" -> "Europe/Kyiv")
+        assert!(st.try_apply_service_action(RowControlId::DateTimeTimezoneOpen));
+        if let Some(modal) = &mut st.active_modal
+            && let Some(tf) = modal.sheet_mut().input.as_mut()
+        {
+            tf.buffer.set_text("kyiv");
+        }
+        st.confirm_active_modal();
+        assert_eq!(st.timedate.timezone, "Europe/Kyiv");
+        assert_eq!(
+            coalesce_service_commands(st.pending_service_cmds.clone()),
+            vec![
+                ServiceCommand::SetNtpEnabled(false),
+                ServiceCommand::SetTimezone(String::from("Europe/Kyiv")),
+                ServiceCommand::SetManualDateTime(String::from("2026-11-23 18:45:00")),
             ]
         );
     }

@@ -14,6 +14,7 @@ pub mod portal;
 pub mod privacy;
 pub mod storage;
 pub mod theme_sync;
+pub mod timedate;
 pub mod updates;
 
 pub use appruntime::{
@@ -82,6 +83,10 @@ pub use storage::{
     RemovableVolume, StorageService, is_valid_block_device_path, parse_lsblk_removable_volumes,
 };
 pub use theme_sync::{ThemeSyncConfig, ThemeSyncService, merge_gtk_settings_ini};
+pub use timedate::{
+    COMMON_TIMEZONES, TimeDateService, TimeDateStatus, is_valid_iana_timezone,
+    match_timezone_suggestions, parse_manual_datetime_input, parse_timedatectl_show,
+};
 pub use updates::{
     PackageUpdateItem, UpdateCheckState, UpdateCheckerHandle, UpdateStatusSnapshot,
     is_rustyos_package, package_requires_restart, parse_checkupdates_output,

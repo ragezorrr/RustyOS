@@ -2640,6 +2640,19 @@ hardware/software context и низкие накладные расходы.
   - `disconnect_wifi`/`forget_wifi`, парсинг `--wifi-ssid`, маска/показ пароля, повторное открытие модалки при ошибке `Connect`, `Disconnect`/`Forget`/`RescanWifi` покрыты unit-тестами; `cargo fmt --check`, `clippy`, `cargo test` (`rusty-services`, `rusty-settings`, `rusty-compositor`) и живая визуальная проверка `--winit` Light/Dark скриншотов проходят чисто.
 - **Risks:** Низкие; 0 новых Cargo-зависимостей, IPC-протокол не менялся.
 
+### RUSTYOS-160 — Настройка системного времени, часового пояса и NTP (`Date & Time`)
+- **Status:** Done
+- **Goal:** Реализовать полноценное управление датой, временем, NTP и часовыми поясами через `org.freedesktop.timedate1` (D-Bus + графическая Polkit-авторизация) в `crates/rusty-services/src/timedate.rs` и `apps/rusty-settings` (`SettingsPage::DateTime`), а также включить `systemd-timesyncd` в `scripts/rustyos-install.sh` для новых установок.
+- **Dependencies:** `RUSTYOS-103`, `RUSTYOS-130`, `RUSTYOS-131`, `RUSTYOS-158`.
+- **Scope:**
+  - `crates/rusty-services/src/{timedate.rs, lib.rs}`.
+  - `apps/rusty-settings/src/{state.rs, layout.rs}`.
+  - `scripts/rustyos-install.sh`.
+  - `docs/adr/0089-timedate-service-and-datetime-settings.md`, `DECISIONS.md` (`D-103`), `ARCHITECTURE.md` §7.
+- **Acceptance Criteria:**
+  - `parse_timedatectl_show`, `is_valid_iana_timezone`, `parse_manual_datetime_input`, `match_timezone_suggestions`, а также NTP/Timezone/ManualDateTime модалки и coalescing в `rusty-settings` покрыты unit-тестами; `bash -n`, `cargo fmt --check`, `clippy`, `cargo test` (`rusty-services`, `rusty-settings`) и живая визуальная проверка `--winit` Light/Dark скриншотов проходят чисто.
+- **Risks:** Низкие; 0 новых Cargo-зависимостей, хостовая ОС не изменялась.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

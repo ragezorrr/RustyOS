@@ -862,30 +862,75 @@ fn build_system_page_sections(
                 &app.clock_locale,
                 app.clock_24h,
             );
-            vec![place_card_section(
-                Some("Clock & Time Format"),
-                content_x,
-                cur_y,
-                content_w,
-                vec![
-                    row_info("Current Time", now_label),
-                    row_switch(
-                        "Use 24-Hour Clock",
-                        RowControlId::Clock24hToggle,
-                        app.clock_24h,
-                    ),
-                    row_choice(
-                        "Clock Language",
-                        RowControlId::ClockLocaleCycle,
-                        match app.clock_locale.as_str() {
-                            "ru" => "Русский",
-                            "uk" => "Українська",
-                            _ => "English",
-                        }
-                        .to_owned(),
-                    ),
-                ],
-            )]
+            let sync_label = if !app.timedate_hint.is_empty() {
+                app.timedate_hint.clone()
+            } else if app.timedate.ntp_synchronized {
+                String::from("Synchronized via NTP")
+            } else if app.timedate.ntp_enabled {
+                String::from("NTP enabled (syncing...)")
+            } else {
+                String::from("Manual")
+            };
+            let manual_label = if app.timedate.ntp_enabled {
+                String::from("Auto (NTP)")
+            } else {
+                String::from("Set...")
+            };
+            vec![
+                place_card_section(
+                    Some("Date & Time"),
+                    content_x,
+                    cur_y,
+                    content_w,
+                    vec![
+                        row_info("Current Time", now_label),
+                        row_switch(
+                            "Set Time and Date Automatically",
+                            RowControlId::DateTimeNtpToggle,
+                            app.timedate.ntp_enabled,
+                        ),
+                        row_info("Synchronization", sync_label),
+                        row_choice(
+                            "Date & Time",
+                            RowControlId::DateTimeManualOpen,
+                            manual_label,
+                        ),
+                        row_choice(
+                            "Time Zone",
+                            RowControlId::DateTimeTimezoneOpen,
+                            app.timedate.timezone.clone(),
+                        ),
+                        row_choice(
+                            "Quick Time Zone",
+                            RowControlId::DateTimeTimezoneCycle,
+                            String::from("Next Preset"),
+                        ),
+                    ],
+                ),
+                place_card_section(
+                    Some("Clock & Time Format"),
+                    content_x,
+                    cur_y,
+                    content_w,
+                    vec![
+                        row_switch(
+                            "Use 24-Hour Clock",
+                            RowControlId::Clock24hToggle,
+                            app.clock_24h,
+                        ),
+                        row_choice(
+                            "Clock Language",
+                            RowControlId::ClockLocaleCycle,
+                            match app.clock_locale.as_str() {
+                                "ru" => "Русский",
+                                "uk" => "Українська",
+                                _ => "English",
+                            }
+                            .to_owned(),
+                        ),
+                    ],
+                ),
+            ]
         }
         SettingsPage::Language => {
             vec![place_card_section(

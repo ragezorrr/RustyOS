@@ -1207,6 +1207,15 @@
                            в `rusty-settings` и переход
                            `open_wifi_password_settings_action` из `TopBar`
                            `WifiPopover`
+
+  D-103    Accepted        ADR-0089 (`RUSTYOS-160`): системное время и часовой
+                           пояс через `org.freedesktop.timedate1` (D-Bus + Polkit)
+                           — `TimeDateService` и `TimeDateStatus` в
+                           `crates/rusty-services/src/timedate.rs` (валидация IANA
+                           и `YYYY-MM-DD HH:MM`), расширение `SettingsPage::DateTime`
+                           (`NTP`-тумблер, `SettingsModal::{TimezoneEdit,
+                           ManualDateTime}`, `Quick Time Zone`, статус/ошибки) и
+                           автозапуск `systemd-timesyncd` в `scripts/rustyos-install.sh`
   -----------------------------------------------------------------------
 
 ## Открытые решения

@@ -766,7 +766,7 @@ EOF
     fi
     arch-chroot "${MOUNT_ROOT}" chown -R "${USERNAME_VAL}:${USERNAME_VAL}" "/home/${USERNAME_VAL}/.config"
 
-    arch-chroot "${MOUNT_ROOT}" systemctl enable NetworkManager greetd bluetooth
+    arch-chroot "${MOUNT_ROOT}" systemctl enable NetworkManager greetd bluetooth systemd-timesyncd
     install_optional_yay_bin
 
     emit_step 95 bootloader "Installing ${BOOTLOADER}"
