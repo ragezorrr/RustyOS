@@ -1008,8 +1008,12 @@ impl RustyCompositorState {
             }
             crate::shell_render::WifiPopoverHit::SelectNetwork(idx) if button == 272 => {
                 if let Some(ap) = tel.network.wifi_networks.get(idx) {
-                    self.telemetry.connect_wifi(&ap.ssid);
-                    self.shell_redraw_needed = true;
+                    if ap.secure && !ap.known {
+                        self.open_wifi_settings_action();
+                    } else {
+                        self.telemetry.connect_wifi(&ap.ssid);
+                        self.shell_redraw_needed = true;
+                    }
                 }
             }
             crate::shell_render::WifiPopoverHit::OpenWifiSettings if button == 272 => {

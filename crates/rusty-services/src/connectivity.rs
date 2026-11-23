@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use zbus::zvariant::Value;
 
@@ -268,16 +268,27 @@ impl NetworkService {
         }
         let clean_pw = password.filter(|pw| !pw.is_empty());
         if clean_pw.is_none()
-            && Command::new("nmcli")
+            && let Ok(out) = Command::new("nmcli")
                 .args(["connection", "up", "id", trimmed])
-                .status()
-                .is_ok_and(|s| s.success())
+                .stdin(Stdio::null())
+                .output()
         {
-            return Ok(());
+            if out.status.success() {
+                return Ok(());
+            }
+            let detail = format!(
+                "{}\n{}",
+                String::from_utf8_lossy(&out.stderr),
+                String::from_utf8_lossy(&out.stdout)
+            );
+            if nmcli_requires_secrets(&detail) {
+                return Err(format!("Wi-Fi network '{trimmed}' requires a password"));
+            }
         }
 
         let mut cmd = Command::new("nmcli");
-        cmd.args(["device", "wifi", "connect", trimmed]);
+        cmd.args(["device", "wifi", "connect", trimmed])
+            .stdin(Stdio::null());
         if let Some(pw) = clean_pw {
             cmd.args(["password", pw]);
         }
@@ -290,11 +301,15 @@ impl NetworkService {
                 } else {
                     err
                 };
-                Err(if msg.is_empty() {
-                    format!("Failed to connect to Wi-Fi '{trimmed}'")
+                if nmcli_requires_secrets(&msg) {
+                    Err(format!("Wi-Fi network '{trimmed}' requires a password"))
                 } else {
-                    msg
-                })
+                    Err(if msg.is_empty() {
+                        format!("Failed to connect to Wi-Fi '{trimmed}'")
+                    } else {
+                        msg
+                    })
+                }
             }
             Err(err) => Err(format!("Unable to run nmcli: {err}")),
         }
@@ -315,9 +330,19 @@ impl NetworkService {
         let arg = if enabled { "on" } else { "off" };
         Command::new("nmcli")
             .args(["radio", "wifi", arg])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .status()
             .is_ok_and(|s| s.success())
     }
+}
+
+fn nmcli_requires_secrets(output: &str) -> bool {
+    let lower = output.to_ascii_lowercase();
+    lower.contains("secrets were required")
+        || lower.contains("802-11-wireless-security.psk")
+        || lower.contains("requires a password")
 }
 
 /// Parses Linux `/proc/net/wireless` link quality (`0..=70` or percentage) into `0..=100` (`RUSTYOS-052`).
@@ -1142,6 +1167,9 @@ fn remove_bluez_device_via_dbus(mac: &str) -> bool {
 fn run_bluetoothctl(args: &[&str]) -> bool {
     Command::new("bluetoothctl")
         .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .is_ok_and(|s| s.success())
 }
@@ -1222,4 +1250,22 @@ fn query_bluetooth_snapshot_fallback() -> BluetoothSnapshot {
             format_bluetooth_label(snap.status.available, snap.status.powered, None);
     }
     snap
+}
+
+#[cfg(test)]
+mod tests {
+    use super::nmcli_requires_secrets;
+
+    #[test]
+    fn detects_nmcli_missing_wifi_psk_messages() {
+        assert!(nmcli_requires_secrets(
+            "Warning: password for '802-11-wireless-security.psk' not given in 'passwd-file'"
+        ));
+        assert!(nmcli_requires_secrets(
+            "Error: Connection activation failed: Secrets were required, but not provided"
+        ));
+        assert!(!nmcli_requires_secrets(
+            "Error: No network with SSID 'Missing' found."
+        ));
+    }
 }

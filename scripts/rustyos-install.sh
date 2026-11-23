@@ -580,7 +580,7 @@ install_system() {
     emit_step 35 mount "Mounting target filesystems"
     mount "${root_part}" "${MOUNT_ROOT}"
     mkdir -p "${MOUNT_ROOT}/boot"
-    mount "${efi_part}" "${MOUNT_ROOT}/boot"
+    mount -o fmask=0077,dmask=0077 "${efi_part}" "${MOUNT_ROOT}/boot"
 
     if [[ "${INSTALL_MODE}" == "dual-boot" && "${format_efi}" -eq 0 ]]; then
         local avail_esp

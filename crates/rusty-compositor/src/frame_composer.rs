@@ -2587,15 +2587,12 @@ pub(crate) fn spawn_test_client(
     command: &str,
     socket_name: &str,
     ipc_socket_path: &std::path::Path,
-) {
-    let mut parts = command.split_whitespace();
-    let Some(program) = parts.next() else {
-        return;
-    };
-    let args: Vec<&str> = parts.collect();
+) -> Option<std::process::Child> {
+    let parts = split_shell_words(command);
+    let (program, args) = parts.split_first()?;
 
     match Command::new(program)
-        .args(&args)
+        .args(args)
         .env("WAYLAND_DISPLAY", socket_name)
         .env("RUSTYOS_IPC_SOCKET", ipc_socket_path)
         .spawn()
@@ -2607,9 +2604,11 @@ pub(crate) fn spawn_test_client(
                 wayland_display = socket_name,
                 "Spawned child Wayland client"
             );
+            Some(child)
         }
         Err(err) => {
             warn!(program, error = %err, "Failed to spawn child Wayland client");
+            None
         }
     }
 }
@@ -2671,16 +2670,17 @@ pub(crate) fn spawn_greeter_client(
 }
 
 /// Best-effort handoff from Plymouth boot splash (`--retain-splash`) once DRM is active (`RUSTYOS-157`).
-pub(crate) fn quit_plymouth_retain_splash() {
+pub(crate) fn quit_plymouth_retain_splash() -> Option<std::process::Child> {
     if !std::path::Path::new("/run/plymouth/pid").exists() {
-        return;
+        return None;
     }
-    let _ = Command::new("plymouth")
+    Command::new("plymouth")
         .args(["quit", "--retain-splash"])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .spawn();
+        .spawn()
+        .ok()
 }
 
 /// Returns `true` when a bound client window has neither render elements nor a non-zero

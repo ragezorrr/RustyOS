@@ -1410,11 +1410,30 @@ impl InstallerAppState {
         write_atomic(&path, text.as_bytes())?;
         self.last_config_mtime = current_config_mtime();
         if clear_oobe_marker && let Some(dir) = path.parent() {
-            let _ = fs::remove_file(dir.join(".oobe-pending"));
+            clear_oobe_marker_in_dir(dir);
         }
         notify_compositor_reload();
         Ok(())
     }
+
+    #[must_use]
+    pub(crate) const fn should_clear_oobe_marker_on_close(&self) -> bool {
+        matches!(self.mode, WizardMode::Oobe) && !matches!(self.env_kind, RunEnv::Demo)
+    }
+
+    pub(crate) fn request_close(&mut self) {
+        if self.should_clear_oobe_marker_on_close()
+            && let Some(path) = config_toml_path()
+            && let Some(dir) = path.parent()
+        {
+            clear_oobe_marker_in_dir(dir);
+        }
+        self.win.running = false;
+    }
+}
+
+fn clear_oobe_marker_in_dir(dir: &Path) {
+    let _ = fs::remove_file(dir.join(".oobe-pending"));
 }
 
 fn ping_callback(wake: Option<&Arc<dyn Fn() + Send + Sync>>) {
@@ -2070,5 +2089,39 @@ error: failed retrieving file 'core.db' from mirror.example.org : Could not reso
         demo.connect_selected_wifi();
         assert_eq!(demo.network.active_ssid.as_deref(), Some("Studio-Home"));
         assert_eq!(demo.wifi_password, "");
+    }
+
+    #[test]
+    fn oobe_close_clears_pending_marker_only_for_non_demo_oobe() {
+        let oobe_real = InstallerAppState::new(&StartupOptions {
+            mode: WizardMode::Oobe,
+            env_kind: RunEnv::Standard,
+            ..Default::default()
+        });
+        assert!(oobe_real.should_clear_oobe_marker_on_close());
+
+        let oobe_demo = InstallerAppState::new(&StartupOptions {
+            mode: WizardMode::Oobe,
+            env_kind: RunEnv::Demo,
+            ..Default::default()
+        });
+        assert!(!oobe_demo.should_clear_oobe_marker_on_close());
+
+        let install_std = InstallerAppState::new(&StartupOptions {
+            mode: WizardMode::Install,
+            env_kind: RunEnv::Standard,
+            ..Default::default()
+        });
+        assert!(!install_std.should_clear_oobe_marker_on_close());
+
+        let tmp =
+            std::env::temp_dir().join(format!("rustyos-oobe-marker-test-{}", std::process::id()));
+        let _ = fs::create_dir_all(&tmp);
+        let marker = tmp.join(".oobe-pending");
+        assert!(fs::write(&marker, b"").is_ok());
+        assert!(marker.exists());
+        clear_oobe_marker_in_dir(&tmp);
+        assert!(!marker.exists());
+        let _ = fs::remove_dir_all(&tmp);
     }
 }

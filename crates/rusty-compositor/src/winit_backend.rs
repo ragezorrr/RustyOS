@@ -233,7 +233,11 @@ pub fn run_nested_winit(config: &CompositorConfig) -> Result<BootstrapReport, Co
     } else {
         let autostart = state.user_config.autostart.clone();
         for cmd in autostart.iter().chain(config.spawn_clients.iter()) {
-            frame_composer::spawn_test_client(cmd, &socket_name, &ipc_socket_path);
+            if let Some(child) =
+                frame_composer::spawn_test_client(cmd, &socket_name, &ipc_socket_path)
+            {
+                state.launcher.track_child(child);
+            }
         }
         None
     };

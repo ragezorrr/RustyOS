@@ -570,7 +570,9 @@ fn telemetry_worker_loop(shared: &SharedState) {
                     let _ = services.network.set_wifi_enabled(enabled);
                 }
                 TelemetryCmd::ConnectWifi(ssid) => {
-                    let _ = services.network.connect_wifi(&ssid);
+                    if let Err(err) = services.network.connect_wifi_with_password(&ssid, None) {
+                        tracing::warn!(ssid = %ssid, error = %err, "Wi-Fi connection failed");
+                    }
                 }
                 TelemetryCmd::SetBrightness(pct) => {
                     let _ = services.brightness.set_percent(pct);

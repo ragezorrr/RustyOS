@@ -1859,13 +1859,19 @@ fn try_run_native_drm_session_once(
     } else {
         let autostart = state.user_config.autostart.clone();
         for cmd in autostart.iter().chain(config.spawn_clients.iter()) {
-            crate::frame_composer::spawn_test_client(cmd, &socket_name, &ipc_socket_path);
+            if let Some(child) =
+                crate::frame_composer::spawn_test_client(cmd, &socket_name, &ipc_socket_path)
+            {
+                state.launcher.track_child(child);
+            }
         }
         None
     };
 
     runtime.borrow_mut().render_ready_outputs(&mut state, true);
-    crate::frame_composer::quit_plymouth_retain_splash();
+    if let Some(plymouth_child) = crate::frame_composer::quit_plymouth_retain_splash() {
+        state.launcher.track_child(plymouth_child);
+    }
 
     let rt_dispatch = Rc::clone(&runtime);
     event_loop

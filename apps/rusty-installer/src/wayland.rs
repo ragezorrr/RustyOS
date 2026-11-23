@@ -181,7 +181,7 @@ impl InstallerClient {
 
     fn handle_key(&mut self, keysym: Keysym, utf8: Option<&str>) {
         if self.modifiers.ctrl && keysym == Keysym::q {
-            self.app.win.running = false;
+            self.app.request_close();
             return;
         }
         if self.app.caret.focused_field.is_some()
@@ -340,7 +340,7 @@ impl InstallerClient {
                     win.move_(seat, serial);
                 }
             }
-            InstallerHit::TrafficClose => self.app.win.running = false,
+            InstallerHit::TrafficClose => self.app.request_close(),
             InstallerHit::TrafficMinimize => {
                 if let Some(win) = &self.window {
                     win.set_minimized();
@@ -922,7 +922,7 @@ impl ShmHandler for InstallerClient {
 
 impl WindowHandler for InstallerClient {
     fn request_close(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &Window) {
-        self.app.win.running = false;
+        self.app.request_close();
     }
 
     fn configure(

@@ -497,10 +497,17 @@ impl LauncherState {
         self.icon_for_app_hints(Some(&key), &key)
     }
 
-    /// Non-blockingly reaps any exited child processes spawned from Spotlight.
+    /// Non-blockingly reaps any exited child processes spawned by the compositor.
     pub fn reap_children(&mut self) {
         self.children
             .retain_mut(|child| matches!(child.try_wait(), Ok(None)));
+    }
+
+    /// Registers an externally spawned child process (`--spawn`, `autostart`, `plymouth`)
+    /// so [`Self::reap_children`] reaps it non-blockingly once it exits.
+    pub(crate) fn track_child(&mut self, child: Child) {
+        self.reap_children();
+        self.children.push(child);
     }
 
     /// Spawns `program` with explicit `args`, resolving `PATH` or sibling workspace binaries.
@@ -1312,5 +1319,26 @@ Exec=firefox --private-window
         );
         let chosen = launcher.find_available_command_with(bins, |_| true);
         assert_eq!(chosen.as_deref(), Some("rusty-terminal"));
+    }
+
+    #[test]
+    fn track_child_and_reap_children_collects_exited_process() -> Result<(), String> {
+        let mut launcher = LauncherState::with_catalog(Vec::new());
+        let child = Command::new("/bin/true")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|err| format!("spawn /bin/true failed: {err}"))?;
+        launcher.track_child(child);
+        for _ in 0..50 {
+            launcher.reap_children();
+            if launcher.children.is_empty() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(launcher.children.is_empty());
+        Ok(())
     }
 }
