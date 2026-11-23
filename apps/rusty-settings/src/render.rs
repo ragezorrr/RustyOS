@@ -1753,6 +1753,11 @@ fn render_floating_overlays(
                 ui_pal,
                 elapsed,
             );
+            if let Some(cb) =
+                modal.wifi_show_password_checkbox(layout.win_w as u32, layout.win_h as u32)
+            {
+                cb.paint(painter, ui_pal, false, 0.0);
+            }
         }
     });
 }

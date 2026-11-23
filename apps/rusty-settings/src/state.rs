@@ -29,6 +29,7 @@ pub(crate) struct StartupOptions {
     pub(crate) theme_override: Option<ThemeChoice>,
     pub(crate) initial_page: SettingsPage,
     pub(crate) no_gpu: bool,
+    pub(crate) wifi_prompt_ssid: Option<String>,
 }
 
 /// Appearance mode tiles (`Light`, `Dark`, `Auto`).
@@ -286,6 +287,8 @@ pub(crate) enum RowControlId {
     CursorSizeUp,
     WifiEnabledToggle,
     WifiConnectIndex(usize),
+    WifiInfoIndex(usize),
+    WifiDisconnectActive,
     NetworkRefresh,
     NotifAllowToggle,
     NotifShowPreviewsCycle,
@@ -481,12 +484,22 @@ pub(crate) const SHORTCUT_DEFS: [ShortcutDef; 17] = [
     },
 ];
 
-/// Active modal dialog sheet hosted inside `rusty-settings` (`RUSTYOS-131`).
+/// Active modal dialog sheet hosted inside `rusty-settings` (`RUSTYOS-131`, `RUSTYOS-159`).
 #[derive(Debug, Clone)]
 pub(crate) enum SettingsModal {
     BluetoothDeviceInfo {
         address: String,
         paired: bool,
+        connected: bool,
+        sheet: rusty_ui::DialogSheet,
+    },
+    WifiPassword {
+        ssid: String,
+        show_password: bool,
+        sheet: rusty_ui::DialogSheet,
+    },
+    WifiNetworkInfo {
+        ssid: String,
         connected: bool,
         sheet: rusty_ui::DialogSheet,
     },
@@ -506,6 +519,8 @@ impl SettingsModal {
     pub(crate) const fn sheet(&self) -> &rusty_ui::DialogSheet {
         match self {
             Self::BluetoothDeviceInfo { sheet, .. }
+            | Self::WifiPassword { sheet, .. }
+            | Self::WifiNetworkInfo { sheet, .. }
             | Self::InfoSheet { sheet }
             | Self::ShortcutEdit { sheet, .. } => sheet,
         }
@@ -514,10 +529,52 @@ impl SettingsModal {
     pub(crate) fn sheet_mut(&mut self) -> &mut rusty_ui::DialogSheet {
         match self {
             Self::BluetoothDeviceInfo { sheet, .. }
+            | Self::WifiPassword { sheet, .. }
+            | Self::WifiNetworkInfo { sheet, .. }
             | Self::InfoSheet { sheet }
             | Self::ShortcutEdit { sheet, .. } => sheet,
         }
     }
+
+    /// Computes the "Show password" checkbox origin and hit rectangle inside [`Self::WifiPassword`].
+    #[must_use]
+    pub(crate) fn wifi_show_password_checkbox(
+        &self,
+        win_w: u32,
+        win_h: u32,
+    ) -> Option<rusty_ui::Checkbox> {
+        let Self::WifiPassword {
+            show_password,
+            sheet,
+            ..
+        } = self
+        else {
+            return None;
+        };
+        let layout = sheet.layout(win_w, win_h);
+        Some(rusty_ui::Checkbox::new(
+            layout.card_rect.x + 20,
+            layout.primary_rect.y + 7,
+            "Show password",
+            *show_password,
+        ))
+    }
+}
+
+/// Type of Wi-Fi operation reported back from the background service worker (`RUSTYOS-159`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WifiActionKind {
+    Connect,
+    Disconnect,
+    Forget,
+}
+
+/// Result of a Wi-Fi connect/disconnect/forget command executed off the UI thread (`RUSTYOS-159`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WifiActionOutcome {
+    pub(crate) ssid: String,
+    pub(crate) kind: WifiActionKind,
+    pub(crate) result: Result<(), String>,
 }
 
 /// Snapshot of live NetworkManager, BlueZ, power, and audio service status (`RUSTYOS-112`, `RUSTYOS-131`).
@@ -528,16 +585,21 @@ pub(crate) struct ServiceSnapshot {
     pub(crate) power: PowerDetails,
     pub(crate) volume_percent: u8,
     pub(crate) muted: bool,
+    pub(crate) wifi_action_result: Option<WifiActionOutcome>,
 }
 
 /// Asynchronous service command executed off the Wayland GUI thread (`RUSTYOS-112`, `RUSTYOS-131`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ServiceCommand {
     Refresh,
+    RescanWifi,
     SetVolume(u8),
     ToggleMute,
     SetWifiEnabled(bool),
     ConnectWifi(String),
+    ConnectWifiWithPassword { ssid: String, password: String },
+    DisconnectWifi(String),
+    ForgetWifi(String),
     SetBluetoothPowered(bool),
     SetBluetoothDiscovering(bool),
     ConnectBluetooth(String),
@@ -678,6 +740,9 @@ impl SettingsAppState {
         }
         if opts.initial_page == SettingsPage::SoftwareUpdate {
             state.check_updates_now();
+        }
+        if let Some(ssid) = &opts.wifi_prompt_ssid {
+            state.open_wifi_password_modal(ssid.clone(), None);
         }
         state
     }
@@ -1194,7 +1259,9 @@ impl SettingsAppState {
 
     pub(crate) fn apply_service_snapshot(&mut self, snap: ServiceSnapshot) -> bool {
         let clamped_vol = snap.volume_percent.clamp(0, 100);
-        let changed = self.network_status != snap.network.status_label
+        let has_wifi_outcome = snap.wifi_action_result.is_some();
+        let changed = has_wifi_outcome
+            || self.network_status != snap.network.status_label
             || self.network != snap.network
             || self.bluetooth != snap.bluetooth
             || self.power != snap.power
@@ -1210,6 +1277,16 @@ impl SettingsAppState {
         self.power = snap.power;
         self.volume_percent = clamped_vol;
         self.muted = snap.muted;
+        if let Some(outcome) = snap.wifi_action_result
+            && let Err(err) = outcome.result
+        {
+            self.network_status.clone_from(&err);
+            if outcome.kind == WifiActionKind::Connect {
+                self.open_wifi_password_modal(outcome.ssid, Some(err));
+            }
+            self.mark_dirty(DamageScope::Full);
+            return true;
+        }
         self.mark_dirty(DamageScope::Page);
         true
     }
@@ -1434,7 +1511,64 @@ impl SettingsAppState {
             || self.toggle_anims.iter().any(|(_, m)| m.is_active())
     }
 
+    fn try_apply_wifi_service_action(&mut self, action: RowControlId) -> bool {
+        match action {
+            RowControlId::WifiEnabledToggle => {
+                let next = !self.network.wifi_enabled;
+                self.network.wifi_enabled = next;
+                self.pending_service_cmds
+                    .push(ServiceCommand::SetWifiEnabled(next));
+            }
+            RowControlId::WifiConnectIndex(idx) => {
+                let Some(ap) = self.network.wifi_networks.get(idx).cloned() else {
+                    return true;
+                };
+                if ap.connected {
+                    self.network_status = format!("Disconnecting from {}...", ap.ssid);
+                    self.pending_service_cmds
+                        .push(ServiceCommand::DisconnectWifi(ap.ssid));
+                } else if ap.secure && !ap.known {
+                    self.open_wifi_password_modal(ap.ssid, None);
+                } else {
+                    self.network_status = format!("Connecting to {}...", ap.ssid);
+                    self.pending_service_cmds
+                        .push(ServiceCommand::ConnectWifi(ap.ssid));
+                }
+            }
+            RowControlId::WifiInfoIndex(idx) => {
+                let Some(ap) = self.network.wifi_networks.get(idx).cloned() else {
+                    return true;
+                };
+                if ap.known || ap.connected {
+                    self.open_wifi_info_modal(&ap);
+                } else if ap.secure {
+                    self.open_wifi_password_modal(ap.ssid, None);
+                } else {
+                    self.network_status = format!("Connecting to {}...", ap.ssid);
+                    self.pending_service_cmds
+                        .push(ServiceCommand::ConnectWifi(ap.ssid));
+                }
+            }
+            RowControlId::WifiDisconnectActive => {
+                if let Some(ssid) = self.network.wifi_ssid.clone() {
+                    self.network_status = format!("Disconnecting from {ssid}...");
+                    self.pending_service_cmds
+                        .push(ServiceCommand::DisconnectWifi(ssid));
+                }
+            }
+            RowControlId::NetworkRefresh => {
+                self.network_status = String::from("Scanning nearby Wi-Fi networks...");
+                self.pending_service_cmds.push(ServiceCommand::RescanWifi);
+            }
+            _ => return false,
+        }
+        true
+    }
+
     fn try_apply_service_action(&mut self, action: RowControlId) -> bool {
+        if self.try_apply_wifi_service_action(action) {
+            return true;
+        }
         match action {
             RowControlId::VolumeDown => {
                 let target = self.volume_percent.saturating_sub(5);
@@ -1451,24 +1585,6 @@ impl SettingsAppState {
             RowControlId::ToggleMute => {
                 self.muted = !self.muted;
                 self.pending_service_cmds.push(ServiceCommand::ToggleMute);
-            }
-            RowControlId::WifiEnabledToggle => {
-                let next = !self.network.wifi_enabled;
-                self.network.wifi_enabled = next;
-                self.pending_service_cmds
-                    .push(ServiceCommand::SetWifiEnabled(next));
-            }
-            RowControlId::WifiConnectIndex(idx) => {
-                let Some(ap) = self.network.wifi_networks.get(idx).cloned() else {
-                    return true;
-                };
-                self.network_status = format!("Connecting to {}...", ap.ssid);
-                self.pending_service_cmds
-                    .push(ServiceCommand::ConnectWifi(ap.ssid));
-            }
-            RowControlId::NetworkRefresh => {
-                self.network_status = String::from("Refreshing...");
-                self.pending_service_cmds.push(ServiceCommand::Refresh);
             }
             RowControlId::BluetoothPoweredToggle => {
                 let next = !self.bluetooth.status.powered;
@@ -2091,6 +2207,63 @@ impl SettingsAppState {
         }
     }
 
+    pub(crate) fn open_wifi_password_modal(&mut self, ssid: String, error: Option<String>) {
+        let message =
+            error.unwrap_or_else(|| format!("Enter the WPA2/WPA3 password for \"{ssid}\"."));
+        let mut sheet = rusty_ui::DialogSheet::prompt(
+            format!("Join \"{ssid}\""),
+            message,
+            "Join",
+            "Password",
+            "",
+        );
+        sheet.width = 430;
+        if let Some(tf) = sheet.input.as_mut() {
+            tf.masked = true;
+            tf.buffer.clear_selection();
+        }
+        self.active_modal = Some(SettingsModal::WifiPassword {
+            ssid,
+            show_password: false,
+            sheet,
+        });
+        self.mark_dirty(DamageScope::Full);
+    }
+
+    fn open_wifi_info_modal(&mut self, ap: &rusty_services::WifiAccessPoint) {
+        let state_label = if ap.connected { "Connected" } else { "Saved" };
+        let sec_label = if ap.secure { "WPA2/WPA3" } else { "Open" };
+        let msg = format!(
+            "{state_label} · {sec_label} · Signal {}%",
+            ap.signal_percent
+        );
+        let mut sheet =
+            rusty_ui::DialogSheet::confirm(ap.ssid.clone(), msg, "Forget").with_destructive(true);
+        sheet.cancel_label = Some(String::from("Close"));
+        sheet.width = 400;
+        self.active_modal = Some(SettingsModal::WifiNetworkInfo {
+            ssid: ap.ssid.clone(),
+            connected: ap.connected,
+            sheet,
+        });
+        self.mark_dirty(DamageScope::Full);
+    }
+
+    pub(crate) fn toggle_wifi_password_visibility(&mut self) {
+        if let Some(SettingsModal::WifiPassword {
+            show_password,
+            sheet,
+            ..
+        }) = &mut self.active_modal
+        {
+            *show_password = !*show_password;
+            if let Some(tf) = sheet.input.as_mut() {
+                tf.masked = !*show_password;
+            }
+            self.mark_dirty(DamageScope::Full);
+        }
+    }
+
     pub(crate) fn dismiss_active_modal(&mut self) {
         if self.active_modal.take().is_some() {
             self.mark_dirty(DamageScope::Full);
@@ -2115,6 +2288,37 @@ impl SettingsAppState {
                     ServiceCommand::PairBluetooth(address)
                 };
                 self.pending_service_cmds.push(cmd);
+            }
+            SettingsModal::WifiPassword {
+                ssid,
+                show_password,
+                mut sheet,
+            } => {
+                let password = sheet
+                    .input
+                    .as_ref()
+                    .map_or_default(|tf| tf.buffer.as_str().to_owned());
+                if password.is_empty() {
+                    sheet.message = String::from("Please enter the Wi-Fi password.");
+                    self.active_modal = Some(SettingsModal::WifiPassword {
+                        ssid,
+                        show_password,
+                        sheet,
+                    });
+                    self.mark_dirty(DamageScope::Full);
+                    return;
+                }
+                self.network_status = format!("Connecting to {ssid}...");
+                self.pending_service_cmds
+                    .push(ServiceCommand::ConnectWifiWithPassword { ssid, password });
+            }
+            SettingsModal::WifiNetworkInfo {
+                ssid, connected, ..
+            } => {
+                let _ = connected;
+                self.network_status = format!("Forgetting {ssid}...");
+                self.pending_service_cmds
+                    .push(ServiceCommand::ForgetWifi(ssid));
             }
             SettingsModal::InfoSheet { .. } => {}
             SettingsModal::ShortcutEdit {
@@ -2640,17 +2844,19 @@ pub(crate) fn query_service_snapshot() -> ServiceSnapshot {
         power,
         volume_percent: audio.volume_percent.clamp(0, 100),
         muted: audio.muted,
+        wifi_action_result: None,
     }
 }
 
-/// Collapses redundant queued service commands before worker execution (`RUSTYOS-112`).
+/// Collapses redundant queued service commands before worker execution (`RUSTYOS-112`, `RUSTYOS-159`).
 #[must_use]
 pub(crate) fn coalesce_service_commands(cmds: Vec<ServiceCommand>) -> Vec<ServiceCommand> {
     let mut had_refresh = false;
+    let mut rescan_wifi = false;
     let mut set_volume = None;
     let mut toggle_mute = false;
     let mut set_wifi = None;
-    let mut connect_ssid = None;
+    let mut wifi_op: Option<ServiceCommand> = None;
     let mut bt_power = None;
     let mut bt_discover = None;
     let mut bt_device_op: Option<ServiceCommand> = None;
@@ -2659,15 +2865,20 @@ pub(crate) fn coalesce_service_commands(cmds: Vec<ServiceCommand>) -> Vec<Servic
     for cmd in cmds {
         match cmd {
             ServiceCommand::Refresh => had_refresh = true,
+            ServiceCommand::RescanWifi => rescan_wifi = true,
             ServiceCommand::SetVolume(v) => set_volume = Some(v),
             ServiceCommand::ToggleMute => toggle_mute = !toggle_mute,
             ServiceCommand::SetWifiEnabled(en) => {
                 set_wifi = Some(en);
                 if !en {
-                    connect_ssid = None;
+                    wifi_op = None;
+                    rescan_wifi = false;
                 }
             }
-            ServiceCommand::ConnectWifi(ssid) => connect_ssid = Some(ssid),
+            op @ (ServiceCommand::ConnectWifi(_)
+            | ServiceCommand::ConnectWifiWithPassword { .. }
+            | ServiceCommand::DisconnectWifi(_)
+            | ServiceCommand::ForgetWifi(_)) => wifi_op = Some(op),
             ServiceCommand::SetBluetoothPowered(en) => {
                 bt_power = Some(en);
                 if !en {
@@ -2688,8 +2899,11 @@ pub(crate) fn coalesce_service_commands(cmds: Vec<ServiceCommand>) -> Vec<Servic
     if let Some(en) = set_wifi {
         out.push(ServiceCommand::SetWifiEnabled(en));
     }
-    if let Some(ssid) = connect_ssid {
-        out.push(ServiceCommand::ConnectWifi(ssid));
+    if let Some(op) = wifi_op {
+        out.push(op);
+    }
+    if rescan_wifi {
+        out.push(ServiceCommand::RescanWifi);
     }
     if let Some(en) = bt_power {
         out.push(ServiceCommand::SetBluetoothPowered(en));
@@ -2715,13 +2929,19 @@ pub(crate) fn coalesce_service_commands(cmds: Vec<ServiceCommand>) -> Vec<Servic
     out
 }
 
-/// Executes a coalesced batch of service commands and queries fresh snapshot (`RUSTYOS-112`, `RUSTYOS-131`).
+/// Executes a coalesced batch of service commands and queries fresh snapshot (`RUSTYOS-112`, `RUSTYOS-131`, `RUSTYOS-159`).
 #[must_use]
 pub(crate) fn execute_coalesced_service_batch(cmds: Vec<ServiceCommand>) -> ServiceSnapshot {
     let bt = BluetoothService::new();
+    let net = NetworkService::new();
+    let mut wifi_action_result: Option<WifiActionOutcome> = None;
+    let mut rescanned_networks: Option<Vec<rusty_services::WifiAccessPoint>> = None;
     for cmd in coalesce_service_commands(cmds) {
         match cmd {
             ServiceCommand::Refresh => {}
+            ServiceCommand::RescanWifi => {
+                rescanned_networks = Some(net.rescan_wifi_networks());
+            }
             ServiceCommand::SetVolume(v) => {
                 let _ = AudioService::new().set_volume(v);
             }
@@ -2729,10 +2949,39 @@ pub(crate) fn execute_coalesced_service_batch(cmds: Vec<ServiceCommand>) -> Serv
                 let _ = AudioService::new().toggle_mute();
             }
             ServiceCommand::SetWifiEnabled(en) => {
-                let _ = NetworkService::new().set_wifi_enabled(en);
+                let _ = net.set_wifi_enabled(en);
             }
             ServiceCommand::ConnectWifi(ssid) => {
-                let _ = NetworkService::new().connect_wifi(&ssid);
+                let result = net.connect_wifi_with_password(&ssid, None);
+                wifi_action_result = Some(WifiActionOutcome {
+                    ssid,
+                    kind: WifiActionKind::Connect,
+                    result,
+                });
+            }
+            ServiceCommand::ConnectWifiWithPassword { ssid, password } => {
+                let result = net.connect_wifi_with_password(&ssid, Some(&password));
+                wifi_action_result = Some(WifiActionOutcome {
+                    ssid,
+                    kind: WifiActionKind::Connect,
+                    result,
+                });
+            }
+            ServiceCommand::DisconnectWifi(ssid) => {
+                let result = net.disconnect_wifi(&ssid);
+                wifi_action_result = Some(WifiActionOutcome {
+                    ssid,
+                    kind: WifiActionKind::Disconnect,
+                    result,
+                });
+            }
+            ServiceCommand::ForgetWifi(ssid) => {
+                let result = net.forget_wifi(&ssid);
+                wifi_action_result = Some(WifiActionOutcome {
+                    ssid,
+                    kind: WifiActionKind::Forget,
+                    result,
+                });
             }
             ServiceCommand::SetBluetoothPowered(en) => {
                 let _ = bt.set_powered(en);
@@ -2757,7 +3006,14 @@ pub(crate) fn execute_coalesced_service_batch(cmds: Vec<ServiceCommand>) -> Serv
             }
         }
     }
-    query_service_snapshot()
+    let mut snap = query_service_snapshot();
+    if let Some(fresh) = rescanned_networks
+        && !fresh.is_empty()
+    {
+        snap.network.wifi_networks = fresh;
+    }
+    snap.wifi_action_result = wifi_action_result;
+    snap
 }
 
 fn default_search_controls() -> (
@@ -3164,5 +3420,128 @@ mod tests {
 
         st.apply_toml_kv("shortcuts", "launcher", "ctrl+space");
         assert_eq!(st.shortcuts[0], "Ctrl+Space");
+    }
+
+    #[test]
+    fn wifi_password_modal_disconnect_forget_and_error_retry_work() {
+        let mut st = SettingsAppState::new(&StartupOptions {
+            initial_page: SettingsPage::Wifi,
+            wifi_prompt_ssid: Some(String::from("Cafe-5G")),
+            ..Default::default()
+        });
+        assert!(matches!(
+            st.active_modal,
+            Some(SettingsModal::WifiPassword { ref ssid, show_password: false, .. }) if ssid == "Cafe-5G"
+        ));
+        assert!(
+            st.active_modal
+                .as_ref()
+                .and_then(|m| m.sheet().input.as_ref())
+                .is_some_and(|tf| tf.masked)
+        );
+        st.toggle_wifi_password_visibility();
+        assert!(
+            st.active_modal
+                .as_ref()
+                .and_then(|m| m.sheet().input.as_ref())
+                .is_some_and(|tf| !tf.masked)
+        );
+        st.pending_service_cmds.clear();
+
+        // Empty password stays open with validation message
+        st.confirm_active_modal();
+        assert!(matches!(
+            st.active_modal,
+            Some(SettingsModal::WifiPassword { .. })
+        ));
+        assert_eq!(st.pending_service_cmds.len(), 0);
+
+        // Non-empty password enqueues ConnectWifiWithPassword
+        if let Some(modal) = &mut st.active_modal
+            && let Some(tf) = modal.sheet_mut().input.as_mut()
+        {
+            tf.buffer.set_text("super-secret-psk");
+        }
+        st.confirm_active_modal();
+        assert!(st.active_modal.is_none());
+        assert_eq!(
+            st.pending_service_cmds,
+            vec![ServiceCommand::ConnectWifiWithPassword {
+                ssid: String::from("Cafe-5G"),
+                password: String::from("super-secret-psk"),
+            }]
+        );
+    }
+
+    #[test]
+    fn wifi_error_reopens_modal_and_forget_disconnect_rescan_work() {
+        let mut st = SettingsAppState::defaults_with_page(SettingsPage::Wifi);
+
+        // Failed connect snapshot re-opens password dialog with nmcli error
+        let err_snap = ServiceSnapshot {
+            network: NetworkStatus {
+                wifi_enabled: true,
+                wifi_networks: vec![
+                    rusty_services::WifiAccessPoint {
+                        ssid: String::from("Home-WiFi"),
+                        signal_percent: 90,
+                        secure: true,
+                        connected: true,
+                        known: true,
+                    },
+                    rusty_services::WifiAccessPoint {
+                        ssid: String::from("Cafe-5G"),
+                        signal_percent: 65,
+                        secure: true,
+                        connected: false,
+                        known: false,
+                    },
+                ],
+                wifi_connected: true,
+                wifi_ssid: Some(String::from("Home-WiFi")),
+                ..NetworkStatus::default()
+            },
+            bluetooth: BluetoothSnapshot::default(),
+            power: PowerDetails::default(),
+            volume_percent: 50,
+            muted: false,
+            wifi_action_result: Some(WifiActionOutcome {
+                ssid: String::from("Cafe-5G"),
+                kind: WifiActionKind::Connect,
+                result: Err(String::from("Wi-Fi network 'Cafe-5G' requires a password")),
+            }),
+        };
+        assert!(st.apply_service_snapshot(err_snap));
+        assert!(matches!(
+            st.active_modal,
+            Some(SettingsModal::WifiPassword { ref ssid, ref sheet, .. })
+                if ssid == "Cafe-5G" && sheet.message.contains("requires a password")
+        ));
+        st.dismiss_active_modal();
+
+        // Info button on saved network opens Forget modal; confirm enqueues ForgetWifi
+        st.pending_service_cmds.clear();
+        assert!(st.try_apply_service_action(RowControlId::WifiInfoIndex(0)));
+        assert!(matches!(
+            st.active_modal,
+            Some(SettingsModal::WifiNetworkInfo { ref ssid, .. }) if ssid == "Home-WiFi"
+        ));
+        st.confirm_active_modal();
+        assert_eq!(
+            st.pending_service_cmds,
+            vec![ServiceCommand::ForgetWifi(String::from("Home-WiFi"))]
+        );
+
+        // Disconnect active enqueues DisconnectWifi; Refresh enqueues RescanWifi
+        st.pending_service_cmds.clear();
+        assert!(st.try_apply_service_action(RowControlId::WifiDisconnectActive));
+        assert!(st.try_apply_service_action(RowControlId::NetworkRefresh));
+        assert_eq!(
+            coalesce_service_commands(st.pending_service_cmds.clone()),
+            vec![
+                ServiceCommand::DisconnectWifi(String::from("Home-WiFi")),
+                ServiceCommand::RescanWifi,
+            ]
+        );
     }
 }

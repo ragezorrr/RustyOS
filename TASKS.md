@@ -2627,6 +2627,19 @@ hardware/software context и низкие накладные расходы.
   - `bash -n scripts/rustyos-install.sh` и `--dry-run` проверки для обоих режимов (`--install-source squashfs` с временным файлом и `--install-source pacstrap`) проходят чисто; `cargo fmt`, `clippy -p rusty-services -D warnings`, `cargo test -p rusty-services` проходят без ошибок.
 - **Risks:** Низкие; `pacstrap` сохранён как автоматический fallback, хостовая ОС не изменялась.
 
+### RUSTYOS-159 — Подключение к Wi-Fi с вводом пароля (PSK) и управление сетями в `rusty-settings` и `TopBar`
+- **Status:** Done
+- **Goal:** Обеспечить полный цикл управления Wi-Fi с рабочего стола: ввод пароля WPA2/WPA3 через `SettingsModal::WifiPassword` (`DialogSheet` + маскированный `TextField` + чекбокс `Show password` + показ ошибок `nmcli`), действия `Disconnect`, `Forget` (`SettingsModal::WifiNetworkInfo` по кнопке `...`) и активный `Rescan` в `rusty-settings`, а также запуск `rusty-settings --page wifi --wifi-ssid <ssid>` при клике по незнакомой защищённой сети из `TopBar` `WifiPopover`.
+- **Dependencies:** `RUSTYOS-108`, `RUSTYOS-130`, `RUSTYOS-131`.
+- **Scope:**
+  - `crates/rusty-services/src/connectivity.rs`.
+  - `apps/rusty-settings/src/{main.rs, state.rs, layout.rs, render.rs, wayland.rs}`.
+  - `crates/rusty-compositor/src/{state/shell_actions.rs, input/shell_pointer.rs}`.
+  - `docs/adr/0088-wifi-password-dialog-and-network-management.md`, `DECISIONS.md` (`D-102`), `ARCHITECTURE.md` §7.
+- **Acceptance Criteria:**
+  - `disconnect_wifi`/`forget_wifi`, парсинг `--wifi-ssid`, маска/показ пароля, повторное открытие модалки при ошибке `Connect`, `Disconnect`/`Forget`/`RescanWifi` покрыты unit-тестами; `cargo fmt --check`, `clippy`, `cargo test` (`rusty-services`, `rusty-settings`, `rusty-compositor`) и живая визуальная проверка `--winit` Light/Dark скриншотов проходят чисто.
+- **Risks:** Низкие; 0 новых Cargo-зависимостей, IPC-протокол не менялся.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

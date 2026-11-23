@@ -605,6 +605,12 @@ impl SettingsClient {
         let streak = self.click_streak;
         let elapsed = self.app.epoch.elapsed();
         if let Some(modal) = &mut self.app.active_modal {
+            if let Some(cb) = modal.wifi_show_password_checkbox(w, h)
+                && cb.hit_rect.contains_f64(px, py)
+            {
+                self.app.toggle_wifi_password_visibility();
+                return;
+            }
             let sheet = modal.sheet_mut();
             let layout = sheet.sync_input_rect(w, h);
             if let (Some(tf), Some(ir)) = (&mut sheet.input, layout.input_rect)

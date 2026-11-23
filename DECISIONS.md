@@ -1196,6 +1196,17 @@
                            `autodetect` + `kms plymouth`, fallback на `pacstrap`)
                            и облегчённый Live ISO `initramfs` (без `kms` + `zstd -19`
                            в `archiso.conf` против `unknown-block(0,0)` на UEFI)
+
+  D-102    Accepted        ADR-0088 (`RUSTYOS-159`): подключение к защищённым
+                           Wi-Fi сетям (WPA2/WPA3) и управление профилями —
+                           `NetworkService::{disconnect_wifi, forget_wifi}`,
+                           `SettingsModal::{WifiPassword, WifiNetworkInfo}`
+                           (`DialogSheet` + `TextField` + чекбокс `Show password` +
+                           повторный показ ошибки без логирования PSK),
+                           `Disconnect`/`Forget`/`RescanWifi`, флаг `--wifi-ssid`
+                           в `rusty-settings` и переход
+                           `open_wifi_password_settings_action` из `TopBar`
+                           `WifiPopover`
   -----------------------------------------------------------------------
 
 ## Открытые решения

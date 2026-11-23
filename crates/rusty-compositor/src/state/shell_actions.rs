@@ -248,6 +248,21 @@ impl RustyCompositorState {
         self.open_settings_page(Some("wifi"));
     }
 
+    /// Opens `rusty-settings --page wifi --wifi-ssid <ssid>` to prompt for a Wi-Fi password (`RUSTYOS-159`).
+    pub fn open_wifi_password_settings_action(&mut self, ssid: &str) {
+        self.close_wifi_popover();
+        let trimmed = ssid.trim();
+        if trimmed.is_empty() {
+            self.open_settings_page(Some("wifi"));
+            return;
+        }
+        if self.wayland_socket_exists()
+            && self.launch_rusty_settings_args(&["--page", "wifi", "--wifi-ssid", trimmed])
+        {
+            self.shell_redraw_needed = true;
+        }
+    }
+
     /// Builds [`crate::shell_render::TopBarLayoutOptions`] reflecting active config and telemetry (`RUSTYOS-141`, `RUSTYOS-142`).
     #[must_use]
     pub fn top_bar_layout_options_for(

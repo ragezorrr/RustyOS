@@ -321,6 +321,32 @@ impl NetworkService {
         self.connect_wifi_with_password(ssid, None).is_ok()
     }
 
+    /// Disconnects the active Wi-Fi connection profile for `ssid` via `nmcli` (`RUSTYOS-159`).
+    ///
+    /// # Errors
+    ///
+    /// Returns a human-readable diagnostic when `ssid` is empty or `nmcli` fails.
+    pub fn disconnect_wifi(&self, ssid: &str) -> Result<(), String> {
+        let trimmed = ssid.trim();
+        if trimmed.is_empty() {
+            return Err(String::from("Wi-Fi network name cannot be empty"));
+        }
+        run_nmcli_connection_action("down", trimmed)
+    }
+
+    /// Forgets (deletes) a saved NetworkManager Wi-Fi connection profile for `ssid` (`RUSTYOS-159`).
+    ///
+    /// # Errors
+    ///
+    /// Returns a human-readable diagnostic when `ssid` is empty or `nmcli` fails.
+    pub fn forget_wifi(&self, ssid: &str) -> Result<(), String> {
+        let trimmed = ssid.trim();
+        if trimmed.is_empty() {
+            return Err(String::from("Wi-Fi network name cannot be empty"));
+        }
+        run_nmcli_connection_action("delete", trimmed)
+    }
+
     /// Enables or disables the system Wi-Fi radio via `NetworkManager` D-Bus or `nmcli` (`RUSTYOS-053`).
     #[must_use]
     pub fn set_wifi_enabled(&self, enabled: bool) -> bool {
@@ -335,6 +361,33 @@ impl NetworkService {
             .stderr(Stdio::null())
             .status()
             .is_ok_and(|s| s.success())
+    }
+}
+
+fn run_nmcli_connection_action(action: &str, ssid: &str) -> Result<(), String> {
+    match Command::new("nmcli")
+        .args(["connection", action, "id", ssid])
+        .stdin(Stdio::null())
+        .output()
+    {
+        Ok(out) if out.status.success() => Ok(()),
+        Ok(out) => Err(format_nmcli_action_error(
+            action,
+            ssid,
+            &String::from_utf8_lossy(&out.stderr),
+            &String::from_utf8_lossy(&out.stdout),
+        )),
+        Err(err) => Err(format!("Unable to run nmcli: {err}")),
+    }
+}
+
+fn format_nmcli_action_error(action: &str, ssid: &str, stderr: &str, stdout: &str) -> String {
+    let err = stderr.trim();
+    let msg = if err.is_empty() { stdout.trim() } else { err };
+    if msg.is_empty() {
+        format!("Failed to {action} Wi-Fi '{ssid}'")
+    } else {
+        msg.to_owned()
     }
 }
 
@@ -1254,7 +1307,7 @@ fn query_bluetooth_snapshot_fallback() -> BluetoothSnapshot {
 
 #[cfg(test)]
 mod tests {
-    use super::nmcli_requires_secrets;
+    use super::{NetworkService, format_nmcli_action_error, nmcli_requires_secrets};
 
     #[test]
     fn detects_nmcli_missing_wifi_psk_messages() {
@@ -1267,5 +1320,20 @@ mod tests {
         assert!(!nmcli_requires_secrets(
             "Error: No network with SSID 'Missing' found."
         ));
+    }
+
+    #[test]
+    fn wifi_disconnect_and_forget_validate_empty_ssid_and_format_errors() {
+        let svc = NetworkService::new();
+        assert!(svc.disconnect_wifi("   ").is_err());
+        assert!(svc.forget_wifi("").is_err());
+        assert_eq!(
+            format_nmcli_action_error("delete", "HomeWiFi", "", ""),
+            "Failed to delete Wi-Fi 'HomeWiFi'"
+        );
+        assert_eq!(
+            format_nmcli_action_error("down", "HomeWiFi", "Error: unknown connection", ""),
+            "Error: unknown connection"
+        );
     }
 }

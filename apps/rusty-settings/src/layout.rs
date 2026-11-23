@@ -160,6 +160,7 @@ pub(crate) enum CardRowControl {
         secure: bool,
         signal_percent: u8,
         action: RowControlId,
+        info_action: RowControlId,
     },
     NotificationHeader {
         subtitle: String,
@@ -1609,6 +1610,14 @@ fn build_wifi_page_sections(
                 target: None,
             },
         });
+        header_rows.push(RowSpec {
+            label: String::from("Current Connection"),
+            height: 44,
+            control: CardRowControl::Choice {
+                action: RowControlId::WifiDisconnectActive,
+                value: String::from("Disconnect"),
+            },
+        });
     }
     sections.push(place_card_section(
         None,
@@ -1674,6 +1683,7 @@ fn append_wifi_network_sections(
                 secure: ap.secure,
                 signal_percent: ap.signal_percent,
                 action: RowControlId::WifiConnectIndex(idx),
+                info_action: RowControlId::WifiInfoIndex(idx),
             },
         };
         if ap.connected || ap.known {
@@ -2321,8 +2331,20 @@ fn hit_test_appearance(app: &AppearanceCardsLayout, px: f64, py: f64) -> Option<
 
 fn hit_test_row(row: &CardRowLayout, px: f64, py: f64) -> Option<SettingsHit> {
     match &row.control {
-        CardRowControl::WifiNetwork { action, .. }
-        | CardRowControl::NotificationAppRow { action, .. } => {
+        CardRowControl::WifiNetwork {
+            action,
+            info_action,
+            ..
+        } => {
+            if row.rect.contains_f64(px, py) {
+                let info_x = f64::from(row.rect.right() - 34);
+                if px >= info_x {
+                    return Some(SettingsHit::Control(*info_action));
+                }
+                return Some(SettingsHit::Control(*action));
+            }
+        }
+        CardRowControl::NotificationAppRow { action, .. } => {
             if row.rect.contains_f64(px, py) {
                 return Some(SettingsHit::Control(*action));
             }

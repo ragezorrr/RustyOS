@@ -30,6 +30,17 @@ where
                 };
                 opts.initial_page = SettingsPage::from_cli_id(&id);
             }
+            "--wifi-ssid" => {
+                let Some(ssid) = iter.next() else {
+                    return Err(String::from("--wifi-ssid requires an SSID"));
+                };
+                let trimmed = ssid.trim();
+                if trimmed.is_empty() {
+                    return Err(String::from("--wifi-ssid cannot be empty"));
+                }
+                opts.initial_page = SettingsPage::Wifi;
+                opts.wifi_prompt_ssid = Some(trimmed.to_owned());
+            }
             other => return Err(format!("unknown argument '{other}'")),
         }
     }
@@ -45,7 +56,9 @@ fn main() -> ExitCode {
     let opts = match parse_args(env::args().skip(1)) {
         Ok(Some(o)) => o,
         Ok(None) => {
-            println!("Usage: rusty-settings [--light | --dark] [--page <id>] [--no-gpu]");
+            println!(
+                "Usage: rusty-settings [--light | --dark] [--page <id>] [--wifi-ssid <ssid>] [--no-gpu]"
+            );
             return ExitCode::SUCCESS;
         }
         Err(msg) => {
@@ -80,9 +93,26 @@ mod tests {
                 theme_override: Some(ThemeChoice::Light),
                 initial_page: SettingsPage::DockDesktop,
                 no_gpu: true,
+                wifi_prompt_ssid: None,
+            }))
+        );
+        assert_eq!(
+            parse_args([
+                "--page".to_owned(),
+                "wifi".to_owned(),
+                "--wifi-ssid".to_owned(),
+                "Studio-5G".to_owned(),
+            ]),
+            Ok(Some(StartupOptions {
+                theme_override: None,
+                initial_page: SettingsPage::Wifi,
+                no_gpu: false,
+                wifi_prompt_ssid: Some(String::from("Studio-5G")),
             }))
         );
         assert!(parse_args(["--page".to_owned()]).is_err());
+        assert!(parse_args(["--wifi-ssid".to_owned()]).is_err());
+        assert!(parse_args(["--wifi-ssid".to_owned(), "   ".to_owned()]).is_err());
         assert!(parse_args(["--bogus".to_owned()]).is_err());
     }
 }
