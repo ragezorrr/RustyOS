@@ -1,6 +1,6 @@
 //! Core surface, SHM, output, XDG shell, layer shell, decoration, and scaling handlers.
 
-use rusty_wm::{Rect, WmAction};
+use rusty_wm::Rect;
 use smithay::{
     backend::renderer::utils::on_commit_buffer_handler,
     delegate_compositor, delegate_fractional_scale, delegate_layer_shell, delegate_output,
@@ -32,8 +32,8 @@ use smithay::{
                 WlrLayerShellState,
             },
             xdg::{
-                PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
-                decoration::XdgDecorationHandler,
+                Configure, PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler,
+                XdgShellState, decoration::XdgDecorationHandler,
             },
         },
         shm::{ShmHandler, ShmState},
@@ -42,9 +42,7 @@ use smithay::{
 };
 use tracing::{info, warn};
 
-use super::super::{
-    ClientState, PRIMARY_OUTPUT_ID, RustyCompositorState, WindowDragState, WindowResizeState,
-};
+use super::super::{ClientState, RustyCompositorState, WindowDragState, WindowResizeState};
 
 impl BufferHandler for RustyCompositorState {
     fn buffer_destroyed(&mut self, buffer: &wl_buffer::WlBuffer) {
@@ -96,17 +94,19 @@ impl CompositorHandler for RustyCompositorState {
         }) {
             window.on_commit();
             if let Some(win_id) = self.window_id_for_smithay(&window) {
+                self.toplevel_initial_committed.insert(win_id);
                 self.bump_window_commit_revision(win_id);
                 self.sync_toplevel_icon_from_surface(win_id, surface);
                 self.sync_foreign_toplevel_metadata(win_id);
                 self.refresh_dock_window_presence(win_id);
+                self.sync_window_max_size(win_id);
                 if self.ensure_floating_min_size(win_id) {
                     let serial = smithay::utils::SERIAL_COUNTER.next_serial();
                     self.sync_space_with_wm(serial);
                 }
                 if !self.is_window_minimized(win_id)
                     && let Some(wm_win) = self.wm.window(win_id)
-                    && wm_win.workspace == self.wm.active_workspace_id()
+                    && self.wm.output_for_workspace(wm_win.workspace).is_some()
                 {
                     let origin = self
                         .animations
@@ -115,8 +115,9 @@ impl CompositorHandler for RustyCompositorState {
                     let titlebar_h = self.window_titlebar_height(win_id);
                     let content_origin = (origin.0, origin.1 + titlebar_h);
                     let is_focused = self.wm.focused_window() == Some(win_id);
-                    self.space.map_element(window, content_origin, is_focused);
-                    if is_focused && !self.screen_locked {
+                    // Preserve z-order (do not raise above override-redirect X11 popups on commit).
+                    self.space.map_element(window, content_origin, false);
+                    if is_focused && self.should_allow_window_keyboard_focus() {
                         let keyboard = self.keyboard.clone();
                         if keyboard.current_focus().as_ref() != Some(surface) {
                             keyboard.set_focus(
@@ -128,6 +129,17 @@ impl CompositorHandler for RustyCompositorState {
                     }
                 }
             }
+        } else if let Some(or_win) = self.space.elements().find_map(|el| {
+            el.x11_surface()
+                .is_some_and(smithay::xwayland::X11Surface::is_override_redirect)
+                .then(|| {
+                    WaylandFocus::wl_surface(el)
+                        .is_some_and(|ws| &*ws == surface)
+                        .then(|| el.clone())
+                })
+                .flatten()
+        }) {
+            or_win.on_commit();
         } else if let Some(parent_win) = self.window_bindings.iter().find_map(|(_, w)| {
             WaylandFocus::wl_surface(w)
                 .is_some_and(|ws| Self::surface_in_tree(&ws, surface))
@@ -166,47 +178,50 @@ impl CompositorHandler for RustyCompositorState {
 
 impl RustyCompositorState {
     fn commit_layer_surface(&mut self, surface: &WlSurface) {
-        let layer_work_area = {
-            let mut layer_map = layer_map_for_output(&self.output);
-            if let Some(layer) = layer_map
-                .layer_for_surface(surface, WindowSurfaceType::ALL)
-                .cloned()
-            {
-                let initial_configure_sent = compositor::with_states(surface, |states| {
-                    states
-                        .data_map
-                        .get::<LayerSurfaceData>()
-                        .map(|data| data.lock().is_ok_and(|d| d.initial_configure_sent))
-                })
-                .unwrap_or_default();
+        let entries: Vec<_> = self.output_map.entries().to_vec();
+        let mut matched_entry = None;
+        for entry in entries {
+            let found = {
+                let mut layer_map = layer_map_for_output(&entry.output);
+                if let Some(layer) = layer_map
+                    .layer_for_surface(surface, WindowSurfaceType::ALL)
+                    .cloned()
+                {
+                    let initial_configure_sent = compositor::with_states(surface, |states| {
+                        states
+                            .data_map
+                            .get::<LayerSurfaceData>()
+                            .map(|data| data.lock().is_ok_and(|d| d.initial_configure_sent))
+                    })
+                    .unwrap_or_default();
 
-                if !initial_configure_sent {
-                    layer.layer_surface().send_configure();
+                    if !initial_configure_sent {
+                        layer.layer_surface().send_configure();
+                    }
+
+                    layer_map.arrange();
+                    true
+                } else {
+                    false
                 }
-
-                layer_map.arrange();
-                let non_exclusive = layer_map.non_exclusive_zone();
-                Some(Rect::new(
-                    non_exclusive.loc.x,
-                    non_exclusive.loc.y,
-                    non_exclusive.size.w,
-                    non_exclusive.size.h,
-                ))
-            } else {
-                None
+            };
+            if found {
+                matched_entry = Some(entry);
+                break;
             }
-        };
+        }
 
-        if let Some(wm_rect) = layer_work_area {
-            let primary_geo = self.output_map.primary().logical_geometry();
+        if let Some(entry) = matched_entry {
+            let geo = entry.logical_geometry();
             let full_area = Rect::new(
-                primary_geo.loc.x,
-                primary_geo.loc.y,
-                primary_geo.size.w.max(100),
-                primary_geo.size.h.max(100),
+                geo.loc.x,
+                geo.loc.y,
+                geo.size.w.max(100),
+                geo.size.h.max(100),
             );
+            let work_area = self.effective_work_area_for_output_entry(&entry);
             self.wm
-                .upsert_output_with_full_area(PRIMARY_OUTPUT_ID, wm_rect, full_area);
+                .upsert_output_with_full_area(entry.id, work_area, full_area);
             let serial = smithay::utils::SERIAL_COUNTER.next_serial();
             self.sync_space_with_wm(serial);
         }
@@ -279,6 +294,9 @@ impl XdgShellHandler for RustyCompositorState {
     }
 
     fn move_request(&mut self, surface: ToplevelSurface, _seat: wl_seat::WlSeat, serial: Serial) {
+        if !self.is_valid_pointer_grab_request(Some(serial)) {
+            return;
+        }
         if let Some(win_id) = self.window_id_for_toplevel(&surface) {
             self.wm.focus_and_raise(win_id);
             self.sync_space_with_wm(serial);
@@ -300,10 +318,20 @@ impl XdgShellHandler for RustyCompositorState {
         serial: Serial,
         edges: xdg_toplevel::ResizeEdge,
     ) {
+        if !self.is_valid_pointer_grab_request(Some(serial)) {
+            return;
+        }
         let Some(mapped_edges) = map_xdg_resize_edge(edges) else {
             return;
         };
         if let Some(win_id) = self.window_id_for_toplevel(&surface) {
+            if self
+                .wm
+                .window(win_id)
+                .is_none_or(|w| w.fullscreen || w.maximized)
+            {
+                return;
+            }
             self.wm.focus_and_raise(win_id);
             self.sync_space_with_wm(serial);
             if let Some(wm_win) = self.wm.window(win_id) {
@@ -314,6 +342,7 @@ impl XdgShellHandler for RustyCompositorState {
                     start_pointer: self.pointer_location,
                     start_rect: wm_win.geometry,
                 });
+                self.sync_space_with_wm(serial);
             }
         }
     }
@@ -332,65 +361,60 @@ impl XdgShellHandler for RustyCompositorState {
 
     fn maximize_request(&mut self, surface: ToplevelSurface) {
         if let Some(win_id) = self.window_id_for_toplevel(&surface) {
-            if self.wm.window(win_id).is_some_and(|w| w.maximized) {
-                return;
-            }
-            let prev_focus = self.wm.focused_window();
-            self.wm.focus_and_raise(win_id);
+            let _ = self.wm.set_window_maximized(win_id, true);
             let serial = smithay::utils::SERIAL_COUNTER.next_serial();
-            self.apply_wm_action(WmAction::ToggleMaximizeFocused, serial);
-            if let Some(prev) = prev_focus
-                && prev != win_id
-            {
-                self.wm.focus_and_raise(prev);
-                self.sync_space_with_wm(serial);
+            self.sync_space_with_wm(serial);
+            if surface.is_initial_configure_sent() {
+                surface.send_configure();
             }
         }
     }
 
     fn unmaximize_request(&mut self, surface: ToplevelSurface) {
         if let Some(win_id) = self.window_id_for_toplevel(&surface) {
-            if !self.wm.window(win_id).is_some_and(|w| w.maximized) {
-                return;
-            }
-            let prev_focus = self.wm.focused_window();
-            self.wm.focus_and_raise(win_id);
+            let _ = self.wm.set_window_maximized(win_id, false);
             let serial = smithay::utils::SERIAL_COUNTER.next_serial();
-            self.apply_wm_action(WmAction::ToggleMaximizeFocused, serial);
-            if let Some(prev) = prev_focus
-                && prev != win_id
-            {
-                self.wm.focus_and_raise(prev);
-                self.sync_space_with_wm(serial);
+            self.sync_space_with_wm(serial);
+            if surface.is_initial_configure_sent() {
+                surface.send_configure();
             }
         }
     }
 
-    fn fullscreen_request(&mut self, surface: ToplevelSurface, _output: Option<WlOutput>) {
+    fn fullscreen_request(&mut self, surface: ToplevelSurface, output: Option<WlOutput>) {
         if let Some(win_id) = self.window_id_for_toplevel(&surface) {
-            if self.wm.window(win_id).is_some_and(|w| w.fullscreen) {
-                return;
-            }
-            if self.wm.focused_window().is_none() || self.wm.focused_window() == Some(win_id) {
+            let target_output = output
+                .as_ref()
+                .and_then(Output::from_resource)
+                .and_then(|out| {
+                    self.output_map
+                        .entries()
+                        .iter()
+                        .find(|e| e.output == out)
+                        .map(|e| e.id)
+                });
+            let _ = self
+                .wm
+                .set_window_fullscreen_on_output(win_id, true, target_output);
+            if self.wm.focused_window().is_none() {
                 self.wm.focus_and_raise(win_id);
             }
-            self.wm.set_window_fullscreen(win_id, true);
             let serial = smithay::utils::SERIAL_COUNTER.next_serial();
             self.sync_space_with_wm(serial);
+            if surface.is_initial_configure_sent() {
+                surface.send_configure();
+            }
         }
     }
 
     fn unfullscreen_request(&mut self, surface: ToplevelSurface) {
         if let Some(win_id) = self.window_id_for_toplevel(&surface) {
-            if !self.wm.window(win_id).is_some_and(|w| w.fullscreen) {
-                return;
-            }
-            if self.wm.focused_window().is_none() || self.wm.focused_window() == Some(win_id) {
-                self.wm.focus_and_raise(win_id);
-            }
-            self.wm.set_window_fullscreen(win_id, false);
+            let _ = self.wm.set_window_fullscreen(win_id, false);
             let serial = smithay::utils::SERIAL_COUNTER.next_serial();
             self.sync_space_with_wm(serial);
+            if surface.is_initial_configure_sent() {
+                surface.send_configure();
+            }
         }
     }
 
@@ -411,12 +435,27 @@ impl XdgShellHandler for RustyCompositorState {
         if let Some(win_id) = self.window_id_for_toplevel(&surface)
             && let Some(win) = self.wm.window(win_id)
         {
+            let titlebar_h = self.window_titlebar_height(win_id);
             let global_pos = Point::<f64, Logical>::from((
                 f64::from(win.geometry.x + location.x),
-                f64::from(win.geometry.y + location.y),
+                f64::from(win.geometry.y + titlebar_h + location.y),
             ));
             self.wm.focus_and_raise(win_id);
             self.open_window_context_menu(global_pos, win_id);
+        }
+    }
+
+    fn ack_configure(&mut self, surface: WlSurface, configure: Configure) {
+        let serial = match configure {
+            Configure::Toplevel(tl) => tl.serial,
+            Configure::Popup(pp) => pp.serial,
+        };
+        if let Some(win_id) = self.window_bindings.iter().find_map(|(id, w)| {
+            WaylandFocus::wl_surface(w)
+                .is_some_and(|ws| *ws == surface)
+                .then_some(*id)
+        }) {
+            self.last_acknowledged_configure.insert(win_id, serial);
         }
     }
 
@@ -558,16 +597,31 @@ impl WlrLayerShellHandler for RustyCompositorState {
     }
 
     fn layer_destroyed(&mut self, surface: WlrLayerSurface) {
-        let mut layer_map = layer_map_for_output(&self.output);
-        let target_layer = layer_map
-            .layers()
-            .find(|l| l.layer_surface() == &surface)
-            .cloned();
+        let entries: Vec<_> = self.output_map.entries().to_vec();
+        let mut removed_any = false;
+        for entry in entries {
+            let mut layer_map = layer_map_for_output(&entry.output);
+            let target_layer = layer_map
+                .layers()
+                .find(|l| l.layer_surface() == &surface)
+                .cloned();
 
-        if let Some(layer) = target_layer {
-            layer_map.unmap_layer(&layer);
-            layer_map.arrange();
-            info!(namespace = %layer.namespace(), "Unmapped destroyed layer surface");
+            if let Some(layer) = target_layer {
+                layer_map.unmap_layer(&layer);
+                layer_map.arrange();
+                info!(
+                    namespace = %layer.namespace(),
+                    output = entry.output.name(),
+                    "Unmapped destroyed layer surface"
+                );
+                removed_any = true;
+                break;
+            }
+        }
+        if removed_any {
+            self.relayout_wm_for_all_outputs();
+            let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+            self.sync_space_with_wm(serial);
         }
     }
 }

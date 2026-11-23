@@ -106,6 +106,25 @@ pub fn spawn_xwayland_source(
                 warn!("XWayland server exited unexpectedly");
                 state.xwm = None;
                 state.set_xwayland_display(None);
+                let x11_win_ids: Vec<WindowId> = state
+                    .window_bindings
+                    .iter()
+                    .filter_map(|(id, sw)| sw.x11_surface().is_some().then_some(*id))
+                    .collect();
+                for id in x11_win_ids {
+                    state.finish_window_teardown(id);
+                }
+                let or_elems: Vec<Window> = state
+                    .space
+                    .elements()
+                    .filter(|el| el.x11_surface().is_some())
+                    .cloned()
+                    .collect();
+                for el in or_elems {
+                    state.space.unmap_elem(&el);
+                }
+                let serial = SERIAL_COUNTER.next_serial();
+                state.sync_space_with_wm(serial);
             }
         })
     {
@@ -172,6 +191,15 @@ impl XwmHandler for RustyCompositorState {
 
         let win_id = self.wm.next_window_id();
         let rect = self.wm.map_window(win_id, preferred_size);
+        if let Some(max_sz) = window.max_size() {
+            let max_w = max_sz.w.max(0);
+            let max_h = if max_sz.h > 0 {
+                max_sz.h.saturating_add(extra_h)
+            } else {
+                0
+            };
+            let _ = self.wm.set_window_max_size(win_id, Some((max_w, max_h)));
+        }
         if let Err(err) = window.set_mapped(true) {
             warn!(x11_id, error = %err, "Failed to mark X11 window mapped");
             self.wm.unmap_window(win_id);
@@ -228,13 +256,53 @@ impl XwmHandler for RustyCompositorState {
         _reorder: Option<Reorder>,
     ) {
         if let Some(win_id) = find_bound_window_id(self, window.window_id())
-            && let Some(wm_win) = self.wm.window(win_id)
+            && let Some(wm_win) = self.wm.window(win_id).cloned()
         {
             let has_ssd = !window.is_decorated();
-            let _ = window.configure(compute_x11_client_rect_for_decoration(
-                wm_win.geometry,
-                has_ssd,
-            ));
+            let extra_h = if has_ssd { TITLEBAR_HEIGHT } else { 0 };
+            let ws_is_floating = self
+                .wm
+                .workspace(wm_win.workspace)
+                .is_none_or(|ws| ws.layout == rusty_wm::LayoutMode::Floating);
+            if ws_is_floating
+                && !wm_win.maximized
+                && !wm_win.fullscreen
+                && (w.is_some() || h.is_some())
+            {
+                let work_area = self.floating_work_area_for_window(win_id);
+                let (min_w, min_h) = self.effective_window_min_size(win_id);
+                let req_w = w
+                    .and_then(|v| i32::try_from(v).ok())
+                    .map_or(wm_win.geometry.width, |v| v.clamp(min_w, work_area.width));
+                let req_h = h
+                    .and_then(|v| i32::try_from(v).ok())
+                    .map_or(wm_win.geometry.height, |v| {
+                        v.saturating_add(extra_h).clamp(min_h, work_area.height)
+                    });
+                let max_x = work_area.x + (work_area.width - req_w).max(0);
+                let max_y = work_area.y + (work_area.height - req_h).max(0);
+                let next_x = x
+                    .unwrap_or(wm_win.geometry.x)
+                    .clamp(work_area.x, max_x.max(work_area.x));
+                let next_y = y
+                    .map_or(wm_win.geometry.y, |ny| ny.saturating_sub(extra_h))
+                    .clamp(work_area.y, max_y.max(work_area.y));
+                let target = Rect::new(next_x, next_y, req_w, req_h);
+                if self.wm.resize_window_with_min(win_id, target, min_w, min_h)
+                    && let Some(updated) = self.wm.window(win_id)
+                {
+                    let rect = updated.geometry;
+                    self.animations.snap_window_immediate(
+                        win_id.0,
+                        rusty_animation::LogicalRect::new(rect.x, rect.y, rect.width, rect.height),
+                    );
+                    let serial = SERIAL_COUNTER.next_serial();
+                    self.sync_space_with_wm(serial);
+                    return;
+                }
+            }
+            let client_rect = compute_x11_client_rect_for_decoration(wm_win.geometry, has_ssd);
+            let _ = window.configure(client_rect);
             return;
         }
         let mut geo = window.geometry();
@@ -278,6 +346,7 @@ impl XwmHandler for RustyCompositorState {
         };
         match property {
             WmWindowProperty::MotifHints | WmWindowProperty::NormalHints => {
+                self.sync_window_max_size(win_id);
                 self.ensure_floating_min_size(win_id);
                 let serial = SERIAL_COUNTER.next_serial();
                 self.sync_space_with_wm(serial);
@@ -293,49 +362,26 @@ impl XwmHandler for RustyCompositorState {
 
     fn maximize_request(&mut self, _xwm: XwmId, window: X11Surface) {
         if let Some(win_id) = find_bound_window_id(self, window.window_id()) {
-            if self.wm.window(win_id).is_some_and(|w| w.maximized) {
-                return;
-            }
-            let prev_focus = self.wm.focused_window();
-            self.wm.focus_and_raise(win_id);
+            let _ = self.wm.set_window_maximized(win_id, true);
             let serial = SERIAL_COUNTER.next_serial();
-            self.apply_wm_action(rusty_wm::WmAction::ToggleMaximizeFocused, serial);
-            if let Some(prev) = prev_focus
-                && prev != win_id
-            {
-                self.wm.focus_and_raise(prev);
-                self.sync_space_with_wm(serial);
-            }
+            self.sync_space_with_wm(serial);
         }
     }
 
     fn unmaximize_request(&mut self, _xwm: XwmId, window: X11Surface) {
         if let Some(win_id) = find_bound_window_id(self, window.window_id()) {
-            if !self.wm.window(win_id).is_some_and(|w| w.maximized) {
-                return;
-            }
-            let prev_focus = self.wm.focused_window();
-            self.wm.focus_and_raise(win_id);
+            let _ = self.wm.set_window_maximized(win_id, false);
             let serial = SERIAL_COUNTER.next_serial();
-            self.apply_wm_action(rusty_wm::WmAction::ToggleMaximizeFocused, serial);
-            if let Some(prev) = prev_focus
-                && prev != win_id
-            {
-                self.wm.focus_and_raise(prev);
-                self.sync_space_with_wm(serial);
-            }
+            self.sync_space_with_wm(serial);
         }
     }
 
     fn fullscreen_request(&mut self, _xwm: XwmId, window: X11Surface) {
         if let Some(win_id) = find_bound_window_id(self, window.window_id()) {
-            if self.wm.window(win_id).is_some_and(|w| w.fullscreen) {
-                return;
-            }
-            if self.wm.focused_window().is_none() || self.wm.focused_window() == Some(win_id) {
+            let _ = self.wm.set_window_fullscreen(win_id, true);
+            if self.wm.focused_window().is_none() {
                 self.wm.focus_and_raise(win_id);
             }
-            self.wm.set_window_fullscreen(win_id, true);
             let serial = SERIAL_COUNTER.next_serial();
             self.sync_space_with_wm(serial);
         }
@@ -343,13 +389,7 @@ impl XwmHandler for RustyCompositorState {
 
     fn unfullscreen_request(&mut self, _xwm: XwmId, window: X11Surface) {
         if let Some(win_id) = find_bound_window_id(self, window.window_id()) {
-            if !self.wm.window(win_id).is_some_and(|w| w.fullscreen) {
-                return;
-            }
-            if self.wm.focused_window().is_none() || self.wm.focused_window() == Some(win_id) {
-                self.wm.focus_and_raise(win_id);
-            }
-            self.wm.set_window_fullscreen(win_id, false);
+            let _ = self.wm.set_window_fullscreen(win_id, false);
             let serial = SERIAL_COUNTER.next_serial();
             self.sync_space_with_wm(serial);
         }
@@ -376,29 +416,49 @@ impl XwmHandler for RustyCompositorState {
         _button: u32,
         resize_edge: ResizeEdge,
     ) {
-        if let Some(win_id) = find_bound_window_id(self, window.window_id())
-            && let Some(wm_win) = self.wm.window(win_id)
-        {
-            self.active_window_drag = None;
-            self.active_window_resize = Some(WindowResizeState {
-                window_id: win_id,
-                edges: map_x11_resize_edge(resize_edge),
-                start_pointer: self.pointer_location,
-                start_rect: wm_win.geometry,
-            });
+        if !self.is_valid_pointer_grab_request(None) {
+            return;
+        }
+        if let Some(win_id) = find_bound_window_id(self, window.window_id()) {
+            if self
+                .wm
+                .window(win_id)
+                .is_none_or(|w| w.fullscreen || w.maximized)
+            {
+                return;
+            }
+            let serial = SERIAL_COUNTER.next_serial();
+            self.wm.focus_and_raise(win_id);
+            self.sync_space_with_wm(serial);
+            if let Some(wm_win) = self.wm.window(win_id) {
+                self.active_window_drag = None;
+                self.active_window_resize = Some(WindowResizeState {
+                    window_id: win_id,
+                    edges: map_x11_resize_edge(resize_edge),
+                    start_pointer: self.pointer_location,
+                    start_rect: wm_win.geometry,
+                });
+                self.sync_space_with_wm(serial);
+            }
         }
     }
 
     fn move_request(&mut self, _xwm: XwmId, window: X11Surface, _button: u32) {
-        if let Some(win_id) = find_bound_window_id(self, window.window_id())
-            && let Some(wm_win) = self.wm.window(win_id)
-        {
-            self.active_window_resize = None;
-            self.active_window_drag = Some(WindowDragState {
-                window_id: win_id,
-                start_pointer: self.pointer_location,
-                start_origin: (wm_win.geometry.x, wm_win.geometry.y),
-            });
+        if !self.is_valid_pointer_grab_request(None) {
+            return;
+        }
+        if let Some(win_id) = find_bound_window_id(self, window.window_id()) {
+            let serial = SERIAL_COUNTER.next_serial();
+            self.wm.focus_and_raise(win_id);
+            self.sync_space_with_wm(serial);
+            if let Some(wm_win) = self.wm.window(win_id) {
+                self.active_window_resize = None;
+                self.active_window_drag = Some(WindowDragState {
+                    window_id: win_id,
+                    start_pointer: self.pointer_location,
+                    start_origin: (wm_win.geometry.x, wm_win.geometry.y),
+                });
+            }
         }
     }
 

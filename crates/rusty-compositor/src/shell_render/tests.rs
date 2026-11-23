@@ -655,6 +655,7 @@ fn csd_frame_hit_testing_ignores_client_header_and_preserves_outer_resize() {
         id: rusty_wm::WindowId(42),
         rect: rusty_wm::Rect::new(100, 80, 600, 420),
         has_ssd: false,
+        allow_resize: true,
     };
     let list = [win];
 
@@ -1027,11 +1028,13 @@ fn macos27_traffic_hover_notifications_and_osd_routing() {
         id: rusty_wm::WindowId(10),
         rect: rusty_wm::Rect::new(100, 80, 500, 360),
         has_ssd: true,
+        allow_resize: true,
     };
     let csd_win = SsdHitWindow {
         id: rusty_wm::WindowId(11),
         rect: rusty_wm::Rect::new(200, 120, 400, 300),
         has_ssd: false,
+        allow_resize: true,
     };
     assert_eq!(
         check_window_traffic_lights_hover(&[ssd_win], 121.0, 94.0),
@@ -2279,4 +2282,46 @@ fn notification_center_layout_and_hit_testing_work() {
         hit_test_notification_center(screen, &state, 20.0, 20.0),
         NotificationCenterHit::OutsidePanel
     );
+}
+
+#[test]
+fn fullscreen_and_maximized_frame_hit_testing_suppress_illegal_ssd_and_resize_grabs() {
+    let background = SsdHitWindow {
+        id: rusty_wm::WindowId(1),
+        rect: rusty_wm::Rect::new(0, 0, 1280, 800),
+        has_ssd: true,
+        allow_resize: true,
+    };
+    let fullscreen = SsdHitWindow {
+        id: rusty_wm::WindowId(2),
+        rect: rusty_wm::Rect::new(0, 0, 1280, 800),
+        has_ssd: false,
+        allow_resize: false,
+    };
+    // Fullscreen window must neither expose traffic-light/titlebar/resize hits NOR leak clicks to
+    // the floating window behind it.
+    let list_fs = [background, fullscreen];
+    assert_eq!(check_window_frame_hit(&list_fs, 21.0, 14.0), None);
+    assert_eq!(check_window_frame_hit(&list_fs, 600.0, 14.0), None);
+    assert_eq!(check_window_frame_hit(&list_fs, 1.0, 400.0), None);
+    assert_eq!(check_window_frame_hit(&list_fs, 1279.0, 799.0), None);
+
+    // Maximized SSD window keeps traffic lights and titlebar drag, but disables edge resize grabs.
+    let maximized = SsdHitWindow {
+        id: rusty_wm::WindowId(3),
+        rect: rusty_wm::Rect::new(0, 28, 1280, 772),
+        has_ssd: true,
+        allow_resize: false,
+    };
+    let list_max = [maximized];
+    assert_eq!(
+        check_window_frame_hit(&list_max, 21.0, 42.0),
+        Some(SsdHit::Close(rusty_wm::WindowId(3)))
+    );
+    assert_eq!(
+        check_window_frame_hit(&list_max, 640.0, 42.0),
+        Some(SsdHit::TitlebarDrag(rusty_wm::WindowId(3)))
+    );
+    assert_eq!(check_window_frame_hit(&list_max, 1.0, 400.0), None);
+    assert_eq!(check_window_frame_hit(&list_max, 1279.0, 799.0), None);
 }

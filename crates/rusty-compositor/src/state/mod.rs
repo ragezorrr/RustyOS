@@ -463,8 +463,21 @@ pub struct RustyCompositorState {
     pub window_bindings: Vec<(WindowId, Window)>,
     /// Managed windows that bound `zxdg_toplevel_decoration_v1` (`RUSTYOS-030`).
     pub xdg_decoration_requested: HashSet<WindowId>,
+    /// Managed `xdg_toplevel` windows that have performed their initial `wl_surface.commit` (`RUSTYOS-165`).
+    pub toplevel_initial_committed: HashSet<WindowId>,
+    /// Last `xdg_surface::ack_configure` serial received per managed window (`RUSTYOS-165`).
+    pub last_acknowledged_configure: std::collections::HashMap<WindowId, Serial>,
     /// Managed windows using client-side decorations (CSD) without RustyOS SSD (`RUSTYOS-030`).
     pub csd_window_ids: HashSet<WindowId>,
+    /// Last applied XWayland `(client_rect, activated, maximized, fullscreen)` state per window (`RUSTYOS-165`).
+    pub last_x11_configure_state:
+        std::collections::HashMap<WindowId, (Rectangle<i32, Logical>, bool, bool, bool)>,
+    /// Last synchronized bottom-to-top XWayland window ID stacking order (`RUSTYOS-165`).
+    pub last_x11_stacking_order: Vec<u32>,
+    /// Currently pressed pointer buttons (`linux-input-event-codes`) for grab validation (`RUSTYOS-165`).
+    pub pressed_pointer_buttons: HashSet<u32>,
+    /// Serial of the most recent pointer button press (`RUSTYOS-165`).
+    pub last_pointer_press_serial: Option<Serial>,
     /// Managed windows currently minimized to the Dock (`RUSTYOS-032`).
     pub minimized_window_ids: HashSet<WindowId>,
     /// User-ordered list of minimized windows shown in the Dock's minimized section (`RUSTYOS-162`).
@@ -1013,7 +1026,13 @@ impl RustyCompositorState {
             wm,
             window_bindings: Vec::new(),
             xdg_decoration_requested: HashSet::new(),
+            toplevel_initial_committed: HashSet::new(),
+            last_acknowledged_configure: std::collections::HashMap::new(),
             csd_window_ids: HashSet::new(),
+            last_x11_configure_state: std::collections::HashMap::new(),
+            last_x11_stacking_order: Vec::new(),
+            pressed_pointer_buttons: HashSet::new(),
+            last_pointer_press_serial: None,
             minimized_window_ids: HashSet::new(),
             minimized_dock_order: Vec::new(),
             space,
@@ -1395,6 +1414,42 @@ impl RustyCompositorState {
         true
     }
 
+    pub(in crate::state) fn effective_work_area_for_output_entry(
+        &self,
+        entry: &crate::outputs::OutputEntry,
+    ) -> Rect {
+        let geo = entry.logical_geometry();
+        let logical_phys = Size::<i32, smithay::utils::Physical>::from((geo.size.w, geo.size.h));
+        let dock_vis = self.user_config.effective_dock_visibility();
+        let mut work_area = crate::shell_render::usable_work_area_for_output(
+            logical_phys,
+            entry.is_primary,
+            self.user_config.dock_position,
+            self.user_config.dock_icon_size,
+            dock_vis.expands_work_area(),
+        );
+        work_area.x += geo.loc.x;
+        work_area.y += geo.loc.y;
+
+        let mut layer_map = layer_map_for_output(&entry.output);
+        layer_map.arrange();
+        let non_excl = layer_map.non_exclusive_zone();
+        if non_excl.size.w > 0 && non_excl.size.h > 0 {
+            let lx0 = geo.loc.x + non_excl.loc.x;
+            let ly0 = geo.loc.y + non_excl.loc.y;
+            let lx1 = lx0 + non_excl.size.w;
+            let ly1 = ly0 + non_excl.size.h;
+            let wx0 = work_area.x.max(lx0);
+            let wy0 = work_area.y.max(ly0);
+            let wx1 = (work_area.x + work_area.width).min(lx1);
+            let wy1 = (work_area.y + work_area.height).min(ly1);
+            if wx1 - wx0 >= 120 && wy1 - wy0 >= 100 {
+                work_area = Rect::new(wx0, wy0, wx1 - wx0, wy1 - wy0);
+            }
+        }
+        work_area
+    }
+
     pub(in crate::state) fn relayout_wm_for_all_outputs(&mut self) {
         let entries: Vec<_> = self.output_map.entries().to_vec();
         for entry in entries {
@@ -1403,27 +1458,15 @@ impl RustyCompositorState {
                 .change_current_state(None, None, None, Some(entry.location));
             self.space.map_output(&entry.output, entry.location);
             let geo = entry.logical_geometry();
-            let logical_phys =
-                Size::<i32, smithay::utils::Physical>::from((geo.size.w, geo.size.h));
             let full_area = Rect::new(
                 geo.loc.x,
                 geo.loc.y,
                 geo.size.w.max(100),
                 geo.size.h.max(100),
             );
-            let dock_vis = self.user_config.effective_dock_visibility();
-            let mut work_area = crate::shell_render::usable_work_area_for_output(
-                logical_phys,
-                entry.is_primary,
-                self.user_config.dock_position,
-                self.user_config.dock_icon_size,
-                dock_vis.expands_work_area(),
-            );
-            work_area.x += geo.loc.x;
-            work_area.y += geo.loc.y;
+            let work_area = self.effective_work_area_for_output_entry(&entry);
             self.wm
                 .upsert_output_with_full_area(entry.id, work_area, full_area);
-            layer_map_for_output(&entry.output).arrange();
         }
 
         let total = self.output_map.total_bounds();
@@ -2064,11 +2107,39 @@ impl RustyCompositorState {
         if removed.is_primary {
             self.output = self.output_map.primary().output.clone();
         }
+        self.output_map.relayout_adjacent();
+        self.relayout_wm_for_all_outputs();
 
         self.reconfigure_ext_lock_surfaces();
         let serial = smithay::utils::SERIAL_COUNTER.next_serial();
         self.sync_space_with_wm(serial);
         true
+    }
+
+    /// Returns `true` when background client commits are permitted to acquire `wl_keyboard` focus
+    /// (i.e. no session lock, blocking modal, shell menu/overlay, or desktop focus is active) (`RUSTYOS-165`).
+    #[must_use]
+    pub fn should_allow_window_keyboard_focus(&self) -> bool {
+        !self.is_session_locked()
+            && !self.desktop_focused
+            && !self.has_blocking_shell_overlay()
+            && self.context_menu.is_none()
+            && self.window_switcher.is_none()
+            && self.screenshot_hud.is_none()
+            && self.active_top_bar_menu.is_none()
+    }
+
+    /// Validates whether a client-initiated interactive move/resize request corresponds to an active
+    /// pointer button press (and matching `serial` when supplied by Wayland clients) (`RUSTYOS-165`).
+    #[must_use]
+    pub fn is_valid_pointer_grab_request(&self, serial: Option<Serial>) -> bool {
+        if self.is_session_locked()
+            || self.has_blocking_shell_overlay()
+            || self.pressed_pointer_buttons.is_empty()
+        {
+            return false;
+        }
+        serial.is_none_or(|req| self.last_pointer_press_serial == Some(req))
     }
 
     /// Computes the total bounding rectangle enclosing all connected outputs (`RUSTYOS-040`).
@@ -2343,7 +2414,34 @@ impl RustyCompositorState {
             }
         }
 
-        self.topmost_fullscreen_window_on(output_id)
+        let fs_id = self.topmost_fullscreen_window_on(output_id)?;
+        // Never allow Direct Scanout to bypass active xdg_popups, IME popups, or X11 override-redirect menus.
+        if !self.ime_popups.is_empty() {
+            return None;
+        }
+        if let Some(sw) = self.smithay_window_for_id(fs_id)
+            && let Some(root) = smithay::wayland::seat::WaylandFocus::wl_surface(&sw)
+            && smithay::desktop::PopupManager::popups_for_surface(&root)
+                .next()
+                .is_some()
+        {
+            return None;
+        }
+        if let Some(entry) = self.output_map.get(output_id) {
+            let out_geo = entry.logical_geometry();
+            let has_or_popup = self.space.elements().any(|el| {
+                el.x11_surface()
+                    .is_some_and(smithay::xwayland::X11Surface::is_override_redirect)
+                    && self.space.element_location(el).is_some_and(|loc| {
+                        let bbox = Rectangle::new(loc, el.geometry().size);
+                        bbox.overlaps(out_geo)
+                    })
+            });
+            if has_or_popup {
+                return None;
+            }
+        }
+        Some(fs_id)
     }
 
     pub(in crate::state) fn init_seat_keyboard(

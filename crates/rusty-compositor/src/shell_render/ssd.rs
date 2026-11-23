@@ -59,12 +59,15 @@ pub struct SsdHitWindow {
     /// Visual outer frame bounds.
     pub rect: rusty_wm::Rect,
     /// `true` when the compositor renders an SSD titlebar (`TITLEBAR_HEIGHT`);
-    /// `false` when the client owns its own header/buttons (CSD).
+    /// `false` when the client owns its own header/buttons (CSD) or is fullscreen.
     pub has_ssd: bool,
+    /// `true` when outer frame edges/corners may trigger interactive resize (`false` for
+    /// fullscreen and maximized windows) (`RUSTYOS-165`).
+    pub allow_resize: bool,
 }
 
 /// Hit-tests `(x, y)` against visible window frames in reverse (top-to-bottom) stacking order,
-/// respecting CSD windows by forwarding top header / corner button clicks directly to the client.
+/// respecting CSD, maximized, and fullscreen windows (`RUSTYOS-165`).
 #[must_use]
 pub fn check_window_frame_hit(
     windows_bottom_to_top: &[SsdHitWindow],
@@ -78,8 +81,13 @@ pub fn check_window_frame_hit(
         let rw = f64::from(win.rect.width);
         let rh = f64::from(win.rect.height);
         let th = f64::from(TITLEBAR_HEIGHT);
+        let outer_pad = if win.allow_resize { pad } else { 0.0 };
 
-        if x < rx - pad || x >= rx + rw + pad || y < ry - pad || y >= ry + rh + pad {
+        if x < rx - outer_pad
+            || x >= rx + rw + outer_pad
+            || y < ry - outer_pad
+            || y >= ry + rh + outer_pad
+        {
             continue;
         }
 
@@ -98,18 +106,20 @@ pub fn check_window_frame_hit(
             }
         }
 
-        // 2. Outer frame edges & corners trigger interactive resize.
-        // For CSD windows keep resize grabs outside the client surface (plus a 1px hairlip)
+        // 2. Outer frame edges & corners trigger interactive resize when permitted.
+        // For CSD windows keep resize grabs outside the client surface (plus a 1.5px hairlip)
         // so interior header controls (such as corner `_ [] X` buttons) stay clickable.
-        let inner_inset = if win.has_ssd { pad } else { 1.5 };
-        let edges = ResizeEdges {
-            left: rel_x < inner_inset,
-            right: rel_x >= rw - inner_inset,
-            top: rel_y < if win.has_ssd { pad - 1.0 } else { 1.5 },
-            bottom: rel_y >= rh - inner_inset,
-        };
-        if edges.any() {
-            return Some(SsdHit::Resize(win.id, edges));
+        if win.allow_resize {
+            let inner_inset = if win.has_ssd { pad } else { 1.5 };
+            let edges = ResizeEdges {
+                left: rel_x < inner_inset,
+                right: rel_x >= rw - inner_inset,
+                top: rel_y < if win.has_ssd { pad - 1.0 } else { 1.5 },
+                bottom: rel_y >= rh - inner_inset,
+            };
+            if edges.any() {
+                return Some(SsdHit::Resize(win.id, edges));
+            }
         }
 
         // 3. Remaining SSD titlebar interior triggers move drag.
@@ -136,6 +146,7 @@ pub fn check_window_ssd_hit(
             id,
             rect,
             has_ssd: true,
+            allow_resize: true,
         })
         .collect();
     check_window_frame_hit(&targets, x, y)

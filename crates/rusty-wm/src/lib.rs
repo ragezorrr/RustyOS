@@ -128,6 +128,10 @@ pub struct ManagedWindow {
     pub maximized: bool,
     /// Whether the window is currently in true unbordered fullscreen mode (`RUSTYOS-041`).
     pub fullscreen: bool,
+    /// Whether the window is currently minimized to the Dock (`RUSTYOS-165`).
+    pub minimized: bool,
+    /// Optional client-declared maximum logical size `(max_w, max_h)` where `0` means unbounded (`RUSTYOS-165`).
+    pub max_size: Option<(i32, i32)>,
 }
 
 /// State of a display output managed by [`WindowManager`].
@@ -275,7 +279,8 @@ impl WindowManager {
     /// Removes an output (never removes the last remaining output).
     ///
     /// Migrates any windows that were assigned to the disconnected output's workspace
-    /// onto the remaining active output's workspace.
+    /// onto the remaining active output's workspace while preserving stacking order
+    /// and `saved_floating_geometry` dimensions (`RUSTYOS-165`).
     pub fn remove_output(&mut self, id: OutputId) -> bool {
         if self.outputs.len() <= 1 {
             return false;
@@ -290,19 +295,102 @@ impl WindowManager {
 
         let target_ws = self.outputs[0].active_workspace;
         let work_area = self.outputs[0].work_area;
+        let removed_ws = removed.active_workspace;
 
-        // Migrate all windows from the disconnected output to the primary/active workspace
-        for win in &mut self.windows {
-            if win.workspace == removed.active_workspace {
-                win.workspace = target_ws;
-                win.geometry.x = work_area.x + 32;
-                win.geometry.y = work_area.y + 32;
-                win.saved_floating_geometry = win.geometry;
+        if removed_ws != target_ws {
+            let migrated_ids: Vec<WindowId> = self
+                .workspace_mut(removed_ws)
+                .map(|ws| {
+                    ws.focused = None;
+                    std::mem::take(&mut ws.stacking)
+                })
+                .unwrap_or_default();
+
+            let mut migrated_set = Vec::with_capacity(migrated_ids.len());
+            for win_id in migrated_ids {
+                if let Some(win) = self.windows.iter_mut().find(|w| w.id == win_id) {
+                    win.workspace = target_ws;
+                    win.saved_floating_geometry = clamp_rect_to_work_area(
+                        Rect::new(
+                            work_area.x + 32,
+                            work_area.y + 32,
+                            win.saved_floating_geometry.width,
+                            win.saved_floating_geometry.height,
+                        ),
+                        work_area,
+                    );
+                    if !win.maximized && !win.fullscreen {
+                        win.geometry = win.saved_floating_geometry;
+                    }
+                    migrated_set.push(win_id);
+                }
+            }
+            // Catch any stray windows referencing `removed_ws` not in `removed_ws.stacking`.
+            for win in &mut self.windows {
+                if win.workspace == removed_ws {
+                    win.workspace = target_ws;
+                    win.saved_floating_geometry = clamp_rect_to_work_area(
+                        Rect::new(
+                            work_area.x + 32,
+                            work_area.y + 32,
+                            win.saved_floating_geometry.width,
+                            win.saved_floating_geometry.height,
+                        ),
+                        work_area,
+                    );
+                    if !win.maximized && !win.fullscreen {
+                        win.geometry = win.saved_floating_geometry;
+                    }
+                    migrated_set.push(win.id);
+                }
+            }
+
+            if let Some(dst) = self.workspace_mut(target_ws) {
+                for win_id in migrated_set {
+                    if !dst.stacking.contains(&win_id) {
+                        dst.stacking.push(win_id);
+                    }
+                }
+            }
+            if self
+                .workspace(target_ws)
+                .is_some_and(|ws| ws.focused.is_none())
+            {
+                let next_focus = self.topmost_unminimized_in(target_ws);
+                if let Some(dst) = self.workspace_mut(target_ws) {
+                    dst.focused = next_focus;
+                }
             }
         }
 
         self.relayout_workspace(target_ws);
         true
+    }
+
+    /// Returns the managed output metadata for `id`, if connected (`RUSTYOS-165`).
+    #[must_use]
+    pub fn output(&self, id: OutputId) -> Option<&ManagedOutput> {
+        self.outputs.iter().find(|o| o.id == id)
+    }
+
+    /// Returns all currently connected managed outputs (`RUSTYOS-165`).
+    #[must_use]
+    pub fn outputs(&self) -> &[ManagedOutput] {
+        &self.outputs
+    }
+
+    /// Returns the output currently displaying `ws_id`, if any (`RUSTYOS-165`).
+    #[must_use]
+    pub fn output_for_workspace(&self, ws_id: WorkspaceId) -> Option<&ManagedOutput> {
+        self.outputs.iter().find(|o| o.active_workspace == ws_id)
+    }
+
+    /// Returns the output currently owning `win_id`'s workspace, falling back to `focused_output` (`RUSTYOS-165`).
+    #[must_use]
+    pub fn output_for_window(&self, win_id: WindowId) -> Option<&ManagedOutput> {
+        let ws_id = self.window(win_id)?.workspace;
+        self.output_for_workspace(ws_id)
+            .or_else(|| self.output(self.focused_output))
     }
 
     /// Returns the active [`WorkspaceId`] on the currently focused output.
@@ -391,6 +479,8 @@ impl WindowManager {
             saved_floating_geometry: floating_rect,
             maximized: false,
             fullscreen: false,
+            minimized: false,
+            max_size: None,
         });
 
         if let Some(ws) = self.workspace_mut(ws_id) {
@@ -403,16 +493,22 @@ impl WindowManager {
     }
 
     /// Unmaps and removes a window, transferring focus deterministically to the next topmost
-    /// window on the same workspace.
+    /// non-minimized window on the same workspace.
     pub fn unmap_window(&mut self, id: WindowId) -> Option<WindowId> {
         let pos = self.windows.iter().position(|w| w.id == id)?;
         let removed = self.windows.remove(pos);
         let ws_id = removed.workspace;
 
-        if let Some(ws) = self.workspace_mut(ws_id) {
+        let was_focused = if let Some(ws) = self.workspace_mut(ws_id) {
             ws.stacking.retain(|&w| w != id);
-            if ws.focused == Some(id) {
-                ws.focused = ws.stacking.last().copied();
+            ws.focused == Some(id)
+        } else {
+            false
+        };
+        if was_focused {
+            let next_focus = self.topmost_unminimized_in(ws_id);
+            if let Some(ws) = self.workspace_mut(ws_id) {
+                ws.focused = next_focus;
             }
         }
 
@@ -420,11 +516,64 @@ impl WindowManager {
         self.workspace(ws_id).and_then(|ws| ws.focused)
     }
 
-    /// Focuses and raises the specified window (and switches the focused output if needed).
-    pub fn focus_and_raise(&mut self, id: WindowId) -> bool {
-        let Some(ws_id) = self.window(id).map(|w| w.workspace) else {
+    /// Sets the minimized state of `win_id`, updating workspace focus and tiling layout (`RUSTYOS-165`).
+    ///
+    /// Returns `true` if `win_id` existed and its minimized state actually changed.
+    pub fn set_window_minimized(&mut self, win_id: WindowId, minimized: bool) -> bool {
+        let Some(ws_id) = self.window(win_id).map(|w| w.workspace) else {
             return false;
         };
+        let changed = if let Some(win) = self.windows.iter_mut().find(|w| w.id == win_id) {
+            if win.minimized == minimized {
+                false
+            } else {
+                win.minimized = minimized;
+                true
+            }
+        } else {
+            false
+        };
+        if !changed {
+            return false;
+        }
+
+        if minimized {
+            if self
+                .workspace(ws_id)
+                .is_some_and(|ws| ws.focused == Some(win_id))
+            {
+                let next_focus = self.topmost_unminimized_in(ws_id);
+                if let Some(ws) = self.workspace_mut(ws_id) {
+                    ws.focused = next_focus;
+                }
+            }
+        } else {
+            if let Some(output) = self.outputs.iter().find(|o| o.active_workspace == ws_id) {
+                self.focused_output = output.id;
+            }
+            if let Some(ws) = self.workspace_mut(ws_id) {
+                if let Some(pos) = ws.stacking.iter().position(|&w| w == win_id) {
+                    let id = ws.stacking.remove(pos);
+                    ws.stacking.push(id);
+                }
+                ws.focused = Some(win_id);
+            }
+        }
+
+        self.relayout_workspace(ws_id);
+        true
+    }
+
+    /// Focuses and raises the specified window (and switches the focused output if needed).
+    /// Unminimizes the window if it was minimized so focus never points to a hidden window.
+    pub fn focus_and_raise(&mut self, id: WindowId) -> bool {
+        let Some((ws_id, was_minimized)) = self.window(id).map(|w| (w.workspace, w.minimized))
+        else {
+            return false;
+        };
+        if was_minimized {
+            return self.set_window_minimized(id, false);
+        }
 
         if let Some(output) = self.outputs.iter().find(|o| o.active_workspace == ws_id) {
             self.focused_output = output.id;
@@ -442,13 +591,14 @@ impl WindowManager {
         }
     }
 
-    /// Finds the topmost visible window containing the given logical coordinates `(px, py)`.
+    /// Finds the topmost visible non-minimized window containing the given logical coordinates `(px, py)`.
     #[must_use]
     pub fn window_under_point(&self, px: i32, py: i32) -> Option<WindowId> {
         for output in self.outputs.iter().rev() {
             if let Some(ws) = self.workspace(output.active_workspace) {
                 for &win_id in ws.stacking.iter().rev() {
                     if let Some(win) = self.window(win_id)
+                        && !win.minimized
                         && win.geometry.contains_point(px, py)
                     {
                         return Some(win_id);
@@ -499,16 +649,24 @@ impl WindowManager {
 
         if let Some(src) = self.workspace_mut(source_ws) {
             src.stacking.retain(|&w| w != win_id);
-            src.focused = src.stacking.last().copied();
+        }
+        let next_src_focus = self.topmost_unminimized_in(source_ws);
+        if let Some(src) = self.workspace_mut(source_ws) {
+            src.focused = next_src_focus;
         }
 
+        let is_minimized = self.window(win_id).is_some_and(|w| w.minimized);
         if let Some(win) = self.windows.iter_mut().find(|w| w.id == win_id) {
             win.workspace = target_ws;
         }
 
         if let Some(dst) = self.workspace_mut(target_ws) {
-            dst.stacking.push(win_id);
-            dst.focused = Some(win_id);
+            if !dst.stacking.contains(&win_id) {
+                dst.stacking.push(win_id);
+            }
+            if !is_minimized {
+                dst.focused = Some(win_id);
+            }
         }
 
         self.relayout_workspace(source_ws);
@@ -516,7 +674,56 @@ impl WindowManager {
         Some(win_id)
     }
 
-    /// Moves the focused window to the next connected output (if more than one output exists).
+    /// Migrates `win_id` onto `target_output`'s active workspace (e.g. when dragged across monitors
+    /// or targeted by `xdg_toplevel::set_fullscreen(output)`) without snapping floating coordinates
+    /// (`RUSTYOS-165`).
+    pub fn migrate_window_to_output(&mut self, win_id: WindowId, target_output: OutputId) -> bool {
+        let Some(target_ws) = self.output(target_output).map(|o| o.active_workspace) else {
+            return false;
+        };
+        let Some((source_ws, is_minimized, needs_relayout)) = self
+            .window(win_id)
+            .map(|w| (w.workspace, w.minimized, w.maximized || w.fullscreen))
+        else {
+            return false;
+        };
+        if source_ws == target_ws {
+            return false;
+        }
+
+        if let Some(src) = self.workspace_mut(source_ws) {
+            src.stacking.retain(|&w| w != win_id);
+        }
+        let next_src_focus = self.topmost_unminimized_in(source_ws);
+        if let Some(src) = self.workspace_mut(source_ws) {
+            src.focused = next_src_focus;
+        }
+
+        if let Some(win) = self.windows.iter_mut().find(|w| w.id == win_id) {
+            win.workspace = target_ws;
+        }
+
+        let dst_is_tiled = self
+            .workspace(target_ws)
+            .is_some_and(|ws| ws.layout == LayoutMode::MasterStack);
+        if let Some(dst) = self.workspace_mut(target_ws) {
+            if !dst.stacking.contains(&win_id) {
+                dst.stacking.push(win_id);
+            }
+            if !is_minimized {
+                dst.focused = Some(win_id);
+            }
+        }
+        self.focused_output = target_output;
+        self.relayout_workspace(source_ws);
+        if needs_relayout || dst_is_tiled {
+            self.relayout_workspace(target_ws);
+        }
+        true
+    }
+
+    /// Moves the focused window to the next connected output (if more than one output exists),
+    /// preserving relative position inside the destination output's work area (`RUSTYOS-165`).
     pub fn move_focused_to_next_output(&mut self) -> Option<WindowId> {
         if self.outputs.len() <= 1 {
             return self.focused_window();
@@ -525,37 +732,73 @@ impl WindowManager {
             .outputs
             .iter()
             .position(|o| o.id == self.focused_output)?;
+        let src_work = self.outputs[curr_idx].work_area;
         let next_idx = (curr_idx + 1) % self.outputs.len();
         let next_output_id = self.outputs[next_idx].id;
         let next_ws = self.outputs[next_idx].active_workspace;
+        let dst_work = self.outputs[next_idx].work_area;
+
+        let win_id = self.focused_window()?;
+        if let Some(win) = self.windows.iter_mut().find(|w| w.id == win_id) {
+            let rel_x = win.saved_floating_geometry.x - src_work.x;
+            let rel_y = win.saved_floating_geometry.y - src_work.y;
+            win.saved_floating_geometry = clamp_rect_to_work_area(
+                Rect::new(
+                    dst_work.x + rel_x,
+                    dst_work.y + rel_y,
+                    win.saved_floating_geometry.width,
+                    win.saved_floating_geometry.height,
+                ),
+                dst_work,
+            );
+            if !win.maximized && !win.fullscreen {
+                win.geometry = win.saved_floating_geometry;
+            }
+        }
 
         let moved = self.move_focused_to_workspace(next_ws)?;
         self.focused_output = next_output_id;
         Some(moved)
     }
 
-    /// Cycles focus forward or backward on the active workspace without losing stacking invariants.
+    /// Cycles focus forward or backward among non-minimized windows on the active workspace
+    /// without losing stacking invariants (`RUSTYOS-165`).
     pub fn cycle_focus(&mut self, forward: bool) -> Option<WindowId> {
         let ws_id = self.active_workspace_id();
-        let ws = self.workspace_mut(ws_id)?;
-        if ws.stacking.is_empty() {
-            ws.focused = None;
+        let active_ids: Vec<WindowId> = self
+            .workspace(ws_id)?
+            .stacking
+            .iter()
+            .copied()
+            .filter(|&id| self.window(id).is_some_and(|w| !w.minimized))
+            .collect();
+        if active_ids.is_empty() {
+            if let Some(ws) = self.workspace_mut(ws_id) {
+                ws.focused = None;
+            }
             return None;
         }
-        if ws.stacking.len() == 1 {
-            let only = ws.stacking[0];
-            ws.focused = Some(only);
+        if active_ids.len() == 1 {
+            let only = active_ids[0];
+            if let Some(ws) = self.workspace_mut(ws_id) {
+                ws.focused = Some(only);
+            }
             return Some(only);
         }
 
+        let ws = self.workspace_mut(ws_id)?;
         let next_id = if forward {
-            // Rotate top window to bottom and bring the previous one to top.
-            let top = ws.stacking.pop()?;
+            // Move topmost non-minimized window to the bottom and raise the previous non-minimized one.
+            let top = *active_ids.last()?;
+            let next = active_ids[active_ids.len() - 2];
+            ws.stacking.retain(|&w| w != top && w != next);
             ws.stacking.insert(0, top);
-            *ws.stacking.last()?
+            ws.stacking.push(next);
+            next
         } else {
-            // Bring bottom window to top.
-            let bottom = ws.stacking.remove(0);
+            // Bring bottommost non-minimized window to the top.
+            let bottom = active_ids[0];
+            ws.stacking.retain(|&w| w != bottom);
             ws.stacking.push(bottom);
             bottom
         };
@@ -581,16 +824,16 @@ impl WindowManager {
         new_mode
     }
 
-    /// Toggles maximized state of the currently focused window.
-    pub fn toggle_maximize_focused(&mut self) -> Option<Rect> {
-        let ws_id = self.active_workspace_id();
-        let win_id = self.focused_window()?;
+    /// Explicitly enables or disables maximized state for `win_id` without altering focus or stacking
+    /// order (`RUSTYOS-165`).
+    pub fn set_window_maximized(&mut self, win_id: WindowId, enabled: bool) -> Option<Rect> {
+        let ws_id = self.window(win_id)?.workspace;
         let work_area = self.work_area_for_workspace(ws_id);
 
         if let Some(win) = self.windows.iter_mut().find(|w| w.id == win_id) {
             win.fullscreen = false;
-            win.maximized = !win.maximized;
-            if win.maximized {
+            win.maximized = enabled;
+            if enabled {
                 win.geometry = work_area;
             } else {
                 win.geometry = win.saved_floating_geometry;
@@ -601,11 +844,34 @@ impl WindowManager {
         self.window(win_id).map(|w| w.geometry)
     }
 
+    /// Toggles maximized state of the currently focused window.
+    /// When currently fullscreen, exits fullscreen into maximized state (`RUSTYOS-165`).
+    pub fn toggle_maximize_focused(&mut self) -> Option<Rect> {
+        let win_id = self.focused_window()?;
+        let win = self.window(win_id)?;
+        let next = if win.fullscreen { true } else { !win.maximized };
+        self.set_window_maximized(win_id, next)
+    }
+
     /// Explicitly enables or disables fullscreen mode for `win_id` (`RUSTYOS-041`).
     ///
     /// In fullscreen mode, the window spans its output's complete `full_area` (ignoring
     /// `TopBar`/`Dock` margins). Leaving fullscreen restores maximized or floating geometry.
     pub fn set_window_fullscreen(&mut self, win_id: WindowId, enabled: bool) -> Option<Rect> {
+        self.set_window_fullscreen_on_output(win_id, enabled, None)
+    }
+
+    /// Explicitly enables or disables fullscreen mode for `win_id`, optionally targeting a specific
+    /// `target_output` as requested by `xdg_toplevel::set_fullscreen(output)` (`RUSTYOS-165`).
+    pub fn set_window_fullscreen_on_output(
+        &mut self,
+        win_id: WindowId,
+        enabled: bool,
+        target_output: Option<OutputId>,
+    ) -> Option<Rect> {
+        if enabled && let Some(out_id) = target_output {
+            let _ = self.migrate_window_to_output(win_id, out_id);
+        }
         let ws_id = self.window(win_id)?.workspace;
         let full_area = self.full_area_for_workspace(ws_id);
         let work_area = self.work_area_for_workspace(ws_id);
@@ -626,6 +892,23 @@ impl WindowManager {
 
         self.relayout_workspace(ws_id);
         self.window(win_id).map(|w| w.geometry)
+    }
+
+    /// Updates the client-declared maximum logical size for `win_id` (`0` = unbounded per axis) (`RUSTYOS-165`).
+    pub fn set_window_max_size(&mut self, win_id: WindowId, max_size: Option<(i32, i32)>) -> bool {
+        let Some(win) = self.windows.iter_mut().find(|w| w.id == win_id) else {
+            return false;
+        };
+        let normalized = max_size.and_then(|(w, h)| {
+            let cw = w.max(0);
+            let ch = h.max(0);
+            (cw > 0 || ch > 0).then_some((cw, ch))
+        });
+        if win.max_size == normalized {
+            return false;
+        }
+        win.max_size = normalized;
+        true
     }
 
     /// Toggles fullscreen state of the currently focused window (`RUSTYOS-041`).
@@ -699,7 +982,7 @@ impl WindowManager {
     }
 
     /// Resizes and repositions a window to `rect` in logical space while enforcing explicit
-    /// minimum bounds `(min_w, min_h)` so windows stop cleanly at client minimum sizes (`RUSTYOS-112`).
+    /// minimum bounds `(min_w, min_h)` and any client-declared `max_size` (`RUSTYOS-112` / `RUSTYOS-165`).
     pub fn resize_window_with_min(
         &mut self,
         id: WindowId,
@@ -712,12 +995,17 @@ impl WindowManager {
         };
         let floor_w = min_w.max(64);
         let floor_h = min_h.max(64);
-        let sanitized = Rect::new(
-            rect.x,
-            rect.y,
-            rect.width.max(floor_w),
-            rect.height.max(floor_h),
-        );
+        let mut width = rect.width.max(floor_w);
+        let mut height = rect.height.max(floor_h);
+        if let Some((max_w, max_h)) = win.max_size {
+            if max_w > 0 {
+                width = width.min(max_w.max(floor_w));
+            }
+            if max_h > 0 {
+                height = height.min(max_h.max(floor_h));
+            }
+        }
+        let sanitized = Rect::new(rect.x, rect.y, width, height);
         win.maximized = false;
         win.fullscreen = false;
         win.geometry = sanitized;
@@ -775,6 +1063,15 @@ impl WindowManager {
         self.workspaces.iter_mut().find(|ws| ws.id == id)
     }
 
+    fn topmost_unminimized_in(&self, ws_id: WorkspaceId) -> Option<WindowId> {
+        self.workspace(ws_id)?
+            .stacking
+            .iter()
+            .rev()
+            .copied()
+            .find(|&id| self.window(id).is_some_and(|w| !w.minimized))
+    }
+
     fn work_area_for_workspace(&self, ws_id: WorkspaceId) -> Rect {
         self.outputs
             .iter()
@@ -821,12 +1118,17 @@ impl WindowManager {
             LayoutMode::MasterStack => {
                 let mut tiled_ids = Vec::with_capacity(stacking.len());
                 for &win_id in stacking.iter().rev() {
-                    if self.window(win_id).is_some_and(|w| w.fullscreen) {
-                        if let Some(win) = self.windows.iter_mut().find(|w| w.id == win_id) {
-                            win.geometry = full_area;
+                    if let Some(win) = self.window(win_id) {
+                        if win.minimized {
+                            continue;
                         }
-                    } else {
-                        tiled_ids.push(win_id);
+                        if win.fullscreen {
+                            if let Some(w_mut) = self.windows.iter_mut().find(|w| w.id == win_id) {
+                                w_mut.geometry = full_area;
+                            }
+                        } else {
+                            tiled_ids.push(win_id);
+                        }
                     }
                 }
 
@@ -1095,5 +1397,109 @@ mod tests {
             vec![w1, w2]
         );
         assert_eq!(wm.visible_windows_for_output(OutputId(1)).len(), 0);
+    }
+
+    #[test]
+    fn remove_output_migrates_stacking_and_preserves_saved_floating_size() {
+        let mut wm = WindowManager::new(Rect::new(0, 28, 1920, 1052));
+        wm.upsert_output(OutputId(2), Rect::new(1920, 0, 2560, 1440));
+        wm.set_focused_output(OutputId(2));
+
+        let w1 = wm.next_window_id();
+        let initial = wm.map_window(w1, Some((720, 480)));
+        assert_eq!(wm.window(w1).map(|w| w.workspace), Some(WorkspaceId(2)));
+        let _ = wm.set_window_maximized(w1, true);
+        assert_eq!(wm.window(w1).map(|w| w.geometry.width), Some(2560));
+
+        assert!(wm.remove_output(OutputId(2)));
+        assert_eq!(wm.focused_output(), OutputId(1));
+        let vis: Vec<WindowId> = wm
+            .visible_windows_for_output(OutputId(1))
+            .iter()
+            .map(|w| w.id)
+            .collect();
+        assert_eq!(vis, vec![w1]);
+        assert_eq!(wm.focused_window(), Some(w1));
+        assert_eq!(wm.window(w1).map(|w| w.geometry.width), Some(1920));
+        // Unmaximizing must still restore the saved 720x480 floating size, not 2560x1440.
+        let restored = wm.set_window_maximized(w1, false);
+        assert_eq!(
+            restored.map(|r| (r.width, r.height)),
+            Some((initial.width, initial.height))
+        );
+    }
+
+    #[test]
+    fn minimized_windows_skip_focus_tiling_hit_test_and_cycle() {
+        let mut wm = WindowManager::new(Rect::new(0, 28, 1280, 772));
+        let w1 = wm.next_window_id();
+        let w2 = wm.next_window_id();
+        wm.map_window(w1, Some((600, 400)));
+        wm.map_window(w2, Some((600, 400)));
+        wm.apply_action(WmAction::ToggleLayoutMode);
+        assert_eq!(wm.active_layout_mode(), LayoutMode::MasterStack);
+
+        // Minimizing w2 transfers focus to w1 and lets w1 expand to full single-tile width.
+        assert!(wm.set_window_minimized(w2, true));
+        assert!(!wm.set_window_minimized(w2, true));
+        assert_eq!(wm.focused_window(), Some(w1));
+        assert_eq!(
+            wm.window(w1).map(|w| w.geometry.width),
+            Some(1280 - wm.gap_px * 2)
+        );
+        assert_eq!(wm.cycle_focus(true), Some(w1));
+
+        // Minimizing the last visible window clears focused_window cleanly.
+        assert!(wm.set_window_minimized(w1, true));
+        assert_eq!(wm.focused_window(), None);
+        assert_eq!(wm.window_under_point(100, 100), None);
+        assert_eq!(wm.cycle_focus(true), None);
+
+        // Restoring w2 refocuses and raises it.
+        assert!(wm.set_window_minimized(w2, false));
+        assert_eq!(wm.focused_window(), Some(w2));
+    }
+
+    #[test]
+    fn direct_maximize_max_size_fullscreen_target_and_migrate_output_work() {
+        let mut wm = WindowManager::new(Rect::new(0, 28, 1920, 1052));
+        wm.upsert_output_with_full_area(
+            OutputId(2),
+            Rect::new(1920, 0, 2560, 1440),
+            Rect::new(1920, 0, 2560, 1440),
+        );
+
+        let w1 = wm.next_window_id();
+        let w2 = wm.next_window_id();
+        wm.map_window(w1, Some((600, 400)));
+        wm.map_window(w2, Some((600, 400)));
+        assert_eq!(wm.focused_window(), Some(w2));
+
+        // Maximizing unfocused w1 must not steal focus or raise w1 above w2.
+        let _ = wm.set_window_maximized(w1, true);
+        assert_eq!(wm.focused_window(), Some(w2));
+        let order: Vec<WindowId> = wm
+            .visible_windows_for_output(OutputId(1))
+            .iter()
+            .map(|w| w.id)
+            .collect();
+        assert_eq!(order, vec![w1, w2]);
+
+        // Enforcing client max_size caps resize bounds.
+        assert!(wm.set_window_max_size(w2, Some((800, 600))));
+        assert!(wm.resize_window_with_min(w2, Rect::new(100, 100, 1400, 900), 300, 200));
+        assert_eq!(
+            wm.window(w2).map(|w| w.geometry),
+            Some(Rect::new(100, 100, 800, 600))
+        );
+
+        // Fullscreen targeting OutputId(2) migrates w2 onto Output 2's full_area.
+        let fs = wm.set_window_fullscreen_on_output(w2, true, Some(OutputId(2)));
+        assert_eq!(fs, Some(Rect::new(1920, 0, 2560, 1440)));
+        assert_eq!(wm.window(w2).map(|w| w.workspace), Some(WorkspaceId(2)));
+
+        // Migrating w1 to Output 2 works cleanly.
+        assert!(wm.migrate_window_to_output(w1, OutputId(2)));
+        assert_eq!(wm.window(w1).map(|w| w.workspace), Some(WorkspaceId(2)));
     }
 }

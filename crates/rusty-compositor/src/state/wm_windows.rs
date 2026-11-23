@@ -41,10 +41,11 @@ use super::{
 };
 
 impl RustyCompositorState {
-    /// Returns `true` if `win_id` is currently minimized to the Dock (`RUSTYOS-032`).
+    /// Returns `true` if `win_id` is currently minimized to the Dock (`RUSTYOS-032` / `RUSTYOS-165`).
     #[must_use]
     pub fn is_window_minimized(&self, win_id: WindowId) -> bool {
-        self.minimized_window_ids.contains(&win_id)
+        self.wm.window(win_id).is_some_and(|w| w.minimized)
+            || self.minimized_window_ids.contains(&win_id)
     }
 
     fn compute_minimize_target_rect(&self, win_id: WindowId) -> Rect {
@@ -102,8 +103,11 @@ impl RustyCompositorState {
         )
     }
 
-    /// Minimizes `win_id` to the Dock with Genie/Scale animation, shifting focus cleanly (`RUSTYOS-032`/`073`).
+    /// Minimizes `win_id` to the Dock with Genie/Scale animation, shifting focus cleanly (`RUSTYOS-032`/`073`/`165`).
     pub fn minimize_window(&mut self, win_id: WindowId, serial: Serial) {
+        if self.is_window_minimized(win_id) {
+            return;
+        }
         let Some(wm_win) = self.wm.window(win_id) else {
             return;
         };
@@ -124,17 +128,11 @@ impl RustyCompositorState {
         if !self.minimized_dock_order.contains(&win_id) {
             self.minimized_dock_order.push(win_id);
         }
-        if self.wm.focused_window() == Some(win_id) {
-            let next_visible = self
-                .wm
-                .visible_windows()
-                .into_iter()
-                .rev()
-                .find(|w| w.id != win_id && !self.is_window_minimized(w.id))
-                .map(|w| w.id);
-            if let Some(next_id) = next_visible {
-                self.wm.focus_and_raise(next_id);
-            }
+        let _ = self.wm.set_window_minimized(win_id, true);
+        if let Some(sw) = self.smithay_window_for_id(win_id)
+            && let Some(x11) = sw.x11_surface()
+        {
+            let _ = x11.set_suspended(true);
         }
         self.sync_space_with_wm(serial);
 
@@ -163,22 +161,34 @@ impl RustyCompositorState {
         self.shell_redraw_needed = true;
     }
 
-    /// Restores a minimized window from the Dock with Genie/Scale animation (`RUSTYOS-032`/`073`).
+    /// Restores a minimized window from the Dock with Genie/Scale animation, or simply focuses
+    /// and raises an already-visible window without playing an unminimize warp (`RUSTYOS-032`/`073`/`165`).
     pub fn restore_window(&mut self, win_id: WindowId, serial: Serial) {
         let Some(wm_win) = self.wm.window(win_id) else {
             return;
         };
+        let was_minimized = self.is_window_minimized(win_id);
         let window_rect = wm_win.geometry;
-        let dock_rect = self.compute_minimize_target_rect(win_id);
+        let dock_rect = was_minimized.then(|| self.compute_minimize_target_rect(win_id));
         self.minimized_window_ids.remove(&win_id);
         self.minimized_dock_order.retain(|id| *id != win_id);
+        let _ = self.wm.set_window_minimized(win_id, false);
         self.wm.focus_and_raise(win_id);
+        if was_minimized
+            && let Some(sw) = self.smithay_window_for_id(win_id)
+            && let Some(x11) = sw.x11_surface()
+        {
+            let _ = x11.set_suspended(false);
+        }
         self.sync_space_with_wm(serial);
 
         self.minimize_anims.retain(|anim| anim.win_id != win_id);
         self.lifecycle_anims
             .retain(|anim| anim.win_id != win_id || anim.kind == super::WindowLifecycleKind::Close);
-        if !self.animations.reduced_motion() {
+        if was_minimized
+            && !self.animations.reduced_motion()
+            && let Some(dock_rect) = dock_rect
+        {
             let mut progress = AnimatedValue::new_settled(1.0);
             progress.retarget(
                 0.0,
@@ -369,26 +379,32 @@ impl RustyCompositorState {
     }
 
     /// Finds the topmost surface (layer shell or window) under the given logical point,
-    /// respecting Wayland layer-shell stacking order (Overlay -> Top -> Windows -> Bottom -> Background).
+    /// respecting multi-monitor outputs and Wayland layer-shell stacking order (`RUSTYOS-165`).
     #[must_use]
     pub fn target_surface_under(
         &self,
         point: Point<f64, Logical>,
     ) -> Option<(Option<Window>, WlSurface, Point<f64, Logical>)> {
-        let layer_map = layer_map_for_output(&self.output);
+        let target_entry = self
+            .output_under(point)
+            .and_then(|id| self.output_map.get(id))
+            .unwrap_or_else(|| self.output_map.primary());
+        let output_loc = target_entry.location;
+        let local_point = point - output_loc.to_f64();
+        let layer_map = layer_map_for_output(&target_entry.output);
 
         // 1. Overlay & Top layers (including overflowing layer popups)
         for layer in layer_map.layers().rev() {
             if matches!(layer.layer(), Layer::Overlay | Layer::Top)
                 && let Some(geo) = layer_map.layer_geometry(layer)
-                && (geo.to_f64().contains(point)
+                && (geo.to_f64().contains(local_point)
                     || PopupManager::popups_for_surface(layer.wl_surface())
                         .next()
                         .is_some())
             {
-                let rel = point - geo.loc.to_f64();
+                let rel = local_point - geo.loc.to_f64();
                 if let Some((surf, offset)) = layer.surface_under(rel, WindowSurfaceType::ALL) {
-                    let origin = (geo.loc + offset).to_f64();
+                    let origin = (output_loc + geo.loc + offset).to_f64();
                     return Some((None, surf, origin));
                 }
             }
@@ -403,14 +419,14 @@ impl RustyCompositorState {
         for layer in layer_map.layers().rev() {
             if matches!(layer.layer(), Layer::Bottom | Layer::Background)
                 && let Some(geo) = layer_map.layer_geometry(layer)
-                && (geo.to_f64().contains(point)
+                && (geo.to_f64().contains(local_point)
                     || PopupManager::popups_for_surface(layer.wl_surface())
                         .next()
                         .is_some())
             {
-                let rel = point - geo.loc.to_f64();
+                let rel = local_point - geo.loc.to_f64();
                 if let Some((surf, offset)) = layer.surface_under(rel, WindowSurfaceType::ALL) {
-                    let origin = (geo.loc + offset).to_f64();
+                    let origin = (output_loc + geo.loc + offset).to_f64();
                     return Some((None, surf, origin));
                 }
             }
@@ -464,28 +480,46 @@ impl RustyCompositorState {
         &self,
         surface: &PopupSurface,
     ) -> Option<Rectangle<i32, Logical>> {
-        let output_geo = self.space.output_geometry(&self.output)?;
         let kind = PopupKind::from(surface.clone());
         let root = find_popup_root_surface(&kind).ok()?;
 
-        // Locate the root surface origin in global logical coordinates (window or layer surface).
-        let root_origin = self
+        // Locate the root surface origin and owning output in global logical coordinates across all monitors (`RUSTYOS-165`).
+        let (root_origin, output_geo) = self
             .window_bindings
             .iter()
-            .find_map(|(_, win)| {
+            .find_map(|(win_id, win)| {
                 let matches = win.toplevel().is_some_and(|tl| tl.wl_surface() == &root);
                 if matches {
-                    self.space.element_location(win)
+                    let loc = self.space.element_location(win)?;
+                    let geo = self
+                        .wm
+                        .output_for_window(*win_id)
+                        .and_then(|o| self.output_map.get(o.id))
+                        .or_else(|| {
+                            self.output_under(loc.to_f64())
+                                .and_then(|id| self.output_map.get(id))
+                        })
+                        .map_or_else(
+                            || self.output_map.primary().logical_geometry(),
+                            crate::outputs::OutputEntry::logical_geometry,
+                        );
+                    Some((loc, geo))
                 } else {
                     None
                 }
             })
             .or_else(|| {
-                let layer_map = layer_map_for_output(&self.output);
-                layer_map
-                    .layers()
-                    .find(|l| l.wl_surface() == &root)
-                    .and_then(|l| layer_map.layer_geometry(l).map(|g| g.loc))
+                for entry in self.output_map.entries() {
+                    let layer_map = layer_map_for_output(&entry.output);
+                    if let Some(loc) = layer_map
+                        .layers()
+                        .find(|l| l.wl_surface() == &root)
+                        .and_then(|l| layer_map.layer_geometry(l).map(|g| entry.location + g.loc))
+                    {
+                        return Some((loc, entry.logical_geometry()));
+                    }
+                }
+                None
             })?;
 
         let parent_offset = if surface.get_parent_surface().as_ref() == Some(&root) {
@@ -746,6 +780,27 @@ impl RustyCompositorState {
             self.lifecycle_anims.retain(|anim| anim.win_id != win_id);
         }
         self.window_commit_revisions.remove(&win_id);
+        self.toplevel_initial_committed.remove(&win_id);
+        self.last_acknowledged_configure.remove(&win_id);
+        self.last_x11_configure_state.remove(&win_id);
+        if self.hovered_traffic_light_window == Some(win_id) {
+            self.hovered_traffic_light_window = None;
+        }
+        self.dock_app_last_active.retain(|_, id| *id != win_id);
+        if self
+            .dock_drag
+            .as_ref()
+            .is_some_and(|drag| drag.source_minimized_win == Some(win_id))
+        {
+            self.dock_drag = None;
+        }
+        if self
+            .context_menu
+            .as_ref()
+            .is_some_and(|ctx| ctx.target == crate::shell_render::ContextMenuTarget::Window(win_id))
+        {
+            self.context_menu = None;
+        }
         if self
             .active_window_drag
             .is_some_and(|drag| drag.window_id == win_id)
@@ -1089,12 +1144,54 @@ impl RustyCompositorState {
         None
     }
 
-    /// Computes client-declared minimum `(width, height)` including SSD titlebar and clamped to work area (`RUSTYOS-112`).
+    /// Returns any client-declared maximum `(width, height)` in logical coordinates (`RUSTYOS-165`).
+    #[must_use]
+    pub fn window_max_size(&self, win_id: WindowId) -> Option<(i32, i32)> {
+        let window = self.smithay_window_for_id(win_id)?;
+        if let Some(x11) = window.x11_surface() {
+            return x11.max_size().and_then(|s| {
+                let w = s.w.max(0);
+                let h = s.h.max(0);
+                (w > 0 || h > 0).then_some((w, h))
+            });
+        }
+        if let Some(toplevel) = window.toplevel() {
+            let max = compositor::with_states(toplevel.wl_surface(), |states| {
+                let mut guard = states
+                    .cached_state
+                    .get::<smithay::wayland::shell::xdg::SurfaceCachedState>();
+                guard.current().max_size
+            });
+            let w = max.w.max(0);
+            let h = max.h.max(0);
+            return (w > 0 || h > 0).then_some((w, h));
+        }
+        None
+    }
+
+    /// Synchronizes any client-declared `max_size` (including SSD titlebar) into [`WindowManager`] (`RUSTYOS-165`).
+    pub fn sync_window_max_size(&mut self, win_id: WindowId) {
+        let titlebar_h = self.window_titlebar_height(win_id);
+        let max_size = self.window_max_size(win_id).map(|(w, h)| {
+            (
+                w.max(0),
+                if h > 0 {
+                    h.saturating_add(titlebar_h)
+                } else {
+                    0
+                },
+            )
+        });
+        let _ = self.wm.set_window_max_size(win_id, max_size);
+    }
+
+    /// Computes client-declared minimum `(width, height)` including SSD titlebar and clamped to the
+    /// window's owning output work area (`RUSTYOS-112` / `RUSTYOS-165`).
     #[must_use]
     pub fn floating_min_bounds(&self, win_id: WindowId) -> Option<(i32, i32)> {
         let (min_w, min_h) = self.window_min_size(win_id)?;
         let titlebar_h = self.window_titlebar_height(win_id);
-        let work_area = self.floating_work_area();
+        let work_area = self.floating_work_area_for_window(win_id);
         let desired_w = min_w.min(work_area.width);
         let desired_h = min_h.saturating_add(titlebar_h).min(work_area.height);
         Some((desired_w, desired_h))
@@ -1107,26 +1204,32 @@ impl RustyCompositorState {
             .map_or((240, 160), |(w, h)| (w.max(240), h.max(160)))
     }
 
-    /// Expands a non-maximized floating window if client `min_size` exceeds its current box (`RUSTYOS-030`).
+    /// Expands a non-maximized floating window if client `min_size` exceeds its current box (`RUSTYOS-030` / `RUSTYOS-165`).
     pub fn ensure_floating_min_size(&mut self, win_id: WindowId) -> bool {
-        if self.wm.active_layout_mode() != LayoutMode::Floating
-            || self
-                .active_window_resize
-                .is_some_and(|resize| resize.window_id == win_id)
+        if self
+            .active_window_resize
+            .is_some_and(|resize| resize.window_id == win_id)
         {
             return false;
         }
         let Some(wm_win) = self.wm.window(win_id) else {
             return false;
         };
-        if wm_win.maximized {
+        if wm_win.maximized || wm_win.fullscreen {
+            return false;
+        }
+        if self
+            .wm
+            .workspace(wm_win.workspace)
+            .is_some_and(|ws| ws.layout != LayoutMode::Floating)
+        {
             return false;
         }
         let current = wm_win.geometry;
         let Some((desired_w, desired_h)) = self.floating_min_bounds(win_id) else {
             return false;
         };
-        let work_area = self.floating_work_area();
+        let work_area = self.floating_work_area_for_window(win_id);
         if desired_w <= current.width && desired_h <= current.height {
             return false;
         }
@@ -1153,30 +1256,28 @@ impl RustyCompositorState {
         false
     }
 
-    fn floating_work_area(&self) -> Rect {
-        self.space.output_geometry(&self.output).map_or_else(
-            || Rect::new(0, crate::shell_render::TOP_BAR_HEIGHT, 1280, 744),
-            |geo| {
-                crate::shell_render::usable_work_area_with_dock(
-                    geo.size.to_physical(1),
-                    self.user_config.dock_position,
-                    self.user_config.dock_icon_size,
-                    self.user_config
-                        .effective_dock_visibility()
-                        .expands_work_area(),
-                )
-            },
-        )
+    /// Returns the usable floating work area for `win_id`'s owning output (`RUSTYOS-165`).
+    #[must_use]
+    pub(crate) fn floating_work_area_for_window(&self, win_id: WindowId) -> Rect {
+        if let Some(out) = self.wm.output_for_window(win_id) {
+            return out.work_area;
+        }
+        let primary = self.output_map.primary();
+        self.effective_work_area_for_output_entry(primary)
     }
 
     fn apply_preferred_initial_size(&mut self, win_id: WindowId) {
-        if self.wm.active_layout_mode() != LayoutMode::Floating {
-            return;
-        }
         let Some(wm_win) = self.wm.window(win_id) else {
             return;
         };
-        if wm_win.maximized {
+        if wm_win.maximized || wm_win.fullscreen {
+            return;
+        }
+        if self
+            .wm
+            .workspace(wm_win.workspace)
+            .is_some_and(|ws| ws.layout != LayoutMode::Floating)
+        {
             return;
         }
         let Some(app_id) = self.window_app_id(win_id) else {
@@ -1187,7 +1288,7 @@ impl RustyCompositorState {
         {
             return;
         }
-        let work_area = self.floating_work_area();
+        let work_area = self.floating_work_area_for_window(win_id);
         let w = 882.min(work_area.width);
         let h = 600.min(work_area.height);
         let x = work_area.x + (work_area.width - w).max(0) / 2;
@@ -1201,8 +1302,8 @@ impl RustyCompositorState {
         }
     }
 
-    /// Flushes initial `xdg_toplevel` configure events once per dispatch turn after
-    /// `zxdg_toplevel_decoration_v1` requests in the same batch have been processed (`RUSTYOS-030`).
+    /// Flushes initial `xdg_toplevel` configure events once the client has performed its initial
+    /// `wl_surface.commit` (per `xdg_shell` protocol spec) (`RUSTYOS-030` / `RUSTYOS-165`).
     pub fn flush_pending_toplevel_configures(&mut self) {
         let focused_id = self.wm.focused_window();
         let pending_wins: Vec<(WindowId, ToplevelSurface)> = self
@@ -1210,7 +1311,9 @@ impl RustyCompositorState {
             .iter()
             .filter_map(|(win_id, sw)| {
                 let toplevel = sw.toplevel()?.clone();
-                (!toplevel.is_initial_configure_sent()).then_some((*win_id, toplevel))
+                (!toplevel.is_initial_configure_sent()
+                    && self.toplevel_initial_committed.contains(win_id))
+                .then_some((*win_id, toplevel))
             })
             .collect();
 
@@ -1222,10 +1325,18 @@ impl RustyCompositorState {
             if !self.xdg_decoration_requested.contains(&win_id) {
                 self.csd_window_ids.insert(win_id);
             }
+            self.sync_window_max_size(win_id);
+            let _ = self.ensure_floating_min_size(win_id);
             self.apply_preferred_initial_size(win_id);
             if let Some(wm_win) = self.wm.window(win_id) {
                 let rect = wm_win.geometry;
                 let maximized = wm_win.maximized;
+                let fullscreen = wm_win.fullscreen;
+                let is_tiled = !fullscreen
+                    && self
+                        .wm
+                        .workspace(wm_win.workspace)
+                        .is_some_and(|ws| ws.layout == LayoutMode::MasterStack);
                 let (client_w, client_h) = self.effective_client_size(win_id, rect);
                 let is_focused = focused_id == Some(win_id);
                 let dec_mode = if self.csd_window_ids.contains(&win_id) {
@@ -1236,16 +1347,14 @@ impl RustyCompositorState {
                 toplevel.with_pending_state(|state| {
                     state.size = Some((client_w, client_h).into());
                     state.decoration_mode = Some(dec_mode);
-                    if is_focused {
-                        state.states.set(xdg_toplevel::State::Activated);
-                    } else {
-                        state.states.unset(xdg_toplevel::State::Activated);
-                    }
-                    if maximized {
-                        state.states.set(xdg_toplevel::State::Maximized);
-                    } else {
-                        state.states.unset(xdg_toplevel::State::Maximized);
-                    }
+                    apply_xdg_toplevel_states(
+                        &mut state.states,
+                        is_focused,
+                        maximized && !fullscreen,
+                        fullscreen,
+                        false,
+                        is_tiled,
+                    );
                 });
             }
             toplevel.send_configure();
@@ -1306,6 +1415,20 @@ impl RustyCompositorState {
             self.cursor_status = CursorImageStatus::default_named();
         }
         self.active_popup_grabs.retain(PopupSurface::alive);
+        // Prune dead override-redirect X11 surfaces from Space (`RUSTYOS-165`).
+        let dead_or: Vec<Window> = self
+            .space
+            .elements()
+            .filter(|el| {
+                el.x11_surface()
+                    .is_some_and(X11Surface::is_override_redirect)
+                    && !el.alive()
+            })
+            .cloned()
+            .collect();
+        for el in dead_or {
+            self.space.unmap_elem(&el);
+        }
         let mut dead_ids = Vec::new();
         for (id, win) in &self.window_bindings {
             if !win.alive() {
@@ -1390,7 +1513,16 @@ impl RustyCompositorState {
             && prev_ws != target_ws
         {
             self.window_switcher = None;
-            let output_width = self.output.current_mode().map_or(1280, |m| m.size.w);
+            self.active_window_drag = None;
+            self.active_window_resize = None;
+            self.dismiss_active_popup_grabs();
+            let output_width = self
+                .output_map
+                .get(self.wm.focused_output())
+                .unwrap_or_else(|| self.output_map.primary())
+                .logical_geometry()
+                .size
+                .w;
             self.animations.trigger_workspace_slide(
                 prev_ws.0,
                 target_ws.0,
@@ -1402,17 +1534,52 @@ impl RustyCompositorState {
         self.sync_space_with_wm(serial);
     }
 
+    fn sync_x11_window_state(
+        &mut self,
+        win_id: WindowId,
+        x11: &X11Surface,
+        client_rect: Rectangle<i32, Logical>,
+        is_focused: bool,
+        is_maximized: bool,
+        is_fullscreen: bool,
+    ) {
+        let next = (client_rect, is_focused, is_maximized, is_fullscreen);
+        if let Some(&prev) = self.last_x11_configure_state.get(&win_id) {
+            if prev == next {
+                return;
+            }
+            if prev.0 != next.0 {
+                let _ = x11.configure(client_rect);
+            }
+            if prev.1 != next.1 {
+                let _ = x11.set_activated(is_focused);
+            }
+            if prev.2 != next.2 {
+                let _ = x11.set_maximized(is_maximized);
+            }
+            if prev.3 != next.3 {
+                let _ = x11.set_fullscreen(is_fullscreen);
+            }
+        } else {
+            let _ = x11.configure(client_rect);
+            let _ = x11.set_activated(is_focused);
+            let _ = x11.set_maximized(is_maximized);
+            let _ = x11.set_fullscreen(is_fullscreen);
+        }
+        self.last_x11_configure_state.insert(win_id, next);
+    }
+
     /// Synchronizes Smithay's [`Space<Window>`], `xdg_toplevel` pending configure geometry/states,
-    /// and Wayland keyboard focus with the deterministic state in [`WindowManager`].
+    /// XWayland coordinates/stacking, and Wayland keyboard focus with [`WindowManager`].
     pub fn sync_space_with_wm(&mut self, serial: Serial) {
         self.desktop_focused = false;
         let now = self.elapsed();
-        let visible: Vec<(WindowId, Rect, bool, bool)> = self
+        let visible: Vec<(WindowId, rusty_wm::WorkspaceId, Rect, bool, bool)> = self
             .wm
             .visible_windows()
             .into_iter()
             .filter(|w| !self.is_window_minimized(w.id))
-            .map(|w| (w.id, w.geometry, w.maximized, w.fullscreen))
+            .map(|w| (w.id, w.workspace, w.geometry, w.maximized, w.fullscreen))
             .collect();
         let focused_id = self
             .wm
@@ -1420,25 +1587,21 @@ impl RustyCompositorState {
             .filter(|id| !self.is_window_minimized(*id));
 
         // 1. Unmap managed windows that are no longer on an active workspace, preserving override-redirect X11 popups.
-        let current_space_windows: Vec<Window> = self.space.elements().cloned().collect();
-        for sw in current_space_windows {
-            if sw
-                .x11_surface()
-                .is_some_and(X11Surface::is_override_redirect)
-            {
-                continue;
-            }
-            let still_visible = self
-                .window_id_for_smithay(&sw)
-                .is_some_and(|id| visible.iter().any(|(vid, _, _, _)| *vid == id));
-            if !still_visible {
-                self.space.unmap_elem(&sw);
-            }
-        }
+        let visible_ids: Vec<WindowId> = visible.iter().map(|(vid, _, _, _, _)| *vid).collect();
+        self.unmap_hidden_space_windows(&visible_ids);
 
         // 2. Map/update visible windows in bottom-to-top z-order and send pending configures.
-        for (win_id, rect, maximized, fullscreen) in visible {
+        let mut x11_stack: Vec<X11Surface> = Vec::new();
+        for (win_id, ws_id, rect, maximized, fullscreen) in visible {
             let is_focused = focused_id == Some(win_id);
+            let is_resizing = self
+                .active_window_resize
+                .is_some_and(|resize| resize.window_id == win_id);
+            let is_tiled = !fullscreen
+                && self
+                    .wm
+                    .workspace(ws_id)
+                    .is_some_and(|ws| ws.layout == LayoutMode::MasterStack);
             let center = Point::from((
                 f64::from(rect.x) + f64::from(rect.width) * 0.5,
                 f64::from(rect.y) + f64::from(rect.height) * 0.5,
@@ -1468,33 +1631,32 @@ impl RustyCompositorState {
                 if let Some(toplevel) = window.toplevel() {
                     toplevel.with_pending_state(|state| {
                         state.size = Some((client_width, client_height).into());
-                        if is_focused {
-                            state.states.set(xdg_toplevel::State::Activated);
-                        } else {
-                            state.states.unset(xdg_toplevel::State::Activated);
-                        }
-                        if maximized && !fullscreen {
-                            state.states.set(xdg_toplevel::State::Maximized);
-                        } else {
-                            state.states.unset(xdg_toplevel::State::Maximized);
-                        }
-                        if fullscreen {
-                            state.states.set(xdg_toplevel::State::Fullscreen);
-                        } else {
-                            state.states.unset(xdg_toplevel::State::Fullscreen);
-                        }
+                        apply_xdg_toplevel_states(
+                            &mut state.states,
+                            is_focused,
+                            maximized && !fullscreen,
+                            fullscreen,
+                            is_resizing,
+                            is_tiled,
+                        );
                     });
                     if toplevel.is_initial_configure_sent() {
                         toplevel.send_pending_configure();
                     }
                 } else if let Some(x11) = window.x11_surface() {
-                    let _ = x11.configure(crate::xwayland::compute_x11_client_rect_for_decoration(
+                    let client_rect = crate::xwayland::compute_x11_client_rect_for_decoration(
                         Rect::new(origin.0, origin.1, rect.width, rect.height),
                         has_ssd,
-                    ));
-                    let _ = x11.set_activated(is_focused);
-                    let _ = x11.set_maximized(maximized && !fullscreen);
-                    let _ = x11.set_fullscreen(fullscreen);
+                    );
+                    self.sync_x11_window_state(
+                        win_id,
+                        x11,
+                        client_rect,
+                        is_focused,
+                        maximized && !fullscreen,
+                        fullscreen,
+                    );
+                    x11_stack.push(x11.clone());
                 }
                 if let Some(root_ws) = WaylandFocus::wl_surface(&window) {
                     Self::apply_surface_scale(&root_ws, output_scale);
@@ -1505,9 +1667,41 @@ impl RustyCompositorState {
             }
         }
 
+        self.sync_x11_stacking_order(&x11_stack);
         self.sync_keyboard_focus_with_wm(focused_id, serial);
         self.record_focused_app_window(focused_id);
         self.sync_dock_visibility_for_all_outputs(false);
+    }
+
+    fn unmap_hidden_space_windows(&mut self, visible_ids: &[WindowId]) {
+        let current_space_windows: Vec<Window> = self.space.elements().cloned().collect();
+        for sw in current_space_windows {
+            if sw
+                .x11_surface()
+                .is_some_and(X11Surface::is_override_redirect)
+            {
+                continue;
+            }
+            let still_visible = self
+                .window_id_for_smithay(&sw)
+                .is_some_and(|id| visible_ids.contains(&id));
+            if !still_visible {
+                self.space.unmap_elem(&sw);
+            }
+        }
+    }
+
+    fn sync_x11_stacking_order(&mut self, x11_stack: &[X11Surface]) {
+        let x11_ids: Vec<u32> = x11_stack.iter().map(X11Surface::window_id).collect();
+        if x11_ids == self.last_x11_stacking_order {
+            return;
+        }
+        if let Some(ref mut xwm) = self.xwm {
+            for x11 in x11_stack {
+                let _ = xwm.raise_window(x11);
+            }
+        }
+        self.last_x11_stacking_order = x11_ids;
     }
 
     fn sync_keyboard_focus_with_wm(&mut self, focused_id: Option<WindowId>, serial: Serial) {
@@ -1517,6 +1711,9 @@ impl RustyCompositorState {
                 .rev()
                 .find(|(_, ls)| ls.alive())
                 .map(|(_, ls)| ls.wl_surface().clone())
+        } else if self.screen_locked || self.polkit_prompt.is_some() || self.portal_prompt.is_some()
+        {
+            None
         } else {
             focused_id
                 .and_then(|id| self.smithay_window_for_id(id))
@@ -1629,26 +1826,45 @@ impl RustyCompositorState {
             return;
         }
         let _ = self.animations.tick(now);
+        self.sync_animated_window_positions();
+    }
 
+    fn sync_animated_window_positions(&mut self) {
         let focused_id = self
             .wm
             .focused_window()
             .filter(|id| !self.is_window_minimized(*id));
-        let visible_ids: Vec<WindowId> = self
+        let visible: Vec<(WindowId, Rect, bool, bool)> = self
             .wm
             .visible_windows()
             .into_iter()
             .filter(|w| !self.is_window_minimized(w.id))
-            .map(|w| w.id)
+            .map(|w| (w.id, w.geometry, w.maximized, w.fullscreen))
             .collect();
-        for win_id in visible_ids {
+        for (win_id, rect, maximized, fullscreen) in visible {
             if let Some(origin) = self.animations.animated_window_origin(win_id.0)
                 && let Some(window) = self.smithay_window_for_id(win_id)
             {
                 let is_focused = focused_id == Some(win_id);
                 let titlebar_h = self.window_titlebar_height(win_id);
                 let content_origin = (origin.0, origin.1 + titlebar_h);
-                self.space.map_element(window, content_origin, is_focused);
+                self.space
+                    .map_element(window.clone(), content_origin, false);
+                if let Some(x11) = window.x11_surface() {
+                    let has_ssd = !fullscreen && !self.window_uses_csd(win_id);
+                    let client_rect = crate::xwayland::compute_x11_client_rect_for_decoration(
+                        Rect::new(origin.0, origin.1, rect.width, rect.height),
+                        has_ssd,
+                    );
+                    self.sync_x11_window_state(
+                        win_id,
+                        x11,
+                        client_rect,
+                        is_focused,
+                        maximized && !fullscreen,
+                        fullscreen,
+                    );
+                }
             }
         }
     }
@@ -1870,4 +2086,47 @@ fn surface_and_popups_have_pending_frame_callbacks(root: &WlSurface) -> bool {
     surface_tree_has_pending_frame_callbacks(root)
         || PopupManager::popups_for_surface(root)
             .any(|(popup, _)| surface_tree_has_pending_frame_callbacks(popup.wl_surface()))
+}
+
+#[allow(clippy::fn_params_excessive_bools)]
+fn apply_xdg_toplevel_states(
+    states: &mut smithay::wayland::shell::xdg::ToplevelStateSet,
+    is_focused: bool,
+    is_maximized: bool,
+    is_fullscreen: bool,
+    is_resizing: bool,
+    is_tiled: bool,
+) {
+    if is_focused {
+        states.set(xdg_toplevel::State::Activated);
+    } else {
+        states.unset(xdg_toplevel::State::Activated);
+    }
+    if is_maximized {
+        states.set(xdg_toplevel::State::Maximized);
+    } else {
+        states.unset(xdg_toplevel::State::Maximized);
+    }
+    if is_fullscreen {
+        states.set(xdg_toplevel::State::Fullscreen);
+    } else {
+        states.unset(xdg_toplevel::State::Fullscreen);
+    }
+    if is_resizing {
+        states.set(xdg_toplevel::State::Resizing);
+    } else {
+        states.unset(xdg_toplevel::State::Resizing);
+    }
+    for edge in [
+        xdg_toplevel::State::TiledLeft,
+        xdg_toplevel::State::TiledRight,
+        xdg_toplevel::State::TiledTop,
+        xdg_toplevel::State::TiledBottom,
+    ] {
+        if is_tiled {
+            states.set(edge);
+        } else {
+            states.unset(edge);
+        }
+    }
 }

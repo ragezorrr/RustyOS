@@ -168,10 +168,6 @@ impl RustyCompositorState {
     pub(super) fn apply_pointer_position(&mut self, pos: Point<f64, Logical>, time: u32) {
         self.pointer_location = pos;
 
-        if let Some(out_id) = self.output_under(pos) {
-            self.wm.set_focused_output(out_id);
-        }
-
         if self.screenshot_hud.is_some() {
             self.handle_screenshot_hud_motion(pos);
             self.dispatch_pointer_motion_to_surface(pos, None, time);
@@ -207,8 +203,24 @@ impl RustyCompositorState {
             let dx = (pos.x - drag.start_pointer.x).round() as i32;
             #[allow(clippy::cast_possible_truncation)]
             let dy = (pos.y - drag.start_pointer.y).round() as i32;
-            let new_x = drag.start_origin.0 + dx;
-            let new_y = (drag.start_origin.1 + dy).max(crate::shell_render::TOP_BAR_HEIGHT);
+            if let Some(dest_out) = self.output_under(pos) {
+                let _ = self.wm.migrate_window_to_output(drag.window_id, dest_out);
+            }
+            let min_y = self
+                .output_under(pos)
+                .and_then(|out_id| self.wm.output(out_id))
+                .map_or(crate::shell_render::TOP_BAR_HEIGHT, |o| o.work_area.y);
+            let total = self.total_output_bounds();
+            let win_w = self
+                .wm
+                .window(drag.window_id)
+                .map_or(320, |w| w.geometry.width);
+            let min_x = total.loc.x - win_w + 64;
+            let max_x = total.loc.x + total.size.w - 64;
+            let max_y =
+                (total.loc.y + total.size.h - crate::shell_render::TITLEBAR_HEIGHT).max(min_y);
+            let new_x = (drag.start_origin.0 + dx).clamp(min_x, max_x.max(min_x));
+            let new_y = (drag.start_origin.1 + dy).clamp(min_y, max_y);
             if self.wm.move_window(drag.window_id, new_x, new_y)
                 && let Some(win) = self.wm.window(drag.window_id)
             {
@@ -230,14 +242,20 @@ impl RustyCompositorState {
             #[allow(clippy::cast_possible_truncation)]
             let dy = (pos.y - resize.start_pointer.y).round() as i32;
             let (min_w, min_h) = self.effective_window_min_size(resize.window_id);
-            let target_rect = compute_resized_rect_with_min(
+            let max_size = self.wm.window(resize.window_id).and_then(|w| w.max_size);
+            let min_top = self
+                .wm
+                .output_for_window(resize.window_id)
+                .map_or(crate::shell_render::TOP_BAR_HEIGHT, |o| o.work_area.y);
+            let target_rect = compute_resized_rect_with_bounds(
                 resize.start_rect,
                 resize.edges,
                 dx,
                 dy,
-                crate::shell_render::TOP_BAR_HEIGHT,
+                min_top,
                 min_w,
                 min_h,
+                max_size,
             );
             if self
                 .wm
@@ -446,8 +464,14 @@ impl RustyCompositorState {
         let button = event.button_code();
         let button_state = event.state();
 
-        if button_state == ButtonState::Pressed && self.pending_external_dnd_drop.is_some() {
-            self.cancel_pending_external_dnd_drop();
+        if button_state == ButtonState::Pressed {
+            self.pressed_pointer_buttons.insert(button);
+            self.last_pointer_press_serial = Some(serial);
+            if self.pending_external_dnd_drop.is_some() {
+                self.cancel_pending_external_dnd_drop();
+            }
+        } else {
+            self.pressed_pointer_buttons.remove(&button);
         }
 
         if button_state == ButtonState::Released {
@@ -476,8 +500,16 @@ impl RustyCompositorState {
                 self.handle_screenshot_hud_button(false);
                 return;
             }
-            let ended_drag = self.active_window_drag.take().is_some();
-            let ended_resize = self.active_window_resize.take().is_some();
+            let ended_drag = if button == 272 || self.pressed_pointer_buttons.is_empty() {
+                self.active_window_drag.take().is_some()
+            } else {
+                false
+            };
+            let ended_resize = if button == 272 || self.pressed_pointer_buttons.is_empty() {
+                self.active_window_resize.take().is_some()
+            } else {
+                false
+            };
             self.qs_slider_drag = None;
             if ended_drag || ended_resize {
                 self.sync_space_with_wm(serial);
@@ -930,6 +962,9 @@ impl RustyCompositorState {
                 }
             } else {
                 self.space.elements().for_each(|w| {
+                    if let Some(x11) = w.x11_surface() {
+                        let _ = x11.set_activated(false);
+                    }
                     if w.set_activated(false)
                         && let Some(tl) = w.toplevel()
                     {
@@ -1068,6 +1103,17 @@ impl RustyCompositorState {
     }
 
     pub(super) fn handle_pointer_axis<B: InputBackend>(&mut self, event: &B::PointerAxisEvent) {
+        if self.screen_locked
+            || self.polkit_prompt.is_some()
+            || self.portal_prompt.is_some()
+            || self.has_blocking_shell_overlay()
+            || self.window_switcher.is_some()
+            || self.screenshot_hud.is_some()
+            || self.context_menu.is_some()
+            || self.active_top_bar_menu.is_some()
+        {
+            return;
+        }
         let source = event.source();
         let horizontal_amount = event
             .amount(Axis::Horizontal)
@@ -1194,6 +1240,7 @@ pub(super) fn compute_resized_rect(
     compute_resized_rect_with_min(start, edges, dx, dy, min_top, 240, 160)
 }
 
+#[cfg(test)]
 pub(super) fn compute_resized_rect_with_min(
     start: rusty_wm::Rect,
     edges: crate::shell_render::ResizeEdges,
@@ -1203,8 +1250,30 @@ pub(super) fn compute_resized_rect_with_min(
     min_w: i32,
     min_h: i32,
 ) -> rusty_wm::Rect {
+    compute_resized_rect_with_bounds(start, edges, dx, dy, min_top, min_w, min_h, None)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn compute_resized_rect_with_bounds(
+    start: rusty_wm::Rect,
+    edges: crate::shell_render::ResizeEdges,
+    dx: i32,
+    dy: i32,
+    min_top: i32,
+    min_w: i32,
+    min_h: i32,
+    max_size: Option<(i32, i32)>,
+) -> rusty_wm::Rect {
     let min_w = min_w.max(64);
     let min_h = min_h.max(64);
+    let max_w = max_size
+        .map(|(mw, _)| mw)
+        .filter(|&mw| mw > 0)
+        .map(|mw| mw.max(min_w));
+    let max_h = max_size
+        .map(|(_, mh)| mh)
+        .filter(|&mh| mh > 0)
+        .map(|mh| mh.max(min_h));
 
     let mut x = start.x;
     let mut y = start.y;
@@ -1213,19 +1282,27 @@ pub(super) fn compute_resized_rect_with_min(
 
     if edges.right {
         w = (start.width + dx).max(min_w);
+        if let Some(cap) = max_w {
+            w = w.min(cap);
+        }
     } else if edges.left {
         let right_edge = start.x + start.width;
         let max_left = right_edge - min_w;
-        x = (start.x + dx).min(max_left);
+        let min_left = max_w.map_or(i32::MIN, |cap| right_edge - cap);
+        x = (start.x + dx).clamp(min_left, max_left);
         w = right_edge - x;
     }
 
     if edges.bottom {
         h = (start.height + dy).max(min_h);
+        if let Some(cap) = max_h {
+            h = h.min(cap);
+        }
     } else if edges.top {
         let bottom_edge = start.y + start.height;
         let max_top = bottom_edge - min_h;
-        let bounded_min_top = min_top.min(max_top);
+        let min_top_from_max = max_h.map_or(i32::MIN, |cap| bottom_edge - cap);
+        let bounded_min_top = min_top.max(min_top_from_max).min(max_top);
         y = (start.y + dy).clamp(bounded_min_top, max_top);
         h = (bottom_edge - y).max(min_h);
     }

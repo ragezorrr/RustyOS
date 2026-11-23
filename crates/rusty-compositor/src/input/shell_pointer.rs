@@ -12,10 +12,19 @@ impl RustyCompositorState {
             .visible_windows()
             .into_iter()
             .filter(|w| !self.is_window_minimized(w.id))
-            .map(|w| crate::shell_render::SsdHitWindow {
-                id: w.id,
-                rect: w.geometry,
-                has_ssd: !self.window_uses_csd(w.id),
+            .map(|w| {
+                let has_ssd = !w.fullscreen && !self.window_uses_csd(w.id);
+                let rect = self
+                    .resolved_window_global_rect(w.id)
+                    .map_or(w.geometry, |r| {
+                        rusty_wm::Rect::new(w.geometry.x, w.geometry.y, r.width, r.height)
+                    });
+                crate::shell_render::SsdHitWindow {
+                    id: w.id,
+                    rect,
+                    has_ssd,
+                    allow_resize: !w.fullscreen && !w.maximized,
+                }
             })
             .collect()
     }

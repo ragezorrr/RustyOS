@@ -1263,6 +1263,17 @@
                            (`$XDG_DATA_DIRS` + Flatpak, debounce `250 ms`) в
                            `crates/rusty-services/src/app_catalog_monitor.rs` для живого обновления
                            Spotlight и кэша Dock без рестарта (`0` новых крейтов, `rusty-compositor` без `unsafe`)
+
+  D-108    Accepted        ADR-0094 (`RUSTYOS-165`): стабилизация ядра WM (Фаза A) —
+                           перенос `minimized` и `max_size` в `rusty-wm::ManagedWindow`, прямые
+                           `set_window_minimized`/`set_window_maximized`/`set_window_fullscreen_on_output`/
+                           `migrate_window_to_output`, исправление `remove_output` (миграция `stacking`
+                           и `relayout_adjacent`), защита фокуса в `CompositorHandler::commit` и
+                           `handle_pointer_axis`, отключение SSD/resize хитбоксов для `fullscreen`/`maximized`,
+                           корректный XDG initial-configure handshake, `ack_configure` + `Resizing`/`Tiled*`,
+                           валидация `serial` в `move`/`resize`, мультимониторные `layer_shell`/`xdg_popup`/drag,
+                           рендер/очистка XWayland override-redirect, синхронизация X11 координат/stacking и
+                           правильный Z-order вложенных `xdg_popup` (`0` новых крейтов, `rusty-compositor` без `unsafe`)
   -----------------------------------------------------------------------
 
 ## Открытые решения

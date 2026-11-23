@@ -628,7 +628,10 @@ fn push_client_popup_elements(
             Point::<i32, Logical>::from((origin.0 - geo_loc.x, origin.1 + titlebar_h - geo_loc.y))
                 .to_physical_precise_round(output_scale);
 
-        for (popup, popup_offset) in smithay::desktop::PopupManager::popups_for_surface(&root) {
+        // Render nested child submenus before their parent popups so child submenus appear on top
+        // in Smithay's front-to-back render list (`RUSTYOS-165`).
+        let popups: Vec<_> = smithay::desktop::PopupManager::popups_for_surface(&root).collect();
+        for (popup, popup_offset) in popups.into_iter().rev() {
             let popup_surface = popup.wl_surface();
             let offset = geo_loc + popup_offset - popup.geometry().loc;
             let phys_loc = client_loc + offset.to_physical_precise_round(output_scale);
@@ -661,6 +664,52 @@ fn push_client_popup_elements(
                 popup_logical_loc,
             );
         }
+    }
+}
+
+/// Appends visible XWayland override-redirect surfaces (menus, dropdowns, tooltips) intersecting
+/// `output_geo` in front-to-back order (`RUSTYOS-165`).
+fn push_xwayland_override_redirect_elements(
+    render_list: &mut Vec<CompositorRenderElement>,
+    renderer: &mut GlesRenderer,
+    state: &RustyCompositorState,
+    output_geo: smithay::utils::Rectangle<i32, Logical>,
+    output_scale: f64,
+) {
+    for el in state.space.elements().rev() {
+        let Some(x11) = el.x11_surface() else {
+            continue;
+        };
+        if !x11.is_override_redirect() {
+            continue;
+        }
+        let Some(loc) = state.space.element_location(el) else {
+            continue;
+        };
+        let bbox = smithay::utils::Rectangle::new(loc, el.geometry().size);
+        if !bbox.overlaps(output_geo) {
+            continue;
+        }
+        let Some(root) = smithay::wayland::seat::WaylandFocus::wl_surface(el) else {
+            continue;
+        };
+        let render_loc = loc - el.geometry().loc - output_geo.loc;
+        let phys_loc = render_loc.to_physical_precise_round(output_scale);
+        render_list.extend(
+            render_elements_from_surface_tree::<
+                GlesRenderer,
+                WaylandSurfaceRenderElement<GlesRenderer>,
+            >(
+                renderer,
+                &root,
+                phys_loc,
+                smithay::utils::Scale::from(output_scale),
+                1.0,
+                Kind::Unspecified,
+            )
+            .into_iter()
+            .map(CompositorRenderElement::Surface),
+        );
     }
 }
 
@@ -816,8 +865,10 @@ fn push_window_elements_with_options(
         }
     }
 
+    // Always render SSD titlebar/chrome in front of the client surface; xdg_popups render in their
+    // own dedicated pass above all windows (`push_client_popup_elements`) (`RUSTYOS-165`).
     let ssd_hovered = state.hovered_traffic_light_window == Some(win_id);
-    if has_ssd && !has_open_popup {
+    if has_ssd {
         let title_text = state.window_title(win_id);
         backdrop_list.extend(
             crate::shell_render::generate_window_ssd_composite_elements_with_hover(
@@ -843,21 +894,6 @@ fn push_window_elements_with_options(
             origin,
             titlebar_h,
             glass_backdrop_offset,
-        );
-    }
-
-    if has_ssd && has_open_popup {
-        let title_text = state.window_title(win_id);
-        backdrop_list.extend(
-            crate::shell_render::generate_window_ssd_composite_elements_with_hover(
-                text_cache,
-                shape_cache,
-                renderer,
-                frame_rect,
-                &title_text,
-                is_focused,
-                ssd_hovered,
-            ),
         );
     }
 
@@ -2232,6 +2268,13 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
         };
 
         let mut popup_elements = Vec::new();
+        push_xwayland_override_redirect_elements(
+            &mut popup_elements,
+            renderer,
+            state,
+            output_geo,
+            output_scale,
+        );
         push_client_popup_elements(
             &mut popup_elements,
             renderer,
@@ -2335,6 +2378,13 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
             );
         }
         render_list.extend(top_layer_elements);
+        push_xwayland_override_redirect_elements(
+            &mut render_list,
+            renderer,
+            state,
+            output_geo,
+            output_scale,
+        );
         push_client_popup_elements(
             &mut render_list,
             renderer,

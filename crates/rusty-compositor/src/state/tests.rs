@@ -2550,3 +2550,167 @@ fn live_app_catalog_monitor_updates_spotlight_and_dock_metadata_without_restart(
     let _ = std::fs::remove_dir_all(&tmp);
     Ok(())
 }
+
+#[test]
+fn restore_window_skips_minimize_anim_when_already_visible_and_clears_focus_on_last_minimize()
+-> Result<(), Box<dyn Error>> {
+    let display: Display<RustyCompositorState> = Display::new()?;
+    let event_loop: EventLoop<RustyCompositorState> = EventLoop::try_new()?;
+    let mut compositor = RustyCompositorState::new(
+        &display,
+        "rusty-test-restore-min".to_owned(),
+        event_loop.get_signal(),
+        event_loop.handle(),
+        (1280, 800).into(),
+    )?;
+    compositor.animations.set_reduced_motion(false);
+    let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+
+    let w1 = compositor.wm.next_window_id();
+    let w2 = compositor.wm.next_window_id();
+    compositor.wm.map_window(w1, Some((600, 400)));
+    compositor.wm.map_window(w2, Some((600, 400)));
+
+    // Calling restore_window on already-visible w1 (e.g. via Alt+Tab or Overview) must NOT
+    // queue a Dock unminimize animation.
+    compositor.restore_window(w1, serial);
+    assert!(compositor.minimize_anims.is_empty());
+    assert_eq!(compositor.wm.focused_window(), Some(w1));
+
+    // Minimizing w1 falls back to w2, and minimizing w2 clears focused_window cleanly.
+    compositor.minimize_window(w1, serial);
+    assert!(compositor.is_window_minimized(w1));
+    assert_eq!(compositor.wm.focused_window(), Some(w2));
+    compositor.minimize_window(w2, serial);
+    assert!(compositor.is_window_minimized(w2));
+    assert_eq!(compositor.wm.focused_window(), None);
+
+    // Restoring an actually minimized window queues a restoring animation cleanly.
+    compositor.minimize_anims.clear();
+    compositor.restore_window(w1, serial);
+    assert!(!compositor.is_window_minimized(w1));
+    assert_eq!(compositor.wm.focused_window(), Some(w1));
+    assert!(
+        compositor
+            .minimize_anims
+            .iter()
+            .any(|a| a.win_id == w1 && a.restoring)
+    );
+    Ok(())
+}
+
+#[test]
+fn keyboard_focus_guard_grab_serial_validation_and_teardown_cleanup_work()
+-> Result<(), Box<dyn Error>> {
+    use crate::shell_render::{ContextMenuState, ContextMenuTarget};
+    use smithay::utils::Point;
+
+    let display: Display<RustyCompositorState> = Display::new()?;
+    let event_loop: EventLoop<RustyCompositorState> = EventLoop::try_new()?;
+    let mut compositor = RustyCompositorState::new(
+        &display,
+        "rusty-test-focus-guard".to_owned(),
+        event_loop.get_signal(),
+        event_loop.handle(),
+        (1280, 800).into(),
+    )?;
+
+    assert!(compositor.should_allow_window_keyboard_focus());
+    compositor.ext_session_locked = true;
+    assert!(!compositor.should_allow_window_keyboard_focus());
+    compositor.ext_session_locked = false;
+    compositor.desktop_focused = true;
+    assert!(!compositor.should_allow_window_keyboard_focus());
+    compositor.desktop_focused = false;
+    compositor.launcher_active = true;
+    assert!(!compositor.should_allow_window_keyboard_focus());
+    compositor.launcher_active = false;
+    assert!(compositor.should_allow_window_keyboard_focus());
+
+    // Pointer grab validation rejects stale/unpressed requests and accepts matching pressed serial.
+    let s1 = smithay::utils::SERIAL_COUNTER.next_serial();
+    let s2 = smithay::utils::SERIAL_COUNTER.next_serial();
+    assert!(!compositor.is_valid_pointer_grab_request(Some(s1)));
+    compositor.pressed_pointer_buttons.insert(272);
+    compositor.last_pointer_press_serial = Some(s1);
+    assert!(compositor.is_valid_pointer_grab_request(Some(s1)));
+    assert!(!compositor.is_valid_pointer_grab_request(Some(s2)));
+    assert!(compositor.is_valid_pointer_grab_request(None));
+
+    // Teardown cleans up all window-bound hover/menu/cache references.
+    let w1 = compositor.wm.next_window_id();
+    compositor.wm.map_window(w1, Some((600, 400)));
+    compositor.toplevel_initial_committed.insert(w1);
+    compositor.last_acknowledged_configure.insert(w1, s1);
+    compositor.hovered_traffic_light_window = Some(w1);
+    compositor
+        .dock_app_last_active
+        .insert("demo".to_owned(), w1);
+    compositor.context_menu = Some(ContextMenuState::new(
+        compositor.output_map.primary().id,
+        Point::from((100, 100)),
+        ContextMenuTarget::Window(w1),
+        Vec::new(),
+    ));
+    compositor.finish_window_teardown(w1);
+    assert!(!compositor.toplevel_initial_committed.contains(&w1));
+    assert!(!compositor.last_acknowledged_configure.contains_key(&w1));
+    assert_eq!(compositor.hovered_traffic_light_window, None);
+    assert!(!compositor.dock_app_last_active.contains_key("demo"));
+    assert!(compositor.context_menu.is_none());
+    Ok(())
+}
+
+#[test]
+fn multimonitor_remove_output_and_floating_work_area_preserve_windows() -> Result<(), Box<dyn Error>>
+{
+    use rusty_wm::{OutputId, WindowId};
+    use smithay::output::{Mode, PhysicalProperties, Scale, Subpixel};
+    use smithay::utils::{Point, Size};
+
+    let display: Display<RustyCompositorState> = Display::new()?;
+    let event_loop: EventLoop<RustyCompositorState> = EventLoop::try_new()?;
+    let mut compositor = RustyCompositorState::new(
+        &display,
+        "rusty-test-multi-out".to_owned(),
+        event_loop.get_signal(),
+        event_loop.handle(),
+        (1280, 800).into(),
+    )?;
+
+    let sec_id = compositor.add_output(
+        "DP-2".to_owned(),
+        PhysicalProperties {
+            size: Size::from((300, 200)),
+            subpixel: Subpixel::Unknown,
+            make: "Test".to_owned(),
+            model: "DP-2".to_owned(),
+        },
+        Mode {
+            size: Size::from((1920, 1080)),
+            refresh: 60_000,
+        },
+        Scale::Integer(1),
+        Point::from((1280, 0)),
+    );
+    assert_ne!(sec_id, OutputId(1));
+
+    // Map window on secondary output and confirm floating_work_area_for_window targets Monitor 2.
+    compositor.wm.set_focused_output(sec_id);
+    let w_sec = compositor.wm.next_window_id();
+    compositor.wm.map_window(w_sec, Some((700, 500)));
+    let sec_work = compositor.floating_work_area_for_window(w_sec);
+    assert_eq!(sec_work.x, 1280);
+
+    // Disconnecting Monitor 2 must migrate w_sec into primary output's visible stacking list.
+    assert!(compositor.remove_output(sec_id));
+    let primary_visible: Vec<WindowId> = compositor
+        .wm
+        .visible_windows_for_output(compositor.output_map.primary().id)
+        .iter()
+        .map(|w| w.id)
+        .collect();
+    assert_eq!(primary_visible, vec![w_sec]);
+    assert_eq!(compositor.floating_work_area_for_window(w_sec).x, 0);
+    Ok(())
+}

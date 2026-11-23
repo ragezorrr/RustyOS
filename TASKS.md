@@ -2714,6 +2714,21 @@ hardware/software context и низкие накладные расходы.
   - `classify_system_signal_path`, `format_battery_time_remaining`, `estimate_sysfs_time_remaining_from_readings`, `discover_application_dirs_from` (включая `$XDG_DATA_DIRS` и Flatpak), живой `inotify` тест `AppCatalogMonitorHandle`, `SystemMetricsHandle::replace_snapshot` (`revision` + `on_change` только на реальную дельту), `format_battery_popover_status`, `drain_telemetry_updates` (одноразовые `Low Battery` / `Critically Low Battery` + сброс на AC) и живое обновление Spotlight + `dock_pin_meta_cache` без рестарта покрыты unit-тестами (`74` в `rusty-services`, `232` в `rusty-compositor`); `cargo fmt --check`, `clippy -D warnings` и живые `--winit` Light/Dark прогоны `Battery` popover (`68% • 2h 15m left`) проходят чисто с 0 WARN/ERROR.
 - **Risks:** Низкие; 0 новых внешних Cargo-зависимостей, `crates/rusty-compositor` без `unsafe`.
 
+### RUSTYOS-165 — Стабилизация ядра WM, безопасности фокуса, Wayland/XDG, XWayland и Multi-Monitor (Фаза A)
+- **Status:** Done
+- **Goal:** Исправить критические баги ядра управления окнами, выявленные аудитом и сравнением с Cutefish (`KWin`): отключить невидимые SSD/resize хитбоксы у `fullscreen`/`maximized` окон и синхронизировать хит-размер с фактическим `committed_size`; устранить кражу клавиатурного фокуса в `CompositorHandler::commit`, утечку скролла `handle_pointer_axis` под Lock/оверлеи и несинхронную смену `focused_output` на hover; перенести `minimized` и `max_size` в `rusty-wm::ManagedWindow` (фокус-фолбэк, `MasterStack`, `restore_window` без ложной анимации для видимых окон, `_NET_WM_STATE_HIDDEN` через `x11.set_suspended`); починить `remove_output` (миграция `stacking`, сохранение `saved_floating_geometry`, `relayout_adjacent`), мультимониторные `work_area`/`layer_shell`/`xdg_popup`/drag-миграцию; реализовать прямые `set_window_maximized`/`set_window_fullscreen_on_output`, корректный XDG initial-configure handshake, `ack_configure` + `State::{Resizing, Tiled*}`, валидацию `serial` в `move`/`resize` и смещение `show_window_menu`; добавить рендер/очистку XWayland override-redirect окон, синхронизацию X11 координат/stacking/`configure_request`, правильный Z-order вложенных `xdg_popup` и полный teardown cleanup.
+- **Dependencies:** `RUSTYOS-004`, `RUSTYOS-026`, `RUSTYOS-040`, `RUSTYOS-041`, `RUSTYOS-112`, `RUSTYOS-161`.
+- **Scope:**
+  - `crates/rusty-wm/src/lib.rs`.
+  - `crates/rusty-compositor/src/state/{mod.rs, wm_windows.rs, wayland_handlers/core.rs, tests.rs}`.
+  - `crates/rusty-compositor/src/{xwayland.rs, frame_composer.rs}`.
+  - `crates/rusty-compositor/src/input/{pointer.rs, shell_pointer.rs}`.
+  - `crates/rusty-compositor/src/shell_render/{ssd.rs, tests.rs}`.
+  - `docs/adr/0094-window-management-core-protocol-and-multimonitor-fixes.md`, `DECISIONS.md` (`D-108`), `ARCHITECTURE.md` §7.
+- **Acceptance Criteria:**
+  - `remove_output` (перенос `stacking` и `saved_floating_geometry`), `set_window_minimized` (фокус-фолбэк, `MasterStack`, `cycle_focus`, `window_under_point`), `set_window_maximized`, `set_window_fullscreen_on_output`, `set_window_max_size`, `migrate_window_to_output`, `fullscreen`/`maximized` frame hit-testing, `restore_window` без ложной анимации, `should_allow_window_keyboard_focus`, `is_valid_pointer_grab_request`, `finish_window_teardown` и мультимониторный `floating_work_area_for_window` покрыты unit-тестами (`10` в `rusty-wm`, `236` в `rusty-compositor`); `cargo fmt --check`, `clippy -D warnings` и живые `--winit` Light/Dark прогоны с клиентом `rusty-settings` и меню `Window` проходят чисто с 0 WARN/ERROR.
+- **Risks:** Низкие; 0 новых внешних Cargo-зависимостей, `crates/rusty-compositor` без нового `unsafe`.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance
