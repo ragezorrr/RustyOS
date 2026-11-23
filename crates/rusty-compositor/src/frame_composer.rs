@@ -1704,6 +1704,7 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
         is_primary,
     );
     let hide_chrome_for_fullscreen = fullscreen_win.is_some()
+        || state.greeter_mode
         || state.should_hide_shell_chrome_for_fullscreen_on(output_entry.id);
     let context_menu_here = state
         .context_menu
@@ -2180,6 +2181,7 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
         render_list.extend(top_layer_elements);
         if !top_layer_surfaces_present
             && fullscreen_win.is_none()
+            && !state.greeter_mode
             && !state.should_hide_shell_chrome_for_fullscreen_on(output_entry.id)
             && !state.is_session_locked()
             && state.polkit_prompt.is_none()
@@ -2612,6 +2614,75 @@ pub(crate) fn spawn_test_client(
     }
 }
 
+/// Splits a simple shell command string supporting single and double quotes (`RUSTYOS-157`).
+#[must_use]
+pub(crate) fn split_shell_words(input: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut cur = String::new();
+    let mut in_single = false;
+    let mut in_double = false;
+    for ch in input.chars() {
+        match ch {
+            '\'' if !in_double => in_single = !in_single,
+            '"' if !in_single => in_double = !in_double,
+            c if c.is_whitespace() && !in_single && !in_double => {
+                if !cur.is_empty() {
+                    words.push(std::mem::take(&mut cur));
+                }
+            }
+            c => cur.push(c),
+        }
+    }
+    if !cur.is_empty() {
+        words.push(cur);
+    }
+    words
+}
+
+/// Spawns a `greetd` greeter Wayland client and returns its handle so the compositor
+/// can exit cleanly once the greeter finishes authentication (`RUSTYOS-157`).
+pub(crate) fn spawn_greeter_client(
+    command: &str,
+    socket_name: &str,
+    ipc_socket_path: &std::path::Path,
+) -> Option<std::process::Child> {
+    let parts = split_shell_words(command);
+    let (program, args) = parts.split_first()?;
+    match Command::new(program)
+        .args(args)
+        .env("WAYLAND_DISPLAY", socket_name)
+        .env("RUSTYOS_IPC_SOCKET", ipc_socket_path)
+        .spawn()
+    {
+        Ok(child) => {
+            info!(
+                program,
+                pid = child.id(),
+                wayland_display = socket_name,
+                "Spawned greetd greeter client"
+            );
+            Some(child)
+        }
+        Err(err) => {
+            warn!(program, error = %err, "Failed to spawn greetd greeter client");
+            None
+        }
+    }
+}
+
+/// Best-effort handoff from Plymouth boot splash (`--retain-splash`) once DRM is active (`RUSTYOS-157`).
+pub(crate) fn quit_plymouth_retain_splash() {
+    if !std::path::Path::new("/run/plymouth/pid").exists() {
+        return;
+    }
+    let _ = Command::new("plymouth")
+        .args(["quit", "--retain-splash"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+}
+
 /// Returns `true` when a bound client window has neither render elements nor a non-zero
 /// committed surface size yet, suppressing orphan SSD/shadow chrome before first commit (`RUSTYOS-112`).
 #[must_use]
@@ -2674,6 +2745,21 @@ mod tests {
         assert_eq!(
             pointer_local_if_on_output((1930.0, 400.0).into(), out2),
             Some(Point::from((10, 400)))
+        );
+    }
+
+    #[test]
+    fn split_shell_words_preserves_quoted_greeter_session_cmd() {
+        let parts = split_shell_words(
+            "/usr/bin/rusty-greeter --session-cmd \"/usr/bin/rustyos-session --drm\"",
+        );
+        assert_eq!(
+            parts,
+            vec![
+                "/usr/bin/rusty-greeter",
+                "--session-cmd",
+                "/usr/bin/rustyos-session --drm"
+            ]
         );
     }
 }

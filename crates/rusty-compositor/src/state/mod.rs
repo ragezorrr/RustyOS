@@ -626,6 +626,8 @@ pub struct RustyCompositorState {
     pub telemetry: crate::telemetry::SystemMetricsHandle,
     /// Whether the session lock screen is active (`RUSTYOS-009`/`010`/`025`).
     pub screen_locked: bool,
+    /// Whether the compositor is hosting a pre-session `greetd` greeter client (`RUSTYOS-157`).
+    pub greeter_mode: bool,
     /// Animated Lock Screen transition progress (`0.0` unlocked -> `1.0` locked) (`RUSTYOS-025`).
     pub lock_screen_anim: AnimatedValue,
     /// Selected account index on the macOS-style Lock Screen user switcher (`RUSTYOS-054`).
@@ -1016,6 +1018,7 @@ impl RustyCompositorState {
             focus_mode: false,
             telemetry: crate::telemetry::SystemMetricsHandle::static_default(),
             screen_locked: false,
+            greeter_mode: false,
             lock_screen_anim: AnimatedValue::new_settled(0.0),
             lock_selected_user: 0,
             lock_power_menu_open: false,

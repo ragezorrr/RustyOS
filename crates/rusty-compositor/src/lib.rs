@@ -79,6 +79,10 @@ pub struct CompositorConfig {
     pub reduced_motion: bool,
     /// Optional CLI display rotation override (`0|90|180|270`) (`RUSTYOS-055`).
     pub rotation_override: Option<config::DisplayRotation>,
+    /// Optional greeter client command for `greetd` pre-session mode (`RUSTYOS-157`).
+    /// When set, shell chrome (`TopBar`, `Dock`, desktop icons) and user autostart are suppressed,
+    /// and the compositor exits cleanly once the greeter process terminates.
+    pub greeter_cmd: Option<String>,
 }
 
 impl CompositorConfig {
@@ -94,6 +98,7 @@ impl CompositorConfig {
             force_full_damage: false,
             reduced_motion: false,
             rotation_override: None,
+            greeter_cmd: None,
         }
     }
 }
@@ -250,6 +255,20 @@ where
                 };
                 config.rotation_override = Some(rot);
             }
+            "--greeter" => {
+                let Some(cmd) = iter.next() else {
+                    return Err(CompositorError::InvalidArgument(
+                        "--greeter requires a command string".to_owned(),
+                    ));
+                };
+                let trimmed = cmd.as_ref().trim();
+                if trimmed.is_empty() {
+                    return Err(CompositorError::InvalidArgument(
+                        "--greeter command cannot be empty".to_owned(),
+                    ));
+                }
+                config.greeter_cmd = Some(trimmed.to_owned());
+            }
             other => return Err(CompositorError::InvalidArgument(other.to_owned())),
         }
     }
@@ -351,6 +370,8 @@ mod tests {
             "--reduced-motion",
             "--rotate",
             "180",
+            "--greeter",
+            "/usr/bin/rusty-greeter --session-cmd \"/usr/bin/rustyos-session --drm\"",
         ]);
         assert_eq!(
             nested,
@@ -363,6 +384,10 @@ mod tests {
                 force_full_damage: true,
                 reduced_motion: true,
                 rotation_override: Some(config::DisplayRotation::Rotate180),
+                greeter_cmd: Some(
+                    "/usr/bin/rusty-greeter --session-cmd \"/usr/bin/rustyos-session --drm\""
+                        .to_owned()
+                ),
             })
         );
 

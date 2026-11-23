@@ -1,0 +1,51 @@
+# RustyOS minimalist dark GRUB theme (`RUSTYOS-157`).
+
+title-text: ""
+desktop-color: "#0A0A0C"
+terminal-font: "Fixed Regular 13"
+terminal-left: "0"
+terminal-top: "0"
+terminal-width: "100%"
+terminal-height: "100%"
+terminal-border: "0"
+
++ image {
+    left = 50%-48
+    top = 18%
+    width = 96
+    height = 96
+    file = "logo.png"
+}
+
++ boot_menu {
+    left = 25%
+    top = 38%
+    width = 50%
+    height = 38%
+    item_color = "#AEAEB2"
+    selected_item_color = "#FFFFFF"
+    selected_item_pixmap_style = "select_*.png"
+    item_height = 36
+    item_padding = 12
+    item_spacing = 8
+    scrollbar = false
+}
+
++ label {
+    left = 0
+    top = 86%
+    width = 100%
+    align = "center"
+    id = "__timeout__"
+    text = "Starting RustyOS in %d seconds..."
+    color = "#8E8E93"
+}
+
++ label {
+    left = 0
+    top = 92%
+    width = 100%
+    align = "center"
+    text = "Up/Down Select   •   Enter Boot   •   e Edit"
+    color = "#636366"
+}

@@ -1853,16 +1853,30 @@ fn try_run_native_drm_session_once(
 
     sync_drm_activation_environment(&socket_name, state.xwayland_display);
 
-    let autostart = state.user_config.autostart.clone();
-    for cmd in autostart.iter().chain(config.spawn_clients.iter()) {
-        crate::frame_composer::spawn_test_client(cmd, &socket_name, &ipc_socket_path);
-    }
+    state.greeter_mode = config.greeter_cmd.is_some();
+    let mut greeter_child = if let Some(ref greeter_cmd) = config.greeter_cmd {
+        crate::frame_composer::spawn_greeter_client(greeter_cmd, &socket_name, &ipc_socket_path)
+    } else {
+        let autostart = state.user_config.autostart.clone();
+        for cmd in autostart.iter().chain(config.spawn_clients.iter()) {
+            crate::frame_composer::spawn_test_client(cmd, &socket_name, &ipc_socket_path);
+        }
+        None
+    };
 
     runtime.borrow_mut().render_ready_outputs(&mut state, true);
+    crate::frame_composer::quit_plymouth_retain_splash();
 
     let rt_dispatch = Rc::clone(&runtime);
     event_loop
         .run(Some(Duration::from_millis(4)), &mut state, |app_state| {
+            if let Some(child) = greeter_child.as_mut()
+                && matches!(child.try_wait(), Ok(Some(_)))
+            {
+                greeter_child = None;
+                app_state.request_shutdown();
+                return;
+            }
             crate::frame_composer::dispatch_and_refresh_clients(
                 &mut display,
                 ipc_server.as_mut(),

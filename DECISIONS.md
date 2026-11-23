@@ -1176,6 +1176,17 @@
                            сохранение `reminders_done`/видимости виджетов в
                            `config.toml` и таймстемпы уведомлений в
                            `Notification Center`
+
+  D-100    Accepted        ADR-0086 (`RUSTYOS-157`): бесшовная цепочка загрузки —
+                           тема Plymouth `packaging/plymouth/rustyos/` (чёрный фон,
+                           белый HiDPI-логотип, тонкий прогресс-бар, LUKS-промпт),
+                           тёмная тема GRUB `packaging/grub/rustyos/`, тихие
+                           параметры ядра (`quiet splash loglevel=3`), `systemd-boot`
+                           `timeout 0` (single-OS) / `timeout 4` (dual-boot) с
+                           fallback-пунктом `Console`, а также режим `--greeter <cmd>`
+                           в `rusty-compositor` + `rustyos-session --greeter` с
+                           `plymouth quit --retain-splash` и заменой `agreety` в
+                           `greetd/config.toml`
   -----------------------------------------------------------------------
 
 ## Открытые решения

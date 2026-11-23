@@ -2599,6 +2599,21 @@ hardware/software context и низкие накладные расходы.
   - `parse_wpctl_status_sinks` и `parse_pactl_short_sinks` корректно парсят аудиовыходы; `TopBar` Volume Popover и `Control Center` отображают и переключают активный аудиовыход; `Control Center` переключает тему `Light ↔ Dark` и открывает `rusty-settings`; `Notification Center` сохраняет `reminders_done` и видимость виджетов в `config.toml`; все тесты и `clippy -D warnings` проходят чисто.
 - **Risks:** Низкие; ноль новых Cargo-зависимостей.
 
+### RUSTYOS-157 — Бесшовная загрузка: Plymouth Splash `rustyos`, темы `systemd-boot`/`GRUB` и графический `greetd`/`rusty-greeter`
+- **Status:** Done
+- **Goal:** Закрыть разрывы между прошивкой и рабочим столом: добавить минималистичную тему Plymouth `rustyos` и тёмную тему GRUB `rustyos`, включить `plymouth` + тихие параметры ядра + `systemd-boot` `timeout 0` (single-OS) / `timeout 4` (dual-boot) с `Console`-пунктом в `PKGBUILD`, `packaging/archiso/` и `scripts/rustyos-install.sh`, а также реализовать режим `--greeter <cmd>` в `rusty-compositor` + `rustyos-session --greeter` с передачей DRM от Plymouth (`--retain-splash`) вместо `agreety`.
+- **Dependencies:** `RUSTYOS-115`, `RUSTYOS-136`, `RUSTYOS-156`.
+- **Scope:**
+  - `packaging/plymouth/rustyos/{rustyos.plymouth, rustyos.script, logo.png, progress_bg.png, progress_fg.png}`.
+  - `packaging/grub/rustyos/{theme.txt, logo.png, select_c.png}`.
+  - `packaging/arch/PKGBUILD`, `packaging/archiso/{packages.x86_64, grub/grub.cfg, efiboot/loader/entries/01-rustyos-x86_64-linux.conf, airootfs/etc/mkinitcpio.conf.d/archiso.conf, airootfs/etc/plymouth/plymouthd.conf, airootfs/etc/greetd/config.toml}`.
+  - `scripts/rustyos-install.sh`, `bin/rustyos-session`.
+  - `crates/rusty-compositor/src/{lib.rs, state/mod.rs, frame_composer.rs, drm_backend.rs, winit_backend.rs}`.
+  - `docs/adr/0086-seamless-boot-splash-bootloader-and-greeter.md`, `DECISIONS.md` (`D-100`).
+- **Acceptance Criteria:**
+  - `parse_args` и `split_shell_words` покрыты unit-тестами; `cargo fmt`, `clippy -D warnings`, `cargo test -p rusty-compositor`, `bash -n scripts/rustyos-install.sh packaging/arch/PKGBUILD`, `sh -n bin/rustyos-session`, и живой `--winit --max-frames 10` прогон проходят чисто; хостовая ОС не изменялась.
+- **Risks:** Низкие; консольные пункты загрузчика сохранены для отладки, ноль новых Cargo-зависимостей.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

@@ -208,7 +208,7 @@ run_doctor() {
 
 case "${1:-}" in
     --help|-h)
-        echo "Usage: $0 [--drm|--kms|--winit|--nested|--drm-probe|--check|--doctor] [-- <compositor-args>]"
+        echo "Usage: $0 [--drm|--kms|--winit|--nested|--greeter|--drm-probe|--check|--doctor] [-- <compositor-args>]"
         exit 0
         ;;
     --doctor)
@@ -222,8 +222,14 @@ if [ ! -x "$COMPOSITOR_BIN" ]; then
     exit 1
 fi
 
+GREETER_MODE=0
 BACKEND_FLAG=""
 case "${1:-}" in
+    --greeter)
+        GREETER_MODE=1
+        BACKEND_FLAG="--drm"
+        shift
+        ;;
     --drm|--kms|--winit|--nested|--drm-probe|--check)
         BACKEND_FLAG="$1"
         shift
@@ -341,6 +347,15 @@ run_drm_compositor() {
 
 if [ "$BACKEND_FLAG" != "--check" ] && [ "$BACKEND_FLAG" != "--drm-probe" ]; then
     ensure_runtime_environment
+fi
+
+if [ "$GREETER_MODE" -eq 1 ]; then
+    GREETER_BIN="$(find_rusty_bin rusty-greeter)"
+    if [ -z "$GREETER_BIN" ] || [ ! -x "$GREETER_BIN" ]; then
+        echo "Error: rusty-greeter binary not found" >&2
+        exit 1
+    fi
+    exec "$COMPOSITOR_BIN" --drm --greeter "$GREETER_BIN --session-cmd \"/usr/bin/rustyos-session --drm\"" "$@"
 fi
 
 # Sync session desktop and toolkit variables into systemd/D-Bus user environment for standalone sessions.

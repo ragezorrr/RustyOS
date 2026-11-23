@@ -1,0 +1,8 @@
+[Plymouth Theme]
+Name=RustyOS
+Description=Minimalist macOS-inspired RustyOS boot splash with white emblem and progress bar
+ModuleName=script
+
+[script]
+ImageDir=/usr/share/plymouth/themes/rustyos
+ScriptFile=/usr/share/plymouth/themes/rustyos/rustyos.script

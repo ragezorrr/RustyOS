@@ -1,0 +1,94 @@
+# RustyOS minimalist macOS-style Plymouth boot splash (`RUSTYOS-157`).
+
+Window.SetBackgroundTopColor(0.0, 0.0, 0.0);
+Window.SetBackgroundBottomColor(0.0, 0.0, 0.0);
+
+screen_w = Window.GetWidth();
+screen_h = Window.GetHeight();
+
+logo.image = Image("logo.png");
+logo.sprite = Sprite(logo.image);
+logo.x = Math.Int(screen_w / 2 - logo.image.GetWidth() / 2);
+logo.y = Math.Int(screen_h / 2 - logo.image.GetHeight() / 2 - 28);
+logo.sprite.SetPosition(logo.x, logo.y, 10);
+
+bar_bg.image = Image("progress_bg.png");
+bar_bg.sprite = Sprite(bar_bg.image);
+bar_w = bar_bg.image.GetWidth();
+bar_h = bar_bg.image.GetHeight();
+bar_x = Math.Int(screen_w / 2 - bar_w / 2);
+bar_y = logo.y + logo.image.GetHeight() + 44;
+bar_bg.sprite.SetPosition(bar_x, bar_y, 10);
+
+bar_fg.raw = Image("progress_fg.png");
+bar_fg.sprite = Sprite();
+bar_fg.sprite.SetPosition(bar_x, bar_y, 11);
+
+global.max_progress = 0.04;
+
+fun update_bar(progress) {
+    if (progress > global.max_progress) {
+        global.max_progress = progress;
+    }
+    clamped = global.max_progress;
+    if (clamped < 0.04) clamped = 0.04;
+    if (clamped > 1.0) clamped = 1.0;
+
+    fill_w = Math.Int(bar_w * clamped);
+    if (fill_w < 6) fill_w = 6;
+    cropped = bar_fg.raw.Crop(0, 0, fill_w, bar_h);
+    bar_fg.sprite.SetImage(cropped);
+}
+
+update_bar(0.04);
+
+fun boot_progress_callback(duration, progress) {
+    update_bar(progress);
+}
+Plymouth.SetBootProgressFunction(boot_progress_callback);
+
+# Minimalist LUKS / disk-unlock password prompt (hidden during normal boot).
+dialog.prompt_sprite = Sprite();
+dialog.bullets_sprite = Sprite();
+
+fun hide_password_dialog() {
+    dialog.prompt_sprite.SetOpacity(0);
+    dialog.bullets_sprite.SetOpacity(0);
+    bar_bg.sprite.SetOpacity(1);
+    bar_fg.sprite.SetOpacity(1);
+}
+
+fun display_password_callback(prompt, bullets) {
+    bar_bg.sprite.SetOpacity(0);
+    bar_fg.sprite.SetOpacity(0);
+
+    prompt_img = Image.Text(prompt, 0.88, 0.88, 0.92);
+    dialog.prompt_sprite.SetImage(prompt_img);
+    dialog.prompt_sprite.SetPosition(
+        Math.Int(screen_w / 2 - prompt_img.GetWidth() / 2),
+        bar_y - 8,
+        20
+    );
+    dialog.prompt_sprite.SetOpacity(1);
+
+    bullet_str = "";
+    for (i = 0; i < bullets; i++) {
+        bullet_str += "*";
+    }
+    bullets_img = Image.Text(bullet_str, 1.0, 1.0, 1.0);
+    dialog.bullets_sprite.SetImage(bullets_img);
+    dialog.bullets_sprite.SetPosition(
+        Math.Int(screen_w / 2 - bullets_img.GetWidth() / 2),
+        bar_y + 22,
+        20
+    );
+    dialog.bullets_sprite.SetOpacity(1);
+}
+
+Plymouth.SetDisplayPasswordFunction(display_password_callback);
+Plymouth.SetDisplayNormalFunction(hide_password_dialog);
+
+fun quit_callback() {
+    logo.sprite.SetOpacity(1);
+}
+Plymouth.SetQuitFunction(quit_callback);

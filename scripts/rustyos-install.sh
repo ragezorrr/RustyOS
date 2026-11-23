@@ -317,7 +317,7 @@ run_dry_plan() {
     fi
 
     emit_step 40 keyring "[dry-run] Would initialize pacman-key and refresh archlinux-keyring"
-    emit_step 55 pacstrap "[dry-run] Would run pacstrap -K ${MOUNT_ROOT}: base linux linux-firmware networkmanager pipewire wireplumber seatd polkit mesa xorg-xwayland ttf-jetbrains-mono git base-devel greetd sudo ${boot_pkg} rustyos-git"
+    emit_step 55 pacstrap "[dry-run] Would run pacstrap -K ${MOUNT_ROOT}: base linux linux-firmware networkmanager pipewire wireplumber seatd polkit mesa xorg-xwayland ttf-jetbrains-mono git base-devel greetd plymouth sudo ${boot_pkg} rustyos-git"
     emit_step 75 system "[dry-run] Would set timezone=${TIMEZONE_VAL}, locale=${LOCALE_VAL}, keymap=${KEYMAP_VAL}, hostname=${HOSTNAME_VAL}, user=${USERNAME_VAL}"
     emit_step 88 desktop "[dry-run] Would write /etc/greetd/config.toml (autologin=${AUTOLOGIN}) and ~/.config/rustyos/config.toml (theme=${APPEARANCE}, accent=${ACCENT_INDEX}, kb=${KB_LAYOUT}, oobe=${INSTALL_OOBE})"
     emit_step 90 yay "[dry-run] Would build and install optional yay-bin AUR helper for ${USERNAME_VAL} (with safe fallback)"
@@ -550,7 +550,7 @@ EOF
     pacstrap -K "${pacstrap_conf_arg[@]}" "${MOUNT_ROOT}" \
         base linux linux-firmware sof-firmware alsa-ucm-conf alsa-utils \
         networkmanager pipewire pipewire-alsa pipewire-pulse wireplumber \
-        seatd polkit mesa xorg-xwayland ttf-jetbrains-mono git base-devel greetd sudo \
+        seatd polkit mesa xorg-xwayland ttf-jetbrains-mono git base-devel greetd plymouth sudo \
         ${boot_pkg} rustyos-git
 
     emit_step 75 system "Configuring timezone, locale, hostname, and user ${USERNAME_VAL}"
@@ -604,7 +604,7 @@ command = "/usr/bin/rustyos-session --drm"
 user = "${USERNAME_VAL}"
 
 [default_session]
-command = "/usr/bin/agreety --cmd /usr/bin/rustyos-session"
+command = "/usr/bin/rustyos-session --greeter"
 user = "greeter"
 EOF
     else
@@ -613,10 +613,23 @@ EOF
 vt = 1
 
 [default_session]
-command = "/usr/bin/agreety --cmd /usr/bin/rustyos-session"
+command = "/usr/bin/rustyos-session --greeter"
 user = "greeter"
 EOF
     fi
+
+    # Configure Plymouth boot splash (`RUSTYOS-157`) and rebuild initramfs with `plymouth` hook.
+    mkdir -p "${MOUNT_ROOT}/etc/plymouth"
+    cat <<'EOF' > "${MOUNT_ROOT}/etc/plymouth/plymouthd.conf"
+[Daemon]
+Theme=rustyos
+ShowDelay=0
+DeviceTimeout=5
+EOF
+    if [[ -f "${MOUNT_ROOT}/etc/mkinitcpio.conf" ]] && ! grep -q '\bplymouth\b' "${MOUNT_ROOT}/etc/mkinitcpio.conf"; then
+        sed -i 's/\(HOOKS=(.*udev\)/\1 plymouth/' "${MOUNT_ROOT}/etc/mkinitcpio.conf"
+    fi
+    arch-chroot "${MOUNT_ROOT}" mkinitcpio -P
 
     local cfg_dir="${MOUNT_ROOT}/home/${USERNAME_VAL}/.config/rustyos"
     mkdir -p "${cfg_dir}"
@@ -643,11 +656,22 @@ EOF
     install_optional_yay_bin
 
     emit_step 95 bootloader "Installing ${BOOTLOADER}"
+    local quiet_opts="quiet splash loglevel=3 rd.udev.log_level=3 vt.global_cursor_default=0"
     if [[ "${BOOTLOADER}" == "grub" ]]; then
         if grep -q '^#GRUB_DISABLE_OS_PROBER=' "${MOUNT_ROOT}/etc/default/grub" 2>/dev/null; then
             sed -i 's/^#GRUB_DISABLE_OS_PROBER=.*/GRUB_DISABLE_OS_PROBER=false/' "${MOUNT_ROOT}/etc/default/grub"
         elif ! grep -q '^GRUB_DISABLE_OS_PROBER=' "${MOUNT_ROOT}/etc/default/grub" 2>/dev/null; then
             printf '\nGRUB_DISABLE_OS_PROBER=false\n' >> "${MOUNT_ROOT}/etc/default/grub"
+        fi
+        if grep -q '^GRUB_CMDLINE_LINUX_DEFAULT=' "${MOUNT_ROOT}/etc/default/grub" 2>/dev/null; then
+            sed -i "s|^GRUB_CMDLINE_LINUX_DEFAULT=.*|GRUB_CMDLINE_LINUX_DEFAULT=\"${quiet_opts}\"|" "${MOUNT_ROOT}/etc/default/grub"
+        else
+            printf 'GRUB_CMDLINE_LINUX_DEFAULT="%s"\n' "${quiet_opts}" >> "${MOUNT_ROOT}/etc/default/grub"
+        fi
+        if grep -q '^#\?GRUB_THEME=' "${MOUNT_ROOT}/etc/default/grub" 2>/dev/null; then
+            sed -i 's|^#\?GRUB_THEME=.*|GRUB_THEME="/usr/share/grub/themes/rustyos/theme.txt"|' "${MOUNT_ROOT}/etc/default/grub"
+        else
+            printf 'GRUB_THEME="/usr/share/grub/themes/rustyos/theme.txt"\n' >> "${MOUNT_ROOT}/etc/default/grub"
         fi
         if [[ -d /sys/firmware/efi ]]; then
             arch-chroot "${MOUNT_ROOT}" grub-install --target=x86_64-efi --efi-directory=/boot --bootloader-id=RustyOS
@@ -659,10 +683,14 @@ EOF
         arch-chroot "${MOUNT_ROOT}" bootctl install
         local root_uuid
         root_uuid="$(blkid -s UUID -o value "${root_part}")"
+        local boot_timeout="0"
+        if [[ "${INSTALL_MODE}" == "dual-boot" ]]; then
+            boot_timeout="4"
+        fi
         if [[ "${INSTALL_MODE}" == "whole-disk" || ! -f "${MOUNT_ROOT}/boot/loader/loader.conf" ]]; then
-            cat <<'EOF' > "${MOUNT_ROOT}/boot/loader/loader.conf"
+            cat <<EOF > "${MOUNT_ROOT}/boot/loader/loader.conf"
 default rustyos.conf
-timeout 4
+timeout ${boot_timeout}
 console-mode max
 editor no
 EOF
@@ -672,7 +700,13 @@ EOF
 title   RustyOS
 linux   /vmlinuz-linux
 initrd  /initramfs-linux.img
-options root=UUID=${root_uuid} rw quiet
+options root=UUID=${root_uuid} rw ${quiet_opts}
+EOF
+        cat <<EOF > "${MOUNT_ROOT}/boot/loader/entries/rustyos-console.conf"
+title   RustyOS (Console / Verbose)
+linux   /vmlinuz-linux
+initrd  /initramfs-linux.img
+options root=UUID=${root_uuid} rw
 EOF
     fi
 

@@ -26,6 +26,7 @@ parted
 pipewire
 pipewire-alsa
 pipewire-pulse
+plymouth
 polkit
 rustyos-git
 seatd

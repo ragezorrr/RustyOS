@@ -42,6 +42,7 @@ optdepends=(
   'firefox: optional Mozilla web browser'
   'sddm: graphical Wayland session login chooser'
   'greetd: minimal login manager alternative'
+  'plymouth: flicker-free graphical boot splash screen'
   'networkmanager: Wi-Fi status and network toggles in Control Center'
   'bluez: Bluetooth toggle and device status in Control Center'
   'upower: battery and power supply status in TopBar'
@@ -118,6 +119,8 @@ package() {
     "${pkgdir}/usr/share/wayland-sessions" \
     "${pkgdir}/usr/share/xdg-desktop-portal/portals" \
     "${pkgdir}/usr/share/rustyos/wallpapers" \
+    "${pkgdir}/usr/share/plymouth/themes/rustyos" \
+    "${pkgdir}/usr/share/grub/themes/rustyos" \
     "${pkgdir}/usr/share/doc/${pkgname}"
 
   install -m755 "${target_dir}/rusty-compositor" "${pkgdir}/usr/bin/rusty-compositor"
@@ -175,6 +178,24 @@ package() {
     "${pkgdir}/usr/share/rustyos/wallpapers/rustyos-light-4k.png"
   install -m644 "${root}/assets/wallpapers/rustyos-dark-4k.png" \
     "${pkgdir}/usr/share/rustyos/wallpapers/rustyos-dark-4k.png"
+
+  install -m644 "${root}/packaging/plymouth/rustyos/rustyos.plymouth" \
+    "${pkgdir}/usr/share/plymouth/themes/rustyos/rustyos.plymouth"
+  install -m644 "${root}/packaging/plymouth/rustyos/rustyos.script" \
+    "${pkgdir}/usr/share/plymouth/themes/rustyos/rustyos.script"
+  install -m644 "${root}/packaging/plymouth/rustyos/logo.png" \
+    "${pkgdir}/usr/share/plymouth/themes/rustyos/logo.png"
+  install -m644 "${root}/packaging/plymouth/rustyos/progress_bg.png" \
+    "${pkgdir}/usr/share/plymouth/themes/rustyos/progress_bg.png"
+  install -m644 "${root}/packaging/plymouth/rustyos/progress_fg.png" \
+    "${pkgdir}/usr/share/plymouth/themes/rustyos/progress_fg.png"
+
+  install -m644 "${root}/packaging/grub/rustyos/theme.txt" \
+    "${pkgdir}/usr/share/grub/themes/rustyos/theme.txt"
+  install -m644 "${root}/packaging/grub/rustyos/logo.png" \
+    "${pkgdir}/usr/share/grub/themes/rustyos/logo.png"
+  install -m644 "${root}/packaging/grub/rustyos/select_c.png" \
+    "${pkgdir}/usr/share/grub/themes/rustyos/select_c.png"
 
   install -m644 "${root}/README.md" "${pkgdir}/usr/share/doc/${pkgname}/README.md"
 }
