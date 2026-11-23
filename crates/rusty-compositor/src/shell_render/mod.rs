@@ -119,9 +119,11 @@ pub use spotlight_overview::{
 };
 pub use ssd::{
     ResizeEdges, SsdHit, SsdHitWindow, check_window_frame_hit, check_window_ssd_hit,
-    check_window_traffic_lights_hover, generate_ssd_title_element, generate_window_shadow_elements,
+    check_window_traffic_lights_hover, generate_edge_snap_preview_elements,
+    generate_ssd_title_element, generate_window_shadow_elements,
     generate_window_shadow_elements_with_opacity, generate_window_ssd_composite_elements,
-    generate_window_ssd_composite_elements_with_hover, generate_window_ssd_elements,
+    generate_window_ssd_composite_elements_with_hover,
+    generate_window_ssd_composite_elements_with_options, generate_window_ssd_elements,
 };
 pub(crate) use tokens::push_liquid_glass_panel_elevation;
 #[cfg(test)]

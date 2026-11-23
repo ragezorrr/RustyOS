@@ -107,14 +107,14 @@ pub fn check_window_frame_hit(
         }
 
         // 2. Outer frame edges & corners trigger interactive resize when permitted.
-        // For CSD windows keep resize grabs outside the client surface (plus a 1.5px hairlip)
-        // so interior header controls (such as corner `_ [] X` buttons) stay clickable.
+        // Bias the resize zone outside the window frame (`6 px` outside, `2 px` inside SSD /
+        // `1.5 px` inside CSD) so narrow scrollbars and interior controls stay clickable (`RUSTYOS-166`).
         if win.allow_resize {
-            let inner_inset = if win.has_ssd { pad } else { 1.5 };
+            let inner_inset = if win.has_ssd { 2.0 } else { 1.5 };
             let edges = ResizeEdges {
                 left: rel_x < inner_inset,
                 right: rel_x >= rw - inner_inset,
-                top: rel_y < if win.has_ssd { pad - 1.0 } else { 1.5 },
+                top: rel_y < inner_inset,
                 bottom: rel_y >= rh - inner_inset,
             };
             if edges.any() {
@@ -152,17 +152,31 @@ pub fn check_window_ssd_hit(
     check_window_frame_hit(&targets, x, y)
 }
 
-/// Returns the topmost SSD window whose traffic-light cluster is hovered at `(x, y)` (`RUSTYOS-051`).
+/// Returns the topmost SSD window whose traffic-light cluster is hovered at `(x, y)` (`RUSTYOS-051` / `RUSTYOS-166`).
+///
+/// Uses the continuous `TrafficLightButtons::is_hovered` cluster box so hover glyphs never flicker
+/// in the `4 px` gaps between individual traffic-light dots.
 #[must_use]
 pub fn check_window_traffic_lights_hover(
     windows_bottom_to_top: &[SsdHitWindow],
     x: f64,
     y: f64,
 ) -> Option<rusty_wm::WindowId> {
-    match check_window_frame_hit(windows_bottom_to_top, x, y) {
-        Some(SsdHit::Close(id) | SsdHit::Minimize(id) | SsdHit::Maximize(id)) => Some(id),
-        _ => None,
+    let ssd_tl = rusty_ui::TrafficLightButtons::default_ssd();
+    for &win in windows_bottom_to_top.iter().rev() {
+        let rx = f64::from(win.rect.x);
+        let ry = f64::from(win.rect.y);
+        let rw = f64::from(win.rect.width);
+        let rh = f64::from(win.rect.height);
+        if x < rx || x >= rx + rw || y < ry || y >= ry + rh {
+            continue;
+        }
+        if win.has_ssd && ssd_tl.is_hovered(x - rx, y - ry) {
+            return Some(win.id);
+        }
+        return None;
     }
+    None
 }
 
 /// Generates Server-Side Decoration elements (titlebar, macOS traffic lights, 1px glass border)
@@ -376,7 +390,6 @@ pub fn generate_window_ssd_composite_elements(
 
 /// Generates rounded SSD titlebar, gel-lit macOS traffic lights, optional hover glyphs (`×`, `−`, `+`),
 /// and 4-corner `WINDOW_RADIUS` rounded 1px frame rim (`RUSTYOS-051`).
-#[allow(clippy::many_single_char_names, clippy::too_many_lines)]
 pub fn generate_window_ssd_composite_elements_with_hover(
     text_cache: &mut crate::text::TextCache,
     shape_cache: &mut crate::surfaces::UiShapeCache,
@@ -385,6 +398,34 @@ pub fn generate_window_ssd_composite_elements_with_hover(
     title: &str,
     is_focused: bool,
     traffic_lights_hovered: bool,
+) -> Vec<CompositorRenderElement> {
+    generate_window_ssd_composite_elements_with_options(
+        text_cache,
+        shape_cache,
+        renderer,
+        rect,
+        title,
+        is_focused,
+        traffic_lights_hovered,
+        false,
+    )
+}
+
+/// Generates SSD titlebar chrome with optional square corners for maximized/`MasterStack` windows (`RUSTYOS-166`).
+#[allow(
+    clippy::many_single_char_names,
+    clippy::too_many_lines,
+    clippy::too_many_arguments
+)]
+pub fn generate_window_ssd_composite_elements_with_options(
+    text_cache: &mut crate::text::TextCache,
+    shape_cache: &mut crate::surfaces::UiShapeCache,
+    renderer: &mut GlesRenderer,
+    rect: rusty_wm::Rect,
+    title: &str,
+    is_focused: bool,
+    traffic_lights_hovered: bool,
+    square_corners: bool,
 ) -> Vec<CompositorRenderElement> {
     use crate::surfaces::{CornerQuadrant, TrafficLightKind};
 
@@ -421,8 +462,6 @@ pub fn generate_window_ssd_composite_elements_with_hover(
         }
     }
 
-    // Rounded top & bottom corners (`WINDOW_RADIUS = 14`) + crisp 1px glass rim
-    let r = WINDOW_RADIUS.min(w / 2).min(h / 2).max(4);
     let pal = super::tokens::ThemePalette::active();
     let (titlebar_rgba, border_rgba) = ssd_frame_colors(pal.is_dark, is_focused);
     let spec_alpha = if pal.is_dark {
@@ -440,6 +479,31 @@ pub fn generate_window_ssd_composite_elements_with_hover(
     let titlebar_fill = rgba_to_premul_color32f(titlebar_rgba);
     let top_rim_col = blend_border_over_fill_color(border_rgba, titlebar_rgba);
     let edge_border_col = rgba_to_premul_color32f(border_rgba);
+
+    if square_corners {
+        out.push(CompositorRenderElement::Solid(make_solid_element(
+            Rectangle::new(Point::from((x, y)), Size::from((w, 1))),
+            top_rim_col,
+        )));
+        out.push(CompositorRenderElement::Solid(make_solid_element(
+            Rectangle::new(
+                Point::from((x, y + 1)),
+                Size::from((w, TITLEBAR_HEIGHT - 2)),
+            ),
+            titlebar_fill,
+        )));
+        out.push(CompositorRenderElement::Solid(make_solid_element(
+            Rectangle::new(
+                Point::from((x, y + TITLEBAR_HEIGHT - 1)),
+                Size::from((w, 1)),
+            ),
+            divider_col,
+        )));
+        return out;
+    }
+
+    // Rounded top & bottom corners (`WINDOW_RADIUS = 14`) + crisp 1px glass rim
+    let r = WINDOW_RADIUS.min(w / 2).min(h / 2).max(4);
 
     for (quad, fill, loc) in [
         (CornerQuadrant::TopLeft, titlebar_rgba, Point::from((x, y))),
@@ -514,6 +578,42 @@ pub fn generate_window_ssd_composite_elements_with_hover(
         )));
     }
 
+    out
+}
+
+/// Generates a translucent Liquid Glass Edge/Corner Snap preview overlay during interactive drag (`RUSTYOS-166`).
+pub fn generate_edge_snap_preview_elements(
+    shape_cache: &mut crate::surfaces::UiShapeCache,
+    renderer: &mut GlesRenderer,
+    local_rect: rusty_wm::Rect,
+) -> Vec<CompositorRenderElement> {
+    let pal = super::tokens::ThemePalette::active();
+    let inset = 6;
+    let x = local_rect.x + inset;
+    let y = local_rect.y + inset;
+    let w = (local_rect.width - inset * 2).max(48);
+    let h = (local_rect.height - inset * 2).max(48);
+    let accent = pal.accent_rgba;
+    let fill = if pal.is_dark {
+        [accent[0], accent[1], accent[2], 46]
+    } else {
+        [accent[0], accent[1], accent[2], 38]
+    };
+    let border = if pal.is_dark {
+        [accent[0], accent[1], accent[2], 210]
+    } else {
+        [accent[0], accent[1], accent[2], 190]
+    };
+    let mut out = Vec::new();
+    super::tokens::push_rounded_glass_box(
+        &mut out,
+        shape_cache,
+        renderer,
+        Rectangle::new(Point::from((x, y)), Size::from((w, h))),
+        WINDOW_RADIUS,
+        fill,
+        Some(border),
+    );
     out
 }
 

@@ -2729,6 +2729,21 @@ hardware/software context и низкие накладные расходы.
   - `remove_output` (перенос `stacking` и `saved_floating_geometry`), `set_window_minimized` (фокус-фолбэк, `MasterStack`, `cycle_focus`, `window_under_point`), `set_window_maximized`, `set_window_fullscreen_on_output`, `set_window_max_size`, `migrate_window_to_output`, `fullscreen`/`maximized` frame hit-testing, `restore_window` без ложной анимации, `should_allow_window_keyboard_focus`, `is_valid_pointer_grab_request`, `finish_window_teardown` и мультимониторный `floating_work_area_for_window` покрыты unit-тестами (`10` в `rusty-wm`, `236` в `rusty-compositor`); `cargo fmt --check`, `clippy -D warnings` и живые `--winit` Light/Dark прогоны с клиентом `rusty-settings` и меню `Window` проходят чисто с 0 WARN/ERROR.
 - **Risks:** Низкие; 0 новых внешних Cargo-зависимостей, `crates/rusty-compositor` без нового `unsafe`.
 
+### RUSTYOS-166 — Интерактивная эргономика WM: композиторные курсоры, Edge/Corner Snap, Unmaximize-on-Drag и полировка SSD (Фаза B)
+- **Status:** Done
+- **Goal:** Довести интерактивную эргономику управления окнами до уровня Cutefish/macOS без новых зависимостей и без `unsafe`: добавить слой композиторного override курсоров (стрелки ресайза на границах/углах, `Grabbing` при drag, `Crosshair` на `ScreenshotHud`, `Default` на SSD/TopBar/Dock/shell-оверлеях при сохранении клиентского курсора над клиентской областью); реализовать плавный unmaximize-on-drag с порогом `5 px` и пропорциональным якорением под курсором (`compute_unmaximized_drag_origin`); добавить anchor-lock для top/left интерактивного ресайза без дрожания противоположного края; расширить `rusty_wm::SnapTarget` (`TopLeft`, `TopRight`, `BottomLeft`, `BottomRight`, `Maximize`, `compute_snap_rect`, `snap_window`) и реализовать интерактивный Edge/Corner Snap с полупрозрачным Liquid Glass превью прямо под перетаскиваемым окном; поддержать двойной клик ЛКМ по SSD-заголовку для `Maximize / Restore`; сместить ресайз-зону наружу (`6 px` снаружи / `2 px` внутри SSD, `1.5 px` внутри CSD); отполировать SSD-светофор (только ЛКМ на `Released` с отменой при уводе, непрерывный `TrafficLightButtons::is_hovered` без `4 px` провалов, `shell_redraw_needed = true` и per-output fullscreen); отключить скругления и тени у `maximized` и `MasterStack`-окон (`window_is_square_framed`).
+- **Dependencies:** `RUSTYOS-165`, `RUSTYOS-040`, `RUSTYOS-112`, `RUSTYOS-158`.
+- **Scope:**
+  - `crates/rusty-wm/src/lib.rs`.
+  - `crates/rusty-compositor/src/state/{mod.rs, wm_windows.rs, shell_actions.rs, wayland_handlers/seat_input.rs, wayland_handlers/core.rs}`.
+  - `crates/rusty-compositor/src/{xwayland.rs, frame_composer.rs, winit_backend.rs}`.
+  - `crates/rusty-compositor/src/shell_render/{ssd.rs, mod.rs}`.
+  - `crates/rusty-compositor/src/input/{pointer.rs, shell_pointer.rs, tests.rs}`.
+  - `docs/adr/0095-interactive-wm-cursors-edge-snap-and-chrome-polish.md`, `DECISIONS.md` (`D-109`), `ARCHITECTURE.md` §7.
+- **Acceptance Criteria:**
+  - `snap_window_quarters_and_maximize_preserve_saved_floating_geometry`, `edge_snap_detection_and_unmaximize_proportional_anchor_work` и `compositor_cursor_override_outer_resize_zone_traffic_gap_and_square_framing_work` покрыты unit-тестами (`11` в `rusty-wm`, `238` в `rusty-compositor`, 0 ошибок); `cargo fmt --check`, `clippy -D warnings` и живые `--winit` Wayland Light/Dark прогоны с клиентом `rusty-settings` (`RUSTYOS_TEST_CAPTURE_MENU=edge_snap`) проходят чисто с 0 WARN/ERROR и визуально подтверждённым Liquid Glass превью Edge Snap.
+- **Risks:** Низкие; 0 новых внешних Cargo-зависимостей, `crates/rusty-compositor` без `unsafe`.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

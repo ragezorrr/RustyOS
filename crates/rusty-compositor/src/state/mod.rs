@@ -119,12 +119,40 @@ pub use dock_dnd::{
 pub(in crate::state) use wayland_handlers::desktop_protocols::ToplevelIconEntry;
 pub(crate) use wayland_handlers::liquid_glass;
 
-/// Active mouse-driven window drag state via SSD titlebar (`RUSTYOS-019`).
+/// Active mouse-driven window drag state via SSD titlebar or client `xdg_toplevel::move` (`RUSTYOS-019` / `RUSTYOS-166`).
 #[derive(Debug, Clone, Copy)]
 pub struct WindowDragState {
     pub window_id: WindowId,
     pub start_pointer: Point<f64, Logical>,
     pub start_origin: (i32, i32),
+    /// `true` when the drag began while the window was maximized (enables 5px drag threshold + proportional anchor).
+    pub started_maximized: bool,
+    /// Original window width at drag start for proportional cursor anchoring on unmaximize.
+    pub start_width: i32,
+    /// `true` once a maximized drag passed the unmaximize threshold and anchored under the pointer.
+    pub unmaximized_during_drag: bool,
+    /// Active Edge/Corner Snap preview `(output_id, target, preview_rect)` shown during drag (`RUSTYOS-166`).
+    pub snap_preview: Option<(OutputId, rusty_wm::SnapTarget, Rect)>,
+}
+
+impl WindowDragState {
+    /// Constructs a new [`WindowDragState`] capturing the window's initial origin, width, and maximized state.
+    #[must_use]
+    pub const fn new(
+        window_id: WindowId,
+        start_pointer: Point<f64, Logical>,
+        win: &rusty_wm::ManagedWindow,
+    ) -> Self {
+        Self {
+            window_id,
+            start_pointer,
+            start_origin: (win.geometry.x, win.geometry.y),
+            started_maximized: win.maximized,
+            start_width: win.geometry.width,
+            unmaximized_during_drag: false,
+            snap_preview: None,
+        }
+    }
 }
 
 /// Active mouse-driven window resize state via SSD borders/corners (`RUSTYOS-022`).
@@ -488,8 +516,12 @@ pub struct RustyCompositorState {
     pub popups: PopupManager,
     /// Grabbed `xdg_popup` surfaces awaiting outside-click or Escape dismissal (`RUSTYOS-034`).
     pub active_popup_grabs: Vec<PopupSurface>,
-    /// Active cursor image state requested by focused Wayland clients (`RUSTYOS-034`).
+    /// Effective rendered cursor image status (compositor override or client cursor) (`RUSTYOS-034` / `RUSTYOS-166`).
     pub cursor_status: CursorImageStatus,
+    /// Last cursor image requested by the focused Wayland client (`RUSTYOS-166`).
+    pub client_cursor_status: CursorImageStatus,
+    /// Active compositor cursor override (resize arrows, drag grabbing, shell chrome) (`RUSTYOS-166`).
+    pub compositor_cursor_override: Option<smithay::input::pointer::CursorIcon>,
     /// Active virtual or physical primary output.
     pub output: Output,
     /// Multi-monitor coordinate layout and output registry (`RUSTYOS-040`).
@@ -664,6 +696,10 @@ pub struct RustyCompositorState {
     pub hovered_notification_idx: Option<usize>,
     /// Managed SSD window whose traffic-light button cluster is currently hovered (`RUSTYOS-051`).
     pub hovered_traffic_light_window: Option<WindowId>,
+    /// SSD traffic-light button currently pressed by LMB awaiting release confirmation (`RUSTYOS-166`).
+    pub pressed_ssd_button: Option<(WindowId, rusty_ui::TrafficLightKind)>,
+    /// Last LMB click on an SSD titlebar `(window_id, pos, instant)` for double-click Maximize/Restore (`RUSTYOS-166`).
+    pub last_titlebar_click: Option<(WindowId, Point<f64, Logical>, Instant)>,
     /// Live shell glass opacity multiplier (`0.35..=1.0`, default `0.78`) (`RUSTYOS-048`).
     pub glass_opacity: f32,
     /// High-contrast opaque shell panels mode (`RUSTYOS-048`).
@@ -1039,6 +1075,8 @@ impl RustyCompositorState {
             popups: PopupManager::default(),
             active_popup_grabs: Vec::new(),
             cursor_status: CursorImageStatus::default_named(),
+            client_cursor_status: CursorImageStatus::default_named(),
+            compositor_cursor_override: None,
             output,
             output_map,
             compositor_state,
@@ -1129,6 +1167,8 @@ impl RustyCompositorState {
             qs_slider_drag: None,
             hovered_notification_idx: None,
             hovered_traffic_light_window: None,
+            pressed_ssd_button: None,
+            last_titlebar_click: None,
             glass_opacity: initial_glass_opacity,
             reduce_transparency: initial_reduce_transparency,
             menubar_show_workspaces: initial_menubar_show_workspaces,
@@ -2140,6 +2180,44 @@ impl RustyCompositorState {
             return false;
         }
         serial.is_none_or(|req| self.last_pointer_press_serial == Some(req))
+    }
+
+    /// Recomputes `cursor_status` from `compositor_cursor_override` (if active) or `client_cursor_status` (`RUSTYOS-166`).
+    pub fn sync_effective_cursor_status(&mut self) {
+        let next = self.compositor_cursor_override.map_or_else(
+            || self.client_cursor_status.clone(),
+            CursorImageStatus::Named,
+        );
+        if self.cursor_status != next {
+            self.cursor_status = next;
+            self.shell_redraw_needed = true;
+        }
+    }
+
+    /// Sets or clears the compositor's cursor shape override and updates `cursor_status` (`RUSTYOS-166`).
+    pub fn set_compositor_cursor_override(
+        &mut self,
+        icon: Option<smithay::input::pointer::CursorIcon>,
+    ) {
+        if self.compositor_cursor_override != icon {
+            self.compositor_cursor_override = icon;
+            self.sync_effective_cursor_status();
+        }
+    }
+
+    /// Returns `true` when `win_id` should render with square corners and no drop shadow
+    /// (fullscreen, maximized, or `MasterStack` tiled) (`RUSTYOS-166`).
+    #[must_use]
+    pub fn window_is_square_framed(&self, win_id: WindowId) -> bool {
+        let Some(win) = self.wm.window(win_id) else {
+            return false;
+        };
+        if win.fullscreen || win.maximized {
+            return true;
+        }
+        self.wm
+            .workspace(win.workspace)
+            .is_some_and(|ws| ws.layout == rusty_wm::LayoutMode::MasterStack)
     }
 
     /// Computes the total bounding rectangle enclosing all connected outputs (`RUSTYOS-040`).

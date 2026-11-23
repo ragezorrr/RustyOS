@@ -169,6 +169,9 @@ impl RustyCompositorState {
         self.pointer_location = pos;
 
         if self.screenshot_hud.is_some() {
+            self.set_compositor_cursor_override(Some(
+                smithay::input::pointer::CursorIcon::Crosshair,
+            ));
             self.handle_screenshot_hud_motion(pos);
             self.dispatch_pointer_motion_to_surface(pos, None, time);
             return;
@@ -185,6 +188,11 @@ impl RustyCompositorState {
             } else {
                 None
             };
+            self.set_compositor_cursor_override(
+                under
+                    .is_none()
+                    .then_some(smithay::input::pointer::CursorIcon::Default),
+            );
             self.dispatch_pointer_motion_to_surface(pos, under, time);
             return;
         }
@@ -198,45 +206,13 @@ impl RustyCompositorState {
         }
         self.update_shell_hover_states(pos);
 
-        if let Some(drag) = self.active_window_drag {
-            #[allow(clippy::cast_possible_truncation)]
-            let dx = (pos.x - drag.start_pointer.x).round() as i32;
-            #[allow(clippy::cast_possible_truncation)]
-            let dy = (pos.y - drag.start_pointer.y).round() as i32;
-            if let Some(dest_out) = self.output_under(pos) {
-                let _ = self.wm.migrate_window_to_output(drag.window_id, dest_out);
-            }
-            let min_y = self
-                .output_under(pos)
-                .and_then(|out_id| self.wm.output(out_id))
-                .map_or(crate::shell_render::TOP_BAR_HEIGHT, |o| o.work_area.y);
-            let total = self.total_output_bounds();
-            let win_w = self
-                .wm
-                .window(drag.window_id)
-                .map_or(320, |w| w.geometry.width);
-            let min_x = total.loc.x - win_w + 64;
-            let max_x = total.loc.x + total.size.w - 64;
-            let max_y =
-                (total.loc.y + total.size.h - crate::shell_render::TITLEBAR_HEIGHT).max(min_y);
-            let new_x = (drag.start_origin.0 + dx).clamp(min_x, max_x.max(min_x));
-            let new_y = (drag.start_origin.1 + dy).clamp(min_y, max_y);
-            if self.wm.move_window(drag.window_id, new_x, new_y)
-                && let Some(win) = self.wm.window(drag.window_id)
-            {
-                let rect = win.geometry;
-                self.animations.snap_window_immediate(
-                    drag.window_id.0,
-                    rusty_animation::LogicalRect::new(rect.x, rect.y, rect.width, rect.height),
-                );
-                let serial = SERIAL_COUNTER.next_serial();
-                self.sync_space_with_wm(serial);
-                self.shell_redraw_needed = true;
-            }
+        if self.active_window_drag.is_some() {
+            self.handle_active_window_drag_motion(pos);
             return;
         }
 
         if let Some(resize) = self.active_window_resize {
+            self.set_compositor_cursor_override(Some(cursor_icon_for_resize_edges(resize.edges)));
             #[allow(clippy::cast_possible_truncation)]
             let dx = (pos.x - resize.start_pointer.x).round() as i32;
             #[allow(clippy::cast_possible_truncation)]
@@ -439,7 +415,135 @@ impl RustyCompositorState {
             self.target_surface_under(pos)
                 .map(|(_win, surface, origin)| (surface, origin))
         };
+        self.update_compositor_cursor_for_pointer(pos, under.is_some());
         self.dispatch_pointer_motion_to_surface(pos, under, time);
+    }
+
+    fn handle_active_window_drag_motion(&mut self, pos: Point<f64, Logical>) {
+        let Some(mut drag) = self.active_window_drag else {
+            return;
+        };
+        self.set_compositor_cursor_override(Some(smithay::input::pointer::CursorIcon::Grabbing));
+
+        let dest_out = self.output_under(pos);
+        let dest_work = dest_out
+            .and_then(|out_id| self.wm.output(out_id))
+            .map(|o| (o.id, o.work_area));
+        let min_y = dest_work.map_or(crate::shell_render::TOP_BAR_HEIGHT, |(_, wa)| wa.y);
+
+        // Hold maximized windows across a 5 px drag threshold so clicks/double-clicks never
+        // accidentally unmaximize, then anchor proportionally under the cursor (`RUSTYOS-166`).
+        if drag.started_maximized && !drag.unmaximized_during_drag {
+            let dist = (pos.x - drag.start_pointer.x).hypot(pos.y - drag.start_pointer.y);
+            if dist < 5.0 {
+                return;
+            }
+            let saved_w = self
+                .wm
+                .window(drag.window_id)
+                .map_or(640, |w| w.saved_floating_geometry.width);
+            let anchored = compute_unmaximized_drag_origin(
+                drag.start_pointer,
+                drag.start_origin,
+                drag.start_width,
+                saved_w,
+                pos,
+                min_y,
+            );
+            drag.start_origin = anchored;
+            drag.start_pointer = pos;
+            drag.unmaximized_during_drag = true;
+        }
+
+        if let Some(out_id) = dest_out {
+            let _ = self.wm.migrate_window_to_output(drag.window_id, out_id);
+        }
+
+        #[allow(clippy::cast_possible_truncation)]
+        let dx = (pos.x - drag.start_pointer.x).round() as i32;
+        #[allow(clippy::cast_possible_truncation)]
+        let dy = (pos.y - drag.start_pointer.y).round() as i32;
+        let total = self.total_output_bounds();
+        let win_w = self
+            .wm
+            .window(drag.window_id)
+            .map_or(320, |w| w.geometry.width);
+        let min_x = total.loc.x - win_w + 64;
+        let max_x = total.loc.x + total.size.w - 64;
+        let max_y = (total.loc.y + total.size.h - crate::shell_render::TITLEBAR_HEIGHT).max(min_y);
+        let new_x = (drag.start_origin.0 + dx).clamp(min_x, max_x.max(min_x));
+        let new_y = (drag.start_origin.1 + dy).clamp(min_y, max_y);
+
+        drag.snap_preview = dest_work.and_then(|(out_id, work_area)| {
+            detect_edge_snap_target(work_area, pos).map(|target| {
+                let preview = rusty_wm::compute_snap_rect(work_area, self.wm.gap_px, target);
+                (out_id, target, preview)
+            })
+        });
+        self.active_window_drag = Some(drag);
+
+        if self.wm.move_window(drag.window_id, new_x, new_y)
+            && let Some(win) = self.wm.window(drag.window_id)
+        {
+            let rect = win.geometry;
+            self.animations.snap_window_immediate(
+                drag.window_id.0,
+                rusty_animation::LogicalRect::new(rect.x, rect.y, rect.width, rect.height),
+            );
+            let serial = SERIAL_COUNTER.next_serial();
+            self.sync_space_with_wm(serial);
+            self.shell_redraw_needed = true;
+        }
+    }
+
+    pub(crate) fn update_compositor_cursor_for_pointer(
+        &mut self,
+        pos: Point<f64, Logical>,
+        has_client_surface: bool,
+    ) {
+        use smithay::input::pointer::CursorIcon;
+
+        if self.has_blocking_shell_overlay()
+            || self.context_menu.is_some()
+            || self.window_switcher.is_some()
+            || self.active_top_bar_menu.is_some()
+            || self.dock_hover_slot.is_some()
+            || self.dock_stack.is_some()
+            || self.dock_drag.is_some()
+        {
+            self.set_compositor_cursor_override(Some(CursorIcon::Default));
+            return;
+        }
+
+        let (_, is_on_primary, _, primary_local_y) = self.primary_local_coords(pos);
+        if is_on_primary
+            && primary_local_y < f64::from(crate::shell_render::TOP_BAR_HEIGHT)
+            && !self.should_hide_shell_chrome_for_fullscreen()
+        {
+            self.set_compositor_cursor_override(Some(CursorIcon::Default));
+            return;
+        }
+
+        let hit_windows = self.visible_ssd_hit_windows();
+        if let Some(hit) = crate::shell_render::check_window_frame_hit(&hit_windows, pos.x, pos.y) {
+            let icon = match hit {
+                crate::shell_render::SsdHit::Resize(_, edges) => {
+                    cursor_icon_for_resize_edges(edges)
+                }
+                crate::shell_render::SsdHit::Close(_)
+                | crate::shell_render::SsdHit::Minimize(_)
+                | crate::shell_render::SsdHit::Maximize(_)
+                | crate::shell_render::SsdHit::TitlebarDrag(_) => CursorIcon::Default,
+            };
+            self.set_compositor_cursor_override(Some(icon));
+            return;
+        }
+
+        if has_client_surface {
+            self.set_compositor_cursor_override(None);
+        } else {
+            self.set_compositor_cursor_override(Some(CursorIcon::Default));
+        }
     }
 
     pub(super) fn primary_local_coords(
@@ -500,10 +604,48 @@ impl RustyCompositorState {
                 self.handle_screenshot_hud_button(false);
                 return;
             }
+            if button == 272
+                && let Some((pressed_win, pressed_kind)) = self.pressed_ssd_button.take()
+            {
+                let hit_windows = self.visible_ssd_hit_windows();
+                let still_on_same = match crate::shell_render::check_window_frame_hit(
+                    &hit_windows,
+                    self.pointer_location.x,
+                    self.pointer_location.y,
+                ) {
+                    Some(crate::shell_render::SsdHit::Close(id)) => {
+                        id == pressed_win && pressed_kind == rusty_ui::TrafficLightKind::Close
+                    }
+                    Some(crate::shell_render::SsdHit::Minimize(id)) => {
+                        id == pressed_win && pressed_kind == rusty_ui::TrafficLightKind::Minimize
+                    }
+                    Some(crate::shell_render::SsdHit::Maximize(id)) => {
+                        id == pressed_win && pressed_kind == rusty_ui::TrafficLightKind::Maximize
+                    }
+                    _ => false,
+                };
+                if still_on_same {
+                    match pressed_kind {
+                        rusty_ui::TrafficLightKind::Close => {
+                            self.wm.focus_and_raise(pressed_win);
+                            self.apply_wm_action(WmAction::CloseFocused, serial);
+                        }
+                        rusty_ui::TrafficLightKind::Minimize => {
+                            self.minimize_window(pressed_win, serial);
+                        }
+                        rusty_ui::TrafficLightKind::Maximize => {
+                            self.wm.focus_and_raise(pressed_win);
+                            self.apply_wm_action(WmAction::ToggleMaximizeFocused, serial);
+                        }
+                    }
+                }
+                self.shell_redraw_needed = true;
+                return;
+            }
             let ended_drag = if button == 272 || self.pressed_pointer_buttons.is_empty() {
-                self.active_window_drag.take().is_some()
+                self.active_window_drag.take()
             } else {
-                false
+                None
             };
             let ended_resize = if button == 272 || self.pressed_pointer_buttons.is_empty() {
                 self.active_window_resize.take().is_some()
@@ -511,8 +653,19 @@ impl RustyCompositorState {
                 false
             };
             self.qs_slider_drag = None;
-            if ended_drag || ended_resize {
+            if let Some(drag) = ended_drag {
+                if let Some((out_id, target, _)) = drag.snap_preview {
+                    let _ = self.wm.migrate_window_to_output(drag.window_id, out_id);
+                    let _ = self.wm.snap_window(drag.window_id, target);
+                }
                 self.sync_space_with_wm(serial);
+                let has_surface = self.target_surface_under(self.pointer_location).is_some();
+                self.update_compositor_cursor_for_pointer(self.pointer_location, has_surface);
+                self.shell_redraw_needed = true;
+            } else if ended_resize {
+                self.sync_space_with_wm(serial);
+                let has_surface = self.target_surface_under(self.pointer_location).is_some();
+                self.update_compositor_cursor_for_pointer(self.pointer_location, has_surface);
                 self.shell_redraw_needed = true;
             }
             if button == 272
@@ -856,27 +1009,60 @@ impl RustyCompositorState {
                         self.open_window_context_menu(self.pointer_location, win_id);
                         return;
                     }
+                    if button != 272 {
+                        return;
+                    }
                     match hit {
                         crate::shell_render::SsdHit::Close(win_id) => {
                             self.wm.focus_and_raise(win_id);
-                            self.apply_wm_action(WmAction::CloseFocused, serial);
+                            self.sync_space_with_wm(serial);
+                            self.pressed_ssd_button =
+                                Some((win_id, rusty_ui::TrafficLightKind::Close));
+                            self.shell_redraw_needed = true;
                         }
                         crate::shell_render::SsdHit::Minimize(win_id) => {
-                            self.minimize_window(win_id, serial);
+                            self.wm.focus_and_raise(win_id);
+                            self.sync_space_with_wm(serial);
+                            self.pressed_ssd_button =
+                                Some((win_id, rusty_ui::TrafficLightKind::Minimize));
+                            self.shell_redraw_needed = true;
                         }
                         crate::shell_render::SsdHit::Maximize(win_id) => {
                             self.wm.focus_and_raise(win_id);
-                            self.apply_wm_action(WmAction::ToggleMaximizeFocused, serial);
+                            self.sync_space_with_wm(serial);
+                            self.pressed_ssd_button =
+                                Some((win_id, rusty_ui::TrafficLightKind::Maximize));
+                            self.shell_redraw_needed = true;
                         }
                         crate::shell_render::SsdHit::TitlebarDrag(win_id) => {
                             self.wm.focus_and_raise(win_id);
                             self.sync_space_with_wm(serial);
+                            let now = std::time::Instant::now();
+                            let is_double_click = self.last_titlebar_click.is_some_and(
+                                |(prev_id, prev_pos, prev_at)| {
+                                    prev_id == win_id
+                                        && now.duration_since(prev_at)
+                                            <= std::time::Duration::from_millis(400)
+                                        && (self.pointer_location.x - prev_pos.x)
+                                            .hypot(self.pointer_location.y - prev_pos.y)
+                                            <= 6.0
+                                },
+                            );
+                            if is_double_click {
+                                self.last_titlebar_click = None;
+                                self.apply_wm_action(WmAction::ToggleMaximizeFocused, serial);
+                                return;
+                            }
+                            self.last_titlebar_click = Some((win_id, self.pointer_location, now));
                             if let Some(win) = self.wm.window(win_id) {
-                                self.active_window_drag = Some(crate::state::WindowDragState {
-                                    window_id: win_id,
-                                    start_pointer: self.pointer_location,
-                                    start_origin: (win.geometry.x, win.geometry.y),
-                                });
+                                self.active_window_drag = Some(crate::state::WindowDragState::new(
+                                    win_id,
+                                    self.pointer_location,
+                                    win,
+                                ));
+                                self.set_compositor_cursor_override(Some(
+                                    smithay::input::pointer::CursorIcon::Grabbing,
+                                ));
                             }
                         }
                         crate::shell_render::SsdHit::Resize(win_id, edges) => {
@@ -889,13 +1075,17 @@ impl RustyCompositorState {
                                     start_pointer: self.pointer_location,
                                     start_rect: win.geometry,
                                 });
+                                self.set_compositor_cursor_override(Some(
+                                    cursor_icon_for_resize_edges(edges),
+                                ));
+                                self.sync_space_with_wm(serial);
                             }
                         }
                     }
                     return;
                 }
 
-                // Allow Alt+Left or Super+Left anywhere on a window (especially CSD windows) to drag it
+                // Allow Alt+Left or Super+Left anywhere on a non-fullscreen window to drag it
                 let mods = self.keyboard.modifier_state();
                 if button == 272 && (mods.alt || mods.logo) {
                     let target_id = self
@@ -912,16 +1102,21 @@ impl RustyCompositorState {
                                 )
                                 .filter(|id| !self.is_window_minimized(*id))
                         });
-                    if let Some(win_id) = target_id {
+                    if let Some(win_id) = target_id
+                        && self.wm.window(win_id).is_some_and(|w| !w.fullscreen)
+                    {
                         self.wm.focus_and_raise(win_id);
                         self.sync_space_with_wm(serial);
                         if let Some(win) = self.wm.window(win_id) {
                             self.active_window_resize = None;
-                            self.active_window_drag = Some(crate::state::WindowDragState {
-                                window_id: win_id,
-                                start_pointer: self.pointer_location,
-                                start_origin: (win.geometry.x, win.geometry.y),
-                            });
+                            self.active_window_drag = Some(crate::state::WindowDragState::new(
+                                win_id,
+                                self.pointer_location,
+                                win,
+                            ));
+                            self.set_compositor_cursor_override(Some(
+                                smithay::input::pointer::CursorIcon::Grabbing,
+                            ));
                             return;
                         }
                     }
@@ -1308,4 +1503,87 @@ pub(super) fn compute_resized_rect_with_bounds(
     }
 
     rusty_wm::Rect::new(x, y, w, h)
+}
+
+/// Maps window [`ResizeEdges`] to the matching standard Wayland [`CursorIcon`] (`RUSTYOS-166`).
+#[must_use]
+pub(crate) const fn cursor_icon_for_resize_edges(
+    edges: crate::shell_render::ResizeEdges,
+) -> smithay::input::pointer::CursorIcon {
+    use smithay::input::pointer::CursorIcon;
+
+    match (edges.left, edges.right, edges.top, edges.bottom) {
+        (true, false, true, false) => CursorIcon::NwResize,
+        (false, true, true, false) => CursorIcon::NeResize,
+        (true, false, false, true) => CursorIcon::SwResize,
+        (false, true, false, true) => CursorIcon::SeResize,
+        (true, false, false, false) => CursorIcon::WResize,
+        (false, true, false, false) => CursorIcon::EResize,
+        (false, false, true, false) => CursorIcon::NResize,
+        (false, false, false, true) => CursorIcon::SResize,
+        _ => CursorIcon::Default,
+    }
+}
+
+/// Detects an Edge/Corner Snap target when dragging a window near the bounds of `work_area` (`RUSTYOS-166`).
+#[must_use]
+pub(crate) fn detect_edge_snap_target(
+    work_area: rusty_wm::Rect,
+    pos: Point<f64, Logical>,
+) -> Option<rusty_wm::SnapTarget> {
+    const EDGE_BAND: f64 = 12.0;
+    const CORNER_BAND: f64 = 48.0;
+
+    let x0 = f64::from(work_area.x);
+    let y0 = f64::from(work_area.y);
+    let x1 = f64::from(work_area.x + work_area.width);
+    let y1 = f64::from(work_area.y + work_area.height);
+
+    let near_left = pos.x <= x0 + EDGE_BAND;
+    let near_right = pos.x >= x1 - EDGE_BAND;
+    let near_top = pos.y <= y0 + EDGE_BAND;
+    let in_top_corner = pos.y <= y0 + CORNER_BAND;
+    let in_bottom_corner = pos.y >= y1 - CORNER_BAND;
+
+    if near_left {
+        if in_top_corner {
+            Some(rusty_wm::SnapTarget::TopLeft)
+        } else if in_bottom_corner {
+            Some(rusty_wm::SnapTarget::BottomLeft)
+        } else {
+            Some(rusty_wm::SnapTarget::LeftHalf)
+        }
+    } else if near_right {
+        if in_top_corner {
+            Some(rusty_wm::SnapTarget::TopRight)
+        } else if in_bottom_corner {
+            Some(rusty_wm::SnapTarget::BottomRight)
+        } else {
+            Some(rusty_wm::SnapTarget::RightHalf)
+        }
+    } else if near_top {
+        Some(rusty_wm::SnapTarget::Maximize)
+    } else {
+        None
+    }
+}
+
+/// Computes the unmaximized floating window origin anchored proportionally beneath the pointer (`RUSTYOS-166`).
+#[must_use]
+pub(crate) fn compute_unmaximized_drag_origin(
+    start_pointer: Point<f64, Logical>,
+    start_origin: (i32, i32),
+    start_width: i32,
+    saved_width: i32,
+    pos: Point<f64, Logical>,
+    min_y: i32,
+) -> (i32, i32) {
+    let ratio = ((start_pointer.x - f64::from(start_origin.0)) / f64::from(start_width.max(1)))
+        .clamp(0.1, 0.9);
+    #[allow(clippy::cast_possible_truncation)]
+    let anchor_x = (pos.x - ratio * f64::from(saved_width.max(120))).round() as i32;
+    #[allow(clippy::cast_possible_truncation)]
+    let anchor_y =
+        ((pos.y - f64::from(crate::shell_render::TITLEBAR_HEIGHT) * 0.5).round() as i32).max(min_y);
+    (anchor_x, anchor_y)
 }

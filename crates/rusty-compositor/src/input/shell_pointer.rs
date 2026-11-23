@@ -410,9 +410,14 @@ impl RustyCompositorState {
         self.update_wifi_popover_hover(is_on_primary, chrome_hidden, local_x, local_y);
         self.update_top_bar_quick_popover_hover(is_on_primary, chrome_hidden, local_x, local_y);
         self.update_notification_center_hover(is_on_primary, chrome_hidden, local_x, local_y);
-        let fullscreen_active = self
-            .topmost_fullscreen_window_on(self.output_map.primary().id)
-            .is_some();
+        let ptr_output = self
+            .output_under(pos)
+            .unwrap_or_else(|| self.output_map.primary().id);
+        let fullscreen_active = self.topmost_fullscreen_window_on(ptr_output).is_some();
+
+        let prev_menu_hover = self.top_bar_menu_hover_row;
+        let prev_notif_hover = self.hovered_notification_idx;
+        let prev_tl_hover = self.hovered_traffic_light_window;
 
         self.top_bar_menu_hover_row = if is_on_primary && !chrome_hidden {
             if let Some(menu) = self.active_top_bar_menu {
@@ -474,6 +479,13 @@ impl RustyCompositorState {
         } else {
             None
         };
+
+        if self.top_bar_menu_hover_row != prev_menu_hover
+            || self.hovered_notification_idx != prev_notif_hover
+            || self.hovered_traffic_light_window != prev_tl_hover
+        {
+            self.shell_redraw_needed = true;
+        }
     }
 
     fn update_dock_stack_hover(&mut self, pos: Point<f64, Logical>) {

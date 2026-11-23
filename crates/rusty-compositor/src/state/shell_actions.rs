@@ -612,6 +612,8 @@ impl RustyCompositorState {
         self.qs_slider_drag = None;
         self.hovered_notification_idx = None;
         self.hovered_traffic_light_window = None;
+        self.pressed_ssd_button = None;
+        self.set_compositor_cursor_override(None);
     }
 
     /// Updates hovered Dock slot and triggers a 120 ms lift transition (`RUSTYOS-048`).

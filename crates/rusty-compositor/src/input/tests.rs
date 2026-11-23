@@ -1751,3 +1751,107 @@ fn custom_shortcuts_override_defaults_in_match_shortcut_with_config() {
         Some(KeyIntercept::Wm(WmAction::CloseFocused))
     );
 }
+
+#[test]
+fn edge_snap_detection_and_unmaximize_proportional_anchor_work() {
+    use rusty_wm::SnapTarget;
+
+    let work = rusty_wm::Rect::new(0, 28, 1280, 772);
+    assert_eq!(
+        pointer::detect_edge_snap_target(work, Point::from((640.0, 32.0))),
+        Some(SnapTarget::Maximize)
+    );
+    assert_eq!(
+        pointer::detect_edge_snap_target(work, Point::from((4.0, 400.0))),
+        Some(SnapTarget::LeftHalf)
+    );
+    assert_eq!(
+        pointer::detect_edge_snap_target(work, Point::from((1276.0, 400.0))),
+        Some(SnapTarget::RightHalf)
+    );
+    assert_eq!(
+        pointer::detect_edge_snap_target(work, Point::from((4.0, 40.0))),
+        Some(SnapTarget::TopLeft)
+    );
+    assert_eq!(
+        pointer::detect_edge_snap_target(work, Point::from((1276.0, 40.0))),
+        Some(SnapTarget::TopRight)
+    );
+    assert_eq!(
+        pointer::detect_edge_snap_target(work, Point::from((4.0, 790.0))),
+        Some(SnapTarget::BottomLeft)
+    );
+    assert_eq!(
+        pointer::detect_edge_snap_target(work, Point::from((1276.0, 790.0))),
+        Some(SnapTarget::BottomRight)
+    );
+    assert_eq!(
+        pointer::detect_edge_snap_target(work, Point::from((640.0, 400.0))),
+        None
+    );
+
+    // Grabbing the right quarter (x=960 on a 1280px maximized window) must anchor the 640px
+    // restored window so the cursor stays ~75% across its titlebar instead of jumping to x=0.
+    let (ax, ay) = pointer::compute_unmaximized_drag_origin(
+        Point::from((960.0, 40.0)),
+        (0, 28),
+        1280,
+        640,
+        Point::from((960.0, 100.0)),
+        28,
+    );
+    assert_eq!(ax, 480);
+    assert_eq!(ay, 86);
+}
+
+#[test]
+fn compositor_cursor_override_outer_resize_zone_traffic_gap_and_square_framing_work()
+-> Result<(), Box<dyn std::error::Error>> {
+    use smithay::input::pointer::{CursorIcon, CursorImageStatus};
+
+    let (_display, _event_loop, mut compositor) =
+        test_compositor_state("rusty-test-cursor-polish")?;
+    let w1 = compositor.wm.next_window_id();
+    let rect = compositor.wm.map_window(w1, Some((600, 400)));
+    assert!(!compositor.window_is_square_framed(w1));
+
+    // Client sets IBeam cursor, but hovering the left resize edge overrides with WResize.
+    compositor.client_cursor_status = CursorImageStatus::Named(CursorIcon::Text);
+    compositor.sync_effective_cursor_status();
+    assert_eq!(
+        compositor.cursor_status,
+        CursorImageStatus::Named(CursorIcon::Text)
+    );
+
+    let left_edge = Point::from((f64::from(rect.x) - 2.0, f64::from(rect.y + 120)));
+    compositor.apply_pointer_position(left_edge, 1);
+    assert_eq!(
+        compositor.cursor_status,
+        CursorImageStatus::Named(CursorIcon::WResize)
+    );
+
+    // 4 px inside the right edge must NOT trigger resize (keeps scrollbars clickable).
+    let inside_x = f64::from(rect.x + rect.width) - 4.0;
+    let inside_y = f64::from(rect.y + 120);
+    let hit_windows = compositor.visible_ssd_hit_windows();
+    assert_eq!(
+        crate::shell_render::check_window_frame_hit(&hit_windows, inside_x, inside_y),
+        None
+    );
+
+    // Traffic-light cluster hover stays continuous in the 4 px gap between Close and Minimize dots.
+    let gap_between_dots = Point::from((f64::from(rect.x) + 32.0, f64::from(rect.y) + 14.0));
+    compositor.shell_redraw_needed = false;
+    compositor.apply_pointer_position(gap_between_dots, 2);
+    assert_eq!(compositor.hovered_traffic_light_window, Some(w1));
+    assert!(compositor.shell_redraw_needed);
+
+    // Maximized and MasterStack windows render square-framed (no rounded corners or drop shadows).
+    let _ = compositor.wm.set_window_maximized(w1, true);
+    assert!(compositor.window_is_square_framed(w1));
+    let _ = compositor.wm.set_window_maximized(w1, false);
+    assert!(!compositor.window_is_square_framed(w1));
+    compositor.wm.toggle_layout_mode();
+    assert!(compositor.window_is_square_framed(w1));
+    Ok(())
+}

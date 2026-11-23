@@ -1274,6 +1274,18 @@
                            валидация `serial` в `move`/`resize`, мультимониторные `layer_shell`/`xdg_popup`/drag,
                            рендер/очистка XWayland override-redirect, синхронизация X11 координат/stacking и
                            правильный Z-order вложенных `xdg_popup` (`0` новых крейтов, `rusty-compositor` без `unsafe`)
+
+  D-109    Accepted        ADR-0095 (`RUSTYOS-166`): интерактивный UX WM (Фаза B) —
+                           композиторный override курсоров (`client_cursor_status` + `compositor_cursor_override`
+                           для ресайз-стрелок, `Grabbing`, `Crosshair` и shell/SSD), плавный unmaximize-on-drag
+                           с порогом `5 px` и пропорциональным якорением (`compute_unmaximized_drag_origin`),
+                           anchor-lock для top/left ресайза без дрожания, интерактивный Edge/Corner Snap
+                           (расширение `rusty_wm::SnapTarget` четвертями и `Maximize`, `compute_snap_rect`,
+                           `snap_window`, `detect_edge_snap_target`, Liquid Glass превью `generate_edge_snap_preview_elements`),
+                           двойной клик по SSD-заголовку, внешняя зона ресайза (`6 px` снаружи / `2 px` внутри),
+                           полировка светофора (только ЛКМ на Release с отменой, `is_hovered` без `4 px` зазоров,
+                           `shell_redraw_needed`, per-output fullscreen) и квадратные границы без теней для
+                           `maximized`/`MasterStack` окон (`0` новых крейтов, `rusty-compositor` без `unsafe`)
   -----------------------------------------------------------------------
 
 ## Открытые решения

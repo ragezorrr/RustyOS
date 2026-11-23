@@ -786,6 +786,15 @@ impl RustyCompositorState {
         if self.hovered_traffic_light_window == Some(win_id) {
             self.hovered_traffic_light_window = None;
         }
+        if self.pressed_ssd_button.is_some_and(|(id, _)| id == win_id) {
+            self.pressed_ssd_button = None;
+        }
+        if self
+            .last_titlebar_click
+            .is_some_and(|(id, _, _)| id == win_id)
+        {
+            self.last_titlebar_click = None;
+        }
         self.dock_app_last_active.retain(|_, id| *id != win_id);
         if self
             .dock_drag
@@ -1410,6 +1419,10 @@ impl RustyCompositorState {
     pub fn prune_dead_windows(&mut self) {
         if self.dnd_icon.as_ref().is_some_and(|surf| !surf.alive()) {
             self.dnd_icon = None;
+        }
+        if matches!(&self.client_cursor_status, CursorImageStatus::Surface(surf) if !surf.alive()) {
+            self.client_cursor_status = CursorImageStatus::default_named();
+            self.sync_effective_cursor_status();
         }
         if matches!(&self.cursor_status, CursorImageStatus::Surface(surf) if !surf.alive()) {
             self.cursor_status = CursorImageStatus::default_named();

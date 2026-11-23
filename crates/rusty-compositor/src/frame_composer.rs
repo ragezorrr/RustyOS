@@ -764,7 +764,7 @@ fn push_window_elements_with_options(
         .animations
         .animated_window_origin(win_id.0)
         .unwrap_or((rect.x, rect.y));
-    let origin = (
+    let mut origin = (
         global_origin.0 - output_loc.x,
         global_origin.1 - output_loc.y,
     );
@@ -774,20 +774,38 @@ fn push_window_elements_with_options(
     } else {
         0
     };
-    let actively_resizing = state
+    let active_resize = state
         .active_window_resize
-        .is_some_and(|resize| resize.window_id == win_id);
+        .filter(|resize| resize.window_id == win_id);
+    let actively_resizing = active_resize.is_some();
 
     let smithay_win = state.smithay_window_for_id(win_id);
     let committed_size = smithay_win.as_ref().map(|w| w.geometry().size);
+    // Anchor-lock top/left interactive resize: keep the opposite right/bottom edge pinned to
+    // `resize.start_rect` while waiting for the client to commit the resized buffer (`RUSTYOS-166`).
+    if let (Some(resize), Some(sz)) = (active_resize, committed_size)
+        && sz.w >= 64
+        && sz.h >= 64
+    {
+        let frame_w = sz.w;
+        let frame_h = sz.h + titlebar_h;
+        if resize.edges.left {
+            let right_edge = resize.start_rect.x + resize.start_rect.width - output_loc.x;
+            origin.0 = right_edge - frame_w;
+        }
+        if resize.edges.top {
+            let bottom_edge = resize.start_rect.y + resize.start_rect.height - output_loc.y;
+            origin.1 = bottom_edge - frame_h;
+        }
+    }
     let frame_rect = match (state.wm.active_layout_mode(), committed_size) {
-        (rusty_wm::LayoutMode::Floating, Some(sz))
-            if !actively_resizing && sz.w >= 64 && sz.h >= 64 =>
-        {
+        (rusty_wm::LayoutMode::Floating, Some(sz)) if sz.w >= 64 && sz.h >= 64 => {
             rusty_wm::Rect::new(origin.0, origin.1, sz.w, sz.h + titlebar_h)
         }
         _ => rusty_wm::Rect::new(origin.0, origin.1, rect.width, rect.height),
     };
+    let _ = actively_resizing;
+    let square_framed = is_fullscreen || state.window_is_square_framed(win_id);
 
     let has_open_popup = smithay_win
         .as_ref()
@@ -829,7 +847,7 @@ fn push_window_elements_with_options(
                 1.0,
             )
         };
-        if is_fullscreen {
+        if square_framed {
             surface_elems.extend(raw_elems.into_iter().map(CompositorRenderElement::Surface));
         } else {
             let clip_p0: Point<i32, smithay::utils::Physical> =
@@ -871,7 +889,7 @@ fn push_window_elements_with_options(
     if has_ssd {
         let title_text = state.window_title(win_id);
         backdrop_list.extend(
-            crate::shell_render::generate_window_ssd_composite_elements_with_hover(
+            crate::shell_render::generate_window_ssd_composite_elements_with_options(
                 text_cache,
                 shape_cache,
                 renderer,
@@ -879,6 +897,7 @@ fn push_window_elements_with_options(
                 &title_text,
                 is_focused,
                 ssd_hovered,
+                square_framed,
             ),
         );
     }
@@ -898,7 +917,7 @@ fn push_window_elements_with_options(
     }
 
     if include_shadow
-        && !is_fullscreen
+        && !square_framed
         && state.user_config.window_shadow != crate::config::WindowShadowMode::None
     {
         backdrop_list.extend(crate::shell_render::generate_window_shadow_elements(
@@ -1478,7 +1497,7 @@ fn push_minimize_warp_elements(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn build_backdrop_render_elements(
     renderer: &mut GlesRenderer,
     text_cache: &mut crate::text::TextCache,
@@ -1532,6 +1551,13 @@ fn build_backdrop_render_elements(
     let backdrop_logical =
         Size::<i32, Logical>::from((output_geo.size.w.max(1), output_geo.size.h.max(1)));
 
+    let drag_snap = state.active_window_drag.and_then(|d| {
+        d.snap_preview
+            .filter(|(out_id, _, _)| out_id.0 == output_id)
+            .map(|(_, _, preview_rect)| (d.window_id, preview_rect))
+    });
+    let mut drag_snap_drawn = false;
+
     // Walk bottom-to-top so every Liquid Glass window samples the true Dual-Kawase blur
     // of wallpaper, desktop items, and all windows strictly beneath it (zero self-blur).
     for &(win_id, rect) in output_windows {
@@ -1550,6 +1576,20 @@ fn build_backdrop_render_elements(
             && win_id != fs_id
         {
             continue;
+        }
+        if !drag_snap_drawn
+            && let Some((drag_win_id, preview_rect)) = drag_snap
+            && drag_win_id == win_id
+        {
+            accumulated = prepend_edge_snap_preview(
+                accumulated,
+                shape_cache,
+                renderer,
+                preview_rect,
+                output_loc,
+                output_scale,
+            );
+            drag_snap_drawn = true;
         }
         let is_focused = focused_win == Some(win_id);
         let is_fullscreen = fullscreen_win == Some(win_id) || state.is_window_fullscreen(win_id);
@@ -1597,7 +1637,42 @@ fn build_backdrop_render_elements(
         accumulated = win_scaled;
     }
 
+    if !drag_snap_drawn && let Some((_, preview_rect)) = drag_snap {
+        accumulated = prepend_edge_snap_preview(
+            accumulated,
+            shape_cache,
+            renderer,
+            preview_rect,
+            output_loc,
+            output_scale,
+        );
+    }
+
     accumulated
+}
+
+fn prepend_edge_snap_preview(
+    accumulated: Vec<CompositorRenderElement>,
+    shape_cache: &mut crate::surfaces::UiShapeCache,
+    renderer: &mut GlesRenderer,
+    preview_rect: rusty_wm::Rect,
+    output_loc: Point<i32, Logical>,
+    output_scale: f64,
+) -> Vec<CompositorRenderElement> {
+    let local_preview = rusty_wm::Rect::new(
+        preview_rect.x - output_loc.x,
+        preview_rect.y - output_loc.y,
+        preview_rect.width,
+        preview_rect.height,
+    );
+    let snap_raw = crate::shell_render::generate_edge_snap_preview_elements(
+        shape_cache,
+        renderer,
+        local_preview,
+    );
+    let mut snap_scaled = scale_render_elements_for_output(snap_raw, output_scale);
+    snap_scaled.extend(accumulated);
+    snap_scaled
 }
 
 /// Builds the front-to-back composite render element list for `output_id` using `cursor_mode` (`RUSTYOS-046`, `RUSTYOS-060`).

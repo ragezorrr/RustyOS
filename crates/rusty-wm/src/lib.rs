@@ -86,6 +86,46 @@ pub enum SnapTarget {
     RightHalf,
     /// Centered 70% of the work area.
     Center,
+    /// Top-left 25% quarter of the work area (`RUSTYOS-166`).
+    TopLeft,
+    /// Top-right 25% quarter of the work area (`RUSTYOS-166`).
+    TopRight,
+    /// Bottom-left 25% quarter of the work area (`RUSTYOS-166`).
+    BottomLeft,
+    /// Bottom-right 25% quarter of the work area (`RUSTYOS-166`).
+    BottomRight,
+    /// Full work area maximization (`RUSTYOS-166`).
+    Maximize,
+}
+
+/// Computes the destination logical rectangle for `target` inside `work_area` with `gap_px` spacing (`RUSTYOS-166`).
+#[must_use]
+pub fn compute_snap_rect(work_area: Rect, gap_px: i32, target: SnapTarget) -> Rect {
+    let gap = gap_px.max(0);
+    let half_w = ((work_area.width - gap * 3) / 2).max(100);
+    let full_h = (work_area.height - gap * 2).max(100);
+    let half_h = ((work_area.height - gap * 3) / 2).max(100);
+    let left_x = work_area.x + gap;
+    let right_x = work_area.x + gap * 2 + half_w;
+    let top_y = work_area.y + gap;
+    let bottom_y = work_area.y + gap * 2 + half_h;
+
+    match target {
+        SnapTarget::Maximize => work_area,
+        SnapTarget::LeftHalf => Rect::new(left_x, top_y, half_w, full_h),
+        SnapTarget::RightHalf => Rect::new(right_x, top_y, half_w, full_h),
+        SnapTarget::TopLeft => Rect::new(left_x, top_y, half_w, half_h),
+        SnapTarget::TopRight => Rect::new(right_x, top_y, half_w, half_h),
+        SnapTarget::BottomLeft => Rect::new(left_x, bottom_y, half_w, half_h),
+        SnapTarget::BottomRight => Rect::new(right_x, bottom_y, half_w, half_h),
+        SnapTarget::Center => {
+            let w = ((work_area.width * 7) / 10).max(200);
+            let h = ((work_area.height * 75) / 100).max(160);
+            let x = work_area.x + (work_area.width - w) / 2;
+            let y = work_area.y + (work_area.height - h) / 2;
+            Rect::new(x, y, w, h)
+        }
+    }
 }
 
 /// High-level window management actions triggered by keyboard shortcuts or shell UI.
@@ -918,33 +958,14 @@ impl WindowManager {
         self.set_window_fullscreen(win_id, next_state)
     }
 
-    /// Snaps the focused window to a [`SnapTarget`] and switches its state to non-maximized floating.
-    pub fn snap_focused(&mut self, target: SnapTarget) -> Option<Rect> {
-        let ws_id = self.active_workspace_id();
-        let win_id = self.focused_window()?;
+    /// Snaps `win_id` to a [`SnapTarget`] within its workspace's output work area (`RUSTYOS-166`).
+    pub fn snap_window(&mut self, win_id: WindowId, target: SnapTarget) -> Option<Rect> {
+        if target == SnapTarget::Maximize {
+            return self.set_window_maximized(win_id, true);
+        }
+        let ws_id = self.window(win_id)?.workspace;
         let work_area = self.work_area_for_workspace(ws_id);
-        let gap = self.gap_px.max(0);
-
-        let snapped = match target {
-            SnapTarget::LeftHalf => {
-                let half_w = ((work_area.width - gap * 3) / 2).max(100);
-                let h = (work_area.height - gap * 2).max(100);
-                Rect::new(work_area.x + gap, work_area.y + gap, half_w, h)
-            }
-            SnapTarget::RightHalf => {
-                let half_w = ((work_area.width - gap * 3) / 2).max(100);
-                let h = (work_area.height - gap * 2).max(100);
-                let x = work_area.x + gap * 2 + half_w;
-                Rect::new(x, work_area.y + gap, half_w, h)
-            }
-            SnapTarget::Center => {
-                let w = ((work_area.width * 7) / 10).max(200);
-                let h = ((work_area.height * 75) / 100).max(160);
-                let x = work_area.x + (work_area.width - w) / 2;
-                let y = work_area.y + (work_area.height - h) / 2;
-                Rect::new(x, y, w, h)
-            }
-        };
+        let snapped = compute_snap_rect(work_area, self.gap_px, target);
 
         if let Some(win) = self.windows.iter_mut().find(|w| w.id == win_id) {
             win.fullscreen = false;
@@ -955,6 +976,12 @@ impl WindowManager {
 
         self.relayout_workspace(ws_id);
         self.window(win_id).map(|w| w.geometry)
+    }
+
+    /// Snaps the focused window to a [`SnapTarget`] and switches its state accordingly.
+    pub fn snap_focused(&mut self, target: SnapTarget) -> Option<Rect> {
+        let win_id = self.focused_window()?;
+        self.snap_window(win_id, target)
     }
 
     /// Moves a window to `(x, y)` in logical space, clearing any maximized or fullscreen flag.
@@ -1501,5 +1528,36 @@ mod tests {
         // Migrating w1 to Output 2 works cleanly.
         assert!(wm.migrate_window_to_output(w1, OutputId(2)));
         assert_eq!(wm.window(w1).map(|w| w.workspace), Some(WorkspaceId(2)));
+    }
+
+    #[test]
+    fn snap_window_quarters_and_maximize_preserve_saved_floating_geometry() {
+        let work = Rect::new(0, 28, 1280, 772);
+        let mut wm = WindowManager::new(work);
+        let w1 = wm.next_window_id();
+        let initial = wm.map_window(w1, Some((640, 420)));
+
+        // Snapping to Maximize preserves saved_floating_geometry.
+        let max_rect = wm.snap_window(w1, SnapTarget::Maximize);
+        assert_eq!(max_rect, Some(work));
+        assert!(wm.window(w1).is_some_and(|w| w.maximized));
+        assert_eq!(
+            wm.window(w1).map(|w| w.saved_floating_geometry),
+            Some(initial)
+        );
+
+        // Quarter snap targets tile into 2x2 non-overlapping quadrants within work_area.
+        let tl = compute_snap_rect(work, wm.gap_px, SnapTarget::TopLeft);
+        let tr = compute_snap_rect(work, wm.gap_px, SnapTarget::TopRight);
+        let bl = compute_snap_rect(work, wm.gap_px, SnapTarget::BottomLeft);
+        let br = compute_snap_rect(work, wm.gap_px, SnapTarget::BottomRight);
+        assert_eq!(tl.x, work.x + wm.gap_px);
+        assert_eq!(tl.y, work.y + wm.gap_px);
+        assert!(tr.x >= tl.x + tl.width + wm.gap_px);
+        assert!(bl.y >= tl.y + tl.height + wm.gap_px);
+        assert_eq!(br.x, tr.x);
+        assert_eq!(br.y, bl.y);
+        assert_eq!(wm.snap_window(w1, SnapTarget::BottomRight), Some(br));
+        assert!(wm.window(w1).is_some_and(|w| !w.maximized));
     }
 }

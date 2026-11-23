@@ -139,12 +139,35 @@ pub fn run_nested_winit(config: &CompositorConfig) -> Result<BootstrapReport, Co
                             | "dock_minimize"
                             | "dock_dnd_slot"
                             | "dock_dnd_pin"
+                            | "edge_snap"
                     ) {
                         (70_u64, 95_u64)
                     } else {
                         (5_u64, 12_u64)
                     };
-                    if menu_test == "dock_minimize"
+                    if menu_test == "edge_snap"
+                        && rendered_frames == 45
+                        && let Some(win_id) = app_state.wm.focused_window()
+                        && let Some(win) = app_state.wm.window(win_id).cloned()
+                    {
+                        let out_id = app_state.output_map.primary().id;
+                        if let Some(out) = app_state.wm.output(out_id) {
+                            let preview = rusty_wm::compute_snap_rect(
+                                out.work_area,
+                                app_state.wm.gap_px,
+                                rusty_wm::SnapTarget::LeftHalf,
+                            );
+                            let mut drag = crate::state::WindowDragState::new(
+                                win_id,
+                                smithay::utils::Point::from((200.0, 80.0)),
+                                &win,
+                            );
+                            drag.snap_preview =
+                                Some((out_id, rusty_wm::SnapTarget::LeftHalf, preview));
+                            app_state.active_window_drag = Some(drag);
+                            app_state.shell_redraw_needed = true;
+                        }
+                    } else if menu_test == "dock_minimize"
                         && rendered_frames == 35
                         && let Some(win_id) = app_state.wm.focused_window()
                     {

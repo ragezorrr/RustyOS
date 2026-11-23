@@ -453,11 +453,8 @@ impl XwmHandler for RustyCompositorState {
             self.sync_space_with_wm(serial);
             if let Some(wm_win) = self.wm.window(win_id) {
                 self.active_window_resize = None;
-                self.active_window_drag = Some(WindowDragState {
-                    window_id: win_id,
-                    start_pointer: self.pointer_location,
-                    start_origin: (wm_win.geometry.x, wm_win.geometry.y),
-                });
+                self.active_window_drag =
+                    Some(WindowDragState::new(win_id, self.pointer_location, wm_win));
             }
         }
     }
