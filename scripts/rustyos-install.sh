@@ -317,7 +317,7 @@ run_dry_plan() {
     fi
 
     emit_step 40 keyring "[dry-run] Would initialize pacman-key and refresh archlinux-keyring"
-    emit_step 55 pacstrap "[dry-run] Would run pacstrap -K ${MOUNT_ROOT}: base linux linux-firmware networkmanager pipewire wireplumber seatd polkit mesa xorg-xwayland ttf-jetbrains-mono git base-devel greetd plymouth sudo ${boot_pkg} rustyos-git"
+    emit_step 55 pacstrap "[dry-run] Would run pacstrap -K ${MOUNT_ROOT}: base linux linux-firmware intel-ucode amd-ucode dosfstools networkmanager bluez bluez-utils upower pipewire wireplumber seatd polkit mesa xorg-xwayland xdg-utils xdg-desktop-portal-gtk unzip ttf-jetbrains-mono git base-devel greetd plymouth sudo ${boot_pkg} rustyos-git"
     emit_step 75 system "[dry-run] Would set timezone=${TIMEZONE_VAL}, locale=${LOCALE_VAL}, keymap=${KEYMAP_VAL}, hostname=${HOSTNAME_VAL}, user=${USERNAME_VAL}"
     emit_step 88 desktop "[dry-run] Would write /etc/greetd/config.toml (autologin=${AUTOLOGIN}) and ~/.config/rustyos/config.toml (theme=${APPEARANCE}, accent=${ACCENT_INDEX}, kb=${KB_LAYOUT}, oobe=${INSTALL_OOBE})"
     emit_step 90 yay "[dry-run] Would build and install optional yay-bin AUR helper for ${USERNAME_VAL} (with safe fallback)"
@@ -548,9 +548,10 @@ EOF
     emit_step 45 pacstrap "Installing base system, Wayland desktop, and RustyOS packages"
     # shellcheck disable=SC2086
     pacstrap -K "${pacstrap_conf_arg[@]}" "${MOUNT_ROOT}" \
-        base linux linux-firmware sof-firmware alsa-ucm-conf alsa-utils \
-        networkmanager pipewire pipewire-alsa pipewire-pulse wireplumber \
-        seatd polkit mesa xorg-xwayland ttf-jetbrains-mono git base-devel greetd plymouth sudo \
+        base linux linux-firmware intel-ucode amd-ucode dosfstools sof-firmware alsa-ucm-conf alsa-utils \
+        networkmanager bluez bluez-utils upower pipewire pipewire-alsa pipewire-pulse wireplumber \
+        seatd polkit mesa xorg-xwayland xdg-utils xdg-desktop-portal-gtk unzip \
+        ttf-jetbrains-mono git base-devel greetd plymouth sudo \
         ${boot_pkg} rustyos-git
 
     emit_step 75 system "Configuring timezone, locale, hostname, and user ${USERNAME_VAL}"
@@ -627,7 +628,11 @@ ShowDelay=0
 DeviceTimeout=5
 EOF
     if [[ -f "${MOUNT_ROOT}/etc/mkinitcpio.conf" ]] && ! grep -q '\bplymouth\b' "${MOUNT_ROOT}/etc/mkinitcpio.conf"; then
-        sed -i 's/\(HOOKS=(.*udev\)/\1 plymouth/' "${MOUNT_ROOT}/etc/mkinitcpio.conf"
+        if grep -q 'HOOKS=.*\bkms\b' "${MOUNT_ROOT}/etc/mkinitcpio.conf"; then
+            sed -i 's/\(HOOKS=(.*kms\)/\1 plymouth/' "${MOUNT_ROOT}/etc/mkinitcpio.conf"
+        else
+            sed -i 's/\(HOOKS=(.*udev\)/\1 plymouth/' "${MOUNT_ROOT}/etc/mkinitcpio.conf"
+        fi
     fi
     arch-chroot "${MOUNT_ROOT}" mkinitcpio -P
 
@@ -652,7 +657,7 @@ EOF
     fi
     arch-chroot "${MOUNT_ROOT}" chown -R "${USERNAME_VAL}:${USERNAME_VAL}" "/home/${USERNAME_VAL}/.config"
 
-    arch-chroot "${MOUNT_ROOT}" systemctl enable NetworkManager greetd
+    arch-chroot "${MOUNT_ROOT}" systemctl enable NetworkManager greetd bluetooth
     install_optional_yay_bin
 
     emit_step 95 bootloader "Installing ${BOOTLOADER}"

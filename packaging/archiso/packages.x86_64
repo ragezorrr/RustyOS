@@ -4,6 +4,8 @@ alsa-utils
 arch-install-scripts
 base
 base-devel
+bluez
+bluez-utils
 dosfstools
 e2fsprogs
 efibootmgr
@@ -36,7 +38,10 @@ sudo
 syslinux
 systemd-resolvconf
 ttf-jetbrains-mono
+unzip
+upower
 wireplumber
 xdg-desktop-portal
 xdg-desktop-portal-gtk
+xdg-utils
 xorg-xwayland
