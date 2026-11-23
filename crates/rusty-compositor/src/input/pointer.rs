@@ -613,8 +613,25 @@ impl RustyCompositorState {
                 self.pointer_location.y,
             ) && let Some(&toast_id) = visible_toast_ids.get(toast_idx)
             {
-                self.dismiss_notification(toast_id);
+                let rects = crate::shell_render::notification_toast_rects(
+                    output_phys,
+                    visible_toast_ids.len(),
+                );
+                let hit_close = rects.get(toast_idx).is_some_and(|card| {
+                    let cx = f64::from(card.loc.x + card.size.w - 28);
+                    let cy = f64::from(card.loc.y + 10);
+                    self.pointer_location.x >= cx
+                        && self.pointer_location.x < cx + 20.0
+                        && self.pointer_location.y >= cy
+                        && self.pointer_location.y < cy + 20.0
+                });
+                if hit_close {
+                    self.dismiss_notification(toast_id);
+                } else {
+                    self.activate_notification(toast_id);
+                }
                 self.hovered_notification_idx = None;
+                self.shell_redraw_needed = true;
                 return;
             }
 

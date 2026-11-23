@@ -43,10 +43,18 @@ pub enum DbusNotificationCommand {
     },
 }
 
+/// Outbound Freedesktop D-Bus signals emitted back to notification clients.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DbusNotificationSignal {
+    Closed { id: u32, reason: u32 },
+    ActionInvoked { id: u32, action_key: String },
+}
+
 /// Handle held by the compositor to drain D-Bus notifications non-blockingly.
 #[derive(Debug)]
 pub struct DbusNotificationHandle {
     rx: Mutex<mpsc::Receiver<DbusNotificationCommand>>,
+    signal_tx: mpsc::Sender<DbusNotificationSignal>,
     stop_flag: Arc<AtomicBool>,
     waker: Arc<Mutex<Option<Ping>>>,
     _thread: Option<JoinHandle<()>>,
@@ -55,8 +63,10 @@ pub struct DbusNotificationHandle {
 impl Default for DbusNotificationHandle {
     fn default() -> Self {
         let (_tx, rx) = mpsc::channel();
+        let (signal_tx, _signal_rx) = mpsc::channel();
         Self {
             rx: Mutex::new(rx),
+            signal_tx,
             stop_flag: Arc::new(AtomicBool::new(true)),
             waker: Arc::new(Mutex::new(None)),
             _thread: None,
@@ -78,18 +88,29 @@ impl DbusNotificationHandle {
     #[must_use]
     pub fn start_background() -> Self {
         let (tx, rx) = mpsc::channel();
+        let (signal_tx, signal_rx) = mpsc::channel();
         let stop_flag = Arc::new(AtomicBool::new(false));
         let thread_stop = Arc::clone(&stop_flag);
         let waker: Arc<Mutex<Option<Ping>>> = Arc::new(Mutex::new(None));
         let thread_waker = Arc::clone(&waker);
+        let thread_signal_tx = signal_tx.clone();
 
         let handle = thread::Builder::new()
             .name("rusty-dbus-notif".to_owned())
-            .spawn(move || run_dbus_server_loop(&tx, &thread_stop, &thread_waker))
+            .spawn(move || {
+                run_dbus_server_loop(
+                    &tx,
+                    &thread_signal_tx,
+                    &signal_rx,
+                    &thread_stop,
+                    &thread_waker,
+                );
+            })
             .ok();
 
         Self {
             rx: Mutex::new(rx),
+            signal_tx,
             stop_flag,
             waker,
             _thread: handle,
@@ -101,6 +122,22 @@ impl DbusNotificationHandle {
         if let Ok(mut guard) = self.waker.lock() {
             *guard = Some(ping);
         }
+    }
+
+    /// Emits `org.freedesktop.Notifications.NotificationClosed(id, reason)` asynchronously.
+    /// Standard Freedesktop reasons: `1` = expired, `2` = dismissed by user, `3` = closed by call.
+    pub fn emit_closed(&self, id: u32, reason: u32) {
+        let _ = self
+            .signal_tx
+            .send(DbusNotificationSignal::Closed { id, reason });
+    }
+
+    /// Emits `org.freedesktop.Notifications.ActionInvoked(id, action_key)` asynchronously.
+    pub fn emit_action_invoked(&self, id: u32, action_key: &str) {
+        let _ = self.signal_tx.send(DbusNotificationSignal::ActionInvoked {
+            id,
+            action_key: action_key.to_owned(),
+        });
     }
 
     /// Non-blockingly drains all pending D-Bus notification commands.
@@ -119,6 +156,7 @@ impl DbusNotificationHandle {
 
 struct NotificationsInterface {
     tx: mpsc::Sender<DbusNotificationCommand>,
+    signal_tx: mpsc::Sender<DbusNotificationSignal>,
     next_id: AtomicU32,
     waker: Arc<Mutex<Option<Ping>>>,
 }
@@ -186,12 +224,16 @@ impl NotificationsInterface {
             body: clean_body,
             expire_after,
         });
+        info!(id, app_name, "Received D-Bus notification");
         self.wake_compositor();
         id
     }
 
     fn close_notification(&self, id: u32) {
         let _ = self.tx.send(DbusNotificationCommand::Close { id });
+        let _ = self
+            .signal_tx
+            .send(DbusNotificationSignal::Closed { id, reason: 3 });
         self.wake_compositor();
     }
 
@@ -212,22 +254,56 @@ impl NotificationsInterface {
 
 fn try_bind_notification_bus(
     tx: &mpsc::Sender<DbusNotificationCommand>,
+    signal_tx: &mpsc::Sender<DbusNotificationSignal>,
     waker: &Arc<Mutex<Option<Ping>>>,
     bus_name: &str,
 ) -> Result<zbus::blocking::Connection, zbus::Error> {
     let iface = NotificationsInterface {
         tx: tx.clone(),
+        signal_tx: signal_tx.clone(),
         next_id: AtomicU32::new(100),
         waker: Arc::clone(waker),
     };
-    zbus::blocking::connection::Builder::session()?
+    let conn = zbus::blocking::connection::Builder::session()?
         .serve_at("/org/freedesktop/Notifications", iface)?
-        .name(bus_name)?
-        .build()
+        .build()?;
+    let reply =
+        conn.request_name_with_flags(bus_name, zbus::fdo::RequestNameFlags::DoNotQueue.into())?;
+    if !matches!(
+        reply,
+        zbus::fdo::RequestNameReply::PrimaryOwner | zbus::fdo::RequestNameReply::AlreadyOwner
+    ) {
+        return Err(zbus::Error::Failure(format!(
+            "D-Bus name '{bus_name}' is already owned ({reply:?})"
+        )));
+    }
+    Ok(conn)
+}
+
+fn emit_outbound_signal(conn: &zbus::blocking::Connection, sig: DbusNotificationSignal) {
+    let Ok(iface_ref) = conn
+        .object_server()
+        .interface::<_, NotificationsInterface>("/org/freedesktop/Notifications")
+    else {
+        return;
+    };
+    let emitter = iface_ref.signal_emitter();
+    let _ = zbus::block_on(async move {
+        match sig {
+            DbusNotificationSignal::Closed { id, reason } => {
+                NotificationsInterface::notification_closed(emitter, id, reason).await
+            }
+            DbusNotificationSignal::ActionInvoked { id, action_key } => {
+                NotificationsInterface::action_invoked(emitter, id, &action_key).await
+            }
+        }
+    });
 }
 
 fn run_dbus_server_loop(
     tx: &mpsc::Sender<DbusNotificationCommand>,
+    signal_tx: &mpsc::Sender<DbusNotificationSignal>,
+    signal_rx: &mpsc::Receiver<DbusNotificationSignal>,
     stop_flag: &AtomicBool,
     waker: &Arc<Mutex<Option<Ping>>>,
 ) {
@@ -235,12 +311,13 @@ fn run_dbus_server_loop(
     // `org.rustyos.Notifications` in nested sessions where KDE/GNOME already owns it.
     let (conn, bus_name) = match try_bind_notification_bus(
         tx,
+        signal_tx,
         waker,
         "org.freedesktop.Notifications",
     ) {
         Ok(c) => (c, "org.freedesktop.Notifications"),
         Err(primary_err) => {
-            match try_bind_notification_bus(tx, waker, "org.rustyos.Notifications") {
+            match try_bind_notification_bus(tx, signal_tx, waker, "org.rustyos.Notifications") {
                 Ok(c) => {
                     info!(
                         reason = %primary_err,
@@ -265,7 +342,16 @@ fn run_dbus_server_loop(
     );
 
     while !stop_flag.load(Ordering::Relaxed) {
-        thread::sleep(Duration::from_millis(200));
+        match signal_rx.recv_timeout(Duration::from_millis(100)) {
+            Ok(sig) => {
+                emit_outbound_signal(&conn, sig);
+                while let Ok(more) = signal_rx.try_recv() {
+                    emit_outbound_signal(&conn, more);
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
     }
     drop(conn);
 }

@@ -1222,19 +1222,32 @@ impl RustyCompositorState {
     }
 
     /// Removes notifications whose TTL has elapsed as of current uptime (`RUSTYOS-024`).
-    pub fn expire_notifications(&mut self) {
+    pub fn expire_notifications(&mut self) -> bool {
         let now = self.start_time.elapsed();
-        self.expire_notifications_at(now);
+        self.expire_notifications_at(now)
     }
 
     /// Removes notifications and transient OSD banners whose TTL has elapsed at `now` (`RUSTYOS-024`/`031`).
-    pub fn expire_notifications_at(&mut self, now: Duration) {
-        self.notifications
-            .retain(|n| now.saturating_sub(n.created_at) < n.ttl);
+    pub fn expire_notifications_at(&mut self, now: Duration) -> bool {
+        let mut expired_dbus_ids = Vec::new();
+        let prev_len = self.notifications.len();
+        self.notifications.retain(|n| {
+            let keep = now.saturating_sub(n.created_at) < n.ttl;
+            if !keep && let Some(dbus_id) = n.dbus_id {
+                expired_dbus_ids.push(dbus_id);
+            }
+            keep
+        });
+        for dbus_id in expired_dbus_ids {
+            self.dbus_notifications.emit_closed(dbus_id, 1);
+        }
         self.sync_notification_count();
+        let mut changed = self.notifications.len() != prev_len;
         if self.osd.as_ref().is_some_and(|osd| now >= osd.expires_at) {
             self.osd = None;
+            changed = true;
         }
+        changed
     }
 
     /// Displays a transient glass OSD indicator pill above the Dock (`RUSTYOS-031`).
@@ -1278,18 +1291,46 @@ impl RustyCompositorState {
         }
     }
 
+    /// Activates the default D-Bus action (`"default"`) on a clicked notification toast and dismisses it.
+    pub fn activate_notification(&mut self, id: u64) -> bool {
+        let dbus_id = self
+            .notifications
+            .iter()
+            .chain(self.notification_history.iter())
+            .find(|n| n.id == id)
+            .and_then(|n| n.dbus_id);
+        if let Some(did) = dbus_id {
+            self.dbus_notifications.emit_action_invoked(did, "default");
+        }
+        self.dismiss_notification(id)
+    }
+
     /// Dismisses a single active notification by ID (`RUSTYOS-024`, `RUSTYOS-109`).
     pub fn dismiss_notification(&mut self, id: u64) -> bool {
+        let dbus_id = self
+            .notifications
+            .iter()
+            .chain(self.notification_history.iter())
+            .find(|n| n.id == id)
+            .and_then(|n| n.dbus_id);
         let prev_len = self.notifications.len();
         let prev_hist = self.notification_history.len();
         self.notifications.retain(|n| n.id != id);
         self.notification_history.retain(|n| n.id != id);
+        if let Some(did) = dbus_id {
+            self.dbus_notifications.emit_closed(did, 2);
+        }
         self.sync_notification_count();
         self.notifications.len() < prev_len || self.notification_history.len() < prev_hist
     }
 
     /// Clears all active notifications from the HUD queue and Notification Center (`RUSTYOS-024`, `RUSTYOS-109`).
     pub fn clear_notifications(&mut self) {
+        for n in &self.notifications {
+            if let Some(did) = n.dbus_id {
+                self.dbus_notifications.emit_closed(did, 2);
+            }
+        }
         self.notifications.clear();
         self.notification_history.clear();
         self.sync_notification_count();

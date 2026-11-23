@@ -57,6 +57,9 @@ pub(crate) fn dispatch_and_refresh_clients(
 ) {
     let dispatch_start = Instant::now();
     app_state.drain_dbus_notifications();
+    if app_state.expire_notifications() {
+        app_state.shell_redraw_needed = true;
+    }
     app_state.drain_tray_updates();
     app_state.drain_screenshot_results();
     app_state.drain_trash_empty_results();

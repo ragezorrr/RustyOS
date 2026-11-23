@@ -17,15 +17,15 @@ use super::panel::compute_top_bar_right_layout;
 use super::panel::{TopBarLayoutOptions, compute_top_bar_right_layout_with_options};
 
 /// Shared notification card geometry matching `Notification-Center` (`RUSTYOS-110`).
-pub(crate) const NOTIFICATION_CARD_WIDTH: i32 = 344;
-pub(crate) const NOTIFICATION_CARD_HEIGHT: i32 = 68;
-pub(crate) const NOTIFICATION_CARD_RADIUS: i32 = 22;
-pub(crate) const NOTIFICATION_CARD_RIGHT_MARGIN: i32 = 14;
+pub(crate) const NOTIFICATION_CARD_WIDTH: i32 = 392;
+pub(crate) const NOTIFICATION_CARD_HEIGHT: i32 = 86;
+pub(crate) const NOTIFICATION_CARD_RADIUS: i32 = 20;
+pub(crate) const NOTIFICATION_CARD_RIGHT_MARGIN: i32 = 16;
 pub(crate) const NOTIFICATION_CARD_TOP_MARGIN: i32 = 12;
-const NOTIFICATION_ICON_SIZE: i32 = 38;
+const NOTIFICATION_ICON_SIZE: i32 = 46;
 const NOTIFICATION_ICON_OFFSET_X: i32 = 16;
-const NOTIFICATION_ICON_OFFSET_Y: i32 = 15;
-const NOTIFICATION_TEXT_OFFSET_X: i32 = 66;
+const NOTIFICATION_ICON_OFFSET_Y: i32 = 20;
+const NOTIFICATION_TEXT_OFFSET_X: i32 = 74;
 const NOTIFICATION_TEXT_RIGHT_PAD: i32 = 18;
 
 /// Active notification toast view rendered in the top-right Notification HUD (`RUSTYOS-024`).
@@ -602,12 +602,12 @@ pub(crate) fn push_notification_card_text_lines(
         (card_rect.size.w - NOTIFICATION_TEXT_OFFSET_X - NOTIFICATION_TEXT_RIGHT_PAD).max(80);
     // Reserve right clearance for the 20x20 hover close button on the title row.
     let title_max_w = (card_rect.size.w - NOTIFICATION_TEXT_OFFSET_X - 38).max(80);
-    let body_lines = wrap_notification_lines(text_cache, body, 11.5, max_w, 2);
+    let body_lines = wrap_notification_lines(text_cache, body, 13.0, max_w, 2);
 
     let (title_size, title_y) = match body_lines.len() {
-        0 => (13.0, ty + 25),
-        1 => (13.0, ty + 16),
-        _ => (12.5, ty + 9),
+        0 => (14.5, ty + 33),
+        1 => (14.5, ty + 20),
+        _ => (14.0, ty + 13),
     };
     let title_fit = truncate_text_to_width(
         text_cache,
@@ -636,9 +636,9 @@ pub(crate) fn push_notification_card_text_lines(
     };
     for (idx, line) in body_lines.iter().enumerate() {
         let line_y = if body_lines.len() >= 2 {
-            ty + 26 + i32::try_from(idx).unwrap_or(0) * 16
+            ty + 36 + i32::try_from(idx).unwrap_or(0) * 19
         } else {
-            ty + 35
+            ty + 44
         };
         let fg = if idx == 0 {
             lead_body_fg
@@ -646,7 +646,7 @@ pub(crate) fn push_notification_card_text_lines(
             pal.popover_text_secondary
         };
         if let Some(el) =
-            text_cache.render_label(renderer, line, 11.5, fg, Point::from((tx, line_y)))
+            text_cache.render_label(renderer, line, 13.0, fg, Point::from((tx, line_y)))
         {
             elements.push(el);
         }
@@ -663,8 +663,8 @@ mod tests {
         let multi = wrap_notification_lines(
             &cache,
             "hey buddy\n—— Stephen Hackett stephen@hackett.fm",
-            11.5,
-            260,
+            13.0,
+            300,
             2,
         );
         assert_eq!(multi.len(), 2);
@@ -673,7 +673,7 @@ mod tests {
 
         let rects = notification_toast_rects(Size::from((1280, 800)), 1);
         assert_eq!(rects.len(), 1);
-        assert_eq!(rects[0].size, Size::from((344, 68)));
-        assert_eq!(rects[0].loc.x, 1280 - 344 - 14);
+        assert_eq!(rects[0].size, Size::from((392, 86)));
+        assert_eq!(rects[0].loc.x, 1280 - 392 - 16);
     }
 }
