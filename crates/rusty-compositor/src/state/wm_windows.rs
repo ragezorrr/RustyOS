@@ -52,8 +52,25 @@ impl RustyCompositorState {
         let app_id = self.window_app_id(win_id);
         let app_key =
             crate::shell_render::canonical_dock_app_key(app_id.as_deref(), &title, win_id);
+        let target_output_id = self
+            .wm
+            .window(win_id)
+            .and_then(|w| {
+                let center = Point::from((
+                    f64::from(w.geometry.x) + f64::from(w.geometry.width) * 0.5,
+                    f64::from(w.geometry.y) + f64::from(w.geometry.height) * 0.5,
+                ));
+                self.output_map.output_under(center)
+            })
+            .unwrap_or_else(|| self.output_map.primary().id);
+        let output_loc = self
+            .output_map
+            .get(target_output_id)
+            .unwrap_or_else(|| self.output_map.primary())
+            .logical_geometry()
+            .loc;
         let tiles = self.build_dock_tiles();
-        let layout = self.active_dock_layout(&tiles);
+        let layout = self.dock_layout_for_output(target_output_id, &tiles);
         let target_slot = layout
             .slots
             .iter()
@@ -69,12 +86,17 @@ impl RustyCompositorState {
             });
         if let Some(slot) = target_slot {
             let r = slot.icon_rect;
-            return Rect::new(r.loc.x, r.loc.y, r.size.w.max(16), r.size.h.max(16));
+            return Rect::new(
+                output_loc.x + r.loc.x,
+                output_loc.y + r.loc.y,
+                r.size.w.max(16),
+                r.size.h.max(16),
+            );
         }
         let c = layout.capsule_rect;
         Rect::new(
-            c.loc.x + (c.size.w / 2 - 24).max(0),
-            c.loc.y + (c.size.h / 2 - 24).max(0),
+            output_loc.x + c.loc.x + (c.size.w / 2 - 24).max(0),
+            output_loc.y + c.loc.y + (c.size.h / 2 - 24).max(0),
             48,
             48,
         )
@@ -1134,7 +1156,9 @@ impl RustyCompositorState {
                     geo.size.to_physical(1),
                     self.user_config.dock_position,
                     self.user_config.dock_icon_size,
-                    self.user_config.dock_auto_hide,
+                    self.user_config
+                        .effective_dock_visibility()
+                        .expands_work_area(),
                 )
             },
         )
@@ -1477,6 +1501,8 @@ impl RustyCompositorState {
         }
 
         self.sync_keyboard_focus_with_wm(focused_id, serial);
+        self.record_focused_app_window(focused_id);
+        self.sync_dock_visibility_for_all_outputs(false);
     }
 
     fn sync_keyboard_focus_with_wm(&mut self, focused_id: Option<WindowId>, serial: Serial) {
@@ -1505,6 +1531,7 @@ impl RustyCompositorState {
             || self.lock_screen_anim.is_active()
             || self.dock_hover_anim.is_active()
             || self.dock_auto_hide_anim.is_active()
+            || self.has_active_dock_animations()
             || !self.app_bounces.is_empty()
             || self
                 .minimize_anims
@@ -1526,7 +1553,7 @@ impl RustyCompositorState {
         let _ = self.quick_settings_anim.tick(now);
         let _ = self.lock_screen_anim.tick(now);
         let _ = self.dock_hover_anim.tick(now);
-        let _ = self.dock_auto_hide_anim.tick(now);
+        self.tick_dock_states(now);
 
         if !self.app_bounces.is_empty() {
             for bounce in &mut self.app_bounces {

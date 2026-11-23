@@ -1713,6 +1713,14 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
         .context_menu
         .as_ref()
         .is_some_and(|ctx| ctx.output_id == output_entry.id);
+    let dock_visible_here = !top_layer_surfaces_present
+        && !hide_chrome_for_fullscreen
+        && !state.greeter_mode
+        && !state.is_session_locked()
+        && state.dock_reveal_for_output(output_entry.id) > 0.01;
+    let dock_stack_here = state
+        .dock_stack_render_state_for_output(output_entry.id)
+        .is_some();
     let needs_backdrop_blur = !state.screen_locked
         && !state.ext_session_locked
         && !state.reduce_transparency
@@ -1725,7 +1733,11 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
                     || state.polkit_prompt.is_some()
                     || state.portal_prompt.is_some()
             } else {
-                context_menu_here && !top_layer_surfaces_present && fullscreen_win.is_none()
+                dock_visible_here
+                    || dock_stack_here
+                    || (context_menu_here
+                        && !top_layer_surfaces_present
+                        && fullscreen_win.is_none())
             });
     if needs_backdrop_blur {
         let backdrop_logical = Size::<i32, Logical>::from((logical_size.w, logical_size.h));
@@ -1777,6 +1789,8 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
     }
 
     if is_primary {
+        let dock_tiles = state.build_dock_tiles();
+        let presented_dock = state.sync_dock_presentation_for_output(output_entry.id, &dock_tiles);
         let tray_views: Vec<TopBarTrayItem<'_>> = state
             .tray_items
             .iter()
@@ -1894,13 +1908,13 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
         let show_ov = !show_launcher && !show_qs && (state.overview_active || ov_progress > 0.01);
 
         let dock_windows = collect_dock_windows(state, &visible_windows, focused_win, show_ov);
-        let dock_tiles = state.build_dock_tiles();
         let dock_bounces = state.dock_bounce_offsets();
-        let dock_view = state.dock_view_state(
+        let dock_view = state.dock_view_state_for_output(
+            output_entry.id,
             &dock_tiles,
             &dock_windows,
             &dock_bounces,
-            state.dock_hover_slot,
+            Some(&presented_dock),
         );
 
         let switcher_cards: Vec<WindowSwitcherCard<'_>> =
@@ -2064,7 +2078,7 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
             .context_menu
             .as_ref()
             .filter(|ctx| ctx.output_id == output_entry.id);
-        let dock_stack_view = state.dock_stack_render_state();
+        let dock_stack_view = state.dock_stack_render_state_for_output(output_entry.id);
         let updates_view = state
             .updates_popover_open
             .then(|| state.updates_render_state(logical_size.w));
@@ -2181,17 +2195,36 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
             overview_overlay,
         ));
     } else {
-        render_list.extend(top_layer_elements);
-        if !top_layer_surfaces_present
+        let secondary_dock_prepared = dock_visible_here.then(|| {
+            let dock_tiles = state.build_dock_tiles();
+            let presented_dock =
+                state.sync_dock_presentation_for_output(output_entry.id, &dock_tiles);
+            (dock_tiles, presented_dock)
+        });
+        let secondary_context_menu = (!top_layer_surfaces_present
             && fullscreen_win.is_none()
             && !state.greeter_mode
             && !state.should_hide_shell_chrome_for_fullscreen_on(output_entry.id)
             && !state.is_session_locked()
             && state.polkit_prompt.is_none()
-            && state.portal_prompt.is_none()
-            && let Some(ref ctx) = state.context_menu
-            && ctx.output_id == output_entry.id
-        {
+            && state.portal_prompt.is_none())
+        .then(|| {
+            state
+                .context_menu
+                .as_ref()
+                .filter(|ctx| ctx.output_id == output_entry.id)
+        })
+        .flatten();
+        let secondary_stack = (!top_layer_surfaces_present
+            && fullscreen_win.is_none()
+            && !state.greeter_mode
+            && !state.should_hide_shell_chrome_for_fullscreen_on(output_entry.id)
+            && !state.is_session_locked()
+            && state.polkit_prompt.is_none()
+            && state.portal_prompt.is_none())
+        .then(|| state.dock_stack_render_state_for_output(output_entry.id))
+        .flatten();
+        if let Some(ctx) = secondary_context_menu {
             render_list.extend(crate::shell_render::generate_context_menu_elements(
                 text_cache,
                 shape_cache,
@@ -2202,7 +2235,25 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
                 ctx,
                 false,
             ));
+        } else if let Some(ref stack) = secondary_stack {
+            let secondary_telemetry = TopBarTelemetry {
+                glass_opacity: state.glass_opacity,
+                reduce_transparency: state.reduce_transparency,
+                ..TopBarTelemetry::default()
+            };
+            render_list.extend(
+                crate::shell_render::generate_shell_foreground_overlay_elements(
+                    text_cache,
+                    shape_cache,
+                    renderer,
+                    logical_size,
+                    &secondary_telemetry,
+                    ShellOverlayView::DockStack(stack),
+                    &[],
+                ),
+            );
         }
+        render_list.extend(top_layer_elements);
         push_client_popup_elements(
             &mut render_list,
             renderer,
@@ -2213,6 +2264,33 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
             &output_windows,
             fullscreen_win,
         );
+        if let Some((ref dock_tiles, ref presented_dock)) = secondary_dock_prepared {
+            let dock_bounces = state.dock_bounce_offsets();
+            let dock_view = state.dock_view_state_for_output(
+                output_entry.id,
+                dock_tiles,
+                &[],
+                &dock_bounces,
+                Some(presented_dock),
+            );
+            let secondary_overlay = if let Some(ctx) = secondary_context_menu {
+                ShellOverlayView::ContextMenu(ctx)
+            } else if let Some(ref stack) = secondary_stack {
+                ShellOverlayView::DockStack(stack)
+            } else {
+                ShellOverlayView::None
+            };
+            render_list.extend(crate::shell_render::generate_dock_only_chrome_elements(
+                text_cache,
+                shape_cache,
+                renderer,
+                logical_size,
+                &dock_view,
+                state.glass_opacity,
+                state.reduce_transparency,
+                secondary_overlay,
+            ));
+        }
     }
 
     shape_cache.clear_active_liquid_glass_backdrop();

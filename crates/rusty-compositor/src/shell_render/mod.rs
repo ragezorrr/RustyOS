@@ -40,6 +40,7 @@ mod chrome_shapes;
 mod context_menu;
 mod desktop_canvas;
 mod dock;
+mod dock_presentation;
 mod dock_stack;
 mod lock_screen;
 mod modals;
@@ -57,7 +58,8 @@ mod updates_popover;
 mod wifi_popover;
 
 pub use chrome_shapes::{
-    generate_shell_chrome_composite_elements, generate_shell_overview_elements,
+    generate_dock_only_chrome_elements, generate_shell_chrome_composite_elements,
+    generate_shell_overview_elements,
 };
 pub use overlay_shapes::generate_shell_foreground_overlay_elements;
 pub use text_pass::generate_shell_text_elements;
@@ -74,11 +76,15 @@ pub use desktop_canvas::{
     load_desktop_grid_positions, render_desktop_canvas_elements, save_desktop_grid_positions,
 };
 pub use dock::{
-    ComputedDockLayout, ComputedDockSlot, DockAppTile, DockDragPreview, DockHit, DockSection,
-    DockViewState, DockWindowEntry, append_utility_dock_tiles, canonical_dock_app_key,
-    check_dock_click, check_dock_layout_slot, check_dock_slot, compute_dock_layout,
-    dock_builtin_for_key, dock_hit_for_pinned_key, dock_label_for_key, dock_slot_rect,
-    extract_app_name, is_dock_pin_removable, is_pointer_in_dock_auto_hide_zone, make_window_badge,
+    ComputedDockLayout, ComputedDockSlot, DOCK_REVEAL_STRIP_PX, DockAppTile, DockDragPreview,
+    DockHit, DockSection, DockViewState, DockWindowEntry, append_utility_dock_tiles,
+    canonical_dock_app_key, check_dock_click, check_dock_layout_slot, check_dock_slot,
+    compute_dock_layout, dock_builtin_for_key, dock_hit_for_pinned_key, dock_label_for_key,
+    dock_obstruction_region, dock_slot_rect, extract_app_name, is_dock_pin_removable,
+    is_pointer_in_dock_auto_hide_zone, make_window_badge,
+};
+pub use dock_presentation::{
+    DOCK_LEAVE_DURATION, DOCK_PRESENTATION_DURATION, DockPresentation, dock_tile_presentation_key,
 };
 pub use dock_stack::{
     DockStackEntry, DockStackHit, DockStackItemSlot, DockStackLayout, DockStackRenderState,
@@ -128,7 +134,7 @@ pub use tokens::{
     DOCK_PINNED_COUNT, DOCK_RADIUS, DOCK_UTILITY_COUNT, RESIZE_GRAB_BORDER, TITLEBAR_HEIGHT,
     TOP_BAR_APP_X, TOP_BAR_FONT_SIZE, TOP_BAR_HEIGHT, TOP_BAR_ITEM_H, TOP_BAR_ITEM_Y,
     TOP_BAR_LOGO_W, TOP_BAR_LOGO_X, WINDOW_RADIUS, WS_BTN_GAP, WS_BTN_STRIDE, WS_BTN_WIDTH,
-    compute_dock_radius, usable_work_area, usable_work_area_with_dock,
+    compute_dock_radius, usable_work_area, usable_work_area_for_output, usable_work_area_with_dock,
 };
 pub use top_bar::{
     BarBackdropStyle, analyze_top_bar_backdrop_bgra, check_top_bar_menu_click_with_app_menu,

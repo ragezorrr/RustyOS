@@ -469,17 +469,23 @@ impl crate::state::RustyCompositorState {
 
     pub(crate) fn matching_windows_for_dock_key(&self, app_key: &str) -> Vec<WindowId> {
         let key = app_key.trim().to_ascii_lowercase();
-        self.ordered_visible_window_ids()
+        let merge_firefox = key == "browser" && self.is_browser_merged_with_firefox();
+        let mut matched: Vec<WindowId> = self
+            .ordered_visible_window_ids()
             .into_iter()
             .filter(|&win_id| {
                 let title = self.window_title(win_id);
                 let app_id = self.window_app_id(win_id);
-                crate::shell_render::canonical_dock_app_key(app_id.as_deref(), &title, win_id)
-                    == key
+                let canon =
+                    crate::shell_render::canonical_dock_app_key(app_id.as_deref(), &title, win_id);
+                canon == key || (merge_firefox && canon == "firefox")
             })
-            .collect()
+            .collect();
+        matched.sort_by_key(|id| id.0);
+        matched
     }
 
+    #[allow(clippy::too_many_lines)]
     pub(crate) fn build_dock_app_context_entries(
         &self,
         hit: DockHit,
@@ -506,9 +512,15 @@ impl crate::state::RustyCompositorState {
                 } else {
                     UiGlyphKind::WindowMax
                 };
+                let raw_title = self.window_title(win_id);
+                let item_label = if minimized {
+                    format!("{raw_title} (Minimized)")
+                } else {
+                    raw_title
+                };
                 entries.push(
                     ContextMenuEntry::item(
-                        self.window_title(win_id),
+                        item_label,
                         glyph,
                         ContextMenuAction::DockFocusWindow(win_id),
                     )
@@ -568,7 +580,8 @@ impl crate::state::RustyCompositorState {
         let has_running = !matching.is_empty();
         if has_running {
             entries.push(ContextMenuEntry::Separator);
-            let quit_entry = if alt_held {
+            let escalate_force = alt_held || self.is_app_quit_pending(&app_key);
+            let quit_entry = if escalate_force {
                 ContextMenuEntry::item(
                     "Force Quit",
                     UiGlyphKind::Close,
@@ -676,6 +689,7 @@ impl crate::state::RustyCompositorState {
         };
         let matching = self.matching_windows_for_dock_key(&app_key);
         if force {
+            self.clear_pending_app_quit(&app_key);
             let self_pid = std::process::id();
             let pids: BTreeSet<u32> = matching
                 .iter()
@@ -690,6 +704,10 @@ impl crate::state::RustyCompositorState {
                 self.kill_pids_gracefully_forced(&pids);
             }
         } else {
+            if !matching.is_empty() {
+                let label = crate::shell_render::dock_label_for_key(&app_key);
+                self.begin_graceful_app_quit(&app_key, &label);
+            }
             for id in matching {
                 self.close_window_by_id(id);
             }

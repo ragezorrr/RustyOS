@@ -265,10 +265,10 @@ impl RustyCompositorState {
             ));
             let screen_size = primary_geo.size;
             let tiles = self.build_dock_tiles();
-            let layout = self.active_dock_layout(&tiles);
+            let layout = self.dock_layout_for_output(primary_entry.id, &tiles);
             let drop_to_trash =
                 crate::shell_render::check_dock_layout_slot(&layout, local_pos.x, local_pos.y)
-                    .and_then(|idx| layout.slots.get(idx))
+                    .and_then(|idx| layout.slots.iter().find(|s| s.slot_idx == idx))
                     .is_some_and(|slot| slot.tile.hit == crate::shell_render::DockHit::PinnedTrash);
 
             if let Some(ref mut drag) = self.desktop_drag {
@@ -635,13 +635,22 @@ impl RustyCompositorState {
                 return;
             }
 
-            // Handle Dock clicks & internal drag-reorder (`RUSTYOS-023` / `RUSTYOS-064` / `RUSTYOS-073`) before Overview/windows when visible
+            // Handle Dock clicks & internal drag-reorder (`RUSTYOS-023` / `RUSTYOS-064` / `RUSTYOS-073` / `RUSTYOS-161`) across all outputs
+            let (cursor_output_id, _, _, dock_local_x, dock_local_y) =
+                self.output_local_coords(self.pointer_location);
+            let dock_chrome_visible_here = !self
+                .has_foreground_layer_surfaces_on_id(cursor_output_id)
+                && !self.should_hide_shell_chrome_for_fullscreen_on(cursor_output_id);
             let (_, is_on_primary, primary_local_x, primary_local_y) =
                 self.primary_local_coords(self.pointer_location);
             let ordered_ids = self.ordered_visible_window_ids();
-            if is_on_primary
-                && shell_chrome_visible
-                && self.handle_dock_pointer_press(primary_local_x, primary_local_y, button)
+            if dock_chrome_visible_here
+                && self.handle_dock_pointer_press(
+                    cursor_output_id,
+                    dock_local_x,
+                    dock_local_y,
+                    button,
+                )
             {
                 return;
             }

@@ -310,6 +310,74 @@ impl DockPosition {
     }
 }
 
+/// Dock visibility and auto-hide policy (`RUSTYOS-161`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DockVisibilityMode {
+    /// Keep the Dock permanently visible and reserve `usable_work_area`.
+    #[default]
+    AlwaysShow,
+    /// Hide the Dock only when obstructed by a visible or maximized window on the same output.
+    SmartHide,
+    /// Always hide the Dock when idle and reveal on screen-edge hover.
+    AlwaysHide,
+}
+
+impl DockVisibilityMode {
+    /// Canonical TOML key string.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::AlwaysShow => "always_show",
+            Self::SmartHide => "smart_hide",
+            Self::AlwaysHide => "always_hide",
+        }
+    }
+
+    /// Human-readable UI label shown in `System Settings -> Dock & Desktop`.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::AlwaysShow => "Always Show",
+            Self::SmartHide => "Smart Hide",
+            Self::AlwaysHide => "Always Hide",
+        }
+    }
+
+    /// Cycles `AlwaysShow -> SmartHide -> AlwaysHide -> AlwaysShow`.
+    #[must_use]
+    pub const fn next(self) -> Self {
+        match self {
+            Self::AlwaysShow => Self::SmartHide,
+            Self::SmartHide => Self::AlwaysHide,
+            Self::AlwaysHide => Self::AlwaysShow,
+        }
+    }
+
+    /// Returns `true` when windows may expand across the Dock strip (`SmartHide` or `AlwaysHide`).
+    #[must_use]
+    pub const fn expands_work_area(self) -> bool {
+        !matches!(self, Self::AlwaysShow)
+    }
+
+    /// Returns `true` when the Dock participates in edge-reveal auto-hide transitions.
+    #[must_use]
+    pub const fn uses_auto_hide_reveal(self) -> bool {
+        !matches!(self, Self::AlwaysShow)
+    }
+
+    /// Parses a persisted string from `[dock].visibility`.
+    #[must_use]
+    pub fn parse(raw: &str) -> Option<Self> {
+        match strip_toml_quotes(raw).trim().to_ascii_lowercase().as_str() {
+            "always_show" | "always-show" | "show" | "never" => Some(Self::AlwaysShow),
+            "smart_hide" | "smart-hide" | "smart" | "intellihide" | "intell_hide"
+            | "when_obstructed" | "when-obstructed" | "dodge" => Some(Self::SmartHide),
+            "always_hide" | "always-hide" | "hide" | "always" => Some(Self::AlwaysHide),
+            _ => None,
+        }
+    }
+}
+
 /// Window minimize/restore animation effect into the Dock (`RUSTYOS-073`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DockMinimizeEffect {
@@ -1007,7 +1075,9 @@ pub struct UserConfig {
     pub dock_minimize_effect: DockMinimizeEffect,
     /// Minimize windows directly into their owning application's Dock icon (`RUSTYOS-073`).
     pub dock_minimize_into_app: bool,
-    /// Automatically hide Dock when idle and expand `usable_work_area` (`RUSTYOS-073`).
+    /// Dock visibility policy (`AlwaysShow`, `SmartHide`, or `AlwaysHide`) (`RUSTYOS-161`).
+    pub dock_visibility: DockVisibilityMode,
+    /// Legacy alias for `dock_visibility == DockVisibilityMode::AlwaysHide` (`RUSTYOS-073`).
     pub dock_auto_hide: bool,
     /// Bounce app icon while launching (`RUSTYOS-073`).
     pub dock_animate_opening: bool,
@@ -1112,6 +1182,7 @@ impl Default for UserConfig {
             dock_position: DockPosition::Bottom,
             dock_minimize_effect: DockMinimizeEffect::Genie,
             dock_minimize_into_app: false,
+            dock_visibility: DockVisibilityMode::AlwaysShow,
             dock_auto_hide: false,
             dock_animate_opening: true,
             dock_show_indicators: true,
@@ -1187,6 +1258,7 @@ impl UserConfig {
         let mut section = String::new();
         let mut pending_array_key: Option<String> = None;
         let mut pending_array_buf = String::new();
+        let mut explicit_dock_visibility: Option<DockVisibilityMode> = None;
 
         for raw_line in src.lines() {
             let line = strip_toml_comment(raw_line).trim();
@@ -1233,10 +1305,31 @@ impl UserConfig {
                 continue;
             }
 
+            if section == "dock"
+                && key == "visibility"
+                && let Some(vis) = DockVisibilityMode::parse(val)
+            {
+                explicit_dock_visibility = Some(vis);
+            }
             cfg.apply_toml_kv(&section, key, val);
         }
 
+        if let Some(vis) = explicit_dock_visibility {
+            cfg.dock_visibility = vis;
+            cfg.dock_auto_hide = matches!(vis, DockVisibilityMode::AlwaysHide);
+        }
+
         cfg
+    }
+
+    /// Resolves effective Dock visibility, honoring legacy `dock_auto_hide = true` when
+    /// `dock_visibility` was left at its default (`RUSTYOS-161`).
+    #[must_use]
+    pub const fn effective_dock_visibility(&self) -> DockVisibilityMode {
+        match self.dock_visibility {
+            DockVisibilityMode::AlwaysShow if self.dock_auto_hide => DockVisibilityMode::AlwaysHide,
+            other => other,
+        }
     }
 
     fn apply_toml_kv(&mut self, section: &str, key: &str, val: &str) {
@@ -1365,9 +1458,20 @@ impl UserConfig {
                     self.dock_minimize_into_app = b;
                 }
             }
+            "visibility" => {
+                if let Some(vis) = DockVisibilityMode::parse(val) {
+                    self.dock_visibility = vis;
+                    self.dock_auto_hide = matches!(vis, DockVisibilityMode::AlwaysHide);
+                }
+            }
             "auto_hide" => {
                 if let Ok(b) = val.parse::<bool>() {
                     self.dock_auto_hide = b;
+                    self.dock_visibility = if b {
+                        DockVisibilityMode::AlwaysHide
+                    } else {
+                        DockVisibilityMode::AlwaysShow
+                    };
                 }
             }
             "animate_opening" => {
@@ -1927,8 +2031,14 @@ impl UserConfig {
             "minimize_effect = \"{}\"",
             self.dock_minimize_effect.as_str()
         );
+        let vis = self.effective_dock_visibility();
         let _ = writeln!(out, "minimize_into_app = {}", self.dock_minimize_into_app);
-        let _ = writeln!(out, "auto_hide = {}", self.dock_auto_hide);
+        let _ = writeln!(out, "visibility = \"{}\"", vis.as_str());
+        let _ = writeln!(
+            out,
+            "auto_hide = {}",
+            matches!(vis, DockVisibilityMode::AlwaysHide)
+        );
         let _ = writeln!(out, "animate_opening = {}", self.dock_animate_opening);
         let _ = writeln!(out, "show_indicators = {}", self.dock_show_indicators);
         let _ = writeln!(out, "show_recent = {}", self.dock_show_recent);
@@ -2539,6 +2649,7 @@ mod tests {
             dock_position: DockPosition::Left,
             dock_minimize_effect: DockMinimizeEffect::Scale,
             dock_minimize_into_app: true,
+            dock_visibility: DockVisibilityMode::AlwaysHide,
             dock_auto_hide: true,
             dock_animate_opening: false,
             dock_show_indicators: false,
@@ -2682,6 +2793,52 @@ mod tests {
         assert_eq!(
             LowPowerMode::Never.desired_profile(false, true),
             PowerProfile::Balanced
+        );
+    }
+
+    #[test]
+    fn parses_dock_visibility_modes_and_preserves_legacy_auto_hide_compat() {
+        let legacy = UserConfig::parse_toml("[dock]\nauto_hide = true\n");
+        assert_eq!(legacy.dock_visibility, DockVisibilityMode::AlwaysHide);
+        assert_eq!(
+            legacy.effective_dock_visibility(),
+            DockVisibilityMode::AlwaysHide
+        );
+        assert!(legacy.dock_auto_hide);
+
+        let smart_with_legacy_false =
+            UserConfig::parse_toml("[dock]\nvisibility = \"smart_hide\"\nauto_hide = false\n");
+        assert_eq!(
+            smart_with_legacy_false.dock_visibility,
+            DockVisibilityMode::SmartHide
+        );
+        assert!(!smart_with_legacy_false.dock_auto_hide);
+        assert!(smart_with_legacy_false.dock_visibility.expands_work_area());
+        assert!(
+            smart_with_legacy_false
+                .dock_visibility
+                .uses_auto_hide_reveal()
+        );
+
+        let roundtrip = UserConfig::parse_toml(&smart_with_legacy_false.to_toml_string());
+        assert_eq!(roundtrip.dock_visibility, DockVisibilityMode::SmartHide);
+        assert!(!roundtrip.dock_auto_hide);
+
+        assert_eq!(
+            DockVisibilityMode::parse("intellihide"),
+            Some(DockVisibilityMode::SmartHide)
+        );
+        assert_eq!(
+            DockVisibilityMode::AlwaysShow.next(),
+            DockVisibilityMode::SmartHide
+        );
+        assert_eq!(
+            DockVisibilityMode::SmartHide.next(),
+            DockVisibilityMode::AlwaysHide
+        );
+        assert_eq!(
+            DockVisibilityMode::AlwaysHide.next(),
+            DockVisibilityMode::AlwaysShow
         );
     }
 }

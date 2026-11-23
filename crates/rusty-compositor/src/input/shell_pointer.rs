@@ -21,36 +21,49 @@ impl RustyCompositorState {
     }
 
     pub(super) fn update_dock_hover_slot(&mut self, pos: Point<f64, Logical>) {
-        let (_primary_size, is_on_primary, local_x, local_y) = self.primary_local_coords(pos);
-        let logical_size = self.primary_output_logical_size();
-        let chrome_allowed = is_on_primary
-            && !self.launcher_active
+        let (output_id, is_primary, logical_size, local_x, local_y) = self.output_local_coords(pos);
+        let chrome_allowed = !self.launcher_active
             && !self.quick_settings_active
             && !self.updates_popover_open
             && !self.wifi_popover_open
             && !self.notification_center_open
-            && !self.has_foreground_layer_surfaces()
-            && !self.should_hide_shell_chrome_for_fullscreen();
+            && !self.has_foreground_layer_surfaces_on_id(output_id)
+            && !self.should_hide_shell_chrome_for_fullscreen_on(output_id);
 
-        if chrome_allowed && self.dock_drag.is_some() {
-            self.update_dock_drag_motion(logical_size, local_x, local_y);
-            self.set_dock_auto_hide_hovered(true);
+        if chrome_allowed && let Some(drag_output) = self.dock_drag.as_ref().map(|d| d.output_id) {
+            let drag_geo = self
+                .output_map
+                .get(drag_output)
+                .unwrap_or_else(|| self.output_map.primary())
+                .logical_geometry();
+            let drag_size = Size::from((drag_geo.size.w.max(320), drag_geo.size.h.max(240)));
+            let drag_local_x = pos.x - f64::from(drag_geo.loc.x);
+            let drag_local_y = pos.y - f64::from(drag_geo.loc.y);
+            self.active_dock_output = Some(drag_output);
+            self.update_dock_drag_motion(drag_output, drag_size, drag_local_x, drag_local_y);
+            self.set_dock_hovered_on_output(drag_output, true);
             return;
         }
         if !chrome_allowed {
-            self.set_dock_auto_hide_hovered(false);
+            self.set_dock_hovered_on_output(output_id, false);
             self.set_dock_hover_slot(None);
             return;
         }
 
         let tiles = self.build_dock_tiles();
-        let bounces = self.dock_bounce_offsets();
-        let dock_view = self.dock_view_state(&tiles, &[], &bounces, self.dock_hover_slot);
-        let layout = crate::shell_render::compute_dock_layout(logical_size, &dock_view);
+        let layout = self.dock_layout_for_output(output_id, &tiles);
         let next_slot = crate::shell_render::check_dock_layout_slot(&layout, local_x, local_y);
+        let bounces = self.dock_bounce_offsets();
+        let dock_view =
+            self.dock_view_state_for_output(output_id, &tiles, &[], &bounces, Some(&layout));
 
-        if self.user_config.dock_auto_hide {
-            let reveal = self.dock_auto_hide_anim.current();
+        let mut hovered_this_dock = next_slot.is_some();
+        if self
+            .user_config
+            .effective_dock_visibility()
+            .uses_auto_hide_reveal()
+        {
+            let reveal = self.dock_reveal_for_output(output_id);
             let in_edge = crate::shell_render::is_pointer_in_dock_auto_hide_zone(
                 logical_size,
                 &dock_view,
@@ -66,20 +79,29 @@ impl RustyCompositorState {
                 && local_y >= f64::from(c.loc.y - pad)
                 && local_y < f64::from(c.loc.y + c.size.h + pad);
             let in_stack = self
-                .dock_stack_render_state()
+                .dock_stack_render_state_for_output(output_id)
                 .and_then(|st| {
                     crate::shell_render::hit_test_dock_stack(logical_size, &st, local_x, local_y)
                 })
                 .is_some();
-            self.set_dock_auto_hide_hovered(in_edge || near_capsule || in_stack);
+            hovered_this_dock = in_edge || near_capsule || in_stack;
+            self.set_dock_hovered_on_output(output_id, hovered_this_dock);
         }
 
-        self.set_dock_hover_slot(next_slot);
+        if hovered_this_dock || (is_primary && next_slot.is_some()) {
+            self.active_dock_output = Some(output_id);
+        }
+        if self.active_dock_output == Some(output_id) {
+            self.set_dock_hover_slot(next_slot);
+        } else {
+            self.set_dock_hover_slot(None);
+        }
     }
 
     fn update_dock_drag_motion(
         &mut self,
-        primary_size: Size<i32, smithay::utils::Physical>,
+        output_id: rusty_wm::OutputId,
+        output_size: Size<i32, smithay::utils::Physical>,
         local_x: f64,
         local_y: f64,
     ) {
@@ -96,15 +118,24 @@ impl RustyCompositorState {
         let mut pulled_outside = false;
 
         if active_drag && source_pinned.is_some() {
+            let is_primary = self
+                .output_map
+                .get(output_id)
+                .is_none_or(|entry| entry.is_primary);
             let tiles = self.build_dock_tiles();
             let rest_view = crate::shell_render::DockViewState {
                 tiles: &tiles,
                 icon_size: self.user_config.dock_icon_size,
                 position: self.user_config.dock_position,
                 show_indicators: self.user_config.dock_show_indicators,
+                top_inset: if is_primary {
+                    crate::shell_render::TOP_BAR_HEIGHT
+                } else {
+                    0
+                },
                 ..crate::shell_render::DockViewState::default()
             };
-            let rest_layout = crate::shell_render::compute_dock_layout(primary_size, &rest_view);
+            let rest_layout = crate::shell_render::compute_dock_layout(output_size, &rest_view);
             let cap = rest_layout.capsule_rect;
             let outside_dist = match self.user_config.dock_position {
                 crate::config::DockPosition::Bottom => f64::from(cap.loc.y) - local_y,
@@ -160,15 +191,17 @@ impl RustyCompositorState {
     }
 
     pub(super) fn handle_dock_stack_pointer_press(&mut self, button: u32) -> bool {
-        if self.dock_stack.is_none() {
+        let Some(stack_output_id) = self.dock_stack.as_ref().map(|s| s.output_id) else {
             return false;
-        }
-        let (_, is_on_primary, local_x, local_y) = self.primary_local_coords(self.pointer_location);
-        let logical_size = self.primary_output_logical_size();
-        if is_on_primary
-            && let Some(hit) = self.dock_stack_render_state().and_then(|st| {
-                crate::shell_render::hit_test_dock_stack(logical_size, &st, local_x, local_y)
-            })
+        };
+        let (output_id, _, logical_size, local_x, local_y) =
+            self.output_local_coords(self.pointer_location);
+        if output_id == stack_output_id
+            && let Some(hit) = self
+                .dock_stack_render_state_for_output(output_id)
+                .and_then(|st| {
+                    crate::shell_render::hit_test_dock_stack(logical_size, &st, local_x, local_y)
+                })
         {
             match hit {
                 crate::shell_render::DockStackHit::Entry(idx) => {
@@ -195,14 +228,18 @@ impl RustyCompositorState {
                 }
             }
         }
-        let clicked_downloads_toggle = is_on_primary && button == 272 && {
+        let clicked_downloads_toggle = output_id == stack_output_id && button == 272 && {
             let tiles = self.build_dock_tiles();
-            let layout = self.active_dock_layout(&tiles);
+            let layout = self.dock_layout_for_output(output_id, &tiles);
             crate::shell_render::check_dock_layout_slot(&layout, local_x, local_y).is_some_and(
                 |idx| {
-                    layout.slots.get(idx).is_some_and(|s| {
-                        s.tile.hit == crate::shell_render::DockHit::PinnedDownloads
-                    })
+                    layout
+                        .slots
+                        .iter()
+                        .find(|s| s.slot_idx == idx)
+                        .is_some_and(|s| {
+                            s.tile.hit == crate::shell_render::DockHit::PinnedDownloads
+                        })
                 },
             )
         };
@@ -212,26 +249,34 @@ impl RustyCompositorState {
 
     pub(super) fn handle_dock_pointer_press(
         &mut self,
+        output_id: rusty_wm::OutputId,
         local_x: f64,
         local_y: f64,
         button: u32,
     ) -> bool {
-        if self.user_config.dock_auto_hide && self.dock_auto_hide_anim.current() <= 0.25 {
+        if self
+            .user_config
+            .effective_dock_visibility()
+            .uses_auto_hide_reveal()
+            && self.dock_reveal_for_output(output_id) <= 0.25
+        {
             return false;
         }
-        let logical_size = self.primary_output_logical_size();
+        let logical_size = self.output_logical_size(output_id);
         let tiles = self.build_dock_tiles();
-        let layout = self.active_dock_layout(&tiles);
+        let layout = self.dock_layout_for_output(output_id, &tiles);
         let Some(slot_idx) = crate::shell_render::check_dock_layout_slot(&layout, local_x, local_y)
         else {
             return false;
         };
-        let Some(slot) = layout.slots.get(slot_idx) else {
+        let Some(slot) = layout.slots.iter().find(|s| s.slot_idx == slot_idx) else {
             return false;
         };
+        self.active_dock_output = Some(output_id);
         if button == 273 {
             let alt_held = self.keyboard.modifier_state().alt;
-            self.open_dock_context_menu(
+            self.open_dock_context_menu_on_output(
+                output_id,
                 slot.tile.hit,
                 logical_size,
                 self.pointer_location,
@@ -249,6 +294,7 @@ impl RustyCompositorState {
                 })
                 .flatten();
             self.dock_drag = Some(crate::state::DockDragState {
+                output_id,
                 slot_idx,
                 app_key: slot.tile.app_key.clone(),
                 source_pinned_idx,
@@ -300,7 +346,7 @@ impl RustyCompositorState {
         let (primary_size, is_on_primary, local_x, local_y) = self.primary_local_coords(pos);
         let chrome_hidden =
             self.has_foreground_layer_surfaces() || self.should_hide_shell_chrome_for_fullscreen();
-        self.update_dock_stack_hover(is_on_primary, chrome_hidden, local_x, local_y);
+        self.update_dock_stack_hover(pos);
         self.update_updates_popover_hover(is_on_primary, chrome_hidden, local_x, local_y);
         self.update_wifi_popover_hover(is_on_primary, chrome_hidden, local_x, local_y);
         self.update_top_bar_quick_popover_hover(is_on_primary, chrome_hidden, local_x, local_y);
@@ -371,20 +417,22 @@ impl RustyCompositorState {
         };
     }
 
-    fn update_dock_stack_hover(
-        &mut self,
-        is_on_primary: bool,
-        chrome_hidden: bool,
-        local_x: f64,
-        local_y: f64,
-    ) {
-        if !(self.dock_stack.is_some() && is_on_primary && !chrome_hidden) {
+    fn update_dock_stack_hover(&mut self, pos: Point<f64, Logical>) {
+        let Some(stack_output_id) = self.dock_stack.as_ref().map(|s| s.output_id) else {
+            return;
+        };
+        let (output_id, _, logical_size, local_x, local_y) = self.output_local_coords(pos);
+        if output_id != stack_output_id
+            || self.has_foreground_layer_surfaces_on_id(output_id)
+            || self.should_hide_shell_chrome_for_fullscreen_on(output_id)
+        {
             return;
         }
-        let logical_size = self.primary_output_logical_size();
-        let stack_hit = self.dock_stack_render_state().and_then(|st| {
-            crate::shell_render::hit_test_dock_stack(logical_size, &st, local_x, local_y)
-        });
+        let stack_hit = self
+            .dock_stack_render_state_for_output(output_id)
+            .and_then(|st| {
+                crate::shell_render::hit_test_dock_stack(logical_size, &st, local_x, local_y)
+            });
         let (new_item, new_footer) = match stack_hit {
             Some(crate::shell_render::DockStackHit::Entry(idx)) => (Some(idx), false),
             Some(crate::shell_render::DockStackHit::OpenInFiles) => (None, true),

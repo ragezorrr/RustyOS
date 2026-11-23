@@ -290,17 +290,19 @@ pub const COLOR_WARNING: Color32F = Color32F::new(1.0, 0.839, 0.039, 1.0); // #F
 pub const COLOR_BORDER: Color32F = premul(1.0, 1.0, 1.0, 0.12); // #FFFFFF12 border
 pub const COLOR_BORDER_HIGHLIGHT: Color32F = premul(1.0, 1.0, 1.0, 0.22); // outer glass rim
 
-/// Computes the usable work area rectangle reserving `TopBar` and the active floating `Dock`
-/// (`Bottom`, `Left`, or `Right`, or zero Dock reservation when `auto_hide` is enabled) (`RUSTYOS-073`).
+/// Computes the usable work area rectangle for an output, optionally reserving `TopBar`
+/// and the active floating `Dock` (`Bottom`, `Left`, or `Right`, or zero Dock reservation
+/// when `expands_work_area` is `true` for `SmartHide` / `AlwaysHide`) (`RUSTYOS-073` / `RUSTYOS-161`).
 #[must_use]
-pub fn usable_work_area_with_dock(
+pub fn usable_work_area_for_output(
     screen_size: Size<i32, smithay::utils::Physical>,
+    reserve_top_bar: bool,
     position: crate::config::DockPosition,
     icon_size: i32,
-    auto_hide: bool,
+    expands_work_area: bool,
 ) -> rusty_wm::Rect {
-    let top_margin = TOP_BAR_HEIGHT;
-    if auto_hide {
+    let top_margin = if reserve_top_bar { TOP_BAR_HEIGHT } else { 0 };
+    if expands_work_area {
         let h = (screen_size.h - top_margin).max(100);
         return rusty_wm::Rect::new(0, top_margin, screen_size.w.max(100), h);
     }
@@ -323,6 +325,18 @@ pub fn usable_work_area_with_dock(
             rusty_wm::Rect::new(0, top_margin, w, h)
         }
     }
+}
+
+/// Computes the usable work area rectangle reserving `TopBar` and the active floating `Dock`
+/// (`Bottom`, `Left`, or `Right`, or zero Dock reservation when `auto_hide` is enabled) (`RUSTYOS-073`).
+#[must_use]
+pub fn usable_work_area_with_dock(
+    screen_size: Size<i32, smithay::utils::Physical>,
+    position: crate::config::DockPosition,
+    icon_size: i32,
+    auto_hide: bool,
+) -> rusty_wm::Rect {
+    usable_work_area_for_output(screen_size, true, position, icon_size, auto_hide)
 }
 
 /// Computes the usable work area rectangle for client windows using default bottom Dock metrics.

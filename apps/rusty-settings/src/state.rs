@@ -220,7 +220,9 @@ impl SettingsPage {
             Self::Users => "user account profile groups uid admin home shell login",
             Self::Appearance => "theme dark light auto accent color",
             Self::Wallpaper => "background picture desktop image wallpaper",
-            Self::DockDesktop => "dock position size auto hide glass effect transparency motion",
+            Self::DockDesktop => {
+                "dock position size visibility smart hide auto hide glass effect transparency motion"
+            }
             Self::MenuBar => "menubar topbar wifi battery volume bluetooth clock contrast tray",
             Self::Notifications => "alerts banners do not disturb previews",
             Self::DateTime => "date time clock timezone 24-hour ntp sync",
@@ -250,7 +252,7 @@ pub(crate) enum RowControlId {
     DockPositionSet(u8),
     DockSizeDown,
     DockSizeUp,
-    DockAutoHideToggle,
+    DockVisibilityCycle,
     DockIndicatorsToggle,
     DockRecentToggle,
     DockMinimizeIntoAppToggle,
@@ -674,6 +676,7 @@ pub(crate) struct SettingsAppState {
     pub(crate) dock_position: String,
     pub(crate) dock_minimize_effect: String,
     pub(crate) dock_minimize_into_app: bool,
+    pub(crate) dock_visibility: String,
     pub(crate) dock_auto_hide: bool,
     pub(crate) dock_show_indicators: bool,
     pub(crate) dock_show_recent: bool,
@@ -815,6 +818,7 @@ impl SettingsAppState {
             dock_position: String::from("bottom"),
             dock_minimize_effect: String::from("genie"),
             dock_minimize_into_app: true,
+            dock_visibility: String::from("always_show"),
             dock_auto_hide: false,
             dock_show_indicators: true,
             dock_show_recent: true,
@@ -1775,10 +1779,19 @@ impl SettingsAppState {
                 let v = self.dock_icon_size.to_string();
                 let _ = update_config_entries(&[("dock", "icon_size", &v)]);
             }
-            RowControlId::DockAutoHideToggle => {
-                self.dock_auto_hide = !self.dock_auto_hide;
-                let v = bool_str(self.dock_auto_hide);
-                let _ = update_config_entries(&[("dock", "auto_hide", v)]);
+            RowControlId::DockVisibilityCycle => {
+                let next = match self.dock_visibility.as_str() {
+                    "always_show" => "smart_hide",
+                    "smart_hide" => "always_hide",
+                    _ => "always_show",
+                };
+                next.clone_into(&mut self.dock_visibility);
+                self.dock_auto_hide = next == "always_hide";
+                let auto_v = bool_str(self.dock_auto_hide);
+                let _ = update_config_entries(&[
+                    ("dock", "visibility", &self.dock_visibility),
+                    ("dock", "auto_hide", auto_v),
+                ]);
             }
             RowControlId::DockIndicatorsToggle => {
                 self.dock_show_indicators = !self.dock_show_indicators;
@@ -2657,6 +2670,7 @@ impl SettingsAppState {
         };
         let mut section = String::new();
         let mut auto_mode_seen = false;
+        let mut explicit_dock_visibility: Option<String> = None;
         for raw in content.lines() {
             let line = raw.trim();
             if line.is_empty() || line.starts_with('#') {
@@ -2675,10 +2689,20 @@ impl SettingsAppState {
             if sec == "ui" && key == "theme_mode" && val.eq_ignore_ascii_case("auto") {
                 auto_mode_seen = true;
             }
+            if sec == "dock"
+                && key == "visibility"
+                && let Some(norm) = normalize_dock_visibility(val)
+            {
+                explicit_dock_visibility = Some(norm.to_owned());
+            }
             self.apply_toml_kv(sec, key, val);
         }
         if auto_mode_seen {
             self.theme_choice = ThemeChoice::Auto;
+        }
+        if let Some(vis) = explicit_dock_visibility {
+            self.dock_auto_hide = vis == "always_hide";
+            self.dock_visibility = vis;
         }
     }
 
@@ -2765,7 +2789,21 @@ impl SettingsAppState {
             ("dock", "position") => self.dock_position = val.to_ascii_lowercase(),
             ("dock", "minimize_effect") => self.dock_minimize_effect = val.to_ascii_lowercase(),
             ("dock", "minimize_into_app") => self.dock_minimize_into_app = parse_bool(val),
-            ("dock", "auto_hide") => self.dock_auto_hide = parse_bool(val),
+            ("dock", "visibility") => {
+                if let Some(norm) = normalize_dock_visibility(val) {
+                    norm.clone_into(&mut self.dock_visibility);
+                    self.dock_auto_hide = norm == "always_hide";
+                }
+            }
+            ("dock", "auto_hide") => {
+                self.dock_auto_hide = parse_bool(val);
+                let vis = if self.dock_auto_hide {
+                    "always_hide"
+                } else {
+                    "always_show"
+                };
+                vis.clone_into(&mut self.dock_visibility);
+            }
             ("dock", "show_indicators") => self.dock_show_indicators = parse_bool(val),
             ("dock", "show_recent") => self.dock_show_recent = parse_bool(val),
             ("display", "scale") => {
@@ -2832,6 +2870,24 @@ const fn bool_str(b: bool) -> &'static str {
 
 fn parse_bool(s: &str) -> bool {
     s.eq_ignore_ascii_case("true") || s == "1"
+}
+
+fn normalize_dock_visibility(raw: &str) -> Option<&'static str> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "always_show" | "always-show" | "show" | "never" => Some("always_show"),
+        "smart_hide" | "smart-hide" | "smart" | "intellihide" | "intell_hide"
+        | "when_obstructed" | "when-obstructed" | "dodge" => Some("smart_hide"),
+        "always_hide" | "always-hide" | "hide" | "always" => Some("always_hide"),
+        _ => None,
+    }
+}
+
+pub(crate) fn dock_visibility_label(raw: &str) -> &'static str {
+    match normalize_dock_visibility(raw).unwrap_or("always_show") {
+        "smart_hide" => "Smart Hide",
+        "always_hide" => "Always Hide",
+        _ => "Always Show",
+    }
 }
 
 fn unquote_toml(s: &str) -> &str {
@@ -3626,14 +3682,24 @@ mod tests {
         st.navigate_to(SettingsPage::DockDesktop);
         let l1 = crate::layout::compute_layout(&st, 882, 600);
         st.sync_toggles_from_layout(&l1);
-        let p0 = st.switch_progress(RowControlId::DockAutoHideToggle, st.dock_auto_hide);
-        st.dock_auto_hide = !st.dock_auto_hide;
+        let p0 = st.switch_progress(RowControlId::DockIndicatorsToggle, st.dock_show_indicators);
+        st.dock_show_indicators = !st.dock_show_indicators;
         let l2 = crate::layout::compute_layout(&st, 882, 600);
         st.sync_toggles_from_layout(&l2);
         std::thread::sleep(Duration::from_millis(20));
         let _ = st.step_ui_animations(Instant::now());
-        let p1 = st.switch_progress(RowControlId::DockAutoHideToggle, st.dock_auto_hide);
+        let p1 = st.switch_progress(RowControlId::DockIndicatorsToggle, st.dock_show_indicators);
         assert!((p1 - p0).abs() > 0.01);
+
+        assert_eq!(dock_visibility_label(&st.dock_visibility), "Always Show");
+        st.apply_toml_device_kv("dock", "visibility", "smart_hide");
+        assert_eq!(st.dock_visibility, "smart_hide");
+        assert!(!st.dock_auto_hide);
+        assert_eq!(dock_visibility_label(&st.dock_visibility), "Smart Hide");
+        st.apply_toml_device_kv("dock", "auto_hide", "true");
+        assert_eq!(st.dock_visibility, "always_hide");
+        assert!(st.dock_auto_hide);
+        assert_eq!(dock_visibility_label(&st.dock_visibility), "Always Hide");
     }
 
     #[test]

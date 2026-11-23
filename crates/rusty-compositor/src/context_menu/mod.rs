@@ -108,9 +108,28 @@ impl RustyCompositorState {
         self.install_context_menu(output_id, anchor_local, ContextMenuTarget::Desktop, entries);
     }
 
-    /// Opens the macOS-aligned Dock slot context menu (`RUSTYOS-064`).
+    /// Opens the macOS-aligned Dock slot context menu on the primary output (`RUSTYOS-064`).
     pub fn open_dock_context_menu(
         &mut self,
+        hit: DockHit,
+        dock_screen_size: Size<i32, smithay::utils::Physical>,
+        global_pos: Point<f64, Logical>,
+        alt_held: bool,
+    ) {
+        let primary_id = self.output_map.primary().id;
+        self.open_dock_context_menu_on_output(
+            primary_id,
+            hit,
+            dock_screen_size,
+            global_pos,
+            alt_held,
+        );
+    }
+
+    /// Opens the macOS-aligned Dock slot context menu anchored to `output_id` (`RUSTYOS-161`).
+    pub fn open_dock_context_menu_on_output(
+        &mut self,
+        output_id: rusty_wm::OutputId,
         hit: DockHit,
         dock_screen_size: Size<i32, smithay::utils::Physical>,
         global_pos: Point<f64, Logical>,
@@ -125,12 +144,22 @@ impl RustyCompositorState {
         self.close_notification_center();
         let tiles = self.build_dock_tiles();
         let bounces = self.dock_bounce_offsets();
-        let view = self.dock_view_state(&tiles, &[], &bounces, self.dock_hover_slot);
-        let layout = crate::shell_render::compute_dock_layout(dock_screen_size, &view);
+        let view = self.dock_view_state_for_output(output_id, &tiles, &[], &bounces, None);
+        let target_layout = crate::shell_render::compute_dock_layout(dock_screen_size, &view);
+        let layout = self.output_docks.get(&output_id).map_or_else(
+            || target_layout.clone(),
+            |dock| {
+                dock.presentation
+                    .apply(&target_layout, self.user_config.dock_position)
+            },
+        );
 
-        let primary = self.output_map.primary();
-        let output_id = primary.id;
-        let geo = primary.logical_geometry();
+        let target_entry = self
+            .output_map
+            .get(output_id)
+            .unwrap_or_else(|| self.output_map.primary());
+        let resolved_output_id = target_entry.id;
+        let geo = target_entry.logical_geometry();
         let anchor_local = layout
             .slots
             .iter()
@@ -178,7 +207,7 @@ impl RustyCompositorState {
             }
         };
         self.install_context_menu(
-            output_id,
+            resolved_output_id,
             anchor_local,
             ContextMenuTarget::DockSlot(hit),
             entries,

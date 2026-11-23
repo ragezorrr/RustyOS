@@ -105,6 +105,7 @@ impl ClientData for ClientState {
 }
 
 pub(crate) mod context_menu_actions;
+mod dock_state;
 mod shell_actions;
 mod system_bridges;
 mod wayland_handlers;
@@ -146,9 +147,10 @@ pub struct DockBounceState {
     pub continuous: bool,
 }
 
-/// Active pointer drag state inside the Dock for reordering/unpinning (`RUSTYOS-073`).
+/// Active pointer drag state inside the Dock for reordering/unpinning (`RUSTYOS-073` / `RUSTYOS-161`).
 #[derive(Debug, Clone)]
 pub struct DockDragState {
+    pub output_id: OutputId,
     pub slot_idx: usize,
     pub app_key: String,
     pub source_pinned_idx: Option<usize>,
@@ -160,9 +162,10 @@ pub struct DockDragState {
     pub hit: crate::shell_render::DockHit,
 }
 
-/// Interactive open `Downloads` Stack popover state (`RUSTYOS-073`).
+/// Interactive open `Downloads` Stack popover state (`RUSTYOS-073` / `RUSTYOS-161`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DockStackState {
+    pub output_id: OutputId,
     pub title: String,
     pub anchor_rect: smithay::utils::Rectangle<i32, smithay::utils::Physical>,
     pub entries: Vec<crate::shell_render::DockStackEntry>,
@@ -170,6 +173,62 @@ pub struct DockStackState {
     pub hovered_open_in_files: bool,
     pub selected_idx: Option<usize>,
 }
+
+/// Per-output Dock visibility, occlusion, auto-hide delay, and slot presentation state (`RUSTYOS-161`).
+#[derive(Debug)]
+pub struct OutputDockState {
+    /// Animated reveal progress (`0.0` hidden offscreen -> `1.0` revealed).
+    pub reveal_anim: AnimatedValue,
+    /// True when the pointer is within this output's reveal strip, near the Dock, or inside its Stack.
+    pub hovered: bool,
+    /// True when a visible or maximized window on this output currently obstructs the resting Dock area.
+    pub obstructed: bool,
+    /// Optional 200 ms hide delay deadline armed when the pointer leaves an auto-hidden Dock.
+    pub hide_deadline: Option<std::time::Duration>,
+    /// Smooth per-output slot, divider, and capsule length presentation animator.
+    pub presentation: crate::shell_render::DockPresentation,
+}
+
+impl OutputDockState {
+    /// Creates an initial per-output Dock state with the requested reveal progress.
+    #[must_use]
+    pub fn new(initial_reveal: f64) -> Self {
+        Self {
+            reveal_anim: AnimatedValue::new_settled(initial_reveal),
+            hovered: false,
+            obstructed: false,
+            hide_deadline: None,
+            presentation: crate::shell_render::DockPresentation::new(),
+        }
+    }
+}
+
+/// Grace window tracking an in-flight graceful Quit request for a Dock application (`RUSTYOS-161`).
+#[derive(Debug, Clone)]
+pub struct PendingAppQuit {
+    pub app_key: String,
+    pub label: String,
+    pub started_at: std::time::Duration,
+    pub grace: std::time::Duration,
+    pub notified_timeout: bool,
+}
+
+/// Cached desktop metadata for a pinned Dock application, preserving icons/labels across
+/// temporary `.desktop` removals during package upgrades (`3000 ms` grace) (`RUSTYOS-161`).
+#[derive(Debug, Clone)]
+pub struct CachedDockPinMeta {
+    pub icon_name: Option<String>,
+    pub label: String,
+    pub command: Option<String>,
+    pub missing_since: Option<std::time::Duration>,
+}
+
+/// Auto-hide pointer-leave delay (`200 ms`) matching smooth desktop shelf semantics (`RUSTYOS-161`).
+pub const DOCK_AUTO_HIDE_DELAY: std::time::Duration = std::time::Duration::from_millis(200);
+/// Graceful quit window (`3000 ms`) before surfacing Force Quit escalation (`RUSTYOS-161`).
+pub const DOCK_QUIT_GRACE: std::time::Duration = std::time::Duration::from_millis(3000);
+/// Package-upgrade grace window (`3000 ms`) preserving pinned icon metadata if a `.desktop` file vanishes briefly (`RUSTYOS-161`).
+pub const DOCK_PIN_UNINSTALL_GRACE: std::time::Duration = std::time::Duration::from_millis(3000);
 
 /// Active per-window GLES Genie / Scale minimize or restore animation (`RUSTYOS-073`).
 #[derive(Debug, Clone)]
@@ -515,10 +574,20 @@ pub struct RustyCompositorState {
     pub recent_unpinned_apps: Vec<RecentDockApp>,
     /// Active launch/notification Dock icon bounce timers (`RUSTYOS-073`).
     pub app_bounces: Vec<DockBounceState>,
-    /// Animated auto-hide reveal progress (`0.0` hidden offscreen -> `1.0` revealed) (`RUSTYOS-073`).
+    /// Animated auto-hide reveal progress (`0.0` hidden offscreen -> `1.0` revealed) on primary output (`RUSTYOS-073`).
     pub dock_auto_hide_anim: AnimatedValue,
-    /// True when the pointer is within the edge reveal strip or hovering an open Dock/Stack (`RUSTYOS-073`).
+    /// True when the pointer is within the edge reveal strip or hovering an open Dock/Stack on primary output (`RUSTYOS-073`).
     pub dock_auto_hide_hovered: bool,
+    /// Independent per-output Dock visibility, occlusion, reveal, and presentation state (`RUSTYOS-161`).
+    pub output_docks: std::collections::HashMap<OutputId, OutputDockState>,
+    /// Output currently hosting interactive Dock hover, tooltip, or drag (`RUSTYOS-161`).
+    pub active_dock_output: Option<OutputId>,
+    /// Most recently focused window per canonical Dock app key for deterministic cycling (`RUSTYOS-161`).
+    pub dock_app_last_active: std::collections::HashMap<String, WindowId>,
+    /// In-flight graceful Quit requests per canonical Dock app key (`3000 ms` grace) (`RUSTYOS-161`).
+    pub pending_app_quits: std::collections::HashMap<String, PendingAppQuit>,
+    /// Cached pinned app metadata protecting Dock icons during brief package-upgrade removals (`RUSTYOS-161`).
+    pub dock_pin_meta_cache: std::collections::HashMap<String, CachedDockPinMeta>,
     /// Active internal Dock drag-reorder/pull-out state (`RUSTYOS-073`).
     pub dock_drag: Option<DockDragState>,
     /// Open interactive `Downloads` Stack popover state (`RUSTYOS-073`).
@@ -857,13 +926,22 @@ impl RustyCompositorState {
         );
         let logical_phys_typed =
             Size::<i32, smithay::utils::Physical>::from((logical_size.w, logical_size.h));
-        let initial_dock_reveal = if user_config.dock_auto_hide { 0.0 } else { 1.0 };
-        let work_area = crate::shell_render::usable_work_area_with_dock(
+        let dock_vis = user_config.effective_dock_visibility();
+        let initial_dock_reveal =
+            if matches!(dock_vis, crate::config::DockVisibilityMode::AlwaysHide) {
+                0.0
+            } else {
+                1.0
+            };
+        let work_area = crate::shell_render::usable_work_area_for_output(
             logical_phys_typed,
+            true,
             user_config.dock_position,
             user_config.dock_icon_size,
-            user_config.dock_auto_hide,
+            dock_vis.expands_work_area(),
         );
+        let mut initial_output_docks = std::collections::HashMap::new();
+        initial_output_docks.insert(PRIMARY_OUTPUT_ID, OutputDockState::new(initial_dock_reveal));
         let full_area = Rect::new(0, 0, logical_size.w.max(100), logical_size.h.max(100));
         let mut wm = WindowManager::new(work_area);
         wm.upsert_output_with_full_area(PRIMARY_OUTPUT_ID, work_area, full_area);
@@ -964,6 +1042,11 @@ impl RustyCompositorState {
             app_bounces: Vec::new(),
             dock_auto_hide_anim: AnimatedValue::new_settled(initial_dock_reveal),
             dock_auto_hide_hovered: false,
+            output_docks: initial_output_docks,
+            active_dock_output: Some(PRIMARY_OUTPUT_ID),
+            dock_app_last_active: std::collections::HashMap::new(),
+            pending_app_quits: std::collections::HashMap::new(),
+            dock_pin_meta_cache: std::collections::HashMap::new(),
             dock_drag: None,
             dock_stack: None,
             overview_filter_app: None,
@@ -1079,6 +1162,7 @@ impl RustyCompositorState {
             .animations
             .set_reduced_motion(state.user_config.reduced_motion);
         state.refresh_keyboard_layout_label();
+        state.refresh_dock_pin_metadata_cache();
         Ok(state)
     }
 
@@ -1157,14 +1241,33 @@ impl RustyCompositorState {
         let logical_size =
             crate::outputs::compute_logical_size_for_rotation(mode.size, scale_val, rotation);
 
-        let work_area = Rect::new(
+        let logical_phys =
+            Size::<i32, smithay::utils::Physical>::from((logical_size.w, logical_size.h));
+        let full_area = Rect::new(
             location.x,
             location.y,
             logical_size.w.max(100),
             logical_size.h.max(100),
         );
+        let dock_vis = self.user_config.effective_dock_visibility();
+        let mut work_area = crate::shell_render::usable_work_area_for_output(
+            logical_phys,
+            false,
+            self.user_config.dock_position,
+            self.user_config.dock_icon_size,
+            dock_vis.expands_work_area(),
+        );
+        work_area.x += location.x;
+        work_area.y += location.y;
         self.wm
-            .upsert_output_with_full_area(new_id, work_area, work_area);
+            .upsert_output_with_full_area(new_id, work_area, full_area);
+        let initial_reveal = if matches!(dock_vis, crate::config::DockVisibilityMode::AlwaysHide) {
+            0.0
+        } else {
+            1.0
+        };
+        self.output_docks
+            .insert(new_id, OutputDockState::new(initial_reveal));
 
         let mut entry = crate::outputs::OutputEntry::new(
             new_id,
@@ -1264,19 +1367,16 @@ impl RustyCompositorState {
                 geo.size.w.max(100),
                 geo.size.h.max(100),
             );
-            let work_area = if entry.is_primary {
-                let mut wa = crate::shell_render::usable_work_area_with_dock(
-                    logical_phys,
-                    self.user_config.dock_position,
-                    self.user_config.dock_icon_size,
-                    self.user_config.dock_auto_hide,
-                );
-                wa.x += geo.loc.x;
-                wa.y += geo.loc.y;
-                wa
-            } else {
-                full_area
-            };
+            let dock_vis = self.user_config.effective_dock_visibility();
+            let mut work_area = crate::shell_render::usable_work_area_for_output(
+                logical_phys,
+                entry.is_primary,
+                self.user_config.dock_position,
+                self.user_config.dock_icon_size,
+                dock_vis.expands_work_area(),
+            );
+            work_area.x += geo.loc.x;
+            work_area.y += geo.loc.y;
             self.wm
                 .upsert_output_with_full_area(entry.id, work_area, full_area);
             layer_map_for_output(&entry.output).arrange();
@@ -1795,6 +1895,16 @@ impl RustyCompositorState {
             self.display_handle.remove_global::<Self>(gid);
         }
         self.wm.remove_output(id);
+        self.output_docks.remove(&id);
+        if self.active_dock_output == Some(id) {
+            self.active_dock_output = Some(self.output_map.primary().id);
+        }
+        if self.dock_stack.as_ref().is_some_and(|s| s.output_id == id) {
+            self.dock_stack = None;
+        }
+        if self.dock_drag.as_ref().is_some_and(|d| d.output_id == id) {
+            self.dock_drag = None;
+        }
 
         if removed.is_primary {
             self.output = self.output_map.primary().output.clone();

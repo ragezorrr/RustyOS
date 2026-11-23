@@ -481,6 +481,28 @@ impl LauncherState {
         })
     }
 
+    /// Returns `true` when `app_key` resolves to an installed `.desktop` entry or executable on `PATH` (`RUSTYOS-161`).
+    #[must_use]
+    pub(crate) fn has_installed_dock_entry(&self, app_key: &str) -> bool {
+        let key = app_key.trim().to_ascii_lowercase();
+        if key.is_empty() {
+            return false;
+        }
+        if self.find_command_for_dock_key(&key).is_some() {
+            return true;
+        }
+        let dot_suffix = format!(".{key}");
+        self.catalog.iter().any(|app| {
+            let id_lower = app.id.trim_end_matches(".desktop").to_ascii_lowercase();
+            let bin = exec_basename(&app.exec);
+            app.id.eq_ignore_ascii_case(&key)
+                || id_lower == key
+                || id_lower.ends_with(&dot_suffix)
+                || bin.eq_ignore_ascii_case(&key)
+                || app.name.eq_ignore_ascii_case(&key)
+        })
+    }
+
     /// Resolves an XDG icon name/path for a canonical or custom Dock key.
     #[must_use]
     pub(crate) fn icon_for_dock_key(&self, app_key: &str) -> Option<String> {

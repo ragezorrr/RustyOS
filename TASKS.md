@@ -2653,6 +2653,21 @@ hardware/software context и низкие накладные расходы.
   - `parse_timedatectl_show`, `is_valid_iana_timezone`, `parse_manual_datetime_input`, `match_timezone_suggestions`, а также NTP/Timezone/ManualDateTime модалки и coalescing в `rusty-settings` покрыты unit-тестами; `bash -n`, `cargo fmt --check`, `clippy`, `cargo test` (`rusty-services`, `rusty-settings`) и живая визуальная проверка `--winit` Light/Dark скриншотов проходят чисто.
 - **Risks:** Низкие; 0 новых Cargo-зависимостей, хостовая ОС не изменялась.
 
+### RUSTYOS-161 — Dock: Smart Hide, Multi-Monitor, плавный `DockPresentation` и жизненный цикл приложений (Фаза A)
+- **Status:** Done
+- **Goal:** Добавить 3-режимную видимость `DockVisibilityMode::{AlwaysShow, SmartHide, AlwaysHide}` с обратной совместимостью `config.toml` и контролом `Dock Visibility` в `apps/rusty-settings`, независимую multi-monitor работу Dock (`OutputDockState`, перекрытия/fullscreen, рендер и ввод на вторичных мониторах, `200 ms` hide-delay), слой плавных анимаций раскладки `DockPresentation` (`240 ms` слоты/разделители/капсула, `reduced_motion`), детерминированный цикл окон + MRU, 3s grace для `Quit`/`Force Quit` и 3s grace-кэш пинов при обновлении пакетов.
+- **Dependencies:** `RUSTYOS-040`, `RUSTYOS-073`, `RUSTYOS-103`, `RUSTYOS-128`.
+- **Scope:**
+  - `crates/rusty-compositor/src/{config.rs, launcher.rs, frame_composer.rs}`.
+  - `crates/rusty-compositor/src/shell_render/{dock.rs, dock_presentation.rs, chrome_shapes.rs, text_pass.rs, tokens.rs, mod.rs}`.
+  - `crates/rusty-compositor/src/state/{mod.rs, dock_state.rs, shell_actions.rs, wm_windows.rs, tests.rs}`.
+  - `crates/rusty-compositor/src/input/{pointer.rs, shell_pointer.rs}` и `context_menu/{mod.rs, dock_menu.rs}`.
+  - `apps/rusty-settings/src/{state.rs, layout.rs}`.
+  - `docs/adr/0090-dock-smart-hide-multimonitor-and-presentation.md`, `DECISIONS.md` (`D-104`), `ARCHITECTURE.md` §7.
+- **Acceptance Criteria:**
+  - `DockVisibilityMode` + обратная совместимость `auto_hide`, `DockPresentation` (glide/appear/leave/`reduced_motion`), multi-monitor `SmartHide` + `200 ms` delay, цикл 3 окон + MRU, 3s Quit/Force Quit grace и 3s pin upgrade grace покрыты unit-тестами (`221` в `rusty-compositor`, `19` в `rusty-settings`); `cargo fmt --check`, `clippy -D warnings` и живые `--winit` Light (`always_show`) / Dark (`smart_hide`) прогоны и скриншоты проходят чисто без EGL/shader ошибок.
+- **Risks:** Низкие; 0 новых Cargo-зависимостей, обратная совместимость `[dock].auto_hide` сохранена.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

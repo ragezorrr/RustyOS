@@ -677,10 +677,10 @@ fn build_dock_layout(
             RowControlId::GlassOpacityUp,
             format!("{}%", (app.glass_opacity * 100.0).round() as i32),
         ),
-        row_switch(
-            "Auto-hide the Dock",
-            RowControlId::DockAutoHideToggle,
-            app.dock_auto_hide,
+        row_choice(
+            "Dock Visibility",
+            RowControlId::DockVisibilityCycle,
+            crate::state::dock_visibility_label(&app.dock_visibility).to_owned(),
         ),
         row_choice(
             "Minimize using",

@@ -1701,3 +1701,264 @@ fn window_open_and_close_lifecycle_animations_respect_reduced_motion() -> Result
 
     Ok(())
 }
+
+#[test]
+#[allow(clippy::too_many_lines)]
+fn smart_hide_multimonitor_occlusion_and_auto_hide_delay_isolate_outputs()
+-> Result<(), Box<dyn Error>> {
+    use crate::shell_render::DockHit;
+    use smithay::output::{Mode, PhysicalProperties, Scale, Subpixel};
+
+    let display: Display<RustyCompositorState> = Display::new()?;
+    let event_loop: EventLoop<RustyCompositorState> = EventLoop::try_new()?;
+    let mut compositor = RustyCompositorState::new(
+        &display,
+        "rusty-test-smart-hide-mm".to_owned(),
+        event_loop.get_signal(),
+        event_loop.handle(),
+        (1280, 800).into(),
+    )?;
+    compositor.animations.set_reduced_motion(false);
+
+    let primary_id = compositor.output_map.primary().id;
+    let secondary_id = compositor.add_output(
+        "DP-1",
+        PhysicalProperties {
+            size: (600, 340).into(),
+            subpixel: Subpixel::Unknown,
+            make: "RustyOS".to_owned(),
+            model: "DP-1".to_owned(),
+        },
+        Mode {
+            size: (1920, 1080).into(),
+            refresh: 60_000,
+        },
+        Scale::Integer(1),
+        (1280, 0).into(),
+    );
+
+    let mut cfg = compositor.user_config.clone();
+    cfg.dock_visibility = crate::config::DockVisibilityMode::SmartHide;
+    cfg.dock_auto_hide = false;
+    compositor.apply_user_config(cfg);
+
+    // No windows yet: SmartHide stays revealed on both outputs.
+    assert!(!compositor.is_dock_obstructed_on_output(primary_id));
+    assert!(!compositor.is_dock_obstructed_on_output(secondary_id));
+    assert!(
+        compositor
+            .output_docks
+            .get(&primary_id)
+            .is_some_and(|d| (d.reveal_anim.target() - 1.0).abs() < 1e-4)
+    );
+    assert!(
+        compositor
+            .output_docks
+            .get(&secondary_id)
+            .is_some_and(|d| (d.reveal_anim.target() - 1.0).abs() < 1e-4)
+    );
+
+    // Map and maximize a window on primary: only primary becomes obstructed and hides.
+    let w1 = compositor.wm.next_window_id();
+    let _ = compositor.wm.map_window(w1, Some((900, 600)));
+    let _ = compositor
+        .wm
+        .apply_action(rusty_wm::WmAction::ToggleMaximizeFocused);
+    let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+    compositor.sync_space_with_wm(serial);
+
+    assert!(compositor.is_dock_obstructed_on_output(primary_id));
+    assert!(!compositor.is_dock_obstructed_on_output(secondary_id));
+    assert!(
+        compositor
+            .output_docks
+            .get(&primary_id)
+            .is_some_and(|d| d.reveal_anim.target().abs() < 1e-4)
+    );
+    assert!(
+        compositor
+            .output_docks
+            .get(&secondary_id)
+            .is_some_and(|d| (d.reveal_anim.target() - 1.0).abs() < 1e-4)
+    );
+
+    // Edge hover on primary reveals primary Dock; leaving arms 200 ms hide delay before sliding out.
+    compositor.set_dock_hovered_on_output(primary_id, true);
+    assert!(
+        compositor
+            .output_docks
+            .get(&primary_id)
+            .is_some_and(
+                |d| (d.reveal_anim.target() - 1.0).abs() < 1e-4 && d.hide_deadline.is_none()
+            )
+    );
+    compositor.set_dock_hovered_on_output(primary_id, false);
+    let deadline = compositor
+        .output_docks
+        .get(&primary_id)
+        .and_then(|d| d.hide_deadline)
+        .ok_or("expected 200ms auto-hide deadline on pointer leave")?;
+    assert!(
+        compositor
+            .output_docks
+            .get(&primary_id)
+            .is_some_and(|d| (d.reveal_anim.target() - 1.0).abs() < 1e-4),
+        "dock should stay open during the 200ms hide grace window"
+    );
+    compositor.tick_dock_states(deadline + std::time::Duration::from_millis(5));
+    assert!(
+        compositor
+            .output_docks
+            .get(&primary_id)
+            .is_some_and(|d| d.hide_deadline.is_none() && d.reveal_anim.target().abs() < 1e-4)
+    );
+
+    // Dock context menu opened on secondary output anchors to secondary_id.
+    compositor.open_dock_context_menu_on_output(
+        secondary_id,
+        DockHit::PinnedTrash,
+        (1920, 1080).into(),
+        (2200.0, 1040.0).into(),
+        false,
+    );
+    assert_eq!(
+        compositor.context_menu.as_ref().map(|c| c.output_id),
+        Some(secondary_id)
+    );
+
+    Ok(())
+}
+
+#[test]
+fn dock_cycles_three_windows_deterministically_and_escalates_graceful_quit()
+-> Result<(), Box<dyn Error>> {
+    use crate::shell_render::{ContextMenuAction, ContextMenuEntry, DockHit};
+
+    let w1 = rusty_wm::WindowId(1);
+    let w2 = rusty_wm::WindowId(2);
+    let w3 = rusty_wm::WindowId(3);
+    let ordered = [w1, w2, w3];
+
+    // Cycling across 3 windows advances deterministically w1 -> w2 -> w3 -> w1.
+    assert_eq!(
+        RustyCompositorState::select_dock_app_target_window(&ordered, Some(w1), Some(w1)),
+        Some(w2)
+    );
+    assert_eq!(
+        RustyCompositorState::select_dock_app_target_window(&ordered, Some(w2), Some(w2)),
+        Some(w3)
+    );
+    assert_eq!(
+        RustyCompositorState::select_dock_app_target_window(&ordered, Some(w3), Some(w3)),
+        Some(w1)
+    );
+    // Returning from another app restores the last-active window (MRU).
+    assert_eq!(
+        RustyCompositorState::select_dock_app_target_window(
+            &ordered,
+            Some(rusty_wm::WindowId(99)),
+            Some(w2)
+        ),
+        Some(w2)
+    );
+
+    let display: Display<RustyCompositorState> = Display::new()?;
+    let event_loop: EventLoop<RustyCompositorState> = EventLoop::try_new()?;
+    let mut compositor = RustyCompositorState::new(
+        &display,
+        "rusty-test-dock-cycle-quit".to_owned(),
+        event_loop.get_signal(),
+        event_loop.handle(),
+        (1280, 800).into(),
+    )?;
+
+    let mapped = compositor.wm.next_window_id();
+    let _ = compositor.wm.map_window(mapped, Some((600, 400)));
+    let app_key = compositor
+        .dock_key_for_hit(DockHit::WindowSlot(0))
+        .ok_or("expected unpinned window dock key")?;
+
+    // Graceful Quit starts 3s grace window and escalates context menu to Force Quit.
+    compositor.quit_dock_app(DockHit::WindowSlot(0), false);
+    assert!(compositor.is_app_quit_pending(&app_key));
+    let tiles = compositor.build_dock_tiles();
+    let menu = compositor
+        .build_dock_app_context_entries(DockHit::WindowSlot(0), &tiles, false)
+        .ok_or("expected window dock menu")?;
+    assert!(menu.iter().any(|entry| {
+        matches!(
+            entry,
+            ContextMenuEntry::Item {
+                action: ContextMenuAction::DockForceQuitApp(DockHit::WindowSlot(0)),
+                danger: true,
+                ..
+            }
+        )
+    }));
+
+    // Advancing past 3000 ms emits an OSD reminder while waiting for user Force Quit.
+    let after_grace =
+        compositor.elapsed() + super::DOCK_QUIT_GRACE + std::time::Duration::from_millis(50);
+    compositor.tick_dock_states(after_grace);
+    assert!(
+        compositor
+            .osd
+            .as_ref()
+            .is_some_and(|o| o.label.contains("Force Quit"))
+    );
+
+    compositor.quit_dock_app(DockHit::WindowSlot(0), true);
+    assert!(!compositor.is_app_quit_pending(&app_key));
+
+    Ok(())
+}
+
+#[test]
+fn dock_pin_metadata_cache_survives_temporary_upgrade_disappearance() -> Result<(), Box<dyn Error>>
+{
+    use crate::shell_render::DockSection;
+
+    let display: Display<RustyCompositorState> = Display::new()?;
+    let event_loop: EventLoop<RustyCompositorState> = EventLoop::try_new()?;
+    let mut compositor = RustyCompositorState::new(
+        &display,
+        "rusty-test-pin-grace".to_owned(),
+        event_loop.get_signal(),
+        event_loop.handle(),
+        (1280, 800).into(),
+    )?;
+
+    compositor
+        .user_config
+        .dock_pinned_apps
+        .push("upgradeapp".to_owned());
+    compositor.dock_pin_meta_cache.insert(
+        "upgradeapp".to_owned(),
+        super::CachedDockPinMeta {
+            icon_name: Some("upgrade-icon".to_owned()),
+            label: "Upgrade App".to_owned(),
+            command: Some("upgradeapp".to_owned()),
+            missing_since: None,
+        },
+    );
+
+    // Simulate desktop file briefly vanishing during package upgrade.
+    compositor.refresh_dock_pin_metadata_cache();
+    assert!(compositor.dock_pin_in_upgrade_grace("upgradeapp"));
+    assert!(
+        compositor
+            .user_config
+            .dock_pinned_apps
+            .iter()
+            .any(|p| p == "upgradeapp")
+    );
+    let tiles = compositor.build_dock_tiles();
+    let tile = tiles
+        .iter()
+        .find(|t| t.section == DockSection::Pinned && t.app_key == "upgradeapp")
+        .ok_or("pinned app must remain in Dock during upgrade grace")?;
+    assert_eq!(tile.icon_name.as_deref(), Some("upgrade-icon"));
+    assert_eq!(tile.label, "Upgrade App");
+
+    Ok(())
+}

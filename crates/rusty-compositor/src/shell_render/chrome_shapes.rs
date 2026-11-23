@@ -5,7 +5,7 @@ use smithay::utils::{Point, Rectangle, Size};
 
 use super::dock::{ComputedDockLayout, ComputedDockSlot, dock_tooltip_rect_and_label};
 use super::spotlight_overview::render_overview_text;
-use super::text_pass::append_chrome_text;
+use super::text_pass::{append_chrome_text, append_dock_text};
 use super::tokens::{
     RGBA_ACCENT, RGBA_BORDER, RGBA_DANGER, ThemePalette, anim_offset, premul,
     push_elevation_shadow, push_liquid_glass_panel, push_liquid_glass_panel_elevation,
@@ -63,6 +63,44 @@ pub fn generate_shell_chrome_composite_elements(
         top_telemetry,
         overlay,
     ));
+    out
+}
+
+/// Generates floating `Dock`-only chrome elements (text + shapes) for secondary monitors (`RUSTYOS-161`).
+#[allow(clippy::too_many_arguments)]
+pub fn generate_dock_only_chrome_elements(
+    text_cache: &mut crate::text::TextCache,
+    shape_cache: &mut crate::surfaces::UiShapeCache,
+    renderer: &mut GlesRenderer,
+    screen_size: Size<i32, smithay::utils::Physical>,
+    dock_view: &DockViewState<'_>,
+    glass_opacity: f32,
+    reduce_transparency: bool,
+    overlay: ShellOverlayView<'_>,
+) -> Vec<CompositorRenderElement> {
+    let mut out = Vec::new();
+    let mut dock_text = Vec::new();
+    append_dock_text(
+        text_cache,
+        renderer,
+        screen_size,
+        dock_view,
+        overlay,
+        &mut dock_text,
+    );
+    out.extend(dock_text.into_iter().map(CompositorRenderElement::Memory));
+    let pal = ThemePalette::active();
+    push_dock_chrome_shapes_with_glass(
+        &mut out,
+        shape_cache,
+        renderer,
+        screen_size,
+        dock_view,
+        glass_opacity,
+        reduce_transparency,
+        overlay,
+        &pal,
+    );
     out
 }
 
@@ -568,7 +606,8 @@ fn push_dock_tooltip_and_drag(
     renderer: &mut GlesRenderer,
     screen_size: Size<i32, smithay::utils::Physical>,
     dock_view: &DockViewState<'_>,
-    top_telemetry: &TopBarTelemetry<'_>,
+    glass_opacity: f32,
+    reduce_transparency: bool,
     overlay: ShellOverlayView<'_>,
     layout: &ComputedDockLayout,
 ) {
@@ -583,8 +622,8 @@ fn push_dock_tooltip_and_drag(
             tooltip_rect,
             9,
             crate::surfaces::GlassPanelStyle::Popover,
-            top_telemetry.glass_opacity,
-            top_telemetry.reduce_transparency,
+            glass_opacity,
+            reduce_transparency,
             rusty_ui::shadow::ShadowElevation::MenuOrTooltip,
         );
     }
@@ -639,16 +678,48 @@ fn push_dock_chrome_shapes(
     overlay: ShellOverlayView<'_>,
     pal: &ThemePalette,
 ) {
-    let layout = compute_dock_layout(screen_size, dock_view);
+    push_dock_chrome_shapes_with_glass(
+        out,
+        shape_cache,
+        renderer,
+        screen_size,
+        dock_view,
+        top_telemetry.glass_opacity,
+        top_telemetry.reduce_transparency,
+        overlay,
+        pal,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_dock_chrome_shapes_with_glass(
+    out: &mut Vec<CompositorRenderElement>,
+    shape_cache: &mut crate::surfaces::UiShapeCache,
+    renderer: &mut GlesRenderer,
+    screen_size: Size<i32, smithay::utils::Physical>,
+    dock_view: &DockViewState<'_>,
+    glass_opacity: f32,
+    reduce_transparency: bool,
+    overlay: ShellOverlayView<'_>,
+    pal: &ThemePalette,
+) {
+    let owned_layout;
+    let layout = if let Some(presented) = dock_view.presented_layout {
+        presented
+    } else {
+        owned_layout = compute_dock_layout(screen_size, dock_view);
+        &owned_layout
+    };
     push_dock_tooltip_and_drag(
         out,
         shape_cache,
         renderer,
         screen_size,
         dock_view,
-        top_telemetry,
+        glass_opacity,
+        reduce_transparency,
         overlay,
-        &layout,
+        layout,
     );
 
     if dock_view.auto_hide_reveal <= 0.01 {
@@ -690,8 +761,8 @@ fn push_dock_chrome_shapes(
         capsule.size.w,
         capsule.size.h,
         radius,
-        top_telemetry.glass_opacity,
-        top_telemetry.reduce_transparency,
+        glass_opacity,
+        reduce_transparency,
         Point::from((capsule.loc.x, capsule.loc.y)),
     ) {
         out.push(dock_glass);

@@ -362,6 +362,10 @@ pub struct DockViewState<'a> {
     pub bounces: &'a [(&'a str, f64)],
     /// Active pinned-app drag-to-reorder / drag-to-remove preview (`RUSTYOS-073`).
     pub drag_preview: Option<DockDragPreview<'a>>,
+    /// Reserved top inset on the output (`TOP_BAR_HEIGHT` on primary, `0` on secondary outputs) (`RUSTYOS-161`).
+    pub top_inset: i32,
+    /// Optional pre-animated layout from [`super::DockPresentation`] (`RUSTYOS-161`).
+    pub presented_layout: Option<&'a ComputedDockLayout>,
 }
 
 impl Default for DockViewState<'_> {
@@ -380,6 +384,8 @@ impl Default for DockViewState<'_> {
             show_indicators: true,
             bounces: &[],
             drag_preview: None,
+            top_inset: TOP_BAR_HEIGHT,
+            presented_layout: None,
         }
     }
 }
@@ -749,10 +755,11 @@ pub fn compute_dock_layout(
     let base_slot = base_icon + 2;
     let thickness = base_icon + DOCK_PADDING * 2 + 2;
     let pos = dock_view.position;
+    let top_inset = dock_view.top_inset.max(0);
     let (screen_axis, axis_origin_offset) = match pos {
         DockPosition::Bottom => (screen_size.w.max(200), 0),
         DockPosition::Left | DockPosition::Right => {
-            ((screen_size.h - TOP_BAR_HEIGHT).max(200), TOP_BAR_HEIGHT)
+            ((screen_size.h - top_inset).max(200), top_inset)
         }
     };
 
@@ -928,46 +935,87 @@ pub(super) fn dock_tooltip_rect_and_label(
         return None;
     }
     let slot_idx = dock_view.hover_slot?;
-    let layout = compute_dock_layout(Size::from((width, height)), dock_view);
-    let slot = layout.slots.get(slot_idx)?;
+    let owned_layout;
+    let layout = if let Some(presented) = dock_view.presented_layout {
+        presented
+    } else {
+        owned_layout = compute_dock_layout(Size::from((width, height)), dock_view);
+        &owned_layout
+    };
+    let slot = layout.slots.iter().find(|s| s.slot_idx == slot_idx)?;
     let label = slot.tile.label.clone();
     let text_w = crate::text::measure_ui_text_width(&label, 12.0, crate::text::FontWeight::Bold);
     let pill_w = (text_w + 22).clamp(48, 220);
     let pill_h = 26;
+    let min_top = dock_view.top_inset.max(0) + 8;
     let rect = match dock_view.position {
         DockPosition::Bottom => {
             let cx = slot.icon_rect.loc.x + slot.icon_rect.size.w / 2;
             let pill_x = (cx - pill_w / 2).clamp(12, (width - pill_w - 12).max(12));
-            let pill_y = (layout.capsule_rect.loc.y - pill_h - 14).max(TOP_BAR_HEIGHT + 8);
+            let pill_y = (layout.capsule_rect.loc.y - pill_h - 14).max(min_top);
             Rectangle::new(Point::from((pill_x, pill_y)), Size::from((pill_w, pill_h)))
         }
         DockPosition::Left => {
             let cy = slot.icon_rect.loc.y + slot.icon_rect.size.h / 2;
             let pill_x = (layout.capsule_rect.loc.x + layout.capsule_rect.size.w + 14)
                 .clamp(12, (width - pill_w - 12).max(12));
-            let pill_y = (cy - pill_h / 2).clamp(
-                TOP_BAR_HEIGHT + 8,
-                (height - pill_h - 12).max(TOP_BAR_HEIGHT + 8),
-            );
+            let pill_y = (cy - pill_h / 2).clamp(min_top, (height - pill_h - 12).max(min_top));
             Rectangle::new(Point::from((pill_x, pill_y)), Size::from((pill_w, pill_h)))
         }
         DockPosition::Right => {
             let cy = slot.icon_rect.loc.y + slot.icon_rect.size.h / 2;
             let pill_x = (layout.capsule_rect.loc.x - pill_w - 14).max(12);
-            let pill_y = (cy - pill_h / 2).clamp(
-                TOP_BAR_HEIGHT + 8,
-                (height - pill_h - 12).max(TOP_BAR_HEIGHT + 8),
-            );
+            let pill_y = (cy - pill_h / 2).clamp(min_top, (height - pill_h - 12).max(min_top));
             Rectangle::new(Point::from((pill_x, pill_y)), Size::from((pill_w, pill_h)))
         }
     };
     Some((rect, label))
 }
 
+/// Computes the resting output-local Dock obstruction region extended to the anchored screen edge
+/// for `SmartHide` (`WhenObstructed`) intersection checks (`RUSTYOS-161`).
+#[must_use]
+pub fn dock_obstruction_region(
+    screen_size: Size<i32, smithay::utils::Physical>,
+    dock_view: &DockViewState<'_>,
+) -> rusty_wm::Rect {
+    let rest_view = DockViewState {
+        auto_hide_reveal: 1.0,
+        hover_slot: None,
+        drag_preview: None,
+        presented_layout: None,
+        ..*dock_view
+    };
+    let cap = compute_dock_layout(screen_size, &rest_view).capsule_rect;
+    match dock_view.position {
+        DockPosition::Bottom => rusty_wm::Rect::new(
+            cap.loc.x,
+            cap.loc.y,
+            cap.size.w.max(1),
+            (screen_size.h - cap.loc.y).max(1),
+        ),
+        DockPosition::Left => rusty_wm::Rect::new(
+            0,
+            cap.loc.y,
+            (cap.loc.x + cap.size.w).max(1),
+            cap.size.h.max(1),
+        ),
+        DockPosition::Right => rusty_wm::Rect::new(
+            cap.loc.x,
+            cap.loc.y,
+            (screen_size.w - cap.loc.x).max(1),
+            cap.size.h.max(1),
+        ),
+    }
+}
+
 /// Hit-tests `(x, y)` against computed Dock layout slots (`RUSTYOS-073`).
 #[must_use]
 pub fn check_dock_layout_slot(layout: &ComputedDockLayout, x: f64, y: f64) -> Option<usize> {
     for slot in &layout.slots {
+        if slot.slot_idx == usize::MAX || slot.hit_rect.size.w <= 0 || slot.hit_rect.size.h <= 0 {
+            continue;
+        }
         let r = slot.hit_rect;
         let rx = f64::from(r.loc.x);
         let ry = f64::from(r.loc.y);
@@ -980,7 +1028,10 @@ pub fn check_dock_layout_slot(layout: &ComputedDockLayout, x: f64, y: f64) -> Op
     None
 }
 
-/// Returns `true` if pointer `(px, py)` should keep an auto-hidden Dock revealed (`RUSTYOS-073`).
+/// Edge reveal strip width/height in logical pixels (`RUSTYOS-161`).
+pub const DOCK_REVEAL_STRIP_PX: f64 = 5.0;
+
+/// Returns `true` if pointer `(px, py)` should keep an auto-hidden Dock revealed (`RUSTYOS-073` / `RUSTYOS-161`).
 #[must_use]
 pub fn is_pointer_in_dock_auto_hide_zone(
     screen_size: Size<i32, smithay::utils::Physical>,
@@ -991,13 +1042,13 @@ pub fn is_pointer_in_dock_auto_hide_zone(
 ) -> bool {
     let screen_w = f64::from(screen_size.w.max(1));
     let screen_h = f64::from(screen_size.h.max(1));
-    if py < f64::from(TOP_BAR_HEIGHT) {
+    if py < f64::from(dock_view.top_inset.max(0)) {
         return false;
     }
     let edge_band = match dock_view.position {
-        DockPosition::Bottom => py >= screen_h - 6.0,
-        DockPosition::Left => px <= 6.0,
-        DockPosition::Right => px >= screen_w - 6.0,
+        DockPosition::Bottom => py >= screen_h - DOCK_REVEAL_STRIP_PX,
+        DockPosition::Left => px <= DOCK_REVEAL_STRIP_PX,
+        DockPosition::Right => px >= screen_w - DOCK_REVEAL_STRIP_PX,
     };
     if edge_band {
         return true;
@@ -1005,7 +1056,13 @@ pub fn is_pointer_in_dock_auto_hide_zone(
     if !currently_revealed {
         return false;
     }
-    let layout = compute_dock_layout(screen_size, dock_view);
+    let owned_layout;
+    let layout = if let Some(presented) = dock_view.presented_layout {
+        presented
+    } else {
+        owned_layout = compute_dock_layout(screen_size, dock_view);
+        &owned_layout
+    };
     let pad = 20.0;
     let capsule = layout.capsule_rect;
     px >= f64::from(capsule.loc.x) - pad

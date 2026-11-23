@@ -1216,6 +1216,17 @@
                            (`NTP`-тумблер, `SettingsModal::{TimezoneEdit,
                            ManualDateTime}`, `Quick Time Zone`, статус/ошибки) и
                            автозапуск `systemd-timesyncd` в `scripts/rustyos-install.sh`
+
+  D-104    Accepted        ADR-0090 (`RUSTYOS-161`): модернизация Dock (Фаза A) —
+                           `DockVisibilityMode::{AlwaysShow, SmartHide, AlwaysHide}`
+                           в `[dock].visibility` (обратная совместимость с `auto_hide`)
+                           и `Dock Visibility` в `apps/rusty-settings`, независимый
+                           multi-monitor `OutputDockState` (перекрытие окнами, `5 px`
+                           reveal-полоса, `200 ms` hide-delay, рендер на вторичных
+                           мониторах), слой плавных анимаций `DockPresentation`
+                           (`240 ms` слоты/разделители/капсула, `reduced_motion`),
+                           детерминированный цикл окон, 3s grace для Quit/Force Quit и
+                           кэш метаданных пинов при обновлении пакетов (`0` новых крейтов)
   -----------------------------------------------------------------------
 
 ## Открытые решения
