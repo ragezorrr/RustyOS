@@ -11,8 +11,9 @@ use crate::storage::is_valid_block_device_path;
 
 /// Well-known Archiso / Live ISO `SquashFS` image paths probed for offline installation.
 pub const LIVE_SQUASHFS_CANDIDATES: &[&str] = &[
-    "/run/archiso/bootmnt/arch/x86_64/airootfs.sfs",
+    "/run/archiso/bootmnt/rustyos/x86_64/airootfs.sfs",
     "/run/archiso/copytoram/airootfs.sfs",
+    "/run/archiso/bootmnt/arch/x86_64/airootfs.sfs",
     "/run/archiso/sfs/airootfs/airootfs.img",
 ];
 

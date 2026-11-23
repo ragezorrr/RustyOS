@@ -2614,6 +2614,19 @@ hardware/software context и низкие накладные расходы.
   - `parse_args` и `split_shell_words` покрыты unit-тестами; `cargo fmt`, `clippy -D warnings`, `cargo test -p rusty-compositor`, `bash -n scripts/rustyos-install.sh packaging/arch/PKGBUILD`, `sh -n bin/rustyos-session`, и живой `--winit --max-frames 10` прогон проходят чисто; хостовая ОС не изменялась.
 - **Risks:** Низкие; консольные пункты загрузчика сохранены для отладки, ноль новых Cargo-зависимостей.
 
+### RUSTYOS-158 — Оффлайн-установка через `SquashFS Copy` и облегчённый Live ISO `initramfs`
+- **Status:** Done
+- **Goal:** Устранить `VFS: Unable to mount root fs on unknown-block(0,0)` на UEFI (убрать `kms` без `autodetect` из Live ISO `archiso.conf` + `zstd -19`, уменьшив `initramfs` с 227 МБ до ~45 МБ) и перевести `scripts/rustyos-install.sh` на быструю оффлайн-установку распаковкой `airootfs.sfs` (`unsquashfs`) с полной очисткой live-артефактов и автоматическим fallback на `pacstrap`.
+- **Dependencies:** `RUSTYOS-115`, `RUSTYOS-137`, `RUSTYOS-157`.
+- **Scope:**
+  - `packaging/archiso/airootfs/etc/mkinitcpio.conf.d/archiso.conf`.
+  - `scripts/rustyos-install.sh`.
+  - `crates/rusty-services/src/installer_service.rs`.
+  - `docs/adr/0087-offline-squashfs-installer-and-slim-live-initramfs.md`, `DECISIONS.md` (`D-101`).
+- **Acceptance Criteria:**
+  - `bash -n scripts/rustyos-install.sh` и `--dry-run` проверки для обоих режимов (`--install-source squashfs` с временным файлом и `--install-source pacstrap`) проходят чисто; `cargo fmt`, `clippy -p rusty-services -D warnings`, `cargo test -p rusty-services` проходят без ошибок.
+- **Risks:** Низкие; `pacstrap` сохранён как автоматический fallback, хостовая ОС не изменялась.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

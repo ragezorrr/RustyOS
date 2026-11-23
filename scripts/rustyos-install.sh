@@ -7,6 +7,7 @@ DRY_RUN=0
 CONFIRM_ERASE=0
 CONFIRM_DUALBOOT=0
 INSTALL_MODE="whole-disk"
+INSTALL_SOURCE="auto"
 TARGET_DISK=""
 ROOT_PART=""
 FREE_SPACE_SPEC=""
@@ -37,6 +38,7 @@ Modes:
 
 Install options:
   --install-mode <mode>      whole-disk | dual-boot (default: whole-disk)
+  --install-source <src>     auto | squashfs | pacstrap (default: auto; prefers offline Live SquashFS)
   --target-disk <dev>        Target whole block device (for whole-disk mode)
   --root-part <dev>          Target existing root partition (for dual-boot mode)
   --free-space <disk:start:size>
@@ -116,6 +118,10 @@ parse_free_space_spec() {
 validate_inputs() {
     if ! [[ "${INSTALL_MODE}" =~ ^(whole-disk|dual-boot)$ ]]; then
         echo "Error: invalid --install-mode '${INSTALL_MODE}' (expected whole-disk or dual-boot)" >&2
+        exit 2
+    fi
+    if ! [[ "${INSTALL_SOURCE}" =~ ^(auto|squashfs|pacstrap)$ ]]; then
+        echo "Error: invalid --install-source '${INSTALL_SOURCE}' (expected auto, squashfs, or pacstrap)" >&2
         exit 2
     fi
     if [[ "${INSTALL_MODE}" == "whole-disk" ]]; then
@@ -286,6 +292,41 @@ find_part_by_start_sector() {
     return 1
 }
 
+detect_live_squashfs() {
+    local cand
+    if [[ -n "${RUSTYOS_SQUASHFS_PATH:-}" && -f "${RUSTYOS_SQUASHFS_PATH}" ]]; then
+        printf '%s\n' "${RUSTYOS_SQUASHFS_PATH}"
+        return 0
+    fi
+    for cand in \
+        /run/archiso/bootmnt/rustyos/x86_64/airootfs.sfs \
+        /run/archiso/copytoram/airootfs.sfs \
+        /run/archiso/bootmnt/arch/x86_64/airootfs.sfs \
+        /run/archiso/sfs/airootfs/airootfs.img; do
+        if [[ -f "${cand}" ]]; then
+            printf '%s\n' "${cand}"
+            return 0
+        fi
+    done
+    return 1
+}
+
+resolve_install_source() {
+    if [[ "${INSTALL_SOURCE}" == "pacstrap" ]]; then
+        printf 'pacstrap\n'
+        return 0
+    fi
+    if detect_live_squashfs >/dev/null 2>&1; then
+        printf 'squashfs\n'
+        return 0
+    fi
+    if [[ "${INSTALL_SOURCE}" == "squashfs" ]]; then
+        echo "Error: --install-source squashfs requested but no live airootfs.sfs was found" >&2
+        exit 2
+    fi
+    printf 'pacstrap\n'
+}
+
 run_dry_plan() {
     local boot_pkg="efibootmgr"
     if [[ "${BOOTLOADER}" == "grub" ]]; then
@@ -316,8 +357,16 @@ run_dry_plan() {
         fi
     fi
 
-    emit_step 40 keyring "[dry-run] Would initialize pacman-key and refresh archlinux-keyring"
-    emit_step 55 pacstrap "[dry-run] Would run pacstrap -K ${MOUNT_ROOT}: base linux linux-firmware intel-ucode amd-ucode dosfstools networkmanager bluez bluez-utils upower pipewire wireplumber seatd polkit mesa xorg-xwayland xdg-utils xdg-desktop-portal-gtk unzip ttf-jetbrains-mono git base-devel greetd plymouth sudo ${boot_pkg} rustyos-git"
+    local resolved_source sfs_path=""
+    resolved_source="$(resolve_install_source)"
+    if [[ "${resolved_source}" == "squashfs" ]]; then
+        sfs_path="$(detect_live_squashfs)"
+        emit_step 40 extract "[dry-run] Would extract offline Live SquashFS ${sfs_path} -> ${MOUNT_ROOT} via unsquashfs"
+        emit_step 55 cleanup "[dry-run] Would copy vmlinuz-linux -> /boot, remove liveuser/archiso artifacts, and initialize offline pacman keyring"
+    else
+        emit_step 40 keyring "[dry-run] Would initialize pacman-key and refresh archlinux-keyring"
+        emit_step 55 pacstrap "[dry-run] Would run pacstrap -K ${MOUNT_ROOT}: base linux linux-firmware intel-ucode amd-ucode dosfstools networkmanager bluez bluez-utils upower pipewire wireplumber seatd polkit mesa xorg-xwayland xdg-utils xdg-desktop-portal-gtk unzip ttf-jetbrains-mono git base-devel greetd plymouth sudo ${boot_pkg} rustyos-git"
+    fi
     emit_step 75 system "[dry-run] Would set timezone=${TIMEZONE_VAL}, locale=${LOCALE_VAL}, keymap=${KEYMAP_VAL}, hostname=${HOSTNAME_VAL}, user=${USERNAME_VAL}"
     emit_step 88 desktop "[dry-run] Would write /etc/greetd/config.toml (autologin=${AUTOLOGIN}) and ~/.config/rustyos/config.toml (theme=${APPEARANCE}, accent=${ACCENT_INDEX}, kb=${KB_LAYOUT}, oobe=${INSTALL_OOBE})"
     emit_step 90 yay "[dry-run] Would build and install optional yay-bin AUR helper for ${USERNAME_VAL} (with safe fallback)"
@@ -344,6 +393,10 @@ check_network_preflight() {
 }
 
 install_optional_yay_bin() {
+    if ! ip route show default 2>/dev/null | grep -q . && ! ip -6 route show default 2>/dev/null | grep -q .; then
+        emit_step 90 yay "Offline install detected; skipping optional yay-bin AUR helper"
+        return 0
+    fi
     local build_dir="/tmp/rustyos-yay-build"
     emit_step 90 yay "Installing yay AUR helper (yay-bin) for ${USERNAME_VAL}"
     rm -rf "${MOUNT_ROOT}${build_dir}"
@@ -392,14 +445,27 @@ install_system() {
         echo "Error: pass --confirm-dualboot to confirm dual-boot partition installation" >&2
         exit 2
     fi
-    for tool in sgdisk blockdev mkfs.fat mkfs.ext4 pacman pacman-key pacstrap genfstab arch-chroot partprobe blkid; do
+    local resolved_source
+    resolved_source="$(resolve_install_source)"
+
+    local required_tools=(sgdisk blockdev mkfs.fat mkfs.ext4 genfstab arch-chroot partprobe blkid)
+    if [[ "${resolved_source}" == "squashfs" ]]; then
+        required_tools+=(unsquashfs)
+    else
+        required_tools+=(pacman pacman-key pacstrap)
+    fi
+    for tool in "${required_tools[@]}"; do
         if ! command -v "${tool}" >/dev/null 2>&1; then
             echo "Error: required installation tool '${tool}' not found in PATH" >&2
             exit 5
         fi
     done
 
-    check_network_preflight
+    if [[ "${resolved_source}" == "pacstrap" ]]; then
+        check_network_preflight
+    else
+        emit_step 3 netcheck "Using offline Live SquashFS image (internet connection not required)"
+    fi
 
     local efi_part root_part format_efi=0 boot_pkg="efibootmgr" boot_disk=""
     if [[ "${BOOTLOADER}" == "grub" ]]; then
@@ -525,37 +591,80 @@ install_system() {
         fi
     fi
 
-    local pacstrap_conf_arg=() host_pacman_conf_arg=()
-    if [[ -f /etc/pacman-rustyos-install.conf ]]; then
-        pacstrap_conf_arg=(-C /etc/pacman-rustyos-install.conf)
-        host_pacman_conf_arg=(--config /etc/pacman-rustyos-install.conf)
-    fi
-    if ! grep -qE '^[[:space:]]*Server[[:space:]]*=' /etc/pacman.d/mirrorlist 2>/dev/null; then
-        mkdir -p /etc/pacman.d
-        cat <<'EOF' > /etc/pacman.d/mirrorlist
+    if [[ "${resolved_source}" == "squashfs" ]]; then
+        local sfs_path
+        sfs_path="$(detect_live_squashfs)"
+        emit_step 40 extract "Extracting offline RustyOS system image (${sfs_path})"
+        unsquashfs -f -d "${MOUNT_ROOT}" "${sfs_path}"
+
+        emit_step 60 cleanup "Preparing kernel, cleaning Live ISO artifacts, and initializing keyring"
+        local kimg=""
+        for cand in \
+            "${MOUNT_ROOT}"/usr/lib/modules/*/vmlinuz \
+            /run/archiso/bootmnt/rustyos/boot/x86_64/vmlinuz-linux \
+            /run/archiso/bootmnt/arch/boot/x86_64/vmlinuz-linux; do
+            if [[ -f "${cand}" ]]; then
+                kimg="${cand}"
+                break
+            fi
+        done
+        if [[ -z "${kimg}" ]]; then
+            echo "Error: unable to locate vmlinuz kernel image after SquashFS extraction" >&2
+            exit 5
+        fi
+        cp -f "${kimg}" "${MOUNT_ROOT}/boot/vmlinuz-linux"
+
+        # Clean Live ISO-only users, hooks, presets, and desktop shortcuts from target root.
+        arch-chroot "${MOUNT_ROOT}" userdel -rf liveuser 2>/dev/null || true
+        rm -rf \
+            "${MOUNT_ROOT}/home/liveuser" \
+            "${MOUNT_ROOT}/etc/sudoers.d/liveuser" \
+            "${MOUNT_ROOT}/etc/polkit-1/rules.d/49-rustyos-live.rules" \
+            "${MOUNT_ROOT}/etc/systemd/system-preset/10-rustyos-live.preset" \
+            "${MOUNT_ROOT}/etc/skel/Desktop/install-rustyos.desktop" \
+            "${MOUNT_ROOT}/etc/mkinitcpio.conf.d/archiso.conf" \
+            "${MOUNT_ROOT}/etc/pacman.d/hooks/99-rustyos-liveuser.hook" \
+            "${MOUNT_ROOT}/usr/local/bin/rustyos-liveuser-setup" \
+            "${MOUNT_ROOT}/etc/pacman-rustyos-install.conf" \
+            "${MOUNT_ROOT}/opt/rustyos-repo" \
+            "${MOUNT_ROOT}/var/lib/dbus/machine-id"
+        : > "${MOUNT_ROOT}/etc/machine-id"
+        arch-chroot "${MOUNT_ROOT}" pacman -Rns --noconfirm mkinitcpio-archiso 2>/dev/null || true
+        arch-chroot "${MOUNT_ROOT}" pacman-key --init
+        arch-chroot "${MOUNT_ROOT}" pacman-key --populate archlinux
+    else
+        local pacstrap_conf_arg=() host_pacman_conf_arg=()
+        if [[ -f /etc/pacman-rustyos-install.conf ]]; then
+            pacstrap_conf_arg=(-C /etc/pacman-rustyos-install.conf)
+            host_pacman_conf_arg=(--config /etc/pacman-rustyos-install.conf)
+        fi
+        if ! grep -qE '^[[:space:]]*Server[[:space:]]*=' /etc/pacman.d/mirrorlist 2>/dev/null; then
+            mkdir -p /etc/pacman.d
+            cat <<'EOF' > /etc/pacman.d/mirrorlist
 Server = https://geo.mirror.pkgbuild.com/$repo/os/$arch
 Server = https://fastly.mirror.pkgbuild.com/$repo/os/$arch
 Server = https://berlin.mirror.pkgbuild.com/$repo/os/$arch
 Server = https://mirror.rackspace.com/archlinux/$repo/os/$arch
 EOF
+        fi
+
+        emit_step 40 keyring "Initializing pacman keyring and updating archlinux-keyring"
+        pacman-key --init
+        pacman-key --populate archlinux
+        pacman -Sy --noconfirm --needed "${host_pacman_conf_arg[@]}" archlinux-keyring
+
+        emit_step 45 pacstrap "Installing base system, Wayland desktop, and RustyOS packages"
+        # shellcheck disable=SC2086
+        pacstrap -K "${pacstrap_conf_arg[@]}" "${MOUNT_ROOT}" \
+            base linux linux-firmware intel-ucode amd-ucode dosfstools sof-firmware alsa-ucm-conf alsa-utils \
+            networkmanager bluez bluez-utils upower pipewire pipewire-alsa pipewire-pulse wireplumber \
+            seatd polkit mesa xorg-xwayland xdg-utils xdg-desktop-portal-gtk unzip \
+            ttf-jetbrains-mono git base-devel greetd plymouth sudo \
+            ${boot_pkg} rustyos-git
     fi
 
-    emit_step 40 keyring "Initializing pacman keyring and updating archlinux-keyring"
-    pacman-key --init
-    pacman-key --populate archlinux
-    pacman -Sy --noconfirm --needed "${host_pacman_conf_arg[@]}" archlinux-keyring
-
-    emit_step 45 pacstrap "Installing base system, Wayland desktop, and RustyOS packages"
-    # shellcheck disable=SC2086
-    pacstrap -K "${pacstrap_conf_arg[@]}" "${MOUNT_ROOT}" \
-        base linux linux-firmware intel-ucode amd-ucode dosfstools sof-firmware alsa-ucm-conf alsa-utils \
-        networkmanager bluez bluez-utils upower pipewire pipewire-alsa pipewire-pulse wireplumber \
-        seatd polkit mesa xorg-xwayland xdg-utils xdg-desktop-portal-gtk unzip \
-        ttf-jetbrains-mono git base-devel greetd plymouth sudo \
-        ${boot_pkg} rustyos-git
-
     emit_step 75 system "Configuring timezone, locale, hostname, and user ${USERNAME_VAL}"
-    genfstab -U "${MOUNT_ROOT}" >> "${MOUNT_ROOT}/etc/fstab"
+    genfstab -U "${MOUNT_ROOT}" > "${MOUNT_ROOT}/etc/fstab"
 
     cat <<EOF > "${MOUNT_ROOT}/etc/vconsole.conf"
 KEYMAP=${KEYMAP_VAL}
@@ -589,7 +698,7 @@ Server = https://ragezorrr.github.io/RustyOS/repo/$arch
 EOF
         fi
     fi
-    if [[ -d /opt/rustyos-repo ]]; then
+    if [[ "${resolved_source}" == "pacstrap" && -d /opt/rustyos-repo ]]; then
         mkdir -p "${MOUNT_ROOT}/opt/rustyos-repo"
         cp -a /opt/rustyos-repo/. "${MOUNT_ROOT}/opt/rustyos-repo/" || true
     fi
@@ -747,6 +856,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --install-mode)
             INSTALL_MODE="${2:-}"
+            shift 2
+            ;;
+        --install-source)
+            INSTALL_SOURCE="${2:-}"
             shift 2
             ;;
         --target-disk)

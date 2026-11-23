@@ -1187,6 +1187,15 @@
                            в `rusty-compositor` + `rustyos-session --greeter` с
                            `plymouth quit --retain-splash` и заменой `agreety` в
                            `greetd/config.toml`
+
+  D-101    Accepted        ADR-0087 (`RUSTYOS-158`): оффлайн-установка через
+                           `SquashFS Copy` (`unsquashfs` из
+                           `/run/archiso/bootmnt/rustyos/x86_64/airootfs.sfs` с
+                           очисткой live-артефактов, копированием `vmlinuz-linux`,
+                           сбросом `machine-id` и пересборкой `mkinitcpio -P` с
+                           `autodetect` + `kms plymouth`, fallback на `pacstrap`)
+                           и облегчённый Live ISO `initramfs` (без `kms` + `zstd -19`
+                           в `archiso.conf` против `unknown-block(0,0)` на UEFI)
   -----------------------------------------------------------------------
 
 ## Открытые решения
