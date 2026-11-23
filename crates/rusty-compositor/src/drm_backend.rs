@@ -1653,6 +1653,10 @@ fn try_run_native_drm_session_once(
         CompositorError::EventLoop(format!("failed to initialize event loop ping: {err}"))
     })?;
     state.dbus_notifications.set_waker(ping.clone());
+    let trash_ping = ping.clone();
+    state
+        .trash_monitor
+        .set_on_change(std::sync::Arc::new(move || trash_ping.ping()));
     state.loop_waker = Some(ping);
 
     let rt_ping = Rc::clone(&runtime);

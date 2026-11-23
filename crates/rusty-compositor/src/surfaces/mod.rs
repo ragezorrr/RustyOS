@@ -731,6 +731,19 @@ impl UiShapeCache {
         )
     }
 
+    /// Emits a live aspect-fit GPU thumbnail element for a minimized window slot in the Dock (`RUSTYOS-162`).
+    pub(crate) fn render_minimized_dock_thumbnail_element(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        window_id: u64,
+        slot: Rectangle<i32, Logical>,
+        output_scale: f64,
+        alpha: f32,
+    ) -> Option<(LiquidGlassElement, Rectangle<i32, Logical>)> {
+        self.window_minimize
+            .render_minimized_dock_thumbnail_element(renderer, window_id, slot, output_scale, alpha)
+    }
+
     /// Retains only open/close lifecycle snapshot textures matching `keep`.
     pub(crate) fn retain_lifecycle_snapshots(&mut self, keep: impl FnMut(u64) -> bool) {
         self.window_minimize.retain_lifecycle_snapshots(keep);

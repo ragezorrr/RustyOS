@@ -1733,6 +1733,7 @@ version = "0.1.0"
 name = "rusty-services"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "zbus",
 ]
 

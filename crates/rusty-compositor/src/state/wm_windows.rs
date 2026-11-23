@@ -121,6 +121,9 @@ impl RustyCompositorState {
             self.active_window_resize = None;
         }
         self.minimized_window_ids.insert(win_id);
+        if !self.minimized_dock_order.contains(&win_id) {
+            self.minimized_dock_order.push(win_id);
+        }
         if self.wm.focused_window() == Some(win_id) {
             let next_visible = self
                 .wm
@@ -168,6 +171,7 @@ impl RustyCompositorState {
         let window_rect = wm_win.geometry;
         let dock_rect = self.compute_minimize_target_rect(win_id);
         self.minimized_window_ids.remove(&win_id);
+        self.minimized_dock_order.retain(|id| *id != win_id);
         self.wm.focus_and_raise(win_id);
         self.sync_space_with_wm(serial);
 
@@ -763,6 +767,7 @@ impl RustyCompositorState {
         self.unregister_window_metadata(win_id);
         self.minimize_anims.retain(|anim| anim.win_id != win_id);
         self.minimized_window_ids.remove(&win_id);
+        self.minimized_dock_order.retain(|id| *id != win_id);
         self.remove_from_switcher(win_id);
         self.wm.unmap_window(win_id);
         self.animations.remove_window(win_id.0);
@@ -1744,8 +1749,10 @@ impl RustyCompositorState {
                 self.apply_wm_action(WmAction::SwitchWorkspace(ws), serial);
             }
             ShellRequest::FocusWindow { window_id } => {
-                self.minimized_window_ids.remove(&WindowId(window_id));
-                if self.wm.focus_and_raise(WindowId(window_id)) {
+                let win_id = WindowId(window_id);
+                self.minimized_window_ids.remove(&win_id);
+                self.minimized_dock_order.retain(|id| *id != win_id);
+                if self.wm.focus_and_raise(win_id) {
                     self.sync_space_with_wm(serial);
                 }
             }

@@ -3,7 +3,9 @@
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::utils::{Point, Rectangle, Size};
 
-use super::dock::{ComputedDockLayout, ComputedDockSlot, dock_tooltip_rect_and_label};
+use super::dock::{
+    ComputedDockLayout, ComputedDockSlot, dock_count_badge_rect, dock_tooltip_rect_and_label,
+};
 use super::spotlight_overview::render_overview_text;
 use super::text_pass::{append_chrome_text, append_dock_text};
 use super::tokens::{
@@ -726,6 +728,7 @@ fn push_dock_chrome_shapes_with_glass(
         return;
     }
 
+    let mut dock_badges = Vec::new();
     let mut dock_icons = Vec::with_capacity(layout.slots.len());
     let mut dock_dots_and_divider = Vec::new();
     let sep_col = if pal.is_dark {
@@ -741,6 +744,7 @@ fn push_dock_chrome_shapes_with_glass(
 
     for slot in &layout.slots {
         push_dock_slot_shape(
+            &mut dock_badges,
             &mut dock_icons,
             &mut dock_dots_and_divider,
             shape_cache,
@@ -751,6 +755,7 @@ fn push_dock_chrome_shapes_with_glass(
         );
     }
 
+    out.extend(dock_badges);
     out.extend(dock_icons);
     out.extend(dock_dots_and_divider);
 
@@ -769,7 +774,9 @@ fn push_dock_chrome_shapes_with_glass(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn push_dock_slot_shape(
+    dock_badges: &mut Vec<CompositorRenderElement>,
     dock_icons: &mut Vec<CompositorRenderElement>,
     dock_dots: &mut Vec<CompositorRenderElement>,
     shape_cache: &mut crate::surfaces::UiShapeCache,
@@ -779,6 +786,31 @@ fn push_dock_slot_shape(
     slot: &ComputedDockSlot,
 ) {
     let tile = &slot.tile;
+    if let Some((badge_rect, _)) = dock_count_badge_rect(slot.icon_rect, tile.badge_count) {
+        let (fill, border) = if pal.is_dark {
+            ([255, 69, 58, 255], [255, 255, 255, 115])
+        } else {
+            ([255, 59, 48, 255], [255, 255, 255, 215])
+        };
+        let radius = badge_rect.size.h / 2;
+        push_rounded_glass_box(
+            dock_badges,
+            shape_cache,
+            renderer,
+            badge_rect,
+            radius,
+            fill,
+            Some(border),
+        );
+        push_elevation_shadow(
+            dock_badges,
+            shape_cache,
+            renderer,
+            badge_rect,
+            radius,
+            rusty_ui::shadow::ShadowElevation::Popup,
+        );
+    }
     if dock_view.show_indicators && tile.has_indicator {
         let pip_color = if tile.has_minimized && tile.window_count == 1 {
             [232, 196, 119, 235]
@@ -805,30 +837,7 @@ fn push_dock_slot_shape(
     }
 
     if tile.section == DockSection::MinimizedWindow {
-        let inset = (slot.icon_rect.size.w / 8).clamp(3, 6);
-        let inner_sz = (slot.icon_rect.size.w - inset * 2).max(16);
-        if let Some(el) = render_dock_tile_icon(
-            shape_cache,
-            renderer,
-            tile,
-            inner_sz,
-            Point::from((slot.icon_rect.loc.x + inset, slot.icon_rect.loc.y + inset)),
-        ) {
-            dock_icons.push(el);
-        }
-        push_rounded_glass_box(
-            dock_icons,
-            shape_cache,
-            renderer,
-            slot.icon_rect,
-            10,
-            if pal.is_dark {
-                [255, 255, 255, 26]
-            } else {
-                [255, 255, 255, 168]
-            },
-            Some(pal.border_highlight_rgba),
-        );
+        push_minimized_dock_slot(dock_icons, shape_cache, renderer, pal, slot);
     } else if let Some(el) = render_dock_tile_icon(
         shape_cache,
         renderer,
@@ -838,6 +847,107 @@ fn push_dock_slot_shape(
     ) {
         dock_icons.push(el);
     }
+}
+
+fn push_minimized_dock_slot(
+    dock_icons: &mut Vec<CompositorRenderElement>,
+    shape_cache: &mut crate::surfaces::UiShapeCache,
+    renderer: &mut GlesRenderer,
+    pal: &ThemePalette,
+    slot: &ComputedDockSlot,
+) {
+    let tile = &slot.tile;
+    let pad = (slot.icon_rect.size.w / 16).clamp(2, 4);
+    let thumb_slot = Rectangle::new(
+        Point::from((slot.icon_rect.loc.x + pad, slot.icon_rect.loc.y + pad)),
+        Size::from((
+            (slot.icon_rect.size.w - pad * 2).max(12),
+            (slot.icon_rect.size.h - pad * 2).max(12),
+        )),
+    );
+    if let Some(win_id) = tile.representative_win
+        && let Some((thumb_el, fit_rect)) = shape_cache
+            .render_minimized_dock_thumbnail_element(renderer, win_id.0, thumb_slot, 1.0, 1.0)
+    {
+        // Front-to-back: small app-icon badge + shadow -> live GPU thumbnail -> subtle frame + shadow.
+        let frame_rect = Rectangle::new(
+            Point::from((fit_rect.loc.x - 1, fit_rect.loc.y - 1)),
+            Size::from((fit_rect.size.w + 2, fit_rect.size.h + 2)),
+        );
+        let badge_sz = (slot.icon_rect.size.w * 42 / 100).clamp(16, 24);
+        let max_badge_x = slot.icon_rect.loc.x + slot.icon_rect.size.w - badge_sz + 2;
+        let max_badge_y = slot.icon_rect.loc.y + slot.icon_rect.size.h - badge_sz + 2;
+        let badge_x = (frame_rect.loc.x + frame_rect.size.w - badge_sz + 3).min(max_badge_x);
+        let badge_y = (frame_rect.loc.y + frame_rect.size.h - badge_sz + 3).min(max_badge_y);
+        if let Some(badge_icon) = render_dock_tile_icon(
+            shape_cache,
+            renderer,
+            tile,
+            badge_sz,
+            Point::from((badge_x, badge_y)),
+        ) {
+            dock_icons.push(badge_icon);
+            push_elevation_shadow(
+                dock_icons,
+                shape_cache,
+                renderer,
+                Rectangle::new(
+                    Point::from((badge_x, badge_y)),
+                    Size::from((badge_sz, badge_sz)),
+                ),
+                (badge_sz / 4).max(4),
+                rusty_ui::shadow::ShadowElevation::MenuOrTooltip,
+            );
+        }
+        dock_icons.push(CompositorRenderElement::ShaderTexture(thumb_el));
+        push_rounded_glass_box(
+            dock_icons,
+            shape_cache,
+            renderer,
+            frame_rect,
+            6,
+            if pal.is_dark {
+                [24, 26, 32, 224]
+            } else {
+                [248, 250, 254, 232]
+            },
+            Some(pal.border_highlight_rgba),
+        );
+        push_elevation_shadow(
+            dock_icons,
+            shape_cache,
+            renderer,
+            frame_rect,
+            6,
+            rusty_ui::shadow::ShadowElevation::MenuOrTooltip,
+        );
+        return;
+    }
+
+    let inset = (slot.icon_rect.size.w / 8).clamp(3, 6);
+    let inner_sz = (slot.icon_rect.size.w - inset * 2).max(16);
+    if let Some(el) = render_dock_tile_icon(
+        shape_cache,
+        renderer,
+        tile,
+        inner_sz,
+        Point::from((slot.icon_rect.loc.x + inset, slot.icon_rect.loc.y + inset)),
+    ) {
+        dock_icons.push(el);
+    }
+    push_rounded_glass_box(
+        dock_icons,
+        shape_cache,
+        renderer,
+        slot.icon_rect,
+        10,
+        if pal.is_dark {
+            [255, 255, 255, 26]
+        } else {
+            [255, 255, 255, 168]
+        },
+        Some(pal.border_highlight_rgba),
+    );
 }
 
 #[allow(clippy::too_many_lines)]

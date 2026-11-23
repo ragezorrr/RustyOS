@@ -79,9 +79,9 @@ pub use dock::{
     ComputedDockLayout, ComputedDockSlot, DOCK_REVEAL_STRIP_PX, DockAppTile, DockDragPreview,
     DockHit, DockSection, DockViewState, DockWindowEntry, append_utility_dock_tiles,
     canonical_dock_app_key, check_dock_click, check_dock_layout_slot, check_dock_slot,
-    compute_dock_layout, dock_builtin_for_key, dock_hit_for_pinned_key, dock_label_for_key,
-    dock_obstruction_region, dock_slot_rect, extract_app_name, is_dock_pin_removable,
-    is_pointer_in_dock_auto_hide_zone, make_window_badge,
+    compute_dock_layout, dock_builtin_for_key, dock_count_badge_rect, dock_hit_for_pinned_key,
+    dock_label_for_key, dock_obstruction_region, dock_slot_rect, extract_app_name,
+    is_dock_pin_removable, is_pointer_in_dock_auto_hide_zone, make_window_badge,
 };
 pub use dock_presentation::{
     DOCK_LEAVE_DURATION, DOCK_PRESENTATION_DURATION, DockPresentation, dock_tile_presentation_key,

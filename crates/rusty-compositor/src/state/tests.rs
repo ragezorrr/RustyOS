@@ -1962,3 +1962,201 @@ fn dock_pin_metadata_cache_survives_temporary_upgrade_disappearance() -> Result<
 
     Ok(())
 }
+
+#[test]
+fn dock_count_badges_support_unity_priority_notif_fallback_focus_clear_and_pill_sizing()
+-> Result<(), Box<dyn Error>> {
+    use crate::shell_render::{DockSection, dock_count_badge_rect};
+    use smithay::utils::{Point, Rectangle, Size};
+
+    let display: Display<RustyCompositorState> = Display::new()?;
+    let event_loop: EventLoop<RustyCompositorState> = EventLoop::try_new()?;
+    let mut compositor = RustyCompositorState::new(
+        &display,
+        "rusty-test-badges".to_owned(),
+        event_loop.get_signal(),
+        event_loop.handle(),
+        (1280, 800).into(),
+    )?;
+
+    // Notification fallback increments unread counter per app key.
+    compositor.push_dbus_notification_for_app(
+        101,
+        0,
+        rusty_ipc::Urgency::Normal,
+        "Firefox".to_owned(),
+        "New message".to_owned(),
+        None,
+        Some("firefox".to_owned()),
+    );
+    compositor.push_dbus_notification_for_app(
+        102,
+        0,
+        rusty_ipc::Urgency::Normal,
+        "Firefox".to_owned(),
+        "Second message".to_owned(),
+        None,
+        Some("firefox".to_owned()),
+    );
+    assert_eq!(compositor.dock_badge_count_for_key("browser"), 2);
+    let tiles = compositor.build_dock_tiles();
+    let browser_tile = tiles
+        .iter()
+        .find(|t| t.section == DockSection::Pinned && t.app_key == "browser")
+        .ok_or("missing browser tile")?;
+    assert_eq!(browser_tile.badge_count, 2);
+
+    // Unity LauncherEntry takes priority over notification fallback.
+    compositor.set_unity_launcher_badge("firefox", 12, true);
+    assert_eq!(compositor.dock_badge_count_for_key("browser"), 12);
+
+    // Clearing Unity badge falls back to remaining unread notifications.
+    compositor.set_unity_launcher_badge("firefox", 0, false);
+    assert_eq!(compositor.dock_badge_count_for_key("browser"), 2);
+
+    // Focusing the app clears the unread notification badge automatically.
+    compositor.clear_notification_badge("firefox");
+    assert_eq!(compositor.dock_badge_count_for_key("browser"), 0);
+
+    // Pill sizing geometry: 0 hidden, 1-digit circle, 2-digit wider, >99 capped at "99+".
+    let icon_rect = Rectangle::new(Point::from((100, 720)), Size::from((50, 50)));
+    assert!(dock_count_badge_rect(icon_rect, 0).is_none());
+    let (r1, l1) = dock_count_badge_rect(icon_rect, 5).ok_or("badge 5")?;
+    assert_eq!(l1, "5");
+    assert_eq!(r1.size.w, r1.size.h);
+    let (r2, l2) = dock_count_badge_rect(icon_rect, 42).ok_or("badge 42")?;
+    assert_eq!(l2, "42");
+    assert!(r2.size.w > r1.size.w);
+    let (r3, l3) = dock_count_badge_rect(icon_rect, 150).ok_or("badge 150")?;
+    assert_eq!(l3, "99+");
+    assert!(r3.size.w > r2.size.w);
+
+    Ok(())
+}
+
+#[test]
+fn dock_minimized_window_order_and_drag_reorder_work() -> Result<(), Box<dyn Error>> {
+    use crate::shell_render::{DockDragPreview, DockSection, DockViewState, compute_dock_layout};
+    use smithay::utils::Size;
+
+    let display: Display<RustyCompositorState> = Display::new()?;
+    let event_loop: EventLoop<RustyCompositorState> = EventLoop::try_new()?;
+    let mut compositor = RustyCompositorState::new(
+        &display,
+        "rusty-test-min-order".to_owned(),
+        event_loop.get_signal(),
+        event_loop.handle(),
+        (1280, 800).into(),
+    )?;
+
+    let w1 = compositor.wm.next_window_id();
+    let _ = compositor.wm.map_window(w1, Some((640, 480)));
+    let w2 = compositor.wm.next_window_id();
+    let _ = compositor.wm.map_window(w2, Some((640, 480)));
+    let w3 = compositor.wm.next_window_id();
+    let _ = compositor.wm.map_window(w3, Some((640, 480)));
+
+    let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+    compositor.minimize_window(w1, serial);
+    compositor.minimize_window(w2, serial);
+    compositor.minimize_window(w3, serial);
+
+    let min_ids = |c: &RustyCompositorState| -> Vec<rusty_wm::WindowId> {
+        c.build_dock_tiles()
+            .into_iter()
+            .filter(|t| t.section == DockSection::MinimizedWindow)
+            .filter_map(|t| t.representative_win)
+            .collect()
+    };
+    assert_eq!(min_ids(&compositor), vec![w1, w2, w3]);
+
+    // Drag preview moves w3 ahead of w1 without removing it even if pulled_outside=true.
+    let tiles = compositor.build_dock_tiles();
+    let preview_view = DockViewState {
+        tiles: &tiles,
+        drag_preview: Some(DockDragPreview {
+            section: DockSection::MinimizedWindow,
+            app_key: "win",
+            minimized_win: Some(w3),
+            source_idx: 2,
+            target_idx: 0,
+            pointer_xy: (600.0, 740.0),
+            pulled_outside: true,
+        }),
+        ..DockViewState::default()
+    };
+    let preview_layout = compute_dock_layout(Size::from((1280, 800)), &preview_view);
+    assert!(preview_layout.drag_remove_badge.is_none());
+    let preview_min_ids: Vec<rusty_wm::WindowId> = preview_layout
+        .slots
+        .iter()
+        .filter(|s| s.tile.section == DockSection::MinimizedWindow)
+        .filter_map(|s| s.tile.representative_win)
+        .collect();
+    assert_eq!(preview_min_ids, vec![w3, w1, w2]);
+
+    // Commit reorder persists new minimized order, and restoring removes only restored window.
+    compositor.commit_dock_minimized_reorder(w3, 0);
+    assert_eq!(min_ids(&compositor), vec![w3, w1, w2]);
+    compositor.restore_window(w1, serial);
+    assert_eq!(min_ids(&compositor), vec![w3, w2]);
+
+    Ok(())
+}
+
+#[test]
+fn dock_trash_monitor_drain_updates_trash_full_icon_reactively() -> Result<(), Box<dyn Error>> {
+    use std::time::{Duration, Instant};
+
+    let display: Display<RustyCompositorState> = Display::new()?;
+    let event_loop: EventLoop<RustyCompositorState> = EventLoop::try_new()?;
+    let mut compositor = RustyCompositorState::new(
+        &display,
+        "rusty-test-trash-mon".to_owned(),
+        event_loop.get_signal(),
+        event_loop.handle(),
+        (1280, 800).into(),
+    )?;
+
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let tmp_root = std::env::temp_dir().join(format!(
+        "rustyos-comp-trash-{}-{unique}",
+        std::process::id()
+    ));
+    let trash_root = tmp_root.join("Trash");
+    std::fs::create_dir_all(trash_root.join("files"))?;
+
+    compositor.trash_monitor = rusty_services::TrashMonitorHandle::start_with_paths(
+        Some(trash_root.clone()),
+        None,
+        1000,
+        None,
+    );
+    compositor.trash_has_items = compositor.trash_monitor.has_items();
+    assert!(!compositor.trash_has_items);
+
+    std::fs::write(trash_root.join("files/dropped.txt"), b"bye")?;
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline {
+        compositor.drain_trash_monitor_updates();
+        if compositor.trash_has_items {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    assert!(compositor.trash_has_items);
+    let tiles = compositor.build_dock_tiles();
+    let trash_tile = tiles
+        .iter()
+        .find(|t| t.app_key == "trash")
+        .ok_or("missing trash tile")?;
+    assert_eq!(
+        trash_tile.builtin_icon,
+        Some(crate::icons::BuiltinAppIcon::TrashFull)
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp_root);
+    Ok(())
+}

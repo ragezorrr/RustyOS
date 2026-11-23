@@ -75,20 +75,26 @@ pub struct DockAppTile {
     pub toplevel_icon: Option<crate::icons::ShmToplevelIcon>,
     /// Deterministic hue seed title fallback for unthemed windows.
     pub fallback_title: String,
+    /// Unread notification / Unity `LauncherEntry` counter (`0` = hidden, `1..=99`, `100+` -> `"99+"`) (`RUSTYOS-162`).
+    pub badge_count: u32,
 }
 
-/// Active Dock pinned-icon drag preview state passed to layout (`RUSTYOS-073`).
+/// Active Dock icon drag preview state passed to layout (`RUSTYOS-073` / `RUSTYOS-162`).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DockDragPreview<'a> {
+    /// Logical section being reordered (`Pinned` or `MinimizedWindow`).
+    pub section: DockSection,
     /// Canonical app key currently dragged.
     pub app_key: &'a str,
-    /// Original index inside `[dock].pinned_apps`.
-    pub source_pinned_idx: usize,
-    /// Target insertion index inside `[dock].pinned_apps`.
-    pub target_pinned_idx: usize,
-    /// Pointer coordinates relative to the primary output (`Logical` / `1x` px).
+    /// Minimized window identifier when dragging a `DockSection::MinimizedWindow` slot.
+    pub minimized_win: Option<rusty_wm::WindowId>,
+    /// Original index inside the dragged section.
+    pub source_idx: usize,
+    /// Target insertion index inside the dragged section.
+    pub target_idx: usize,
+    /// Pointer coordinates relative to the active output (`Logical` / `1x` px).
     pub pointer_xy: (f64, f64),
-    /// `true` once dragged far enough outside the Dock to trigger `Remove`.
+    /// `true` once dragged far enough outside the Dock to trigger `Remove` (pinned only).
     pub pulled_outside: bool,
 }
 
@@ -479,6 +485,7 @@ pub(super) fn build_default_dock_tiles(
             icon_name: None,
             toplevel_icon: None,
             fallback_title: dock_label_for_key(key),
+            badge_count: 0,
         });
     }
     for (idx, w) in windows.iter().enumerate() {
@@ -496,6 +503,7 @@ pub(super) fn build_default_dock_tiles(
             icon_name: w.icon_name.clone(),
             toplevel_icon: w.toplevel_icon.clone(),
             fallback_title: w.title.clone(),
+            badge_count: 0,
         });
     }
     append_utility_dock_tiles(&mut tiles, false);
@@ -518,6 +526,7 @@ pub fn append_utility_dock_tiles(tiles: &mut Vec<DockAppTile>, trash_has_items: 
         icon_name: None,
         toplevel_icon: None,
         fallback_title: "Downloads".to_owned(),
+        badge_count: 0,
     });
     let trash_icon = if trash_has_items {
         crate::icons::BuiltinAppIcon::TrashFull
@@ -538,10 +547,11 @@ pub fn append_utility_dock_tiles(tiles: &mut Vec<DockAppTile>, trash_has_items: 
         icon_name: None,
         toplevel_icon: None,
         fallback_title: "Trash".to_owned(),
+        badge_count: 0,
     });
 }
 
-fn reorder_pinned_tiles_for_drag(
+fn reorder_tiles_for_drag(
     raw_tiles: &[DockAppTile],
     drag: Option<DockDragPreview<'_>>,
 ) -> (Vec<DockAppTile>, Option<DockAppTile>) {
@@ -549,6 +559,34 @@ fn reorder_pinned_tiles_for_drag(
     let Some(drag) = drag else {
         return (raw_tiles.to_vec(), None);
     };
+    if drag.section == DockSection::MinimizedWindow {
+        let mut before: Vec<DockAppTile> = Vec::new();
+        let mut minimized: Vec<DockAppTile> = Vec::new();
+        let mut after: Vec<DockAppTile> = Vec::new();
+        let mut seen_min = false;
+        for tile in raw_tiles {
+            if tile.section == DockSection::MinimizedWindow {
+                seen_min = true;
+                if tile.representative_win == drag.minimized_win && dragged_tile.is_none() {
+                    dragged_tile = Some(tile.clone());
+                } else {
+                    minimized.push(tile.clone());
+                }
+            } else if seen_min {
+                after.push(tile.clone());
+            } else {
+                before.push(tile.clone());
+            }
+        }
+        if let Some(ref tile) = dragged_tile {
+            let insert_idx = drag.target_idx.min(minimized.len());
+            minimized.insert(insert_idx, tile.clone());
+        }
+        before.extend(minimized);
+        before.extend(after);
+        return (before, dragged_tile);
+    }
+
     let mut pinned: Vec<DockAppTile> = Vec::new();
     let mut tail: Vec<DockAppTile> = Vec::new();
     for tile in raw_tiles {
@@ -565,7 +603,7 @@ fn reorder_pinned_tiles_for_drag(
     if !drag.pulled_outside
         && let Some(ref tile) = dragged_tile
     {
-        let insert_idx = drag.target_pinned_idx.min(pinned.len());
+        let insert_idx = drag.target_idx.min(pinned.len());
         pinned.insert(insert_idx, tile.clone());
     }
     pinned.extend(tail);
@@ -750,7 +788,7 @@ pub fn compute_dock_layout(
         dock_view.tiles
     };
 
-    let (tiles, dragged_tile) = reorder_pinned_tiles_for_drag(raw_tiles, dock_view.drag_preview);
+    let (tiles, dragged_tile) = reorder_tiles_for_drag(raw_tiles, dock_view.drag_preview);
     let base_icon = clamp_dock_icon_size(dock_view.icon_size);
     let base_slot = base_icon + 2;
     let thickness = base_icon + DOCK_PADDING * 2 + 2;
@@ -836,7 +874,16 @@ fn build_drag_overlay(
     let Some(tile) = dragged_tile.or_else(|| {
         tiles
             .iter()
-            .find(|t| t.section == DockSection::Pinned && t.app_key == drag.app_key)
+            .find(|t| match drag.section {
+                DockSection::Pinned => {
+                    t.section == DockSection::Pinned && t.app_key == drag.app_key
+                }
+                DockSection::MinimizedWindow => {
+                    t.section == DockSection::MinimizedWindow
+                        && t.representative_win == drag.minimized_win
+                }
+                _ => false,
+            })
             .cloned()
     }) else {
         return (None, None);
@@ -845,7 +892,7 @@ fn build_drag_overlay(
     let px = drag.pointer_xy.0.round() as i32 - sz / 2;
     let py = drag.pointer_xy.1.round() as i32 - sz / 2;
     let icon_rect = Rectangle::new(Point::from((px, py)), Size::from((sz, sz)));
-    let badge = drag.pulled_outside.then(|| {
+    let badge = (drag.section == DockSection::Pinned && drag.pulled_outside).then(|| {
         Rectangle::new(
             Point::from((px + sz / 2 - 36, py - 30)),
             Size::from((72, 22)),
@@ -1026,6 +1073,35 @@ pub fn check_dock_layout_slot(layout: &ComputedDockLayout, x: f64, y: f64) -> Op
         }
     }
     None
+}
+
+/// Computes the red notification badge pill bounds and formatted label (`1..=99`, `"99+"`)
+/// anchored to the top-right corner of a Dock icon (`RUSTYOS-162`).
+#[must_use]
+pub fn dock_count_badge_rect(
+    icon_rect: Rectangle<i32, smithay::utils::Physical>,
+    count: u32,
+) -> Option<(Rectangle<i32, smithay::utils::Physical>, String)> {
+    if count == 0 || icon_rect.size.w < 20 || icon_rect.size.h < 20 {
+        return None;
+    }
+    let label = if count > 99 {
+        "99+".to_owned()
+    } else {
+        count.to_string()
+    };
+    let h = if icon_rect.size.w < 44 { 16 } else { 18 };
+    let w = match label.len() {
+        1 => h,
+        2 => h + 6,
+        _ => h + 12,
+    };
+    let x = icon_rect.loc.x + icon_rect.size.w - w + 3;
+    let y = icon_rect.loc.y - 3;
+    Some((
+        Rectangle::new(Point::from((x, y)), Size::from((w, h))),
+        label,
+    ))
 }
 
 /// Edge reveal strip width/height in logical pixels (`RUSTYOS-161`).

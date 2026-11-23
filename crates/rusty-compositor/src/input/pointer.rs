@@ -376,6 +376,8 @@ impl RustyCompositorState {
                             drag.target_pinned_idx,
                             drag.pulled_outside,
                         );
+                    } else if let Some(win_id) = drag.source_minimized_win {
+                        self.commit_dock_minimized_reorder(win_id, drag.target_minimized_idx);
                     }
                 } else {
                     self.handle_dock_hit(drag.hit, serial);

@@ -305,6 +305,7 @@ impl DockPresentation {
             let mut ghost = entry.last_slot.clone();
             ghost.slot_idx = usize::MAX;
             ghost.tile.has_indicator = false;
+            ghost.tile.badge_count = 0;
             ghost.hit_rect = Rectangle::new(Point::from((0, 0)), Size::from((0, 0)));
             let scale = 0.45 + 0.55 * app;
             ghost.icon_rect = scale_rect_centered(ghost.icon_rect, scale);
@@ -438,6 +439,7 @@ mod tests {
             icon_name: None,
             toplevel_icon: None,
             fallback_title: key.to_owned(),
+            badge_count: 0,
         }
     }
 

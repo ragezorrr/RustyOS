@@ -98,6 +98,43 @@ impl RustyCompositorState {
         }
     }
 
+    fn nearest_dock_section_index(
+        slots: &[crate::shell_render::ComputedDockSlot],
+        section: crate::shell_render::DockSection,
+        position: crate::config::DockPosition,
+        local_x: f64,
+        local_y: f64,
+        fallback: usize,
+    ) -> usize {
+        let mut best_idx = fallback;
+        let mut best_dist = f64::MAX;
+        let mut ordinal = 0_usize;
+        let cur = match position {
+            crate::config::DockPosition::Bottom => local_x,
+            crate::config::DockPosition::Left | crate::config::DockPosition::Right => local_y,
+        };
+        for slot in slots {
+            if slot.tile.section != section {
+                continue;
+            }
+            let center = match position {
+                crate::config::DockPosition::Bottom => {
+                    f64::from(slot.hit_rect.loc.x) + f64::from(slot.hit_rect.size.w) * 0.5
+                }
+                crate::config::DockPosition::Left | crate::config::DockPosition::Right => {
+                    f64::from(slot.hit_rect.loc.y) + f64::from(slot.hit_rect.size.h) * 0.5
+                }
+            };
+            let d = (cur - center).abs();
+            if d < best_dist {
+                best_dist = d;
+                best_idx = ordinal;
+            }
+            ordinal += 1;
+        }
+        best_idx
+    }
+
     fn update_dock_drag_motion(
         &mut self,
         output_id: rusty_wm::OutputId,
@@ -110,14 +147,17 @@ impl RustyCompositorState {
         };
         let dist = (local_x - drag_snapshot.start_pointer.x)
             .hypot(local_y - drag_snapshot.start_pointer.y);
-        let active_drag =
-            drag_snapshot.source_pinned_idx.is_some() && (drag_snapshot.active_drag || dist > 6.0);
+        let can_drag = drag_snapshot.source_pinned_idx.is_some()
+            || drag_snapshot.source_minimized_idx.is_some();
+        let active_drag = can_drag && (drag_snapshot.active_drag || dist > 6.0);
         let app_key = drag_snapshot.app_key.clone();
         let source_pinned = drag_snapshot.source_pinned_idx;
+        let source_minimized = drag_snapshot.source_minimized_idx;
         let mut target_pinned_idx = drag_snapshot.target_pinned_idx;
+        let mut target_minimized_idx = drag_snapshot.target_minimized_idx;
         let mut pulled_outside = false;
 
-        if active_drag && source_pinned.is_some() {
+        if active_drag {
             let is_primary = self
                 .output_map
                 .get(output_id)
@@ -136,45 +176,37 @@ impl RustyCompositorState {
                 ..crate::shell_render::DockViewState::default()
             };
             let rest_layout = crate::shell_render::compute_dock_layout(output_size, &rest_view);
-            let cap = rest_layout.capsule_rect;
-            let outside_dist = match self.user_config.dock_position {
-                crate::config::DockPosition::Bottom => f64::from(cap.loc.y) - local_y,
-                crate::config::DockPosition::Left => local_x - f64::from(cap.loc.x + cap.size.w),
-                crate::config::DockPosition::Right => f64::from(cap.loc.x) - local_x,
-            };
-            pulled_outside =
-                outside_dist > 52.0 && crate::shell_render::is_dock_pin_removable(&app_key);
+            if source_pinned.is_some() {
+                let cap = rest_layout.capsule_rect;
+                let outside_dist = match self.user_config.dock_position {
+                    crate::config::DockPosition::Bottom => f64::from(cap.loc.y) - local_y,
+                    crate::config::DockPosition::Left => {
+                        local_x - f64::from(cap.loc.x + cap.size.w)
+                    }
+                    crate::config::DockPosition::Right => f64::from(cap.loc.x) - local_x,
+                };
+                pulled_outside =
+                    outside_dist > 52.0 && crate::shell_render::is_dock_pin_removable(&app_key);
 
-            if !pulled_outside {
-                let mut best_pin = target_pinned_idx;
-                let mut best_dist = f64::MAX;
-                let mut pin_ord = 0_usize;
-                for slot in &rest_layout.slots {
-                    if slot.tile.section != crate::shell_render::DockSection::Pinned {
-                        continue;
-                    }
-                    let center = match self.user_config.dock_position {
-                        crate::config::DockPosition::Bottom => {
-                            f64::from(slot.hit_rect.loc.x) + f64::from(slot.hit_rect.size.w) * 0.5
-                        }
-                        crate::config::DockPosition::Left | crate::config::DockPosition::Right => {
-                            f64::from(slot.hit_rect.loc.y) + f64::from(slot.hit_rect.size.h) * 0.5
-                        }
-                    };
-                    let cur = match self.user_config.dock_position {
-                        crate::config::DockPosition::Bottom => local_x,
-                        crate::config::DockPosition::Left | crate::config::DockPosition::Right => {
-                            local_y
-                        }
-                    };
-                    let d = (cur - center).abs();
-                    if d < best_dist {
-                        best_dist = d;
-                        best_pin = pin_ord;
-                    }
-                    pin_ord += 1;
+                if !pulled_outside {
+                    target_pinned_idx = Self::nearest_dock_section_index(
+                        &rest_layout.slots,
+                        crate::shell_render::DockSection::Pinned,
+                        self.user_config.dock_position,
+                        local_x,
+                        local_y,
+                        target_pinned_idx,
+                    );
                 }
-                target_pinned_idx = best_pin;
+            } else if source_minimized.is_some() {
+                target_minimized_idx = Self::nearest_dock_section_index(
+                    &rest_layout.slots,
+                    crate::shell_render::DockSection::MinimizedWindow,
+                    self.user_config.dock_position,
+                    local_x,
+                    local_y,
+                    target_minimized_idx,
+                );
             }
         }
 
@@ -182,6 +214,7 @@ impl RustyCompositorState {
             drag.current_pointer = Point::from((local_x, local_y));
             drag.active_drag = active_drag;
             drag.target_pinned_idx = target_pinned_idx;
+            drag.target_minimized_idx = target_minimized_idx;
             drag.pulled_outside = pulled_outside;
         }
         if active_drag {
@@ -293,15 +326,31 @@ impl RustyCompositorState {
                         .position(|k| k.eq_ignore_ascii_case(&slot.tile.app_key))
                 })
                 .flatten();
+            let (source_minimized_win, source_minimized_idx) = if slot.tile.section
+                == crate::shell_render::DockSection::MinimizedWindow
+            {
+                let win_id = slot.tile.representative_win;
+                let idx = layout
+                    .slots
+                    .iter()
+                    .filter(|s| s.tile.section == crate::shell_render::DockSection::MinimizedWindow)
+                    .position(|s| s.tile.representative_win == win_id);
+                (win_id, idx)
+            } else {
+                (None, None)
+            };
             self.dock_drag = Some(crate::state::DockDragState {
                 output_id,
                 slot_idx,
                 app_key: slot.tile.app_key.clone(),
                 source_pinned_idx,
+                source_minimized_win,
+                source_minimized_idx,
                 start_pointer: Point::from((local_x, local_y)),
                 current_pointer: Point::from((local_x, local_y)),
                 active_drag: false,
                 target_pinned_idx: source_pinned_idx.unwrap_or(0),
+                target_minimized_idx: source_minimized_idx.unwrap_or(0),
                 pulled_outside: false,
                 hit: slot.tile.hit,
             });

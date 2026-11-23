@@ -1227,6 +1227,18 @@
                            (`240 ms` слоты/разделители/капсула, `reduced_motion`),
                            детерминированный цикл окон, 3s grace для Quit/Force Quit и
                            кэш метаданных пинов при обновлении пакетов (`0` новых крейтов)
+
+  D-105    Accepted        ADR-0091 (`RUSTYOS-162`): модернизация Dock (Фаза B) —
+                           живые GPU-миниатюры свёрнутых окон в `WindowMinimizePipeline`
+                           (`render_minimized_dock_thumbnail_element` с отдельным
+                           `dock_thumb_id`, захватом при `reduced_motion` и app-бейджем)
+                           и drag-to-reorder свёрнутых слотов (`minimized_dock_order`),
+                           счётчики `CountBadge` (`com.canonical.Unity.LauncherEntry::Update`
+                           на существующем `zbus`-подключении + фолбэк непрочитанных
+                           уведомлений с автосбросом при фокусе, пилюля `1..99+`) и
+                           фоновый `TrashMonitorHandle` (`inotify` + `/proc/self/mountinfo`
+                           + debounce `150 ms` на workspace `libc`) в `rusty-services`
+                           (`0` новых внешних крейтов, `rusty-compositor` без `unsafe`)
   -----------------------------------------------------------------------
 
 ## Открытые решения

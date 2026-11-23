@@ -434,10 +434,110 @@ impl RustyCompositorState {
         let app_id = self.window_app_id(win_id);
         let key = crate::shell_render::canonical_dock_app_key(app_id.as_deref(), &title, win_id);
         self.dock_app_last_active.insert(key.clone(), win_id);
+        self.clear_notification_badge(&key);
         if key == "firefox" && self.is_browser_merged_with_firefox() {
             self.dock_app_last_active
                 .insert("browser".to_owned(), win_id);
+            self.clear_notification_badge("browser");
         }
+    }
+
+    /// Updates the explicit `com.canonical.Unity.LauncherEntry` badge counter for `app_key` (`RUSTYOS-162`).
+    pub fn set_unity_launcher_badge(&mut self, app_key: &str, count: u32, visible: bool) {
+        let key = app_key.trim().to_ascii_lowercase();
+        if key.is_empty() {
+            return;
+        }
+        let clamped = count.min(9999);
+        let changed = if visible && clamped > 0 {
+            self.dock_unity_badges.insert(key, clamped) != Some(clamped)
+        } else {
+            self.dock_unity_badges.remove(&key).is_some()
+        };
+        if changed {
+            self.shell_redraw_needed = true;
+        }
+    }
+
+    /// Increments the notification-derived unread badge count for `app_key` when not currently focused (`RUSTYOS-162`).
+    pub fn increment_notification_badge(&mut self, app_key: &str) {
+        let key = app_key.trim().to_ascii_lowercase();
+        if key.is_empty() {
+            return;
+        }
+        let currently_focused = self.wm.focused_window().is_some_and(|win_id| {
+            !self.is_window_minimized(win_id) && {
+                let title = self.window_title(win_id);
+                let app_id = self.window_app_id(win_id);
+                let canon =
+                    crate::shell_render::canonical_dock_app_key(app_id.as_deref(), &title, win_id);
+                canon == key
+                    || (key == "browser"
+                        && canon == "firefox"
+                        && self.is_browser_merged_with_firefox())
+            }
+        });
+        if currently_focused {
+            return;
+        }
+        let entry = self.dock_unread_notif_badges.entry(key).or_insert(0);
+        *entry = entry.saturating_add(1).min(999);
+        self.shell_redraw_needed = true;
+    }
+
+    /// Decrements the notification-derived unread badge count for `app_key` (`RUSTYOS-162`).
+    pub fn decrement_notification_badge(&mut self, app_key: &str) {
+        let key = app_key.trim().to_ascii_lowercase();
+        if let Some(count) = self.dock_unread_notif_badges.get_mut(&key) {
+            if *count <= 1 {
+                self.dock_unread_notif_badges.remove(&key);
+            } else {
+                *count -= 1;
+            }
+            self.shell_redraw_needed = true;
+        }
+    }
+
+    /// Clears the notification-derived unread badge for `app_key` (`RUSTYOS-162`).
+    pub fn clear_notification_badge(&mut self, app_key: &str) {
+        let key = app_key.trim().to_ascii_lowercase();
+        if self.dock_unread_notif_badges.remove(&key).is_some() {
+            self.shell_redraw_needed = true;
+        }
+    }
+
+    /// Resolves the effective Dock unread count badge for `app_key` (`RUSTYOS-162`).
+    ///
+    /// Explicit `com.canonical.Unity.LauncherEntry` counts take precedence over notification-derived
+    /// unread counters; `"browser"` merges `"firefox"` when Firefox owns the Browser slot.
+    #[must_use]
+    pub fn dock_badge_count_for_key(&self, app_key: &str) -> u32 {
+        let key = app_key.trim().to_ascii_lowercase();
+        let merge_firefox = key == "browser" && self.is_browser_merged_with_firefox();
+        let unity = self.dock_unity_badges.get(&key).copied().or_else(|| {
+            merge_firefox
+                .then(|| self.dock_unity_badges.get("firefox").copied())
+                .flatten()
+        });
+        if let Some(count) = unity
+            && count > 0
+        {
+            return count;
+        }
+        let notif_direct = self
+            .dock_unread_notif_badges
+            .get(&key)
+            .copied()
+            .unwrap_or(0);
+        let notif_ff = if merge_firefox {
+            self.dock_unread_notif_badges
+                .get("firefox")
+                .copied()
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        notif_direct.saturating_add(notif_ff)
     }
 
     /// Returns `true` when the `"browser"` Dock slot merges `"firefox"` windows (default Firefox pin behavior).

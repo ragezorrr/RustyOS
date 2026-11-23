@@ -646,7 +646,7 @@ pub(super) fn append_chrome_text(
     let _ = shape_cache;
 }
 
-/// Renders Dock hover tooltip and drag `"Remove"` pill labels (`RUSTYOS-050` / `RUSTYOS-161`).
+/// Renders Dock hover tooltip, drag `"Remove"` pill, and unread count badge labels (`RUSTYOS-050` / `RUSTYOS-161` / `RUSTYOS-162`).
 pub(super) fn append_dock_text(
     text_cache: &mut crate::text::TextCache,
     renderer: &mut GlesRenderer,
@@ -655,49 +655,75 @@ pub(super) fn append_dock_text(
     overlay: ShellOverlayView<'_>,
     elements: &mut Vec<MemoryRenderBufferRenderElement<GlesRenderer>>,
 ) {
-    if !text_cache.has_font() || dock_tooltip_hidden_by_overlay(overlay) {
+    if !text_cache.has_font() {
         return;
     }
     let pal = ThemePalette::active();
     let width = screen_size.w;
     let height = screen_size.h;
-    if dock_view.drag_preview.is_some_and(|d| d.pulled_outside) {
-        let owned_layout;
-        let layout = if let Some(presented) = dock_view.presented_layout {
-            presented
-        } else {
-            owned_layout = compute_dock_layout(screen_size, dock_view);
-            &owned_layout
-        };
-        if let Some(badge_rect) = layout.drag_remove_badge
+    let owned_layout;
+    let layout = if let Some(presented) = dock_view.presented_layout {
+        presented
+    } else {
+        owned_layout = compute_dock_layout(screen_size, dock_view);
+        &owned_layout
+    };
+
+    if !dock_tooltip_hidden_by_overlay(overlay) {
+        if dock_view.drag_preview.is_some_and(|d| d.pulled_outside) {
+            if let Some(badge_rect) = layout.drag_remove_badge
+                && let Some(el) = text_cache.render_label_centered_weighted(
+                    renderer,
+                    "Remove",
+                    crate::text::FontWeight::Bold,
+                    11.5,
+                    [255, 255, 255, 255],
+                    Rectangle::new(
+                        Point::from((badge_rect.loc.x, badge_rect.loc.y)),
+                        Size::from((badge_rect.size.w, badge_rect.size.h)),
+                    ),
+                )
+            {
+                elements.push(el);
+            }
+        } else if let Some((tooltip_rect, tooltip_label)) =
+            dock_tooltip_rect_and_label(width, height, dock_view)
             && let Some(el) = text_cache.render_label_centered_weighted(
                 renderer,
-                "Remove",
+                &tooltip_label,
                 crate::text::FontWeight::Bold,
-                11.5,
-                [255, 255, 255, 255],
+                12.0,
+                pal.popover_text_primary,
                 Rectangle::new(
-                    Point::from((badge_rect.loc.x, badge_rect.loc.y)),
-                    Size::from((badge_rect.size.w, badge_rect.size.h)),
+                    Point::from((tooltip_rect.loc.x, tooltip_rect.loc.y)),
+                    Size::from((tooltip_rect.size.w, tooltip_rect.size.h)),
                 ),
             )
         {
             elements.push(el);
         }
-    } else if let Some((tooltip_rect, tooltip_label)) =
-        dock_tooltip_rect_and_label(width, height, dock_view)
-        && let Some(el) = text_cache.render_label_centered_weighted(
-            renderer,
-            &tooltip_label,
-            crate::text::FontWeight::Bold,
-            12.0,
-            pal.popover_text_primary,
-            Rectangle::new(
-                Point::from((tooltip_rect.loc.x, tooltip_rect.loc.y)),
-                Size::from((tooltip_rect.size.w, tooltip_rect.size.h)),
-            ),
-        )
-    {
-        elements.push(el);
+    }
+
+    if dock_view.auto_hide_reveal > 0.01 {
+        for slot in &layout.slots {
+            if let Some((badge_rect, label)) =
+                super::dock::dock_count_badge_rect(slot.icon_rect, slot.tile.badge_count)
+            {
+                let font_size = if badge_rect.size.h < 18 { 9.5 } else { 10.5 };
+                if let Some(el) = text_cache.render_label_centered_weighted(
+                    renderer,
+                    &label,
+                    crate::text::FontWeight::Bold,
+                    font_size,
+                    [255, 255, 255, 255],
+                    Rectangle::new(
+                        Point::from((badge_rect.loc.x, badge_rect.loc.y)),
+                        Size::from((badge_rect.size.w, badge_rect.size.h)),
+                    ),
+                ) {
+                    elements.push(el);
+                }
+            }
+        }
     }
 }

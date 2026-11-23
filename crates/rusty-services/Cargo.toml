@@ -16,6 +16,7 @@ name = "rustyos-installer-service"
 path = "src/bin/rustyos_installer_service.rs"
 
 [dependencies]
+libc.workspace = true
 zbus.workspace = true
 
 [lints]

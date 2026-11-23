@@ -1081,6 +1081,7 @@ impl RustyCompositorState {
         let item = CompositorNotification {
             id,
             dbus_id: None,
+            app_key: None,
             urgency,
             title,
             body,
@@ -1120,6 +1121,29 @@ impl RustyCompositorState {
         body: String,
         expire_after: Option<Duration>,
     ) {
+        self.push_dbus_notification_for_app(
+            dbus_id,
+            replaces_id,
+            urgency,
+            title,
+            body,
+            expire_after,
+            None,
+        );
+    }
+
+    /// Inserts or replaces a D-Bus notification optionally tagged with a canonical Dock `app_key` (`RUSTYOS-162`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn push_dbus_notification_for_app(
+        &mut self,
+        dbus_id: u32,
+        replaces_id: u32,
+        urgency: Urgency,
+        title: String,
+        body: String,
+        expire_after: Option<Duration>,
+        app_key: Option<String>,
+    ) {
         const MAX_QUEUE_LEN: usize = 12;
         const MAX_HISTORY_LEN: usize = 32;
         let now = self.start_time.elapsed();
@@ -1137,6 +1161,9 @@ impl RustyCompositorState {
                 .find(|n| n.dbus_id == Some(replaces_id))
         {
             existing.dbus_id = Some(dbus_id);
+            if app_key.is_some() {
+                existing.app_key.clone_from(&app_key);
+            }
             existing.urgency = urgency;
             existing.title.clone_from(&title);
             existing.body.clone_from(&body);
@@ -1148,6 +1175,9 @@ impl RustyCompositorState {
                 .find(|n| n.dbus_id == Some(replaces_id))
             {
                 hist.dbus_id = Some(dbus_id);
+                if app_key.is_some() {
+                    hist.app_key = app_key;
+                }
                 hist.urgency = urgency;
                 hist.title = title;
                 hist.body = body;
@@ -1158,11 +1188,16 @@ impl RustyCompositorState {
             return;
         }
 
+        if let Some(ref key) = app_key {
+            self.increment_notification_badge(key);
+        }
+
         self.next_notification_id = self.next_notification_id.saturating_add(1);
         let id = self.next_notification_id;
         let item = CompositorNotification {
             id,
             dbus_id: Some(dbus_id),
+            app_key,
             urgency,
             title,
             body,
@@ -1182,7 +1217,7 @@ impl RustyCompositorState {
         self.sync_notification_count();
     }
 
-    /// Non-blockingly drains queued notifications from the D-Bus background thread (`RUSTYOS-026`).
+    /// Non-blockingly drains queued notifications and `Unity.LauncherEntry` badge updates from D-Bus (`RUSTYOS-026` / `RUSTYOS-162`).
     pub fn drain_dbus_notifications(&mut self) {
         for cmd in self.dbus_notifications.drain_commands() {
             match cmd {
@@ -1193,22 +1228,40 @@ impl RustyCompositorState {
                     title,
                     body,
                     expire_after,
+                    app_key,
                 } => {
-                    self.push_dbus_notification(
+                    self.push_dbus_notification_for_app(
                         id,
                         replaces_id,
                         urgency,
                         title,
                         body,
                         expire_after,
+                        app_key,
                     );
                     self.shell_redraw_needed = true;
                 }
                 crate::dbus_notifications::DbusNotificationCommand::Close { id } => {
+                    let closed_app = self
+                        .notifications
+                        .iter()
+                        .chain(self.notification_history.iter())
+                        .find(|n| n.dbus_id == Some(id))
+                        .and_then(|n| n.app_key.clone());
                     self.notifications.retain(|n| n.dbus_id != Some(id));
                     self.notification_history.retain(|n| n.dbus_id != Some(id));
+                    if let Some(key) = closed_app {
+                        self.decrement_notification_badge(&key);
+                    }
                     self.sync_notification_count();
                     self.shell_redraw_needed = true;
+                }
+                crate::dbus_notifications::DbusNotificationCommand::LauncherBadgeUpdate {
+                    app_key,
+                    count,
+                    visible,
+                } => {
+                    self.set_unity_launcher_badge(&app_key, count, visible);
                 }
             }
         }
@@ -1307,18 +1360,23 @@ impl RustyCompositorState {
 
     /// Dismisses a single active notification by ID (`RUSTYOS-024`, `RUSTYOS-109`).
     pub fn dismiss_notification(&mut self, id: u64) -> bool {
-        let dbus_id = self
+        let found = self
             .notifications
             .iter()
             .chain(self.notification_history.iter())
             .find(|n| n.id == id)
-            .and_then(|n| n.dbus_id);
+            .map(|n| (n.dbus_id, n.app_key.clone()));
+        let dbus_id = found.as_ref().and_then(|(did, _)| *did);
+        let app_key = found.and_then(|(_, key)| key);
         let prev_len = self.notifications.len();
         let prev_hist = self.notification_history.len();
         self.notifications.retain(|n| n.id != id);
         self.notification_history.retain(|n| n.id != id);
         if let Some(did) = dbus_id {
             self.dbus_notifications.emit_closed(did, 2);
+        }
+        if let Some(key) = app_key {
+            self.decrement_notification_badge(&key);
         }
         self.sync_notification_count();
         self.notifications.len() < prev_len || self.notification_history.len() < prev_hist
@@ -1333,6 +1391,7 @@ impl RustyCompositorState {
         }
         self.notifications.clear();
         self.notification_history.clear();
+        self.dock_unread_notif_badges.clear();
         self.sync_notification_count();
     }
 
@@ -1904,13 +1963,27 @@ impl RustyCompositorState {
         if !drag.active_drag {
             return None;
         }
-        let source_pinned_idx = drag.source_pinned_idx?;
+        if let Some(source_idx) = drag.source_pinned_idx {
+            return Some(crate::shell_render::DockDragPreview {
+                section: crate::shell_render::DockSection::Pinned,
+                app_key: &drag.app_key,
+                minimized_win: None,
+                source_idx,
+                target_idx: drag.target_pinned_idx,
+                pointer_xy: (drag.current_pointer.x, drag.current_pointer.y),
+                pulled_outside: drag.pulled_outside,
+            });
+        }
+        let source_idx = drag.source_minimized_idx?;
+        let win_id = drag.source_minimized_win?;
         Some(crate::shell_render::DockDragPreview {
+            section: crate::shell_render::DockSection::MinimizedWindow,
             app_key: &drag.app_key,
-            source_pinned_idx,
-            target_pinned_idx: drag.target_pinned_idx,
+            minimized_win: Some(win_id),
+            source_idx,
+            target_idx: drag.target_minimized_idx,
             pointer_xy: (drag.current_pointer.x, drag.current_pointer.y),
-            pulled_outside: drag.pulled_outside,
+            pulled_outside: false,
         })
     }
 
@@ -2060,6 +2133,7 @@ impl RustyCompositorState {
             } else {
                 crate::shell_render::dock_label_for_key(&key)
             };
+            let badge_count = self.dock_badge_count_for_key(&key);
             tiles.push(crate::shell_render::DockAppTile {
                 section: crate::shell_render::DockSection::Pinned,
                 hit: crate::shell_render::dock_hit_for_pinned_key(&key, pin_idx),
@@ -2071,6 +2145,7 @@ impl RustyCompositorState {
                 has_minimized: matching.iter().any(|r| r.minimized),
                 is_active,
                 has_indicator,
+                badge_count,
                 icon_name,
                 toplevel_icon,
                 fallback_title: label,
@@ -2105,6 +2180,7 @@ impl RustyCompositorState {
                 .or_else(|| group.first())
                 .map(|r| r.id);
             let label = Self::label_for_dock_record(&rec.app_key, &rec.title);
+            let badge_count = self.dock_badge_count_for_key(&rec.app_key);
             tiles.push(crate::shell_render::DockAppTile {
                 section: crate::shell_render::DockSection::UnpinnedOrRecent,
                 app_key: rec.app_key.clone(),
@@ -2116,6 +2192,7 @@ impl RustyCompositorState {
                 has_minimized: group.iter().any(|r| r.minimized),
                 is_active: group.iter().any(|r| r.focused),
                 has_indicator: true,
+                badge_count,
                 icon_name: group.iter().find_map(|r| r.icon_name.clone()),
                 toplevel_icon: group.iter().find_map(|r| r.toplevel_icon.clone()),
                 fallback_title: label,
@@ -2129,6 +2206,7 @@ impl RustyCompositorState {
                 {
                     continue;
                 }
+                let badge_count = self.dock_badge_count_for_key(&recent.app_key);
                 tiles.push(crate::shell_render::DockAppTile {
                     section: crate::shell_render::DockSection::UnpinnedOrRecent,
                     app_key: recent.app_key.clone(),
@@ -2140,6 +2218,7 @@ impl RustyCompositorState {
                     has_minimized: false,
                     is_active: false,
                     has_indicator: false,
+                    badge_count,
                     icon_name: recent.icon_name.clone(),
                     toplevel_icon: None,
                     fallback_title: recent.label.clone(),
@@ -2148,7 +2227,20 @@ impl RustyCompositorState {
         }
 
         if !self.user_config.dock_minimize_into_app {
-            for rec in records.iter().filter(|r| r.minimized) {
+            let mut emitted_min = std::collections::HashSet::new();
+            let ordered_records: Vec<&DockWindowRecord> = self
+                .minimized_dock_order
+                .iter()
+                .filter_map(|win_id| records.iter().find(|r| r.minimized && r.id == *win_id))
+                .inspect(|r| {
+                    emitted_min.insert(r.id);
+                })
+                .collect();
+            for rec in ordered_records.into_iter().chain(
+                records
+                    .iter()
+                    .filter(|r| r.minimized && !emitted_min.contains(&r.id)),
+            ) {
                 let short = if rec.title.len() > 24 {
                     crate::shell_render::extract_app_name(&rec.title)
                 } else {
@@ -2165,6 +2257,7 @@ impl RustyCompositorState {
                     has_minimized: true,
                     is_active: false,
                     has_indicator: false,
+                    badge_count: 0,
                     icon_name: rec.icon_name.clone(),
                     toplevel_icon: rec.toplevel_icon.clone(),
                     fallback_title: rec.title.clone(),
@@ -2338,6 +2431,46 @@ impl RustyCompositorState {
             self.sync_and_save_user_config();
             self.shell_redraw_needed = true;
         }
+    }
+
+    /// Commits a finished Dock drag to reorder minimized window tiles (`RUSTYOS-162`).
+    pub fn commit_dock_minimized_reorder(&mut self, dragged_win: WindowId, target_idx: usize) {
+        if !self.is_window_minimized(dragged_win) {
+            return;
+        }
+        let records = self.collect_dock_window_records();
+        let mut visible_order: Vec<WindowId> = self
+            .minimized_dock_order
+            .iter()
+            .copied()
+            .filter(|id| records.iter().any(|r| r.minimized && r.id == *id))
+            .collect();
+        for rec in records.iter().filter(|r| r.minimized) {
+            if !visible_order.contains(&rec.id) {
+                visible_order.push(rec.id);
+            }
+        }
+        let Some(src_idx) = visible_order.iter().position(|id| *id == dragged_win) else {
+            return;
+        };
+        let clamped_target = target_idx.min(visible_order.len().saturating_sub(1));
+        if clamped_target == src_idx {
+            return;
+        }
+        let moved = visible_order.remove(src_idx);
+        visible_order.insert(clamped_target, moved);
+
+        let visible_set: std::collections::HashSet<WindowId> =
+            visible_order.iter().copied().collect();
+        let mut next_order: Vec<WindowId> = self
+            .minimized_dock_order
+            .iter()
+            .copied()
+            .filter(|id| self.is_window_minimized(*id) && !visible_set.contains(id))
+            .collect();
+        next_order.extend(visible_order);
+        self.minimized_dock_order = next_order;
+        self.shell_redraw_needed = true;
     }
 
     /// Pins or unpins an application key inside `[dock].pinned_apps` (`RUSTYOS-073`).

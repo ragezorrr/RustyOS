@@ -2668,6 +2668,22 @@ hardware/software context и низкие накладные расходы.
   - `DockVisibilityMode` + обратная совместимость `auto_hide`, `DockPresentation` (glide/appear/leave/`reduced_motion`), multi-monitor `SmartHide` + `200 ms` delay, цикл 3 окон + MRU, 3s Quit/Force Quit grace и 3s pin upgrade grace покрыты unit-тестами (`221` в `rusty-compositor`, `19` в `rusty-settings`); `cargo fmt --check`, `clippy -D warnings` и живые `--winit` Light (`always_show`) / Dark (`smart_hide`) прогоны и скриншоты проходят чисто без EGL/shader ошибок.
 - **Risks:** Низкие; 0 новых Cargo-зависимостей, обратная совместимость `[dock].auto_hide` сохранена.
 
+### RUSTYOS-162 — Dock: живые GPU-миниатюры свёрнутых окон, `CountBadge` и фоновый `inotify` `TrashMonitor` (Фаза B)
+- **Status:** Done
+- **Goal:** Реализовать живые aspect-fit GPU-миниатюры свёрнутых окон с app-бейджем и drag-to-reorder (`minimized_dock_order`) в Dock, счётчики непрочитанных `CountBadge` (подписка на D-Bus `com.canonical.Unity.LauncherEntry::Update` на существующем `zbus`-подключении + фолбэк непрочитанных уведомлений с автосбросом при фокусе, пилюля `1..99+`) и реактивный фоновый `TrashMonitorHandle` (`inotify` + `/proc/self/mountinfo` + debounce `150 ms` на workspace `libc`) в `crates/rusty-services`.
+- **Dependencies:** `RUSTYOS-073`, `RUSTYOS-132`, `RUSTYOS-161`.
+- **Scope:**
+  - `crates/rusty-services/Cargo.toml`, `crates/rusty-services/src/{trash_monitor.rs, lib.rs}`.
+  - `crates/rusty-compositor/src/{dbus_notifications.rs, drm_backend.rs, winit_backend.rs, frame_composer.rs}`.
+  - `crates/rusty-compositor/src/surfaces/{window_minimize.rs, mod.rs}`.
+  - `crates/rusty-compositor/src/shell_render/{dock.rs, dock_presentation.rs, chrome_shapes.rs, text_pass.rs, mod.rs}`.
+  - `crates/rusty-compositor/src/state/{mod.rs, dock_state.rs, shell_actions.rs, system_bridges.rs, wm_windows.rs, tests.rs}`.
+  - `crates/rusty-compositor/src/input/{pointer.rs, shell_pointer.rs}`.
+  - `docs/adr/0091-dock-live-thumbnails-badges-and-trash-monitor.md`, `DECISIONS.md` (`D-105`), `ARCHITECTURE.md` §7.
+- **Acceptance Criteria:**
+  - `TrashMonitorHandle` (`parse_mountinfo_local_mounts`, `scan_trash_state`, живой `inotify` тест создания/удаления файла, реактивный `drain_trash_monitor_updates`), `CountBadge` (парсинг Unity `LauncherEntry::Update`, приоритет Unity над уведомлениями, автосброс при фокусе, `browser`/`firefox` merge, геометрия `dock_count_badge_rect` для `1`/`42`/`99+`), удержание GPU-снапшотов и drag-to-reorder свёрнутых окон (`minimized_dock_order`, `commit_dock_minimized_reorder`) покрыты unit-тестами (`68` в `rusty-services`, `225` в `rusty-compositor`); `cargo fmt --check`, `clippy -D warnings` и живые `--winit` Light/Dark прогоны (с живой миниатюрой `rusty-settings`, бейджами `3`/`1`/`99+` и `TrashFull` через `inotify`) проходят чисто с 0 WARN/ERROR.
+- **Risks:** Низкие; 0 новых внешних Cargo-зависимостей, `crates/rusty-compositor` без `unsafe`.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

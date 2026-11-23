@@ -63,6 +63,7 @@ pub(crate) fn dispatch_and_refresh_clients(
     app_state.drain_tray_updates();
     app_state.drain_screenshot_results();
     app_state.drain_trash_empty_results();
+    app_state.drain_trash_monitor_updates();
     let _ = app_state.drain_system_integration_events(smithay::utils::SERIAL_COUNTER.next_serial());
     if let Some(ipc) = ipc_server {
         ipc.poll_requests(|req| app_state.handle_ipc_request(req));
@@ -1268,7 +1269,7 @@ fn prepare_minimize_snapshots_for_output(
     output_windows: &[(rusty_wm::WindowId, rusty_wm::Rect)],
     output_scale: f64,
 ) {
-    if state.minimize_anims.is_empty() {
+    if state.minimize_anims.is_empty() && state.minimized_window_ids.is_empty() {
         return;
     }
     for idx in 0..state.minimize_anims.len() {
@@ -1323,6 +1324,47 @@ fn prepare_minimize_snapshots_for_output(
             );
             state.minimize_anims[idx].progress = progress;
         }
+    }
+    // Also capture snapshots for minimized windows lacking a cached texture (e.g. `reduced_motion == true`) (`RUSTYOS-162`).
+    for &(win_id, rect) in output_windows {
+        if !state.is_window_minimized(win_id)
+            || shape_cache.has_minimize_snapshot(win_id.0)
+            || state.minimize_anims.iter().any(|a| a.win_id == win_id)
+        {
+            continue;
+        }
+        let win_origin = state
+            .animations
+            .animated_window_origin(win_id.0)
+            .unwrap_or((rect.x, rect.y));
+        let glass_offset = Point::from((win_origin.0 - output_loc.x, win_origin.1 - output_loc.y));
+        let mut local_elements = Vec::new();
+        push_window_elements_with_options(
+            &mut local_elements,
+            renderer,
+            text_cache,
+            shape_cache,
+            state,
+            win_id,
+            rect,
+            Point::from((win_origin.0, win_origin.1)),
+            output_scale,
+            true,
+            state.is_window_fullscreen(win_id),
+            false,
+            glass_offset,
+        );
+        if local_elements.is_empty() {
+            continue;
+        }
+        let scaled = scale_render_elements_for_output(local_elements, output_scale);
+        let _ = shape_cache.capture_minimize_snapshot(
+            renderer,
+            win_id.0,
+            Size::from((rect.width.max(1), rect.height.max(1))),
+            output_scale,
+            &scaled,
+        );
     }
 }
 

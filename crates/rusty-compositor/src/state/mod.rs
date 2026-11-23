@@ -147,17 +147,20 @@ pub struct DockBounceState {
     pub continuous: bool,
 }
 
-/// Active pointer drag state inside the Dock for reordering/unpinning (`RUSTYOS-073` / `RUSTYOS-161`).
+/// Active pointer drag state inside the Dock for reordering/unpinning (`RUSTYOS-073` / `RUSTYOS-161` / `RUSTYOS-162`).
 #[derive(Debug, Clone)]
 pub struct DockDragState {
     pub output_id: OutputId,
     pub slot_idx: usize,
     pub app_key: String,
     pub source_pinned_idx: Option<usize>,
+    pub source_minimized_win: Option<WindowId>,
+    pub source_minimized_idx: Option<usize>,
     pub start_pointer: Point<f64, Logical>,
     pub current_pointer: Point<f64, Logical>,
     pub active_drag: bool,
     pub target_pinned_idx: usize,
+    pub target_minimized_idx: usize,
     pub pulled_outside: bool,
     pub hit: crate::shell_render::DockHit,
 }
@@ -458,6 +461,8 @@ pub struct RustyCompositorState {
     pub csd_window_ids: HashSet<WindowId>,
     /// Managed windows currently minimized to the Dock (`RUSTYOS-032`).
     pub minimized_window_ids: HashSet<WindowId>,
+    /// User-ordered list of minimized windows shown in the Dock's minimized section (`RUSTYOS-162`).
+    pub minimized_dock_order: Vec<WindowId>,
     /// Desktop space managing mapped windows and outputs for the active workspace.
     pub space: Space<Window>,
     /// Popup manager tracking `xdg_popup` surfaces.
@@ -588,6 +593,10 @@ pub struct RustyCompositorState {
     pub pending_app_quits: std::collections::HashMap<String, PendingAppQuit>,
     /// Cached pinned app metadata protecting Dock icons during brief package-upgrade removals (`RUSTYOS-161`).
     pub dock_pin_meta_cache: std::collections::HashMap<String, CachedDockPinMeta>,
+    /// Explicit unread counts per canonical Dock app key received via `com.canonical.Unity.LauncherEntry` (`RUSTYOS-162`).
+    pub dock_unity_badges: std::collections::HashMap<String, u32>,
+    /// Fallback unread counts derived from active D-Bus notifications per canonical Dock app key (`RUSTYOS-162`).
+    pub dock_unread_notif_badges: std::collections::HashMap<String, u32>,
     /// Active internal Dock drag-reorder/pull-out state (`RUSTYOS-073`).
     pub dock_drag: Option<DockDragState>,
     /// Open interactive `Downloads` Stack popover state (`RUSTYOS-073`).
@@ -614,8 +623,10 @@ pub struct RustyCompositorState {
     pub desktop_rubber_band: Option<crate::shell_render::DesktopRubberBand>,
     /// Active in-place text renaming state for desktop canvas item (`RUSTYOS-083`).
     pub desktop_inline_rename: Option<crate::shell_render::DesktopInlineRename>,
-    /// Whether Trash wastebasket contains files (`RUSTYOS-083`).
+    /// Whether Trash wastebasket contains files (`RUSTYOS-083` / `RUSTYOS-162`).
     pub trash_has_items: bool,
+    /// Non-blocking background `inotify` + `/proc/self/mountinfo` Trash monitor (`RUSTYOS-162`).
+    pub trash_monitor: rusty_services::TrashMonitorHandle,
     /// Last clicked desktop canvas item and timestamp for double-click detection (`RUSTYOS-081`).
     pub last_desktop_click: Option<(std::path::PathBuf, std::time::Instant)>,
     /// Last time desktop directory was scanned for canvas items (`RUSTYOS-081`).
@@ -822,6 +833,8 @@ pub struct CompositorNotification {
     pub id: u64,
     /// Optional freedesktop D-Bus notification ID for `replaces_id` / `CloseNotification`.
     pub dbus_id: Option<u32>,
+    /// Canonical Dock application key associated with this notification for unread badges (`RUSTYOS-162`).
+    pub app_key: Option<String>,
     /// Notification urgency level.
     pub urgency: Urgency,
     /// Short notification title.
@@ -982,6 +995,7 @@ impl RustyCompositorState {
             xdg_decoration_requested: HashSet::new(),
             csd_window_ids: HashSet::new(),
             minimized_window_ids: HashSet::new(),
+            minimized_dock_order: Vec::new(),
             space,
             popups: PopupManager::default(),
             active_popup_grabs: Vec::new(),
@@ -1047,6 +1061,8 @@ impl RustyCompositorState {
             dock_app_last_active: std::collections::HashMap::new(),
             pending_app_quits: std::collections::HashMap::new(),
             dock_pin_meta_cache: std::collections::HashMap::new(),
+            dock_unity_badges: std::collections::HashMap::new(),
+            dock_unread_notif_badges: std::collections::HashMap::new(),
             dock_drag: None,
             dock_stack: None,
             overview_filter_app: None,
@@ -1064,6 +1080,7 @@ impl RustyCompositorState {
             desktop_inline_rename: None,
             trash_has_items: crate::state::context_menu_actions::resolve_trash_root()
                 .is_some_and(|r| crate::state::context_menu_actions::trash_item_count(&r) > 0),
+            trash_monitor: rusty_services::TrashMonitorHandle::default(),
             last_desktop_click: None,
             desktop_last_scan: std::time::Instant::now(),
             top_bar_menu_hover_row: None,
@@ -1512,11 +1529,22 @@ impl RustyCompositorState {
         }
     }
 
-    /// Updates cached trash status and requests shell redraw if changed (`RUSTYOS-083`).
+    /// Updates cached trash status and requests shell redraw if changed (`RUSTYOS-083` / `RUSTYOS-162`).
     pub fn update_trash_full_status(&mut self) {
+        self.trash_monitor.trigger_refresh();
         let has_items = crate::state::context_menu_actions::resolve_trash_root()
             .is_some_and(|root| crate::state::context_menu_actions::trash_item_count(&root) > 0);
         if self.trash_has_items != has_items {
+            self.trash_has_items = has_items;
+            self.shell_redraw_needed = true;
+        }
+    }
+
+    /// Non-blockingly drains live `inotify` + `/proc/self/mountinfo` Trash updates (`RUSTYOS-162`).
+    pub fn drain_trash_monitor_updates(&mut self) {
+        if let Some(has_items) = self.trash_monitor.take_update()
+            && self.trash_has_items != has_items
+        {
             self.trash_has_items = has_items;
             self.shell_redraw_needed = true;
         }
@@ -1751,6 +1779,7 @@ impl RustyCompositorState {
             return false;
         };
         self.minimized_window_ids.remove(&win_id);
+        self.minimized_dock_order.retain(|id| *id != win_id);
         if let Some(target_ws) = self.wm.window(win_id).map(|w| w.workspace)
             && target_ws != self.wm.active_workspace_id()
         {

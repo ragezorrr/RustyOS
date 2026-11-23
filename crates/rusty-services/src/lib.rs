@@ -15,6 +15,7 @@ pub mod privacy;
 pub mod storage;
 pub mod theme_sync;
 pub mod timedate;
+pub mod trash_monitor;
 pub mod updates;
 
 pub use appruntime::{
@@ -86,6 +87,10 @@ pub use theme_sync::{ThemeSyncConfig, ThemeSyncService, merge_gtk_settings_ini};
 pub use timedate::{
     COMMON_TIMEZONES, TimeDateService, TimeDateStatus, is_valid_iana_timezone,
     match_timezone_suggestions, parse_manual_datetime_input, parse_timedatectl_show,
+};
+pub use trash_monitor::{
+    TRASH_MONITOR_DEBOUNCE, TrashMonitorHandle, TrashScanState, parse_mountinfo_local_mounts,
+    resolve_home_trash_root, scan_trash_state, unescape_mountinfo_path,
 };
 pub use updates::{
     PackageUpdateItem, UpdateCheckState, UpdateCheckerHandle, UpdateStatusSnapshot,

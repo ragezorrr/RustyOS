@@ -14,6 +14,7 @@ use std::time::Duration;
 use rusty_ipc::Urgency;
 use smithay::reexports::calloop::ping::Ping;
 use tracing::{info, warn};
+use zbus::blocking::{MessageIterator, fdo};
 use zbus::interface;
 use zbus::object_server::SignalEmitter;
 use zbus::zvariant::OwnedValue;
@@ -35,11 +36,22 @@ pub enum DbusNotificationCommand {
         body: String,
         /// Optional explicit expiration timeout (`None` uses compositor default).
         expire_after: Option<Duration>,
+        /// Optional canonical Dock application key derived from `desktop-entry` hint or `app_name` (`RUSTYOS-162`).
+        app_key: Option<String>,
     },
     /// Close/dismiss an existing notification by ID.
     Close {
         /// Freedesktop notification identifier.
         id: u32,
+    },
+    /// Explicit Dock unread counter update received via `com.canonical.Unity.LauncherEntry::Update` (`RUSTYOS-162`).
+    LauncherBadgeUpdate {
+        /// Canonical Dock application key (`"firefox"`, `"org.telegram.desktop"`, ...).
+        app_key: String,
+        /// Requested unread counter (`0` clears the badge).
+        count: u32,
+        /// Whether the client requests displaying the counter badge.
+        visible: bool,
     },
 }
 
@@ -213,6 +225,10 @@ impl NotificationsInterface {
             self.next_id.fetch_add(1, Ordering::Relaxed)
         };
         let urgency = parse_dbus_urgency(hints.get("urgency"));
+        let desktop_entry = hints
+            .get("desktop-entry")
+            .and_then(|v| <&str>::try_from(v).ok());
+        let app_key = resolve_notification_app_key(desktop_entry, app_name);
         let (title, clean_body) = format_dbus_notification(app_name, summary, body);
         let expire_after = parse_expire_timeout(expire_timeout);
 
@@ -223,6 +239,7 @@ impl NotificationsInterface {
             title,
             body: clean_body,
             expire_after,
+            app_key,
         });
         info!(id, app_name, "Received D-Bus notification");
         self.wake_compositor();
@@ -341,6 +358,8 @@ fn run_dbus_server_loop(
         "Started D-Bus org.freedesktop.Notifications server thread"
     );
 
+    spawn_unity_launcher_badge_listener(&conn, tx.clone(), Arc::clone(waker));
+
     while !stop_flag.load(Ordering::Relaxed) {
         match signal_rx.recv_timeout(Duration::from_millis(100)) {
             Ok(sig) => {
@@ -354,6 +373,158 @@ fn run_dbus_server_loop(
         }
     }
     drop(conn);
+}
+
+fn spawn_unity_launcher_badge_listener(
+    conn: &zbus::blocking::Connection,
+    tx: mpsc::Sender<DbusNotificationCommand>,
+    waker: Arc<Mutex<Option<Ping>>>,
+) {
+    let Ok(rule) = zbus::MatchRule::builder()
+        .msg_type(zbus::message::Type::Signal)
+        .interface("com.canonical.Unity.LauncherEntry")
+        .and_then(|b| b.member("Update"))
+        .map(zbus::match_rule::Builder::build)
+    else {
+        return;
+    };
+    let Ok(dbus) = fdo::DBusProxy::new(conn) else {
+        return;
+    };
+    if dbus.add_match_rule(rule.clone()).is_err() {
+        return;
+    }
+    let Ok(iter) = MessageIterator::for_match_rule(rule, conn, Some(64)) else {
+        return;
+    };
+    let _ = thread::Builder::new()
+        .name("rusty-unity-badges".to_owned())
+        .spawn(move || {
+            for msg_res in iter {
+                let Ok(msg) = msg_res else {
+                    break;
+                };
+                if let Ok((app_uri, props)) = msg
+                    .body()
+                    .deserialize::<(String, HashMap<String, OwnedValue>)>()
+                    && let Some((app_key, count, visible)) =
+                        parse_unity_launcher_update(&app_uri, &props)
+                {
+                    if tx
+                        .send(DbusNotificationCommand::LauncherBadgeUpdate {
+                            app_key,
+                            count,
+                            visible,
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                    if let Ok(guard) = waker.lock()
+                        && let Some(ping) = guard.as_ref()
+                    {
+                        ping.ping();
+                    }
+                }
+            }
+        });
+}
+
+/// Maps a `com.canonical.Unity.LauncherEntry` URI (e.g. `application://org.mozilla.firefox.desktop`)
+/// into a canonical RustyOS Dock application key (`RUSTYOS-162`).
+#[must_use]
+pub fn parse_unity_launcher_app_key(app_uri: &str) -> Option<String> {
+    let trimmed = app_uri.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let raw = trimmed
+        .strip_prefix("application://")
+        .unwrap_or(trimmed)
+        .trim();
+    let stem = raw.strip_suffix(".desktop").unwrap_or(raw).trim();
+    if stem.is_empty() {
+        return None;
+    }
+    Some(crate::shell_render::canonical_dock_app_key(
+        Some(stem),
+        stem,
+        rusty_wm::WindowId(0),
+    ))
+}
+
+/// Parses a `com.canonical.Unity.LauncherEntry::Update(app_uri, properties)` payload into
+/// `(app_key, count, visible)` (`RUSTYOS-162`).
+#[must_use]
+pub fn parse_unity_launcher_update<S: std::hash::BuildHasher>(
+    app_uri: &str,
+    props: &HashMap<String, OwnedValue, S>,
+) -> Option<(String, u32, bool)> {
+    let app_key = parse_unity_launcher_app_key(app_uri)?;
+    let visible_prop = props
+        .get("count-visible")
+        .and_then(|v| bool::try_from(v).ok());
+    let count_prop = props.get("count").and_then(|v| {
+        i64::try_from(v)
+            .ok()
+            .map(|n| u32::try_from(n.clamp(0, 9999)).unwrap_or(0))
+            .or_else(|| {
+                u64::try_from(v)
+                    .ok()
+                    .map(|n| u32::try_from(n.min(9999)).unwrap_or(9999))
+            })
+            .or_else(|| {
+                i32::try_from(v)
+                    .ok()
+                    .map(|n| u32::try_from(n.clamp(0, 9999)).unwrap_or(0))
+            })
+            .or_else(|| u32::try_from(v).ok().map(|n| n.min(9999)))
+    });
+    if visible_prop.is_none() && count_prop.is_none() {
+        return None;
+    }
+    let count = count_prop.unwrap_or(0);
+    let visible = match visible_prop {
+        Some(false) => false,
+        Some(true) | None => count > 0,
+    };
+    Some((app_key, if visible { count } else { 0 }, visible))
+}
+
+/// Resolves a canonical Dock application key from D-Bus notification `desktop-entry` hint or `app_name` (`RUSTYOS-162`).
+#[must_use]
+pub fn resolve_notification_app_key(desktop_entry: Option<&str>, app_name: &str) -> Option<String> {
+    let entry = desktop_entry.map(str::trim).filter(|s| !s.is_empty());
+    let clean_name = sanitize_single_line(app_name);
+    if let Some(de) = entry {
+        let stem = de.strip_suffix(".desktop").unwrap_or(de).trim();
+        if !stem.is_empty() {
+            return Some(crate::shell_render::canonical_dock_app_key(
+                Some(stem),
+                if clean_name.is_empty() {
+                    stem
+                } else {
+                    &clean_name
+                },
+                rusty_wm::WindowId(0),
+            ));
+        }
+    }
+    if clean_name.is_empty() {
+        return None;
+    }
+    let lower = clean_name.to_ascii_lowercase();
+    if matches!(
+        lower.as_str(),
+        "notify-send" | "notification" | "system" | "rustyos" | "rusty-compositor"
+    ) {
+        return None;
+    }
+    Some(crate::shell_render::canonical_dock_app_key(
+        Some(&clean_name),
+        &clean_name,
+        rusty_wm::WindowId(0),
+    ))
 }
 
 /// Maps freedesktop D-Bus `"urgency"` hint values (`0=Low`, `1=Normal`, `2=Critical`).
@@ -474,5 +645,35 @@ mod tests {
             clean_emoji,
             "chat.google.com Так выглядят уведомления на рабочем столе"
         );
+    }
+
+    #[test]
+    fn unity_launcher_entry_and_notification_app_key_parsers_normalize_badges() {
+        let mut props = HashMap::new();
+        props.insert("count".to_owned(), OwnedValue::from(7_i64));
+        props.insert("count-visible".to_owned(), OwnedValue::from(true));
+        assert_eq!(
+            parse_unity_launcher_update("application://org.mozilla.firefox.desktop", &props),
+            Some(("firefox".to_owned(), 7, true))
+        );
+
+        let mut hide_props = HashMap::new();
+        hide_props.insert("count".to_owned(), OwnedValue::from(7_i64));
+        hide_props.insert("count-visible".to_owned(), OwnedValue::from(false));
+        let expected_telegram_key = crate::shell_render::canonical_dock_app_key(
+            Some("org.telegram.desktop"),
+            "Telegram",
+            rusty_wm::WindowId(1),
+        );
+        assert_eq!(
+            parse_unity_launcher_update("application://org.telegram.desktop.desktop", &hide_props),
+            Some((expected_telegram_key, 0, false))
+        );
+
+        assert_eq!(
+            resolve_notification_app_key(Some("org.mozilla.firefox"), "Firefox"),
+            Some("firefox".to_owned())
+        );
+        assert_eq!(resolve_notification_app_key(None, "notify-send"), None);
     }
 }

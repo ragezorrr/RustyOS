@@ -194,12 +194,16 @@ type WarpFrameKey = (u32, u8, u8, [i32; 8]);
 const MAX_LIFECYCLE_SNAPSHOTS: usize = 12;
 const LIFECYCLE_SCALE_FACTOR: f64 = 0.93;
 
-/// Cached snapshot texture and incremental damage state for an active minimize/restore animation (`RUSTYOS-073`).
+/// Cached snapshot texture and incremental damage state for an active minimize/restore animation
+/// and live Dock minimized-window thumbnails (`RUSTYOS-073` / `RUSTYOS-162`).
 pub(crate) struct MinimizedWindowSnapshot {
     pub texture: GlesTexture,
     pub stable_id: Id,
     pub damage: DamageBag<i32, BufferCoord>,
     pub last_anim_key: Option<WarpFrameKey>,
+    pub dock_thumb_id: Id,
+    pub dock_thumb_damage: DamageBag<i32, BufferCoord>,
+    pub last_dock_thumb_key: Option<WarpFrameKey>,
 }
 
 impl std::fmt::Debug for MinimizedWindowSnapshot {
@@ -286,10 +290,17 @@ impl WindowMinimizePipeline {
         let phys_size = Size::<i32, Physical>::from((phys_w, phys_h));
         let buf_size = Size::<i32, BufferCoord>::from((phys_w, phys_h));
 
-        let (mut tex, stable_id, mut damage) =
+        let (mut tex, stable_id, mut damage, dock_thumb_id, mut dock_thumb_damage) =
             if let Some(mut old) = reusable.filter(|s| s.texture.size() == buf_size) {
                 old.damage.reset();
-                (old.texture, old.stable_id, old.damage)
+                old.dock_thumb_damage.reset();
+                (
+                    old.texture,
+                    old.stable_id,
+                    old.damage,
+                    old.dock_thumb_id,
+                    old.dock_thumb_damage,
+                )
             } else {
                 let tex = match renderer.create_buffer(Fourcc::Abgr8888, buf_size) {
                     Ok(t) => t,
@@ -298,7 +309,13 @@ impl WindowMinimizePipeline {
                         return None;
                     }
                 };
-                (tex, Id::new(), DamageBag::new(8))
+                (
+                    tex,
+                    Id::new(),
+                    DamageBag::new(8),
+                    Id::new(),
+                    DamageBag::new(8),
+                )
             };
 
         let mut tracker =
@@ -318,11 +335,15 @@ impl WindowMinimizePipeline {
         }
 
         damage.add([Rectangle::from_size(buf_size)]);
+        dock_thumb_damage.add([Rectangle::from_size(buf_size)]);
         Some(MinimizedWindowSnapshot {
             texture: tex,
             stable_id,
             damage,
             last_anim_key: None,
+            dock_thumb_id,
+            dock_thumb_damage,
+            last_dock_thumb_key: None,
         })
     }
 
@@ -439,6 +460,51 @@ impl WindowMinimizePipeline {
             0,
             alpha.clamp(0.0, 1.0),
         ))
+    }
+
+    /// Emits a live aspect-fit GPU thumbnail element for a minimized window slot in the Dock (`RUSTYOS-162`).
+    ///
+    /// Samples the retained minimize snapshot texture (falling back to any cached lifecycle snapshot)
+    /// using a dedicated Smithay element `Id` so active minimize/restore warp quads never collide
+    /// with the Dock slot in `OutputDamageTracker`. Returns the element and exact aspect-fit rect.
+    pub(crate) fn render_minimized_dock_thumbnail_element(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        window_id: u64,
+        slot: Rectangle<i32, Logical>,
+        output_scale: f64,
+        alpha: f32,
+    ) -> Option<(LiquidGlassElement, Rectangle<i32, Logical>)> {
+        if !self.ensure_program(renderer) {
+            return None;
+        }
+        let program = self.program.clone()?;
+        let snap = if let Some(min_snap) = self.snapshots.get_mut(&window_id) {
+            min_snap
+        } else {
+            let entry = self.lifecycle_snapshots.get_mut(&window_id)?;
+            self.lifecycle_tick = self.lifecycle_tick.saturating_add(1);
+            entry.last_used_frame = self.lifecycle_tick;
+            &mut entry.snap
+        };
+        let tex_size = snap.texture.size();
+        let target_rect = compute_aspect_fit_rect(slot, tex_size.w, tex_size.h);
+        let el = build_snapshot_quad_element(
+            renderer,
+            program,
+            &snap.texture,
+            &snap.dock_thumb_id,
+            &mut snap.dock_thumb_damage,
+            &mut snap.last_dock_thumb_key,
+            target_rect,
+            target_rect,
+            output_scale,
+            1.0,
+            2.0,
+            0,
+            alpha.clamp(0.0, 1.0),
+        );
+        Some((el, target_rect))
     }
 
     pub(crate) fn retain_lifecycle_snapshots(&mut self, mut keep: impl FnMut(u64) -> bool) {
@@ -562,16 +628,49 @@ pub(crate) fn centered_scaled_rect(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
+fn build_snapshot_warp_element(
+    renderer: &mut GlesRenderer,
+    program: GlesTexProgram,
+    snap: &mut MinimizedWindowSnapshot,
+    win_rect: Rectangle<i32, Logical>,
+    target_rect: Rectangle<i32, Logical>,
+    output_scale: f64,
+    progress: f64,
+    mode: f32,
+    edge_u8: u8,
+    fade_alpha: f32,
+) -> LiquidGlassElement {
+    build_snapshot_quad_element(
+        renderer,
+        program,
+        &snap.texture,
+        &snap.stable_id,
+        &mut snap.damage,
+        &mut snap.last_anim_key,
+        win_rect,
+        target_rect,
+        output_scale,
+        progress,
+        mode,
+        edge_u8,
+        fade_alpha,
+    )
+}
+
 #[allow(
     clippy::too_many_arguments,
     clippy::cast_precision_loss,
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss
 )]
-fn build_snapshot_warp_element(
+fn build_snapshot_quad_element(
     renderer: &mut GlesRenderer,
     program: GlesTexProgram,
-    snap: &mut MinimizedWindowSnapshot,
+    texture: &GlesTexture,
+    stable_id: &Id,
+    damage: &mut DamageBag<i32, BufferCoord>,
+    last_anim_key: &mut Option<WarpFrameKey>,
     win_rect: Rectangle<i32, Logical>,
     target_rect: Rectangle<i32, Logical>,
     output_scale: f64,
@@ -599,10 +698,10 @@ fn build_snapshot_warp_element(
             target_rect.size.h,
         ],
     );
-    let tex_size = snap.texture.size();
-    if snap.last_anim_key != Some(cur_key) {
-        snap.last_anim_key = Some(cur_key);
-        snap.damage.add([Rectangle::from_size(tex_size)]);
+    let tex_size = texture.size();
+    if *last_anim_key != Some(cur_key) {
+        *last_anim_key = Some(cur_key);
+        damage.add([Rectangle::from_size(tex_size)]);
     }
 
     let clamped_scale = crate::config::clamp_display_scale(output_scale) as f32;
@@ -633,10 +732,10 @@ fn build_snapshot_warp_element(
     ];
 
     let inner = TextureRenderElement::from_texture_with_damage(
-        snap.stable_id.clone(),
+        stable_id.clone(),
         renderer.context_id(),
         Point::from((f64::from(bounds.loc.x), f64::from(bounds.loc.y))),
-        snap.texture.clone(),
+        texture.clone(),
         1,
         Transform::Normal,
         Some(1.0),
@@ -646,11 +745,11 @@ fn build_snapshot_warp_element(
         )))),
         Some(Size::from((bounds.size.w.max(1), bounds.size.h.max(1)))),
         None,
-        snap.damage.snapshot(),
+        damage.snapshot(),
         Kind::Unspecified,
     );
     let shader = TextureShaderElement::new(inner, program, uniforms);
-    LiquidGlassElement::from_parts(snap.stable_id.clone(), shader)
+    LiquidGlassElement::from_parts(stable_id.clone(), shader)
 }
 
 /// Computes the union quad (`bounds`) and normalized UV sub-rectangles for `win_rect` and `dock_rect`.

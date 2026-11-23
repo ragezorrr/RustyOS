@@ -35,6 +35,12 @@ impl RustyCompositorState {
             self.updates_enabled,
             self.user_config.updates_interval_minutes,
         );
+        self.trash_monitor = rusty_services::TrashMonitorHandle::start_background(None);
+        let trash_full = self.trash_monitor.has_items();
+        if self.trash_has_items != trash_full {
+            self.trash_has_items = trash_full;
+            self.shell_redraw_needed = true;
+        }
     }
 
     /// Returns `true` and clears the pending shell redraw flag when async security events updated UI state.

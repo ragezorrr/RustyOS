@@ -93,6 +93,10 @@ pub fn run_nested_winit(config: &CompositorConfig) -> Result<BootstrapReport, Co
         CompositorError::EventLoop(format!("failed to initialize event loop ping: {err}"))
     })?;
     state.dbus_notifications.set_waker(ping.clone());
+    let trash_ping = ping.clone();
+    state
+        .trash_monitor
+        .set_on_change(std::sync::Arc::new(move || trash_ping.ping()));
     state.loop_waker = Some(ping);
     loop_handle
         .insert_source(ping_source, move |_event, _metadata, _app_state| {})
@@ -128,13 +132,19 @@ pub fn run_nested_winit(config: &CompositorConfig) -> Result<BootstrapReport, Co
                 if let Ok(menu_test) = std::env::var("RUSTYOS_TEST_CAPTURE_MENU") {
                     let (cap_frame, exit_frame) = if matches!(
                         menu_test.as_str(),
-                        "windows" | "overview" | "window" | "screenshot_hud"
+                        "windows" | "overview" | "window" | "screenshot_hud" | "dock_minimize"
                     ) {
-                        (50_u64, 90_u64)
+                        (70_u64, 95_u64)
                     } else {
                         (5_u64, 12_u64)
                     };
-                    if menu_test == "overview" && rendered_frames == 45 {
+                    if menu_test == "dock_minimize"
+                        && rendered_frames == 35
+                        && let Some(win_id) = app_state.wm.focused_window()
+                    {
+                        let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+                        app_state.minimize_window(win_id, serial);
+                    } else if menu_test == "overview" && rendered_frames == 45 {
                         app_state.toggle_overview();
                         app_state.overview_anim.snap_to_target();
                         app_state.shell_redraw_needed = true;
