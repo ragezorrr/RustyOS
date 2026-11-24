@@ -120,6 +120,31 @@ fn test_pointer_click_cancel_and_submit() {
 }
 
 #[test]
+fn test_focus_scope_tab_traversal_and_keyboard_activation() {
+    let mut dlg = PolkitDialogState::new(sample_request());
+    assert!(dlg.focus.is_focused(crate::dialog::focus_id_password()));
+
+    // Tab moves focus: Password -> Cancel -> Submit -> Password
+    dlg.cycle_focus(false);
+    assert!(dlg.focus.is_focused(crate::dialog::focus_id_cancel()));
+    assert_eq!(dlg.activate_focused(), Some(DialogAction::Cancel));
+
+    dlg.cycle_focus(false);
+    assert!(dlg.focus.is_focused(crate::dialog::focus_id_submit()));
+    assert_eq!(dlg.activate_focused(), None);
+
+    dlg.pass_field.buffer.set_text("adminpass");
+    assert_eq!(
+        dlg.activate_focused(),
+        Some(DialogAction::Submit(SecretText::from_slice("adminpass")))
+    );
+
+    // Shift+Tab moves back to Cancel
+    dlg.cycle_focus(true);
+    assert!(dlg.focus.is_focused(crate::dialog::focus_id_cancel()));
+}
+
+#[test]
 fn test_demo_mode_dialog() {
     let dlg = PolkitDialogState::demo();
     assert_ne!(dlg.cookie, "");

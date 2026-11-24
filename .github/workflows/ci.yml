@@ -82,7 +82,7 @@ jobs:
       - name: Validate shell scripts, desktop entries, and Polkit policy
         run: |
           sh -n bin/rustyos-session
-          bash -n packaging/arch/PKGBUILD scripts/install.sh scripts/rustyos-install.sh packaging/archiso/profiledef.sh packaging/archiso/build-iso.sh
+          bash -n packaging/arch/PKGBUILD scripts/install.sh scripts/rustyos-install.sh scripts/qemu-iso-smoke.sh packaging/archiso/profiledef.sh packaging/archiso/build-iso.sh
           desktop-file-validate \
             packaging/applications/org.rustyos.files.desktop \
             packaging/applications/org.rustyos.settings.desktop \
@@ -92,6 +92,7 @@ jobs:
             packaging/archiso/airootfs/etc/skel/Desktop/install-rustyos.desktop
           xmllint --noout packaging/polkit/org.rustyos.updater.policy packaging/polkit/org.rustyos.installer.policy
           ./scripts/rustyos-install.sh --dry-run --target-disk /dev/vda --username rusty --hostname rustyos
+          ./scripts/qemu-iso-smoke.sh --dry-run
 
       - name: Build isolated Arch package with makepkg
         run: |

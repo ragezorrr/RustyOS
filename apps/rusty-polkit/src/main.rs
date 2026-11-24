@@ -11,7 +11,7 @@ use rusty_app::{
     AppConfig, AppContext, BTN_LEFT, ConfigureInfo, KeyEvent, Keysym, LiquidGlassConfig,
     PointerEvent, PointerEventKind, RustyApp, WindowDecorationMode, run_app,
 };
-use rusty_services::{PolkitAgentHandle, PolkitEvent, SecretText};
+use rusty_services::{PolkitAgentHandle, PolkitEvent};
 use rusty_ui::{
     InputModifiers, MemoryClipboard, Rect, TextInputKey, ThemeMode, ThemePalette, UiFontEngine,
     UiPainter,
@@ -161,13 +161,15 @@ impl RustyApp for PolkitApp {
             return;
         };
 
-        let action = if event.keysym == Keysym::Return || event.keysym == Keysym::KP_Enter {
-            let pass = dlg.pass_field.buffer.as_str().trim();
-            if pass.is_empty() {
-                None
-            } else {
-                Some(DialogAction::Submit(SecretText::from_slice(pass)))
-            }
+        let action = if event.keysym == Keysym::Tab || event.keysym == Keysym::ISO_Left_Tab {
+            let backwards = event.keysym == Keysym::ISO_Left_Tab || ctx.modifiers().shift;
+            dlg.cycle_focus(backwards);
+            None
+        } else if event.keysym == Keysym::Return
+            || event.keysym == Keysym::KP_Enter
+            || (event.keysym == Keysym::space && !dlg.focus.is_focused(dialog::focus_id_password()))
+        {
+            dlg.activate_focused()
         } else if event.keysym == Keysym::Escape {
             Some(DialogAction::Cancel)
         } else {

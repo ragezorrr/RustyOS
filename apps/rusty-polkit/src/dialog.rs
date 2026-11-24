@@ -4,9 +4,21 @@ use std::time::Duration;
 
 use rusty_services::{PolkitPromptRequest, SecretText};
 use rusty_ui::{
-    ButtonStyle, InputModifiers, PushButton, Rect, TextField, TextInputEvent, TextInputKey,
-    ThemePalette, UiFontEngine, UiPainter,
+    ButtonStyle, FocusScope, InputModifiers, PushButton, Rect, TextField, TextInputEvent,
+    TextInputKey, ThemePalette, UiFontEngine, UiPainter, WidgetId,
 };
+
+pub(crate) fn focus_id_password() -> WidgetId {
+    WidgetId::from_tag("polkit_password")
+}
+
+pub(crate) fn focus_id_cancel() -> WidgetId {
+    WidgetId::from_tag("polkit_cancel")
+}
+
+pub(crate) fn focus_id_submit() -> WidgetId {
+    WidgetId::from_tag("polkit_submit")
+}
 
 /// Canonical action triggered by user interaction in the Polkit dialog.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,6 +47,7 @@ pub(crate) struct PolkitDialogState {
     pub(crate) dirty: bool,
     pub(crate) cancel_rect: Rect,
     pub(crate) submit_rect: Rect,
+    pub(crate) focus: FocusScope,
 }
 
 impl PolkitDialogState {
@@ -43,6 +56,12 @@ impl PolkitDialogState {
     pub(crate) fn new(req: PolkitPromptRequest) -> Self {
         let field_rect = Rect::new(36, 136, 348, 32);
         let pass_field = TextField::password(field_rect, "Пароль администратора");
+        let mut focus = FocusScope::new();
+        focus.begin_frame();
+        focus.register(focus_id_password());
+        focus.register(focus_id_cancel());
+        focus.register(focus_id_submit());
+        focus.set_focus(focus_id_password(), Duration::ZERO, true);
 
         Self {
             cookie: req.cookie,
@@ -58,6 +77,29 @@ impl PolkitDialogState {
             dirty: true,
             cancel_rect: Rect::new(208, 196, 90, 30),
             submit_rect: Rect::new(308, 196, 96, 30),
+            focus,
+        }
+    }
+
+    /// Cycles keyboard focus across Password -> Cancel -> Confirm (`Tab` / `Shift+Tab`).
+    pub(crate) fn cycle_focus(&mut self, backwards: bool) {
+        let _ = self.focus.cycle_focus(backwards, Duration::ZERO, true);
+        self.dirty = true;
+    }
+
+    /// Activates the currently focused control (`Enter` or `Space` on buttons).
+    pub(crate) fn activate_focused(&self) -> Option<DialogAction> {
+        if self.checking {
+            return None;
+        }
+        if self.focus.is_focused(focus_id_cancel()) {
+            return Some(DialogAction::Cancel);
+        }
+        let pass = self.pass_field.buffer.as_str().trim();
+        if pass.is_empty() {
+            None
+        } else {
+            Some(DialogAction::Submit(SecretText::from_slice(pass)))
         }
     }
 
@@ -262,8 +304,15 @@ impl PolkitDialogState {
         );
 
         // Password input field
-        self.pass_field
-            .paint(painter, fonts, pal, true, 1.0, Duration::from_millis(500));
+        let pass_focused = self.focus.is_focused(focus_id_password());
+        self.pass_field.paint(
+            painter,
+            fonts,
+            pal,
+            pass_focused,
+            if pass_focused { 1.0 } else { 0.0 },
+            Duration::from_millis(500),
+        );
 
         // Status or Error message
         if let Some(status) = &self.status_msg {
@@ -277,8 +326,15 @@ impl PolkitDialogState {
         }
 
         // Action buttons
+        self.paint_buttons(painter, fonts, pal);
+    }
+
+    fn paint_buttons(&self, painter: &mut UiPainter, fonts: &mut UiFontEngine, pal: &ThemePalette) {
         let cancel_btn = PushButton::new(self.cancel_rect, ButtonStyle::Secondary);
         cancel_btn.paint_labeled(painter, fonts, "Отмена", pal, false);
+        if self.focus.is_focused(focus_id_cancel()) {
+            painter.stroke_rounded_rect(self.cancel_rect.inset(-2, -2), 8.0, 2.0, pal.accent);
+        }
 
         let submit_disabled = self.pass_field.buffer.as_str().trim().is_empty() || self.checking;
         let submit_btn = PushButton::new(self.submit_rect, ButtonStyle::Primary);
@@ -293,5 +349,8 @@ impl PolkitDialogState {
             pal,
             submit_disabled,
         );
+        if self.focus.is_focused(focus_id_submit()) {
+            painter.stroke_rounded_rect(self.submit_rect.inset(-2, -2), 8.0, 2.0, pal.accent);
+        }
     }
 }
