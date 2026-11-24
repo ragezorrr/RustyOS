@@ -96,20 +96,16 @@ cargo run -p rusty-compositor -- --drm
 
   Файл                         Назначение
   ---------------------------- ------------------------------------------
-  `AGENTS.md`                  Постоянные правила разработки и approval gates
   `ROADMAP.md`                 Фазы разработки (0..10) и критерии выхода
   `ARCHITECTURE.md`            Актуальная архитектура и структура workspace
   `PERFORMANCE.md`             Цели по latency, frame pacing и benchmark-протоколы
   `HARDWARE.md`                Требования совместимости AMD, Intel и NVIDIA
-  `DESIGN.md`                  Визуальный язык и дизайн-система macOS / Liquid Glass
+  `DESIGN.md`                  Визуальный язык и дизайн-система Liquid Glass
   `SECURITY.md`                Правила безопасности, IPC и системных изменений
-  `DECISIONS.md`               Реестр принятых решений (`D-001` .. `D-086`)
-  `TASKS.md`                   Журнал выполненных и текущих задач (`RUSTYOS-001` .. `RUSTYOS-128`)
+  `DECISIONS.md`               Реестр принятых решений
+  `TASKS.md`                   Журнал выполненных и текущих задач
   `FILE_INVENTORY.md`          Инвентарь файлов репозитория
-  `docs/`                      ADR (`0001`..`0072`), hardware matrix и гайды
-  `.agents/rules/`             Правила Antigravity
-  `.agents/skills/`            14 специализированных навыков
-  `.agents/workflows/`         Повторяемые workflows
+  `docs/`                      ADR, hardware matrix и гайды
 
 ## Принципы проекта
 

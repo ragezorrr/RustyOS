@@ -2,35 +2,7 @@
 
 Актуальная карта файлов репозитория `RustyOS` (по состоянию на `RUSTYOS-128`).
 
-## Правила, навыки и workflows (`.agents/`)
-- `.agents/rules/approval-gates.md`
-- `.agents/rules/graphics-performance.md`
-- `.agents/rules/rust-quality.md`
-- `.agents/rules/system-safety.md`
-- `.agents/rules/token-efficiency.md`
-- `.agents/skills/animation-engine/SKILL.md`
-- `.agents/skills/desktop-shell/SKILL.md`
-- `.agents/skills/gpu-rendering/SKILL.md`
-- `.agents/skills/hardware-compatibility/SKILL.md`
-- `.agents/skills/linux-graphics/SKILL.md`
-- `.agents/skills/linux-integration/SKILL.md`
-- `.agents/skills/performance-engineering/SKILL.md`
-- `.agents/skills/release-engineering/SKILL.md`
-- `.agents/skills/rust-engineering/SKILL.md`
-- `.agents/skills/security/SKILL.md`
-- `.agents/skills/testing-qa/SKILL.md`
-- `.agents/skills/ui-ux-design/SKILL.md`
-- `.agents/skills/wayland-compositor/SKILL.md`
-- `.agents/skills/window-management/SKILL.md`
-- `.agents/workflows/architecture-proposal.md`
-- `.agents/workflows/implement-task.md`
-- `.agents/workflows/performance-audit.md`
-- `.agents/workflows/plan-task.md`
-- `.agents/workflows/project-bootstrap.md`
-- `.agents/workflows/release-checklist.md`
-
 ## Документация и ADR
-- `AGENTS.md`
 - `ARCHITECTURE.md`
 - `DECISIONS.md`
 - `DESIGN.md`
