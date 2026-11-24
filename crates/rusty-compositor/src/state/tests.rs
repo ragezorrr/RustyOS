@@ -1990,6 +1990,8 @@ fn dock_count_badges_support_unity_priority_notif_fallback_focus_clear_and_pill_
         "New message".to_owned(),
         None,
         Some("firefox".to_owned()),
+        Some("Firefox".to_owned()),
+        None,
     );
     compositor.push_dbus_notification_for_app(
         102,
@@ -1999,6 +2001,8 @@ fn dock_count_badges_support_unity_priority_notif_fallback_focus_clear_and_pill_
         "Second message".to_owned(),
         None,
         Some("firefox".to_owned()),
+        Some("Firefox".to_owned()),
+        None,
     );
     assert_eq!(compositor.dock_badge_count_for_key("browser"), 2);
     let tiles = compositor.build_dock_tiles();
@@ -2203,7 +2207,7 @@ fn dock_dnd_uri_list_parser_mime_matching_and_exec_expansion_work() {
     let app = entry.as_ref();
     assert!(app.is_some());
     assert_eq!(
-        app.map(|a| a.mime_types.clone()).unwrap_or_default(),
+        app.map_or_default(|a| a.mime_types.clone()),
         vec!["image/*".to_owned(), "application/pdf".to_owned()]
     );
 

@@ -2830,6 +2830,21 @@ hardware/software context и низкие накладные расходы.
   - `cargo fmt --check` чисто; `cargo clippy -p rusty-polkit --tests -- -D warnings` (0 предупреждений); `cargo test -p rusty-polkit` пройден; ручной/тестовый вызов регистрации и проверка парсинга протокола helper; живой `--winit` или Wayland запуск окна.
 - **Risks:** Низкие; 0 новых Cargo-зависимостей, 0 `unsafe`.
 
+### RUSTYOS-173 — Эргономика кнопок окон SSD, unminimize frame pacing, аватары и стопки в Notification Center
+- **Status:** Done
+- **Goal:** Реализовать правостороннее расположение кнопок окон в SSD, устранить зависание окон при развёртывании из свёрнутого состояния, поддержать извлечение аватаров контактов и имён отправителей в D-Bus notifications и группировку уведомлений в раскрываемые стопки («стос») в Notification Center.
+- **Dependencies:** `RUSTYOS-019`, `RUSTYOS-130`, `RUSTYOS-150`, `RUSTYOS-172`.
+- **Scope:**
+  - `crates/rusty-ui/src/{geometry.rs, traffic_lights.rs, window_frame.rs, window_header.rs}`: введение `TrafficLightPlacement` (`Left`, `Right`), константы `TRAFFIC_LIGHT_MARGIN_RIGHT = 14`, методов `TrafficLightButtons::for_window(width, height)` и `with_placement`.
+  - `crates/rusty-compositor/src/shell_render/ssd.rs`: правостороннее расположение кнопок `[Minimize] [Maximize] [Close]` в SSD-заголовках окон и адаптивный хит-тестинг.
+  - `crates/rusty-compositor/src/state/wm_windows.rs` и `crates/rusty-compositor/src/input/pointer.rs`: при unminimize сброс кэша X11 configure (`last_x11_configure_state`), немедленный вызов `toplevel.send_configure()`, планирование цикла отрисовки для доставки frame callbacks в Smithay и передача фокуса курсора (`apply_pointer_position`) по завершении анимации.
+  - `crates/rusty-compositor/src/{dbus_notifications.rs, state/mod.rs, icons.rs, shell_render/top_bar/notifications.rs}`: извлечение аватаров (`image-data`, `image-path`, `app_icon`), сохранение `NotificationAvatar`, очистка префиксов summary из заголовка тоста, рендеринг круглых миниатюр контактов с субпиксельным сглаживанием.
+  - `crates/rusty-compositor/src/shell_render/notification_center.rs` и `crates/rusty-compositor/src/input/shell_pointer.rs`: группировка уведомлений по источнику, отрисовка физических стопок («стос» карточек) с бейджем `+N`, интерактивное раскрытие/сворачивание по клику (`ToggleStack`).
+  - `docs/adr/0102-notification-cards-window-controls-and-restore-frame-pacing.md`, `DECISIONS.md` (`D-116`), `ARCHITECTURE.md` §7.
+- **Acceptance Criteria:**
+  - `cargo fmt --check` чисто; `cargo clippy --workspace --all-targets -- -D warnings` (0 предупреждений); `cargo test --workspace` пройден (241 compositor тестов, включая группировку стопок и hover кнопок); кнопки SSD находятся справа `[—] [口] [X]`; восстановление окон из свёрнутого состояния мгновенно получает кадры и фокус; уведомления мессенджеров показывают имя и аватар контакта; карточки группируются в стопку с бейджем `+N`.
+- **Risks:** Низкие; 0 новых Cargo-зависимостей, 0 `unsafe`.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

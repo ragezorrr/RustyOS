@@ -174,6 +174,7 @@ impl RustyCompositorState {
         self.minimized_dock_order.retain(|id| *id != win_id);
         let _ = self.wm.set_window_minimized(win_id, false);
         self.wm.focus_and_raise(win_id);
+        self.last_x11_configure_state.remove(&win_id);
         if was_minimized
             && let Some(sw) = self.smithay_window_for_id(win_id)
             && let Some(x11) = sw.x11_surface()
@@ -181,6 +182,19 @@ impl RustyCompositorState {
             let _ = x11.set_suspended(false);
         }
         self.sync_space_with_wm(serial);
+
+        if let Some(sw) = self.smithay_window_for_id(win_id) {
+            if let Some(toplevel) = sw.toplevel() {
+                toplevel.send_configure();
+            }
+            let elapsed = self.elapsed();
+            for entry in self.output_map.entries() {
+                sw.send_frame(&entry.output, elapsed, Some(Duration::ZERO), |_, _| {
+                    Some(entry.output.clone())
+                });
+            }
+            let _ = self.display_handle.flush_clients();
+        }
 
         self.minimize_anims.retain(|anim| anim.win_id != win_id);
         self.lifecycle_anims
@@ -1889,16 +1903,36 @@ impl RustyCompositorState {
 
         if !self.minimize_anims.is_empty() {
             let mut finished_any = false;
+            let mut finished_restores = Vec::new();
             for anim in &mut self.minimize_anims {
                 let _ = anim.progress.tick(now);
                 if !anim.progress.is_active() && !anim.snapshot_pending {
                     finished_any = true;
+                    if anim.restoring {
+                        finished_restores.push(anim.win_id);
+                    }
                 }
             }
             self.minimize_anims
                 .retain(|anim| anim.progress.is_active() || anim.snapshot_pending);
             if finished_any {
                 self.shell_redraw_needed = true;
+            }
+            for restored_id in finished_restores {
+                if let Some(sw) = self.smithay_window_for_id(restored_id) {
+                    if let Some(toplevel) = sw.toplevel() {
+                        toplevel.send_configure();
+                    }
+                    for entry in self.output_map.entries() {
+                        sw.send_frame(&entry.output, now, Some(Duration::ZERO), |_, _| {
+                            Some(entry.output.clone())
+                        });
+                    }
+                    let _ = self.display_handle.flush_clients();
+                }
+                #[allow(clippy::cast_possible_truncation)]
+                let time = (now.as_millis() & 0xFFFF_FFFF) as u32;
+                self.apply_pointer_position(self.pointer_location, time);
             }
         }
 

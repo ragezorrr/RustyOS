@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use crate::geometry::{Rect, TITLEBAR_HEIGHT};
 use crate::theme::TrafficLightKind;
-use crate::traffic_lights::TrafficLightButtons;
+use crate::traffic_lights::{TrafficLightButtons, TrafficLightPlacement};
 
 /// Hit-test target in the window chrome.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,13 +28,19 @@ pub struct WindowFrame {
 }
 
 impl WindowFrame {
-    /// Creates a new CSD window frame state with standard 40 px header height.
+    /// Creates a new CSD window frame state with standard 40 px header height and 800 px width.
     #[must_use]
     pub fn new(title: impl Into<String>) -> Self {
+        Self::for_width(title, 800)
+    }
+
+    /// Creates a new CSD window frame state for a specific window width.
+    #[must_use]
+    pub fn for_width(title: impl Into<String>, window_width: u32) -> Self {
         Self {
             title: title.into(),
             header_height: TITLEBAR_HEIGHT,
-            buttons: TrafficLightButtons::default_csd(),
+            buttons: TrafficLightButtons::default_csd_for_width(window_width),
             is_focused: true,
             is_maximized: false,
             traffic_hovered: false,
@@ -54,7 +60,13 @@ impl WindowFrame {
             return WindowHitTarget::Content;
         }
 
-        if let Some(kind) = self.buttons.hit_test(px, py) {
+        let buttons = if self.buttons.placement == TrafficLightPlacement::Right {
+            TrafficLightButtons::default_csd_for_width(window_width)
+        } else {
+            self.buttons
+        };
+
+        if let Some(kind) = buttons.hit_test(px, py) {
             return WindowHitTarget::TrafficLight(kind);
         }
 

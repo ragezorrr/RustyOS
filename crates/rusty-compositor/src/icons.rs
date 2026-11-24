@@ -413,6 +413,87 @@ impl IconCache {
         element_from_icon_buffer(renderer, buf, size_px, loc)
     }
 
+    /// Renders a circular contact avatar pixmap (`RUSTYOS-173`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn avatar_element(
+        &mut self,
+        renderer: &mut GlesRenderer,
+        avatar_key: &str,
+        rgba: &[u8],
+        src_w: u32,
+        src_h: u32,
+        size_px: i32,
+        loc: Point<i32, Logical>,
+    ) -> Option<MemoryRenderBufferRenderElement<GlesRenderer>> {
+        let size_u16 = u16::try_from(size_px).ok()?;
+        if size_px <= 0 || rgba.is_empty() || src_w == 0 || src_h == 0 {
+            return None;
+        }
+        let frame = self.frame_counter;
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        std::hash::Hash::hash(&rgba.len(), &mut hasher);
+        if let Some(&first) = rgba.first() {
+            std::hash::Hash::hash(&first, &mut hasher);
+        }
+        if let Some(&last) = rgba.last() {
+            std::hash::Hash::hash(&last, &mut hasher);
+        }
+        let fp = std::hash::Hasher::finish(&hasher);
+        let key = IconCacheKey {
+            source_key: format!("avatar:{avatar_key}"),
+            size_px: size_u16,
+            fingerprint: fp,
+        };
+        let entry = self.buffers.entry(key).or_insert_with(|| {
+            let scale = crate::surfaces::GLYPH_BUFFER_SCALE;
+            let dev_px = i32::from(size_u16) * scale;
+            let value = (|| {
+                let dev_usize = usize::try_from(dev_px).ok()?;
+                #[allow(clippy::cast_possible_truncation)]
+                let scaled_bgra =
+                    scale_rgba_to_premul_bgra(src_w as usize, src_h as usize, rgba, dev_usize)?;
+                // Apply antialiased circular mask
+                #[allow(clippy::cast_precision_loss)]
+                let radius = (dev_px as f32) * 0.5;
+                let cx = radius;
+                let cy = radius;
+                let mut masked = scaled_bgra;
+                for y in 0..dev_usize {
+                    for x in 0..dev_usize {
+                        #[allow(clippy::cast_precision_loss)]
+                        let dx = x as f32 + 0.5 - cx;
+                        #[allow(clippy::cast_precision_loss)]
+                        let dy = y as f32 + 0.5 - cy;
+                        let dist = dx.hypot(dy);
+                        let idx = (y * dev_usize + x) * 4;
+                        if dist >= radius {
+                            masked[idx..idx + 4].copy_from_slice(&[0, 0, 0, 0]);
+                        } else if dist > radius - 1.0 {
+                            let alpha = (radius - dist).clamp(0.0, 1.0);
+                            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                            let b = (f32::from(masked[idx]) * alpha) as u8;
+                            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                            let g = (f32::from(masked[idx + 1]) * alpha) as u8;
+                            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                            let r = (f32::from(masked[idx + 2]) * alpha) as u8;
+                            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                            let a = (f32::from(masked[idx + 3]) * alpha) as u8;
+                            masked[idx..idx + 4].copy_from_slice(&[b, g, r, a]);
+                        }
+                    }
+                }
+                Some(upload_bgra_buffer_scaled(dev_px, scale, &masked))
+            })();
+            AgedIconEntry {
+                value,
+                last_frame: frame,
+            }
+        });
+        entry.last_frame = frame;
+        let buf = entry.value.as_ref()?;
+        element_from_icon_buffer(renderer, buf, size_px, loc)
+    }
+
     fn ensure_named_buffer(
         &mut self,
         icon_name: &str,
@@ -518,7 +599,7 @@ impl IconCache {
         element_from_icon_buffer(renderer, buf, size_px, loc)
     }
 
-    /// Renders a GPU-cached procedural macOS 27 squircle icon styled with active theme & accent (`RUSTYOS-048`/`114`).
+    /// Renders a GPU-cached procedural RustyOS squircle icon styled with active theme & accent (`RUSTYOS-048`/`114`).
     pub fn builtin_squircle_icon_element(
         &mut self,
         renderer: &mut GlesRenderer,

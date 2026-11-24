@@ -1,10 +1,20 @@
 //! Standard window-control traffic light layout and vector microglyph geometry.
 
 use crate::geometry::{
-    Rect, TRAFFIC_LIGHT_CENTERS_X, TRAFFIC_LIGHT_DIAMETER, TRAFFIC_LIGHT_GAP,
-    TRAFFIC_LIGHT_MARGIN_LEFT,
+    Rect, TRAFFIC_LIGHT_DIAMETER, TRAFFIC_LIGHT_GAP, TRAFFIC_LIGHT_MARGIN_LEFT,
+    TRAFFIC_LIGHT_MARGIN_RIGHT,
 };
 use crate::theme::TrafficLightKind;
+
+/// Horizontal placement of window controls in the titlebar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TrafficLightPlacement {
+    /// Placed on the left: `[Close] [Minimize] [Maximize]`.
+    Left,
+    /// Placed on the right: `[Minimize] [Maximize] [Close]`.
+    #[default]
+    Right,
+}
 
 /// Geometry and hit-testing for the 3 window controls (Close, Minimize, Maximize).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -14,28 +24,54 @@ pub struct TrafficLightButtons {
     pub maximize_rect: Rect,
     pub hover_zone: Rect,
     pub center_y: f32,
+    pub placement: TrafficLightPlacement,
 }
 
 impl TrafficLightButtons {
-    /// Creates the standard traffic-light layout for a given titlebar height (typically 40 for CSD, 28 for SSD).
+    /// Creates the right-aligned traffic-light layout for a given window width and header height.
     #[must_use]
-    pub fn new(header_height: u32) -> Self {
+    pub fn for_window(width: u32, header_height: u32) -> Self {
+        Self::with_placement(width, header_height, TrafficLightPlacement::Right)
+    }
+
+    /// Creates traffic-light layout with explicit placement (`Left` or `Right`).
+    #[must_use]
+    pub fn with_placement(
+        width: u32,
+        header_height: u32,
+        placement: TrafficLightPlacement,
+    ) -> Self {
         let btn_d = TRAFFIC_LIGHT_DIAMETER;
         let btn_y = (header_height.saturating_sub(btn_d) / 2) as i32;
         let center_y = btn_y as f32 + (btn_d as f32 * 0.5);
 
-        let close_x = TRAFFIC_LIGHT_MARGIN_LEFT as i32;
-        let min_x = close_x + btn_d as i32 + TRAFFIC_LIGHT_GAP as i32;
-        let max_x = min_x + btn_d as i32 + TRAFFIC_LIGHT_GAP as i32;
+        let (min_x, max_x, close_x) = match placement {
+            TrafficLightPlacement::Left => {
+                let close_x = TRAFFIC_LIGHT_MARGIN_LEFT as i32;
+                let min_x = close_x + btn_d as i32 + TRAFFIC_LIGHT_GAP as i32;
+                let max_x = min_x + btn_d as i32 + TRAFFIC_LIGHT_GAP as i32;
+                (min_x, max_x, close_x)
+            }
+            TrafficLightPlacement::Right => {
+                let right_edge = (width as i32) - (TRAFFIC_LIGHT_MARGIN_RIGHT as i32);
+                let close_x = right_edge - btn_d as i32;
+                let max_x = close_x - (TRAFFIC_LIGHT_GAP as i32) - btn_d as i32;
+                let min_x = max_x - (TRAFFIC_LIGHT_GAP as i32) - btn_d as i32;
+                (min_x, max_x, close_x)
+            }
+        };
 
         let close_rect = Rect::new(close_x, btn_y, btn_d, btn_d);
         let minimize_rect = Rect::new(min_x, btn_y, btn_d, btn_d);
         let maximize_rect = Rect::new(max_x, btn_y, btn_d, btn_d);
 
+        let min_bound_x = min_x.min(close_x);
+        let max_bound_x = min_x.max(close_x) + btn_d as i32;
+
         let hover_zone = Rect::new(
-            (close_x - 4).max(0),
+            (min_bound_x - 4).max(0),
             (btn_y - 4).max(0),
-            (max_x + btn_d as i32 + 6 - (close_x - 4).max(0)) as u32,
+            (max_bound_x + 6 - (min_bound_x - 4).max(0)) as u32,
             btn_d + 8,
         );
 
@@ -45,19 +81,54 @@ impl TrafficLightButtons {
             maximize_rect,
             hover_zone,
             center_y,
+            placement,
         }
     }
 
-    /// Default CSD layout (header height 40 px, buttons at y=13).
+    /// Creates the standard traffic-light layout for a given titlebar height at default 800 px width.
     #[must_use]
-    pub fn default_csd() -> Self {
-        Self::new(crate::geometry::TITLEBAR_HEIGHT)
+    pub fn new(header_height: u32) -> Self {
+        Self::for_window(800, header_height)
     }
 
-    /// Default SSD layout (header height 28 px, buttons at y=7).
+    /// Default CSD layout (header height 40 px, standard 800 px width, left placement).
+    #[must_use]
+    pub fn default_csd() -> Self {
+        Self::with_placement(
+            800,
+            crate::geometry::TITLEBAR_HEIGHT,
+            TrafficLightPlacement::Left,
+        )
+    }
+
+    /// Default SSD layout (header height 36 px, standard 800 px width, right placement).
     #[must_use]
     pub fn default_ssd() -> Self {
-        Self::new(crate::geometry::SSD_TITLEBAR_HEIGHT)
+        Self::with_placement(
+            800,
+            crate::geometry::SSD_TITLEBAR_HEIGHT,
+            TrafficLightPlacement::Right,
+        )
+    }
+
+    /// Default SSD layout for a specific window width (right placement).
+    #[must_use]
+    pub fn default_ssd_for_width(width: u32) -> Self {
+        Self::with_placement(
+            width,
+            crate::geometry::SSD_TITLEBAR_HEIGHT,
+            TrafficLightPlacement::Right,
+        )
+    }
+
+    /// Default CSD layout for a specific window width (left placement).
+    #[must_use]
+    pub fn default_csd_for_width(width: u32) -> Self {
+        Self::with_placement(
+            width,
+            crate::geometry::TITLEBAR_HEIGHT,
+            TrafficLightPlacement::Left,
+        )
     }
 
     /// Hit-tests pointer coordinates against individual buttons with a 2 px margin.
@@ -100,12 +171,12 @@ impl TrafficLightButtons {
     /// Center coordinates `(cx, cy)` for a given button kind.
     #[must_use]
     pub fn center_of(&self, kind: TrafficLightKind) -> (f32, f32) {
-        let cx = match kind {
-            TrafficLightKind::Close => TRAFFIC_LIGHT_CENTERS_X[0],
-            TrafficLightKind::Minimize => TRAFFIC_LIGHT_CENTERS_X[1],
-            TrafficLightKind::Maximize => TRAFFIC_LIGHT_CENTERS_X[2],
+        let rect = match kind {
+            TrafficLightKind::Close => self.close_rect,
+            TrafficLightKind::Minimize => self.minimize_rect,
+            TrafficLightKind::Maximize => self.maximize_rect,
         };
-        (cx, self.center_y)
+        (rect.x as f32 + (rect.width as f32 * 0.5), self.center_y)
     }
 }
 

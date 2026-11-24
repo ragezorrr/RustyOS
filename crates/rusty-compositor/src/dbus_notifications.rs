@@ -38,6 +38,10 @@ pub enum DbusNotificationCommand {
         expire_after: Option<Duration>,
         /// Optional canonical Dock application key derived from `desktop-entry` hint or `app_name` (`RUSTYOS-162`).
         app_key: Option<String>,
+        /// Optional human-readable application name (`"Telegram Desktop"`).
+        app_display_name: Option<String>,
+        /// Optional contact avatar pixmap provided via D-Bus hints.
+        avatar: Option<crate::state::NotificationAvatar>,
     },
     /// Close/dismiss an existing notification by ID.
     Close {
@@ -218,7 +222,7 @@ impl NotificationsInterface {
         hints: HashMap<String, OwnedValue>,
         expire_timeout: i32,
     ) -> u32 {
-        let _ = (app_icon, actions);
+        let _ = actions;
         let id = if replaces_id > 0 {
             replaces_id
         } else {
@@ -229,7 +233,16 @@ impl NotificationsInterface {
             .get("desktop-entry")
             .and_then(|v| <&str>::try_from(v).ok());
         let app_key = resolve_notification_app_key(desktop_entry, app_name);
+        let app_display_name = {
+            let s = app_name.trim();
+            if s.is_empty() {
+                None
+            } else {
+                Some(s.to_owned())
+            }
+        };
         let (title, clean_body) = format_dbus_notification(app_name, summary, body);
+        let avatar = parse_notification_avatar(&hints, app_icon);
         let expire_after = parse_expire_timeout(expire_timeout);
 
         let _ = self.tx.send(DbusNotificationCommand::Notify {
@@ -240,6 +253,8 @@ impl NotificationsInterface {
             body: clean_body,
             expire_after,
             app_key,
+            app_display_name,
+            avatar,
         });
         info!(id, app_name, "Received D-Bus notification");
         self.wake_compositor();
@@ -561,6 +576,97 @@ pub fn parse_expire_timeout(expire_timeout_ms: i32) -> Option<Duration> {
     }
 }
 
+/// Parses sender avatar image data or file path from D-Bus notification hints or `app_icon` (`RUSTYOS-173`).
+#[allow(
+    clippy::implicit_hasher,
+    clippy::collapsible_if,
+    clippy::cast_sign_loss,
+    clippy::too_many_lines
+)]
+#[must_use]
+pub fn parse_notification_avatar(
+    hints: &HashMap<String, OwnedValue>,
+    app_icon: &str,
+) -> Option<crate::state::NotificationAvatar> {
+    let img_val = hints
+        .get("image-data")
+        .or_else(|| hints.get("image_data"))
+        .or_else(|| hints.get("icon_data"));
+
+    if let Some(val) = img_val {
+        if let Ok((w, h, rowstride, has_alpha, bits, channels, data)) =
+            <(i32, i32, i32, bool, i32, i32, Vec<u8>)>::try_from(val.clone())
+        {
+            if w > 0 && h > 0 && bits == 8 && (channels == 3 || channels == 4) {
+                #[allow(clippy::cast_sign_loss)]
+                let width = w as u32;
+                #[allow(clippy::cast_sign_loss)]
+                let height = h as u32;
+                let ch = channels as usize;
+                let stride = rowstride as usize;
+                let mut rgba = Vec::with_capacity((width * height * 4) as usize);
+                for y in 0..height {
+                    let row_start = (y as usize).saturating_mul(stride);
+                    for x in 0..width {
+                        let px_start = row_start.saturating_add((x as usize).saturating_mul(ch));
+                        if px_start.saturating_add(ch) <= data.len() {
+                            let r = data[px_start];
+                            let g = data[px_start + 1];
+                            let b = data[px_start + 2];
+                            let a = if ch == 4 && has_alpha {
+                                data[px_start + 3]
+                            } else {
+                                255
+                            };
+                            rgba.extend_from_slice(&[r, g, b, a]);
+                        } else {
+                            rgba.extend_from_slice(&[0, 0, 0, 0]);
+                        }
+                    }
+                }
+                return Some(crate::state::NotificationAvatar {
+                    width,
+                    height,
+                    rgba,
+                });
+            }
+        }
+    }
+
+    let path_val = hints.get("image-path").or_else(|| hints.get("image_path"));
+    if let Some(val) = path_val {
+        if let Ok(path_str) = String::try_from(val.clone()) {
+            let p = path_str.strip_prefix("file://").unwrap_or(&path_str);
+            if let Ok(bytes) = std::fs::read(p) {
+                if let Some((w, h, rgba)) = crate::icons::decode_png_rgba(&bytes) {
+                    #[allow(clippy::cast_possible_truncation)]
+                    return Some(crate::state::NotificationAvatar {
+                        width: w as u32,
+                        height: h as u32,
+                        rgba,
+                    });
+                }
+            }
+        }
+    }
+
+    if app_icon.starts_with('/') || app_icon.starts_with("file://") {
+        let p = app_icon.strip_prefix("file://").unwrap_or(app_icon);
+        if let Ok(bytes) = std::fs::read(p) {
+            if let Some((w, h, rgba)) = crate::icons::decode_png_rgba(&bytes) {
+                #[allow(clippy::cast_possible_truncation)]
+                return Some(crate::state::NotificationAvatar {
+                    width: w as u32,
+                    height: h as u32,
+                    rgba,
+                });
+            }
+        }
+    }
+
+    None
+}
+
 /// Normalizes D-Bus `(app_name, summary, body)` into concise single-line strings for the HUD.
 #[must_use]
 pub fn format_dbus_notification(app_name: &str, summary: &str, body: &str) -> (String, String) {
@@ -571,17 +677,7 @@ pub fn format_dbus_notification(app_name: &str, summary: &str, body: &str) -> (S
     let title = match (app.is_empty(), sum.is_empty()) {
         (true, true) => "Notification".to_owned(),
         (false, true) => app,
-        (true, false) => sum,
-        (false, false) => {
-            if sum
-                .to_ascii_lowercase()
-                .starts_with(&app.to_ascii_lowercase())
-            {
-                sum
-            } else {
-                format!("{app}: {sum}")
-            }
-        }
+        (_, false) => sum,
     };
     (title, clean_body)
 }
@@ -627,7 +723,7 @@ mod tests {
     fn dbus_notification_formatting_combines_app_summary_and_sanitizes_newlines() {
         let (title, body) =
             format_dbus_notification("Spotify", "Now Playing", "Track\nOne\t\tArtist");
-        assert_eq!(title, "Spotify: Now Playing");
+        assert_eq!(title, "Now Playing");
         assert_eq!(body, "Track One Artist");
 
         let (dedup_title, _) = format_dbus_notification("Steam", "Steam Update", "Ready");
@@ -635,6 +731,9 @@ mod tests {
 
         let (fallback_title, _) = format_dbus_notification("", "", "Empty");
         assert_eq!(fallback_title, "Notification");
+
+        let (app_fallback, _) = format_dbus_notification("Telegram", "", "New message");
+        assert_eq!(app_fallback, "Telegram");
 
         let (_, clean_emoji) = format_dbus_notification(
             "Google Chrome",

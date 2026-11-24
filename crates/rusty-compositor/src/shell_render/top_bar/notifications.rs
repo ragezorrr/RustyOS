@@ -28,19 +28,25 @@ const NOTIFICATION_ICON_OFFSET_Y: i32 = 20;
 const NOTIFICATION_TEXT_OFFSET_X: i32 = 74;
 const NOTIFICATION_TEXT_RIGHT_PAD: i32 = 18;
 
-/// Active notification toast view rendered in the top-right Notification HUD (`RUSTYOS-024`).
+/// Active notification toast view rendered in the top-right Notification HUD (`RUSTYOS-024` / `RUSTYOS-173`).
 #[derive(Debug, Clone)]
 pub struct NotificationToastView<'a> {
     /// Unique notification identifier.
     pub id: u64,
     /// Urgency level controlling accent color.
     pub urgency: rusty_ipc::Urgency,
-    /// Short notification title.
+    /// Canonical application key.
+    pub app_key: Option<&'a str>,
+    /// Application display name.
+    pub app_name: Option<&'a str>,
+    /// Short notification title (sender name or summary).
     pub title: &'a str,
     /// Notification body text.
     pub body: &'a str,
     /// True when the pointer is hovering this notification card (`RUSTYOS-051`).
     pub hovered: bool,
+    /// Optional contact avatar pixmap (`RUSTYOS-173`).
+    pub avatar: Option<&'a crate::state::NotificationAvatar>,
 }
 
 /// Active transient On-Screen Display (OSD) indicator pill (`RUSTYOS-031`).
@@ -392,8 +398,8 @@ fn notification_xdg_icon_name(title: &str) -> Option<&'static str> {
     }
 }
 
-/// Appends unified RustyOS chrome (hover close circle, app squircle, `NotificationCard` glass)
-/// for both floating HUD toasts and Notification Center stack cards (`RUSTYOS-110`).
+/// Appends unified RustyOS chrome (hover close circle, contact avatar / app squircle, `NotificationCard` glass)
+/// for both floating HUD toasts and Notification Center stack cards (`RUSTYOS-110` / `RUSTYOS-173`).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn push_notification_card_chrome(
     out: &mut Vec<CompositorRenderElement>,
@@ -402,6 +408,8 @@ pub(crate) fn push_notification_card_chrome(
     card_rect: Rectangle<i32, Physical>,
     close_rect: Rectangle<i32, Physical>,
     title: &str,
+    app_icon_key: Option<&str>,
+    avatar: Option<&crate::state::NotificationAvatar>,
     close_hovered: bool,
     glass_opacity: f32,
     reduce_transparency: bool,
@@ -437,22 +445,39 @@ pub(crate) fn push_notification_card_chrome(
         card_rect.loc.x + NOTIFICATION_ICON_OFFSET_X,
         card_rect.loc.y + NOTIFICATION_ICON_OFFSET_Y,
     ));
-    let xdg_icon_el = notification_xdg_icon_name(title).and_then(|xdg_name| {
-        shape_cache.icons.framed_xdg_squircle_icon_element(
+
+    let avatar_el = avatar.and_then(|av| {
+        let key = format!("av_{}_{}_{}", av.width, av.height, av.rgba.len());
+        shape_cache.icons.avatar_element(
             renderer,
-            xdg_name,
+            &key,
+            &av.rgba,
+            av.width,
+            av.height,
             NOTIFICATION_ICON_SIZE,
             icon_loc,
         )
     });
-    if let Some(icon_el) = xdg_icon_el.or_else(|| {
-        let app_icon = notification_app_icon(title);
-        shape_cache.icons.builtin_squircle_icon_element(
-            renderer,
-            app_icon,
-            NOTIFICATION_ICON_SIZE,
-            icon_loc,
-        )
+
+    let icon_source = app_icon_key.unwrap_or(title);
+    if let Some(icon_el) = avatar_el.or_else(|| {
+        let xdg_icon_el = notification_xdg_icon_name(icon_source).and_then(|xdg_name| {
+            shape_cache.icons.framed_xdg_squircle_icon_element(
+                renderer,
+                xdg_name,
+                NOTIFICATION_ICON_SIZE,
+                icon_loc,
+            )
+        });
+        xdg_icon_el.or_else(|| {
+            let app_icon = notification_app_icon(icon_source);
+            shape_cache.icons.builtin_squircle_icon_element(
+                renderer,
+                app_icon,
+                NOTIFICATION_ICON_SIZE,
+                icon_loc,
+            )
+        })
     }) {
         out.push(CompositorRenderElement::Memory(icon_el));
     }
@@ -497,11 +522,7 @@ fn truncate_text_to_width(
         }
     }
     if best_end == 0 {
-        let mut first = trimmed
-            .chars()
-            .next()
-            .map(|c| c.to_string())
-            .unwrap_or_default();
+        let mut first = trimmed.chars().next().map_or_default(|c| c.to_string());
         first.push_str("...");
         first
     } else {

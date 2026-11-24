@@ -51,6 +51,8 @@ pub const DEFAULT_NOTIFICATION_TASKS: [&str; 4] = [
 pub enum NotificationCenterHit {
     /// Dismiss a single notification card by ID.
     DismissNotification(u64),
+    /// Toggle expand/collapse for a notification card stack group by root notification ID (`RUSTYOS-173`).
+    ToggleStack(u64),
     /// Clear all delivered notifications from Notification Center.
     ClearAll,
     /// Toggle checklist task item `0..4` inside the Reminders widget.
@@ -65,19 +67,25 @@ pub enum NotificationCenterHit {
     OutsidePanel,
 }
 
-/// Read-only view of a single delivered notification inside Notification Center (`RUSTYOS-109`).
+/// Read-only view of a single delivered notification inside Notification Center (`RUSTYOS-109` / `RUSTYOS-173`).
 #[derive(Debug, Clone)]
 pub struct NotificationCenterItemView<'a> {
     /// Monotonic compositor notification ID.
     pub id: u64,
     /// Freedesktop urgency level.
     pub urgency: rusty_ipc::Urgency,
-    /// Formatted notification title / application prefix.
+    /// Canonical application key.
+    pub app_key: Option<&'a str>,
+    /// Human-readable application display name (`"Telegram Desktop"`).
+    pub app_name: Option<&'a str>,
+    /// Formatted notification title / sender name.
     pub title: &'a str,
     /// Sanitized body text.
     pub body: &'a str,
     /// Concise relative age label (`"now"`, `"2m ago"`, `"1h ago"`) (`RUSTYOS-156`).
     pub age_label: String,
+    /// Optional contact avatar pixmap (`RUSTYOS-173`).
+    pub avatar: Option<&'a crate::state::NotificationAvatar>,
 }
 
 /// Live view state driving [`ShellOverlayView::NotificationCenter`] (`RUSTYOS-109`).
@@ -92,6 +100,8 @@ pub struct NotificationCenterRenderState<'a> {
     pub hide_previews: bool,
     /// Ordered newest-first notification items.
     pub notifications: &'a [NotificationCenterItemView<'a>],
+    /// Group keys of expanded notification stacks (`RUSTYOS-173`).
+    pub expanded_stacks: &'a std::collections::HashSet<String>,
     /// Interactive checked state of the 4 Reminders checklist tasks.
     pub task_states: [bool; 4],
     /// Labels of the 4 Reminders checklist tasks.
@@ -108,7 +118,7 @@ pub struct NotificationCenterRenderState<'a> {
     pub show_reminders_widget: bool,
 }
 
-/// Positioned notification card slot in [`NotificationCenterLayout`] (`RUSTYOS-109`).
+/// Positioned notification card slot in [`NotificationCenterLayout`] (`RUSTYOS-109` / `RUSTYOS-173`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NotificationCardSlot {
     /// Notification identifier associated with this card.
@@ -121,6 +131,12 @@ pub struct NotificationCardSlot {
     pub close_rect: Rectangle<i32, Physical>,
     /// True when a stacked-edge lip is drawn beneath this card.
     pub has_stack_edge: bool,
+    /// Total count of notifications in this stack group.
+    pub stack_count: usize,
+    /// True if this stack is expanded.
+    pub is_expanded: bool,
+    /// Group root notification identifier.
+    pub group_id: u64,
 }
 
 /// Precomputed layout rectangles for [`ShellOverlayView::NotificationCenter`] (`RUSTYOS-109`).
@@ -163,6 +179,7 @@ fn point_in_rect(rect: Rectangle<i32, Physical>, x: f64, y: f64) -> bool {
         && y < f64::from(rect.loc.y + rect.size.h)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn card_slot(
     id: u64,
     notif_index: usize,
@@ -170,6 +187,9 @@ fn card_slot(
     y: i32,
     w: i32,
     has_stack_edge: bool,
+    stack_count: usize,
+    is_expanded: bool,
+    group_id: u64,
 ) -> NotificationCardSlot {
     let card_rect = Rectangle::new(Point::from((px, y)), Size::from((w, NC_CARD_HEIGHT)));
     let close_rect = Rectangle::new(Point::from((px + w - 28, y + 10)), Size::from((20, 20)));
@@ -179,10 +199,19 @@ fn card_slot(
         card_rect,
         close_rect,
         has_stack_edge,
+        stack_count,
+        is_expanded,
+        group_id,
     }
 }
 
-/// Computes RustyOS layout for [`ShellOverlayView::NotificationCenter`] (`RUSTYOS-109`).
+struct AppGroup {
+    key: String,
+    items: Vec<(usize, u64)>,
+}
+
+/// Computes RustyOS layout for [`ShellOverlayView::NotificationCenter`] (`RUSTYOS-109` / `RUSTYOS-173`).
+#[allow(clippy::too_many_lines)]
 #[must_use]
 pub fn compute_notification_center_layout(
     screen_size: Size<i32, Physical>,
@@ -200,12 +229,46 @@ pub fn compute_notification_center_layout(
     let mut cur_y = top_y;
     let count = state.notifications.len();
 
-    let lead_card = if count >= 2 {
-        let slot = card_slot(state.notifications[0].id, 0, px, cur_y, w, count > 3);
-        cur_y += NC_CARD_HEIGHT + 14;
-        Some(slot)
+    // Group notifications by app/source into stacks ("стос") (`RUSTYOS-173`)
+    let mut groups: Vec<AppGroup> = Vec::new();
+    for (idx, item) in state.notifications.iter().enumerate() {
+        let key = item
+            .app_key
+            .or(item.app_name)
+            .unwrap_or(item.title)
+            .to_owned();
+        if let Some(g) = groups.iter_mut().find(|g| g.key == key) {
+            g.items.push((idx, item.id));
+        } else {
+            groups.push(AppGroup {
+                key,
+                items: vec![(idx, item.id)],
+            });
+        }
+    }
+
+    let (lead_card, remaining_groups) = if count >= 2 && !groups.is_empty() {
+        let first = &groups[0];
+        let root_id = first.items[0].1;
+        let stack_count = first.items.len();
+        let is_expanded = state.expanded_stacks.contains(&root_id.to_string())
+            || state.expanded_stacks.contains(&first.key);
+        let has_stack_edge = stack_count > 1 && !is_expanded;
+        let slot = card_slot(
+            root_id,
+            first.items[0].0,
+            px,
+            cur_y,
+            w,
+            has_stack_edge,
+            stack_count,
+            is_expanded,
+            root_id,
+        );
+        cur_y += NC_CARD_HEIGHT + if has_stack_edge { 16 } else { 14 };
+        (Some(slot), &groups[1..])
     } else {
-        None
+        (None, groups.as_slice())
     };
 
     let header_rect = Rectangle::new(Point::from((px + 2, cur_y)), Size::from((w - 34, 24)));
@@ -220,25 +283,73 @@ pub fn compute_notification_center_layout(
         empty_rect = Some(er);
         cur_y += 48 + 14;
     } else {
-        let start_idx = usize::from(lead_card.is_some());
+        if let Some(ref lead) = lead_card
+            && lead.is_expanded
+            && !groups.is_empty()
+        {
+            for &(notif_index, id) in &groups[0].items[1..] {
+                stack_cards.push(card_slot(
+                    id,
+                    notif_index,
+                    px,
+                    cur_y,
+                    w,
+                    false,
+                    lead.stack_count,
+                    true,
+                    lead.group_id,
+                ));
+                cur_y += NC_CARD_HEIGHT + 10;
+            }
+        }
+
         let avail_for_stack = (top_y + cards_budget - cur_y).max(NC_CARD_HEIGHT);
-        let max_stack = usize::try_from(((avail_for_stack + 10) / (NC_CARD_HEIGHT + 10)).max(1))
-            .unwrap_or(1)
-            .min(4);
-        let slice = &state.notifications[start_idx..count.min(start_idx + max_stack)];
-        for (offset, item) in slice.iter().enumerate() {
-            let notif_index = start_idx + offset;
-            let is_last = offset + 1 == slice.len();
-            let hidden_more = count > start_idx + slice.len();
-            stack_cards.push(card_slot(
-                item.id,
-                notif_index,
-                px,
-                cur_y,
-                w,
-                is_last && hidden_more,
-            ));
-            cur_y += NC_CARD_HEIGHT + if is_last { 14 } else { 10 };
+        let max_stack_slots =
+            usize::try_from(((avail_for_stack + 10) / (NC_CARD_HEIGHT + 10)).max(1))
+                .unwrap_or(1)
+                .min(6);
+
+        for group in remaining_groups {
+            if stack_cards.len() >= max_stack_slots {
+                break;
+            }
+            let root_id = group.items[0].1;
+            let stack_count = group.items.len();
+            let is_expanded = state.expanded_stacks.contains(&root_id.to_string())
+                || state.expanded_stacks.contains(&group.key);
+            if is_expanded {
+                for &(notif_index, id) in &group.items {
+                    if stack_cards.len() >= max_stack_slots {
+                        break;
+                    }
+                    stack_cards.push(card_slot(
+                        id,
+                        notif_index,
+                        px,
+                        cur_y,
+                        w,
+                        false,
+                        stack_count,
+                        true,
+                        root_id,
+                    ));
+                    cur_y += NC_CARD_HEIGHT + 10;
+                }
+            } else {
+                let has_stack_edge = stack_count > 1;
+                stack_cards.push(card_slot(
+                    root_id,
+                    group.items[0].0,
+                    px,
+                    cur_y,
+                    w,
+                    has_stack_edge,
+                    stack_count,
+                    false,
+                    root_id,
+                ));
+                cur_y += NC_CARD_HEIGHT + if has_stack_edge { 16 } else { 10 };
+            }
         }
     }
 
@@ -311,7 +422,13 @@ pub fn hit_test_notification_center(
         return NotificationCenterHit::ClearAll;
     }
     for slot in layout.lead_card.iter().chain(layout.stack_cards.iter()) {
-        if point_in_rect(slot.close_rect, x, y) || point_in_rect(slot.card_rect, x, y) {
+        if point_in_rect(slot.close_rect, x, y) {
+            return NotificationCenterHit::DismissNotification(slot.id);
+        }
+        if point_in_rect(slot.card_rect, x, y) {
+            if slot.stack_count > 1 {
+                return NotificationCenterHit::ToggleStack(slot.group_id);
+            }
             return NotificationCenterHit::DismissNotification(slot.id);
         }
     }
@@ -500,6 +617,21 @@ fn render_notification_card_text(
         pal,
         elements,
     );
+    if slot.stack_count > 1 && !slot.is_expanded {
+        let badge_text = format!("+{}", slot.stack_count - 1);
+        let badge_x = slot.card_rect.loc.x + slot.card_rect.size.w - 42;
+        let badge_y = slot.card_rect.loc.y + slot.card_rect.size.h - 22;
+        if let Some(el) = text_cache.render_label_weighted(
+            renderer,
+            &badge_text,
+            crate::text::FontWeight::Bold,
+            11.5,
+            pal.accent_rgba,
+            Point::from((badge_x, badge_y)),
+        ) {
+            elements.push(el);
+        }
+    }
 }
 
 fn render_weather_widget_text(
@@ -766,6 +898,7 @@ fn push_notification_card_composite(
     pal: &ThemePalette,
 ) {
     let hovered = state.hovered_hit == Some(NotificationCenterHit::DismissNotification(slot.id));
+    let app_icon_key = item.app_key.or(item.app_name);
     push_notification_card_chrome(
         out,
         shape_cache,
@@ -773,28 +906,49 @@ fn push_notification_card_composite(
         slot.card_rect,
         slot.close_rect,
         item.title,
+        app_icon_key,
+        item.avatar,
         hovered,
         state.glass_opacity,
         state.reduce_transparency,
         pal,
     );
 
-    if slot.has_stack_edge {
-        let lip = Rectangle::new(
+    if slot.has_stack_edge && slot.stack_count > 1 {
+        let lip1 = Rectangle::new(
             Point::from((
-                slot.card_rect.loc.x + 10,
-                slot.card_rect.loc.y + slot.card_rect.size.h - 14,
+                slot.card_rect.loc.x + 16,
+                slot.card_rect.loc.y + slot.card_rect.size.h - 6,
             )),
-            Size::from(((slot.card_rect.size.w - 20).max(80), 20)),
+            Size::from(((slot.card_rect.size.w - 32).max(80), 16)),
         );
         push_liquid_glass_panel_elevation(
             out,
             shape_cache,
             renderer,
-            lip,
-            18,
+            lip1,
+            16,
             GlassPanelStyle::NotificationCard,
-            state.glass_opacity,
+            state.glass_opacity * 0.75,
+            state.reduce_transparency,
+            rusty_ui::shadow::ShadowElevation::Popup,
+        );
+
+        let lip2 = Rectangle::new(
+            Point::from((
+                slot.card_rect.loc.x + 8,
+                slot.card_rect.loc.y + slot.card_rect.size.h - 10,
+            )),
+            Size::from(((slot.card_rect.size.w - 16).max(80), 18)),
+        );
+        push_liquid_glass_panel_elevation(
+            out,
+            shape_cache,
+            renderer,
+            lip2,
+            17,
+            GlassPanelStyle::NotificationCard,
+            state.glass_opacity * 0.9,
             state.reduce_transparency,
             rusty_ui::shadow::ShadowElevation::Popup,
         );

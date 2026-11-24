@@ -359,17 +359,12 @@ impl AsyncAuthHandle {
             password.clear();
             return false;
         };
-        if tx
-            .send(AuthCmd {
-                request_id,
-                username,
-                password,
-            })
-            .is_err()
-        {
-            return false;
-        }
-        true
+        tx.send(AuthCmd {
+            request_id,
+            username,
+            password,
+        })
+        .is_ok()
     }
 
     /// Non-blockingly drains completed authentication checks.

@@ -864,8 +864,10 @@ pub struct RustyCompositorState {
     pub pending_screenshot: Option<crate::screenshot::ScreenshotRequest>,
     /// Async background PNG/clipboard completion queue (`RUSTYOS-031`).
     pub screenshot_results: crate::screenshot::ScreenshotResultQueue,
-    /// Active macOS-aligned Desktop/Dock right-click context menu (`RUSTYOS-064`).
+    /// Active RustyOS-aligned Desktop/Dock right-click context menu (`RUSTYOS-064`).
     pub context_menu: Option<crate::shell_render::ContextMenuState>,
+    /// Set of expanded notification stack group keys in Notification Center (`RUSTYOS-173`).
+    pub expanded_notification_stacks: std::collections::HashSet<String>,
     /// Non-blocking completion channel for background `Empty Trash` cleanup (`RUSTYOS-064`).
     pub(crate) trash_empty_rx: Option<std::sync::mpsc::Receiver<Result<usize, String>>>,
     /// Pending TTY virtual terminal switch (`Ctrl+Alt+F1..F12` -> `libseat::change_vt`).
@@ -928,7 +930,15 @@ pub struct OsdBanner {
     pub expires_at: Duration,
 }
 
-/// Active notification banner tracked by the compositor (`RUSTYOS-024`).
+/// Decoded avatar image for notification sender (`RUSTYOS-173`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NotificationAvatar {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
+}
+
+/// Active notification banner tracked by the compositor (`RUSTYOS-024` / `RUSTYOS-173`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompositorNotification {
     /// Unique monotonic identifier.
@@ -937,12 +947,16 @@ pub struct CompositorNotification {
     pub dbus_id: Option<u32>,
     /// Canonical Dock application key associated with this notification for unread badges (`RUSTYOS-162`).
     pub app_key: Option<String>,
+    /// Optional human-readable application display name (`"Telegram Desktop"`, `"Google Chrome"`, ...).
+    pub app_display_name: Option<String>,
     /// Notification urgency level.
     pub urgency: Urgency,
-    /// Short notification title.
+    /// Short notification title (e.g. sender contact name or subject).
     pub title: String,
     /// Notification body text.
     pub body: String,
+    /// Optional contact avatar pixmap provided via D-Bus hints.
+    pub avatar: Option<NotificationAvatar>,
     /// Monotonic creation offset from compositor startup (`start_time.elapsed()`).
     pub created_at: Duration,
     /// Auto-dismiss time-to-live.
@@ -1204,6 +1218,7 @@ impl RustyCompositorState {
             top_bar_menu_hover_row: None,
             qs_slider_drag: None,
             hovered_notification_idx: None,
+            expanded_notification_stacks: std::collections::HashSet::new(),
             hovered_traffic_light_window: None,
             pressed_ssd_button: None,
             last_titlebar_click: None,

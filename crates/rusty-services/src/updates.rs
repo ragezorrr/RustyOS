@@ -175,10 +175,11 @@ impl UpdateCheckerHandle {
     /// Returns a cloned snapshot of the latest update status.
     #[must_use]
     pub fn snapshot(&self) -> UpdateStatusSnapshot {
-        self.snapshot
-            .lock()
-            .map(|guard| guard.clone())
-            .unwrap_or_default()
+        if let Ok(guard) = self.snapshot.lock() {
+            guard.clone()
+        } else {
+            UpdateStatusSnapshot::default()
+        }
     }
 
     /// Returns `true` and clears the pending UI notification flag when state changed.
@@ -549,9 +550,10 @@ fn query_pacman_pkg_version(pkg: &str) -> Option<String> {
 pub fn read_system_release_summary() -> SystemReleaseSummary {
     let os_release = std::fs::read_to_string("/etc/os-release").unwrap_or_default();
     let distro_name = parse_os_release_pretty_name(&os_release);
-    let kernel_release = std::fs::read_to_string("/proc/sys/kernel/osrelease")
-        .map(|s| s.trim().to_owned())
-        .unwrap_or_default();
+    let kernel_release = match std::fs::read_to_string("/proc/sys/kernel/osrelease") {
+        Ok(s) => s.trim().to_owned(),
+        Err(_) => String::new(),
+    };
     let rustyos_installed_version =
         query_pacman_pkg_version("rustyos-git").or_else(|| query_pacman_pkg_version("rustyos"));
     SystemReleaseSummary {
@@ -936,10 +938,11 @@ impl UpdateTransactionHandle {
     /// Drains all queued progress/log events without blocking the UI loop.
     #[must_use]
     pub fn drain_events(&self) -> Vec<UpdateTxEvent> {
-        self.events
-            .lock()
-            .map(|mut guard| std::mem::take(&mut *guard))
-            .unwrap_or_default()
+        if let Ok(mut guard) = self.events.lock() {
+            std::mem::take(&mut *guard)
+        } else {
+            Vec::new()
+        }
     }
 
     /// Signals cancellation and terminates an unprivileged child process if active.

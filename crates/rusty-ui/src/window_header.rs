@@ -83,14 +83,20 @@ impl WindowHeader {
         Self { config, frame }
     }
 
-    /// Leading inset (width reserved for buttons + margins).
+    /// Inset reserved for window control buttons (trailing inset on right, or leading inset if left-aligned).
     #[must_use]
-    pub fn leading_inset(&self) -> f32 {
+    pub fn button_inset(&self) -> f32 {
         if self.config.close_only {
             self.config.button_margin + 22.0 + 8.0
         } else {
-            self.frame.buttons.maximize_rect.right() as f32 + 12.0
+            74.0
         }
+    }
+
+    /// Leading inset (legacy compatibility).
+    #[must_use]
+    pub fn leading_inset(&self) -> f32 {
+        self.button_inset()
     }
 
     /// Checks if a pointer press hits buttons or titlebar drag.

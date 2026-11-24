@@ -9,6 +9,7 @@ pub const TRAFFIC_LIGHT_RADIUS: f32 = 7.0;
 pub const TRAFFIC_LIGHT_GAP: u32 = 8;
 pub const TRAFFIC_LIGHT_STEP: u32 = 22;
 pub const TRAFFIC_LIGHT_MARGIN_LEFT: u32 = 14;
+pub const TRAFFIC_LIGHT_MARGIN_RIGHT: u32 = 14;
 pub const TRAFFIC_LIGHT_CENTERS_X: [f32; 3] = [21.0, 43.0, 65.0];
 
 /// 2D integer point.

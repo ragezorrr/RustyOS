@@ -630,8 +630,7 @@ impl FilesAppState {
     pub(crate) fn selected_entries(&self) -> Vec<FileEntry> {
         self.columns
             .get(self.active_column)
-            .map(|col| col.selected_entries().into_iter().cloned().collect())
-            .unwrap_or_default()
+            .map_or_default(|col| col.selected_entries().into_iter().cloned().collect())
     }
 
     /// Toggles collapsed state for a sidebar section header (`Favorites`, `Locations`, `Tags`).
@@ -662,8 +661,7 @@ impl FilesAppState {
             FilePickerMode::OpenFile => self
                 .selected_entry()
                 .filter(|e| !e.is_navigable_dir())
-                .map(|e| vec![e.path.clone()])
-                .unwrap_or_default(),
+                .map_or_default(|e| vec![e.path.clone()]),
             FilePickerMode::OpenFiles => self
                 .selected_entries()
                 .into_iter()
@@ -684,8 +682,7 @@ impl FilesAppState {
                     return Vec::new();
                 }
                 self.active_directory_path()
-                    .map(|dir| vec![dir.join(name)])
-                    .unwrap_or_default()
+                    .map_or_default(|dir| vec![dir.join(name)])
             }
         }
     }

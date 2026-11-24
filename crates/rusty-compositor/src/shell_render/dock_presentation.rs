@@ -493,14 +493,12 @@ mod tests {
             .slots
             .iter()
             .find(|s| s.tile.app_key == "firefox")
-            .map(|s| s.icon_rect.size.w)
-            .unwrap_or(0);
+            .map_or(0, |s| s.icon_rect.size.w);
         let dst_firefox = layout_b
             .slots
             .iter()
             .find(|s| s.tile.app_key == "firefox")
-            .map(|s| s.icon_rect.size.w)
-            .unwrap_or(0);
+            .map_or(0, |s| s.icon_rect.size.w);
         assert!(mid_firefox < dst_firefox);
 
         let _ = pres.tick(t0 + Duration::from_millis(400));

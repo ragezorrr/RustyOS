@@ -108,8 +108,7 @@ pub fn scan_desktop_canvas_items(desktop_dir: &Path) -> Vec<DesktopCanvasItem> {
 
     let saved_slots = crate::config::default_user_config_path()
         .and_then(|cfg| cfg.parent().map(|dir| dir.join("desktop_grid.toml")))
-        .map(|path| crate::shell_render::load_desktop_grid_positions(&path))
-        .unwrap_or_default();
+        .map_or_default(|path| crate::shell_render::load_desktop_grid_positions(&path));
 
     let mut occupied: HashSet<(usize, usize)> = HashSet::new();
 
@@ -118,8 +117,7 @@ pub fn scan_desktop_canvas_items(desktop_dir: &Path) -> Vec<DesktopCanvasItem> {
         let key = item
             .path
             .file_name()
-            .map(|f| f.to_string_lossy().into_owned())
-            .unwrap_or_default();
+            .map_or_default(|f| f.to_string_lossy().into_owned());
         if let Some(&slot) = saved_slots.get(&key)
             && !occupied.contains(&slot)
         {

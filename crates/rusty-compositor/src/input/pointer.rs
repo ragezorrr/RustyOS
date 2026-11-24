@@ -165,7 +165,7 @@ impl RustyCompositorState {
     }
 
     #[allow(clippy::too_many_lines)]
-    pub(super) fn apply_pointer_position(&mut self, pos: Point<f64, Logical>, time: u32) {
+    pub(crate) fn apply_pointer_position(&mut self, pos: Point<f64, Logical>, time: u32) {
         self.pointer_location = pos;
 
         if self.screenshot_hud.is_some() {

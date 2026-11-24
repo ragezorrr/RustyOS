@@ -536,9 +536,12 @@ impl RustyCompositorState {
                 crate::shell_render::NotificationCenterItemView {
                     id: n.id,
                     urgency: n.urgency,
+                    app_key: n.app_key.as_deref(),
+                    app_name: n.app_display_name.as_deref(),
                     title: &n.title,
                     body: &n.body,
                     age_label,
+                    avatar: n.avatar.as_ref(),
                 }
             })
             .collect()
@@ -561,6 +564,7 @@ impl RustyCompositorState {
             reduce_transparency: self.reduce_transparency,
             hide_previews,
             notifications: items,
+            expanded_stacks: &self.expanded_notification_stacks,
             task_states: self.notification_center_tasks,
             task_labels: crate::shell_render::DEFAULT_NOTIFICATION_TASKS,
             hovered_hit: self.notification_center_hover,
@@ -569,6 +573,17 @@ impl RustyCompositorState {
             show_weather_widget: self.user_config.notifications_show_weather_widget,
             show_reminders_widget: self.user_config.notifications_show_reminders_widget,
         }
+    }
+
+    /// Toggles expand/collapse for a notification card stack group (`RUSTYOS-173`).
+    pub fn toggle_notification_center_stack(&mut self, root_id: u64) {
+        let key = root_id.to_string();
+        if self.expanded_notification_stacks.contains(&key) {
+            self.expanded_notification_stacks.remove(&key);
+        } else {
+            self.expanded_notification_stacks.insert(key);
+        }
+        self.shell_redraw_needed = true;
     }
 
     /// Toggles a `TopBar` left menu dropdown popover (`RUSTYOS-048`, `RUSTYOS-068`).
@@ -1094,9 +1109,11 @@ impl RustyCompositorState {
             id,
             dbus_id: None,
             app_key: None,
+            app_display_name: None,
             urgency,
             title,
             body,
+            avatar: None,
             created_at: now,
             ttl,
         };
@@ -1141,6 +1158,8 @@ impl RustyCompositorState {
             body,
             expire_after,
             None,
+            None,
+            None,
         );
     }
 
@@ -1155,6 +1174,8 @@ impl RustyCompositorState {
         body: String,
         expire_after: Option<Duration>,
         app_key: Option<String>,
+        app_display_name: Option<String>,
+        avatar: Option<crate::state::NotificationAvatar>,
     ) {
         const MAX_QUEUE_LEN: usize = 12;
         const MAX_HISTORY_LEN: usize = 32;
@@ -1176,9 +1197,15 @@ impl RustyCompositorState {
             if app_key.is_some() {
                 existing.app_key.clone_from(&app_key);
             }
+            if app_display_name.is_some() {
+                existing.app_display_name.clone_from(&app_display_name);
+            }
             existing.urgency = urgency;
             existing.title.clone_from(&title);
             existing.body.clone_from(&body);
+            if avatar.is_some() {
+                existing.avatar.clone_from(&avatar);
+            }
             existing.created_at = now;
             existing.ttl = ttl;
             if let Some(hist) = self
@@ -1190,9 +1217,15 @@ impl RustyCompositorState {
                 if app_key.is_some() {
                     hist.app_key = app_key;
                 }
+                if app_display_name.is_some() {
+                    hist.app_display_name = app_display_name;
+                }
                 hist.urgency = urgency;
                 hist.title = title;
                 hist.body = body;
+                if avatar.is_some() {
+                    hist.avatar = avatar;
+                }
                 hist.created_at = now;
                 hist.ttl = ttl;
             }
@@ -1214,9 +1247,11 @@ impl RustyCompositorState {
             id,
             dbus_id: Some(dbus_id),
             app_key,
+            app_display_name,
             urgency,
             title,
             body,
+            avatar,
             created_at: now,
             ttl,
         };
@@ -1247,6 +1282,8 @@ impl RustyCompositorState {
                     body,
                     expire_after,
                     app_key,
+                    app_display_name,
+                    avatar,
                 } => {
                     self.push_dbus_notification_for_app(
                         id,
@@ -1256,6 +1293,8 @@ impl RustyCompositorState {
                         body,
                         expire_after,
                         app_key,
+                        app_display_name,
+                        avatar,
                     );
                     self.shell_redraw_needed = true;
                 }

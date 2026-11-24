@@ -175,10 +175,7 @@ impl AppMenuRegistrarInterface {
         window_id: u32,
         menu_object_path: OwnedObjectPath,
     ) {
-        let sender = header
-            .sender()
-            .map(|s| s.as_str().to_owned())
-            .unwrap_or_default();
+        let sender = header.sender().map_or_default(|s| s.as_str().to_owned());
         if sender.is_empty() {
             return;
         }
@@ -339,9 +336,7 @@ fn parse_dbusmenu_root(root: &RawDbusMenuNode) -> Vec<AppMenuSection> {
         if !prop_bool(&sec_props, "visible", true) {
             continue;
         }
-        let title = prop_str(&sec_props, "label")
-            .map(|s| strip_menu_mnemonic(&s))
-            .unwrap_or_default();
+        let title = prop_str(&sec_props, "label").map_or_default(|s| strip_menu_mnemonic(&s));
         if title.is_empty() {
             continue;
         }
@@ -354,9 +349,7 @@ fn parse_dbusmenu_root(root: &RawDbusMenuNode) -> Vec<AppMenuSection> {
                 continue;
             }
             let is_sep = prop_str(&item_props, "type").as_deref() == Some("separator");
-            let label = prop_str(&item_props, "label")
-                .map(|s| strip_menu_mnemonic(&s))
-                .unwrap_or_default();
+            let label = prop_str(&item_props, "label").map_or_default(|s| strip_menu_mnemonic(&s));
             if !is_sep && label.is_empty() {
                 continue;
             }

@@ -950,17 +950,20 @@ fn keyboard_shortcuts_inhibit_preserves_vt_switch_and_super_escape()
 }
 
 #[test]
-fn macos27_pointer_hover_slider_drag_and_overview_space_switching()
+fn shell_pointer_hover_slider_drag_and_overview_space_switching()
 -> Result<(), Box<dyn std::error::Error>> {
-    let (_display, _event_loop, mut compositor) =
-        test_compositor_state("rusty-test-macos27-hover")?;
+    let (_display, _event_loop, mut compositor) = test_compositor_state("rusty-test-shell-hover")?;
     let serial = SERIAL_COUNTER.next_serial();
     let out_size = compositor.output_map.primary().physical_size;
 
     // 1. Traffic-light hover tracks top-most visible SSD window and clears when pointer leaves.
     let win_id = rusty_wm::WindowId(77);
     let rect = compositor.wm.map_window(win_id, Some((640, 480)));
-    let tl_pos: Point<f64, Logical> = (f64::from(rect.x) + 18.0, f64::from(rect.y) + 14.0).into();
+    let tl_pos: Point<f64, Logical> = (
+        f64::from(rect.x + rect.width) - 20.0,
+        f64::from(rect.y) + 14.0,
+    )
+        .into();
     compositor.apply_pointer_position(tl_pos, 1);
     assert_eq!(compositor.hovered_traffic_light_window, Some(win_id));
     compositor.apply_pointer_position((10.0, 400.0).into(), 2);
@@ -1839,8 +1842,11 @@ fn compositor_cursor_override_outer_resize_zone_traffic_gap_and_square_framing_w
         None
     );
 
-    // Traffic-light cluster hover stays continuous in the 4 px gap between Close and Minimize dots.
-    let gap_between_dots = Point::from((f64::from(rect.x) + 32.0, f64::from(rect.y) + 14.0));
+    // Traffic-light cluster hover stays continuous in the gap between right-aligned dots.
+    let gap_between_dots = Point::from((
+        f64::from(rect.x + rect.width) - 32.0,
+        f64::from(rect.y) + 14.0,
+    ));
     compositor.shell_redraw_needed = false;
     compositor.apply_pointer_position(gap_between_dots, 2);
     assert_eq!(compositor.hovered_traffic_light_window, Some(w1));

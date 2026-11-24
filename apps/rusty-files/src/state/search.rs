@@ -292,8 +292,7 @@ impl FilesAppState {
             let entries: Vec<FileEntry> = self
                 .columns
                 .first()
-                .map(|c| c.visible_entries.iter().take(48).cloned().collect())
-                .unwrap_or_default();
+                .map_or_default(|c| c.visible_entries.iter().take(48).cloned().collect());
             for entry in &entries {
                 if is_supported_raster_name(&entry.name) {
                     self.request_preview_if_needed(entry, 96, 96);

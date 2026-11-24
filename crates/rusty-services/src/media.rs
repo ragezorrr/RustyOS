@@ -231,8 +231,9 @@ impl AudioService {
             .output()
             .ok()
             .filter(|o| o.status.success())
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
-            .unwrap_or_default();
+            .map_or_else(String::new, |o| {
+                String::from_utf8_lossy(&o.stdout).trim().to_owned()
+            });
 
         if let Ok(output) = Command::new("pactl")
             .args(["list", "short", "sinks"])

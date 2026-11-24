@@ -464,6 +464,8 @@ fn build_foreground_overlay_shapes(
                 card,
                 close_rect,
                 toast.title,
+                toast.app_name.or(toast.app_key),
+                toast.avatar,
                 toast.hovered,
                 top_telemetry.glass_opacity,
                 top_telemetry.reduce_transparency,

@@ -300,15 +300,15 @@ fn ssd_hit_testing_detects_traffic_lights_and_drag_in_top_to_bottom_order() {
 
     // Overlapping window win2 is topmost (last in bottom-to-top list)
     assert_eq!(
-        check_window_ssd_hit(&windows, 121.0, 114.0),
+        check_window_ssd_hit(&windows, 579.0, 114.0),
         Some(SsdHit::Close(win2))
     );
     assert_eq!(
-        check_window_ssd_hit(&windows, 143.0, 114.0),
+        check_window_ssd_hit(&windows, 535.0, 114.0),
         Some(SsdHit::Minimize(win2))
     );
     assert_eq!(
-        check_window_ssd_hit(&windows, 165.0, 114.0),
+        check_window_ssd_hit(&windows, 557.0, 114.0),
         Some(SsdHit::Maximize(win2))
     );
     assert_eq!(
@@ -1037,7 +1037,7 @@ fn macos27_traffic_hover_notifications_and_osd_routing() {
         allow_resize: true,
     };
     assert_eq!(
-        check_window_traffic_lights_hover(&[ssd_win], 121.0, 94.0),
+        check_window_traffic_lights_hover(&[ssd_win], 579.0, 94.0),
         Some(rusty_wm::WindowId(10))
     );
     assert_eq!(
@@ -2188,29 +2188,40 @@ fn top_bar_clock_and_control_center_click_regions_are_disjoint() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn notification_center_layout_and_hit_testing_work() {
     let screen = Size::from((1280, 800));
+    let empty_expanded = std::collections::HashSet::new();
     let items = [
         NotificationCenterItemView {
             id: 101,
             urgency: rusty_ipc::Urgency::Normal,
+            app_key: Some("backup"),
+            app_name: Some("Backup Utility"),
             title: "Backup Complete",
             body: "Snapshot stored safely.",
             age_label: "now".to_owned(),
+            avatar: None,
         },
         NotificationCenterItemView {
             id: 102,
             urgency: rusty_ipc::Urgency::Low,
+            app_key: Some("chat"),
+            app_name: Some("Telegram"),
             title: "Messages",
             body: "Ready for review.",
             age_label: "2m ago".to_owned(),
+            avatar: None,
         },
         NotificationCenterItemView {
             id: 103,
             urgency: rusty_ipc::Urgency::Critical,
+            app_key: Some("update"),
+            app_name: Some("Software Update"),
             title: "Software Update",
             body: "2 packages pending.",
             age_label: "1h ago".to_owned(),
+            avatar: None,
         },
     ];
     let state = NotificationCenterRenderState {
@@ -2218,6 +2229,7 @@ fn notification_center_layout_and_hit_testing_work() {
         reduce_transparency: false,
         hide_previews: false,
         notifications: &items,
+        expanded_stacks: &empty_expanded,
         task_states: [false, true, false, false],
         task_labels: DEFAULT_NOTIFICATION_TASKS,
         hovered_hit: None,
@@ -2293,6 +2305,94 @@ fn notification_center_layout_and_hit_testing_work() {
 }
 
 #[test]
+#[allow(clippy::unwrap_used)]
+fn notification_center_stacking_groups_by_app_and_toggles() {
+    fn make_state<'a>(
+        items: &'a [NotificationCenterItemView<'a>],
+        exp: &'a std::collections::HashSet<String>,
+    ) -> NotificationCenterRenderState<'a> {
+        NotificationCenterRenderState {
+            glass_opacity: crate::config::DEFAULT_GLASS_OPACITY,
+            reduce_transparency: false,
+            hide_previews: false,
+            notifications: items,
+            expanded_stacks: exp,
+            task_states: [false; 4],
+            task_labels: DEFAULT_NOTIFICATION_TASKS,
+            hovered_hit: None,
+            location_name: "Local Station",
+            system_summary: "50% Vol".to_owned(),
+            show_weather_widget: false,
+            show_reminders_widget: false,
+        }
+    }
+
+    let screen = Size::from((1280, 800));
+    let mut expanded = std::collections::HashSet::new();
+    let items = [
+        NotificationCenterItemView {
+            id: 201,
+            urgency: rusty_ipc::Urgency::Normal,
+            app_key: Some("telegram"),
+            app_name: Some("Telegram Desktop"),
+            title: "Alice",
+            body: "Hey there!",
+            age_label: "now".to_owned(),
+            avatar: None,
+        },
+        NotificationCenterItemView {
+            id: 202,
+            urgency: rusty_ipc::Urgency::Normal,
+            app_key: Some("telegram"),
+            app_name: Some("Telegram Desktop"),
+            title: "Alice",
+            body: "Are you free?",
+            age_label: "1m ago".to_owned(),
+            avatar: None,
+        },
+        NotificationCenterItemView {
+            id: 203,
+            urgency: rusty_ipc::Urgency::Normal,
+            app_key: Some("telegram"),
+            app_name: Some("Telegram Desktop"),
+            title: "Bob",
+            body: "Check this out",
+            age_label: "2m ago".to_owned(),
+            avatar: None,
+        },
+    ];
+
+    // When collapsed:
+    let state_collapsed = make_state(&items, &expanded);
+    let layout_collapsed = compute_notification_center_layout(screen, &state_collapsed);
+    let lead = layout_collapsed.lead_card.unwrap();
+    assert_eq!(lead.stack_count, 3);
+    assert!(!lead.is_expanded);
+    assert!(lead.has_stack_edge);
+    assert_eq!(layout_collapsed.stack_cards.len(), 0);
+
+    // Clicking card toggles stack:
+    let hit = hit_test_notification_center(
+        screen,
+        &state_collapsed,
+        f64::from(lead.card_rect.loc.x + 50),
+        f64::from(lead.card_rect.loc.y + 20),
+    );
+    assert_eq!(hit, NotificationCenterHit::ToggleStack(201));
+
+    // When expanded:
+    expanded.insert("201".to_string());
+    let state_expanded = make_state(&items, &expanded);
+    let layout_expanded = compute_notification_center_layout(screen, &state_expanded);
+    let lead_exp = layout_expanded.lead_card.unwrap();
+    assert_eq!(lead_exp.stack_count, 3);
+    assert!(lead_exp.is_expanded);
+    assert!(!lead_exp.has_stack_edge);
+    // The remaining 2 notifications in the stack are displayed:
+    assert_eq!(layout_expanded.stack_cards.len(), 2);
+}
+
+#[test]
 fn fullscreen_and_maximized_frame_hit_testing_suppress_illegal_ssd_and_resize_grabs() {
     let background = SsdHitWindow {
         id: rusty_wm::WindowId(1),
@@ -2323,7 +2423,7 @@ fn fullscreen_and_maximized_frame_hit_testing_suppress_illegal_ssd_and_resize_gr
     };
     let list_max = [maximized];
     assert_eq!(
-        check_window_frame_hit(&list_max, 21.0, 42.0),
+        check_window_frame_hit(&list_max, 1259.0, 42.0),
         Some(SsdHit::Close(rusty_wm::WindowId(3)))
     );
     assert_eq!(

@@ -1199,6 +1199,182 @@ fn zlib_decompress(data: &[u8], expected_hint: usize, max_inflate_bytes: usize) 
     Some(out)
 }
 
+/// Parses `(width, height)` from an uncompressed or bitfield BMP header.
+#[must_use]
+pub fn read_bmp_dimensions_from_bytes(data: &[u8]) -> Option<(u32, u32)> {
+    if data.len() < 26 || &data[0..2] != b"BM" {
+        return None;
+    }
+    let dib_header_size = u32::from_le_bytes(data.get(14..18)?.try_into().ok()?);
+    if dib_header_size < 12 {
+        return None;
+    }
+    let (w, h) = if dib_header_size == 12 {
+        let w = u16::from_le_bytes(data.get(18..20)?.try_into().ok()?);
+        let h = u16::from_le_bytes(data.get(20..22)?.try_into().ok()?);
+        (u32::from(w), u32::from(h))
+    } else {
+        let w_raw = i32::from_le_bytes(data.get(18..22)?.try_into().ok()?);
+        let h_raw = i32::from_le_bytes(data.get(22..26)?.try_into().ok()?);
+        (w_raw.unsigned_abs(), h_raw.unsigned_abs())
+    };
+    (w > 0 && h > 0).then_some((w, h))
+}
+
+/// Decodes an uncompressed or bitfield 8-bit paletted, 24-bit RGB, or 32-bit RGBA BMP image into `(width, height, straight_rgba)`.
+#[must_use]
+#[allow(clippy::too_many_lines)]
+pub fn decode_bmp_rgba_limited(data: &[u8], max_dim: u32) -> Option<(usize, usize, Vec<u8>)> {
+    if data.len() < 26 || &data[0..2] != b"BM" {
+        return None;
+    }
+    let pixel_offset =
+        usize::try_from(u32::from_le_bytes(data.get(10..14)?.try_into().ok()?)).ok()?;
+    let dib_size = usize::try_from(u32::from_le_bytes(data.get(14..18)?.try_into().ok()?)).ok()?;
+    if dib_size < 12 {
+        return None;
+    }
+
+    let (width, height, top_down, bpp, compression) = if dib_size == 12 {
+        let w = u32::from(u16::from_le_bytes(data.get(18..20)?.try_into().ok()?));
+        let h = u32::from(u16::from_le_bytes(data.get(20..22)?.try_into().ok()?));
+        let planes = u16::from_le_bytes(data.get(22..24)?.try_into().ok()?);
+        let bpp = u16::from_le_bytes(data.get(24..26)?.try_into().ok()?);
+        if planes != 1 {
+            return None;
+        }
+        (w, h, false, bpp, 0)
+    } else {
+        let w_raw = i32::from_le_bytes(data.get(18..22)?.try_into().ok()?);
+        let h_raw = i32::from_le_bytes(data.get(22..26)?.try_into().ok()?);
+        let planes = u16::from_le_bytes(data.get(26..28)?.try_into().ok()?);
+        let bpp = u16::from_le_bytes(data.get(28..30)?.try_into().ok()?);
+        let comp = if data.len() >= 34 {
+            u32::from_le_bytes(data.get(30..34)?.try_into().ok()?)
+        } else {
+            0
+        };
+        if planes != 1 {
+            return None;
+        }
+        (
+            w_raw.unsigned_abs(),
+            h_raw.unsigned_abs(),
+            h_raw < 0,
+            bpp,
+            comp,
+        )
+    };
+
+    if width == 0 || height == 0 || width > max_dim || height > max_dim {
+        return None;
+    }
+    if compression != 0 && compression != 3 {
+        return None;
+    }
+
+    let w_usize = usize::try_from(width).ok()?;
+    let h_usize = usize::try_from(height).ok()?;
+    let pixel_count = w_usize.checked_mul(h_usize)?;
+    let mut rgba = vec![255_u8; pixel_count.checked_mul(4)?];
+
+    match bpp {
+        24 => {
+            let row_stride = ((w_usize.checked_mul(3)?.checked_add(3)?) / 4) * 4;
+            for y in 0..h_usize {
+                let target_y = if top_down { y } else { h_usize - 1 - y };
+                let row_start = pixel_offset.checked_add(y.checked_mul(row_stride)?)?;
+                let row_bytes = data.get(row_start..row_start.checked_add(w_usize * 3)?)?;
+                for x in 0..w_usize {
+                    let src_idx = x * 3;
+                    let dst_idx = (target_y * w_usize + x) * 4;
+                    let b = row_bytes[src_idx];
+                    let g = row_bytes[src_idx + 1];
+                    let r = row_bytes[src_idx + 2];
+                    rgba[dst_idx] = r;
+                    rgba[dst_idx + 1] = g;
+                    rgba[dst_idx + 2] = b;
+                    rgba[dst_idx + 3] = 255;
+                }
+            }
+        }
+        32 => {
+            let row_stride = w_usize.checked_mul(4)?;
+            let mut has_non_zero_alpha = false;
+            for y in 0..h_usize {
+                let target_y = if top_down { y } else { h_usize - 1 - y };
+                let row_start = pixel_offset.checked_add(y.checked_mul(row_stride)?)?;
+                let row_bytes = data.get(row_start..row_start.checked_add(row_stride)?)?;
+                for x in 0..w_usize {
+                    let src_idx = x * 4;
+                    let dst_idx = (target_y * w_usize + x) * 4;
+                    let b = row_bytes[src_idx];
+                    let g = row_bytes[src_idx + 1];
+                    let r = row_bytes[src_idx + 2];
+                    let a = row_bytes[src_idx + 3];
+                    if a > 0 {
+                        has_non_zero_alpha = true;
+                    }
+                    rgba[dst_idx] = r;
+                    rgba[dst_idx + 1] = g;
+                    rgba[dst_idx + 2] = b;
+                    rgba[dst_idx + 3] = a;
+                }
+            }
+            if !has_non_zero_alpha {
+                for chunk in rgba.as_chunks_mut::<4>().0 {
+                    chunk[3] = 255;
+                }
+            }
+        }
+        8 => {
+            let palette_offset = 14 + dib_size;
+            let palette_bytes = data.get(palette_offset..pixel_offset)?;
+            if palette_bytes.len() < 4 {
+                return None;
+            }
+            let palette_entries = palette_bytes.len() / 4;
+            let row_stride = ((w_usize.checked_add(3)?) / 4) * 4;
+            for y in 0..h_usize {
+                let target_y = if top_down { y } else { h_usize - 1 - y };
+                let row_start = pixel_offset.checked_add(y.checked_mul(row_stride)?)?;
+                let row_bytes = data.get(row_start..row_start.checked_add(w_usize)?)?;
+                for (x, &b_byte) in row_bytes.iter().take(w_usize).enumerate() {
+                    let color_idx = usize::from(b_byte);
+                    let dst_idx = (target_y * w_usize + x) * 4;
+                    if color_idx < palette_entries {
+                        let pal_start = color_idx * 4;
+                        let b = palette_bytes[pal_start];
+                        let g = palette_bytes[pal_start + 1];
+                        let r = palette_bytes[pal_start + 2];
+                        rgba[dst_idx] = r;
+                        rgba[dst_idx + 1] = g;
+                        rgba[dst_idx + 2] = b;
+                        rgba[dst_idx + 3] = 255;
+                    }
+                }
+            }
+        }
+        _ => return None,
+    }
+
+    Some((w_usize, h_usize, rgba))
+}
+
+/// Decodes an image of any supported raster format (PNG, BMP, PPM) into `(width, height, straight_rgba)`.
+#[must_use]
+pub fn decode_image_rgba_limited(data: &[u8], max_dim: u32) -> Option<(usize, usize, Vec<u8>)> {
+    if data.starts_with(&PNG_SIGNATURE) {
+        decode_png_rgba_limited(data, max_dim, MAX_WALLPAPER_INFLATE_BYTES)
+    } else if data.starts_with(b"BM") {
+        decode_bmp_rgba_limited(data, max_dim)
+    } else if data.starts_with(b"P3") || data.starts_with(b"P6") {
+        decode_ppm_rgba_limited(data, max_dim)
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1327,6 +1503,32 @@ mod tests {
             row.iter()
                 .all(|p| p[0] <= p[3] && p[1] <= p[3] && p[2] <= p[3])
         );
+        Ok(())
+    }
+
+    #[test]
+    fn bmp_24bit_and_32bit_decoding_and_bounds_work() -> Result<(), &'static str> {
+        let mut bmp24 = vec![0_u8; 62];
+        bmp24[0..2].copy_from_slice(b"BM");
+        bmp24[2..6].copy_from_slice(&62_u32.to_le_bytes());
+        bmp24[10..14].copy_from_slice(&54_u32.to_le_bytes());
+        bmp24[14..18].copy_from_slice(&40_u32.to_le_bytes());
+        bmp24[18..22].copy_from_slice(&2_i32.to_le_bytes());
+        bmp24[22..26].copy_from_slice(&1_i32.to_le_bytes());
+        bmp24[26..28].copy_from_slice(&1_u16.to_le_bytes());
+        bmp24[28..30].copy_from_slice(&24_u16.to_le_bytes());
+        bmp24[54..60].copy_from_slice(&[0x10, 0x20, 0x30, 0xFF, 0x80, 0x00]);
+
+        assert_eq!(read_bmp_dimensions_from_bytes(&bmp24), Some((2, 1)));
+        let (w, h, rgba) = decode_bmp_rgba_limited(&bmp24, 64).ok_or("bmp24 decode failed")?;
+        assert_eq!((w, h), (2, 1));
+        assert_eq!(rgba, vec![0x30, 0x20, 0x10, 255, 0x00, 0x80, 0xFF, 255]);
+
+        let (w_gen, h_gen, rgba_gen) =
+            decode_image_rgba_limited(&bmp24, 64).ok_or("decode_image bmp failed")?;
+        assert_eq!((w_gen, h_gen), (2, 1));
+        assert_eq!(rgba_gen, rgba);
+
         Ok(())
     }
 }

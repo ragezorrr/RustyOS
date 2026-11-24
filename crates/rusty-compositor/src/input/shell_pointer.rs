@@ -775,6 +775,7 @@ impl RustyCompositorState {
             local_y,
         ) {
             hit @ (crate::shell_render::NotificationCenterHit::DismissNotification(_)
+            | crate::shell_render::NotificationCenterHit::ToggleStack(_)
             | crate::shell_render::NotificationCenterHit::ClearAll
             | crate::shell_render::NotificationCenterHit::ToggleTask(_)
             | crate::shell_render::NotificationCenterHit::EditWidgets
@@ -1267,6 +1268,10 @@ impl RustyCompositorState {
                 self.notification_center_hover = None;
                 self.shell_redraw_needed = true;
             }
+            crate::shell_render::NotificationCenterHit::ToggleStack(root_id) if button == 272 => {
+                self.toggle_notification_center_stack(root_id);
+                self.shell_redraw_needed = true;
+            }
             crate::shell_render::NotificationCenterHit::ClearAll if button == 272 => {
                 self.clear_notifications();
                 self.notification_center_hover = None;
@@ -1289,6 +1294,7 @@ impl RustyCompositorState {
             }
             crate::shell_render::NotificationCenterHit::InsidePanel
             | crate::shell_render::NotificationCenterHit::DismissNotification(_)
+            | crate::shell_render::NotificationCenterHit::ToggleStack(_)
             | crate::shell_render::NotificationCenterHit::ClearAll
             | crate::shell_render::NotificationCenterHit::ToggleTask(_)
             | crate::shell_render::NotificationCenterHit::EditWidgets

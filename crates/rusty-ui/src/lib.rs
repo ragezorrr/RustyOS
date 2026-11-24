@@ -43,8 +43,8 @@ pub use draw::{
 pub use focus::{FocusScope, WidgetId};
 pub use geometry::{
     Point, Rect, SSD_TITLEBAR_HEIGHT, Size, TITLEBAR_HEIGHT, TRAFFIC_LIGHT_CENTERS_X,
-    TRAFFIC_LIGHT_DIAMETER, TRAFFIC_LIGHT_GAP, TRAFFIC_LIGHT_MARGIN_LEFT, TRAFFIC_LIGHT_RADIUS,
-    TRAFFIC_LIGHT_STEP, WINDOW_RADIUS,
+    TRAFFIC_LIGHT_DIAMETER, TRAFFIC_LIGHT_GAP, TRAFFIC_LIGHT_MARGIN_LEFT,
+    TRAFFIC_LIGHT_MARGIN_RIGHT, TRAFFIC_LIGHT_RADIUS, TRAFFIC_LIGHT_STEP, WINDOW_RADIUS,
 };
 pub use gpu_gles::GlesSurfaceRenderer;
 pub use list::{ListRow, ListSelectionMode, SelectableList};
@@ -67,7 +67,9 @@ pub use text_input::{
 pub use theme::{
     ACCENT_DARK_PALETTE, ACCENT_PALETTE, ThemeMode, ThemePalette, TrafficLightKind, accent_for,
 };
-pub use traffic_lights::{GlyphSegment, TrafficLightButtons, glyph_segments};
+pub use traffic_lights::{
+    GlyphSegment, TrafficLightButtons, TrafficLightPlacement, glyph_segments,
+};
 pub use widgets::{
     ButtonStyle, GroupCard, PushButton, SearchField, SearchFieldHit, ToggleSwitch, WidgetState,
 };
@@ -96,22 +98,31 @@ mod tests {
 
     #[test]
     fn traffic_light_buttons_hit_testing_and_centers() {
-        let csd = TrafficLightButtons::default_csd();
-        assert_eq!(csd.close_rect, Rect::new(14, 13, 14, 14));
-        assert_eq!(csd.minimize_rect, Rect::new(36, 13, 14, 14));
-        assert_eq!(csd.maximize_rect, Rect::new(58, 13, 14, 14));
+        let left_csd =
+            TrafficLightButtons::with_placement(800, TITLEBAR_HEIGHT, TrafficLightPlacement::Left);
+        assert_eq!(left_csd.close_rect, Rect::new(14, 13, 14, 14));
+        assert_eq!(left_csd.minimize_rect, Rect::new(36, 13, 14, 14));
+        assert_eq!(left_csd.maximize_rect, Rect::new(58, 13, 14, 14));
+        assert_eq!(left_csd.center_y, 20.0);
+        assert_eq!(left_csd.center_of(TrafficLightKind::Close), (21.0, 20.0));
+
+        let csd =
+            TrafficLightButtons::with_placement(800, TITLEBAR_HEIGHT, TrafficLightPlacement::Right);
+        assert_eq!(csd.close_rect, Rect::new(772, 13, 14, 14));
+        assert_eq!(csd.maximize_rect, Rect::new(750, 13, 14, 14));
+        assert_eq!(csd.minimize_rect, Rect::new(728, 13, 14, 14));
         assert_eq!(csd.center_y, 20.0);
 
-        assert_eq!(csd.center_of(TrafficLightKind::Close), (21.0, 20.0));
-        assert_eq!(csd.center_of(TrafficLightKind::Minimize), (43.0, 20.0));
-        assert_eq!(csd.center_of(TrafficLightKind::Maximize), (65.0, 20.0));
+        assert_eq!(csd.center_of(TrafficLightKind::Close), (779.0, 20.0));
+        assert_eq!(csd.center_of(TrafficLightKind::Minimize), (735.0, 20.0));
+        assert_eq!(csd.center_of(TrafficLightKind::Maximize), (757.0, 20.0));
 
-        assert_eq!(csd.hit_test(21.0, 20.0), Some(TrafficLightKind::Close));
-        assert_eq!(csd.hit_test(43.0, 20.0), Some(TrafficLightKind::Minimize));
-        assert_eq!(csd.hit_test(65.0, 20.0), Some(TrafficLightKind::Maximize));
-        assert_eq!(csd.hit_test(100.0, 20.0), None);
+        assert_eq!(csd.hit_test(779.0, 20.0), Some(TrafficLightKind::Close));
+        assert_eq!(csd.hit_test(735.0, 20.0), Some(TrafficLightKind::Minimize));
+        assert_eq!(csd.hit_test(757.0, 20.0), Some(TrafficLightKind::Maximize));
+        assert_eq!(csd.hit_test(500.0, 20.0), None);
 
-        assert!(csd.is_hovered(21.0, 20.0));
+        assert!(csd.is_hovered(779.0, 20.0));
         assert!(!csd.is_hovered(150.0, 20.0));
     }
 
@@ -139,7 +150,8 @@ mod tests {
         let mut canvas = UiCanvas::new(&mut buf, 100, 50, 400, PixelFormat::Bgra8888);
         canvas.clear([255, 255, 255, 255]);
 
-        let csd = TrafficLightButtons::default_csd();
+        let csd =
+            TrafficLightButtons::with_placement(100, TITLEBAR_HEIGHT, TrafficLightPlacement::Left);
         canvas.draw_traffic_lights(&csd, true, true, Some(TrafficLightKind::Close));
 
         let idx = (20 * 400 + 21 * 4) as usize;

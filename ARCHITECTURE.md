@@ -344,6 +344,11 @@ RustyOS/
   - Нативный Safe Rust Polkit Authentication Agent (`RUSTYOS-172`, `ADR-0101`, `D-115`):
     - `apps/rusty-polkit/src/{main.rs, dialog.rs}`: сессионный графический агент аутентификации PolicyKit (`org.freedesktop.PolicyKit1.AuthenticationAgent`) на базе `rusty-ui` и `zbus = "5"` (`420x240 px`, скругление `18 px`, Popover/Sheet стиль, маскированное поле ввода пароля `••••` с автофокусом, кнопки `Отмена`/`Подтвердить` `#007AFF`/`#0A84FF`, навигация `Enter`/`Escape`);
     - Интеграция с системным хелпером `/run/polkit/agent-helper.socket` (и `/usr/lib/polkit-1/polkit-agent-helper-1`), лимит 3 попыток ввода, отслеживание `NameOwnerChanged` и автозапуск через `packaging/applications/org.rustyos.polkit.desktop` / `packaging/systemd/rustyos-polkit.service`.
+  - Эргономика кнопок SSD, unminimize frame pacing, аватары и стопки уведомлений (`RUSTYOS-173`, `ADR-0102`, `D-116`):
+    - `crates/rusty-ui/src/{traffic_lights.rs, geometry.rs, window_frame.rs, window_header.rs}`: `TrafficLightPlacement::Right`, `TRAFFIC_LIGHT_MARGIN_RIGHT = 14`, `TrafficLightButtons::for_window(width, height)` (`Minimize`, `Maximize`, `Close`), правосторонние SSD заголовки;
+    - `crates/rusty-compositor/src/state/wm_windows.rs`: устранение зависания при unminimize через инвалидацию `last_x11_configure_state`, отправку `toplevel.send_configure()`, планирование вызова frame callbacks в Smithay и передачу фокуса курсора `apply_pointer_position`;
+    - `crates/rusty-compositor/src/{dbus_notifications.rs, icons.rs, shell_render/top_bar/notifications.rs}`: извлечение аватаров контактов из D-Bus `image-data`/`image-path`/`app_icon` (`NotificationAvatar`), круглая текстура с субпиксельным сглаживанием, очистка заголовков от префиксов приложения;
+    - `crates/rusty-compositor/src/shell_render/notification_center.rs`: группировка уведомлений по источнику в раскрываемые стопки («стос» карточек) с бейджем `+N` и переключением `ToggleStack`.
   - Сайдбар `#ECEDF1`/`#262628`, активный пункт `r = 10` (`#D9DADD`/`#3E3E41`), холст `#F5F6FA`/`#1C1C1D`, карточки (`CARD_CORNER_RADIUS = 12`, `#FFFFFF`/`#2C2C2D`) и капсулы тулбара/фильтров без серых рамок.
 - **Нетривиальные сигнатуры и lint-правила:**
   - `KeyboardHandle::change_repeat_info(&self, rate: i32, delay: i32)` (порядок `(rate, delay)`, обратный к `seat.add_keyboard(xkb, delay, rate)`).

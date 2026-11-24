@@ -2085,6 +2085,8 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
                 .map(|(idx, n)| NotificationToastView {
                     id: n.id,
                     urgency: n.urgency,
+                    app_key: n.app_key.as_deref(),
+                    app_name: n.app_display_name.as_deref(),
                     title: &n.title,
                     body: if lock_hidden_preview {
                         "Notification preview hidden"
@@ -2092,6 +2094,7 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
                         &n.body
                     },
                     hovered: state.hovered_notification_idx == Some(idx),
+                    avatar: n.avatar.as_ref(),
                 })
                 .collect()
         };

@@ -353,13 +353,12 @@ impl WindowManager {
         let removed_ws = removed.active_workspace;
 
         if removed_ws != target_ws {
-            let migrated_ids: Vec<WindowId> = self
-                .workspace_mut(removed_ws)
-                .map(|ws| {
-                    ws.focused = None;
-                    std::mem::take(&mut ws.stacking)
-                })
-                .unwrap_or_default();
+            let migrated_ids: Vec<WindowId> = if let Some(ws) = self.workspace_mut(removed_ws) {
+                ws.focused = None;
+                std::mem::take(&mut ws.stacking)
+            } else {
+                Vec::new()
+            };
 
             let mut migrated_set = Vec::with_capacity(migrated_ids.len());
             for win_id in migrated_ids {
