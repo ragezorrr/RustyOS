@@ -202,5 +202,7 @@ package() {
   install -m644 "${root}/packaging/grub/rustyos/select_c.png" \
     "${pkgdir}/usr/share/grub/themes/rustyos/select_c.png"
 
-  install -m644 "${root}/README.md" "${pkgdir}/usr/share/doc/${pkgname}/README.md"
+  if [[ -f "${root}/README.md" ]]; then
+    install -m644 "${root}/README.md" "${pkgdir}/usr/share/doc/${pkgname}/README.md"
+  fi
 }
