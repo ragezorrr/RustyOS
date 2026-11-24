@@ -55,6 +55,7 @@ if [ "${ACTION}" = "uninstall" ]; then
         "${BIN_DIR}/rusty-files" \
         "${BIN_DIR}/rusty-settings" \
         "${BIN_DIR}/rusty-terminal" \
+        "${BIN_DIR}/rusty-view" \
         "${BIN_DIR}/rusty-greeter" \
         "${BIN_DIR}/rusty-installer" \
         "${BIN_DIR}/rusty-pipewire-stream" \
@@ -65,6 +66,7 @@ if [ "${ACTION}" = "uninstall" ]; then
         "${APPS_DIR}/org.rustyos.files.desktop" \
         "${APPS_DIR}/org.rustyos.settings.desktop" \
         "${APPS_DIR}/org.rustyos.terminal.desktop" \
+        "${APPS_DIR}/org.rustyos.view.desktop" \
         "${APPS_DIR}/org.rustyos.updater.desktop" \
         "${APPS_DIR}/org.rustyos.installer.desktop" \
         "${SESSIONS_DIR}/rustyos.desktop" \
@@ -104,6 +106,7 @@ install -m 755 "${TARGET_DIR}/rusty-compositor" "${BIN_DIR}/rusty-compositor"
 install -m 755 "${TARGET_DIR}/rusty-files" "${BIN_DIR}/rusty-files"
 install -m 755 "${TARGET_DIR}/rusty-settings" "${BIN_DIR}/rusty-settings"
 install -m 755 "${TARGET_DIR}/rusty-terminal" "${BIN_DIR}/rusty-terminal"
+install -m 755 "${TARGET_DIR}/rusty-view" "${BIN_DIR}/rusty-view"
 install -m 755 "${TARGET_DIR}/rusty-greeter" "${BIN_DIR}/rusty-greeter"
 install -m 755 "${TARGET_DIR}/rusty-installer" "${BIN_DIR}/rusty-installer"
 install -m 755 "${TARGET_DIR}/rustyos-update-helper" "${LIB_DIR}/rustyos-update-helper"
@@ -119,6 +122,7 @@ echo "Installing desktop applications and portal backend configuration..."
 install -m 644 "${ROOT_DIR}/packaging/applications/org.rustyos.files.desktop" "${APPS_DIR}/org.rustyos.files.desktop"
 install -m 644 "${ROOT_DIR}/packaging/applications/org.rustyos.settings.desktop" "${APPS_DIR}/org.rustyos.settings.desktop"
 install -m 644 "${ROOT_DIR}/packaging/applications/org.rustyos.terminal.desktop" "${APPS_DIR}/org.rustyos.terminal.desktop"
+install -m 644 "${ROOT_DIR}/packaging/applications/org.rustyos.view.desktop" "${APPS_DIR}/org.rustyos.view.desktop"
 install -m 644 "${ROOT_DIR}/packaging/applications/org.rustyos.updater.desktop" "${APPS_DIR}/org.rustyos.updater.desktop"
 install -m 644 "${ROOT_DIR}/packaging/applications/org.rustyos.installer.desktop" "${APPS_DIR}/org.rustyos.installer.desktop"
 install -m 644 "${ROOT_DIR}/packaging/portals/rustyos.portal" "${PORTALS_DIR}/rustyos.portal"

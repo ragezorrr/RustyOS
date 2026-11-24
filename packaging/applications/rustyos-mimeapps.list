@@ -1,7 +1,17 @@
 [Default Applications]
 inode/directory=org.rustyos.files.desktop;
 x-scheme-handler/file=org.rustyos.files.desktop;
+image/png=org.rustyos.view.desktop;
+image/bmp=org.rustyos.view.desktop;
+image/x-bmp=org.rustyos.view.desktop;
+image/x-portable-pixmap=org.rustyos.view.desktop;
+image/x-portable-anymap=org.rustyos.view.desktop;
 
 [Added Associations]
 inode/directory=org.rustyos.files.desktop;
 x-scheme-handler/file=org.rustyos.files.desktop;
+image/png=org.rustyos.view.desktop;
+image/bmp=org.rustyos.view.desktop;
+image/x-bmp=org.rustyos.view.desktop;
+image/x-portable-pixmap=org.rustyos.view.desktop;
+image/x-portable-anymap=org.rustyos.view.desktop;

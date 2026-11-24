@@ -127,6 +127,7 @@ package() {
   install -m755 "${target_dir}/rusty-files" "${pkgdir}/usr/bin/rusty-files"
   install -m755 "${target_dir}/rusty-settings" "${pkgdir}/usr/bin/rusty-settings"
   install -m755 "${target_dir}/rusty-terminal" "${pkgdir}/usr/bin/rusty-terminal"
+  install -m755 "${target_dir}/rusty-view" "${pkgdir}/usr/bin/rusty-view"
   install -m755 "${target_dir}/rusty-greeter" "${pkgdir}/usr/bin/rusty-greeter"
   install -m755 "${target_dir}/rusty-installer" "${pkgdir}/usr/bin/rusty-installer"
   install -m755 "${target_dir}/rustyos-update-helper" \
@@ -148,6 +149,8 @@ package() {
     "${pkgdir}/usr/share/applications/org.rustyos.settings.desktop"
   install -m644 "${root}/packaging/applications/org.rustyos.terminal.desktop" \
     "${pkgdir}/usr/share/applications/org.rustyos.terminal.desktop"
+  install -m644 "${root}/packaging/applications/org.rustyos.view.desktop" \
+    "${pkgdir}/usr/share/applications/org.rustyos.view.desktop"
   install -m644 "${root}/packaging/applications/org.rustyos.updater.desktop" \
     "${pkgdir}/usr/share/applications/org.rustyos.updater.desktop"
   install -m644 "${root}/packaging/applications/org.rustyos.installer.desktop" \

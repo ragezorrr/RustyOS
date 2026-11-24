@@ -1,0 +1,18 @@
+[package]
+name = "rusty-view"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "RustyOS standalone image viewer client in Liquid Glass style (Wayland CSD)"
+
+[dependencies]
+rusty-animation.workspace = true
+rusty-services.workspace = true
+rusty-ui.workspace = true
+smithay-client-toolkit = { version = "0.19.2", default-features = false, features = ["calloop", "xkbcommon"] }
+wayland-client = "0.31.15"
+
+[lints]
+workspace = true

@@ -349,6 +349,10 @@ RustyOS/
     - `crates/rusty-compositor/src/state/wm_windows.rs`: устранение зависания при unminimize через инвалидацию `last_x11_configure_state`, отправку `toplevel.send_configure()`, планирование вызова frame callbacks в Smithay и передачу фокуса курсора `apply_pointer_position`;
     - `crates/rusty-compositor/src/{dbus_notifications.rs, icons.rs, shell_render/top_bar/notifications.rs}`: извлечение аватаров контактов из D-Bus `image-data`/`image-path`/`app_icon` (`NotificationAvatar`), круглая текстура с субпиксельным сглаживанием, очистка заголовков от префиксов приложения;
     - `crates/rusty-compositor/src/shell_render/notification_center.rs`: группировка уведомлений по источнику в раскрываемые стопки («стос» карточек) с бейджем `+N` и переключением `ToggleStack`.
+  - Нативный просмотрщик изображений `apps/rusty-view` (`RUSTYOS-174`, `ADR-0103`, `D-117`):
+    - `crates/rusty-services/src/image_decode.rs`: декодеры `decode_image_rgba_limited`, `decode_bmp_rgba_limited`, `read_bmp_dimensions_from_bytes` (24-bit BGR, 32-bit BGRA, 8-bit indexed BMP, PPM, PNG с защитой OOM);
+    - `apps/rusty-view/src/{document.rs, viewport.rs, playlist.rs, toolbar.rs, hud.rs, state.rs, main.rs}`: Zero-Chrome Viewport, парящая капсула тулбара Liquid Glass (`330x42 px`, `r = 21.0`) с автоскрытием (2.5 с), зум относительно курсора `10%..=2500%`, pan-dragging, карусельная навигация каталога с натуральной сортировкой, HUD карточка метаданных (`230x120 px`, `r = 12.0`), CSD traffic lights и горячие клавиши;
+    - Десктопная интеграция: `packaging/applications/org.rustyos.view.desktop` и MIME-ассоциации в `packaging/applications/rustyos-mimeapps.list`.
   - Сайдбар `#ECEDF1`/`#262628`, активный пункт `r = 10` (`#D9DADD`/`#3E3E41`), холст `#F5F6FA`/`#1C1C1D`, карточки (`CARD_CORNER_RADIUS = 12`, `#FFFFFF`/`#2C2C2D`) и капсулы тулбара/фильтров без серых рамок.
 - **Нетривиальные сигнатуры и lint-правила:**
   - `KeyboardHandle::change_repeat_info(&self, rate: i32, delay: i32)` (порядок `(rate, delay)`, обратный к `seat.add_keyboard(xkb, delay, rate)`).

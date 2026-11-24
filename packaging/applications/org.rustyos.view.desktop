@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=Image Viewer
+Comment=View and inspect photos, images, and artwork in RustyOS
+Exec=rusty-view %U
+Icon=image-x-generic
+Terminal=false
+Type=Application
+Categories=Graphics;Viewer;Raster;
+MimeType=image/png;image/bmp;image/x-bmp;image/x-portable-pixmap;image/x-portable-anymap;
+StartupWMClass=org.rustyos.view
+Keywords=image;viewer;picture;photo;gallery;view;rustyos;

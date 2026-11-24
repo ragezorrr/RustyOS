@@ -1793,6 +1793,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusty-view"
+version = "0.1.0"
+dependencies = [
+ "rusty-animation",
+ "rusty-services",
+ "rusty-ui",
+ "smithay-client-toolkit",
+ "wayland-client",
+]
+
+[[package]]
 name = "rusty-wm"
 version = "0.1.0"
 

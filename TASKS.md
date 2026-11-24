@@ -2845,6 +2845,21 @@ hardware/software context и низкие накладные расходы.
   - `cargo fmt --check` чисто; `cargo clippy --workspace --all-targets -- -D warnings` (0 предупреждений); `cargo test --workspace` пройден (241 compositor тестов, включая группировку стопок и hover кнопок); кнопки SSD находятся справа `[—] [口] [X]`; восстановление окон из свёрнутого состояния мгновенно получает кадры и фокус; уведомления мессенджеров показывают имя и аватар контакта; карточки группируются в стопку с бейджем `+N`.
 - **Risks:** Низкие; 0 новых Cargo-зависимостей, 0 `unsafe`.
 
+### RUSTYOS-174 — Нативный просмотрщик изображений `rusty-view` и десктопная интеграция
+- **Status:** Done
+- **Goal:** Создать легковесный, нативный Wayland CSD просмотрщик изображений `apps/rusty-view` в стиле Liquid Glass на базе `rusty-ui` и `rusty-services` без новых внешних зависимостей Cargo и `unsafe`, с поддержкой форматов PNG, BMP и PPM, парящим Liquid Glass тулбаром с автоскрытием, зумом к курсору (`10%..=2500%`), панорамированием, карусельной навигацией по каталогу, шорткатами, HUD-карточкой метаданных и регистрацией MIME-типов `org.rustyos.view.desktop`.
+- **Dependencies:** `RUSTYOS-074`, `RUSTYOS-130`, `RUSTYOS-172`, `RUSTYOS-173`.
+- **Scope:**
+  - `crates/rusty-services/src/image_decode.rs`: расширение нативного Safe Rust декодера растровых изображений (`read_bmp_dimensions_from_bytes`, `decode_bmp_rgba_limited`, `decode_image_rgba_limited`), поддержка BMP (24-bit RGB, 32-bit RGBA, 8-bit с палитрой) наряду с PNG и PPM, безопасная обработка габаритов и защита от OOM (`max_pixels = 32_000_000`).
+  - `apps/rusty-view/Cargo.toml`: интеграция в workspace с зависимостями `rusty-ui`, `rusty-services`, `wayland-client`.
+  - `apps/rusty-view/src/{document.rs, viewport.rs, playlist.rs, toolbar.rs, hud.rs, state.rs, main.rs}`: архитектура Zero-Chrome Viewport; карусельный плейлист с натуральной сортировкой и циклическим переходом (`Left`/`Right`, `Backspace`/`Space`); проекционная математика вьюпорта с зумом относительно курсора мыши (`10%..=2500%`) и drag-панорамированием; поворот на 90° (по/против часовой стрелки `R`/`L`) и зеркалирование (`H`); парящий тулбар-капсула Liquid Glass (`330x42 px`, `r = 21.0`) с автоскрытием через 2.5 секунды неподвижности курсора; выдвижная HUD-карточка метаданных (`I`); CSD-заголовок с traffic lights `rusty-ui` и шорткаты (`F` Fullscreen, `0` Actual Size, `9` Fit to Window, `+/-` Zoom).
+  - `packaging/applications/org.rustyos.view.desktop` и `packaging/applications/rustyos-mimeapps.list`: десктопная ассоциация с типами `image/png`, `image/bmp`, `image/x-bmp`, `image/x-portable-pixmap`, `image/x-portable-anymap`.
+  - `scripts/install.sh` и `packaging/arch/PKGBUILD`: установка бинарного файла `rusty-view` и `.desktop` интеграции в систему.
+  - `docs/adr/0103-native-image-viewer-rusty-view.md`, `DECISIONS.md` (`D-117`), `ARCHITECTURE.md` §7.
+- **Acceptance Criteria:**
+  - `cargo fmt --check` чисто; `cargo clippy -p rusty-view -p rusty-services --tests -- -D warnings` (0 предупреждений); юнит-тесты `rusty-view` (`7/7`) и `rusty-services::image_decode` (`4/4`) успешно пройдены; headless тест `cargo run -p rusty-view -- --test` рендерит валидный frame canvas; `--help` возвращает документацию параметров и клавиатурных шорткатов; 0 новых Cargo-зависимостей, 0 `unsafe`.
+- **Risks:** Низкие; 0 новых Cargo-зависимостей, 0 `unsafe`.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance
