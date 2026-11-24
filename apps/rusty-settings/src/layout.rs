@@ -1887,6 +1887,11 @@ fn build_hardware_page_sections(
             cur_y,
             content_w,
             vec![
+                row_choice(
+                    "Active Monitor",
+                    RowControlId::DisplayOutputCycle,
+                    app.active_display_label(),
+                ),
                 row_stepper(
                     "HiDPI Scale",
                     RowControlId::ScaleDown,

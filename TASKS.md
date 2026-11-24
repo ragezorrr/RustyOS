@@ -2788,6 +2788,19 @@ hardware/software context и низкие накладные расходы.
   - `cargo fmt --check`, `cargo clippy -p rusty-ui -p rusty-files -p rusty-settings -p rusty-terminal --tests -- -A clippy::map_unwrap_or -A clippy::needless_bool -D warnings` (0 предупреждений); `cargo test` (`16` `rusty-ui`, `28` `rusty-files`, `19` `rusty-settings`, `18` `rusty-terminal` — `81/81` passed); живой `--winit` Wayland Light/Dark прогон `rusty-files --light`, `rusty-settings --dark` и `rusty-terminal` с `0 WARN/ERROR` и визуально проверенными скриншотами.
 - **Risks:** Низкие; 0 новых Cargo-зависимостей, `unsafe` строго в существующих FFI-модулях (`gpu_gles.rs`, `gpu_egl.rs`).
 
+### RUSTYOS-170 — Синхронизация `config.toml` (`flock`), `muted_apps` и интерактивные контролы `rusty-settings` (Фаза 3 аудита)
+- **Status:** Done
+- **Goal:** Закрыть гонки записи `config.toml`, подключить сквозную фильтрацию `[notifications].muted_apps` и добавить в `rusty-settings` перетаскивание слайдеров, прямой захват клавиш для шорткатов и выбор монитора (per-output) на странице `Display` без новых Cargo-зависимостей и `unsafe`.
+- **Dependencies:** `RUSTYOS-131`, `RUSTYOS-168`, `RUSTYOS-169`.
+- **Scope:**
+  - `crates/rusty-services/src/lib.rs`: `with_config_file_lock`, `write_file_atomic`.
+  - `crates/rusty-compositor/src/{config.rs, state/shell_actions.rs}`: `save_to_path` под `flock`, `notifications_muted_apps` + `is_notification_app_muted`, подавление toast-баннеров для заглушённых приложений.
+  - `apps/rusty-settings/src/{state.rs, layout.rs, wayland.rs}`: `update_config_entries` под `flock`, `format_toml_string_array`, сквозная синхронизация `NOTIF_APP_KEYS`/`muted_apps`, `StepperDragKind` (`pointer_drag`), `format_captured_shortcut` + `apply_captured_shortcut`, `RowControlId::DisplayOutputCycle` + `sync_wayland_outputs` + `[display.<name>]`.
+  - `docs/adr/0099-config-flock-muted-apps-and-settings-controls.md`, `DECISIONS.md` (`D-113`), `ARCHITECTURE.md` §7.
+- **Acceptance Criteria:**
+  - `cargo fmt --check`, `cargo clippy -p rusty-services -p rusty-compositor -p rusty-settings --tests -- -A clippy::map_unwrap_or -A clippy::needless_bool -D warnings` (0 предупреждений); `cargo test -p rusty-services` (`75/75`), `cargo test -p rusty-settings` (`19/19`), `cargo test -p rusty-compositor config::tests::parses_notifications_section_and_roundtrips` passed.
+- **Risks:** Низкие; 0 новых Cargo-зависимостей, 0 `unsafe`.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

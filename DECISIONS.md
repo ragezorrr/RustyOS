@@ -1325,6 +1325,13 @@
                            кэш заголовка окна и очистка глиф-атласа; в `rusty-files` — внутренний (`target_dir`) и
                            входящий (`text/uri-list`) DnD, сохранение мультивыделения при ПКМ, групповые Duplicate/Trash
                            и `Ping`-пробуждение всех фоновых воркеров (`0` новых Cargo-зависимостей)
+  D-113   2026-11-24  Accepted (ADR-0099)  Фаза 3 аудита (`RUSTYOS-170`): межпроцессная блокировка `flock`
+                           (`with_config_file_lock` + `write_file_atomic` через `std::fs::File::lock()`) для
+                           `config.toml` в `rusty-compositor` и `rusty-settings`, поддержка TOML-массивов и
+                           экранирования в патчере; сквозная фильтрация `[notifications].muted_apps` (подавление
+                           toast-баннеров при сохранении в Notification Center); в `rusty-settings` — перетаскивание
+                           слайдеров (`Volume`/`Scale`/`GlassOpacity`), прямой захват клавиш в `ShortcutEdit` и
+                           селектор монитора (`[display.<name>]`) на странице `Display` (`0` новых крейтов, `0 unsafe`)
   -----------------------------------------------------------------------
 
 ## Открытые решения

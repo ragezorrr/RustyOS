@@ -4,7 +4,7 @@ use std::env;
 use std::fs;
 use std::io::Write;
 use std::os::unix::net::UnixStream;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
@@ -271,6 +271,7 @@ pub(crate) enum RowControlId {
     UpdatesEnabledToggle,
     ScaleDown,
     ScaleUp,
+    DisplayOutputCycle,
     PreferMaxRefreshToggle,
     VrrModeCycle,
     RotationCycle,
@@ -377,6 +378,10 @@ impl Default for SystemAboutInfo {
         }
     }
 }
+
+/// Canonical notification app keys synced with `[notifications].muted_apps` (`RUSTYOS-170`).
+pub(crate) const NOTIF_APP_KEYS: [&str; 5] =
+    ["files", "terminal", "browser", "updater", "settings"];
 
 /// Customizable `[shortcuts]` metadata catalog matching compositor `ShortcutBindings` (`RUSTYOS-131`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -699,6 +704,8 @@ pub(crate) struct SettingsAppState {
     pub(crate) notif_mirroring_off: bool,
     pub(crate) notif_app_enabled: [bool; 5],
     pub(crate) display_scale: f64,
+    pub(crate) display_outputs: Vec<String>,
+    pub(crate) selected_display_idx: usize,
     pub(crate) prefer_max_refresh: bool,
     pub(crate) vrr_mode: String,
     pub(crate) display_rotation: String,
@@ -841,6 +848,8 @@ impl SettingsAppState {
             notif_mirroring_off: true,
             notif_app_enabled: [true; 5],
             display_scale: 1.0,
+            display_outputs: vec![String::from("All Displays")],
+            selected_display_idx: 0,
             prefer_max_refresh: true,
             vrr_mode: String::from("fullscreen"),
             display_rotation: String::from("0"),
@@ -1902,15 +1911,17 @@ impl SettingsAppState {
             RowControlId::UpdatesInstallNow => {
                 self.start_update_transaction();
             }
+            RowControlId::DisplayOutputCycle => {
+                if !self.display_outputs.is_empty() {
+                    self.selected_display_idx =
+                        (self.selected_display_idx + 1) % self.display_outputs.len();
+                }
+            }
             RowControlId::ScaleDown => {
-                self.display_scale = (self.display_scale - 0.25).clamp(1.0, 3.0);
-                let v = format!("{:.2}", self.display_scale);
-                let _ = update_config_entries(&[("display", "scale", &v)]);
+                self.set_display_scale(self.display_scale - 0.25);
             }
             RowControlId::ScaleUp => {
-                self.display_scale = (self.display_scale + 0.25).clamp(1.0, 3.0);
-                let v = format!("{:.2}", self.display_scale);
-                let _ = update_config_entries(&[("display", "scale", &v)]);
+                self.set_display_scale(self.display_scale + 0.25);
             }
             RowControlId::PreferMaxRefreshToggle => {
                 self.prefer_max_refresh = !self.prefer_max_refresh;
@@ -1934,7 +1945,8 @@ impl SettingsAppState {
                     _ => "0",
                 }
                 .clone_into(&mut self.display_rotation);
-                let _ = update_config_entries(&[("display", "rotation", &self.display_rotation)]);
+                let section = self.active_display_config_section();
+                let _ = update_config_entries(&[(&section, "rotation", &self.display_rotation)]);
             }
             other => self.apply_input_action(other),
         }
@@ -2052,6 +2064,14 @@ impl SettingsAppState {
             RowControlId::NotifAppToggle(idx) => {
                 if let Some(enabled) = self.notif_app_enabled.get_mut(idx) {
                     *enabled = !*enabled;
+                    let muted: Vec<String> = NOTIF_APP_KEYS
+                        .iter()
+                        .enumerate()
+                        .filter(|&(i, _)| !self.notif_app_enabled[i])
+                        .map(|(_, k)| (*k).to_owned())
+                        .collect();
+                    let arr = format_toml_string_array(&muted);
+                    let _ = update_config_entries(&[("notifications", "muted_apps", &arr)]);
                 }
             }
             RowControlId::PowerDisplaySleepCycle => {
@@ -2236,7 +2256,7 @@ impl SettingsAppState {
         let mut sheet = rusty_ui::DialogSheet::prompt(
             format!("Shortcut: {}", def.label),
             format!(
-                "Default: {} · Type Super/Alt/Ctrl/Shift + Key",
+                "Default: {} · Press shortcut or type Super/Alt/Ctrl/Shift + Key",
                 def.default_combo
             ),
             "Save",
@@ -2253,6 +2273,97 @@ impl SettingsAppState {
         self.refresh_shortcut_modal_validation(&mut modal);
         self.active_modal = Some(modal);
         self.mark_dirty(DamageScope::Full);
+    }
+
+    /// Updates connected Wayland outputs for per-output `Display` settings (`RUSTYOS-170`).
+    pub(crate) fn sync_wayland_outputs(&mut self, names: Vec<String>) {
+        let mut next = vec![String::from("All Displays")];
+        for name in names {
+            let trimmed = name.trim();
+            if !trimmed.is_empty() && !next.iter().any(|existing| existing == trimmed) {
+                next.push(trimmed.to_owned());
+            }
+        }
+        if self.display_outputs != next {
+            self.display_outputs = next;
+            if self.selected_display_idx >= self.display_outputs.len() {
+                self.selected_display_idx = 0;
+            }
+            if self.current_page == SettingsPage::Display {
+                self.mark_dirty(DamageScope::Page);
+            }
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn active_display_label(&self) -> String {
+        self.display_outputs
+            .get(self.selected_display_idx)
+            .cloned()
+            .unwrap_or_else(|| String::from("All Displays"))
+    }
+
+    #[must_use]
+    pub(crate) fn active_display_config_section(&self) -> String {
+        if self.selected_display_idx == 0 {
+            String::from("display")
+        } else if let Some(name) = self.display_outputs.get(self.selected_display_idx) {
+            format!("display.{name}")
+        } else {
+            String::from("display")
+        }
+    }
+
+    pub(crate) fn set_display_scale(&mut self, scale: f64) {
+        let quantized = ((scale.clamp(1.0, 3.0) * 4.0).round() / 4.0).clamp(1.0, 3.0);
+        if (self.display_scale - quantized).abs() < 1e-4 {
+            return;
+        }
+        self.display_scale = quantized;
+        let v = format!("{:.2}", self.display_scale);
+        let section = self.active_display_config_section();
+        let _ = update_config_entries(&[(&section, "scale", &v)]);
+        self.mark_dirty(DamageScope::Page);
+    }
+
+    pub(crate) fn set_volume_percent(&mut self, pct: u8) {
+        let clamped = pct.min(100);
+        if self.volume_percent == clamped {
+            return;
+        }
+        self.volume_percent = clamped;
+        self.pending_service_cmds
+            .push(ServiceCommand::SetVolume(clamped));
+        self.mark_dirty(DamageScope::Page);
+    }
+
+    pub(crate) fn set_glass_opacity(&mut self, pct: u8) {
+        let clamped = pct.clamp(15, 95);
+        let next = f32::from(clamped) / 100.0;
+        if (self.glass_opacity - next).abs() < 1e-3 {
+            return;
+        }
+        self.glass_opacity = next;
+        let v = format!("{:.2}", self.glass_opacity);
+        let _ = update_config_entries(&[("ui", "glass_opacity", &v)]);
+        self.mark_dirty(DamageScope::Page);
+    }
+
+    /// Applies a directly captured key combo inside `SettingsModal::ShortcutEdit` (`RUSTYOS-170`).
+    pub(crate) fn apply_captured_shortcut(&mut self, combo: &str) -> bool {
+        let Some(mut modal) = self.active_modal.take() else {
+            return false;
+        };
+        let is_shortcut = matches!(modal, SettingsModal::ShortcutEdit { .. });
+        if is_shortcut {
+            if let Some(tf) = &mut modal.sheet_mut().input {
+                tf.buffer.set_text(combo);
+            }
+            self.refresh_shortcut_modal_validation(&mut modal);
+            self.mark_dirty(DamageScope::Full);
+        }
+        self.active_modal = Some(modal);
+        is_shortcut
     }
 
     fn refresh_shortcut_modal_validation(&self, modal: &mut SettingsModal) {
@@ -2775,6 +2886,17 @@ impl SettingsAppState {
             ("notifications", "when_sleeping") => self.notif_when_sleeping = parse_bool(val),
             ("notifications", "when_locked") => self.notif_when_locked = parse_bool(val),
             ("notifications", "mirroring_off") => self.notif_mirroring_off = parse_bool(val),
+            ("notifications", "muted_apps") => {
+                let inner = val.trim().trim_start_matches('[').trim_end_matches(']');
+                let muted: Vec<String> = inner
+                    .split(',')
+                    .map(|p| p.trim().trim_matches('"').to_ascii_lowercase())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                for (i, key) in NOTIF_APP_KEYS.iter().enumerate() {
+                    self.notif_app_enabled[i] = !muted.iter().any(|m| m == key);
+                }
+            }
             _ => self.apply_toml_device_kv(section, key, val),
         }
     }
@@ -2912,12 +3034,36 @@ fn config_toml_path() -> Option<PathBuf> {
 }
 
 fn format_toml_value(val: &str) -> String {
-    if matches!(val, "true" | "false") || val.parse::<f64>().is_ok() {
-        val.to_owned()
+    let trimmed = val.trim();
+    if matches!(trimmed, "true" | "false")
+        || trimmed.parse::<f64>().is_ok()
+        || (trimmed.starts_with('[') && trimmed.ends_with(']'))
+    {
+        trimmed.to_owned()
     } else {
-        let escaped = val.replace('\\', "\\\\").replace('"', "\\\"");
+        let escaped = val
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\n', "\\n")
+            .replace('\r', "\\r")
+            .replace('\t', "\\t");
         format!("\"{escaped}\"")
     }
+}
+
+fn format_toml_string_array(items: &[String]) -> String {
+    let quoted: Vec<String> = items
+        .iter()
+        .map(|s| {
+            let esc = s
+                .replace('\\', "\\\\")
+                .replace('"', "\\\"")
+                .replace('\n', "\\n")
+                .replace('\r', "\\r");
+            format!("\"{esc}\"")
+        })
+        .collect();
+    format!("[{}]", quoted.join(", "))
 }
 
 fn patch_toml_text(original: &str, section: &str, key: &str, raw_val: &str) -> String {
@@ -2973,23 +3119,14 @@ fn update_config_entries(updates: &[(&str, &str, &str)]) -> std::io::Result<()> 
     let Some(path) = config_toml_path() else {
         return Ok(());
     };
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let mut text = fs::read_to_string(&path)
-        .unwrap_or_else(|_| String::from("# RustyOS compositor configuration\n\n[ui]\n"));
-    for &(section, key, val) in updates {
-        text = patch_toml_text(&text, section, key, val);
-    }
-    write_atomic(&path, text.as_bytes())
-}
-
-fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let tmp = path.with_extension("toml.tmp");
-    let mut file = fs::File::create(&tmp)?;
-    file.write_all(bytes)?;
-    file.sync_all()?;
-    fs::rename(&tmp, path)
+    rusty_services::with_config_file_lock(&path, || {
+        let mut text = fs::read_to_string(&path)
+            .unwrap_or_else(|_| String::from("# RustyOS compositor configuration\n\n[ui]\n"));
+        for &(section, key, val) in updates {
+            text = patch_toml_text(&text, section, key, val);
+        }
+        rusty_services::write_file_atomic(&path, text.as_bytes())
+    })
 }
 
 fn current_config_mtime() -> Option<SystemTime> {

@@ -92,6 +92,76 @@ pub fn run_command_bounded(
     })
 }
 
+/// Acquires an exclusive advisory `flock` on a sibling `.config.toml.lock` file and runs `f`
+/// (`RUSTYOS-170`), serializing concurrent `config.toml` updates between `rusty-compositor`
+/// and `rusty-settings`.
+///
+/// # Errors
+///
+/// Returns an I/O error if creating the parent directory, opening/locking the lock file,
+/// or running `f` fails.
+pub fn with_config_file_lock<T>(
+    config_path: &std::path::Path,
+    f: impl FnOnce() -> std::io::Result<T>,
+) -> std::io::Result<T> {
+    let dir = match config_path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => {
+            std::fs::create_dir_all(parent)?;
+            parent
+        }
+        _ => std::path::Path::new("."),
+    };
+    let file_name = config_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("config.toml");
+    let lock_path = dir.join(format!(".{file_name}.lock"));
+    let lock_file = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)?;
+    lock_file.lock()?;
+    let res = f();
+    let _ = lock_file.unlock();
+    res
+}
+
+/// Atomically writes `bytes` to `path` via a PID-scoped sibling temp file, `sync_all()`,
+/// and `rename()` (`RUSTYOS-170`).
+///
+/// # Errors
+///
+/// Returns an I/O error if creating the parent directory, writing/syncing the temp file,
+/// or renaming it into `path` fails.
+pub fn write_file_atomic(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let dir = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => {
+            std::fs::create_dir_all(parent)?;
+            parent
+        }
+        _ => std::path::Path::new("."),
+    };
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("config.toml");
+    let tmp_path = dir.join(format!(".{file_name}.tmp.{}", std::process::id()));
+    let mut file = std::fs::File::create(&tmp_path)?;
+    if let Err(err) = file.write_all(bytes).and_then(|()| file.sync_all()) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(err);
+    }
+    drop(file);
+    if let Err(err) = std::fs::rename(&tmp_path, path) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(err);
+    }
+    Ok(())
+}
+
 pub use app_catalog_monitor::{
     APP_CATALOG_DEBOUNCE, AppCatalogMonitorHandle, discover_application_dirs,
     discover_application_dirs_from,

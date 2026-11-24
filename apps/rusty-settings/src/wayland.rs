@@ -134,6 +134,13 @@ enum RenderBackend {
     Cpu,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StepperDragKind {
+    Volume,
+    Scale,
+    GlassOpacity,
+}
+
 #[allow(clippy::struct_excessive_bools)]
 struct SettingsClient {
     conn: Connection,
@@ -175,6 +182,7 @@ struct SettingsClient {
     pointer_inside: bool,
     pointer_pressed: bool,
     scrollbar_drag: Option<(f64, i32)>,
+    stepper_drag: Option<(StepperDragKind, f64, i32)>,
     click_streak: u8,
     pointer_pos: (f64, f64),
     hover_hit: Option<SettingsHit>,
@@ -236,6 +244,16 @@ impl SettingsClient {
             return;
         }
         if self.app.active_modal.is_some() {
+            if matches!(
+                self.app.active_modal,
+                Some(crate::state::SettingsModal::ShortcutEdit { .. })
+            ) && let Some(combo) = format_captured_shortcut(self.modifiers, keysym)
+            {
+                if self.app.apply_captured_shortcut(&combo) {
+                    self.layout_cache = None;
+                }
+                return;
+            }
             if let Some(ui_key) = map_keysym_to_ui(keysym, utf8) {
                 let mods = rusty_ui::InputModifiers {
                     ctrl: self.modifiers.ctrl,
@@ -507,6 +525,7 @@ impl SettingsClient {
         }
     }
 
+    #[allow(clippy::too_many_lines, clippy::cast_possible_truncation)]
     fn dispatch_content_hit(
         &mut self,
         hit: SettingsHit,
@@ -585,6 +604,28 @@ impl SettingsClient {
             SettingsHit::Control(id)
             | SettingsHit::StepperMinus(id)
             | SettingsHit::StepperPlus(id) => {
+                self.stepper_drag = match id {
+                    crate::state::RowControlId::VolumeDown
+                    | crate::state::RowControlId::VolumeUp => Some((
+                        StepperDragKind::Volume,
+                        px,
+                        i32::from(self.app.volume_percent),
+                    )),
+                    crate::state::RowControlId::ScaleDown | crate::state::RowControlId::ScaleUp => {
+                        Some((
+                            StepperDragKind::Scale,
+                            px,
+                            (self.app.display_scale * 100.0).round() as i32,
+                        ))
+                    }
+                    crate::state::RowControlId::GlassOpacityDown
+                    | crate::state::RowControlId::GlassOpacityUp => Some((
+                        StepperDragKind::GlassOpacity,
+                        px,
+                        (self.app.glass_opacity * 100.0).round() as i32,
+                    )),
+                    _ => None,
+                };
                 self.app.apply_row_action(id);
                 self.layout_cache = None;
                 let next_layout = self.current_layout();
@@ -748,6 +789,7 @@ pub(crate) fn run(opts: &StartupOptions) -> Result<(), WaylandAppError> {
         pointer_inside: false,
         pointer_pressed: false,
         scrollbar_drag: None,
+        stepper_drag: None,
         click_streak: 1,
         pointer_pos: (0.0, 0.0),
         hover_hit: None,
@@ -1114,9 +1156,56 @@ impl OutputHandler for SettingsClient {
     fn output_state(&mut self) -> &mut OutputState {
         &mut self.output_state
     }
-    fn new_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
-    fn update_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
-    fn output_destroyed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
+    fn new_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {
+        self.refresh_wayland_outputs();
+    }
+    fn update_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {
+        self.refresh_wayland_outputs();
+    }
+    fn output_destroyed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {
+        self.refresh_wayland_outputs();
+    }
+}
+
+impl SettingsClient {
+    fn refresh_wayland_outputs(&mut self) {
+        let names: Vec<String> = self
+            .output_state
+            .outputs()
+            .filter_map(|o| self.output_state.info(&o).and_then(|info| info.name))
+            .collect();
+        self.app.sync_wayland_outputs(names);
+        self.layout_cache = None;
+    }
+
+    #[allow(clippy::cast_possible_truncation)]
+    fn update_stepper_drag(&mut self, px: f64) -> bool {
+        let Some((kind, start_x, start_val)) = self.stepper_drag else {
+            return false;
+        };
+        let dx = px - start_x;
+        if dx.abs() < 4.0 {
+            return false;
+        }
+        match kind {
+            StepperDragKind::Volume => {
+                let next = (start_val + (dx / 2.0).round() as i32).clamp(0, 100);
+                self.app.set_volume_percent(u8::try_from(next).unwrap_or(0));
+            }
+            StepperDragKind::Scale => {
+                let steps = (dx / 28.0).round() as i32;
+                let next_pct = (start_val + steps * 25).clamp(100, 300);
+                self.app.set_display_scale(f64::from(next_pct) / 100.0);
+            }
+            StepperDragKind::GlassOpacity => {
+                let next = (start_val + (dx / 2.0).round() as i32).clamp(15, 95);
+                self.app.set_glass_opacity(u8::try_from(next).unwrap_or(80));
+            }
+        }
+        self.layout_cache = None;
+        self.flush_pending_service_commands();
+        true
+    }
 }
 
 impl CompositorHandler for SettingsClient {
@@ -1394,6 +1483,7 @@ impl PointerHandler for SettingsClient {
                 PointerEventKind::Motion { .. } => {
                     self.pointer_inside = true;
                     if self.handle_modal_pointer_motion(ev.position.0, ev.position.1)
+                        || self.update_stepper_drag(ev.position.0)
                         || self.update_scrollbar_drag(ev.position.1)
                     {
                         continue;
@@ -1424,6 +1514,7 @@ impl PointerHandler for SettingsClient {
                 } => {
                     self.pointer_pressed = false;
                     self.scrollbar_drag = None;
+                    self.stepper_drag = None;
                     self.app.search_field.on_pointer_up();
                     self.handle_modal_left_release(ev.position.0, ev.position.1);
                 }
@@ -1533,6 +1624,76 @@ impl SettingsClient {
             None => self.app.mark_dirty(DamageScope::Full),
         }
     }
+}
+
+fn format_captured_shortcut(mods: Modifiers, keysym: Keysym) -> Option<String> {
+    let has_mod = mods.logo || mods.ctrl || mods.alt;
+    let key_name: String = match keysym {
+        Keysym::Escape | Keysym::Return | Keysym::KP_Enter | Keysym::BackSpace => return None,
+        Keysym::space => String::from("Space"),
+        Keysym::Tab | Keysym::ISO_Left_Tab => String::from("Tab"),
+        Keysym::Left => String::from("Left"),
+        Keysym::Right => String::from("Right"),
+        Keysym::Up => String::from("Up"),
+        Keysym::Down => String::from("Down"),
+        Keysym::Print => String::from("Print"),
+        Keysym::F1 => String::from("F1"),
+        Keysym::F2 => String::from("F2"),
+        Keysym::F3 => String::from("F3"),
+        Keysym::F4 => String::from("F4"),
+        Keysym::F5 => String::from("F5"),
+        Keysym::F6 => String::from("F6"),
+        Keysym::F7 => String::from("F7"),
+        Keysym::F8 => String::from("F8"),
+        Keysym::F9 => String::from("F9"),
+        Keysym::F10 => String::from("F10"),
+        Keysym::F11 => String::from("F11"),
+        Keysym::F12 => String::from("F12"),
+        _ => {
+            if !has_mod {
+                return None;
+            }
+            let ch = keysym.key_char()?;
+            if !ch.is_ascii_alphanumeric() {
+                return None;
+            }
+            ch.to_ascii_uppercase().to_string()
+        }
+    };
+    let is_standalone_fn_key = matches!(
+        keysym,
+        Keysym::Print
+            | Keysym::F1
+            | Keysym::F2
+            | Keysym::F3
+            | Keysym::F4
+            | Keysym::F5
+            | Keysym::F6
+            | Keysym::F7
+            | Keysym::F8
+            | Keysym::F9
+            | Keysym::F10
+            | Keysym::F11
+            | Keysym::F12
+    );
+    if !has_mod && !is_standalone_fn_key {
+        return None;
+    }
+    let mut parts = Vec::with_capacity(4);
+    if mods.logo {
+        parts.push("Super");
+    }
+    if mods.ctrl {
+        parts.push("Ctrl");
+    }
+    if mods.alt {
+        parts.push("Alt");
+    }
+    if mods.shift {
+        parts.push("Shift");
+    }
+    parts.push(&key_name);
+    Some(parts.join("+"))
 }
 
 fn axis_scroll_delta_px(axis: AxisScroll, source: Option<wl_pointer::AxisSource>) -> (f64, bool) {

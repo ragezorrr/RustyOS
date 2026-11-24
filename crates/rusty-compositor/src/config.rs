@@ -1115,6 +1115,8 @@ pub struct UserConfig {
     pub notifications_show_weather_widget: bool,
     /// Show the bottom Reminders checklist widget inside Notification Center (`RUSTYOS-156`).
     pub notifications_show_reminders_widget: bool,
+    /// Lowercase canonical app keys whose popup toast banners are muted (`[notifications].muted_apps`, `RUSTYOS-170`).
+    pub notifications_muted_apps: Vec<String>,
     /// `[power].low_power_mode` power-profile policy (`RUSTYOS-131`).
     pub power_low_power_mode: LowPowerMode,
     /// `[power].display_sleep_minutes` inactivity display sleep hint (`0` = Never, `0..=180`) (`RUSTYOS-131`).
@@ -1202,6 +1204,7 @@ impl Default for UserConfig {
             notifications_reminders_done: [false; 4],
             notifications_show_weather_widget: true,
             notifications_show_reminders_widget: true,
+            notifications_muted_apps: Vec::new(),
             power_low_power_mode: LowPowerMode::Never,
             power_display_sleep_minutes: 10,
             power_auto_lock_minutes: 0,
@@ -1664,8 +1667,26 @@ impl UserConfig {
                     self.notifications_show_reminders_widget = b;
                 }
             }
+            "muted_apps" => {
+                self.notifications_muted_apps = parse_toml_string_array(val)
+                    .into_iter()
+                    .map(|s| s.trim().to_ascii_lowercase())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+            }
             _ => {}
         }
+    }
+
+    /// Returns `true` when `app_key` is listed in `[notifications].muted_apps` (`RUSTYOS-170`).
+    #[must_use]
+    pub fn is_notification_app_muted(&self, app_key: &str) -> bool {
+        let needle = app_key.trim();
+        !needle.is_empty()
+            && self
+                .notifications_muted_apps
+                .iter()
+                .any(|m| m.eq_ignore_ascii_case(needle))
     }
 
     fn apply_power_kv(&mut self, key: &str, val: &str) {
@@ -1992,6 +2013,12 @@ impl UserConfig {
             "show_reminders_widget = {}",
             self.notifications_show_reminders_widget
         );
+        let muted_list: Vec<String> = self
+            .notifications_muted_apps
+            .iter()
+            .map(|s| format!("\"{}\"", escape_toml_string(s)))
+            .collect();
+        let _ = writeln!(out, "muted_apps = [{}]", muted_list.join(", "));
     }
 
     fn append_power_toml(&self, out: &mut String) {
@@ -2061,31 +2088,17 @@ impl UserConfig {
         let _ = writeln!(out, "downloads_sort = \"{}\"", self.downloads_sort.as_str());
     }
 
-    /// Atomically persists [`UserConfig`] to `path` via a sibling temp file + rename (`RUSTYOS-061`).
+    /// Atomically persists [`UserConfig`] to `path` under an advisory `flock` via a sibling temp file + `sync_all` + `rename` (`RUSTYOS-061`, `RUSTYOS-170`).
     ///
     /// # Errors
     ///
-    /// Returns an I/O error if creating the parent directory, writing the temporary file,
-    /// or renaming it into `path` fails.
+    /// Returns an I/O error if creating the parent directory, acquiring the lock, writing the
+    /// temporary file, or renaming it into `path` fails.
     pub fn save_to_path(&self, path: &Path) -> std::io::Result<()> {
-        let dir = match path.parent() {
-            Some(parent) if !parent.as_os_str().is_empty() => {
-                fs::create_dir_all(parent)?;
-                parent
-            }
-            _ => Path::new("."),
-        };
-        let file_name = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("config.toml");
-        let tmp_path = dir.join(format!(".{file_name}.tmp.{}", std::process::id()));
-        fs::write(&tmp_path, self.to_toml_string())?;
-        if let Err(err) = fs::rename(&tmp_path, path) {
-            let _ = fs::remove_file(&tmp_path);
-            return Err(err);
-        }
-        Ok(())
+        let payload = self.to_toml_string();
+        rusty_services::with_config_file_lock(path, || {
+            rusty_services::write_file_atomic(path, payload.as_bytes())
+        })
     }
 }
 

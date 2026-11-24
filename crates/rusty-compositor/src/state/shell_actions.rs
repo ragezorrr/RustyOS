@@ -1200,7 +1200,11 @@ impl RustyCompositorState {
             return;
         }
 
-        if let Some(ref key) = app_key {
+        let suppress_toast = !self.user_config.notifications_allow
+            || app_key
+                .as_deref()
+                .is_some_and(|k| self.user_config.is_notification_app_muted(k));
+        if !suppress_toast && let Some(ref key) = app_key {
             self.increment_notification_badge(key);
         }
 
@@ -1216,7 +1220,9 @@ impl RustyCompositorState {
             created_at: now,
             ttl,
         };
-        self.notifications.push(item.clone());
+        if !suppress_toast {
+            self.notifications.push(item.clone());
+        }
         self.notification_history.push(item);
         if self.notifications.len() > MAX_QUEUE_LEN {
             let excess = self.notifications.len() - MAX_QUEUE_LEN;
