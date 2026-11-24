@@ -172,6 +172,16 @@ pub fn restore_from_trash(trash_entry_name: &str, trash_dir: &Path) -> io::Resul
             "Missing original Path= in .trashinfo",
         )
     })?;
+    if !orig_path.is_absolute()
+        || orig_path
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Refusing to restore unsafe relative or parent-traversing .trashinfo Path=",
+        ));
+    }
 
     if let Some(parent) = orig_path.parent() {
         fs::create_dir_all(parent)?;

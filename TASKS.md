@@ -2759,6 +2759,21 @@ hardware/software context и низкие накладные расходы.
   - `transient_and_modal_dialogs_enforce_centering_stacking_tiling_migration_and_focus_return`, `switcher_thumbnail_hit_testing_close_and_cancel_restore_focus` и `overview_close_button_keyboard_grid_navigation_and_transient_floating_in_master_stack` покрыты unit-тестами (`12` в `rusty-wm`, `240` в `rusty-compositor`, 0 ошибок); `cargo fmt --check`, `clippy -D warnings` и живые `--winit` Wayland Light/Dark прогоны `switcher` и `overview` с двумя клиентами (`rusty-settings`, `rusty-files`) проходят чисто с 0 WARN/ERROR и визуально проверенными живыми миниатюрами.
 - **Risks:** Низкие; 0 новых внешних Cargo-зависимостей, `crates/rusty-compositor` без `unsafe`.
 
+### RUSTYOS-168 — Харденинг безопасности, целостности ФС, XDG-порталов, Greeter и установщика (Фаза 1 аудита)
+- **Status:** Done
+- **Goal:** Закрыть критические и высокоприоритетные дефекты безопасности, целостности данных и системной интеграции из полного аудита: заблокировать IPC-обход Lock Screen и интерактивные IPC при заблокированной сессии, добавить ранний выход рендера при `screen_locked`, перевести Desktop drag-to-trash в фон и защитить Desktop `rename`; убрать WPA-пароль из `argv` `nmcli` (`--passwd-file` `0600` + `--`), добавить `run_command_bounded` с таймаутами, закрыть утечку/zombie в `system_signals.rs` и `updates.rs`; исправить `pick_unique_sibling_path`, `(dev, ino)`-проверку в `copy_file_chunked` и запрет `..` в `restore_from_trash`; перевести портал `FileChooser` на async + `Request.Close` с пробросом `WAYLAND_DISPLAY`/`RUSTYOS_IPC_SOCKET`, добавить `Settings.SettingChanged` и `parse_portal_color_scheme_from_toml`; защитить архивы (`validate_archive_member_paths`, уникальная подпапка, `unzip -n`, `--`) и добавить редактируемый `--save-file` `TextField` + exit code `1` в `rusty-files`; исправить `timezone_idx`, pipe-deadlock, `demo_target_disks()` fallback, RFC 1123 `hostname` и пропуск фейкового `Account` в OOBE в `rusty-installer`; перевести `rusty-greeter` на фоновый поток с 15 с таймаутом и показом PAM-сообщений; синхронизировать `rustyos_installer_service.rs`, `scripts/{rustyos-install.sh, install.sh}`, `bin/rustyos-session` и `packaging/arch/{rustyos-greeter.sysusers, PKGBUILD}`.
+- **Dependencies:** `RUSTYOS-154`, `RUSTYOS-136`, `RUSTYOS-137`, `RUSTYOS-115`, `RUSTYOS-116`, `RUSTYOS-163`.
+- **Scope:**
+  - `crates/rusty-compositor/src/{state/{wm_windows.rs, dock_dnd.rs, system_bridges.rs, shell_actions.rs}, frame_composer.rs, input/pointer.rs, lib.rs}`.
+  - `crates/rusty-services/src/{lib.rs, connectivity.rs, file_manager/{operations.rs, trash.rs}, portal.rs, storage.rs, system_signals.rs, updates.rs, bin/rustyos_installer_service.rs}`.
+  - `apps/rusty-files/src/{main.rs, layout.rs, wayland.rs, render/views.rs, state/{mod.rs, input.rs}}`.
+  - `apps/rusty-installer/src/{state.rs, disks.rs}`, `apps/rusty-greeter/src/{greetd.rs, main.rs}`.
+  - `scripts/{rustyos-install.sh, install.sh}`, `bin/rustyos-session`, `packaging/arch/{PKGBUILD, rustyos-greeter.sysusers}`.
+  - `docs/adr/0097-security-data-integrity-portal-and-installer-hardening.md`, `DECISIONS.md` (`D-111`), `ARCHITECTURE.md` §7.
+- **Acceptance Criteria:**
+  - `bash -n` по всем скриптам чисто; `cargo fmt --check` и `cargo clippy -D warnings` (0 предупреждений) по всем 5 пакетам; unit-тесты `240` (`rusty-compositor`), `75` (`rusty-services`), `28` (`rusty-files`), `15` (`rusty-installer`), `1` (`rusty-greeter`) — `359/359` passed; живой `--winit` Wayland Light/Dark прогон `rusty-files --save-file report.pdf` с 0 WARN/ERROR и визуально проверенным редактируемым полем имени.
+- **Risks:** Низкие; 0 новых Cargo-зависимостей, 0 `unsafe`, конфигурация хост-ОС не изменялась.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

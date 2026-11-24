@@ -43,7 +43,7 @@ else
     APPS_DIR="/usr/share/applications"
     SESSIONS_DIR="/usr/share/wayland-sessions"
     PORTALS_DIR="/usr/share/xdg-desktop-portal/portals"
-    PORTALS_CONF_DIR="/etc/xdg-desktop-portal"
+    PORTALS_CONF_DIR="/usr/share/xdg-desktop-portal"
     SYSTEMD_DIR="/usr/lib/systemd/user"
     POLKIT_DIR="/usr/share/polkit-1/actions"
 fi
@@ -55,11 +55,12 @@ if [ "${ACTION}" = "uninstall" ]; then
         "${BIN_DIR}/rusty-files" \
         "${BIN_DIR}/rusty-settings" \
         "${BIN_DIR}/rusty-terminal" \
-        "${BIN_DIR}/rusty-updater" \
+        "${BIN_DIR}/rusty-greeter" \
         "${BIN_DIR}/rusty-installer" \
         "${BIN_DIR}/rusty-pipewire-stream" \
         "${BIN_DIR}/rustyos-session" \
         "${LIB_DIR}/rustyos-update-helper" \
+        "${LIB_DIR}/rustyos-installer-service" \
         "${LIB_DIR}/rustyos-install" \
         "${APPS_DIR}/org.rustyos.files.desktop" \
         "${APPS_DIR}/org.rustyos.settings.desktop" \
@@ -132,8 +133,10 @@ fi
 echo "Installing session entry to ${SESSIONS_DIR}/rustyos.desktop..."
 TMP_DESKTOP="$(mktemp)"
 trap 'rm -f "${TMP_DESKTOP}"' EXIT
-sed "s|^Exec=.*|Exec=${BIN_DIR}/rustyos-session|" \
-    "${ROOT_DIR}/packaging/wayland-sessions/rustyos.desktop" > "${TMP_DESKTOP}"
+awk -v bin="${BIN_DIR}/rustyos-session" '
+    /^Exec=/ { print "Exec=\"" bin "\""; next }
+    { print }
+' "${ROOT_DIR}/packaging/wayland-sessions/rustyos.desktop" > "${TMP_DESKTOP}"
 install -m 644 "${TMP_DESKTOP}" "${SESSIONS_DIR}/rustyos.desktop"
 
 echo ""

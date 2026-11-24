@@ -183,10 +183,11 @@ impl StorageService {
         if !is_valid_block_device_path(device) {
             return Err("invalid block device path".to_owned());
         }
-        let output = Command::new("udisksctl")
-            .args(["unmount", "-b", device, "--no-user-interaction"])
-            .output()
-            .map_err(|err| format!("udisksctl unavailable: {err}"))?;
+        let output = crate::run_command_bounded(
+            Command::new("udisksctl").args(["unmount", "-b", device, "--no-user-interaction"]),
+            std::time::Duration::from_secs(12),
+        )
+        .map_err(|err| format!("udisksctl unavailable: {err}"))?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
             return Err(if stderr.is_empty() {
@@ -195,20 +196,20 @@ impl StorageService {
                 stderr
             });
         }
-        let _ = Command::new("udisksctl")
-            .args(["power-off", "-b", device, "--no-user-interaction"])
-            .output();
+        let _ = crate::run_command_bounded(
+            Command::new("udisksctl").args(["power-off", "-b", device, "--no-user-interaction"]),
+            std::time::Duration::from_secs(8),
+        );
         Ok(format!("Ejected {device}"))
     }
 
     /// Queries available (free for non-root users) bytes on the filesystem containing `path`.
     #[must_use]
     pub fn available_disk_space_bytes(path: &std::path::Path) -> Option<u64> {
-        let output = Command::new("df")
-            .args(["-B1", "--output=avail", "--"])
-            .arg(path)
-            .output()
-            .ok()?;
+        let mut cmd = Command::new("df");
+        cmd.args(["-B1", "--output=avail", "--"]).arg(path);
+        let output =
+            crate::run_command_bounded(&mut cmd, std::time::Duration::from_secs(3)).ok()?;
         if !output.status.success() {
             return None;
         }

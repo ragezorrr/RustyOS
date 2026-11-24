@@ -93,6 +93,7 @@ struct GreeterApp {
     pass_field: TextField,
     focus_password: bool,
     status_msg: String,
+    auth_rx: Option<std::sync::mpsc::Receiver<Result<(), String>>>,
     dirty: bool,
 }
 
@@ -127,21 +128,51 @@ impl GreeterApp {
             self.dirty = true;
             return;
         }
+        if self.auth_rx.is_some() {
+            return;
+        }
         let Ok(sock) = std::env::var("GREETD_SOCK") else {
             "GREETD_SOCK not set (use --demo for preview)".clone_into(&mut self.status_msg);
             self.dirty = true;
             return;
         };
-        match greetd::GreetdClient::connect(&PathBuf::from(sock))
-            .and_then(|mut c| c.authenticate_and_start(&user, &pass, self.cfg.session_cmd.clone()))
+        "Signing in...".clone_into(&mut self.status_msg);
+        self.dirty = true;
+        let session_cmd = self.cfg.session_cmd.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.auth_rx = Some(rx);
+        let _ = std::thread::Builder::new()
+            .name("rusty-greeter-auth".to_owned())
+            .spawn(move || {
+                let res = greetd::GreetdClient::connect(&PathBuf::from(sock))
+                    .and_then(|mut c| c.authenticate_and_start(&user, &pass, session_cmd));
+                let _ = tx.send(res);
+            });
+    }
+
+    fn poll_auth_result(&mut self) {
+        let outcome = match self
+            .auth_rx
+            .as_ref()
+            .map(std::sync::mpsc::Receiver::try_recv)
         {
-            Ok(()) => {
-                self.exit = true;
-            }
-            Err(err) => {
-                self.status_msg = err;
-                self.pass_field.buffer.set_text("");
-                self.dirty = true;
+            Some(Ok(res)) => Some(res),
+            Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => Some(Err(
+                "Authentication worker terminated unexpectedly".to_owned(),
+            )),
+            _ => None,
+        };
+        if let Some(res) = outcome {
+            self.auth_rx = None;
+            match res {
+                Ok(()) => {
+                    self.exit = true;
+                }
+                Err(err) => {
+                    self.status_msg = err;
+                    self.pass_field.buffer.set_text("");
+                    self.dirty = true;
+                }
             }
         }
     }
@@ -433,23 +464,25 @@ impl KeyboardHandler for GreeterApp {
             self.exit = true;
             return;
         }
-        let key = if event.keysym == Keysym::BackSpace {
-            Some(TextInputKey::Backspace)
+        let mut keys = Vec::new();
+        if event.keysym == Keysym::BackSpace {
+            keys.push(TextInputKey::Backspace);
         } else if event.keysym == Keysym::Delete {
-            Some(TextInputKey::Delete)
+            keys.push(TextInputKey::Delete);
         } else if event.keysym == Keysym::Left {
-            Some(TextInputKey::Left)
+            keys.push(TextInputKey::Left);
         } else if event.keysym == Keysym::Right {
-            Some(TextInputKey::Right)
-        } else {
-            event
-                .utf8
-                .as_deref()
-                .and_then(|s| s.chars().next())
-                .filter(|c| !c.is_control())
-                .map(TextInputKey::Char)
-        };
-        if let Some(k) = key {
+            keys.push(TextInputKey::Right);
+        } else if event.keysym == Keysym::Home {
+            keys.push(TextInputKey::Home);
+        } else if event.keysym == Keysym::End {
+            keys.push(TextInputKey::End);
+        } else if let Some(text) = event.utf8.as_deref() {
+            for ch in text.chars().filter(|c| !c.is_control()) {
+                keys.push(TextInputKey::Char(ch));
+            }
+        }
+        if !keys.is_empty() {
             let mods = InputModifiers {
                 ctrl: self.modifiers.ctrl,
                 shift: self.modifiers.shift,
@@ -461,7 +494,9 @@ impl KeyboardHandler for GreeterApp {
             } else {
                 &mut self.user_field
             };
-            let _ = field.handle_key(k, mods, Duration::ZERO, &mut self.fonts, &mut clip);
+            for k in keys {
+                let _ = field.handle_key(k, mods, Duration::ZERO, &mut self.fonts, &mut clip);
+            }
             self.dirty = true;
             self.draw(qh);
         }
@@ -599,11 +634,25 @@ fn main() {
         pass_field,
         focus_password: true,
         status_msg: String::new(),
+        auth_rx: None,
         dirty: true,
     };
 
     while !app.exit {
-        if event_queue.blocking_dispatch(&mut app).is_err() {
+        if app.auth_rx.is_some() {
+            let _ = event_queue.flush();
+            if let Some(guard) = event_queue.prepare_read() {
+                let _ = guard.read();
+            }
+            if event_queue.dispatch_pending(&mut app).is_err() {
+                break;
+            }
+            app.poll_auth_result();
+            if app.dirty && !app.exit {
+                app.draw(&qh);
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        } else if event_queue.blocking_dispatch(&mut app).is_err() {
             break;
         }
     }

@@ -103,6 +103,9 @@ pub(crate) struct FilesAppState {
     pub picker_mode: Option<FilePickerMode>,
     pub picker_title: Option<String>,
     pub picker_filename: String,
+    pub picker_filename_focused: bool,
+    pub picker_filename_field: rusty_ui::TextField,
+    pub picker_confirmed: bool,
     pub picker_cancelled: bool,
     pub window_title: String,
     pub window_size: WindowSizeState,
@@ -221,6 +224,19 @@ impl FilesAppState {
                 Some(FilePickerMode::SaveFile { default_name }) => default_name.clone(),
                 _ => String::new(),
             },
+            picker_filename_focused: matches!(
+                opts.picker_mode,
+                Some(FilePickerMode::SaveFile { .. })
+            ),
+            picker_filename_field: {
+                let mut field =
+                    rusty_ui::TextField::new(rusty_ui::Rect::new(0, 0, 200, 26), "File name");
+                if let Some(FilePickerMode::SaveFile { default_name }) = &opts.picker_mode {
+                    field.buffer.set_text(default_name);
+                }
+                field
+            },
+            picker_confirmed: false,
             picker_cancelled: false,
             window_title: opts
                 .picker_title
@@ -691,12 +707,14 @@ impl FilesAppState {
         for path in chosen {
             println!("{}", path.display());
         }
+        self.picker_confirmed = true;
         self.picker_cancelled = false;
         self.run_state = AppRunState::Exiting;
     }
 
     /// Cancels the active `FileChooser` dialog and exits with status 1 (`RUSTYOS-154`).
     pub(crate) fn cancel_file_picker(&mut self) {
+        self.picker_confirmed = false;
         self.picker_cancelled = true;
         self.run_state = AppRunState::Exiting;
     }
@@ -807,21 +825,92 @@ impl FilesAppState {
     }
 }
 
+/// Validates archive member paths to prevent Zip-Slip / Tar-Slip directory traversal (`RUSTYOS-168`).
+pub(crate) fn validate_archive_member_paths(listing_output: &str) -> Result<(), String> {
+    for raw_line in listing_output.lines() {
+        let entry = raw_line.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        if entry.starts_with('/') || entry.starts_with('\\') || entry.contains('\0') {
+            return Err(format!("Blocked unsafe absolute archive entry: {entry}"));
+        }
+        let path = Path::new(entry);
+        if path.components().any(|c| {
+            matches!(
+                c,
+                std::path::Component::ParentDir | std::path::Component::RootDir
+            )
+        }) {
+            return Err(format!("Blocked archive traversal entry: {entry}"));
+        }
+    }
+    Ok(())
+}
+
+fn check_archive_safety(archive_path: &Path, is_zip: bool) -> Result<(), String> {
+    let mut cmd = if is_zip {
+        let mut c = std::process::Command::new("unzip");
+        c.args(["-Z1", "--"]).arg(archive_path);
+        c
+    } else {
+        let mut c = std::process::Command::new("tar");
+        c.arg("-tf").arg(archive_path);
+        c
+    };
+    match rusty_services::run_command_bounded(&mut cmd, std::time::Duration::from_secs(15)) {
+        Ok(out) if out.status.success() => {
+            validate_archive_member_paths(&String::from_utf8_lossy(&out.stdout))
+        }
+        Ok(out) => {
+            let err = String::from_utf8_lossy(&out.stderr).trim().to_owned();
+            Err(if err.is_empty() {
+                "Failed to inspect archive entries before extraction".to_owned()
+            } else {
+                err
+            })
+        }
+        Err(_) => Ok(()),
+    }
+}
+
 fn extract_archive_to_dir(
     archive_path: &Path,
     parent_dir: &Path,
     name: &str,
 ) -> Result<String, String> {
-    let archive_str = archive_path.to_string_lossy();
-    let dir_str = parent_dir.to_string_lossy();
-    let ok_msg = format!("Extracted {name}");
     let is_zip = archive_path
         .extension()
         .is_some_and(|ext| ext.eq_ignore_ascii_case("zip"));
+    check_archive_safety(archive_path, is_zip)?;
+
+    // Always extract into a fresh non-colliding sibling subfolder so existing files are never
+    // silently overwritten (`RUSTYOS-168`).
+    let stem = archive_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or("extracted");
+    let raw_target = parent_dir.join(stem);
+    let dest_dir = if raw_target.exists() {
+        rusty_services::file_manager::pick_unique_copy_path(&raw_target)
+    } else {
+        raw_target
+    };
+    std::fs::create_dir_all(&dest_dir)
+        .map_err(|err| format!("Failed to create extraction folder: {err}"))?;
+
+    let archive_str = archive_path.to_string_lossy();
+    let dir_str = dest_dir.to_string_lossy();
+    let folder_name = dest_dir
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(stem);
+    let ok_msg = format!("Extracted {name} to {folder_name}");
     if is_zip {
         run_archive_command(
             "unzip",
-            &["-o", &archive_str, "-d", &dir_str],
+            &["-n", "-q", &archive_str, "-d", &dir_str],
             parent_dir,
             ok_msg.clone(),
         )
@@ -844,7 +933,7 @@ fn extract_archive_to_dir(
     } else {
         run_archive_command(
             "tar",
-            &["-xf", &archive_str, "-C", &dir_str],
+            &["--no-same-owner", "-xf", &archive_str, "-C", &dir_str],
             parent_dir,
             ok_msg.clone(),
         )
@@ -865,18 +954,22 @@ fn compress_to_zip_archive(
     item_name: &str,
     zip_name: &str,
 ) -> Result<String, String> {
+    if item_name.is_empty() || item_name.contains('/') || item_name.contains('\0') {
+        return Err("Invalid item name for archive compression".to_owned());
+    }
     let zip_str = zip_path.to_string_lossy();
     let ok_msg = format!("Created {zip_name}");
+    // Pass `--` before `item_name` so filenames starting with `-` can never be parsed as CLI flags (`RUSTYOS-168`).
     run_archive_command(
         "zip",
-        &["-r", "-q", &zip_str, item_name],
+        &["-r", "-q", &zip_str, "--", item_name],
         parent_dir,
         ok_msg.clone(),
     )
     .or_else(|_| {
         run_archive_command(
             "bsdtar",
-            &["-a", "-cf", &zip_str, item_name],
+            &["-a", "-cf", &zip_str, "--", item_name],
             parent_dir,
             ok_msg.clone(),
         )
@@ -1538,7 +1631,14 @@ mod tests {
         extract_archive_to_dir(&zip_path, &dst_dir, "hello.txt.zip")
             .map_err(std::io::Error::other)?;
         assert_eq!(
-            fs::read_to_string(dst_dir.join("hello.txt"))?,
+            fs::read_to_string(dst_dir.join("hello.txt").join("hello.txt"))?,
+            "rustyos zip test"
+        );
+        // Re-extracting never overwrites the existing folder (`RUSTYOS-168`).
+        extract_archive_to_dir(&zip_path, &dst_dir, "hello.txt.zip")
+            .map_err(std::io::Error::other)?;
+        assert_eq!(
+            fs::read_to_string(dst_dir.join("hello copy.txt").join("hello.txt"))?,
             "rustyos zip test"
         );
         Ok(())
@@ -1585,5 +1685,26 @@ mod tests {
             ExecutableFileState::NotExecutable
         );
         Ok(())
+    }
+
+    #[test]
+    fn archive_member_validator_blocks_zip_slip_and_save_file_focuses_filename() {
+        assert!(validate_archive_member_paths("docs/readme.txt\nimg/logo.png\n").is_ok());
+        assert!(validate_archive_member_paths("../escape.txt\n").is_err());
+        assert!(validate_archive_member_paths("nested/../../etc/passwd\n").is_err());
+        assert!(validate_archive_member_paths("/etc/shadow\n").is_err());
+
+        let opts = StartupOptions {
+            picker_mode: Some(FilePickerMode::SaveFile {
+                default_name: "report.pdf".to_owned(),
+            }),
+            ..StartupOptions::default()
+        };
+        let mut state = FilesAppState::new(UserFileLocations::detect(), &opts);
+        assert!(state.picker_filename_focused);
+        assert!(state.has_focused_text_input());
+        state.cancel_file_picker();
+        assert!(state.picker_cancelled);
+        assert!(!state.picker_confirmed);
     }
 }

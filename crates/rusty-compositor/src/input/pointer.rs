@@ -727,27 +727,24 @@ impl RustyCompositorState {
                     return;
                 }
                 if drag.drop_to_trash {
-                    if let Some(trash_root) =
-                        crate::state::context_menu_actions::resolve_trash_root()
-                        && rusty_services::file_manager::move_to_trash(
-                            &drag.dragged_path,
-                            &trash_root,
-                        )
-                        .is_ok()
-                    {
-                        self.show_osd("Moved to Trash", None, false);
-                        self.selected_desktop_items.remove(&drag.dragged_path);
-                        self.resync_desktop_items();
-                        self.save_desktop_grid_layout();
-                        self.update_trash_full_status();
-                    }
+                    self.spawn_background_trash_drop(vec![drag.dragged_path], true);
                     self.shell_redraw_needed = true;
                     return;
                 }
                 if let Some(dest_dir) = drag.target_hover_dir {
                     if let Some(file_name) = drag.dragged_path.file_name() {
-                        let dest_path = dest_dir.join(file_name);
-                        if let Err(err) = std::fs::rename(&drag.dragged_path, &dest_path) {
+                        let candidate = dest_dir.join(file_name);
+                        let dest_path = if candidate.exists() {
+                            rusty_services::file_manager::pick_unique_copy_path(&candidate)
+                        } else {
+                            candidate
+                        };
+                        if dest_path == drag.dragged_path || dest_path.exists() {
+                            tracing::warn!(
+                                ?dest_path,
+                                "Skipped desktop drop into folder to prevent silent overwrite"
+                            );
+                        } else if let Err(err) = std::fs::rename(&drag.dragged_path, &dest_path) {
                             tracing::warn!(?err, "Failed to move desktop item into folder");
                         } else {
                             self.resync_desktop_items();

@@ -1299,6 +1299,21 @@
                            `Esc` возврат `previous_focus`); интерактивный `Workspace Overview` (`OverviewHit::CloseCard`,
                            hover карточек и `Desktop 1..9`, drag-to-workspace `OverviewCardDragState`, клавиатурная
                            навигация по сетке) (`0` новых крейтов, `rusty-compositor` без `unsafe`)
+
+  D-111   2026-11-24  Accepted (ADR-0097)  Фаза 1 аудита (`RUSTYOS-168`): харденинг безопасности, целостности ФС,
+                           порталов, гритера и установщика: запрет IPC unlock при `require_password_on_lock`
+                           и блокировка интерактивных IPC при lock; ранний выход `frame_composer.rs` при
+                           `screen_locked`; фоновый Desktop trash + защита `rename`; `nmcli --passwd-file` (`0600`)
+                           + `--`; `run_command_bounded` с таймаутами; защита `pick_unique_sibling_path`,
+                           `(dev, ino)` в `copy_file_chunked` и запрет `..` в `restore_from_trash`; `conn.close()`
+                           в `SystemSignalMonitorHandle::drop` и `child.wait()` в `updates.rs`; async `FileChooser`
+                           с `WAYLAND_DISPLAY`/`Request.Close`, `Settings.SettingChanged`, `parse_portal_color_scheme_from_toml`;
+                           защита архивов (`validate_archive_member_paths`, уникальная подпапка, `unzip -n`, `--`)
+                           и редактируемый `--save-file` `TextField` + exit code `1` в `rusty-files`; `timezone_idx`,
+                           устранение pipe-deadlock, отключение `demo_target_disks()` в live-режиме и RFC 1123 `hostname`
+                           в `rusty-installer`; асинхронный `rusty-greeter` с `15 s` таймаутом; фиксы
+                           `rustyos_installer_service.rs`, `rustyos-install.sh`, `install.sh`, `rustyos-session`
+                           и `packaging/arch/{rustyos-greeter.sysusers, PKGBUILD}` (`0` новых крейтов, без `unsafe`)
   -----------------------------------------------------------------------
 
 ## Открытые решения

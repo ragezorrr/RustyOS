@@ -245,24 +245,23 @@ pub(crate) fn discover_target_disks(demo_mode: bool) -> Vec<TargetDiskInfo> {
     if demo_mode {
         return demo_target_disks();
     }
-    let out = Command::new("lsblk")
-        .args([
-            "-Jpb",
-            "-o",
-            "NAME,KNAME,MODEL,SIZE,START,LOG-SEC,TYPE,TRAN,RM,FSTYPE,PARTTYPE,LABEL,PTTYPE,MOUNTPOINT,MOUNTPOINTS",
-        ])
-        .output();
-    match out {
-        Ok(o) if o.status.success() => {
-            let parsed = parse_lsblk_json(&String::from_utf8_lossy(&o.stdout));
-            if parsed.is_empty() {
-                demo_target_disks()
-            } else {
-                parsed
-            }
+    // Try rich column list first, then a legacy-compatible column list for older `util-linux`.
+    // Never fall back to fabricated `demo_target_disks()` in live mode (`RUSTYOS-168`).
+    let column_sets = [
+        "NAME,KNAME,MODEL,SIZE,START,LOG-SEC,TYPE,TRAN,RM,FSTYPE,PARTTYPE,LABEL,PTTYPE,MOUNTPOINT,MOUNTPOINTS",
+        "NAME,KNAME,MODEL,SIZE,TYPE,TRAN,RM,FSTYPE,LABEL,MOUNTPOINT",
+    ];
+    for cols in column_sets {
+        let mut cmd = Command::new("lsblk");
+        cmd.args(["-Jpb", "-o", cols]);
+        if let Ok(o) =
+            rusty_services::run_command_bounded(&mut cmd, std::time::Duration::from_secs(8))
+            && o.status.success()
+        {
+            return parse_lsblk_json(&String::from_utf8_lossy(&o.stdout));
         }
-        _ => demo_target_disks(),
     }
+    Vec::new()
 }
 
 /// Builds candidate Dual-Boot targets (unallocated regions first, then reusable partitions).

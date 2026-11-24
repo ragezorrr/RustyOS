@@ -1858,6 +1858,11 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
             logical_size,
             &lock_view,
         ));
+        // Once the opaque lock screen veil is fully settled, never composite hidden desktop
+        // windows, layer-shell surfaces, popups, or IME overlays underneath it (`RUSTYOS-168`).
+        if state.screen_locked && lock_progress >= 0.99 {
+            return render_list;
+        }
     }
 
     push_ime_popup_elements(

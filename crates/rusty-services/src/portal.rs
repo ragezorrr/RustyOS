@@ -916,6 +916,8 @@ struct PortalSharedState {
     next_request_id: AtomicU64,
     events_tx: Sender<PortalEvent>,
     replies_tap: Mutex<Option<Sender<PortalReply>>>,
+    wayland_display: Mutex<Option<String>>,
+    ipc_socket: Mutex<Option<String>>,
 }
 
 impl PortalSharedState {
@@ -1603,6 +1605,8 @@ impl Default for PortalHandle {
             next_request_id: AtomicU64::new(1),
             events_tx,
             replies_tap: Mutex::new(None),
+            wayland_display: Mutex::new(None),
+            ipc_socket: Mutex::new(None),
         });
         Self {
             events_rx: Mutex::new(events_rx),
@@ -1650,6 +1654,8 @@ impl PortalHandle {
             next_request_id: AtomicU64::new(1),
             events_tx,
             replies_tap: Mutex::new(None),
+            wayland_display: Mutex::new(None),
+            ipc_socket: Mutex::new(None),
         });
         let stop_flag = Arc::new(AtomicBool::new(false));
         let conn_slot = Arc::new(Mutex::new(None));
@@ -1696,6 +1702,8 @@ impl PortalHandle {
             next_request_id: AtomicU64::new(1),
             events_tx,
             replies_tap: Mutex::new(replies_tx),
+            wayland_display: Mutex::new(None),
+            ipc_socket: Mutex::new(None),
         });
         Self {
             events_rx: Mutex::new(events_rx),
@@ -1704,6 +1712,46 @@ impl PortalHandle {
             conn_slot: Arc::new(Mutex::new(None)),
             worker: None,
         }
+    }
+
+    /// Configures the compositor's `WAYLAND_DISPLAY` and optional `RUSTYOS_IPC_SOCKET` passed to
+    /// spawned portal helpers such as `rusty-files` (`RUSTYOS-168`).
+    pub fn set_session_env(&self, wayland_display: Option<String>, ipc_socket: Option<String>) {
+        if let Ok(mut guard) = self.shared.wayland_display.lock() {
+            *guard = wayland_display.filter(|s| !s.trim().is_empty());
+        }
+        if let Ok(mut guard) = self.shared.ipc_socket.lock() {
+            *guard = ipc_socket.filter(|s| !s.trim().is_empty());
+        }
+    }
+
+    /// Emits `org.freedesktop.impl.portal.Settings.SettingChanged` for `color-scheme` so GTK4,
+    /// Flatpak, Electron, and Firefox apps switch Light/Dark live without restarting (`RUSTYOS-168`).
+    pub fn notify_color_scheme_changed(&self, is_dark: bool) {
+        let conn = self.conn_slot.lock().ok().and_then(|guard| guard.clone());
+        let Some(conn) = conn else {
+            return;
+        };
+        let scheme: u32 = if is_dark { 1 } else { 2 };
+        let _ = thread::Builder::new()
+            .name("rusty-portal-theme-sig".to_owned())
+            .spawn(move || {
+                zbus::block_on(async {
+                    if let Ok(iface_ref) = conn
+                        .object_server()
+                        .interface::<_, SettingsPortalIface>(PORTAL_OBJECT_PATH)
+                        .await
+                    {
+                        let _ = SettingsPortalIface::setting_changed(
+                            iface_ref.signal_emitter(),
+                            "org.freedesktop.appearance",
+                            "color-scheme",
+                            Value::from(scheme),
+                        )
+                        .await;
+                    }
+                });
+            });
     }
 
     /// Updates the desktop snapshot (outputs, windows, lock status) read by incoming D-Bus calls.
@@ -1772,44 +1820,169 @@ impl PortalHandle {
     }
 }
 
-struct FileChooserPortalIface;
+struct FileChooserRequestIface {
+    cancelled: Arc<AtomicBool>,
+    child: Arc<Mutex<Option<std::process::Child>>>,
+}
+
+#[interface(name = "org.freedesktop.impl.portal.Request")]
+impl FileChooserRequestIface {
+    fn close(&self) {
+        self.cancelled.store(true, Ordering::Release);
+        if let Ok(mut guard) = self.child.lock()
+            && let Some(ref mut child) = *guard
+        {
+            let _ = child.kill();
+        }
+    }
+}
+
+struct FileChooserPortalIface {
+    shared: Arc<PortalSharedState>,
+}
 
 impl FileChooserPortalIface {
-    fn run_picker(args: &[String]) -> (u32, HashMap<String, OwnedValue>) {
-        let mut candidates = Vec::new();
-        if let Ok(exe) = env::current_exe()
-            && let Some(dir) = exe.parent()
-        {
-            candidates.push(dir.join("rusty-files"));
+    async fn run_picker_async(
+        &self,
+        conn: &zbus::Connection,
+        handle: &OwnedObjectPath,
+        args: Vec<String>,
+    ) -> (u32, HashMap<String, OwnedValue>) {
+        if self.shared.is_screen_locked() {
+            return (PORTAL_RESPONSE_CANCELLED, HashMap::new());
         }
-        candidates.push(PathBuf::from("/usr/bin/rusty-files"));
-        candidates.push(PathBuf::from("rusty-files"));
+        let wayland_display = self
+            .shared
+            .wayland_display
+            .lock()
+            .ok()
+            .and_then(|g| g.clone());
+        let ipc_socket = self.shared.ipc_socket.lock().ok().and_then(|g| g.clone());
 
-        for bin in candidates {
-            if let Ok(output) = Command::new(&bin)
-                .args(args)
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::null())
-                .output()
-            {
-                if !output.status.success() {
-                    return (PORTAL_RESPONSE_CANCELLED, HashMap::new());
-                }
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                let uris = parse_picker_stdout_to_uris(&stdout);
-                if uris.is_empty() {
-                    return (PORTAL_RESPONSE_CANCELLED, HashMap::new());
-                }
-                let mut results = HashMap::new();
-                if let Ok(val) = OwnedValue::try_from(Value::from(uris)) {
-                    results.insert("uris".to_owned(), val);
-                }
-                return (PORTAL_RESPONSE_OK, results);
-            }
-        }
-        (PORTAL_RESPONSE_OTHER, HashMap::new())
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let child_slot: Arc<Mutex<Option<std::process::Child>>> = Arc::new(Mutex::new(None));
+        let req_iface = FileChooserRequestIface {
+            cancelled: Arc::clone(&cancelled),
+            child: Arc::clone(&child_slot),
+        };
+        let _ = conn.object_server().at(handle.as_str(), req_iface).await;
+
+        let (tx, rx) = AsyncSignal::<(u32, HashMap<String, OwnedValue>)>::channel();
+        let bg_cancelled = Arc::clone(&cancelled);
+        let bg_child = Arc::clone(&child_slot);
+        let spawned = thread::Builder::new()
+            .name("rusty-portal-filechooser".to_owned())
+            .spawn(move || {
+                let res = run_file_chooser_blocking(
+                    &args,
+                    wayland_display.as_deref(),
+                    ipc_socket.as_deref(),
+                    &bg_cancelled,
+                    &bg_child,
+                );
+                tx.send(res);
+            });
+
+        let result = if spawned.is_ok() {
+            rx.await
+        } else {
+            (PORTAL_RESPONSE_OTHER, HashMap::new())
+        };
+        let _ = conn
+            .object_server()
+            .remove::<FileChooserRequestIface, _>(handle.as_str())
+            .await;
+        result
     }
+}
+
+fn run_file_chooser_blocking(
+    args: &[String],
+    wayland_display: Option<&str>,
+    ipc_socket: Option<&str>,
+    cancelled: &AtomicBool,
+    child_slot: &Mutex<Option<std::process::Child>>,
+) -> (u32, HashMap<String, OwnedValue>) {
+    use std::io::Read;
+
+    let mut candidates = Vec::new();
+    if let Ok(exe) = env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        candidates.push(dir.join("rusty-files"));
+    }
+    candidates.push(PathBuf::from("/usr/bin/rusty-files"));
+    candidates.push(PathBuf::from("rusty-files"));
+
+    for bin in candidates {
+        if cancelled.load(Ordering::Acquire) {
+            return (PORTAL_RESPONSE_CANCELLED, HashMap::new());
+        }
+        let mut cmd = Command::new(&bin);
+        cmd.args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        if let Some(wd) = wayland_display {
+            cmd.env("WAYLAND_DISPLAY", wd);
+        }
+        if let Some(ipc) = ipc_socket {
+            cmd.env("RUSTYOS_IPC_SOCKET", ipc);
+        }
+        let Ok(mut child) = cmd.spawn() else {
+            continue;
+        };
+        let mut stdout_pipe = child.stdout.take();
+        if let Ok(mut guard) = child_slot.lock() {
+            *guard = Some(child);
+        }
+        let out_reader = thread::spawn(move || {
+            let mut buf = Vec::new();
+            if let Some(ref mut p) = stdout_pipe {
+                let _ = p.read_to_end(&mut buf);
+            }
+            buf
+        });
+        let status = loop {
+            if cancelled.load(Ordering::Acquire)
+                && let Ok(mut guard) = child_slot.lock()
+                && let Some(ref mut c) = *guard
+            {
+                let _ = c.kill();
+            }
+            let poll = if let Ok(mut guard) = child_slot.lock() {
+                if let Some(ref mut c) = *guard {
+                    c.try_wait().ok().flatten()
+                } else {
+                    break None;
+                }
+            } else {
+                break None;
+            };
+            if let Some(st) = poll {
+                if let Ok(mut guard) = child_slot.lock() {
+                    *guard = None;
+                }
+                break Some(st);
+            }
+            thread::sleep(Duration::from_millis(20));
+        };
+        let stdout_bytes = out_reader.join().unwrap_or_default();
+        if cancelled.load(Ordering::Acquire) || !status.is_some_and(|s| s.success()) {
+            return (PORTAL_RESPONSE_CANCELLED, HashMap::new());
+        }
+        let stdout = String::from_utf8_lossy(&stdout_bytes);
+        let uris = parse_picker_stdout_to_uris(&stdout);
+        if uris.is_empty() {
+            return (PORTAL_RESPONSE_CANCELLED, HashMap::new());
+        }
+        let mut results = HashMap::new();
+        if let Ok(val) = OwnedValue::try_from(Value::from(uris)) {
+            results.insert("uris".to_owned(), val);
+        }
+        return (PORTAL_RESPONSE_OK, results);
+    }
+    (PORTAL_RESPONSE_OTHER, HashMap::new())
 }
 
 /// Parses newline-separated absolute paths printed by `rusty-files` picker mode into `file://` URIs (`RUSTYOS-154`).
@@ -1869,43 +2042,46 @@ pub fn build_file_chooser_cli_args<S: std::hash::BuildHasher>(
 #[interface(name = "org.freedesktop.impl.portal.FileChooser")]
 #[allow(clippy::unused_self, clippy::needless_pass_by_value)]
 impl FileChooserPortalIface {
-    fn open_file(
+    async fn open_file(
         &self,
+        #[zbus(connection)] conn: &zbus::Connection,
         handle: OwnedObjectPath,
         app_id: String,
         parent_window: String,
         title: String,
         options: HashMap<String, OwnedValue>,
     ) -> (u32, HashMap<String, OwnedValue>) {
-        let _ = (handle, app_id, parent_window);
+        let _ = (app_id, parent_window);
         let args = build_file_chooser_cli_args(false, false, &title, &options);
-        Self::run_picker(&args)
+        self.run_picker_async(conn, &handle, args).await
     }
 
-    fn save_file(
+    async fn save_file(
         &self,
+        #[zbus(connection)] conn: &zbus::Connection,
         handle: OwnedObjectPath,
         app_id: String,
         parent_window: String,
         title: String,
         options: HashMap<String, OwnedValue>,
     ) -> (u32, HashMap<String, OwnedValue>) {
-        let _ = (handle, app_id, parent_window);
+        let _ = (app_id, parent_window);
         let args = build_file_chooser_cli_args(true, false, &title, &options);
-        Self::run_picker(&args)
+        self.run_picker_async(conn, &handle, args).await
     }
 
-    fn save_files(
+    async fn save_files(
         &self,
+        #[zbus(connection)] conn: &zbus::Connection,
         handle: OwnedObjectPath,
         app_id: String,
         parent_window: String,
         title: String,
         options: HashMap<String, OwnedValue>,
     ) -> (u32, HashMap<String, OwnedValue>) {
-        let _ = (handle, app_id, parent_window);
+        let _ = (app_id, parent_window);
         let args = build_file_chooser_cli_args(false, true, &title, &options);
-        Self::run_picker(&args)
+        self.run_picker_async(conn, &handle, args).await
     }
 
     #[zbus(property)]
@@ -1914,8 +2090,18 @@ impl FileChooserPortalIface {
     }
 }
 
+/// Parses `org.freedesktop.appearance` `color-scheme` (`1` = Dark, `2` = Light) from a RustyOS
+/// `config.toml` payload while respecting `[ui]` sections and inline comments (`RUSTYOS-168`).
+#[must_use]
+pub fn parse_portal_color_scheme_from_toml(text: &str) -> u32 {
+    match crate::file_manager::detect_system_theme_from_toml(text) {
+        Some(crate::file_manager::FilesThemeMode::Dark) => 1,
+        Some(crate::file_manager::FilesThemeMode::Light) | None => 2,
+    }
+}
+
 /// Reads the active `org.freedesktop.appearance` `color-scheme` value (`1` = Dark, `2` = Light)
-/// from `~/.config/rustyos/config.toml` (`RUSTYOS-154`).
+/// from `~/.config/rustyos/config.toml` (`RUSTYOS-154`, `RUSTYOS-168`).
 #[must_use]
 pub fn detect_portal_color_scheme() -> u32 {
     let base = env::var_os("XDG_CONFIG_HOME")
@@ -1923,26 +2109,12 @@ pub fn detect_portal_color_scheme() -> u32 {
         .map(PathBuf::from)
         .or_else(|| env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")));
     let Some(cfg_dir) = base else {
-        return 1;
+        return 2;
     };
     let Ok(text) = std::fs::read_to_string(cfg_dir.join("rustyos/config.toml")) else {
-        return 1;
+        return 2;
     };
-    for line in text.lines() {
-        let trimmed = line.trim();
-        if let Some((k, v)) = trimmed.split_once('=')
-            && k.trim() == "theme"
-        {
-            let val = v.trim().trim_matches('"').to_ascii_lowercase();
-            if val == "light" {
-                return 2;
-            }
-            if val == "dark" {
-                return 1;
-            }
-        }
-    }
-    1
+    parse_portal_color_scheme_from_toml(&text)
 }
 
 struct SettingsPortalIface;
@@ -1989,6 +2161,14 @@ impl SettingsPortalIface {
         out
     }
 
+    #[zbus(signal)]
+    async fn setting_changed(
+        emitter: &SignalEmitter<'_>,
+        namespace: &str,
+        key: &str,
+        value: Value<'_>,
+    ) -> zbus::Result<()>;
+
     #[zbus(property)]
     fn version(&self) -> u32 {
         2
@@ -2007,10 +2187,13 @@ fn run_portal_worker(
         let screencast_iface = ScreenCastPortalIface {
             shared: Arc::clone(shared),
         };
+        let file_chooser_iface = FileChooserPortalIface {
+            shared: Arc::clone(shared),
+        };
         zbus::connection::Builder::session()?
             .serve_at(PORTAL_OBJECT_PATH, screenshot_iface)?
             .serve_at(PORTAL_OBJECT_PATH, screencast_iface)?
-            .serve_at(PORTAL_OBJECT_PATH, FileChooserPortalIface)?
+            .serve_at(PORTAL_OBJECT_PATH, file_chooser_iface)?
             .serve_at(PORTAL_OBJECT_PATH, SettingsPortalIface)?
             .name(PORTAL_DBUS_NAME)?
             .build()
@@ -2200,5 +2383,13 @@ mod tests {
             ]
         );
         Ok(())
+    }
+
+    #[test]
+    fn portal_color_scheme_parser_respects_ui_section_and_comments() {
+        let toml_light = "[other]\ntheme = \"dark\"\n[ui]\ntheme = \"light\" # user preference\n";
+        assert_eq!(parse_portal_color_scheme_from_toml(toml_light), 2);
+        let toml_dark = "[ui]\ntheme = \"dark\" # dark mode\n";
+        assert_eq!(parse_portal_color_scheme_from_toml(toml_dark), 1);
     }
 }

@@ -268,10 +268,10 @@ impl NetworkService {
         }
         let clean_pw = password.filter(|pw| !pw.is_empty());
         if clean_pw.is_none()
-            && let Ok(out) = Command::new("nmcli")
-                .args(["connection", "up", "id", trimmed])
-                .stdin(Stdio::null())
-                .output()
+            && let Ok(out) = crate::run_command_bounded(
+                Command::new("nmcli").args(["connection", "up", "id", "--", trimmed]),
+                std::time::Duration::from_secs(15),
+            )
         {
             if out.status.success() {
                 return Ok(());
@@ -286,13 +286,20 @@ impl NetworkService {
             }
         }
 
+        let pw_file_guard = if let Some(pw) = clean_pw {
+            match TempNmcliPasswdFile::create(pw) {
+                Ok(guard) => Some(guard),
+                Err(err) => return Err(format!("Unable to prepare Wi-Fi credentials file: {err}")),
+            }
+        } else {
+            None
+        };
         let mut cmd = Command::new("nmcli");
-        cmd.args(["device", "wifi", "connect", trimmed])
-            .stdin(Stdio::null());
-        if let Some(pw) = clean_pw {
-            cmd.args(["password", pw]);
+        if let Some(ref guard) = pw_file_guard {
+            cmd.arg("--passwd-file").arg(&guard.path);
         }
-        match cmd.output() {
+        cmd.args(["device", "wifi", "connect", "--", trimmed]);
+        match crate::run_command_bounded(&mut cmd, std::time::Duration::from_secs(20)) {
             Ok(out) if out.status.success() => Ok(()),
             Ok(out) => {
                 let err = String::from_utf8_lossy(&out.stderr).trim().to_owned();
@@ -364,12 +371,51 @@ impl NetworkService {
     }
 }
 
+struct TempNmcliPasswdFile {
+    path: std::path::PathBuf,
+}
+
+impl TempNmcliPasswdFile {
+    fn create(password: &str) -> std::io::Result<Self> {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let path = std::env::temp_dir().join(format!(
+            "rustyos-nmcli-pw-{}-{seq}-{nanos}.tmp",
+            std::process::id()
+        ));
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)?;
+        // Format required by `nmcli --passwd-file` (never exposes WPA secret in `/proc/<pid>/cmdline`).
+        let clean = password.replace(['\r', '\n'], "");
+        writeln!(file, "802-11-wireless-security.psk:{clean}")?;
+        file.flush()?;
+        Ok(Self { path })
+    }
+}
+
+impl Drop for TempNmcliPasswdFile {
+    fn drop(&mut self) {
+        let _ = std::fs::write(&self.path, [0_u8; 64]);
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
 fn run_nmcli_connection_action(action: &str, ssid: &str) -> Result<(), String> {
-    match Command::new("nmcli")
-        .args(["connection", action, "id", ssid])
-        .stdin(Stdio::null())
-        .output()
-    {
+    match crate::run_command_bounded(
+        Command::new("nmcli").args(["connection", action, "id", "--", ssid]),
+        std::time::Duration::from_secs(12),
+    ) {
         Ok(out) if out.status.success() => Ok(()),
         Ok(out) => Err(format_nmcli_action_error(
             action,

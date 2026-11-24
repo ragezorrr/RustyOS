@@ -147,6 +147,7 @@ pub(crate) enum OobeStep {
     Hello,
     Keyboard,
     Network,
+    #[allow(dead_code)]
     Account,
     Appearance,
     Finish,
@@ -926,8 +927,7 @@ impl InstallerAppState {
                 self.oobe_step = match self.oobe_step {
                     OobeStep::Hello | OobeStep::Keyboard => OobeStep::Hello,
                     OobeStep::Network => OobeStep::Keyboard,
-                    OobeStep::Account => OobeStep::Network,
-                    OobeStep::Appearance => OobeStep::Account,
+                    OobeStep::Account | OobeStep::Appearance => OobeStep::Network,
                     OobeStep::Finish => OobeStep::Appearance,
                 };
             }
@@ -1041,17 +1041,11 @@ impl InstallerAppState {
                 self.oobe_step = OobeStep::Network;
             }
             OobeStep::Network => {
-                self.caret.focused_field = Some(TextFieldId::FullName);
-                self.oobe_step = OobeStep::Account;
+                // Skip post-install account creation (the user account is already created and logged in) (`RUSTYOS-168`).
+                self.caret.focused_field = None;
+                self.oobe_step = OobeStep::Appearance;
             }
             OobeStep::Account => {
-                if self.env_kind != RunEnv::Demo
-                    && !self.account.password.is_empty()
-                    && let Err(err) = self.validate_account_form()
-                {
-                    self.form_error = Some(err);
-                    return;
-                }
                 self.caret.focused_field = None;
                 self.oobe_step = OobeStep::Appearance;
             }
@@ -1090,10 +1084,12 @@ impl InstallerAppState {
         let h = self.account.hostname.trim();
         let valid_host = !h.is_empty()
             && h.len() <= 63
+            && !h.starts_with('-')
+            && !h.ends_with('-')
             && h.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-');
         if !valid_host {
             return Err(String::from(
-                "Computer name may contain only letters, digits, and '-'",
+                "Computer name must use letters, digits, and '-' (not at start/end)",
             ));
         }
         if !self.dry_run && self.account.password.len() < 4 {
@@ -1258,7 +1254,10 @@ impl InstallerAppState {
 
     #[must_use]
     pub(crate) fn build_install_args(&self) -> Vec<String> {
-        let (locale, _, tz) = LANGUAGE_OPTIONS[self.language_idx];
+        let (locale, _, default_tz) = LANGUAGE_OPTIONS[self.language_idx];
+        let tz = TIMEZONE_OPTIONS
+            .get(self.timezone_idx)
+            .map_or(default_tz, |&(zone, _)| zone);
         let (kb_layout, _, _, keymap) = KEYBOARD_PRESETS[self.keyboard_idx];
         let appearance = match self.theme_choice {
             ThemeChoice::Light => "light",
@@ -1523,9 +1522,23 @@ fn execute_install_process(
         return;
     };
 
-    if !dry_run && let Some(mut stdin) = child.stdin.take() {
-        let _ = writeln!(stdin, "{password}");
+    if let Some(mut stdin) = child.stdin.take() {
+        if !dry_run {
+            let _ = writeln!(stdin, "{password}");
+        }
+        drop(stdin);
     }
+
+    // Drain `stderr` concurrently in a dedicated thread so >64 KiB on stderr can never deadlock
+    // `stdout` / `child.wait()` (`RUSTYOS-168`).
+    let stderr_handle = child.stderr.take().map(|se| {
+        thread::spawn(move || {
+            BufReader::new(se)
+                .lines()
+                .map_while(Result::ok)
+                .collect::<Vec<_>>()
+        })
+    });
 
     if let Some(stdout) = child.stdout.take() {
         for line in BufReader::new(stdout).lines().map_while(Result::ok) {
@@ -1546,15 +1559,8 @@ fn execute_install_process(
     }
 
     let status = child.wait();
-    let raw_stderr = child
-        .stderr
-        .take()
-        .map(|se| {
-            BufReader::new(se)
-                .lines()
-                .map_while(Result::ok)
-                .collect::<Vec<_>>()
-        })
+    let raw_stderr = stderr_handle
+        .and_then(|h| h.join().ok())
         .unwrap_or_default();
 
     for line in &raw_stderr {
@@ -1955,8 +1961,6 @@ mod tests {
         st.go_next(now);
         assert_eq!(st.oobe_step, OobeStep::Network);
         st.go_next(now);
-        assert_eq!(st.oobe_step, OobeStep::Account);
-        st.go_next(now);
         assert_eq!(st.oobe_step, OobeStep::Appearance);
         st.choose_accent(2, false);
         assert_eq!(st.accent_index, 2);
@@ -1964,6 +1968,8 @@ mod tests {
         assert_eq!(st.oobe_step, OobeStep::Finish);
         st.go_back();
         assert_eq!(st.oobe_step, OobeStep::Appearance);
+        st.go_back();
+        assert_eq!(st.oobe_step, OobeStep::Network);
     }
 
     #[test]
@@ -2123,5 +2129,36 @@ error: failed retrieving file 'core.db' from mirror.example.org : Could not reso
         clear_oobe_marker_in_dir(&tmp);
         assert!(!marker.exists());
         let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn install_args_honor_selected_timezone_and_rfc1123_hostname() {
+        let mut app = InstallerAppState::new(&StartupOptions {
+            mode: WizardMode::Install,
+            env_kind: RunEnv::Demo,
+            dry_run: true,
+            ..Default::default()
+        });
+        app.language_idx = 0; // English (default fallback UTC)
+        let berlin_idx = TIMEZONE_OPTIONS
+            .iter()
+            .position(|(tz, _)| *tz == "Europe/Berlin")
+            .unwrap_or(1);
+        app.timezone_idx = berlin_idx;
+        let args = app.build_install_args();
+        let tz_pos = args.iter().position(|a| a == "--timezone");
+        assert_eq!(
+            tz_pos.and_then(|i| args.get(i + 1)).map(String::as_str),
+            Some(TIMEZONE_OPTIONS[berlin_idx].0)
+        );
+
+        app.account.full_name = "Alice".to_owned();
+        app.account.username = "alice".to_owned();
+        app.account.hostname = "-badhost".to_owned();
+        assert!(app.validate_account_form().is_err());
+        app.account.hostname = "badhost-".to_owned();
+        assert!(app.validate_account_form().is_err());
+        app.account.hostname = "rusty-pc".to_owned();
+        assert!(app.validate_account_form().is_ok());
     }
 }

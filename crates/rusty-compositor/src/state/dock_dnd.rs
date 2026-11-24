@@ -794,7 +794,7 @@ impl RustyCompositorState {
         }
     }
 
-    fn spawn_background_trash_drop(&mut self, paths: Vec<PathBuf>, from_desktop: bool) {
+    pub(crate) fn spawn_background_trash_drop(&mut self, paths: Vec<PathBuf>, from_desktop: bool) {
         let Some(trash_root) = super::context_menu_actions::resolve_trash_root() else {
             self.show_osd("Trash unavailable", None, false);
             return;

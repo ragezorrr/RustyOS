@@ -462,6 +462,7 @@ fn execute_checkupdates_probe_with_limit(max_items: Option<usize>) -> UpdateStat
             }
             Err(err) => {
                 let _ = child.kill();
+                let _ = child.wait();
                 return UpdateStatusSnapshot {
                     state: UpdateCheckState::Unavailable,
                     last_checked_label: format!("Today {}", local_clock_hhmm()),

@@ -355,7 +355,7 @@ if [ "$GREETER_MODE" -eq 1 ]; then
         echo "Error: rusty-greeter binary not found" >&2
         exit 1
     fi
-    exec "$COMPOSITOR_BIN" --drm --greeter "$GREETER_BIN --session-cmd \"/usr/bin/rustyos-session --drm\"" "$@"
+    exec "$COMPOSITOR_BIN" --drm --greeter "\"$GREETER_BIN\" --session-cmd \"/usr/bin/rustyos-session --drm\"" "$@"
 fi
 
 # Sync session desktop and toolkit variables into systemd/D-Bus user environment for standalone sessions.
@@ -377,6 +377,7 @@ if [ "$BACKEND_FLAG" = "--drm" ] || [ "$BACKEND_FLAG" = "--kms" ]; then
             GDK_BACKEND MOZ_ENABLE_WAYLAND ELECTRON_OZONE_PLATFORM_HINT \
             SDL_VIDEODRIVER CLUTTER_BACKEND _JAVA_AWT_WM_NONREPARENTING \
             XCURSOR_THEME XCURSOR_SIZE \
+            ${XDG_DESKTOP_PORTAL_DIR:+XDG_DESKTOP_PORTAL_DIR} \
             >/dev/null 2>&1 || true
         systemctl --user try-restart xdg-desktop-portal.service >/dev/null 2>&1 || true
         systemctl --user start pipewire.service pipewire-pulse.service wireplumber.service >/dev/null 2>&1 || true

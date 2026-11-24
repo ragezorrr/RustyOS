@@ -118,12 +118,20 @@ fn main() {
     if helper.is_file() {
         let status = Command::new(&helper)
             .args([
+                "--install-mode",
+                "whole-disk",
                 "--target-disk",
                 &req.target_disk,
                 "--username",
                 &req.username,
                 "--hostname",
                 &req.hostname,
+                "--timezone",
+                &req.timezone,
+                "--kb-layout",
+                &req.keyboard_layout,
+                "--confirm-erase",
+                "--password-stdin",
             ])
             .status();
         match status {

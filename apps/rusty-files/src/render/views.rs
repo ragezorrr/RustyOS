@@ -592,9 +592,14 @@ fn render_file_picker_bar(
         );
         let box_x = bar.x + 72;
         let box_w = (left_limit - box_x).clamp(80, 280);
-        let input_rect = Rect::new(box_x, bar.y + 6, box_w, 26);
+        let input_rect = layout
+            .picker_filename_rect
+            .unwrap_or_else(|| Rect::new(box_x, bar.y + 6, box_w, 26));
         c.fill_rounded_rect(input_rect, 8, pal.pill_bg);
-        let shown = Canvas::fit_text(&state.picker_filename, box_w - 16, 12.5, false);
+        if state.picker_filename_focused {
+            c.stroke_rounded_rect(input_rect, 8, pal.accent);
+        }
+        let shown = Canvas::fit_text(&state.picker_filename, input_rect.w - 16, 12.5, false);
         c.draw_text(
             &shown,
             input_rect.x + 8,
@@ -604,6 +609,18 @@ fn render_file_picker_bar(
             pal.text_primary,
             input_rect,
         );
+        if state.picker_filename_focused && state.caret_visible {
+            let prefix = &state.picker_filename[..state
+                .picker_filename_field
+                .buffer
+                .cursor()
+                .min(state.picker_filename.len())];
+            let caret_dx = Canvas::measure_text(prefix, 12.5, false).min(input_rect.w - 14);
+            c.fill_rect(
+                Rect::new(input_rect.x + 8 + caret_dx, input_rect.y + 5, 1, 16),
+                pal.accent,
+            );
+        }
     } else {
         let prompt = state
             .status_message

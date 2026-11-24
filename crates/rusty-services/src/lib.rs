@@ -20,6 +20,78 @@ pub mod timedate;
 pub mod trash_monitor;
 pub mod updates;
 
+/// Executes a child command with bounded wall-clock timeout and concurrent `stdout`/`stderr`
+/// readers so neither pipe buffers nor hung daemons/mounts can deadlock worker threads (`RUSTYOS-168`).
+///
+/// # Errors
+/// Returns `io::Error` if spawning fails, waiting fails, or `timeout` elapses (`ErrorKind::TimedOut`).
+pub fn run_command_bounded(
+    cmd: &mut std::process::Command,
+    timeout: std::time::Duration,
+) -> std::io::Result<std::process::Output> {
+    use std::io::Read;
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+
+    let mut child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+
+    let stdout_pipe = child.stdout.take();
+    let stderr_pipe = child.stderr.take();
+    let out_reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut p) = stdout_pipe {
+            let _ = p.read_to_end(&mut buf);
+        }
+        buf
+    });
+    let err_reader = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut p) = stderr_pipe {
+            let _ = p.read_to_end(&mut buf);
+        }
+        buf
+    });
+
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    let _ = out_reader.join();
+                    let _ = err_reader.join();
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "subprocess timed out",
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(err) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = out_reader.join();
+                let _ = err_reader.join();
+                return Err(err);
+            }
+        }
+    };
+
+    let stdout = out_reader.join().unwrap_or_default();
+    let stderr = err_reader.join().unwrap_or_default();
+    Ok(std::process::Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
 pub use app_catalog_monitor::{
     APP_CATALOG_DEBOUNCE, AppCatalogMonitorHandle, discover_application_dirs,
     discover_application_dirs_from,

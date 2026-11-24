@@ -619,7 +619,10 @@ impl FilesAppState {
 
     #[must_use]
     pub(crate) const fn has_focused_text_input(&self) -> bool {
-        self.search_active || self.inline_rename.is_some() || self.go_to_folder.is_some()
+        self.search_active
+            || self.inline_rename.is_some()
+            || self.go_to_folder.is_some()
+            || self.picker_filename_focused
     }
 
     pub(crate) fn reset_caret_blink(&mut self) {
@@ -649,6 +652,11 @@ impl FilesAppState {
             && self.goto_field.buffer.as_str() != gt.input
         {
             self.goto_field.buffer.set_text(&gt.input);
+        }
+        if self.picker_filename_field.buffer.as_str() != self.picker_filename {
+            self.picker_filename_field
+                .buffer
+                .set_text(&self.picker_filename);
         }
     }
 
@@ -698,6 +706,32 @@ impl FilesAppState {
         }
         if self.go_to_folder.is_some() {
             return self.process_goto_text_key(key, mods, now, fonts, clipboard);
+        }
+        if self.picker_filename_focused
+            && matches!(self.picker_mode, Some(FilePickerMode::SaveFile { .. }))
+        {
+            let ev = self
+                .picker_filename_field
+                .handle_key(key, mods, now, fonts, clipboard);
+            match ev {
+                rusty_ui::TextInputEvent::Ignored => return false,
+                rusty_ui::TextInputEvent::Submitted => {
+                    self.picker_filename = self.picker_filename_field.buffer.as_str().to_owned();
+                    self.confirm_file_picker();
+                    return true;
+                }
+                rusty_ui::TextInputEvent::Cancelled => {
+                    self.cancel_file_picker();
+                    return true;
+                }
+                rusty_ui::TextInputEvent::Changed => {
+                    self.picker_filename = self.picker_filename_field.buffer.as_str().to_owned();
+                }
+                rusty_ui::TextInputEvent::CaretMoved => {}
+            }
+            self.reset_caret_blink();
+            self.dirty = true;
+            return true;
         }
         if self.search_active {
             if matches!(key, rusty_ui::TextInputKey::Enter) {

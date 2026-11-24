@@ -1,0 +1,7 @@
+# Ensure greetd greeter user has KMS/input permissions for rusty-compositor --drm --greeter (RUSTYOS-168)
+g seat - -
+u greeter - "RustyOS Greeter" /var/lib/greeter /usr/bin/nologin
+m greeter video
+m greeter render
+m greeter input
+m greeter seat

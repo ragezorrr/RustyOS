@@ -142,8 +142,24 @@ validate_inputs() {
             parse_free_space_spec "${FREE_SPACE_SPEC}"
         fi
     fi
-    if ! [[ "${HOSTNAME_VAL}" =~ ^[a-zA-Z0-9][a-zA-Z0-9-]{0,62}$ ]]; then
+    if ! [[ "${HOSTNAME_VAL}" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$ ]]; then
         echo "Error: invalid --hostname '${HOSTNAME_VAL}'" >&2
+        exit 2
+    fi
+    if ! [[ "${LOCALE_VAL}" =~ ^[a-zA-Z0-9_.@-]+$ ]]; then
+        echo "Error: invalid --locale '${LOCALE_VAL}'" >&2
+        exit 2
+    fi
+    if ! [[ "${KEYMAP_VAL}" =~ ^[a-zA-Z0-9_./-]+$ ]] || [[ "${KEYMAP_VAL}" == *".."* ]]; then
+        echo "Error: invalid --keymap '${KEYMAP_VAL}'" >&2
+        exit 2
+    fi
+    if ! [[ "${KB_LAYOUT}" =~ ^[a-zA-Z0-9_,+-]+$ ]]; then
+        echo "Error: invalid --kb-layout '${KB_LAYOUT}'" >&2
+        exit 2
+    fi
+    if ! [[ "${TIMEZONE_VAL}" =~ ^[A-Za-z0-9_+-]+(/[A-Za-z0-9_+-]+)*$ ]] || [[ "${TIMEZONE_VAL}" == *".."* ]]; then
+        echo "Error: invalid --timezone '${TIMEZONE_VAL}'" >&2
         exit 2
     fi
     if ! [[ "${USERNAME_VAL}" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]]; then
@@ -520,6 +536,11 @@ install_system() {
             (( align < 1 )) && align=1
             start_sec="$(( ((FREE_START_BYTES + sec_size - 1) / sec_size + align - 1) / align * align ))"
             end_max_sec="$(( (FREE_START_BYTES + FREE_SIZE_BYTES) / sec_size - 1 ))"
+            local last_usable_sec
+            last_usable_sec="$(sgdisk -E "${FREE_DISK}" 2>/dev/null | tr -dc '0-9' || true)"
+            if [[ -n "${last_usable_sec}" ]] && (( end_max_sec > last_usable_sec )); then
+                end_max_sec="${last_usable_sec}"
+            fi
 
             if [[ -z "${EFI_PART}" ]]; then
                 need_new_efi=1
@@ -670,13 +691,32 @@ EOF
 KEYMAP=${KEYMAP_VAL}
 EOF
     printf '%s\n' "${HOSTNAME_VAL}" > "${MOUNT_ROOT}/etc/hostname"
-    sed -i "s/^#${LOCALE_VAL}/${LOCALE_VAL}/" "${MOUNT_ROOT}/etc/locale.gen" || printf '%s UTF-8\n' "${LOCALE_VAL}" >> "${MOUNT_ROOT}/etc/locale.gen"
+    if grep -qE "^#?${LOCALE_VAL//./\\.}[[:space:]]+UTF-8" "${MOUNT_ROOT}/etc/locale.gen"; then
+        awk -v loc="${LOCALE_VAL}" '
+            index($0, "#" loc " ") == 1 { print substr($0, 2); next }
+            { print }
+        ' "${MOUNT_ROOT}/etc/locale.gen" > "${MOUNT_ROOT}/etc/locale.gen.tmp"
+        mv "${MOUNT_ROOT}/etc/locale.gen.tmp" "${MOUNT_ROOT}/etc/locale.gen"
+    else
+        printf '%s UTF-8\n' "${LOCALE_VAL}" >> "${MOUNT_ROOT}/etc/locale.gen"
+    fi
     printf 'LANG=%s\n' "${LOCALE_VAL}" > "${MOUNT_ROOT}/etc/locale.conf"
 
-    arch-chroot "${MOUNT_ROOT}" ln -sf "/usr/share/zoneinfo/${TIMEZONE_VAL}" /etc/localtime
+    if [[ -f "${MOUNT_ROOT}/usr/share/zoneinfo/${TIMEZONE_VAL}" ]]; then
+        arch-chroot "${MOUNT_ROOT}" ln -sf "/usr/share/zoneinfo/${TIMEZONE_VAL}" /etc/localtime
+    else
+        echo "Warning: timezone '${TIMEZONE_VAL}' not found in zoneinfo; falling back to UTC" >&2
+        arch-chroot "${MOUNT_ROOT}" ln -sf "/usr/share/zoneinfo/UTC" /etc/localtime
+    fi
     arch-chroot "${MOUNT_ROOT}" hwclock --systohc
     arch-chroot "${MOUNT_ROOT}" locale-gen
     arch-chroot "${MOUNT_ROOT}" useradd -m -G wheel,seat,video,input,audio -s /bin/bash "${USERNAME_VAL}"
+    # Ensure `greeter` user exists with GPU/input group memberships so `greetd` + `rusty-greeter` can open KMS (`RUSTYOS-168`).
+    arch-chroot "${MOUNT_ROOT}" bash -c '
+        getent group seat >/dev/null || groupadd -r seat
+        id -u greeter >/dev/null 2>&1 || useradd -M -r -s /usr/bin/nologin greeter
+        usermod -aG video,render,input,seat greeter || true
+    '
     printf '%s:%s\n' "${USERNAME_VAL}" "${PASSWORD_VAL}" | arch-chroot "${MOUNT_ROOT}" chpasswd
     printf '%%wheel ALL=(ALL:ALL) ALL\n' > "${MOUNT_ROOT}/etc/sudoers.d/10-wheel"
     chmod 0440 "${MOUNT_ROOT}/etc/sudoers.d/10-wheel"

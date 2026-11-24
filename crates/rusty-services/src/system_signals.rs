@@ -93,6 +93,7 @@ pub fn classify_system_signal_path(object_path: &str) -> SystemSignalMask {
 /// Non-blocking handle to the background system D-Bus signal listener (`UPower` + `NetworkManager` + `BlueZ`).
 pub struct SystemSignalMonitorHandle {
     stop: Arc<AtomicBool>,
+    conn_slot: Arc<std::sync::Mutex<Option<zbus::blocking::Connection>>>,
     worker: Option<JoinHandle<()>>,
 }
 
@@ -108,6 +109,7 @@ impl Default for SystemSignalMonitorHandle {
     fn default() -> Self {
         Self {
             stop: Arc::new(AtomicBool::new(true)),
+            conn_slot: Arc::new(std::sync::Mutex::new(None)),
             worker: None,
         }
     }
@@ -116,6 +118,11 @@ impl Default for SystemSignalMonitorHandle {
 impl Drop for SystemSignalMonitorHandle {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
+        if let Ok(mut guard) = self.conn_slot.lock()
+            && let Some(conn) = guard.take()
+        {
+            let _ = conn.close();
+        }
     }
 }
 
@@ -126,11 +133,17 @@ impl SystemSignalMonitorHandle {
     pub fn start_background(on_signal: Arc<dyn Fn(SystemSignalMask) + Send + Sync>) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let stop_bg = Arc::clone(&stop);
+        let conn_slot = Arc::new(std::sync::Mutex::new(None));
+        let conn_bg = Arc::clone(&conn_slot);
         let worker = thread::Builder::new()
             .name("rustyos-sys-signals".to_owned())
-            .spawn(move || signal_listener_loop(&stop_bg, &on_signal))
+            .spawn(move || signal_listener_loop(&stop_bg, &conn_bg, &on_signal))
             .ok();
-        Self { stop, worker }
+        Self {
+            stop,
+            conn_slot,
+            worker,
+        }
     }
 }
 
@@ -163,11 +176,19 @@ fn build_match_rules() -> Vec<MatchRule<'static>> {
 
 fn signal_listener_loop(
     stop: &AtomicBool,
+    conn_slot: &std::sync::Mutex<Option<zbus::blocking::Connection>>,
     on_signal: &Arc<dyn Fn(SystemSignalMask) + Send + Sync>,
 ) {
     let Ok(conn) = zbus::blocking::Connection::system() else {
         return;
     };
+    if let Ok(mut guard) = conn_slot.lock() {
+        *guard = Some(conn.clone());
+    }
+    if stop.load(Ordering::Acquire) {
+        let _ = conn.close();
+        return;
+    }
     let Ok(dbus) = zbus::blocking::fdo::DBusProxy::new(&conn) else {
         return;
     };

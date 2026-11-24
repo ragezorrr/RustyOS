@@ -2872,6 +2872,9 @@ impl RustyCompositorState {
 
         if wallpaper_changed || appearance_changed {
             let is_dark = !matches!(cfg.appearance, crate::config::AppearanceMode::Light);
+            if appearance_changed {
+                self.portal.notify_color_scheme_changed(is_dark);
+            }
             if let Some(ref wp) = cfg.wallpaper
                 && crate::surfaces::resolve_effective_wallpaper_path(Some(wp.as_path()), is_dark)
                     .is_none_or(|p| !p.exists())

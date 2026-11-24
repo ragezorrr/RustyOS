@@ -584,9 +584,19 @@ impl WaylandClientData {
             FilesHit::PreviewTrashOrRestore => self.app.action_move_selected_to_trash(),
             FilesHit::PreviewTag { path, color } => self.app.toggle_tag_on_path(&path, color),
             FilesHit::PopupItem(cmd) => self.execute_popup_command(cmd),
+            FilesHit::PickerFilenameInput => {
+                self.app.search_active = false;
+                self.app.picker_filename_focused = true;
+                self.app.sync_text_fields_from_strings();
+                self.app.reset_caret_blink();
+                self.app.dirty = true;
+            }
             FilesHit::PickerCancel => self.app.cancel_file_picker(),
             FilesHit::PickerConfirm => self.app.confirm_file_picker(),
-            other => self.handle_stage_b_hit(other, double_click, layout, px, py),
+            other => {
+                self.app.picker_filename_focused = false;
+                self.handle_stage_b_hit(other, double_click, layout, px, py);
+            }
         }
     }
 
@@ -951,6 +961,7 @@ impl WaylandClientData {
                 | FilesHit::PickerCancel
                 | FilesHit::PickerConfirm,
             ) => CursorShape::Pointer,
+            Some(FilesHit::PickerFilenameInput) => CursorShape::Text,
             _ => CursorShape::Default,
         };
         self.apply_cursor_shape(shape);
@@ -1113,7 +1124,7 @@ const fn map_resize_edge(zone: ResizeEdgeZone) -> ResizeEdge {
 /// # Errors
 /// Returns `WaylandAppError` on Wayland connection, protocol binding, or rendering failure.
 #[allow(clippy::too_many_lines)]
-pub(crate) fn run(options: &StartupOptions) -> Result<(), WaylandAppError> {
+pub(crate) fn run(options: &StartupOptions) -> Result<bool, WaylandAppError> {
     let conn = Connection::connect_to_env()?;
     let (globals, queue) = registry_queue_init(&conn)?;
     let qh = queue.handle();
@@ -1267,7 +1278,9 @@ pub(crate) fn run(options: &StartupOptions) -> Result<(), WaylandAppError> {
             .dispatch(timeout, &mut data)
             .map_err(|e| WaylandAppError::EventLoop(e.to_string()))?;
     }
-    Ok(())
+    let ok =
+        data.app.picker_mode.is_none() || (data.app.picker_confirmed && !data.app.picker_cancelled);
+    Ok(ok)
 }
 
 fn acquire_reusable_buffer(

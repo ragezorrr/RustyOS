@@ -120,7 +120,8 @@ fn main() -> ExitCode {
     };
 
     match wayland::run(&opts) {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(true) => ExitCode::SUCCESS,
+        Ok(false) => ExitCode::from(1),
         Err(err) => {
             eprintln!("rusty-files error: {err}");
             ExitCode::FAILURE

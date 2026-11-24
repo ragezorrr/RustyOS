@@ -476,7 +476,14 @@ mod tests {
         compositor.handle_ipc_request(rusty_ipc::ShellRequest::SetReducedMotion { enabled: true });
         assert!((compositor.lock_screen_anim.current() - 1.0).abs() < f64::EPSILON);
 
+        // Unauthenticated IPC unlock and interactive shell requests must be blocked when locked (`RUSTYOS-168`).
+        compositor.handle_ipc_request(rusty_ipc::ShellRequest::ToggleLauncher);
+        assert!(!compositor.launcher_active);
         compositor.handle_ipc_request(rusty_ipc::ShellRequest::SetLockScreen { locked: false });
+        assert!(compositor.screen_locked);
+
+        // Unlocking succeeds via authenticated compositor state (or IPC when passwordless lock is explicitly enabled).
+        compositor.set_screen_locked(false, smithay::utils::SERIAL_COUNTER.next_serial());
         assert!(!compositor.screen_locked);
         assert!((compositor.lock_screen_anim.current() - 0.0).abs() < f64::EPSILON);
 
@@ -991,7 +998,7 @@ mod tests {
             compositor.active_unoccluded_fullscreen_window_on(out2),
             None
         );
-        compositor.handle_ipc_request(rusty_ipc::ShellRequest::SetLockScreen { locked: false });
+        compositor.set_screen_locked(false, smithay::utils::SERIAL_COUNTER.next_serial());
         compositor.handle_ipc_request(rusty_ipc::ShellRequest::SetReducedMotion { enabled: true });
 
         // Hotplug unplug cleanly unregisters secondary output and migrates w2 onto out1.
@@ -1090,7 +1097,7 @@ mod tests {
 
         compositor.handle_ipc_request(rusty_ipc::ShellRequest::SetLockScreen { locked: true });
         assert!(compositor.has_blocking_shell_overlay());
-        compositor.handle_ipc_request(rusty_ipc::ShellRequest::SetLockScreen { locked: false });
+        compositor.set_screen_locked(false, smithay::utils::SERIAL_COUNTER.next_serial());
         assert!(!compositor.has_blocking_shell_overlay());
 
         // Confined pointer helper must clamp coordinates within logical bounds.
@@ -1188,7 +1195,9 @@ mod tests {
         assert_eq!(compositor.active_unoccluded_fullscreen_window(), Some(w1));
 
         compositor.ext_session_locked = true;
+        // Interactive IPC requests like ToggleLauncher must be ignored while locked (`RUSTYOS-168`).
         compositor.handle_ipc_request(rusty_ipc::ShellRequest::ToggleLauncher);
+        assert!(!compositor.launcher_active);
         assert!(compositor.is_session_locked());
         assert!(compositor.has_blocking_shell_overlay());
         assert_eq!(compositor.active_unoccluded_fullscreen_window(), None);
@@ -1199,10 +1208,10 @@ mod tests {
 
         compositor.unlock();
         assert!(!compositor.is_session_locked());
-        assert_eq!(
-            compositor.active_unoccluded_fullscreen_window(),
-            None // Launcher was toggled above
-        );
+        assert_eq!(compositor.active_unoccluded_fullscreen_window(), Some(w1));
+        compositor.handle_ipc_request(rusty_ipc::ShellRequest::ToggleLauncher);
+        assert!(compositor.launcher_active);
+        assert_eq!(compositor.active_unoccluded_fullscreen_window(), None);
         compositor.handle_ipc_request(rusty_ipc::ShellRequest::ToggleLauncher);
         assert_eq!(compositor.active_unoccluded_fullscreen_window(), Some(w1));
 

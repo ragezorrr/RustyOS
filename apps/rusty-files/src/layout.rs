@@ -260,6 +260,7 @@ pub(crate) enum FilesHit {
     PreviewTrashOrRestore,
     PreviewTag { path: PathBuf, color: FileTagColor },
     PopupItem(PopupCommand),
+    PickerFilenameInput,
     PickerCancel,
     PickerConfirm,
 }
@@ -300,6 +301,7 @@ pub(crate) struct FilesLayout {
     pub list_headers: Vec<(FileSortField, Rect)>,
     pub list_rows: Vec<(usize, Rect)>,
     pub status_bar_rect: Rect,
+    pub picker_filename_rect: Option<Rect>,
     pub picker_cancel_rect: Option<Rect>,
     pub picker_confirm_rect: Option<Rect>,
     pub path_crumbs: Vec<PathCrumbLayout>,
@@ -383,19 +385,27 @@ pub(crate) fn compute_layout(state: &FilesAppState, surface_w: u32, surface_h: u
         (None, None, after_search_top)
     };
 
-    let (status_bar_rect, picker_cancel_rect, picker_confirm_rect) = if state.picker_mode.is_some()
-    {
-        let bar = Rect::new(toolbar_x, height - 42, width - toolbar_x - 10, 38);
-        let cancel = Rect::new(bar.right() - 172, bar.y + 6, 78, 26);
-        let confirm = Rect::new(bar.right() - 86, bar.y + 6, 78, 26);
-        (bar, Some(cancel), Some(confirm))
-    } else {
-        (
-            Rect::new(toolbar_x, height - 28, width - toolbar_x - 10, 24),
-            None,
-            None,
-        )
-    };
+    let (status_bar_rect, picker_filename_rect, picker_cancel_rect, picker_confirm_rect) =
+        if let Some(ref mode) = state.picker_mode {
+            let bar = Rect::new(toolbar_x, height - 42, width - toolbar_x - 10, 38);
+            let cancel = Rect::new(bar.right() - 172, bar.y + 6, 78, 26);
+            let confirm = Rect::new(bar.right() - 86, bar.y + 6, 78, 26);
+            let filename_rect =
+                matches!(mode, crate::state::FilePickerMode::SaveFile { .. }).then(|| {
+                    let box_x = bar.x + 72;
+                    let left_limit = cancel.x - 12;
+                    let box_w = (left_limit - box_x).clamp(80, 280);
+                    Rect::new(box_x, bar.y + 6, box_w, 26)
+                });
+            (bar, filename_rect, Some(cancel), Some(confirm))
+        } else {
+            (
+                Rect::new(toolbar_x, height - 28, width - toolbar_x - 10, 24),
+                None,
+                None,
+                None,
+            )
+        };
     let status_w = crate::render::Canvas::measure_text(&state.status_summary(), 11.5, false);
     let crumbs_limit_x = (status_bar_rect.right() - status_w - 22).max(status_bar_rect.x + 12);
     let path_crumbs = if state.show_path_bar && state.picker_mode.is_none() {
@@ -448,6 +458,7 @@ pub(crate) fn compute_layout(state: &FilesAppState, surface_w: u32, surface_h: u
         list_headers: content.list_headers,
         list_rows: content.list_rows,
         status_bar_rect,
+        picker_filename_rect,
         picker_cancel_rect,
         picker_confirm_rect,
         path_crumbs,
@@ -1439,6 +1450,11 @@ pub(crate) fn hit_test(layout: &FilesLayout, px: f64, py: f64) -> Option<FilesHi
 }
 
 fn hit_test_chrome(layout: &FilesLayout, px: f64, py: f64) -> Option<FilesHit> {
+    if let Some(input_r) = layout.picker_filename_rect
+        && input_r.contains_f64(px, py)
+    {
+        return Some(FilesHit::PickerFilenameInput);
+    }
     if let Some(cancel) = layout.picker_cancel_rect
         && cancel.contains_f64(px, py)
     {

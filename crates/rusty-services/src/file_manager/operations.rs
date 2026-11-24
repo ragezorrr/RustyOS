@@ -117,6 +117,12 @@ pub fn pick_duplicate_copy_path(dest: &Path) -> PathBuf {
     })
 }
 
+/// Alias for [`pick_duplicate_copy_path`] (`RUSTYOS-168`).
+#[must_use]
+pub fn pick_unique_copy_path(base_path: &Path) -> PathBuf {
+    pick_duplicate_copy_path(base_path)
+}
+
 pub(crate) fn pick_unique_sibling_path<F>(
     base_path: &Path,
     fallback_stem: &str,
@@ -125,6 +131,10 @@ pub(crate) fn pick_unique_sibling_path<F>(
 where
     F: FnMut(u32) -> String,
 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    static FALLBACK_SEQ: AtomicU64 = AtomicU64::new(1);
     let parent = base_path.parent().unwrap_or_else(|| Path::new("/"));
     let stem = base_path
         .file_stem()
@@ -142,7 +152,22 @@ where
             return candidate;
         }
     }
-    base_path.to_path_buf()
+    // Never fall back to returning the existing `base_path` (which would truncate on `File::create`).
+    loop {
+        let seq = FALLBACK_SEQ.fetch_add(1, Ordering::Relaxed);
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let suffix = format!("{}-{nanos}-{seq}", suffix_for(1000));
+        let file_name = match ext {
+            Some(e) => format!("{stem}{suffix}.{e}"),
+            None => format!("{stem}{suffix}"),
+        };
+        let candidate = parent.join(file_name);
+        if candidate.symlink_metadata().is_err() {
+            return candidate;
+        }
+    }
 }
 
 /// Safely renames `source` inside its parent directory after component validation and collision checks.
@@ -526,6 +551,16 @@ fn copy_file_chunked<P>(
 where
     P: FnMut(&TransferProgress),
 {
+    // Guard against truncating the source file if `src_path` and `dst_path` resolve to the same inode (`RUSTYOS-168`).
+    if let Ok(dst_meta) = fs::metadata(dst_path) {
+        use std::os::unix::fs::MetadataExt;
+        if src_meta.dev() == dst_meta.dev() && src_meta.ino() == dst_meta.ino() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Refusing to overwrite source file with itself",
+            ));
+        }
+    }
     let mut reader = File::open(src_path)?;
     let mut writer = File::create(dst_path)?;
     let mut chunk = vec![0_u8; 64 * 1024].into_boxed_slice();

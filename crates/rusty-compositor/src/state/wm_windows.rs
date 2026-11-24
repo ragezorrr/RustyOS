@@ -2058,6 +2058,7 @@ impl RustyCompositorState {
     }
 
     /// Processes a single [`ShellRequest`] over the versioned local IPC bus and returns a [`CompositorEvent`].
+    #[allow(clippy::too_many_lines)]
     pub fn handle_ipc_request(&mut self, request: ShellRequest) -> CompositorEvent {
         let serial = smithay::utils::SERIAL_COUNTER.next_serial();
         match request {
@@ -2077,47 +2078,77 @@ impl RustyCompositorState {
             }
             ShellRequest::GetStateSnapshot => {}
             ShellRequest::SwitchWorkspace { workspace } => {
-                let ws = WorkspaceId::new_clamped(workspace);
-                self.apply_wm_action(WmAction::SwitchWorkspace(ws), serial);
+                if self.is_session_locked() {
+                    warn!("Rejected SwitchWorkspace IPC while session is locked");
+                } else {
+                    let ws = WorkspaceId::new_clamped(workspace);
+                    self.apply_wm_action(WmAction::SwitchWorkspace(ws), serial);
+                }
             }
             ShellRequest::FocusWindow { window_id } => {
-                let win_id = WindowId(window_id);
-                self.minimized_window_ids.remove(&win_id);
-                self.minimized_dock_order.retain(|id| *id != win_id);
-                if self.wm.focus_and_raise(win_id) {
-                    self.sync_space_with_wm(serial);
+                if self.is_session_locked() {
+                    warn!("Rejected FocusWindow IPC while session is locked");
+                } else {
+                    let win_id = WindowId(window_id);
+                    self.minimized_window_ids.remove(&win_id);
+                    self.minimized_dock_order.retain(|id| *id != win_id);
+                    if self.wm.focus_and_raise(win_id) {
+                        self.sync_space_with_wm(serial);
+                    }
                 }
             }
             ShellRequest::ToggleLayoutMode => {
-                self.apply_wm_action(WmAction::ToggleLayoutMode, serial);
+                if self.is_session_locked() {
+                    warn!("Rejected ToggleLayoutMode IPC while session is locked");
+                } else {
+                    self.apply_wm_action(WmAction::ToggleLayoutMode, serial);
+                }
             }
             ShellRequest::ToggleOverview => {
-                self.toggle_overview();
-                info!(
-                    overview_active = self.overview_active,
-                    "Toggled workspace overview via IPC"
-                );
+                if self.is_session_locked() {
+                    warn!("Rejected ToggleOverview IPC while session is locked");
+                } else {
+                    self.toggle_overview();
+                    info!(
+                        overview_active = self.overview_active,
+                        "Toggled workspace overview via IPC"
+                    );
+                }
             }
             ShellRequest::ToggleLauncher => {
-                self.toggle_launcher();
-                info!(
-                    launcher_active = self.launcher_active,
-                    "Toggled Spotlight application launcher via IPC"
-                );
+                if self.is_session_locked() {
+                    warn!("Rejected ToggleLauncher IPC while session is locked");
+                } else {
+                    self.toggle_launcher();
+                    info!(
+                        launcher_active = self.launcher_active,
+                        "Toggled Spotlight application launcher via IPC"
+                    );
+                }
             }
             ShellRequest::LaunchCommand { command } => {
-                self.handle_launch_command_ipc(&command);
+                if self.is_session_locked() {
+                    warn!("Rejected LaunchCommand IPC while session is locked");
+                } else {
+                    self.handle_launch_command_ipc(&command);
+                }
             }
             ShellRequest::SetReducedMotion { enabled } => {
                 self.set_reduced_motion_pref(enabled);
                 info!(reduced_motion = enabled, "Updated reduced-motion via IPC");
             }
             ShellRequest::SetLockScreen { locked } => {
-                self.set_screen_locked(locked, serial);
-                info!(
-                    screen_locked = locked,
-                    "Updated session lock screen state via IPC"
-                );
+                if !locked && self.user_config.require_password_on_lock {
+                    warn!(
+                        "Rejected unauthenticated IPC unlock attempt while require_password_on_lock=true"
+                    );
+                } else {
+                    self.set_screen_locked(locked, serial);
+                    info!(
+                        screen_locked = locked,
+                        "Updated session lock screen state via IPC"
+                    );
+                }
             }
             ShellRequest::Notify {
                 urgency,

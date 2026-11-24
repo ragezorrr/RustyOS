@@ -165,6 +165,9 @@ impl GreetdClient {
     pub fn connect(path: &Path) -> Result<Self, String> {
         let stream = UnixStream::connect(path)
             .map_err(|err| format!("failed to connect to {}: {err}", path.display()))?;
+        let timeout = Some(std::time::Duration::from_secs(15));
+        let _ = stream.set_read_timeout(timeout);
+        let _ = stream.set_write_timeout(timeout);
         Ok(Self { stream })
     }
 
@@ -207,7 +210,9 @@ impl GreetdClient {
         let mut resp = self.roundtrip(&GreetdRequest::CreateSession {
             username: username.to_owned(),
         })?;
-        loop {
+        let mut last_pam_notice: Option<String> = None;
+        let mut secret_sent = false;
+        for _round in 0..8_u8 {
             match resp {
                 GreetdResponse::Success => {
                     let start = self.roundtrip(&GreetdRequest::StartSession {
@@ -221,23 +226,51 @@ impl GreetdClient {
                     };
                 }
                 GreetdResponse::AuthMessage {
-                    auth_message_type, ..
+                    auth_message_type,
+                    auth_message,
                 } => {
-                    let answer = if auth_message_type == "secret" || auth_message_type == "visible"
-                    {
-                        Some(password.to_owned())
+                    if auth_message_type == "error" || auth_message_type == "info" {
+                        if !auth_message.trim().is_empty() {
+                            last_pam_notice = Some(auth_message);
+                        }
+                        resp = self.roundtrip(&GreetdRequest::PostAuthMessageResponse {
+                            response: None,
+                        })?;
+                    } else if auth_message_type == "secret" || auth_message_type == "visible" {
+                        if secret_sent {
+                            let _ = self.roundtrip(&GreetdRequest::CancelSession);
+                            return Err(last_pam_notice.unwrap_or_else(|| {
+                                if auth_message.trim().is_empty() {
+                                    "Additional authentication required".to_owned()
+                                } else {
+                                    auth_message
+                                }
+                            }));
+                        }
+                        secret_sent = true;
+                        resp = self.roundtrip(&GreetdRequest::PostAuthMessageResponse {
+                            response: Some(password.to_owned()),
+                        })?;
                     } else {
-                        None
-                    };
-                    resp = self
-                        .roundtrip(&GreetdRequest::PostAuthMessageResponse { response: answer })?;
+                        resp = self.roundtrip(&GreetdRequest::PostAuthMessageResponse {
+                            response: None,
+                        })?;
+                    }
                 }
                 GreetdResponse::Error { description, .. } => {
                     let _ = self.roundtrip(&GreetdRequest::CancelSession);
-                    return Err(description);
+                    return Err(last_pam_notice.map_or(description.clone(), |notice| {
+                        if description.trim().is_empty() {
+                            notice
+                        } else {
+                            format!("{notice} ({description})")
+                        }
+                    }));
                 }
             }
         }
+        let _ = self.roundtrip(&GreetdRequest::CancelSession);
+        Err(last_pam_notice.unwrap_or_else(|| "Authentication exceeded max PAM rounds".to_owned()))
     }
 }
 

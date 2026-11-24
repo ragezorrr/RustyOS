@@ -30,6 +30,10 @@ impl RustyCompositorState {
             self.polkit = rusty_services::PolkitAgentHandle::start_background();
         }
         self.portal = rusty_services::PortalHandle::start_background();
+        self.portal.set_session_env(
+            Some(self.socket_name.clone()),
+            std::env::var("RUSTYOS_IPC_SOCKET").ok(),
+        );
         self.sync_portal_snapshot();
         self.updates_checker = rusty_services::UpdateCheckerHandle::start_background(
             self.updates_enabled,
