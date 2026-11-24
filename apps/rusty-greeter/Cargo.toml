@@ -7,9 +7,8 @@ license.workspace = true
 authors.workspace = true
 
 [dependencies]
+rusty-app.workspace = true
 rusty-ui.workspace = true
-smithay-client-toolkit.workspace = true
-wayland-client.workspace = true
 
 [lints]
 workspace = true
