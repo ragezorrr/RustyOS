@@ -2860,6 +2860,18 @@ hardware/software context и низкие накладные расходы.
   - `cargo fmt --check` чисто; `cargo clippy -p rusty-view -p rusty-services --tests -- -D warnings` (0 предупреждений); юнит-тесты `rusty-view` (`7/7`) и `rusty-services::image_decode` (`4/4`) успешно пройдены; headless тест `cargo run -p rusty-view -- --test` рендерит валидный frame canvas; `--help` возвращает документацию параметров и клавиатурных шорткатов; 0 новых Cargo-зависимостей, 0 `unsafe`.
 - **Risks:** Низкие; 0 новых Cargo-зависимостей, 0 `unsafe`.
 
+### RUSTYOS-175 — Правосторонние кнопки сторонних CSD-окон, очистка веб-доменов в уведомлениях и стабилизация `rusty-view`
+- **Status:** Done
+- **Goal:** Вернуть кнопки управления окном в правый верхний угол у сторонних CSD-приложений (Chrome, Electron, GTK) через `theme_sync` без изменения наших нативных приложений, полностью удалять ведущие веб-домены (`chat.google.com` и др.) из тела D-Bus уведомлений, убрать паразитную SSD-рамку и исправить баги event loop/тулбара/отрисовки в `apps/rusty-view`.
+- **Dependencies:** `RUSTYOS-173`, `RUSTYOS-174`.
+- **Scope:**
+  - `crates/rusty-services/src/theme_sync.rs`: переключение `gtk-decoration-layout` и `gsettings org.gnome.desktop.wm.preferences button-layout` с `close,minimize,maximize:` на `:minimize,maximize,close` + обновление юнит-теста.
+  - `crates/rusty-compositor/src/dbus_notifications.rs`: добавление `strip_leading_web_origin` / `is_web_origin_token` для полной очистки ведущих веб-доменов из тела Web Push уведомлений с сохранением имён файлов (`*.png` и др.) + юнит-тесты.
+  - `apps/rusty-view/src/{main.rs, state.rs, toolbar.rs, tests.rs}`: перевод на `WindowDecorations::RequestClient` (без SSD-рамки), замена `prepare_read + sleep(4ms)` на `calloop::EventLoop` + `WaylandSource` и VSync frame callbacks, прозрачная очистка буфера и скруглённый CSD-фон с заголовком и 1px рамкой, исправление двойного срабатывания кнопок тулбара (только на `pointer_up`), замена отсутствующих глифов на гарантированные читаемые символы (`<`, `-`, `+`, `Fit`, `90°`, `i`, `>`), корректная центровка слотов в `330 px`.
+- **Acceptance Criteria:**
+  - `cargo fmt --check` чисто; `cargo clippy --workspace --all-targets -- -D warnings` (0 предупреждений); `cargo test -p rusty-services -p rusty-compositor -p rusty-view` (241 + 78 + 7) и `cargo run -p rusty-view -- --test` пройдены; 0 новых зависимостей, 0 `unsafe`.
+- **Risks:** Низкие; 0 новых Cargo-зависимостей, 0 `unsafe`.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

@@ -53,8 +53,11 @@ impl Toolbar {
         Rect::new(x.max(8), y.max(8), TOOLBAR_WIDTH, TOOLBAR_HEIGHT)
     }
 
-    /// Records pointer movement to wake up the toolbar.
-    pub(crate) fn on_pointer_moved(&mut self, px: f64, py: f64, win_w: u32, win_h: u32) {
+    /// Records pointer movement to wake up the toolbar. Returns `true` if visual state changed.
+    pub(crate) fn on_pointer_moved(&mut self, px: f64, py: f64, win_w: u32, win_h: u32) -> bool {
+        let prev_opacity = self.opacity;
+        let prev_hover = self.hovered_action;
+
         self.last_motion = Instant::now();
         self.opacity = 1.0;
 
@@ -65,6 +68,8 @@ impl Toolbar {
         } else {
             None
         };
+
+        (self.opacity - prev_opacity).abs() > 0.01 || self.hovered_action != prev_hover
     }
 
     /// Handles pointer click down on the toolbar.
@@ -209,10 +214,10 @@ impl Toolbar {
 
             match action {
                 ToolbarAction::Prev => {
-                    painter.draw_text_centered(fonts, "◀", slot_rect, 13.0, true, text_color);
+                    painter.draw_text_centered(fonts, "<", slot_rect, 14.0, true, text_color);
                 }
                 ToolbarAction::ZoomOut => {
-                    painter.draw_text_centered(fonts, "−", slot_rect, 16.0, true, text_color);
+                    painter.draw_text_centered(fonts, "-", slot_rect, 16.0, true, text_color);
                 }
                 ToolbarAction::ZoomReset => {
                     painter.draw_text_centered(fonts, zoom_text, slot_rect, 11.5, true, text_color);
@@ -221,16 +226,16 @@ impl Toolbar {
                     painter.draw_text_centered(fonts, "+", slot_rect, 15.0, true, text_color);
                 }
                 ToolbarAction::FitToWindow => {
-                    painter.draw_text_centered(fonts, "⛶", slot_rect, 14.0, false, text_color);
+                    painter.draw_text_centered(fonts, "Fit", slot_rect, 11.5, true, text_color);
                 }
                 ToolbarAction::RotateCw => {
-                    painter.draw_text_centered(fonts, "↷", slot_rect, 16.0, true, text_color);
+                    painter.draw_text_centered(fonts, "90°", slot_rect, 11.5, true, text_color);
                 }
                 ToolbarAction::ToggleInfo => {
-                    painter.draw_text_centered(fonts, "ℹ", slot_rect, 13.0, true, text_color);
+                    painter.draw_text_centered(fonts, "i", slot_rect, 13.0, true, text_color);
                 }
                 ToolbarAction::Next => {
-                    painter.draw_text_centered(fonts, "▶", slot_rect, 13.0, true, text_color);
+                    painter.draw_text_centered(fonts, ">", slot_rect, 14.0, true, text_color);
                 }
             }
         }
@@ -242,22 +247,22 @@ fn compute_button_slots(bar: Rect) -> Vec<(ToolbarAction, Rect)> {
     let y = bar.y + ((bar.height as i32 - btn_h as i32) / 2);
 
     let items = [
-        (ToolbarAction::Prev, 34),
-        (ToolbarAction::ZoomOut, 32),
-        (ToolbarAction::ZoomReset, 54),
-        (ToolbarAction::ZoomIn, 32),
+        (ToolbarAction::Prev, 32),
+        (ToolbarAction::ZoomOut, 30),
+        (ToolbarAction::ZoomReset, 52),
+        (ToolbarAction::ZoomIn, 30),
         (ToolbarAction::FitToWindow, 36),
-        (ToolbarAction::RotateCw, 34),
-        (ToolbarAction::ToggleInfo, 32),
-        (ToolbarAction::Next, 34),
+        (ToolbarAction::RotateCw, 36),
+        (ToolbarAction::ToggleInfo, 30),
+        (ToolbarAction::Next, 32),
     ];
 
     let mut slots = Vec::with_capacity(items.len());
-    let mut cur_x = bar.x + 8;
+    let mut cur_x = bar.x + 12;
 
     for (act, width) in items {
         slots.push((act, Rect::new(cur_x, y, width, btn_h)));
-        cur_x += (width as i32) + 5;
+        cur_x += (width as i32) + 4;
     }
 
     slots

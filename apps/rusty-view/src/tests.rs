@@ -188,4 +188,15 @@ fn test_viewer_state_initialization() {
     state.action_zoom_in(800, 600);
     state.action_actual_size();
     state.action_fit(800, 600);
+
+    // Toolbar ToggleInfo click fires only once on pointer_up (not twice on down + up)
+    let hud_before = state.hud.is_visible;
+    let bar = Toolbar::compute_rect(1000, 700);
+    // ToggleInfo slot is the 7th slot: x = bar.x + 12 + (32+4)+(30+4)+(52+4)+(30+4)+(36+4)+(36+4) = bar.x + 252
+    let info_x = f64::from(bar.x + 260);
+    let info_y = f64::from(bar.y + 20);
+    let _ = state.on_pointer_down(info_x, info_y, 1000, 700);
+    assert_eq!(state.hud.is_visible, hud_before);
+    let _ = state.on_pointer_up(info_x, info_y, 1000, 700);
+    assert_ne!(state.hud.is_visible, hud_before);
 }

@@ -172,7 +172,9 @@ impl ViewerState {
 
     /// Handles pointer movement.
     pub(crate) fn on_pointer_moved(&mut self, px: f64, py: f64, win_w: u32, win_h: u32) {
-        self.toolbar.on_pointer_moved(px, py, win_w, win_h);
+        if self.toolbar.on_pointer_moved(px, py, win_w, win_h) {
+            self.dirty = true;
+        }
         if self.viewport.drag_start.is_some() {
             self.viewport.drag_to(px, py);
             self.dirty = true;
@@ -195,19 +197,9 @@ impl ViewerState {
         win_w: u32,
         win_h: u32,
     ) -> WindowHitTarget {
-        // 1. Check toolbar click first
-        if let Some(action) = self.toolbar.on_pointer_down(px, py, win_w, win_h) {
+        // 1. Check toolbar press first (action fires once on release in `on_pointer_up`)
+        if self.toolbar.on_pointer_down(px, py, win_w, win_h).is_some() {
             self.dirty = true;
-            match action {
-                ToolbarAction::Prev => self.action_prev(win_w, win_h),
-                ToolbarAction::Next => self.action_next(win_w, win_h),
-                ToolbarAction::ZoomOut => self.action_zoom_out(win_w, win_h),
-                ToolbarAction::ZoomReset => self.action_actual_size(),
-                ToolbarAction::ZoomIn => self.action_zoom_in(win_w, win_h),
-                ToolbarAction::FitToWindow => self.action_fit(win_w, win_h),
-                ToolbarAction::RotateCw => self.action_rotate_cw(win_w, win_h),
-                ToolbarAction::ToggleInfo => self.action_toggle_info(),
-            }
             return WindowHitTarget::Content;
         }
 
@@ -281,15 +273,25 @@ impl ViewerState {
     ) {
         let pal = ThemePalette::new(self.theme_mode == ThemeMode::Dark, 0);
 
-        // 1. Dark / Light neutral background
+        // 1. Dark / Light neutral rounded CSD background
         let bg_color = if pal.is_dark {
-            [16, 17, 20, 255]
+            [18, 19, 23, 255]
         } else {
-            [238, 240, 245, 255]
+            [240, 242, 247, 255]
         };
-        painter.fill_rect(Rect::new(0, 0, win_w, win_h), bg_color);
+        let window_radius = if self.is_fullscreen || self.frame.is_maximized {
+            0.0
+        } else {
+            rusty_ui::WINDOW_RADIUS as f32
+        };
+        let win_rect = Rect::new(0, 0, win_w, win_h);
+        if window_radius > 0.0 {
+            painter.fill_rounded_rect(win_rect, window_radius, bg_color);
+        } else {
+            painter.fill_rect(win_rect, bg_color);
+        }
 
-        // 2. Render Image
+        // 2. Render Image (inset slightly from border when windowed)
         if let Some(doc) = &self.document {
             let dst_rect = self
                 .viewport
@@ -304,24 +306,25 @@ impl ViewerState {
             );
         } else {
             // Empty state placeholder
-            let msg = "No image loaded — Open an image or drag & drop here";
+            let msg = "No image loaded — Open an image to view";
             let color = if pal.is_dark {
                 [120, 125, 138, 255]
             } else {
                 [140, 145, 158, 255]
             };
-            painter.draw_text_centered(
-                fonts,
-                msg,
-                Rect::new(0, 0, win_w, win_h),
-                14.0,
-                false,
-                color,
-            );
+            painter.draw_text_centered(fonts, msg, win_rect, 14.0, false, color);
         }
 
-        // 3. Traffic lights (unless in fullscreen mode)
+        // 3. Subtle CSD header title & traffic lights (unless in fullscreen mode)
         if !self.is_fullscreen {
+            let title_fg = if pal.is_dark {
+                [220, 224, 234, 210]
+            } else {
+                [42, 46, 56, 210]
+            };
+            let title_rect = Rect::new(88, 0, win_w.saturating_sub(176), 40);
+            painter.draw_text_centered(fonts, &self.frame.title, title_rect, 12.5, true, title_fg);
+
             painter.draw_traffic_lights(
                 &self.frame.buttons,
                 self.frame.is_focused,
@@ -339,6 +342,16 @@ impl ViewerState {
         if let Some(doc) = &self.document {
             self.hud
                 .paint(painter, &pal, win_w, doc, &self.playlist, &self.viewport);
+        }
+
+        // 6. Crisp 1px CSD glass border
+        if window_radius > 0.0 {
+            let border = if pal.is_dark {
+                [255, 255, 255, 28]
+            } else {
+                [0, 0, 0, 24]
+            };
+            painter.stroke_rounded_rect(win_rect, window_radius, 1.0, border);
         }
     }
 }

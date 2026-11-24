@@ -672,7 +672,8 @@ pub fn parse_notification_avatar(
 pub fn format_dbus_notification(app_name: &str, summary: &str, body: &str) -> (String, String) {
     let app = sanitize_single_line(app_name);
     let sum = sanitize_single_line(summary);
-    let clean_body = sanitize_single_line(body);
+    let stripped_body = strip_leading_web_origin(body);
+    let clean_body = sanitize_single_line(stripped_body);
 
     let title = match (app.is_empty(), sum.is_empty()) {
         (true, true) => "Notification".to_owned(),
@@ -680,6 +681,90 @@ pub fn format_dbus_notification(app_name: &str, summary: &str, body: &str) -> (S
         (_, false) => sum,
     };
     (title, clean_body)
+}
+
+/// Strips a leading web origin line or token (e.g. `chat.google.com\n123` -> `123`)
+/// prepended by browsers to Web Push notifications (`RUSTYOS-175`).
+fn strip_leading_web_origin(raw: &str) -> &str {
+    let trimmed = raw.trim_start();
+    if let Some((first_line, rest)) = trimmed.split_once('\n') {
+        let rest_trimmed = rest.trim_start();
+        if !rest_trimmed.is_empty() && is_web_origin_token(first_line.trim()) {
+            return rest_trimmed;
+        }
+    }
+    if let Some((first_tok, rest)) = trimmed.split_once(char::is_whitespace) {
+        let rest_trimmed = rest.trim_start();
+        if !rest_trimmed.is_empty() && is_web_origin_token(first_tok) {
+            return rest_trimmed;
+        }
+    }
+    raw
+}
+
+fn is_web_origin_token(token: &str) -> bool {
+    let stripped = token
+        .strip_prefix("https://")
+        .or_else(|| token.strip_prefix("http://"))
+        .unwrap_or(token)
+        .trim_end_matches('/');
+    let host = stripped.split(':').next().unwrap_or(stripped);
+    if host.is_empty() || host.len() > 253 || !host.contains('.') {
+        return false;
+    }
+    let mut labels = host.split('.');
+    let mut count = 0_usize;
+    let mut last_label = "";
+    for label in &mut labels {
+        if label.is_empty()
+            || label.len() > 63
+            || label.starts_with('-')
+            || label.ends_with('-')
+            || !label
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        {
+            return false;
+        }
+        last_label = label;
+        count += 1;
+    }
+    if count < 2 || !(2..=12).contains(&last_label.len()) {
+        return false;
+    }
+    if !last_label.bytes().all(|b| b.is_ascii_lowercase()) {
+        return false;
+    }
+    !matches!(
+        last_label,
+        "png"
+            | "jpg"
+            | "jpeg"
+            | "gif"
+            | "webp"
+            | "bmp"
+            | "ppm"
+            | "svg"
+            | "pdf"
+            | "txt"
+            | "md"
+            | "log"
+            | "zip"
+            | "tar"
+            | "gz"
+            | "xz"
+            | "mp3"
+            | "mp4"
+            | "mkv"
+            | "wav"
+            | "rs"
+            | "toml"
+            | "json"
+            | "yaml"
+            | "yml"
+            | "ini"
+            | "conf"
+    )
 }
 
 fn is_unsupported_emoji_char(ch: char) -> bool {
@@ -740,9 +825,21 @@ mod tests {
             "Chat приветствует вас!",
             "chat.google.com\nТак выглядят уведомления на рабочем столе 👍",
         );
+        assert_eq!(clean_emoji, "Так выглядят уведомления на рабочем столе");
+
+        let (sender_title, stripped_msg) =
+            format_dbus_notification("Google Chrome", "Олександр Жук", "chat.google.com\n123");
+        assert_eq!(sender_title, "Олександр Жук");
+        assert_eq!(stripped_msg, "123");
+
+        let (_, kept_filename) = format_dbus_notification(
+            "RustyOS",
+            "Screenshot Saved",
+            "RustyOS_2026-11-24_11-56-09.png (copied to clipboard)",
+        );
         assert_eq!(
-            clean_emoji,
-            "chat.google.com Так выглядят уведомления на рабочем столе"
+            kept_filename,
+            "RustyOS_2026-11-24_11-56-09.png (copied to clipboard)"
         );
     }
 

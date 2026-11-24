@@ -31,6 +31,7 @@ use smithay_client_toolkit::{
     delegate_compositor, delegate_keyboard, delegate_output, delegate_pointer, delegate_registry,
     delegate_seat, delegate_shm, delegate_xdg_shell, delegate_xdg_window,
     output::{OutputHandler, OutputState},
+    reexports::{calloop::EventLoop, calloop_wayland_source::WaylandSource},
     registry::{ProvidesRegistryState, RegistryState},
     registry_handlers,
     seat::{
@@ -135,17 +136,18 @@ struct ViewerApp {
     pointer_pos: (f64, f64),
     fonts: UiFontEngine,
     state: ViewerState,
-    is_maximized: bool,
+    frame_pending: bool,
+    last_title: String,
 }
 
 impl ViewerApp {
     fn toggle_maximize(&mut self) {
-        if self.is_maximized {
+        if self.state.frame.is_maximized {
             self.window.unset_maximized();
-            self.is_maximized = false;
+            self.state.frame.is_maximized = false;
         } else {
             self.window.set_maximized();
-            self.is_maximized = true;
+            self.state.frame.is_maximized = true;
         }
         self.state.dirty = true;
     }
@@ -161,9 +163,14 @@ impl ViewerApp {
         self.state.dirty = true;
     }
 
-    fn draw(&mut self, _qh: &QueueHandle<Self>) {
+    fn draw(&mut self, qh: &QueueHandle<Self>) {
         if !self.configured {
             return;
+        }
+
+        if self.last_title != self.state.frame.title {
+            self.last_title.clone_from(&self.state.frame.title);
+            self.window.set_title(&self.last_title);
         }
 
         let w = self.width.max(MIN_VIEWER_WIDTH);
@@ -194,6 +201,7 @@ impl ViewerApp {
             (w * 4) as usize,
             rusty_ui::PixelFormat::Bgra8888,
         );
+        canvas.clear([0, 0, 0, 0]);
         render_draw_list_to_canvas(&list, &mut canvas, &mut self.fonts);
 
         let surf = self.window.wl_surface();
@@ -203,8 +211,10 @@ impl ViewerApp {
             i32::try_from(w).unwrap_or(900),
             i32::try_from(h).unwrap_or(650),
         );
+        surf.frame(qh, surf.clone());
         let _ = buffer.attach_to(surf);
         surf.commit();
+        self.frame_pending = true;
         self.state.dirty = false;
     }
 }
@@ -227,6 +237,7 @@ impl CompositorHandler for ViewerApp {
     ) {
     }
     fn frame(&mut self, _: &Connection, qh: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: u32) {
+        self.frame_pending = false;
         if self.state.dirty {
             self.draw(qh);
         }
@@ -277,6 +288,9 @@ impl WindowHandler for ViewerApp {
 
         self.width = new_w;
         self.height = new_h;
+        self.state.frame.is_maximized = configure.is_maximized();
+        self.state.frame.is_focused = configure.is_activated();
+        self.state.is_fullscreen = configure.is_fullscreen();
         self.state.frame.buttons = TrafficLightButtons::default_csd_for_width(new_w);
 
         if self.state.viewport.is_fitting {
@@ -284,6 +298,7 @@ impl WindowHandler for ViewerApp {
         }
 
         self.configured = true;
+        self.frame_pending = false;
         self.state.dirty = true;
         self.draw(qh);
     }
@@ -641,7 +656,7 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     };
 
-    let Ok((globals, mut event_queue)) = registry_queue_init(&conn) else {
+    let Ok((globals, event_queue)) = registry_queue_init(&conn) else {
         eprintln!("rusty-view: failed to initialize Wayland registry");
         return ExitCode::FAILURE;
     };
@@ -668,7 +683,7 @@ fn main() -> ExitCode {
     };
 
     let surface = compositor.create_surface(&qh);
-    let window = xdg_shell.create_window(surface, WindowDecorations::RequestServer, &qh);
+    let window = xdg_shell.create_window(surface, WindowDecorations::RequestClient, &qh);
     window.set_title("Image Viewer");
     window.set_app_id("org.rustyos.view");
     window.set_min_size(Some((MIN_VIEWER_WIDTH, MIN_VIEWER_HEIGHT)));
@@ -704,23 +719,47 @@ fn main() -> ExitCode {
         pointer_pos: (0.0, 0.0),
         fonts: UiFontEngine::new(),
         state,
-        is_maximized: false,
+        frame_pending: false,
+        last_title: "Image Viewer".to_owned(),
     };
 
+    run_wayland_loop(conn, event_queue, &qh, &mut app)
+}
+
+fn run_wayland_loop(
+    conn: Connection,
+    event_queue: wayland_client::EventQueue<ViewerApp>,
+    qh: &QueueHandle<ViewerApp>,
+    app: &mut ViewerApp,
+) -> ExitCode {
+    let Ok(mut event_loop) = EventLoop::<ViewerApp>::try_new() else {
+        eprintln!("rusty-view: failed to create event loop");
+        return ExitCode::FAILURE;
+    };
+    if WaylandSource::new(conn, event_queue)
+        .insert(event_loop.handle())
+        .is_err()
+    {
+        eprintln!("rusty-view: failed to register Wayland source");
+        return ExitCode::FAILURE;
+    }
+
     while !app.exit {
-        let _ = event_queue.flush();
-        if let Some(guard) = event_queue.prepare_read() {
-            let _ = guard.read();
+        if app.state.toolbar.update_visibility() {
+            app.state.dirty = true;
         }
-        if event_queue.dispatch_pending(&mut app).is_err() {
+        if app.configured && app.state.dirty && !app.frame_pending {
+            app.draw(qh);
+        }
+
+        let timeout = if app.state.toolbar.opacity > 0.01 && !app.state.toolbar.is_pointer_inside {
+            Some(Duration::from_millis(33))
+        } else {
+            Some(Duration::from_millis(250))
+        };
+        if event_loop.dispatch(timeout, app).is_err() {
             break;
         }
-
-        if app.state.dirty && !app.exit {
-            app.draw(&qh);
-        }
-
-        std::thread::sleep(Duration::from_millis(4));
     }
 
     ExitCode::SUCCESS

@@ -46,7 +46,7 @@ pub fn merge_gtk_settings_ini(existing: &str, cfg: &ThemeSyncConfig) -> String {
         ),
         (
             "gtk-decoration-layout",
-            "close,minimize,maximize:".to_owned(),
+            ":minimize,maximize,close".to_owned(),
         ),
     ];
     if let Some(icon) = cfg
@@ -295,7 +295,7 @@ fn apply_gsettings_best_effort(cfg: &ThemeSyncConfig) {
         "set",
         "org.gnome.desktop.wm.preferences",
         "button-layout",
-        "close,minimize,maximize:",
+        ":minimize,maximize,close",
     ]);
     if let Some(icon) = cfg
         .icon_theme
@@ -345,7 +345,7 @@ mod tests {
         assert!(merged.contains("gtk-icon-theme-name=Papirus-Dark"));
         assert!(merged.contains("gtk-cursor-theme-name=Adwaita"));
         assert!(merged.contains("gtk-cursor-theme-size=24"));
-        assert!(merged.contains("gtk-decoration-layout=close,minimize,maximize:"));
+        assert!(merged.contains("gtk-decoration-layout=:minimize,maximize,close"));
         assert!(merged.contains("gtk-font-name=Inter 10"));
     }
 
