@@ -338,6 +338,9 @@ RustyOS/
     - `crates/rusty-services/src/lib.rs`: `with_config_file_lock` (`std::fs::File::lock()` на `.config.toml.lock`) и `write_file_atomic` (`.tmp.<pid>` + `sync_all()` + `rename()`);
     - `crates/rusty-compositor/src/{config.rs, state/shell_actions.rs}`: `notifications_muted_apps`, `is_notification_app_muted`, подавление toast-баннеров для заглушённых приложений при сохранении в `notification_history`;
     - `apps/rusty-settings/src/{state.rs, layout.rs, wayland.rs}`: `NOTIF_APP_KEYS`/`muted_apps`, `format_toml_string_array`, `StepperDragKind` (`pointer_drag` для `Volume`/`Scale`/`GlassOpacity`), `format_captured_shortcut` + `apply_captured_shortcut` в `ShortcutEdit`, `RowControlId::DisplayOutputCycle` + `sync_wayland_outputs` (`[display.<name>]`).
+  - Нативный Safe Rust сокет-клиент PipeWire/PulseAudio и реактивная телеметрия громкости (`RUSTYOS-171`, `ADR-0100`, `D-114`):
+    - `crates/rusty-services/src/{audio_pulse.rs, media.rs, system_signals.rs}`: чистый Safe Rust протокол PulseAudio over UNIX domain socket (`PulseClient`, `TagWriter`, `TagReader`, `TagType`), zero-fork sub-millisecond `AudioService::{query_status, set_volume, toggle_mute, set_default_output}`, прозрачный fallback на `wpctl`/`pactl` при отсутствии сокета, `SystemSignalMask::AUDIO` (`1 << 3`) и подписка `PA_SUBSCRIPTION_MASK_SINK` для мгновенных событий;
+    - `crates/rusty-compositor/src/telemetry.rs`: таргетированный опрос аудио-статуса в `poll_targeted` по сигналу `mask.has_audio()` без задержек поллинга.
   - Сайдбар `#ECEDF1`/`#262628`, активный пункт `r = 10` (`#D9DADD`/`#3E3E41`), холст `#F5F6FA`/`#1C1C1D`, карточки (`CARD_CORNER_RADIUS = 12`, `#FFFFFF`/`#2C2C2D`) и капсулы тулбара/фильтров без серых рамок.
 - **Нетривиальные сигнатуры и lint-правила:**
   - `KeyboardHandle::change_repeat_info(&self, rate: i32, delay: i32)` (порядок `(rate, delay)`, обратный к `seat.add_keyboard(xkb, delay, rate)`).

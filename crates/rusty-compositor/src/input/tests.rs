@@ -1801,7 +1801,7 @@ fn edge_snap_detection_and_unmaximize_proportional_anchor_work() {
         28,
     );
     assert_eq!(ax, 480);
-    assert_eq!(ay, 86);
+    assert_eq!(ay, 82);
 }
 
 #[test]

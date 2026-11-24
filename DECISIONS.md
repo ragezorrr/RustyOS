@@ -1332,6 +1332,13 @@
                            toast-баннеров при сохранении в Notification Center); в `rusty-settings` — перетаскивание
                            слайдеров (`Volume`/`Scale`/`GlassOpacity`), прямой захват клавиш в `ShortcutEdit` и
                            селектор монитора (`[display.<name>]`) на странице `Display` (`0` новых крейтов, `0 unsafe`)
+  D-114   2026-11-24  Accepted (ADR-0100)  Нативный аудио-движок (`RUSTYOS-171`): чистый Safe Rust клиент
+                           бинарного протокола PulseAudio/PipeWire (`crates/rusty-services/src/audio_pulse.rs`)
+                           поверх UNIX domain сокета (`$XDG_RUNTIME_DIR/pulse/native`), субмиллисекундная регулировка
+                           громкости (`SET_SINK_VOLUME`), mute (`SET_SINK_MUTE`) и переключение выходов
+                           (`SET_DEFAULT_SINK`) без `fork`/`exec` внешних утилит; реактивный слушатель событий
+                           (`SUBSCRIBE` на SINK/SERVER) с мгновенным пробуждением `telemetry` через
+                           `SystemSignalMask::AUDIO`; прозрачный fallback на `wpctl`/`pactl` (`0` новых крейтов, `0 unsafe`)
   -----------------------------------------------------------------------
 
 ## Открытые решения

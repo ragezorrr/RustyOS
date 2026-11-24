@@ -1,8 +1,11 @@
 //! Audio (`wpctl`/`pactl`) and MPRIS2 media playback adapters (`RUSTYOS-011`, `RUSTYOS-031`, `RUSTYOS-053`).
 
 use std::process::Command;
+use std::sync::{Arc, Mutex};
 
 use zbus::zvariant::Value;
+
+use crate::audio_pulse::{PulseClient, PulseError};
 
 /// Single discovered audio output sink (`RUSTYOS-156`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -70,21 +73,85 @@ pub enum MediaAction {
 
 /// Audio service interacting with PipeWire/WirePlumber or PulseAudio/ALSA.
 #[derive(Debug, Default, Clone)]
-pub struct AudioService;
+pub struct AudioService {
+    pulse_client: Arc<Mutex<Option<PulseClient>>>,
+}
 
 impl AudioService {
     /// Creates a new audio service adapter.
     #[must_use]
     pub fn new() -> Self {
-        Self
+        Self {
+            pulse_client: Arc::new(Mutex::new(None)),
+        }
     }
 
-    /// Queries the current audio volume and mute state via `wpctl` or `pactl`.
+    fn with_pulse_client<R>(
+        &self,
+        mut f: impl FnMut(&mut PulseClient) -> Result<R, PulseError>,
+    ) -> Option<R> {
+        let mut guard = self.pulse_client.lock().ok()?;
+        if guard.is_none()
+            && let Ok(client) = PulseClient::connect()
+        {
+            *guard = Some(client);
+        }
+        if let Some(client) = guard.as_mut() {
+            if let Ok(res) = f(client) {
+                Some(res)
+            } else {
+                // Drop dead socket connection and retry once
+                *guard = None;
+                if let Ok(mut new_client) = PulseClient::connect() {
+                    let res = f(&mut new_client).ok();
+                    *guard = Some(new_client);
+                    res
+                } else {
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    }
+
+    /// Queries the current audio volume and mute state via native PipeWire socket or `wpctl`/`pactl` fallbacks.
     #[must_use]
     pub fn query_status(&self) -> AudioStatus {
+        // 1. Try native PipeWire/PulseAudio UNIX domain socket first (sub-millisecond, zero-fork)
+        if let Some(sink) = self.with_pulse_client(PulseClient::get_default_sink) {
+            let active_output_name = if sink.description.is_empty() {
+                sink.name.clone()
+            } else {
+                sink.description.clone()
+            };
+            let mut status = AudioStatus {
+                volume_percent: sink.volume_percent,
+                muted: sink.muted,
+                backend: "pipewire-native".to_string(),
+                active_output_name,
+                outputs: self.list_outputs(),
+            };
+            if status.outputs.is_empty() {
+                status.outputs.push(AudioOutputDevice {
+                    id: sink.name.clone(),
+                    name: status.active_output_name.clone(),
+                    is_default: true,
+                });
+            } else if let Some(def) = status
+                .outputs
+                .iter()
+                .find(|o| o.is_default)
+                .or_else(|| status.outputs.first())
+            {
+                def.name.clone_into(&mut status.active_output_name);
+            }
+            return status;
+        }
+
         let mut status = AudioStatus::default();
 
-        // 1. Try PipeWire's WirePlumber CLI: `wpctl get-volume @DEFAULT_AUDIO_SINK@`
+        // 2. Try PipeWire's WirePlumber CLI: `wpctl get-volume @DEFAULT_AUDIO_SINK@`
         if let Ok(output) = Command::new("wpctl")
             .args(["get-volume", "@DEFAULT_AUDIO_SINK@"])
             .output()
@@ -181,12 +248,20 @@ impl AudioService {
         Vec::new()
     }
 
-    /// Switches the default audio output sink by `WirePlumber` node ID or `PulseAudio` sink name (`RUSTYOS-156`).
+    /// Switches the default audio output sink by `WirePlumber` node ID or `PulseAudio` sink name (`RUSTYOS-156`, `RUSTYOS-171`).
     #[must_use]
     pub fn set_default_output(&self, id: &str) -> bool {
         let trimmed = id.trim();
         if trimmed.is_empty() {
             return false;
+        }
+        // 1. If non-numeric sink name, try native PulseAudio/PipeWire socket first
+        if !trimmed.chars().all(|c| c.is_ascii_digit())
+            && self
+                .with_pulse_client(|c| c.set_default_sink(trimmed))
+                .is_some()
+        {
+            return true;
         }
         if trimmed.chars().all(|c| c.is_ascii_digit())
             && Command::new("wpctl")
@@ -234,10 +309,17 @@ impl AudioService {
         }
     }
 
-    /// Sets master output volume (`0..=100`) via `wpctl` or `pactl`.
+    /// Sets master output volume (`0..=100`) via native PipeWire socket or `wpctl`/`pactl` fallbacks.
     #[must_use]
     pub fn set_volume(&self, percent: u8) -> bool {
         let clamped = percent.min(100);
+        // 1. Try native socket first (zero-fork, < 0.2 ms!)
+        if self
+            .with_pulse_client(|c| c.set_sink_volume("@DEFAULT_SINK@", clamped))
+            .is_some()
+        {
+            return true;
+        }
         let wpctl_arg = format_wpctl_volume(clamped);
         if Command::new("wpctl")
             .args(["set-volume", "@DEFAULT_AUDIO_SINK@", &wpctl_arg])
@@ -253,9 +335,17 @@ impl AudioService {
             .is_ok_and(|s| s.success())
     }
 
-    /// Toggles master output mute via `wpctl` or `pactl`.
+    /// Toggles master output mute via native PipeWire socket or `wpctl`/`pactl` fallbacks.
     #[must_use]
     pub fn toggle_mute(&self) -> bool {
+        // 1. Try native socket first (zero-fork)
+        if let Some(toggled) = self.with_pulse_client(|c| {
+            let cur = c.get_default_sink()?;
+            c.set_sink_mute("@DEFAULT_SINK@", !cur.muted)?;
+            Ok(true)
+        }) {
+            return toggled;
+        }
         if Command::new("wpctl")
             .args(["set-mute", "@DEFAULT_AUDIO_SINK@", "toggle"])
             .status()

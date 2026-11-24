@@ -2801,6 +2801,20 @@ hardware/software context и низкие накладные расходы.
   - `cargo fmt --check`, `cargo clippy -p rusty-services -p rusty-compositor -p rusty-settings --tests -- -A clippy::map_unwrap_or -A clippy::needless_bool -D warnings` (0 предупреждений); `cargo test -p rusty-services` (`75/75`), `cargo test -p rusty-settings` (`19/19`), `cargo test -p rusty-compositor config::tests::parses_notifications_section_and_roundtrips` passed.
 - **Risks:** Низкие; 0 новых Cargo-зависимостей, 0 `unsafe`.
 
+### RUSTYOS-171 — Нативный Safe Rust аудио-клиент PipeWire/PulseAudio и реактивные события телеметрии
+- **Status:** Done
+- **Goal:** Заменить спавн внешних CLI-процессов `wpctl`/`pactl` при регулировке звука и опросе статуса на нативный Safe Rust клиент бинарного протокола PulseAudio поверх UNIX-сокета (`$XDG_RUNTIME_DIR/pulse/native`), устранив задержки перетаскивания слайдеров и добавив реактивные push-уведомления об изменении громкости и устройств без новых Cargo-зависимостей и `unsafe`.
+- **Dependencies:** `RUSTYOS-011`, `RUSTYOS-156`, `RUSTYOS-164`, `RUSTYOS-170`.
+- **Scope:**
+  - `crates/rusty-services/src/audio_pulse.rs`: чистый safe Rust клиент `PulseClient`, сериализатор `TagWriter` и безопасный парсер `TagReader` для 20-байтных пакетов и тегов `L`, `t`, `v`, `1`/`0`, `x`, `P`/`N`; рукопожатие `PA_COMMAND_AUTH` с чтением cookie и `PA_COMMAND_SET_CLIENT_NAME`, команды `get_default_sink` (`PA_COMMAND_GET_SINK_INFO`), `set_sink_volume` (`PA_COMMAND_SET_SINK_VOLUME`), `set_sink_mute` (`PA_COMMAND_SET_SINK_MUTE`), `set_default_sink` (`PA_COMMAND_SET_DEFAULT_SINK`) и `subscribe` (`PA_COMMAND_SUBSCRIBE`).
+  - `crates/rusty-services/src/media.rs`: интеграция `PulseClient` в `AudioService` через потокобезопасный `Arc<Mutex<Option<PulseClient>>>` с авто-переподключением при сбоях и прозрачным fallback на `wpctl`/`pactl` при отсутствии сокета.
+  - `crates/rusty-services/src/system_signals.rs`: добавление домена `SystemSignalMask::AUDIO` (`1 << 3`), фоновый поток `pulse_signal_listener_loop` со слушателем асинхронных уведомлений `PA_COMMAND_SUBSCRIBE_EVENT` (opcode 68).
+  - `crates/rusty-compositor/src/telemetry.rs`: реактивное целевое обновление `snap.audio = services.audio.query_status()` в `poll_targeted` по сигналу `AUDIO`.
+  - `docs/adr/0100-pipewire-native-audio-client.md`, `DECISIONS.md` (`D-114`), `ARCHITECTURE.md` §7.
+- **Acceptance Criteria:**
+  - `cargo fmt --check` чисто; `cargo clippy --workspace --all-targets -- -A clippy::map_unwrap_or -A clippy::needless_bool -D warnings` (0 предупреждений); полный прогон unit-тестов `430/430` passed (включая `77/77` `rusty-services`, `240/240` `rusty-compositor`, `19/19` `rusty-settings`); подтверждено живое подключение `AudioService` к локальному PipeWire сокету с backend `"pipewire-native"` в sub-millisecond режиме (0.02s на тест).
+- **Risks:** Низкие; 0 новых Cargo-зависимостей, 0 `unsafe`, сохранён 100% рабочий CLI-фоллбэк.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

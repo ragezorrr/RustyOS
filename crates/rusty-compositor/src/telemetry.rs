@@ -615,6 +615,9 @@ fn poll_targeted(
     if mask.has_bluetooth() {
         snap.bluetooth = services.bluetooth.query_status();
     }
+    if mask.has_audio() {
+        snap.audio = services.audio.query_status();
+    }
     refresh_clock_fields(&mut snap, clock_locale);
     snap
 }

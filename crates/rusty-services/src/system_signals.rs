@@ -10,6 +10,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
 use zbus::MatchRule;
 
@@ -26,8 +27,10 @@ impl SystemSignalMask {
     pub const NETWORK: Self = Self(1 << 1);
     /// Bluetooth adapter / devices (`org.bluez`).
     pub const BLUETOOTH: Self = Self(1 << 2);
+    /// Audio volume / sink changes (`PipeWire` / `PulseAudio`).
+    pub const AUDIO: Self = Self(1 << 3);
     /// All reactive system signal domains combined.
-    pub const ALL: Self = Self(Self::POWER.0 | Self::NETWORK.0 | Self::BLUETOOTH.0);
+    pub const ALL: Self = Self(Self::POWER.0 | Self::NETWORK.0 | Self::BLUETOOTH.0 | Self::AUDIO.0);
 
     /// Returns raw bit representation for atomic storage.
     #[must_use]
@@ -65,6 +68,12 @@ impl SystemSignalMask {
         self.0 & Self::BLUETOOTH.0 != 0
     }
 
+    /// Returns `true` when `PipeWire` or `PulseAudio` signalled an audio change.
+    #[must_use]
+    pub const fn has_audio(self) -> bool {
+        self.0 & Self::AUDIO.0 != 0
+    }
+
     /// Combines two masks.
     #[must_use]
     pub const fn union(self, other: Self) -> Self {
@@ -90,17 +99,19 @@ pub fn classify_system_signal_path(object_path: &str) -> SystemSignalMask {
     }
 }
 
-/// Non-blocking handle to the background system D-Bus signal listener (`UPower` + `NetworkManager` + `BlueZ`).
+/// Non-blocking handle to the background system signal listener (`UPower`, `NetworkManager`, `BlueZ`, `PipeWire`).
 pub struct SystemSignalMonitorHandle {
     stop: Arc<AtomicBool>,
     conn_slot: Arc<std::sync::Mutex<Option<zbus::blocking::Connection>>>,
     worker: Option<JoinHandle<()>>,
+    pulse_worker: Option<JoinHandle<()>>,
 }
 
 impl fmt::Debug for SystemSignalMonitorHandle {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SystemSignalMonitorHandle")
             .field("active", &self.worker.is_some())
+            .field("pulse_active", &self.pulse_worker.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -111,6 +122,7 @@ impl Default for SystemSignalMonitorHandle {
             stop: Arc::new(AtomicBool::new(true)),
             conn_slot: Arc::new(std::sync::Mutex::new(None)),
             worker: None,
+            pulse_worker: None,
         }
     }
 }
@@ -127,22 +139,33 @@ impl Drop for SystemSignalMonitorHandle {
 }
 
 impl SystemSignalMonitorHandle {
-    /// Spawns a background system D-Bus signal listener invoking `on_signal(mask)` whenever
-    /// `UPower`, `NetworkManager`, or `BlueZ` emits a relevant change signal.
+    /// Spawns a background system signal listener invoking `on_signal(mask)` whenever
+    /// `UPower`, `NetworkManager`, `BlueZ`, or `PipeWire` emits a relevant change signal (`RUSTYOS-171`).
     #[must_use]
+    #[allow(clippy::needless_pass_by_value)]
     pub fn start_background(on_signal: Arc<dyn Fn(SystemSignalMask) + Send + Sync>) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let stop_bg = Arc::clone(&stop);
         let conn_slot = Arc::new(std::sync::Mutex::new(None));
         let conn_bg = Arc::clone(&conn_slot);
+        let dbus_cb = Arc::clone(&on_signal);
         let worker = thread::Builder::new()
             .name("rustyos-sys-signals".to_owned())
-            .spawn(move || signal_listener_loop(&stop_bg, &conn_bg, &on_signal))
+            .spawn(move || signal_listener_loop(&stop_bg, &conn_bg, &dbus_cb))
             .ok();
+
+        let pulse_stop = Arc::clone(&stop);
+        let pulse_cb = Arc::clone(&on_signal);
+        let pulse_worker = thread::Builder::new()
+            .name("rustyos-pulse-signals".to_owned())
+            .spawn(move || pulse_signal_listener_loop(&pulse_stop, &pulse_cb))
+            .ok();
+
         Self {
             stop,
             conn_slot,
             worker,
+            pulse_worker,
         }
     }
 }
@@ -224,6 +247,49 @@ fn signal_listener_loop(
     }
 }
 
+fn pulse_signal_listener_loop(
+    stop: &AtomicBool,
+    on_signal: &Arc<dyn Fn(SystemSignalMask) + Send + Sync>,
+) {
+    while !stop.load(Ordering::Acquire) {
+        if let Ok(mut client) = crate::audio_pulse::PulseClient::connect()
+            && client
+                .subscribe(
+                    crate::audio_pulse::PA_SUBSCRIPTION_MASK_SINK
+                        | crate::audio_pulse::PA_SUBSCRIPTION_MASK_SERVER,
+                )
+                .is_ok()
+        {
+            while !stop.load(Ordering::Acquire) {
+                match client.read_packet_with_timeout(Duration::from_millis(500)) {
+                    Ok(body) => {
+                        if body.len() >= 5 {
+                            let mut r = crate::audio_pulse::TagReader::new(&body);
+                            if let Ok(cmd) = r.get_u32()
+                                && cmd == crate::audio_pulse::PA_COMMAND_SUBSCRIBE_EVENT
+                            {
+                                on_signal(SystemSignalMask::AUDIO);
+                            }
+                        }
+                    }
+                    Err(crate::audio_pulse::PulseError::Io(e))
+                        if e.kind() == std::io::ErrorKind::TimedOut
+                            || e.kind() == std::io::ErrorKind::WouldBlock => {}
+                    Err(_) => {
+                        break;
+                    }
+                }
+            }
+        }
+        for _ in 0..20 {
+            if stop.load(Ordering::Acquire) {
+                return;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -255,10 +321,13 @@ mod tests {
             SystemSignalMask::EMPTY
         );
 
-        let combined = SystemSignalMask::POWER.union(SystemSignalMask::NETWORK);
+        let combined = SystemSignalMask::POWER
+            .union(SystemSignalMask::NETWORK)
+            .union(SystemSignalMask::AUDIO);
         assert!(combined.has_power());
         assert!(combined.has_network());
         assert!(!combined.has_bluetooth());
+        assert!(combined.has_audio());
         assert_eq!(SystemSignalMask::from_bits(combined.bits()), combined);
     }
 }

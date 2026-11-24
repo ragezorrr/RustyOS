@@ -5,6 +5,7 @@
 
 pub mod app_catalog_monitor;
 pub mod appruntime;
+pub mod audio_pulse;
 pub mod auth;
 pub mod file_manager;
 pub mod image_decode;
@@ -317,6 +318,10 @@ mod tests {
         let audio = AudioService::new();
         let st = audio.query_status();
         assert!(st.volume_percent <= 100);
+        if audio_pulse::PulseClient::find_socket_path().is_some() {
+            assert_eq!(st.backend, "pipewire-native");
+            assert_ne!(st.active_output_name, "");
+        }
     }
 
     #[test]

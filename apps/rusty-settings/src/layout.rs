@@ -2646,8 +2646,9 @@ mod tests {
             ),
             Some(SettingsHit::Control(RowControlId::NotifAppToggle(0)))
         );
+        let was_enabled = app.notif_app_enabled[0];
         app.apply_row_action(RowControlId::NotifAppToggle(0));
-        assert!(!app.notif_app_enabled[0]);
+        assert_eq!(app.notif_app_enabled[0], !was_enabled);
     }
 
     #[test]
