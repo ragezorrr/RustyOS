@@ -4,6 +4,7 @@ members = [
     "apps/rusty-files",
     "apps/rusty-greeter",
     "apps/rusty-installer",
+    "apps/rusty-polkit",
     "apps/rusty-settings",
     "apps/rusty-terminal",
     "crates/rusty-animation",

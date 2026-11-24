@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=PolicyKit Authentication Agent
+Comment=PolicyKit authentication agent for RustyOS desktop
+Exec=rusty-polkit
+Icon=dialog-password
+Terminal=false
+Type=Application
+NoDisplay=true
+OnlyShowIn=RustyOS;
+X-GNOME-Autostart-Phase=Applications

@@ -341,6 +341,9 @@ RustyOS/
   - Нативный Safe Rust сокет-клиент PipeWire/PulseAudio и реактивная телеметрия громкости (`RUSTYOS-171`, `ADR-0100`, `D-114`):
     - `crates/rusty-services/src/{audio_pulse.rs, media.rs, system_signals.rs}`: чистый Safe Rust протокол PulseAudio over UNIX domain socket (`PulseClient`, `TagWriter`, `TagReader`, `TagType`), zero-fork sub-millisecond `AudioService::{query_status, set_volume, toggle_mute, set_default_output}`, прозрачный fallback на `wpctl`/`pactl` при отсутствии сокета, `SystemSignalMask::AUDIO` (`1 << 3`) и подписка `PA_SUBSCRIPTION_MASK_SINK` для мгновенных событий;
     - `crates/rusty-compositor/src/telemetry.rs`: таргетированный опрос аудио-статуса в `poll_targeted` по сигналу `mask.has_audio()` без задержек поллинга.
+  - Нативный Safe Rust Polkit Authentication Agent (`RUSTYOS-172`, `ADR-0101`, `D-115`):
+    - `apps/rusty-polkit/src/{main.rs, dialog.rs}`: сессионный графический агент аутентификации PolicyKit (`org.freedesktop.PolicyKit1.AuthenticationAgent`) на базе `rusty-ui` и `zbus = "5"` (`420x240 px`, скругление `18 px`, Popover/Sheet стиль, маскированное поле ввода пароля `••••` с автофокусом, кнопки `Отмена`/`Подтвердить` `#007AFF`/`#0A84FF`, навигация `Enter`/`Escape`);
+    - Интеграция с системным хелпером `/run/polkit/agent-helper.socket` (и `/usr/lib/polkit-1/polkit-agent-helper-1`), лимит 3 попыток ввода, отслеживание `NameOwnerChanged` и автозапуск через `packaging/applications/org.rustyos.polkit.desktop` / `packaging/systemd/rustyos-polkit.service`.
   - Сайдбар `#ECEDF1`/`#262628`, активный пункт `r = 10` (`#D9DADD`/`#3E3E41`), холст `#F5F6FA`/`#1C1C1D`, карточки (`CARD_CORNER_RADIUS = 12`, `#FFFFFF`/`#2C2C2D`) и капсулы тулбара/фильтров без серых рамок.
 - **Нетривиальные сигнатуры и lint-правила:**
   - `KeyboardHandle::change_repeat_info(&self, rate: i32, delay: i32)` (порядок `(rate, delay)`, обратный к `seat.add_keyboard(xkb, delay, rate)`).

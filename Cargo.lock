@@ -1730,6 +1730,18 @@ name = "rusty-ipc"
 version = "0.1.0"
 
 [[package]]
+name = "rusty-polkit"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "rusty-services",
+ "rusty-ui",
+ "smithay-client-toolkit",
+ "wayland-client",
+ "zbus",
+]
+
+[[package]]
 name = "rusty-services"
 version = "0.1.0"
 dependencies = [

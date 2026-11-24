@@ -1339,6 +1339,13 @@
                            (`SET_DEFAULT_SINK`) без `fork`/`exec` внешних утилит; реактивный слушатель событий
                            (`SUBSCRIBE` на SINK/SERVER) с мгновенным пробуждением `telemetry` через
                            `SystemSignalMask::AUDIO`; прозрачный fallback на `wpctl`/`pactl` (`0` новых крейтов, `0 unsafe`)
+  D-115   2026-11-24  Accepted (ADR-0101)  Системная безопасность (`RUSTYOS-172`): нативный агент аутентификации
+                           PolicyKit (`apps/rusty-polkit`) на базе `rusty-ui` и `zbus = "5"` с экспортом
+                           `org.freedesktop.PolicyKit1.AuthenticationAgent` на системной шине, модальным диалогом
+                           в стиле macOS 27 (`400x230 px`, `r = 18 px`, тень Popover, маскированное поле пароля с
+                           автофокусом и `Enter`/`Escape`), взаимодействием со стандартным хелпером
+                           `/run/polkit/agent-helper.socket` (и `/usr/lib/polkit-1/polkit-agent-helper-1`),
+                           перерегистрацией при перезапуске `polkitd` и автозапуском в сессии (`0` новых крейтов, `0 unsafe`)
   -----------------------------------------------------------------------
 
 ## Открытые решения

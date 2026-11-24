@@ -1,0 +1,19 @@
+[package]
+name = "rusty-polkit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "RustyOS PolicyKit graphical authentication agent in macOS 27 style"
+
+[dependencies]
+libc.workspace = true
+rusty-services.workspace = true
+rusty-ui.workspace = true
+smithay-client-toolkit = { version = "0.19.2", default-features = false, features = ["calloop", "xkbcommon"] }
+wayland-client = "0.31.15"
+zbus.workspace = true
+
+[lints]
+workspace = true

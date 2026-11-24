@@ -2815,6 +2815,21 @@ hardware/software context и низкие накладные расходы.
   - `cargo fmt --check` чисто; `cargo clippy --workspace --all-targets -- -A clippy::map_unwrap_or -A clippy::needless_bool -D warnings` (0 предупреждений); полный прогон unit-тестов `430/430` passed (включая `77/77` `rusty-services`, `240/240` `rusty-compositor`, `19/19` `rusty-settings`); подтверждено живое подключение `AudioService` к локальному PipeWire сокету с backend `"pipewire-native"` в sub-millisecond режиме (0.02s на тест).
 - **Risks:** Низкие; 0 новых Cargo-зависимостей, 0 `unsafe`, сохранён 100% рабочий CLI-фоллбэк.
 
+### RUSTYOS-172 — Нативный Safe Rust Polkit Authentication Agent (`apps/rusty-polkit`)
+- **Status:** Done
+- **Goal:** Реализовать нативный графический агент аутентификации PolicyKit (`apps/rusty-polkit`) в стиле macOS 27 на базе `rusty-ui` и `zbus = "5"` без новых зависимостей Cargo и `unsafe`, обеспечив корректный запрос root-пароля через `/run/polkit/agent-helper.socket` / `polkit-agent-helper-1`, обработку отмены/повторных попыток и автозапуск в сессии.
+- **Dependencies:** `RUSTYOS-061`, `RUSTYOS-164`, `RUSTYOS-168`, `RUSTYOS-171`.
+- **Scope:**
+  - `apps/rusty-polkit/Cargo.toml`: интеграция в workspace с зависимостями `rusty-ui`, `rusty-services`, `zbus`, `wayland-client`, `libc`.
+  - `apps/rusty-polkit/src/session.rs`: клиент хелпера аутентификации (подключение к `/run/polkit/agent-helper.socket` с fallback на спавн `/usr/lib/polkit-1/polkit-agent-helper-1`), обработка строк `PAM_PROMPT_ECHO_OFF`, `PAM_ERROR_MSG`, `SUCCESS`, `FAILURE`.
+  - `apps/rusty-polkit/src/agent.rs`: D-Bus интерфейс `org.freedesktop.PolicyKit1.AuthenticationAgent` (`BeginAuthentication`, `CancelAuthentication`), получение `session_id` из `systemd-logind`, регистрация в `org.freedesktop.PolicyKit1.Authority`, подписка на `NameOwnerChanged`.
+  - `apps/rusty-polkit/src/dialog.rs` и `main.rs`: Wayland-окно диалога на `rusty-ui` (`400x230 px`, иконка замка/щита, сообщение действия, имя пользователя, маскированное поле ввода пароля `••••` с автофокусом, кнопки «Отмена»/«Подтвердить», индикация ошибки и лимит 3 попыток).
+  - `data/rustyos-polkit.desktop`, `data/rustyos-polkit.service`: файлы автозапуска для десктопной сессии RustyOS.
+  - `docs/adr/0101-polkit-authentication-agent.md`, `DECISIONS.md` (`D-115`), `ARCHITECTURE.md` §7.
+- **Acceptance Criteria:**
+  - `cargo fmt --check` чисто; `cargo clippy -p rusty-polkit --tests -- -D warnings` (0 предупреждений); `cargo test -p rusty-polkit` пройден; ручной/тестовый вызов регистрации и проверка парсинга протокола helper; живой `--winit` или Wayland запуск окна.
+- **Risks:** Низкие; 0 новых Cargo-зависимостей, 0 `unsafe`.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance
