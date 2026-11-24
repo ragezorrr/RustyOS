@@ -2,7 +2,7 @@
 
 pub const WINDOW_RADIUS: u32 = 14;
 pub const TITLEBAR_HEIGHT: u32 = 40;
-pub const SSD_TITLEBAR_HEIGHT: u32 = 28;
+pub const SSD_TITLEBAR_HEIGHT: u32 = 36;
 
 pub const TRAFFIC_LIGHT_DIAMETER: u32 = 14;
 pub const TRAFFIC_LIGHT_RADIUS: f32 = 7.0;

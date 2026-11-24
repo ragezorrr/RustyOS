@@ -9,8 +9,7 @@ use smithay::utils::{Point, Rectangle, Size};
 use super::CompositorRenderElement;
 use super::tokens::{
     COLOR_BORDER, COLOR_DANGER, COLOR_MUTED, COLOR_SUBTLE, COLOR_SUCCESS, COLOR_WARNING,
-    RESIZE_GRAB_BORDER, RGBA_BORDER, RGBA_BORDER_HIGHLIGHT, RGBA_SURFACE_ELEVATED,
-    RGBA_SURFACE_OVERLAY, TITLEBAR_HEIGHT, WINDOW_RADIUS, blend_border_over_fill_color,
+    RESIZE_GRAB_BORDER, TITLEBAR_HEIGHT, WINDOW_RADIUS, blend_border_over_fill_color,
     make_solid_element, push_cpu_nine_slice_shadow, rgba_to_premul_color32f,
 };
 
@@ -308,28 +307,28 @@ fn ssd_title_pill_color(pal: &super::tokens::ThemePalette, is_focused: bool) -> 
 
 const fn ssd_frame_colors(is_dark: bool, is_focused: bool) -> ([u8; 4], [u8; 4]) {
     if is_dark {
-        // Neutral macOS Dark header tones matching RustyOS Dark (#1C1C1D) & Chromium (#202124).
+        // Frosted macOS 27 Dark header tones matching RustyOS Dark (`#1C1C1D`) & Liquid Glass.
         let titlebar = if is_focused {
-            RGBA_SURFACE_OVERLAY
+            [38, 39, 43, 228]
         } else {
-            RGBA_SURFACE_ELEVATED
+            [30, 31, 35, 212]
         };
         let border = if is_focused {
-            RGBA_BORDER_HIGHLIGHT
+            [255, 255, 255, 34]
         } else {
-            RGBA_BORDER
+            [255, 255, 255, 20]
         };
         (titlebar, border)
     } else {
         let titlebar = if is_focused {
-            [246, 246, 248, 250]
+            [248, 249, 252, 236]
         } else {
-            [236, 237, 240, 246]
+            [238, 240, 244, 218]
         };
         let border = if is_focused {
-            [0, 0, 0, 24]
+            [0, 0, 0, 22]
         } else {
-            [0, 0, 0, 15]
+            [0, 0, 0, 14]
         };
         (titlebar, border)
     }
@@ -465,16 +464,16 @@ pub fn generate_window_ssd_composite_elements_with_options(
     let pal = super::tokens::ThemePalette::active();
     let (titlebar_rgba, border_rgba) = ssd_frame_colors(pal.is_dark, is_focused);
     let spec_alpha = if pal.is_dark {
-        if is_focused { 30 } else { 14 }
+        if is_focused { 44 } else { 20 }
     } else if is_focused {
-        160
+        185
     } else {
-        90
+        110
     };
     let divider_col = if pal.is_dark {
-        COLOR_BORDER
+        rgba_to_premul_color32f([255, 255, 255, 18])
     } else {
-        pal.popover_separator
+        rgba_to_premul_color32f([0, 0, 0, 18])
     };
     let titlebar_fill = rgba_to_premul_color32f(titlebar_rgba);
     let top_rim_col = blend_border_over_fill_color(border_rgba, titlebar_rgba);

@@ -208,7 +208,7 @@ pub const TOP_BAR_ITEM_H: i32 = 22;
 pub const TOP_BAR_FONT_SIZE: f32 = 14.0;
 
 /// Server-Side Decoration (SSD) titlebar height in logical pixels (`RUSTYOS-019`).
-pub const TITLEBAR_HEIGHT: i32 = 28;
+pub const TITLEBAR_HEIGHT: i32 = 36;
 
 /// Dock container height in logical pixels (`RUSTYOS-050`: 50 px icon + concentric padding & 4 px dot).
 pub const DOCK_HEIGHT: i32 = 68;
@@ -471,11 +471,8 @@ pub(super) fn truncate_ascii(text: &str, max_chars: usize) -> String {
     }
 }
 
-pub(super) const RGBA_SURFACE_ELEVATED: [u8; 4] = [28, 28, 30, 246]; // #1C1C1E @ 0.96
-pub(super) const RGBA_SURFACE_OVERLAY: [u8; 4] = [34, 34, 36, 250]; // #222224 @ 0.98
 pub(super) const RGBA_ACCENT: [u8; 4] = [10, 132, 255, 255]; // #0A84FF
 pub(super) const RGBA_BORDER: [u8; 4] = [255, 255, 255, 18];
-pub(super) const RGBA_BORDER_HIGHLIGHT: [u8; 4] = [255, 255, 255, 28];
 pub(super) const RGBA_DANGER: [u8; 4] = [255, 69, 58, 255];
 
 pub(super) fn rgba_to_premul_color32f(rgba: [u8; 4]) -> Color32F {
