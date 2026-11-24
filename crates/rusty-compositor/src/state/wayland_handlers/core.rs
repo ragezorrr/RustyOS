@@ -262,8 +262,9 @@ impl XdgShellHandler for RustyCompositorState {
             state.decoration_mode = Some(DecorationMode::ServerSide);
         });
 
-        let window = Window::new_wayland_window(surface);
+        let window = Window::new_wayland_window(surface.clone());
         self.window_bindings.push((win_id, window));
+        self.sync_xdg_toplevel_parent_and_modal(win_id, &surface, true);
         self.register_foreign_toplevel(win_id);
 
         let serial = smithay::utils::SERIAL_COUNTER.next_serial();
@@ -490,6 +491,15 @@ impl XdgShellHandler for RustyCompositorState {
         if let Some(win_id) = self.window_id_for_toplevel(&surface) {
             self.sync_foreign_toplevel_metadata(win_id);
             self.refresh_dock_window_presence(win_id);
+            self.shell_redraw_needed = true;
+        }
+    }
+
+    fn parent_changed(&mut self, surface: ToplevelSurface) {
+        if let Some(win_id) = self.window_id_for_toplevel(&surface) {
+            self.sync_xdg_toplevel_parent_and_modal(win_id, &surface, true);
+            let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+            self.sync_space_with_wm(serial);
             self.shell_redraw_needed = true;
         }
     }

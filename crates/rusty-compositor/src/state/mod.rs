@@ -297,13 +297,36 @@ pub struct WindowLifecycleAnimState {
     pub progress: AnimatedValue,
 }
 
-/// Active `Alt+Tab` window switcher HUD state (`RUSTYOS-033`).
+/// Active drag-to-workspace session for a window card inside `Workspace Overview` (`RUSTYOS-167`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct OverviewCardDragState {
+    /// Window being dragged across Overview.
+    pub window_id: WindowId,
+    /// Card index at the start of the drag.
+    pub card_index: usize,
+    /// Logical pointer location where LMB was pressed.
+    pub start_pos: Point<f64, Logical>,
+    /// Latest logical pointer location.
+    pub current_pos: Point<f64, Logical>,
+    /// True once pointer moved beyond the drag threshold (`>= 6 px`).
+    pub dragging: bool,
+    /// Destination workspace (`1..=9`) currently hovered in the top Spaces strip.
+    pub target_workspace: Option<u8>,
+}
+
+/// Active `Alt+Tab` window switcher HUD state (`RUSTYOS-033`, `RUSTYOS-167`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WindowSwitcherState {
     /// Active workspace window IDs in presentation order (unminimized MRU first, then minimized).
     pub window_ids: Vec<WindowId>,
     /// Currently highlighted entry index inside `window_ids`.
     pub selected: usize,
+    /// Card index currently hovered by the pointer, if any (`RUSTYOS-167`).
+    pub hovered: Option<usize>,
+    /// Card index whose close (`×`) button is currently hovered, if any (`RUSTYOS-167`).
+    pub hovered_close: Option<usize>,
+    /// Window that held keyboard focus before the switcher opened (`RUSTYOS-167`).
+    pub previous_focus: Option<WindowId>,
 }
 
 /// Active native `PolicyKit` authentication prompt rendered as a Liquid Glass modal (`RUSTYOS-056`).
@@ -654,6 +677,16 @@ pub struct RustyCompositorState {
     pub dock_stack: Option<DockStackState>,
     /// Optional App Exposé filter (`Show All Windows`) inside Workspace Overview (`RUSTYOS-073`).
     pub overview_filter_app: Option<String>,
+    /// Hovered Overview window card index (`RUSTYOS-167`).
+    pub overview_hovered_card: Option<usize>,
+    /// Hovered Overview card close (`×`) button index (`RUSTYOS-167`).
+    pub overview_hovered_close: Option<usize>,
+    /// Hovered Workspace space (`1..=9`) in the top Overview strip (`RUSTYOS-167`).
+    pub overview_hovered_space: Option<u8>,
+    /// Keyboard-selected Overview window card index (`RUSTYOS-167`).
+    pub overview_selected_card: Option<usize>,
+    /// Active drag-to-workspace state inside Overview (`RUSTYOS-167`).
+    pub overview_drag: Option<OverviewCardDragState>,
     /// Active per-window GLES Genie / Scale minimize & restore animations (`RUSTYOS-073`).
     pub minimize_anims: Vec<WindowMinimizeAnimState>,
     /// Active per-window Open & Close fade+scale animations (`RUSTYOS-128`).
@@ -1143,6 +1176,11 @@ impl RustyCompositorState {
             dock_drag: None,
             dock_stack: None,
             overview_filter_app: None,
+            overview_hovered_card: None,
+            overview_hovered_close: None,
+            overview_hovered_space: None,
+            overview_selected_card: None,
+            overview_drag: None,
             minimize_anims: Vec::new(),
             lifecycle_anims: Vec::new(),
             window_commit_revisions: std::collections::HashMap::new(),
@@ -2214,6 +2252,9 @@ impl RustyCompositorState {
         };
         if win.fullscreen || win.maximized {
             return true;
+        }
+        if win.is_floating_transient() {
+            return false;
         }
         self.wm
             .workspace(win.workspace)

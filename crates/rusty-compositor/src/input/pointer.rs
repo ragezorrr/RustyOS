@@ -503,6 +503,10 @@ impl RustyCompositorState {
     ) {
         use smithay::input::pointer::CursorIcon;
 
+        if self.overview_drag.as_ref().is_some_and(|d| d.dragging) {
+            self.set_compositor_cursor_override(Some(CursorIcon::Grabbing));
+            return;
+        }
         if self.has_blocking_shell_overlay()
             || self.context_menu.is_some()
             || self.window_switcher.is_some()
@@ -602,6 +606,29 @@ impl RustyCompositorState {
             }
             if self.screenshot_hud.is_some() {
                 self.handle_screenshot_hud_button(false);
+                return;
+            }
+            if button == 272
+                && let Some(drag) = self.overview_drag.take()
+            {
+                if drag.dragging {
+                    if let Some(ws_num) = drag.target_workspace {
+                        let target_ws = rusty_wm::WorkspaceId::new_clamped(ws_num);
+                        if self.wm.move_window_to_workspace(drag.window_id, target_ws) {
+                            self.sync_space_with_wm(serial);
+                            tracing::info!(
+                                window_id = drag.window_id.0,
+                                workspace = target_ws.0,
+                                "Moved window via Overview drag-to-workspace"
+                            );
+                        }
+                    }
+                } else {
+                    self.restore_window(drag.window_id, serial);
+                    self.close_overview();
+                }
+                self.update_compositor_cursor_for_pointer(self.pointer_location, false);
+                self.shell_redraw_needed = true;
                 return;
             }
             if button == 272
@@ -857,22 +884,32 @@ impl RustyCompositorState {
                 return;
             }
 
-            // Handle Alt+Tab window switcher HUD clicks (`RUSTYOS-033`)
+            // Handle Alt+Tab window switcher HUD clicks (`RUSTYOS-033`, `RUSTYOS-167`)
             if let Some(ref sw) = self.window_switcher {
                 let output_phys = self
                     .space
                     .output_geometry(&self.output)
                     .map_or_else(|| Size::from((1280, 800)), |geo| geo.size)
                     .to_physical(1);
-                if let Some(idx) = crate::shell_render::check_switcher_click(
+                let hit = crate::shell_render::hit_test_switcher(
                     output_phys,
                     sw.window_ids.len(),
                     self.pointer_location.x,
                     self.pointer_location.y,
-                ) {
-                    self.switcher_commit_index(idx, serial);
-                } else {
-                    self.switcher_cancel();
+                );
+                match hit {
+                    crate::shell_render::SwitcherHit::CloseCard(idx) => {
+                        self.switcher_close_index(idx);
+                    }
+                    crate::shell_render::SwitcherHit::Card(idx) if button == 274 => {
+                        self.switcher_close_index(idx);
+                    }
+                    crate::shell_render::SwitcherHit::Card(idx) => {
+                        self.switcher_commit_index(idx, serial);
+                    }
+                    crate::shell_render::SwitcherHit::Outside => {
+                        self.switcher_cancel();
+                    }
                 }
                 return;
             }
@@ -965,9 +1002,9 @@ impl RustyCompositorState {
                 return;
             }
 
-            // Handle Workspace Overview card & Spaces strip clicks or backdrop dismissal (`RUSTYOS-023` / `RUSTYOS-051`)
+            // Handle Workspace Overview card & Spaces strip clicks or backdrop dismissal (`RUSTYOS-023` / `RUSTYOS-051` / `RUSTYOS-167`)
             if self.overview_active {
-                self.handle_overview_pointer_click(output_phys, ordered_ids.len(), serial);
+                self.handle_overview_pointer_click(output_phys, ordered_ids.len(), serial, button);
                 return;
             }
 

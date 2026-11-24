@@ -397,6 +397,7 @@ impl RustyCompositorState {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     pub(super) fn update_shell_hover_states(&mut self, pos: Point<f64, Logical>) {
         if self.context_menu.is_some() {
             self.update_context_menu_hover_at(pos);
@@ -479,6 +480,93 @@ impl RustyCompositorState {
         } else {
             None
         };
+
+        if let Some(ref mut sw) = self.window_switcher {
+            let (next_hov, next_close) = if is_on_primary {
+                match crate::shell_render::hit_test_switcher(
+                    primary_size,
+                    sw.window_ids.len(),
+                    local_x,
+                    local_y,
+                ) {
+                    crate::shell_render::SwitcherHit::CloseCard(idx) => (Some(idx), Some(idx)),
+                    crate::shell_render::SwitcherHit::Card(idx) => (Some(idx), None),
+                    crate::shell_render::SwitcherHit::Outside => (None, None),
+                }
+            } else {
+                (None, None)
+            };
+            if sw.hovered != next_hov || sw.hovered_close != next_close {
+                sw.hovered = next_hov;
+                sw.hovered_close = next_close;
+                self.shell_redraw_needed = true;
+            }
+        }
+
+        if self.overview_active {
+            if let Some(ref mut drag) = self.overview_drag {
+                drag.current_pos = pos;
+                let dx = pos.x - drag.start_pos.x;
+                let dy = pos.y - drag.start_pos.y;
+                if !drag.dragging && (dx * dx + dy * dy).sqrt() >= 6.0 {
+                    drag.dragging = true;
+                }
+                let is_dragging = drag.dragging;
+                let spaces = self.overview_workspace_spaces();
+                let next_target = if is_on_primary && is_dragging {
+                    match crate::shell_render::check_overview_click_with_spaces(
+                        primary_size,
+                        &spaces,
+                        0,
+                        local_x,
+                        local_y,
+                    ) {
+                        crate::shell_render::OverviewHit::SwitchWorkspace(ws) => Some(ws),
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+                if let Some(ref mut d) = self.overview_drag {
+                    d.target_workspace = next_target;
+                }
+                self.shell_redraw_needed = true;
+            } else {
+                let prev_ov = (
+                    self.overview_hovered_card,
+                    self.overview_hovered_close,
+                    self.overview_hovered_space,
+                );
+                let (next_card, next_close, next_space) = if is_on_primary {
+                    let spaces = self.overview_workspace_spaces();
+                    let count = self.overview_window_ids().len();
+                    match crate::shell_render::check_overview_click_with_spaces(
+                        primary_size,
+                        &spaces,
+                        count,
+                        local_x,
+                        local_y,
+                    ) {
+                        crate::shell_render::OverviewHit::CloseCard(idx) => {
+                            (Some(idx), Some(idx), None)
+                        }
+                        crate::shell_render::OverviewHit::Card(idx) => (Some(idx), None, None),
+                        crate::shell_render::OverviewHit::SwitchWorkspace(ws) => {
+                            (None, None, Some(ws))
+                        }
+                        crate::shell_render::OverviewHit::Dismiss => (None, None, None),
+                    }
+                } else {
+                    (None, None, None)
+                };
+                self.overview_hovered_card = next_card;
+                self.overview_hovered_close = next_close;
+                self.overview_hovered_space = next_space;
+                if prev_ov != (next_card, next_close, next_space) {
+                    self.shell_redraw_needed = true;
+                }
+            }
+        }
 
         if self.top_bar_menu_hover_row != prev_menu_hover
             || self.hovered_notification_idx != prev_notif_hover
@@ -1213,6 +1301,7 @@ impl RustyCompositorState {
         output_phys: Size<i32, smithay::utils::Physical>,
         window_count: usize,
         serial: smithay::utils::Serial,
+        button: u32,
     ) {
         let overview_ids = self.overview_window_ids();
         let card_count = if self.overview_filter_app.is_some() {
@@ -1228,12 +1317,34 @@ impl RustyCompositorState {
             self.pointer_location.x,
             self.pointer_location.y,
         ) {
+            crate::shell_render::OverviewHit::CloseCard(idx) => {
+                if button == 272
+                    && let Some(&win_id) = overview_ids.get(idx)
+                {
+                    self.request_close_window(win_id);
+                    self.shell_redraw_needed = true;
+                }
+            }
             crate::shell_render::OverviewHit::Card(idx) => {
-                if let Some(&win_id) = overview_ids.get(idx) {
-                    self.restore_window(win_id, serial);
-                    self.close_overview();
-                } else {
-                    self.focus_ordered_window(idx, serial);
+                if button == 274 {
+                    if let Some(&win_id) = overview_ids.get(idx) {
+                        self.request_close_window(win_id);
+                        self.shell_redraw_needed = true;
+                    }
+                } else if button == 272 {
+                    if let Some(&win_id) = overview_ids.get(idx) {
+                        self.overview_selected_card = Some(idx);
+                        self.overview_drag = Some(crate::state::OverviewCardDragState {
+                            window_id: win_id,
+                            card_index: idx,
+                            start_pos: self.pointer_location,
+                            current_pos: self.pointer_location,
+                            dragging: false,
+                            target_workspace: None,
+                        });
+                    } else {
+                        self.focus_ordered_window(idx, serial);
+                    }
                 }
             }
             crate::shell_render::OverviewHit::SwitchWorkspace(ws) => {

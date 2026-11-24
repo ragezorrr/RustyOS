@@ -282,9 +282,13 @@ impl RustyCompositorState {
             let len_i = isize::try_from(len).unwrap_or(1);
             usize::try_from(delta.rem_euclid(len_i)).unwrap_or(0)
         };
+        let previous_focus = self.wm.focused_window();
         self.window_switcher = Some(WindowSwitcherState {
             window_ids: ordered,
             selected,
+            hovered: None,
+            hovered_close: None,
+            previous_focus,
         });
     }
 
@@ -308,9 +312,58 @@ impl RustyCompositorState {
         }
     }
 
-    /// Cancels the `Alt+Tab` switcher HUD without changing focus or window state (`RUSTYOS-033`).
+    /// Sends a graceful close request (`xdg_toplevel::close` or X11 `WM_DELETE_WINDOW`) to `win_id` (`RUSTYOS-167`).
+    pub fn request_close_window(&mut self, win_id: WindowId) {
+        if let Some(win) = self.smithay_window_for_id(win_id) {
+            if let Some(toplevel) = win.toplevel() {
+                info!(
+                    window_id = win_id.0,
+                    "Sending xdg_toplevel::close to client"
+                );
+                toplevel.send_close();
+            } else if let Some(x11) = win.x11_surface() {
+                info!(
+                    window_id = win_id.0,
+                    x11_id = x11.window_id(),
+                    "Sending WM_DELETE_WINDOW close to XWayland client"
+                );
+                let _ = x11.close();
+            }
+        }
+    }
+
+    /// Requests closing the `Alt+Tab` card at index `idx` without dismissing the switcher if
+    /// other windows remain (`RUSTYOS-167`).
+    pub fn switcher_close_index(&mut self, idx: usize) {
+        let target = self
+            .window_switcher
+            .as_ref()
+            .and_then(|sw| sw.window_ids.get(idx).copied());
+        if let Some(win_id) = target {
+            self.request_close_window(win_id);
+            self.remove_from_switcher(win_id);
+            self.shell_redraw_needed = true;
+        }
+    }
+
+    /// Requests closing the currently highlighted `Alt+Tab` window (`RUSTYOS-167`).
+    pub fn switcher_close_selected(&mut self) {
+        if let Some(idx) = self.window_switcher.as_ref().map(|sw| sw.selected) {
+            self.switcher_close_index(idx);
+        }
+    }
+
+    /// Cancels the `Alt+Tab` switcher HUD without changing focus or window state (`RUSTYOS-033`, `RUSTYOS-167`).
     pub fn switcher_cancel(&mut self) {
-        self.window_switcher = None;
+        if let Some(switcher) = self.window_switcher.take()
+            && let Some(prev) = switcher.previous_focus
+            && self.wm.window(prev).is_some_and(|w| !w.minimized)
+        {
+            let serial = smithay::utils::SERIAL_COUNTER.next_serial();
+            self.wm.focus_and_raise(prev);
+            self.sync_space_with_wm(serial);
+        }
+        self.shell_redraw_needed = true;
     }
 
     /// Removes `win_id` from an active `Alt+Tab` switcher if that window closed while open (`RUSTYOS-033`).
@@ -321,6 +374,10 @@ impl RustyCompositorState {
                 self.window_switcher = None;
             } else {
                 switcher.selected = switcher.selected.min(switcher.window_ids.len() - 1);
+                switcher.hovered = switcher.hovered.filter(|&i| i < switcher.window_ids.len());
+                switcher.hovered_close = switcher
+                    .hovered_close
+                    .filter(|&i| i < switcher.window_ids.len());
             }
         }
     }
@@ -576,12 +633,51 @@ impl RustyCompositorState {
     /// Looks up the [`WindowId`] associated with a `ToplevelSurface`.
     #[must_use]
     pub fn window_id_for_toplevel(&self, surface: &ToplevelSurface) -> Option<WindowId> {
-        let target_wl = surface.wl_surface();
+        self.window_id_for_wl_surface(surface.wl_surface())
+    }
+
+    /// Looks up the [`WindowId`] associated with a root `WlSurface` (`RUSTYOS-167`).
+    #[must_use]
+    pub fn window_id_for_wl_surface(&self, target_wl: &WlSurface) -> Option<WindowId> {
         self.window_bindings.iter().find_map(|(win_id, sw)| {
             sw.toplevel()
                 .is_some_and(|tl| tl.wl_surface() == target_wl)
                 .then_some(*win_id)
         })
+    }
+
+    /// Synchronizes `xdg_toplevel.set_parent` and modal dialog metadata into `WindowManager`,
+    /// centering newly parented dialogs over their parent window (`RUSTYOS-167`).
+    pub fn sync_xdg_toplevel_parent_and_modal(
+        &mut self,
+        win_id: WindowId,
+        surface: &ToplevelSurface,
+        center_if_newly_parented: bool,
+    ) {
+        let parent_id = surface
+            .parent()
+            .and_then(|parent_wl| self.window_id_for_wl_surface(&parent_wl));
+        let is_modal = compositor::with_states(surface.wl_surface(), |states| {
+            states
+                .data_map
+                .get::<smithay::wayland::shell::xdg::XdgToplevelSurfaceData>()
+                .and_then(|data| data.lock().ok().map(|guard| guard.modal))
+                .unwrap_or(false)
+        });
+        let parent_changed = self.wm.set_window_parent(win_id, parent_id);
+        let _ = self
+            .wm
+            .set_window_dialog_flags(win_id, parent_id.is_some(), is_modal);
+        if center_if_newly_parented
+            && parent_changed
+            && parent_id.is_some()
+            && let Some(rect) = self.wm.center_window_on_parent(win_id)
+        {
+            self.animations.snap_window_immediate(
+                win_id.0,
+                rusty_animation::LogicalRect::new(rect.x, rect.y, rect.width, rect.height),
+            );
+        }
     }
 
     /// Looks up the [`WindowId`] matching the raw `xdg_toplevel` protocol resource (`RUSTYOS-047`).
@@ -785,6 +881,13 @@ impl RustyCompositorState {
         self.last_x11_configure_state.remove(&win_id);
         if self.hovered_traffic_light_window == Some(win_id) {
             self.hovered_traffic_light_window = None;
+        }
+        if self
+            .overview_drag
+            .as_ref()
+            .is_some_and(|drag| drag.window_id == win_id)
+        {
+            self.overview_drag = None;
         }
         if self.pressed_ssd_button.is_some_and(|(id, _)| id == win_id) {
             self.pressed_ssd_button = None;

@@ -2744,6 +2744,21 @@ hardware/software context и низкие накладные расходы.
   - `snap_window_quarters_and_maximize_preserve_saved_floating_geometry`, `edge_snap_detection_and_unmaximize_proportional_anchor_work` и `compositor_cursor_override_outer_resize_zone_traffic_gap_and_square_framing_work` покрыты unit-тестами (`11` в `rusty-wm`, `238` в `rusty-compositor`, 0 ошибок); `cargo fmt --check`, `clippy -D warnings` и живые `--winit` Wayland Light/Dark прогоны с клиентом `rusty-settings` (`RUSTYOS_TEST_CAPTURE_MENU=edge_snap`) проходят чисто с 0 WARN/ERROR и визуально подтверждённым Liquid Glass превью Edge Snap.
 - **Risks:** Низкие; 0 новых внешних Cargo-зависимостей, `crates/rusty-compositor` без `unsafe`.
 
+### RUSTYOS-167 — Модальные и transient-диалоги, `Alt+Tab` с живыми GPU-миниатюрами и интерактивный `Workspace Overview` (Фаза C)
+- **Status:** Done
+- **Goal:** Завершить модернизацию управления окнами (Фаза C) без новых Cargo-зависимостей и без `unsafe`: добавить в `rusty-wm` иерархию `parent`/`transient`/`modal` диалогов (центрирование по родителю с clamp в `work_area`, сохранение floating и скруглённых углов в `MasterStack`, инвариант Z-order «дети всегда над родителем», перенаправление фокуса на активный модал, совместная миграция в `move_window_to_workspace` и `migrate_window_to_output`, возврат фокуса родителю при закрытии) с привязкой к `XdgShellHandler::parent_changed` (`ToplevelSurface::parent`, `XdgToplevelSurfaceData::modal`) и XWayland (`X11Surface::is_transient_for`, `WmWindowType::{Dialog, Utility, Splash}`); перевести `Alt+Tab` `WindowSwitcher` на живые `16:10` GPU-миниатюры из кэша `RUSTYOS-132` (включая `MinimizedWindowSnapshot` для свёрнутых окон) с hover-подсветкой, кнопкой `×` / СКМ / `Q` закрытия и возвратом `previous_focus` на `Esc`; добавить в `Workspace Overview` hover-подсветку карточек и `Desktop 1..9`, кнопку закрытия карточки `×`, перетаскивание карточки на пилюлю `Desktop N` (drag-to-workspace с совместным переносом диалогов) и клавиатурную навигацию по сетке (`Left`/`Right`/`Up`/`Down`/`Tab`/`Enter`/`Delete`/`Q`).
+- **Dependencies:** `RUSTYOS-166`, `RUSTYOS-165`, `RUSTYOS-132`, `RUSTYOS-051`, `RUSTYOS-033`.
+- **Scope:**
+  - `crates/rusty-wm/src/lib.rs`.
+  - `crates/rusty-compositor/src/state/{mod.rs, wm_windows.rs, shell_actions.rs, wayland_handlers/core.rs}`.
+  - `crates/rusty-compositor/src/{xwayland.rs, frame_composer.rs, winit_backend.rs, surfaces/window_minimize.rs}`.
+  - `crates/rusty-compositor/src/shell_render/{spotlight_overview.rs, overlay_shapes.rs, chrome_shapes.rs, mod.rs, tests.rs}`.
+  - `crates/rusty-compositor/src/input/{mod.rs, keyboard.rs, pointer.rs, shell_pointer.rs, tests.rs}`.
+  - `docs/adr/0096-wm-transient-dialogs-thumbnail-switcher-and-overview-ux.md`, `DECISIONS.md` (`D-110`), `ARCHITECTURE.md` §7.
+- **Acceptance Criteria:**
+  - `transient_and_modal_dialogs_enforce_centering_stacking_tiling_migration_and_focus_return`, `switcher_thumbnail_hit_testing_close_and_cancel_restore_focus` и `overview_close_button_keyboard_grid_navigation_and_transient_floating_in_master_stack` покрыты unit-тестами (`12` в `rusty-wm`, `240` в `rusty-compositor`, 0 ошибок); `cargo fmt --check`, `clippy -D warnings` и живые `--winit` Wayland Light/Dark прогоны `switcher` и `overview` с двумя клиентами (`rusty-settings`, `rusty-files`) проходят чисто с 0 WARN/ERROR и визуально проверенными живыми миниатюрами.
+- **Risks:** Низкие; 0 новых внешних Cargo-зависимостей, `crates/rusty-compositor` без `unsafe`.
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

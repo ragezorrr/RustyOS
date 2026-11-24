@@ -1286,6 +1286,19 @@
                            полировка светофора (только ЛКМ на Release с отменой, `is_hovered` без `4 px` зазоров,
                            `shell_redraw_needed`, per-output fullscreen) и квадратные границы без теней для
                            `maximized`/`MasterStack` окон (`0` новых крейтов, `rusty-compositor` без `unsafe`)
+
+  D-110   2026-11-24  Accepted (ADR-0096)  Фаза C WM (`RUSTYOS-167`): иерархия `parent`/`transient`/`modal` диалогов
+                           в `crates/rusty-wm` (`ManagedWindow::{parent, is_dialog, is_modal}`,
+                           `set_window_parent` с защитой от циклов, `center_window_on_parent`,
+                           `enforce_transient_stacking_order`, перенаправление фокуса на модал, floating
+                           в `MasterStack`, совместный перенос в `move_window_to_workspace` /
+                           `migrate_window_to_output`, возврат фокуса родителю) + `XdgShellHandler::parent_changed`
+                           и `X11Surface::{is_transient_for, window_type}`; перевод `Alt+Tab` `WindowSwitcher`
+                           на живые GPU-миниатюры из кэша `RUSTYOS-132` (`capture_window_thumbnails`, fallback на
+                           `MinimizedWindowSnapshot`, `SwitcherHit::{Card, CloseCard, Outside}`, `Q`/СКМ закрытие,
+                           `Esc` возврат `previous_focus`); интерактивный `Workspace Overview` (`OverviewHit::CloseCard`,
+                           hover карточек и `Desktop 1..9`, drag-to-workspace `OverviewCardDragState`, клавиатурная
+                           навигация по сетке) (`0` новых крейтов, `rusty-compositor` без `unsafe`)
   -----------------------------------------------------------------------
 
 ## Открытые решения

@@ -1039,7 +1039,7 @@ fn macos27_pointer_hover_slider_drag_and_overview_space_switching()
         f64::from(space3_rect.loc.y + space3_rect.size.h / 2),
     )
         .into();
-    compositor.handle_overview_pointer_click(out_size, 1, serial);
+    compositor.handle_overview_pointer_click(out_size, 1, serial, 272);
     assert_eq!(compositor.wm.active_workspace_id(), WorkspaceId(3));
     assert!(!compositor.overview_active);
 
@@ -1853,5 +1853,116 @@ fn compositor_cursor_override_outer_resize_zone_traffic_gap_and_square_framing_w
     assert!(!compositor.window_is_square_framed(w1));
     compositor.wm.toggle_layout_mode();
     assert!(compositor.window_is_square_framed(w1));
+    Ok(())
+}
+
+#[test]
+fn switcher_thumbnail_hit_testing_close_and_cancel_restore_focus()
+-> Result<(), Box<dyn std::error::Error>> {
+    use smithay::input::keyboard::{Keysym, ModifiersState};
+
+    let (_display, _event_loop, mut compositor) =
+        test_compositor_state("rusty-test-switcher-thumbs")?;
+
+    let w1 = compositor.wm.next_window_id();
+    let w2 = compositor.wm.next_window_id();
+    compositor.wm.map_window(w1, Some((640, 420)));
+    compositor.wm.map_window(w2, Some((640, 420)));
+    assert_eq!(compositor.wm.focused_window(), Some(w2));
+
+    // Open Alt+Tab switcher and verify layout + CloseCard vs Card hit-testing.
+    compositor.switcher_step(1);
+    let Some(sw) = compositor.window_switcher.as_ref() else {
+        return Err("switcher should be open".into());
+    };
+    assert_eq!(sw.window_ids.len(), 2);
+    assert_eq!(sw.previous_focus, Some(w2));
+    assert_eq!(sw.selected, 1);
+
+    let screen = Size::from((1280, 800));
+    let (_panel, cards) = crate::shell_render::switcher_layout(screen, 2);
+    assert_eq!(cards.len(), 2);
+    let close_rect = crate::shell_render::switcher_card_close_rect(cards[0]);
+    assert_eq!(
+        crate::shell_render::hit_test_switcher(
+            screen,
+            2,
+            f64::from(close_rect.loc.x + 10),
+            f64::from(close_rect.loc.y + 10),
+        ),
+        crate::shell_render::SwitcherHit::CloseCard(0)
+    );
+    assert_eq!(
+        crate::shell_render::hit_test_switcher(
+            screen,
+            2,
+            f64::from(cards[1].loc.x + 20),
+            f64::from(cards[1].loc.y + 40),
+        ),
+        crate::shell_render::SwitcherHit::Card(1)
+    );
+
+    // Keyboard Q/Delete inside switcher dispatches SwitcherCloseSelected.
+    let no_mod = ModifiersState::default();
+    assert!(matches!(
+        super::keyboard::match_switcher_key(no_mod, Keysym::q),
+        KeyIntercept::SwitcherCloseSelected
+    ));
+
+    // Cancelling switcher preserves original focus.
+    compositor.switcher_cancel();
+    assert!(compositor.window_switcher.is_none());
+    assert_eq!(compositor.wm.focused_window(), Some(w2));
+    Ok(())
+}
+
+#[test]
+fn overview_close_button_keyboard_grid_navigation_and_transient_floating_in_master_stack()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (_display, _event_loop, mut compositor) = test_compositor_state("rusty-test-overview-ux")?;
+
+    let w1 = compositor.wm.next_window_id();
+    let w2 = compositor.wm.next_window_id();
+    let dialog = compositor.wm.next_window_id();
+    compositor.wm.map_window(w1, Some((640, 420)));
+    compositor.wm.map_window(w2, Some((640, 420)));
+    compositor.wm.map_window(dialog, Some((360, 220)));
+    assert!(compositor.wm.set_window_parent(dialog, Some(w1)));
+
+    // Transient dialog keeps rounded corners even when workspace switches to MasterStack.
+    compositor.wm.toggle_layout_mode();
+    assert!(compositor.window_is_square_framed(w1));
+    assert!(!compositor.window_is_square_framed(dialog));
+
+    // Overview opens pre-selected on the focused window (index 2 = dialog), then wraps & steps across grid.
+    compositor.toggle_overview();
+    assert!(compositor.overview_active);
+    assert_eq!(compositor.overview_selected_card, Some(2));
+    compositor.overview_move_selection(1, 0);
+    assert_eq!(compositor.overview_selected_card, Some(0));
+    compositor.overview_move_selection(0, 1);
+    assert_eq!(compositor.overview_selected_card, Some(2));
+
+    let screen = Size::from((1280, 800));
+    let cards = crate::shell_render::overview_card_rects(screen, 3);
+    let close_rect = crate::shell_render::overview_card_close_rect(cards[0]);
+    assert_eq!(
+        crate::shell_render::check_overview_click(
+            screen,
+            3,
+            f64::from(close_rect.loc.x + 11),
+            f64::from(close_rect.loc.y + 11),
+        ),
+        crate::shell_render::OverviewHit::CloseCard(0)
+    );
+    assert_eq!(
+        crate::shell_render::check_overview_click(
+            screen,
+            3,
+            f64::from(cards[0].loc.x + 30),
+            f64::from(cards[0].loc.y + 40),
+        ),
+        crate::shell_render::OverviewHit::Card(0)
+    );
     Ok(())
 }

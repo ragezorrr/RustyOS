@@ -25,7 +25,9 @@ use smithay::wayland::selection::{
     },
 };
 use smithay::wayland::xwayland_shell::{XWaylandShellHandler, XWaylandShellState};
-use smithay::xwayland::xwm::{Reorder, ResizeEdge, WmWindowProperty, X11Window, XwmId};
+use smithay::xwayland::xwm::{
+    Reorder, ResizeEdge, WmWindowProperty, WmWindowType, X11Window, XwmId,
+};
 use smithay::xwayland::{X11Surface, X11Wm, XWayland, XWaylandEvent, XwmHandler};
 use tracing::{debug, info, warn};
 
@@ -190,7 +192,7 @@ impl XwmHandler for RustyCompositorState {
             .then_some((pref_w, pref_h_raw.saturating_add(extra_h)));
 
         let win_id = self.wm.next_window_id();
-        let rect = self.wm.map_window(win_id, preferred_size);
+        let mut rect = self.wm.map_window(win_id, preferred_size);
         if let Some(max_sz) = window.max_size() {
             let max_w = max_sz.w.max(0);
             let max_h = if max_sz.h > 0 {
@@ -199,6 +201,10 @@ impl XwmHandler for RustyCompositorState {
                 0
             };
             let _ = self.wm.set_window_max_size(win_id, Some((max_w, max_h)));
+        }
+        sync_x11_transient_and_dialog(self, win_id, &window, true);
+        if let Some(updated) = self.wm.window(win_id) {
+            rect = updated.geometry;
         }
         if let Err(err) = window.set_mapped(true) {
             warn!(x11_id, error = %err, "Failed to mark X11 window mapped");
@@ -354,6 +360,12 @@ impl XwmHandler for RustyCompositorState {
             WmWindowProperty::Title | WmWindowProperty::Class => {
                 self.sync_foreign_toplevel_metadata(win_id);
                 self.refresh_dock_window_presence(win_id);
+                self.shell_redraw_needed = true;
+            }
+            WmWindowProperty::TransientFor | WmWindowProperty::WindowType => {
+                sync_x11_transient_and_dialog(self, win_id, &window, true);
+                let serial = SERIAL_COUNTER.next_serial();
+                self.sync_space_with_wm(serial);
                 self.shell_redraw_needed = true;
             }
             _ => {}
@@ -523,6 +535,35 @@ impl XwmHandler for RustyCompositorState {
             }
         }
         let _ = self.display_handle.flush_clients();
+    }
+}
+
+fn sync_x11_transient_and_dialog(
+    state: &mut RustyCompositorState,
+    win_id: WindowId,
+    window: &X11Surface,
+    center_if_newly_parented: bool,
+) {
+    let parent_id = window
+        .is_transient_for()
+        .and_then(|parent_x11| find_bound_window_id(state, parent_x11));
+    let is_dialog_type = matches!(
+        window.window_type(),
+        Some(WmWindowType::Dialog | WmWindowType::Utility | WmWindowType::Splash)
+    );
+    let parent_changed = state.wm.set_window_parent(win_id, parent_id);
+    let _ = state
+        .wm
+        .set_window_dialog_flags(win_id, is_dialog_type || parent_id.is_some(), false);
+    if center_if_newly_parented
+        && parent_changed
+        && parent_id.is_some()
+        && let Some(rect) = state.wm.center_window_on_parent(win_id)
+    {
+        state.animations.snap_window_immediate(
+            win_id.0,
+            rusty_animation::LogicalRect::new(rect.x, rect.y, rect.width, rect.height),
+        );
     }
 }
 

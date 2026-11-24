@@ -23,8 +23,8 @@ use super::{
     TOP_BAR_ITEM_H, TOP_BAR_ITEM_Y, TOP_BAR_LOGO_W, TOP_BAR_LOGO_X, TopBarMenuHit, TopBarTelemetry,
     WS_BTN_STRIDE, WS_BTN_WIDTH, compute_dock_layout, compute_dock_radius,
     compute_top_bar_left_layout_for_profile, compute_top_bar_right_layout_with_options,
-    dock_tooltip_hidden_by_overlay, make_solid_element, overview_card_rects, overview_space_rects,
-    tray_slot_rects_with_options,
+    dock_tooltip_hidden_by_overlay, make_solid_element, overview_card_close_rect,
+    overview_card_rects, overview_space_rects, tray_slot_rects_with_options,
 };
 
 /// Generates persistent desktop chrome (`TopBar`, dropdown menu, and `Dock`) sorted front-to-back (`RUSTYOS-060`).
@@ -1036,13 +1036,23 @@ fn build_overview_shapes(
                     Some([255, 255, 255, 95]),
                 );
             }
-            let thumb_border = if space.active {
+            let is_drop_target = ov.drag_target_workspace == Some(space.id);
+            let is_space_hov = ov.hovered_space == Some(space.id);
+            let thumb_border = if is_drop_target {
+                [88, 178, 255, 255]
+            } else if space.active {
                 RGBA_ACCENT
+            } else if is_space_hov {
+                [215, 224, 240, 225]
             } else {
                 RGBA_BORDER
             };
-            let thumb_bg = if space.active {
+            let thumb_bg = if is_drop_target {
+                [18, 96, 198, 238]
+            } else if space.active {
                 [26, 72, 138, 228]
+            } else if is_space_hov {
+                [58, 64, 76, 228]
             } else if space.window_count > 0 {
                 [44, 48, 56, 214]
             } else {
@@ -1075,18 +1085,59 @@ fn build_overview_shapes(
     let cards = overview_card_rects(screen_size, ov.windows.len());
     #[allow(clippy::cast_possible_truncation)]
     let card_alpha = ov.progress.clamp(0.0, 1.0) as f32;
-    for (win, base_card) in ov.windows.iter().zip(cards) {
+    for (idx, (win, base_card)) in ov.windows.iter().zip(cards).enumerate() {
+        let is_dragging_this = ov
+            .dragging_card
+            .is_some_and(|(drag_idx, _)| drag_idx == idx);
+        let drag_delta = ov
+            .dragging_card
+            .and_then(|(drag_idx, delta)| (drag_idx == idx).then_some(delta))
+            .unwrap_or_else(|| Point::from((0, 0)));
         let card = Rectangle::new(
-            Point::from((base_card.loc.x, base_card.loc.y + card_dy)),
+            Point::from((
+                base_card.loc.x + drag_delta.x,
+                base_card.loc.y + drag_delta.y + card_dy,
+            )),
             base_card.size,
         );
+        let is_hov = ov.hovered_card == Some(idx);
+        let is_sel = ov.selected_card == Some(idx);
+        let is_close_hov = ov.hovered_close == Some(idx);
+
+        if (is_hov || is_sel) && !is_dragging_this {
+            let close_rect = overview_card_close_rect(card);
+            let close_bg = if is_close_hov {
+                RGBA_DANGER
+            } else {
+                [42, 44, 50, 228]
+            };
+            push_rounded_glass_box(
+                &mut out,
+                shape_cache,
+                renderer,
+                close_rect,
+                11,
+                close_bg,
+                Some([255, 255, 255, 64]),
+            );
+        }
+
         let thumb_slot = Rectangle::new(
             Point::from((card.loc.x + 8, card.loc.y + 8)),
             Size::from(((card.size.w - 16).max(1), (card.size.h - 16).max(1))),
         );
-        if let Some(thumb_el) = shape_cache
-            .render_overview_thumbnail_element(renderer, win.id.0, thumb_slot, 1.0, card_alpha)
-        {
+        let effective_alpha = if is_dragging_this {
+            card_alpha * 0.85
+        } else {
+            card_alpha
+        };
+        if let Some(thumb_el) = shape_cache.render_overview_thumbnail_element(
+            renderer,
+            win.id.0,
+            thumb_slot,
+            1.0,
+            effective_alpha,
+        ) {
             out.push(CompositorRenderElement::ShaderTexture(thumb_el));
         }
         push_liquid_glass_panel(
@@ -1099,7 +1150,7 @@ fn build_overview_shapes(
             top_telemetry.glass_opacity,
             top_telemetry.reduce_transparency,
         );
-        if win.focused {
+        if is_sel || is_dragging_this || (ov.selected_card.is_none() && win.focused) {
             push_rounded_glass_box(
                 &mut out,
                 shape_cache,
@@ -1109,8 +1160,25 @@ fn build_overview_shapes(
                     Size::from((card.size.w + 4, card.size.h + 4)),
                 ),
                 15,
-                [10, 132, 255, 68],
+                if is_sel || is_dragging_this {
+                    [10, 132, 255, 92]
+                } else {
+                    [10, 132, 255, 68]
+                },
                 Some([64, 156, 255, 245]),
+            );
+        } else if is_hov {
+            push_rounded_glass_box(
+                &mut out,
+                shape_cache,
+                renderer,
+                Rectangle::new(
+                    Point::from((card.loc.x - 2, card.loc.y - 2)),
+                    Size::from((card.size.w + 4, card.size.h + 4)),
+                ),
+                15,
+                [255, 255, 255, 26],
+                Some([225, 232, 245, 195]),
             );
         }
         push_elevation_shadow(

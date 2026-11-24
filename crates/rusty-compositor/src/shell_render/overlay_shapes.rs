@@ -14,8 +14,8 @@ use super::quick_settings::render_quick_settings_composite;
 use super::spotlight_overview::{spotlight_results_rect, spotlight_search_pill_rect};
 use super::text_pass::append_foreground_overlay_text;
 use super::tokens::{
-    ThemePalette, anim_offset, push_liquid_glass_panel_elevation, push_rounded_glass_box,
-    resolved_icon_to_element,
+    RGBA_DANGER, ThemePalette, anim_offset, push_liquid_glass_panel_elevation,
+    push_rounded_glass_box, resolved_icon_to_element,
 };
 use super::top_bar::push_notification_card_chrome;
 use super::updates_popover::render_updates_composite;
@@ -23,7 +23,8 @@ use super::wifi_popover::render_wifi_popover_composite;
 use super::{
     COLOR_ACCENT, COLOR_MUTED, COLOR_WARNING, CompositorRenderElement, NotificationToastView,
     ShellOverlayView, TopBarTelemetry, make_solid_element, notification_toast_rects,
-    notifications_hidden_by_overlay, switcher_layout,
+    notifications_hidden_by_overlay, switcher_card_close_rect, switcher_card_thumb_rect,
+    switcher_layout,
 };
 
 /// Generates foreground system/interactive overlay elements (`Polkit`, `Portal`, `PickColor`,
@@ -201,63 +202,152 @@ fn build_foreground_overlay_shapes(
             let (panel_rect, cards) = switcher_layout(screen_size, sw.cards.len());
             for (idx, (card_view, card)) in sw.cards.iter().zip(cards).enumerate() {
                 let is_sel = idx == sw.selected;
-                let icon_x = card.loc.x + (card.size.w - 44) / 2;
-                let icon_y = card.loc.y + 14;
+                let is_hov = sw.hovered == Some(idx);
+                let is_close_hov = sw.hovered_close == Some(idx);
                 let sw_key = format!("win-{}", card_view.window_id.0);
-                if let Some(icon_el) = shape_cache.icons.window_icon_element(
-                    renderer,
-                    &sw_key,
-                    card_view.toplevel_icon,
-                    card_view.icon_name,
-                    44,
-                    Point::from((icon_x, icon_y)),
-                ) {
-                    out.push(resolved_icon_to_element(icon_el));
-                } else {
-                    let well_rect =
-                        Rectangle::new(Point::from((icon_x, icon_y)), Size::from((44, 44)));
-                    push_rounded_glass_box(
-                        &mut out,
-                        shape_cache,
-                        renderer,
-                        well_rect,
-                        12,
-                        if is_sel {
-                            pal.accent_rgba
-                        } else {
-                            pal.control_pill_off_rgba
-                        },
-                        None,
-                    );
-                }
 
-                if card_view.minimized {
-                    out.push(CompositorRenderElement::Solid(make_solid_element(
-                        Rectangle::new(
-                            Point::from((
-                                card.loc.x + (card.size.w - 16) / 2,
-                                card.loc.y + card.size.h - 6,
-                            )),
-                            Size::from((16, 2)),
-                        ),
-                        COLOR_WARNING,
-                    )));
-                }
-
-                if is_sel {
-                    let sel_fill = if pal.is_dark {
-                        [255, 255, 255, 36]
+                // Close (`×`) circle in top-right corner when card is selected or hovered (`RUSTYOS-167`).
+                if is_sel || is_hov {
+                    let close_rect = switcher_card_close_rect(card);
+                    let close_bg = if is_close_hov {
+                        RGBA_DANGER
+                    } else if pal.is_dark {
+                        [58, 58, 62, 224]
                     } else {
-                        [0, 0, 0, 22]
+                        [232, 234, 240, 232]
                     };
                     push_rounded_glass_box(
                         &mut out,
                         shape_cache,
                         renderer,
+                        close_rect,
+                        10,
+                        close_bg,
+                        Some(if pal.is_dark {
+                            [255, 255, 255, 42]
+                        } else {
+                            [0, 0, 0, 28]
+                        }),
+                    );
+                }
+
+                // Small 20x20 app icon badge beside the title in the card footer.
+                if let Some(badge_el) = shape_cache.icons.window_icon_element(
+                    renderer,
+                    &sw_key,
+                    card_view.toplevel_icon,
+                    card_view.icon_name,
+                    20,
+                    Point::from((card.loc.x + 10, card.loc.y + card.size.h - 30)),
+                ) {
+                    out.push(resolved_icon_to_element(badge_el));
+                }
+
+                // Live GPU window thumbnail inside the 16:10 preview slot (`RUSTYOS-167`),
+                // falling back to centered 44x44 app icon if no snapshot exists yet.
+                let thumb = switcher_card_thumb_rect(card);
+                let thumb_slot = Rectangle::new(
+                    Point::from((thumb.loc.x + 3, thumb.loc.y + 3)),
+                    Size::from(((thumb.size.w - 6).max(16), (thumb.size.h - 6).max(16))),
+                );
+                let thumb_alpha = if card_view.minimized { 0.84 } else { 1.0 };
+                let rendered_thumb = shape_cache
+                    .render_overview_thumbnail_element(
+                        renderer,
+                        card_view.window_id.0,
+                        thumb_slot,
+                        1.0,
+                        thumb_alpha,
+                    )
+                    .map(|el| {
+                        out.push(CompositorRenderElement::ShaderTexture(el));
+                    })
+                    .is_some();
+
+                if !rendered_thumb {
+                    let icon_x = thumb.loc.x + (thumb.size.w - 44) / 2;
+                    let icon_y = thumb.loc.y + (thumb.size.h - 44) / 2;
+                    if let Some(icon_el) = shape_cache.icons.window_icon_element(
+                        renderer,
+                        &sw_key,
+                        card_view.toplevel_icon,
+                        card_view.icon_name,
+                        44,
+                        Point::from((icon_x, icon_y)),
+                    ) {
+                        out.push(resolved_icon_to_element(icon_el));
+                    } else {
+                        let well_rect =
+                            Rectangle::new(Point::from((icon_x, icon_y)), Size::from((44, 44)));
+                        push_rounded_glass_box(
+                            &mut out,
+                            shape_cache,
+                            renderer,
+                            well_rect,
+                            12,
+                            if is_sel {
+                                pal.accent_rgba
+                            } else {
+                                pal.control_pill_off_rgba
+                            },
+                            None,
+                        );
+                    }
+                }
+
+                // Subtle thumbnail well backdrop behind aspect-fit preview.
+                push_rounded_glass_box(
+                    &mut out,
+                    shape_cache,
+                    renderer,
+                    thumb,
+                    10,
+                    if pal.is_dark {
+                        [18, 19, 22, 168]
+                    } else {
+                        [236, 239, 244, 178]
+                    },
+                    Some(if pal.is_dark {
+                        [255, 255, 255, 22]
+                    } else {
+                        [0, 0, 0, 18]
+                    }),
+                );
+
+                if card_view.minimized {
+                    out.push(CompositorRenderElement::Solid(make_solid_element(
+                        Rectangle::new(
+                            Point::from((
+                                card.loc.x + (card.size.w - 20) / 2,
+                                card.loc.y + card.size.h - 5,
+                            )),
+                            Size::from((20, 2)),
+                        ),
+                        COLOR_WARNING,
+                    )));
+                }
+
+                if is_sel || is_hov {
+                    let card_fill = if is_sel {
+                        if pal.is_dark {
+                            [255, 255, 255, 34]
+                        } else {
+                            [0, 122, 255, 26]
+                        }
+                    } else if pal.is_dark {
+                        [255, 255, 255, 18]
+                    } else {
+                        [0, 0, 0, 14]
+                    };
+                    let border = is_sel.then_some(pal.accent_rgba);
+                    push_rounded_glass_box(
+                        &mut out,
+                        shape_cache,
+                        renderer,
                         card,
-                        16,
-                        sel_fill,
-                        None,
+                        14,
+                        card_fill,
+                        border,
                     );
                 }
             }

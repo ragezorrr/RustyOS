@@ -140,12 +140,19 @@ pub fn run_nested_winit(config: &CompositorConfig) -> Result<BootstrapReport, Co
                             | "dock_dnd_slot"
                             | "dock_dnd_pin"
                             | "edge_snap"
+                            | "switcher"
                     ) {
                         (70_u64, 95_u64)
                     } else {
                         (5_u64, 12_u64)
                     };
-                    if menu_test == "edge_snap"
+                    if menu_test == "switcher" && rendered_frames == 45 {
+                        app_state.switcher_step(0);
+                        if let Some(ref mut sw) = app_state.window_switcher {
+                            sw.hovered = Some(0);
+                        }
+                        app_state.shell_redraw_needed = true;
+                    } else if menu_test == "edge_snap"
                         && rendered_frames == 45
                         && let Some(win_id) = app_state.wm.focused_window()
                         && let Some(win) = app_state.wm.window(win_id).cloned()

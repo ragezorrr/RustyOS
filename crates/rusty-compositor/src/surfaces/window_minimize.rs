@@ -426,11 +426,12 @@ impl WindowMinimizePipeline {
 
     #[must_use]
     pub(crate) fn has_lifecycle_snapshot(&self, window_id: u64) -> bool {
-        self.lifecycle_snapshots.contains_key(&window_id)
+        self.lifecycle_snapshots.contains_key(&window_id) || self.snapshots.contains_key(&window_id)
     }
 
-    /// Emits a live scaled thumbnail element for `Workspace Overview` (`RUSTYOS-132`),
-    /// reusing the `commit_sig`-cached lifecycle snapshot texture and 4-tap RGSS downsampling.
+    /// Emits a live scaled thumbnail element for `Workspace Overview` and `Alt+Tab` (`RUSTYOS-132`, `RUSTYOS-167`),
+    /// reusing the `commit_sig`-cached lifecycle snapshot texture (or retained minimize snapshot for
+    /// minimized windows) with 4-tap RGSS downsampling.
     pub(crate) fn render_overview_thumbnail_element(
         &mut self,
         renderer: &mut GlesRenderer,
@@ -443,15 +444,19 @@ impl WindowMinimizePipeline {
             return None;
         }
         let program = self.program.clone()?;
-        let entry = self.lifecycle_snapshots.get_mut(&window_id)?;
-        self.lifecycle_tick = self.lifecycle_tick.saturating_add(1);
-        entry.last_used_frame = self.lifecycle_tick;
-        let tex_size = entry.snap.texture.size();
+        let snap = if let Some(entry) = self.lifecycle_snapshots.get_mut(&window_id) {
+            self.lifecycle_tick = self.lifecycle_tick.saturating_add(1);
+            entry.last_used_frame = self.lifecycle_tick;
+            &mut entry.snap
+        } else {
+            self.snapshots.get_mut(&window_id)?
+        };
+        let tex_size = snap.texture.size();
         let target_rect = compute_aspect_fit_rect(slot, tex_size.w, tex_size.h);
         Some(build_snapshot_warp_element(
             renderer,
             program,
-            &mut entry.snap,
+            snap,
             target_rect,
             target_rect,
             output_scale,

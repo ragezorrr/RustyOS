@@ -139,6 +139,15 @@ impl RustyCompositorState {
                 self.close_overview();
                 info!("Closed Workspace Overview");
             }
+            KeyIntercept::OverviewMove(dx, dy) => {
+                self.overview_move_selection(dx, dy);
+            }
+            KeyIntercept::OverviewActivate => {
+                self.overview_activate_selected(serial);
+            }
+            KeyIntercept::OverviewCloseSelected => {
+                self.overview_close_selected();
+            }
             KeyIntercept::DismissPopups => {
                 self.dismiss_active_popup_grabs();
             }
@@ -249,6 +258,9 @@ impl RustyCompositorState {
             }
             KeyIntercept::SwitcherStep(delta) => {
                 self.switcher_step(delta);
+            }
+            KeyIntercept::SwitcherCloseSelected => {
+                self.switcher_close_selected();
             }
             KeyIntercept::CommitSwitcher => {
                 self.switcher_commit(serial);
@@ -585,8 +597,10 @@ pub(super) fn classify_keyboard_input(
     if state.active_top_bar_menu.is_some() && sym.raw() == Keysym::Escape.raw() {
         return FilterResult::Intercept(KeyIntercept::TopBarMenuClose);
     }
-    if state.overview_active && sym.raw() == Keysym::Escape.raw() {
-        return FilterResult::Intercept(KeyIntercept::OverviewClose);
+    if state.overview_active
+        && let Some(intercept) = classify_overview_key(modifiers, sym)
+    {
+        return FilterResult::Intercept(intercept);
     }
     if !state.active_popup_grabs.is_empty() && sym.raw() == Keysym::Escape.raw() {
         return FilterResult::Intercept(KeyIntercept::DismissPopups);
@@ -614,6 +628,30 @@ pub(super) fn classify_keyboard_input(
         FilterResult::Intercept(action)
     } else {
         FilterResult::Forward
+    }
+}
+
+fn classify_overview_key(modifiers: ModifiersState, sym: Keysym) -> Option<KeyIntercept> {
+    if sym.raw() == Keysym::Escape.raw() {
+        return Some(KeyIntercept::OverviewClose);
+    }
+    if modifiers.ctrl || modifiers.alt || modifiers.logo {
+        return None;
+    }
+    match sym {
+        Keysym::Left | Keysym::ISO_Left_Tab => Some(KeyIntercept::OverviewMove(-1, 0)),
+        Keysym::Right => Some(KeyIntercept::OverviewMove(1, 0)),
+        Keysym::Tab => Some(KeyIntercept::OverviewMove(
+            if modifiers.shift { -1 } else { 1 },
+            0,
+        )),
+        Keysym::Up => Some(KeyIntercept::OverviewMove(0, -1)),
+        Keysym::Down => Some(KeyIntercept::OverviewMove(0, 1)),
+        Keysym::Return | Keysym::KP_Enter | Keysym::space => Some(KeyIntercept::OverviewActivate),
+        Keysym::Delete | Keysym::BackSpace | Keysym::q | Keysym::Q => {
+            Some(KeyIntercept::OverviewCloseSelected)
+        }
+        _ => None,
     }
 }
 
@@ -666,6 +704,9 @@ pub(super) fn match_switcher_key(modifiers: ModifiersState, sym: Keysym) -> KeyI
         }
         Keysym::Tab => KeyIntercept::SwitcherStep(if modifiers.shift { -1 } else { 1 }),
         Keysym::Right | Keysym::j | Keysym::J => KeyIntercept::SwitcherStep(1),
+        Keysym::q | Keysym::Q | Keysym::Delete | Keysym::BackSpace => {
+            KeyIntercept::SwitcherCloseSelected
+        }
         _ => KeyIntercept::SwitcherConsume,
     }
 }

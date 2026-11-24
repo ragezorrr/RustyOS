@@ -154,6 +154,7 @@ pub enum WmAction {
 }
 
 /// State of a managed window inside [`WindowManager`].
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ManagedWindow {
     /// Unique identifier of the window.
@@ -172,6 +173,20 @@ pub struct ManagedWindow {
     pub minimized: bool,
     /// Optional client-declared maximum logical size `(max_w, max_h)` where `0` means unbounded (`RUSTYOS-165`).
     pub max_size: Option<(i32, i32)>,
+    /// Optional parent window for Wayland `xdg_toplevel.set_parent` or X11 `WM_TRANSIENT_FOR` (`RUSTYOS-167`).
+    pub parent: Option<WindowId>,
+    /// Whether the window is a transient/dialog/utility window that stays floating in tiled layouts (`RUSTYOS-167`).
+    pub is_dialog: bool,
+    /// Whether the window blocks focus on its parent window (`RUSTYOS-167`).
+    pub is_modal: bool,
+}
+
+impl ManagedWindow {
+    /// Returns `true` when this window should stay floating even in `LayoutMode::MasterStack` (`RUSTYOS-167`).
+    #[must_use]
+    pub const fn is_floating_transient(&self) -> bool {
+        self.is_dialog || self.is_modal || self.parent.is_some()
+    }
 }
 
 /// State of a display output managed by [`WindowManager`].
@@ -521,6 +536,9 @@ impl WindowManager {
             fullscreen: false,
             minimized: false,
             max_size: None,
+            parent: None,
+            is_dialog: false,
+            is_modal: false,
         });
 
         if let Some(ws) = self.workspace_mut(ws_id) {
@@ -532,12 +550,191 @@ impl WindowManager {
         self.window(id).map_or(floating_rect, |w| w.geometry)
     }
 
-    /// Unmaps and removes a window, transferring focus deterministically to the next topmost
-    /// non-minimized window on the same workspace.
+    /// Assigns or clears the transient parent of `win_id` (`xdg_toplevel.set_parent` / `WM_TRANSIENT_FOR`)
+    /// with cycle protection, workspace co-location, and Z-order enforcement (`RUSTYOS-167`).
+    pub fn set_window_parent(&mut self, win_id: WindowId, parent: Option<WindowId>) -> bool {
+        let Some(curr_parent) = self.window(win_id).map(|w| w.parent) else {
+            return false;
+        };
+        let valid_parent = parent.filter(|&pid| {
+            pid != win_id && self.window(pid).is_some() && !self.is_ancestor_of(win_id, pid)
+        });
+        let changed = curr_parent != valid_parent;
+        if let Some(win) = self.windows.iter_mut().find(|w| w.id == win_id) {
+            win.parent = valid_parent;
+            if valid_parent.is_some() {
+                win.is_dialog = true;
+            }
+        }
+        if let Some(pid) = valid_parent
+            && let Some(parent_ws) = self.window(pid).map(|w| w.workspace)
+            && self
+                .window(win_id)
+                .is_some_and(|w| w.workspace != parent_ws)
+        {
+            let _ = self.move_window_to_workspace(win_id, parent_ws);
+        }
+        if let Some(ws_id) = self.window(win_id).map(|w| w.workspace) {
+            self.enforce_transient_stacking_order(ws_id);
+            self.relayout_workspace(ws_id);
+        }
+        changed
+    }
+
+    /// Sets explicit dialog/modal flags for `win_id` (`RUSTYOS-167`).
+    pub fn set_window_dialog_flags(
+        &mut self,
+        win_id: WindowId,
+        is_dialog: bool,
+        is_modal: bool,
+    ) -> bool {
+        let Some(ws_id) = self.window(win_id).map(|w| w.workspace) else {
+            return false;
+        };
+        let changed = if let Some(win) = self.windows.iter_mut().find(|w| w.id == win_id) {
+            let eff_dialog = is_dialog || is_modal || win.parent.is_some();
+            let diff = win.is_dialog != eff_dialog || win.is_modal != is_modal;
+            win.is_dialog = eff_dialog;
+            win.is_modal = is_modal;
+            diff
+        } else {
+            false
+        };
+        if changed {
+            self.enforce_transient_stacking_order(ws_id);
+            self.relayout_workspace(ws_id);
+        }
+        changed
+    }
+
+    /// Centers `win_id` over its transient parent window clamped inside the output `work_area` (`RUSTYOS-167`).
+    pub fn center_window_on_parent(&mut self, win_id: WindowId) -> Option<Rect> {
+        let (ws_id, parent_id, rect, locked) = self.window(win_id).map(|w| {
+            (
+                w.workspace,
+                w.parent,
+                w.geometry,
+                w.maximized || w.fullscreen,
+            )
+        })?;
+        if locked {
+            return Some(rect);
+        }
+        let parent_rect = self.window(parent_id?)?.geometry;
+        let work_area = self.work_area_for_workspace(ws_id);
+        let centered = clamp_rect_to_work_area(
+            Rect::new(
+                parent_rect.x + (parent_rect.width - rect.width) / 2,
+                parent_rect.y + (parent_rect.height - rect.height) / 2,
+                rect.width,
+                rect.height,
+            ),
+            work_area,
+        );
+        if let Some(win) = self.windows.iter_mut().find(|w| w.id == win_id) {
+            win.geometry = centered;
+            win.saved_floating_geometry = centered;
+        }
+        Some(centered)
+    }
+
+    /// Returns all transient descendants of `root_id` on the same workspace in bottom-to-top stacking order (`RUSTYOS-167`).
+    #[must_use]
+    pub fn transient_descendants(&self, root_id: WindowId) -> Vec<WindowId> {
+        let Some(root_ws) = self.window(root_id).map(|w| w.workspace) else {
+            return Vec::new();
+        };
+        let Some(ws) = self.workspace(root_ws) else {
+            return Vec::new();
+        };
+        ws.stacking
+            .iter()
+            .copied()
+            .filter(|&cand| cand != root_id && self.is_ancestor_of(root_id, cand))
+            .collect()
+    }
+
+    /// Returns the topmost unminimized modal descendant of `root_id` on the same workspace, if any (`RUSTYOS-167`).
+    #[must_use]
+    pub fn active_modal_descendant(&self, root_id: WindowId) -> Option<WindowId> {
+        let root_ws = self.window(root_id)?.workspace;
+        let ws = self.workspace(root_ws)?;
+        ws.stacking.iter().rev().copied().find(|&cand| {
+            cand != root_id
+                && self.is_ancestor_of(root_id, cand)
+                && self
+                    .window(cand)
+                    .is_some_and(|w| w.is_modal && !w.minimized)
+        })
+    }
+
+    /// Moves `win_id` together with its same-workspace transient descendants onto `target_ws` (`RUSTYOS-167`).
+    pub fn move_window_to_workspace(&mut self, win_id: WindowId, target_ws: WorkspaceId) -> bool {
+        let target_ws = WorkspaceId::new_clamped(target_ws.0);
+        let Some((source_ws, is_minimized)) =
+            self.window(win_id).map(|w| (w.workspace, w.minimized))
+        else {
+            return false;
+        };
+        if source_ws == target_ws {
+            return true;
+        }
+
+        let mut group = Vec::with_capacity(4);
+        group.push(win_id);
+        for desc in self.transient_descendants(win_id) {
+            if !group.contains(&desc) {
+                group.push(desc);
+            }
+        }
+
+        if let Some(src) = self.workspace_mut(source_ws) {
+            src.stacking.retain(|w| !group.contains(w));
+        }
+        let next_src_focus = self.topmost_unminimized_in(source_ws);
+        if let Some(src) = self.workspace_mut(source_ws)
+            && src.focused.is_some_and(|f| group.contains(&f))
+        {
+            src.focused = next_src_focus;
+        }
+
+        for &id in &group {
+            if let Some(win) = self.windows.iter_mut().find(|w| w.id == id) {
+                win.workspace = target_ws;
+            }
+        }
+
+        if let Some(dst) = self.workspace_mut(target_ws) {
+            for &id in &group {
+                if !dst.stacking.contains(&id) {
+                    dst.stacking.push(id);
+                }
+            }
+        }
+        self.enforce_transient_stacking_order(target_ws);
+        if !is_minimized {
+            let focus_target = self.active_modal_descendant(win_id).unwrap_or(win_id);
+            if let Some(dst) = self.workspace_mut(target_ws) {
+                dst.focused = Some(focus_target);
+            }
+        }
+        self.relayout_workspace(source_ws);
+        self.relayout_workspace(target_ws);
+        true
+    }
+
+    /// Unmaps and removes a window, clearing orphaned parent links and transferring focus
+    /// preferentially back to its transient parent (or the next topmost non-minimized window).
     pub fn unmap_window(&mut self, id: WindowId) -> Option<WindowId> {
         let pos = self.windows.iter().position(|w| w.id == id)?;
         let removed = self.windows.remove(pos);
         let ws_id = removed.workspace;
+
+        for win in &mut self.windows {
+            if win.parent == Some(id) {
+                win.parent = None;
+            }
+        }
 
         let was_focused = if let Some(ws) = self.workspace_mut(ws_id) {
             ws.stacking.retain(|&w| w != id);
@@ -546,12 +743,18 @@ impl WindowManager {
             false
         };
         if was_focused {
-            let next_focus = self.topmost_unminimized_in(ws_id);
+            let parent_focus = removed.parent.and_then(|pid| {
+                self.window(pid)
+                    .filter(|p| p.workspace == ws_id && !p.minimized)
+                    .map(|_| self.active_modal_descendant(pid).unwrap_or(pid))
+            });
+            let next_focus = parent_focus.or_else(|| self.topmost_unminimized_in(ws_id));
             if let Some(ws) = self.workspace_mut(ws_id) {
                 ws.focused = next_focus;
             }
         }
 
+        self.enforce_transient_stacking_order(ws_id);
         self.relayout_workspace(ws_id);
         self.workspace(ws_id).and_then(|ws| ws.focused)
     }
@@ -598,6 +801,7 @@ impl WindowManager {
                 }
                 ws.focused = Some(win_id);
             }
+            self.enforce_transient_stacking_order(ws_id);
         }
 
         self.relayout_workspace(ws_id);
@@ -606,6 +810,8 @@ impl WindowManager {
 
     /// Focuses and raises the specified window (and switches the focused output if needed).
     /// Unminimizes the window if it was minimized so focus never points to a hidden window.
+    /// If the window has an active modal descendant, focus redirects to the modal and all
+    /// transient descendants remain stacked above their parent (`RUSTYOS-167`).
     pub fn focus_and_raise(&mut self, id: WindowId) -> bool {
         let Some((ws_id, was_minimized)) = self.window(id).map(|w| (w.workspace, w.minimized))
         else {
@@ -615,20 +821,39 @@ impl WindowManager {
             return self.set_window_minimized(id, false);
         }
 
+        let focus_target = self.active_modal_descendant(id).unwrap_or(id);
+        let descendants = self.transient_descendants(id);
+
         if let Some(output) = self.outputs.iter().find(|o| o.active_workspace == ws_id) {
             self.focused_output = output.id;
         }
 
-        if let Some(ws) = self.workspace_mut(ws_id) {
+        let raised = if let Some(ws) = self.workspace_mut(ws_id) {
             if let Some(pos) = ws.stacking.iter().position(|&w| w == id) {
                 let win_id = ws.stacking.remove(pos);
                 ws.stacking.push(win_id);
             }
-            ws.focused = Some(id);
+            for &desc in &descendants {
+                if let Some(pos) = ws.stacking.iter().position(|&w| w == desc) {
+                    let child_id = ws.stacking.remove(pos);
+                    ws.stacking.push(child_id);
+                }
+            }
+            if focus_target != id
+                && let Some(pos) = ws.stacking.iter().position(|&w| w == focus_target)
+            {
+                let modal_id = ws.stacking.remove(pos);
+                ws.stacking.push(modal_id);
+            }
+            ws.focused = Some(focus_target);
             true
         } else {
             false
+        };
+        if raised {
+            self.enforce_transient_stacking_order(ws_id);
         }
+        raised
     }
 
     /// Finds the topmost visible non-minimized window containing the given logical coordinates `(px, py)`.
@@ -678,45 +903,20 @@ impl WindowManager {
         self.relayout_workspace(target_ws);
     }
 
-    /// Moves the currently focused window to `target_ws` while keeping the current workspace active.
+    /// Moves the currently focused window (and its transient descendants) to `target_ws`
+    /// while keeping the current workspace active (`RUSTYOS-167`).
     pub fn move_focused_to_workspace(&mut self, target_ws: WorkspaceId) -> Option<WindowId> {
-        let target_ws = WorkspaceId::new_clamped(target_ws.0);
-        let source_ws = self.active_workspace_id();
         let win_id = self.focused_window()?;
-        if source_ws == target_ws {
-            return Some(win_id);
+        if self.move_window_to_workspace(win_id, target_ws) {
+            Some(win_id)
+        } else {
+            None
         }
-
-        if let Some(src) = self.workspace_mut(source_ws) {
-            src.stacking.retain(|&w| w != win_id);
-        }
-        let next_src_focus = self.topmost_unminimized_in(source_ws);
-        if let Some(src) = self.workspace_mut(source_ws) {
-            src.focused = next_src_focus;
-        }
-
-        let is_minimized = self.window(win_id).is_some_and(|w| w.minimized);
-        if let Some(win) = self.windows.iter_mut().find(|w| w.id == win_id) {
-            win.workspace = target_ws;
-        }
-
-        if let Some(dst) = self.workspace_mut(target_ws) {
-            if !dst.stacking.contains(&win_id) {
-                dst.stacking.push(win_id);
-            }
-            if !is_minimized {
-                dst.focused = Some(win_id);
-            }
-        }
-
-        self.relayout_workspace(source_ws);
-        self.relayout_workspace(target_ws);
-        Some(win_id)
     }
 
-    /// Migrates `win_id` onto `target_output`'s active workspace (e.g. when dragged across monitors
-    /// or targeted by `xdg_toplevel::set_fullscreen(output)`) without snapping floating coordinates
-    /// (`RUSTYOS-165`).
+    /// Migrates `win_id` (and its same-workspace transient descendants) onto `target_output`'s
+    /// active workspace (e.g. when dragged across monitors or targeted by
+    /// `xdg_toplevel::set_fullscreen(output)`) without snapping floating coordinates (`RUSTYOS-165`, `RUSTYOS-167`).
     pub fn migrate_window_to_output(&mut self, win_id: WindowId, target_output: OutputId) -> bool {
         let Some(target_ws) = self.output(target_output).map(|o| o.active_workspace) else {
             return false;
@@ -731,30 +931,48 @@ impl WindowManager {
             return false;
         }
 
+        let mut group = Vec::with_capacity(4);
+        group.push(win_id);
+        for desc in self.transient_descendants(win_id) {
+            if !group.contains(&desc) {
+                group.push(desc);
+            }
+        }
+
         if let Some(src) = self.workspace_mut(source_ws) {
-            src.stacking.retain(|&w| w != win_id);
+            src.stacking.retain(|w| !group.contains(w));
         }
         let next_src_focus = self.topmost_unminimized_in(source_ws);
-        if let Some(src) = self.workspace_mut(source_ws) {
+        if let Some(src) = self.workspace_mut(source_ws)
+            && src.focused.is_some_and(|f| group.contains(&f))
+        {
             src.focused = next_src_focus;
         }
 
-        if let Some(win) = self.windows.iter_mut().find(|w| w.id == win_id) {
-            win.workspace = target_ws;
+        for &id in &group {
+            if let Some(win) = self.windows.iter_mut().find(|w| w.id == id) {
+                win.workspace = target_ws;
+            }
         }
 
         let dst_is_tiled = self
             .workspace(target_ws)
             .is_some_and(|ws| ws.layout == LayoutMode::MasterStack);
         if let Some(dst) = self.workspace_mut(target_ws) {
-            if !dst.stacking.contains(&win_id) {
-                dst.stacking.push(win_id);
-            }
-            if !is_minimized {
-                dst.focused = Some(win_id);
+            for &id in &group {
+                if !dst.stacking.contains(&id) {
+                    dst.stacking.push(id);
+                }
             }
         }
         self.focused_output = target_output;
+        self.enforce_transient_stacking_order(target_ws);
+        if !is_minimized {
+            let focus_target = self.active_modal_descendant(win_id).unwrap_or(win_id);
+            if let Some(dst) = self.workspace_mut(target_ws) {
+                dst.focused = Some(focus_target);
+            }
+        }
         self.relayout_workspace(source_ws);
         if needs_relayout || dst_is_tiled {
             self.relayout_workspace(target_ws);
@@ -844,7 +1062,14 @@ impl WindowManager {
         };
 
         ws.focused = Some(next_id);
-        Some(next_id)
+        let effective_focus = self.active_modal_descendant(next_id).unwrap_or(next_id);
+        if effective_focus != next_id
+            && let Some(ws) = self.workspace_mut(ws_id)
+        {
+            ws.focused = Some(effective_focus);
+        }
+        self.enforce_transient_stacking_order(ws_id);
+        Some(effective_focus)
     }
 
     /// Toggles the layout mode of the active workspace between `Floating` and `MasterStack`.
@@ -1115,7 +1340,66 @@ impl WindowManager {
             .map_or_else(|| Rect::new(0, 0, 1280, 800), |o| o.full_area)
     }
 
+    fn is_ancestor_of(&self, ancestor: WindowId, candidate: WindowId) -> bool {
+        let mut cursor = self.window(candidate).and_then(|w| w.parent);
+        let mut steps = 0usize;
+        let max_steps = self.windows.len();
+        while let Some(pid) = cursor {
+            if pid == ancestor {
+                return true;
+            }
+            steps += 1;
+            if steps > max_steps {
+                break;
+            }
+            cursor = self.window(pid).and_then(|w| w.parent);
+        }
+        false
+    }
+
+    /// Enforces the Z-order invariant that every transient child on `ws_id` is stacked above its
+    /// parent while preserving relative ordering among unrelated windows (`RUSTYOS-167`).
+    fn enforce_transient_stacking_order(&mut self, ws_id: WorkspaceId) {
+        let parents: Vec<(WindowId, WindowId)> = self
+            .windows
+            .iter()
+            .filter_map(|w| {
+                (w.workspace == ws_id)
+                    .then_some(w.parent.map(|pid| (w.id, pid)))
+                    .flatten()
+            })
+            .collect();
+        if parents.is_empty() {
+            return;
+        }
+        let Some(ws) = self.workspace_mut(ws_id) else {
+            return;
+        };
+        let max_passes = ws.stacking.len().max(1);
+        for _ in 0..max_passes {
+            let mut moved_any = false;
+            for &(child_id, parent_id) in &parents {
+                let Some(child_pos) = ws.stacking.iter().position(|&id| id == child_id) else {
+                    continue;
+                };
+                let Some(parent_pos) = ws.stacking.iter().position(|&id| id == parent_id) else {
+                    continue;
+                };
+                if child_pos < parent_pos {
+                    let removed = ws.stacking.remove(child_pos);
+                    // After removing `child_pos < parent_pos`, `parent_id` is now at `parent_pos - 1`.
+                    ws.stacking.insert(parent_pos, removed);
+                    moved_any = true;
+                }
+            }
+            if !moved_any {
+                break;
+            }
+        }
+    }
+
     fn relayout_workspace(&mut self, ws_id: WorkspaceId) {
+        self.enforce_transient_stacking_order(ws_id);
         let work_area = self.work_area_for_workspace(ws_id);
         let full_area = self.full_area_for_workspace(ws_id);
         let gap = self.gap_px.max(0);
@@ -1152,6 +1436,13 @@ impl WindowManager {
                         if win.fullscreen {
                             if let Some(w_mut) = self.windows.iter_mut().find(|w| w.id == win_id) {
                                 w_mut.geometry = full_area;
+                            }
+                        } else if win.is_floating_transient() {
+                            if let Some(w_mut) = self.windows.iter_mut().find(|w| w.id == win_id) {
+                                w_mut.geometry = clamp_rect_to_work_area(
+                                    w_mut.saved_floating_geometry,
+                                    work_area,
+                                );
                             }
                         } else {
                             tiled_ids.push(win_id);
@@ -1559,5 +1850,73 @@ mod tests {
         assert_eq!(br.y, bl.y);
         assert_eq!(wm.snap_window(w1, SnapTarget::BottomRight), Some(br));
         assert!(wm.window(w1).is_some_and(|w| !w.maximized));
+    }
+
+    #[test]
+    fn transient_and_modal_dialogs_enforce_centering_stacking_tiling_migration_and_focus_return() {
+        let work = Rect::new(0, 28, 1280, 772);
+        let mut wm = WindowManager::new(work);
+        wm.upsert_output_with_full_area(
+            OutputId(2),
+            Rect::new(1280, 0, 1920, 1080),
+            Rect::new(1280, 0, 1920, 1080),
+        );
+
+        let parent = wm.next_window_id();
+        let other = wm.next_window_id();
+        let dialog = wm.next_window_id();
+        wm.map_window(parent, Some((800, 500)));
+        wm.move_window(parent, 200, 140);
+        wm.map_window(other, Some((500, 400)));
+        wm.map_window(dialog, Some((360, 220)));
+
+        // Set parent + modal and verify cycle rejection.
+        assert!(wm.set_window_parent(dialog, Some(parent)));
+        assert!(!wm.set_window_parent(parent, Some(dialog)));
+        assert_eq!(wm.window(parent).and_then(|w| w.parent), None);
+        assert!(wm.set_window_dialog_flags(dialog, true, true));
+
+        // Centering over parent places dialog cleanly inside parent geometry.
+        let centered = Rect::new(200 + (800 - 360) / 2, 140 + (500 - 220) / 2, 360, 220);
+        assert_eq!(wm.center_window_on_parent(dialog), Some(centered));
+
+        // Clicking/focusing parent redirects focus to active modal and keeps dialog stacked above parent.
+        assert!(wm.focus_and_raise(parent));
+        assert_eq!(wm.focused_window(), Some(dialog));
+        let order: Vec<WindowId> = wm
+            .visible_windows_for_output(OutputId(1))
+            .iter()
+            .map(|w| w.id)
+            .collect();
+        let parent_pos = order.iter().position(|&id| id == parent);
+        let dialog_pos = order.iter().position(|&id| id == dialog);
+        assert!(dialog_pos > parent_pos);
+
+        // MasterStack leaves transient dialog floating while tiling parent & other.
+        assert_eq!(wm.toggle_layout_mode(), LayoutMode::MasterStack);
+        assert_eq!(wm.window(dialog).map(|w| w.geometry), Some(centered));
+        assert_ne!(
+            wm.window(parent).map(|w| w.geometry.width),
+            Some(800),
+            "non-dialog parent should be tiled in MasterStack"
+        );
+
+        // Moving parent to another workspace brings its transient dialog along.
+        assert!(wm.move_window_to_workspace(parent, WorkspaceId(3)));
+        assert_eq!(wm.window(parent).map(|w| w.workspace), Some(WorkspaceId(3)));
+        assert_eq!(wm.window(dialog).map(|w| w.workspace), Some(WorkspaceId(3)));
+        assert_eq!(
+            wm.workspace(WorkspaceId(3)).and_then(|ws| ws.focused),
+            Some(dialog)
+        );
+
+        // Migrating parent to Output 2 brings dialog onto Output 2's workspace.
+        assert!(wm.migrate_window_to_output(parent, OutputId(2)));
+        assert_eq!(wm.window(parent).map(|w| w.workspace), Some(WorkspaceId(2)));
+        assert_eq!(wm.window(dialog).map(|w| w.workspace), Some(WorkspaceId(2)));
+
+        // Closing modal dialog returns focus directly to its parent.
+        let next_focus = wm.unmap_window(dialog);
+        assert_eq!(next_focus, Some(parent));
     }
 }

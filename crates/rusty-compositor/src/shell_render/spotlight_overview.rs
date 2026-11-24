@@ -25,7 +25,7 @@ pub struct OverviewWorkspaceSpace {
     pub preview_rects: [(f32, f32, f32, f32); 4],
 }
 
-/// Live data for the Workspace Overview / Expose card grid (`RUSTYOS-023`).
+/// Live data for the Workspace Overview / Expose card grid (`RUSTYOS-023`, `RUSTYOS-167`).
 #[derive(Debug, Clone)]
 pub struct OverviewRenderState<'a> {
     /// Active workspace number (`1..=9`).
@@ -40,13 +40,27 @@ pub struct OverviewRenderState<'a> {
     pub progress: f64,
     /// Optional App Exposé filter banner (e.g. `"App Expose · Files"`) (`RUSTYOS-073`).
     pub filter_label: Option<&'a str>,
+    /// Card index currently hovered by the pointer (`RUSTYOS-167`).
+    pub hovered_card: Option<usize>,
+    /// Card index whose close (`×`) button is currently hovered (`RUSTYOS-167`).
+    pub hovered_close: Option<usize>,
+    /// Workspace number (`1..=9`) currently hovered in the top Spaces strip (`RUSTYOS-167`).
+    pub hovered_space: Option<u8>,
+    /// Keyboard-selected card index inside Overview (`RUSTYOS-167`).
+    pub selected_card: Option<usize>,
+    /// Workspace number (`1..=9`) highlighted as drag-to-workspace drop target (`RUSTYOS-167`).
+    pub drag_target_workspace: Option<u8>,
+    /// Active dragged card `(card_index, pointer_offset)` when dragging a card onto Spaces (`RUSTYOS-167`).
+    pub dragging_card: Option<(usize, Point<i32, smithay::utils::Physical>)>,
 }
 
-/// Interactive click target while Workspace Overview is open (`RUSTYOS-023` / `RUSTYOS-051`).
+/// Interactive click target while Workspace Overview is open (`RUSTYOS-023` / `RUSTYOS-051` / `RUSTYOS-167`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OverviewHit {
     /// Focus and raise the window at card index `usize`.
     Card(usize),
+    /// Close the window at card index `usize` via the card corner button (`RUSTYOS-167`).
+    CloseCard(usize),
     /// Switch to workspace `u8` (`1..=9`) from the top Spaces strip (`RUSTYOS-051`).
     SwitchWorkspace(u8),
     /// Dismiss Overview without changing window focus.
@@ -70,13 +84,28 @@ pub struct WindowSwitcherCard<'a> {
     pub minimized: bool,
 }
 
-/// Active `Alt+Tab` window switcher HUD render state (`RUSTYOS-033`).
+/// Interactive hit target inside the `Alt+Tab` window switcher HUD (`RUSTYOS-167`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SwitcherHit {
+    /// Clicked or hovered on card `usize`.
+    Card(usize),
+    /// Clicked or hovered on the close (`×`) button of card `usize`.
+    CloseCard(usize),
+    /// Outside all switcher cards.
+    Outside,
+}
+
+/// Active `Alt+Tab` window switcher HUD render state (`RUSTYOS-033`, `RUSTYOS-167`).
 #[derive(Debug, Clone, Copy)]
 pub struct WindowSwitcherRenderState<'a> {
     /// Candidate window cards in presentation order.
     pub cards: &'a [WindowSwitcherCard<'a>],
     /// Currently highlighted card index.
     pub selected: usize,
+    /// Card index currently hovered by the pointer, if any (`RUSTYOS-167`).
+    pub hovered: Option<usize>,
+    /// Card index whose close (`×`) button is currently hovered, if any (`RUSTYOS-167`).
+    pub hovered_close: Option<usize>,
 }
 
 /// Computes centered top Spaces miniature strip rectangles for `count` workspaces (`RUSTYOS-051`).
@@ -107,6 +136,27 @@ pub fn overview_space_rects(
         .collect()
 }
 
+/// Returns the number of grid columns used by Workspace Overview for `count` cards (`RUSTYOS-167`).
+#[must_use]
+pub const fn overview_grid_cols(count: usize) -> usize {
+    match count {
+        0 | 1 => 1,
+        2..=4 => 2,
+        _ => 3,
+    }
+}
+
+/// Computes the top-right close (`×`) button rectangle for an Overview card (`RUSTYOS-167`).
+#[must_use]
+pub fn overview_card_close_rect(
+    card: Rectangle<i32, smithay::utils::Physical>,
+) -> Rectangle<i32, smithay::utils::Physical> {
+    Rectangle::new(
+        Point::from((card.loc.x + card.size.w - 28, card.loc.y + 6)),
+        Size::from((22, 22)),
+    )
+}
+
 /// Computes centered Workspace Overview preview card rectangles for `count` windows (`RUSTYOS-023`).
 #[must_use]
 pub fn overview_card_rects(
@@ -123,11 +173,7 @@ pub fn overview_card_rects(
     let avail_w = (width - 64).max(200);
     let avail_h = (area_bottom - area_top).max(120);
 
-    let cols = match count {
-        1 => 1,
-        2..=4 => 2,
-        _ => 3,
-    };
+    let cols = overview_grid_cols(count);
     let rows = count.div_ceil(cols);
     let gap = 18;
     let cols_i32 = i32::try_from(cols).unwrap_or(1);
@@ -162,7 +208,7 @@ pub fn overview_card_rects(
     rects
 }
 
-/// Hit-tests `(x, y)` inside Workspace Overview, including Spaces strip and window cards (`RUSTYOS-023` / `RUSTYOS-051`).
+/// Hit-tests `(x, y)` inside Workspace Overview, including Spaces strip, close buttons, and window cards (`RUSTYOS-023` / `RUSTYOS-051` / `RUSTYOS-167`).
 #[must_use]
 pub fn check_overview_click_with_spaces(
     screen_size: Size<i32, smithay::utils::Physical>,
@@ -182,6 +228,10 @@ pub fn check_overview_click_with_spaces(
     }
     let cards = overview_card_rects(screen_size, window_count);
     for (idx, rect) in cards.into_iter().enumerate() {
+        let close_rect = overview_card_close_rect(rect);
+        if rect_contains(close_rect, x, y) {
+            return OverviewHit::CloseCard(idx);
+        }
         if rect_contains(rect, x, y) {
             return OverviewHit::Card(idx);
         }
@@ -200,7 +250,7 @@ pub fn check_overview_click(
     check_overview_click_with_spaces(screen_size, &[], window_count, x, y)
 }
 
-/// Computes `(panel_rect, card_rects)` for the centered `Alt+Tab` window switcher HUD (`RUSTYOS-033`).
+/// Computes `(panel_rect, card_rects)` for the centered `Alt+Tab` window switcher HUD (`RUSTYOS-033`, `RUSTYOS-167`).
 #[must_use]
 pub fn switcher_layout(
     screen_size: Size<i32, smithay::utils::Physical>,
@@ -216,13 +266,13 @@ pub fn switcher_layout(
         return (rect, Vec::new());
     }
 
-    let pad = 16;
+    let pad = 18;
     let gap = 12;
     let count_i32 = i32::try_from(count).unwrap_or(1);
-    let max_panel_w = (width - 48).max(200);
+    let max_panel_w = (width - 48).max(220);
     let raw_card_w = (max_panel_w - pad * 2 - gap * (count_i32 - 1)) / count_i32;
-    let card_w = raw_card_w.clamp(76, 128);
-    let card_h = 104;
+    let card_w = raw_card_w.clamp(136, 208);
+    let card_h = 160;
     let panel_w = (pad * 2 + count_i32 * card_w + (count_i32 - 1) * gap).min(max_panel_w);
     let panel_h = card_h + pad * 2;
     let panel_x = (width - panel_w) / 2;
@@ -250,6 +300,49 @@ pub fn switcher_layout(
     )
 }
 
+/// Computes the `16:10` live GPU thumbnail slot inside a switcher card (`RUSTYOS-167`).
+#[must_use]
+pub fn switcher_card_thumb_rect(
+    card: Rectangle<i32, smithay::utils::Physical>,
+) -> Rectangle<i32, smithay::utils::Physical> {
+    Rectangle::new(
+        Point::from((card.loc.x + 10, card.loc.y + 10)),
+        Size::from(((card.size.w - 20).max(40), (card.size.h - 46).max(32))),
+    )
+}
+
+/// Computes the top-right close (`×`) button hitbox inside a switcher card (`RUSTYOS-167`).
+#[must_use]
+pub fn switcher_card_close_rect(
+    card: Rectangle<i32, smithay::utils::Physical>,
+) -> Rectangle<i32, smithay::utils::Physical> {
+    Rectangle::new(
+        Point::from((card.loc.x + card.size.w - 26, card.loc.y + 6)),
+        Size::from((20, 20)),
+    )
+}
+
+/// Hit-tests `(x, y)` against visible `Alt+Tab` window switcher cards and close buttons (`RUSTYOS-167`).
+#[must_use]
+pub fn hit_test_switcher(
+    screen_size: Size<i32, smithay::utils::Physical>,
+    count: usize,
+    x: f64,
+    y: f64,
+) -> SwitcherHit {
+    let (_panel, cards) = switcher_layout(screen_size, count);
+    for (idx, rect) in cards.into_iter().enumerate() {
+        let close_rect = switcher_card_close_rect(rect);
+        if rect_contains(close_rect, x, y) {
+            return SwitcherHit::CloseCard(idx);
+        }
+        if rect_contains(rect, x, y) {
+            return SwitcherHit::Card(idx);
+        }
+    }
+    SwitcherHit::Outside
+}
+
 /// Hit-tests `(x, y)` against visible `Alt+Tab` window switcher cards (`RUSTYOS-033`).
 #[must_use]
 pub fn check_switcher_click(
@@ -258,17 +351,10 @@ pub fn check_switcher_click(
     x: f64,
     y: f64,
 ) -> Option<usize> {
-    let (_panel, cards) = switcher_layout(screen_size, count);
-    for (idx, rect) in cards.into_iter().enumerate() {
-        let rx = f64::from(rect.loc.x);
-        let ry = f64::from(rect.loc.y);
-        let rw = f64::from(rect.size.w);
-        let rh = f64::from(rect.size.h);
-        if x >= rx && x < rx + rw && y >= ry && y < ry + rh {
-            return Some(idx);
-        }
+    match hit_test_switcher(screen_size, count, x, y) {
+        SwitcherHit::Card(idx) | SwitcherHit::CloseCard(idx) => Some(idx),
+        SwitcherHit::Outside => None,
     }
-    None
 }
 
 /// Live Spotlight view state passed into shell rendering (`RUSTYOS-018b`).
@@ -470,52 +556,98 @@ pub(super) fn render_switcher_text(
     let (_panel, cards) = switcher_layout(screen_size, sw.cards.len());
     for (idx, (card, rect)) in sw.cards.iter().zip(cards).enumerate() {
         let is_sel = idx == sw.selected;
-        let sw_key = format!("win-{}", card.window_id.0);
-        let has_icon = shape_cache.icons.has_window_icon(
-            renderer,
-            &sw_key,
-            card.toplevel_icon,
-            card.icon_name,
-            44,
-        );
-        if !has_icon {
-            let icon_box = Rectangle::new(
-                Point::from((rect.loc.x + (rect.size.w - 44) / 2, rect.loc.y + 14)),
-                Size::from((44, 44)),
+        let is_hov = sw.hovered == Some(idx);
+        let is_close_hov = sw.hovered_close == Some(idx);
+        if is_sel || is_hov {
+            let close_rect = switcher_card_close_rect(rect);
+            let close_rect_logical = Rectangle::new(
+                Point::from((close_rect.loc.x, close_rect.loc.y)),
+                Size::from((close_rect.size.w, close_rect.size.h)),
             );
-            let badge_fg = if is_sel {
+            let close_fg = if is_close_hov {
                 [255, 255, 255, 255]
             } else {
                 pal.popover_text_primary
             };
             if let Some(el) =
-                text_cache.render_label_centered(renderer, card.badge, 15.0, badge_fg, icon_box)
+                text_cache.render_label_centered(renderer, "x", 10.0, close_fg, close_rect_logical)
             {
                 elements.push(el);
             }
         }
+
+        let has_thumb = shape_cache.has_lifecycle_snapshot(card.window_id.0);
+        let sw_key = format!("win-{}", card.window_id.0);
+        if !has_thumb {
+            let has_icon = shape_cache.icons.has_window_icon(
+                renderer,
+                &sw_key,
+                card.toplevel_icon,
+                card.icon_name,
+                44,
+            );
+            if !has_icon {
+                let thumb = switcher_card_thumb_rect(rect);
+                let icon_box = Rectangle::new(
+                    Point::from((
+                        thumb.loc.x + (thumb.size.w - 44) / 2,
+                        thumb.loc.y + (thumb.size.h - 44) / 2,
+                    )),
+                    Size::from((44, 44)),
+                );
+                let badge_fg = if is_sel {
+                    [255, 255, 255, 255]
+                } else {
+                    pal.popover_text_primary
+                };
+                if let Some(el) =
+                    text_cache.render_label_centered(renderer, card.badge, 15.0, badge_fg, icon_box)
+                {
+                    elements.push(el);
+                }
+            }
+        }
+        let has_badge_icon = shape_cache.icons.has_window_icon(
+            renderer,
+            &sw_key,
+            card.toplevel_icon,
+            card.icon_name,
+            20,
+        );
         let raw_title = if card.minimized {
             format!("Min: {}", card.title)
         } else {
             card.title.to_owned()
         };
-        let title_str = truncate_ascii(&raw_title, 13);
+        let title_x = if has_badge_icon {
+            rect.loc.x + 36
+        } else {
+            rect.loc.x + 10
+        };
+        let title_w = (rect.loc.x + rect.size.w - 10 - title_x).max(40);
+        let max_chars = usize::try_from((title_w / 7).clamp(8, 26)).unwrap_or(14);
+        let title_str = truncate_ascii(&raw_title, max_chars);
         let title_bounds = Rectangle::new(
-            Point::from((rect.loc.x + 6, rect.loc.y + rect.size.h - 28)),
-            Size::from((rect.size.w - 12, 20)),
+            Point::from((title_x, rect.loc.y + rect.size.h - 29)),
+            Size::from((title_w, 20)),
         );
-        if let Some(el) = text_cache.render_label_centered(
+        if let Some(el) = text_cache.render_label(
             renderer,
             &title_str,
-            10.5,
-            if is_sel { text_bright } else { text_muted },
-            title_bounds,
+            11.0,
+            if is_sel || is_hov {
+                text_bright
+            } else {
+                text_muted
+            },
+            title_bounds.loc,
         ) {
             elements.push(el);
         }
     }
 }
 
+#[allow(clippy::too_many_lines)]
 pub(super) fn render_overview_text(
     text_cache: &mut crate::text::TextCache,
     renderer: &mut GlesRenderer,
@@ -592,7 +724,38 @@ pub(super) fn render_overview_text(
 
     let card_dy = anim_offset(ov.progress, 22.0);
     let cards = overview_card_rects(screen_size, ov.windows.len());
-    for (win, card) in ov.windows.iter().zip(cards) {
+    for (idx, (win, base_card)) in ov.windows.iter().zip(cards).enumerate() {
+        let card = if let Some((drag_idx, delta)) = ov.dragging_card
+            && drag_idx == idx
+        {
+            Rectangle::new(
+                Point::from((base_card.loc.x + delta.x, base_card.loc.y + delta.y)),
+                base_card.size,
+            )
+        } else {
+            base_card
+        };
+        let is_hov = ov.hovered_card == Some(idx);
+        let is_sel = ov.selected_card == Some(idx);
+        if (is_hov || is_sel) && ov.dragging_card.is_none() {
+            let close_rect = overview_card_close_rect(Rectangle::new(
+                Point::from((card.loc.x, card.loc.y + card_dy)),
+                card.size,
+            ));
+            let close_rect_logical = Rectangle::new(
+                Point::from((close_rect.loc.x, close_rect.loc.y)),
+                Size::from((close_rect.size.w, close_rect.size.h)),
+            );
+            if let Some(el) = text_cache.render_label_centered(
+                renderer,
+                "x",
+                10.5,
+                [255, 255, 255, 255],
+                close_rect_logical,
+            ) {
+                elements.push(el);
+            }
+        }
         let label = truncate_ascii(&win.title, 26);
         let footer_bounds = Rectangle::new(
             Point::from((card.loc.x + 8, card.loc.y + card.size.h + 5 + card_dy)),
@@ -602,7 +765,11 @@ pub(super) fn render_overview_text(
             renderer,
             &label,
             11.5,
-            if win.focused { text_bright } else { text_muted },
+            if win.focused || is_hov || is_sel {
+                text_bright
+            } else {
+                text_muted
+            },
             footer_bounds,
         ) {
             elements.push(el);
@@ -617,7 +784,11 @@ pub(super) fn render_overview_text(
                 renderer,
                 &center_badge,
                 11.5,
-                if win.focused { text_bright } else { text_muted },
+                if win.focused || is_hov || is_sel {
+                    text_bright
+                } else {
+                    text_muted
+                },
                 body_bounds,
             ) {
                 elements.push(el);

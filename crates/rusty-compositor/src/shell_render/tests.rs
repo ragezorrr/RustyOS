@@ -1237,6 +1237,8 @@ fn overlay_and_chrome_visibility_predicates_isolate_modals() {
     let sw = WindowSwitcherRenderState {
         cards: &[],
         selected: 0,
+        hovered: None,
+        hovered_close: None,
     };
     let ov = OverviewRenderState {
         active_workspace: 1,
@@ -1245,6 +1247,12 @@ fn overlay_and_chrome_visibility_predicates_isolate_modals() {
         spaces: &[],
         progress: 1.0,
         filter_label: None,
+        hovered_card: None,
+        hovered_close: None,
+        hovered_space: None,
+        selected_card: None,
+        drag_target_workspace: None,
+        dragging_card: None,
     };
 
     assert!(!notifications_hidden_by_overlay(ShellOverlayView::None));

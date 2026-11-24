@@ -113,9 +113,10 @@ pub use quick_settings::{
 };
 pub use spotlight_overview::{
     OverviewHit, OverviewRenderState, OverviewWorkspaceSpace, SpotlightHit, SpotlightRenderState,
-    WindowSwitcherCard, WindowSwitcherRenderState, check_overview_click,
+    SwitcherHit, WindowSwitcherCard, WindowSwitcherRenderState, check_overview_click,
     check_overview_click_with_spaces, check_spotlight_click, check_switcher_click,
-    overview_card_rects, overview_space_rects, switcher_layout,
+    hit_test_switcher, overview_card_close_rect, overview_card_rects, overview_grid_cols,
+    overview_space_rects, switcher_card_close_rect, switcher_card_thumb_rect, switcher_layout,
 };
 pub use ssd::{
     ResizeEdges, SsdHit, SsdHitWindow, check_window_frame_hit, check_window_ssd_hit,

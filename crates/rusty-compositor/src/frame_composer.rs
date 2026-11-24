@@ -1023,10 +1023,10 @@ fn capture_window_local_elements(
     )
 }
 
-/// Captures/refreshes live GPU window snapshots for `Workspace Overview` cards (`RUSTYOS-132`).
+/// Captures/refreshes live GPU window snapshots for `Workspace Overview` and `Alt+Tab` (`RUSTYOS-132`, `RUSTYOS-167`).
 /// Skips re-rendering windows whose `commit_sig` has not changed since the last capture.
 #[allow(clippy::too_many_arguments)]
-fn capture_overview_window_snapshots(
+fn capture_window_thumbnails(
     renderer: &mut GlesRenderer,
     text_cache: &mut crate::text::TextCache,
     shape_cache: &mut crate::surfaces::UiShapeCache,
@@ -1035,10 +1035,9 @@ fn capture_overview_window_snapshots(
     output_windows: &[(rusty_wm::WindowId, rusty_wm::Rect)],
     focused_win: Option<rusty_wm::WindowId>,
     output_scale: f64,
-    overview_windows: &[crate::shell_render::DockWindowEntry],
+    window_ids: &[rusty_wm::WindowId],
 ) {
-    for entry in overview_windows {
-        let win_id = entry.id;
+    for &win_id in window_ids {
         let Some(rect) = output_windows
             .iter()
             .find(|(id, _)| *id == win_id)
@@ -2132,6 +2131,8 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
             (!switcher_cards.is_empty()).then_some(WindowSwitcherRenderState {
                 cards: &switcher_cards,
                 selected: sw.selected.min(switcher_cards.len() - 1),
+                hovered: sw.hovered.filter(|&i| i < switcher_cards.len()),
+                hovered_close: sw.hovered_close.filter(|&i| i < switcher_cards.len()),
             })
         });
 
@@ -2213,15 +2214,40 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
                     crate::shell_render::dock_label_for_key(key)
                 )
             });
+        let ov_windows = overview_filtered_windows
+            .as_deref()
+            .unwrap_or(&dock_windows);
+        #[allow(clippy::cast_possible_truncation)]
+        let ov_dragging_card = state.overview_drag.as_ref().and_then(|drag| {
+            drag.dragging.then(|| {
+                let dx = (drag.current_pos.x - drag.start_pos.x).round() as i32;
+                let dy = (drag.current_pos.y - drag.start_pos.y).round() as i32;
+                (drag.card_index, Point::from((dx, dy)))
+            })
+        });
         let ov_view = show_ov.then_some(OverviewRenderState {
             active_workspace: active_ws,
             layout_mode: layout_str,
-            windows: overview_filtered_windows
-                .as_deref()
-                .unwrap_or(&dock_windows),
+            windows: ov_windows,
             spaces: &overview_spaces,
             progress: ov_progress,
             filter_label: overview_filter_label.as_deref(),
+            hovered_card: state
+                .overview_hovered_card
+                .filter(|&i| i < ov_windows.len()),
+            hovered_close: state
+                .overview_hovered_close
+                .filter(|&i| i < ov_windows.len()),
+            hovered_space: state.overview_hovered_space,
+            selected_card: state
+                .overview_selected_card
+                .filter(|&i| i < ov_windows.len()),
+            drag_target_workspace: state
+                .overview_drag
+                .as_ref()
+                .filter(|d| d.dragging)
+                .and_then(|d| d.target_workspace),
+            dragging_card: ov_dragging_card.filter(|(idx, _)| *idx < ov_windows.len()),
         });
 
         let polkit_display = state
@@ -2317,6 +2343,20 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
             ShellOverlayView::None
         };
 
+        if let ShellOverlayView::Switcher(sw) = overlay {
+            let sw_ids: Vec<rusty_wm::WindowId> = sw.cards.iter().map(|c| c.window_id).collect();
+            capture_window_thumbnails(
+                renderer,
+                text_cache,
+                shape_cache,
+                state,
+                output_loc,
+                &output_windows,
+                focused_win,
+                output_scale,
+                &sw_ids,
+            );
+        }
         let overlay_elements = crate::shell_render::generate_shell_foreground_overlay_elements(
             text_cache,
             shape_cache,
@@ -2373,7 +2413,8 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
             overlay
         };
         if let ShellOverlayView::Overview(ov) = overview_overlay {
-            capture_overview_window_snapshots(
+            let ov_ids: Vec<rusty_wm::WindowId> = ov.windows.iter().map(|w| w.id).collect();
+            capture_window_thumbnails(
                 renderer,
                 text_cache,
                 shape_cache,
@@ -2382,7 +2423,7 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
                 &output_windows,
                 focused_win,
                 output_scale,
-                ov.windows,
+                &ov_ids,
             );
         }
         render_list.extend(crate::shell_render::generate_shell_overview_elements(
