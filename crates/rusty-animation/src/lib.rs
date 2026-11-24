@@ -631,4 +631,58 @@ mod tests {
         assert!(!engine.has_active_animations());
         assert_eq!(engine.animated_window_origin(1), Some((646, 12)));
     }
+
+    #[test]
+    fn easing_curves_clamp_out_of_bounds_and_are_monotonic() {
+        for easing in [
+            Easing::Linear,
+            Easing::EaseOutCubic,
+            Easing::EaseInOutCubic,
+            Easing::EaseOutQuart,
+        ] {
+            assert!((easing.sample(-1.0) - 0.0).abs() < 1e-9);
+            assert!((easing.sample(0.0) - 0.0).abs() < 1e-9);
+            assert!((easing.sample(1.0) - 1.0).abs() < 1e-9);
+            assert!((easing.sample(2.5) - 1.0).abs() < 1e-9);
+
+            let mut prev = 0.0;
+            for step in 1..=20 {
+                let t = f64::from(step) / 20.0;
+                let cur = easing.sample(t);
+                assert!(cur >= prev - 1e-9, "{easing:?} not monotonic at t={t}");
+                prev = cur;
+            }
+        }
+        // Decelerating curves advance faster than linear at midpoint.
+        assert!(Easing::EaseOutCubic.sample(0.5) > 0.5);
+        assert!(Easing::EaseOutQuart.sample(0.5) > Easing::EaseOutCubic.sample(0.5));
+    }
+
+    #[test]
+    fn zero_duration_retarget_and_cancel_preserve_exact_state() {
+        let mut val = AnimatedValue::new_settled(10.0);
+        val.retarget(
+            90.0,
+            Duration::ZERO,
+            Duration::ZERO,
+            Easing::EaseOutCubic,
+            false,
+        );
+        assert!(!val.is_active());
+        assert!((val.current() - 90.0).abs() < 1e-6);
+
+        val.retarget(
+            190.0,
+            Duration::ZERO,
+            Duration::from_millis(100),
+            Easing::Linear,
+            false,
+        );
+        let mid = val.tick(Duration::from_millis(50));
+        assert!((mid - 140.0).abs() < 1e-5);
+        val.cancel_at_current();
+        assert!(!val.is_active());
+        assert!((val.current() - 140.0).abs() < 1e-5);
+        assert!((val.target() - 140.0).abs() < 1e-5);
+    }
 }

@@ -612,4 +612,45 @@ mod tests {
             [pal.window_bg[0], pal.window_bg[1], pal.window_bg[2]]
         );
     }
+
+    #[test]
+    fn theme_mode_parsing_and_accent_clamping_are_total() {
+        assert_eq!(ThemeMode::parse("dark"), ThemeMode::Dark);
+        assert_eq!(ThemeMode::parse("  AUTO "), ThemeMode::Auto);
+        assert_eq!(ThemeMode::parse("system"), ThemeMode::Auto);
+        assert_eq!(ThemeMode::parse("light"), ThemeMode::Light);
+        assert_eq!(ThemeMode::parse("unknown"), ThemeMode::Light);
+
+        assert!(!ThemeMode::Light.is_dark(true));
+        assert!(ThemeMode::Dark.is_dark(false));
+        assert!(ThemeMode::Auto.is_dark(true));
+        assert!(!ThemeMode::Auto.is_dark(false));
+
+        // Out-of-bounds accent index clamps safely to the last palette entry.
+        assert_eq!(
+            accent_for(999, false),
+            ACCENT_PALETTE[ACCENT_PALETTE.len() - 1]
+        );
+        assert_eq!(
+            accent_for(999, true),
+            ACCENT_DARK_PALETTE[ACCENT_DARK_PALETTE.len() - 1]
+        );
+    }
+
+    #[test]
+    fn squircle_sdf_matches_interior_boundary_corner_and_capsule_invariants() {
+        let hw = 50.0_f32;
+        let hh = 30.0_f32;
+        let r = 12.0_f32;
+        // Center is strictly inside, edge midpoints lie on the zero contour, outer point is positive.
+        assert!(squircle_sdf_dist(0.0, 0.0, hw, hh, r) < 0.0);
+        assert!(squircle_sdf_dist(hw, 0.0, hw, hh, r).abs() < 1e-5);
+        assert!(squircle_sdf_dist(0.0, hh, hw, hh, r).abs() < 1e-5);
+        assert!((squircle_sdf_dist(hw + 5.0, 0.0, hw, hh, r) - 5.0).abs() < 1e-5);
+        // Rounded corner trims (hw, hh) outside the shape.
+        assert!(squircle_sdf_dist(hw, hh, hw, hh, r) > 0.0);
+        // Capsule radius (r == min(hw, hh)) also keeps (hw, 0) on contour and trims (hw, hh).
+        assert!(squircle_sdf_dist(hw, 0.0, hw, hh, hh).abs() < 1e-5);
+        assert!(squircle_sdf_dist(hw, hh, hw, hh, hh) > 0.0);
+    }
 }
