@@ -15,7 +15,6 @@ name: testing-qa
   real client (`--spawn ... rusty-files`), verifying zero `EGL_BAD_SURFACE` or fallback warnings.
 - For UI/Visual changes, capture a live `--winit` screenshot in `scratch/` (without mutating
   `~/.config/rustyos/config.toml` permanently) and visually inspect the PNG via `read_file` against
-  `docs/design/references/macos-27-golden-gate/` across Light and Dark modes (plus
-  `reduce_transparency = true` fallback when touched).
+  `DESIGN.md` across Light and Dark modes (plus `reduce_transparency = true` fallback when touched).
 - Inspect git diff and run targeted tests after changes.
 - Report tests not run and why; never imply success without evidence.

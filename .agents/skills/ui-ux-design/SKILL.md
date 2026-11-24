@@ -11,14 +11,13 @@ name: ui-ux-design
 - Use consistent spacing, typography, radius and motion tokens.
 - Respect reduced motion and scaling.
 - Do not copy proprietary assets or exact branded interfaces; achieve 1:1 layout,
-  material, and interaction parity with modern macOS-inspired desktop standards using original RustyOS emblems/artwork.
+  material, and interaction parity with modern desktop standards using original RustyOS emblems/artwork.
 - Check GPU cost of blur, shadows and transparency; respect `reduce_transparency` fallback.
 - Enforce `RustyOS Light & Dark` tokens (`DESIGN.md` §5.1, §12): `#F5F6F8` / `#1E1E20`,
   accent `#007AFF` / `#0A84FF`, Sky Blue folders in BOTH Light and Dark. Zero legacy purple,
   lavender, or plum in surfaces, selections, borders, or folder palettes.
-- Before designing or editing UI: open the matching Light and Dark PNGs from
-  `docs/design/references/macos-27-golden-gate/INDEX.md` (`read_file`).
-- Liquid Glass 1:1 parity rules:
+- Do NOT use third-party branding or codenames in code, comments, or documentation.
+- Liquid Glass parity rules:
   - Use the unified continuous cubic squircle lens + directional 3-layer `uRim` shader (`LIQUID_GLASS_FRAG`:
     top `1.0`, bottom `0.35`, vertical sides `0.0`, zero diagonal corner flares or milky `sheen`)
     so Light and Dark glass stay clear and balanced against underlying wallpaper folds.

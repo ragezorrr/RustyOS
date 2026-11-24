@@ -2817,7 +2817,7 @@ hardware/software context и низкие накладные расходы.
 
 ### RUSTYOS-172 — Нативный Safe Rust Polkit Authentication Agent (`apps/rusty-polkit`)
 - **Status:** Done
-- **Goal:** Реализовать нативный графический агент аутентификации PolicyKit (`apps/rusty-polkit`) в стиле macOS 27 на базе `rusty-ui` и `zbus = "5"` без новых зависимостей Cargo и `unsafe`, обеспечив корректный запрос root-пароля через `/run/polkit/agent-helper.socket` / `polkit-agent-helper-1`, обработку отмены/повторных попыток и автозапуск в сессии.
+- **Goal:** Реализовать нативный графический агент аутентификации PolicyKit (`apps/rusty-polkit`) в стиле Liquid Glass на базе `rusty-ui` и `zbus = "5"` без новых зависимостей Cargo и `unsafe`, обеспечив корректный запрос root-пароля через `/run/polkit/agent-helper.socket` / `polkit-agent-helper-1`, обработку отмены/повторных попыток и автозапуск в сессии.
 - **Dependencies:** `RUSTYOS-061`, `RUSTYOS-164`, `RUSTYOS-168`, `RUSTYOS-171`.
 - **Scope:**
   - `apps/rusty-polkit/Cargo.toml`: интеграция в workspace с зависимостями `rusty-ui`, `rusty-services`, `zbus`, `wayland-client`, `libc`.

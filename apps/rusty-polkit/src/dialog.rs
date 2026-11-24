@@ -1,4 +1,4 @@
-//! macOS 27 styled modal `PolicyKit` authentication dialog state and rendering.
+//! Liquid Glass styled modal `PolicyKit` authentication dialog state and rendering.
 
 use std::time::Duration;
 
@@ -173,7 +173,7 @@ impl PolkitDialogState {
         None
     }
 
-    /// Paints the complete macOS 27 styled card onto [`UiPainter`].
+    /// Paints the complete Liquid Glass styled card onto [`UiPainter`].
     pub(crate) fn paint(
         &mut self,
         painter: &mut UiPainter,

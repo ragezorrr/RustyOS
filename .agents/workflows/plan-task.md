@@ -3,8 +3,7 @@
 1.  Identify task ID and acceptance criteria (`ROADMAP.md` + tail of `TASKS.md`).
 2.  Consult `ARCHITECTURE.md` (especially §7 Extension Points) and at most one
     relevant skill; run 1–2 batched `rg` lookups only if §7 lacks a needed hook.
-    For UI/Visual tasks, inspect 1–3 matching Light/Dark PNGs in
-    `docs/design/references/macos-27-golden-gate/INDEX.md` alongside `DESIGN.md`.
+    For UI/Visual tasks, inspect specifications in `DESIGN.md`.
 3.  Before `APPROVE:`, do not read full `.rs` implementation files; read exact
     15–40 line `StartLine..EndLine` slices only after `APPROVE:` when editing.
 4.  Classify changes as routine or approval-gated.
