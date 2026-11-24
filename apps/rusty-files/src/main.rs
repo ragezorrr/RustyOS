@@ -3,7 +3,7 @@
 
 mod icons;
 mod layout;
-pub(crate) mod liquid_glass;
+pub(crate) use rusty_app::liquid_glass;
 mod render;
 mod state;
 mod svg_icons;

@@ -89,20 +89,24 @@ struct ShadowEdgeKey {
     max_alpha: u8,
 }
 
-/// Top-lit frosted glass panel variant used by shell surfaces (`RUSTYOS-050`/`051`).
+/// Top-lit frosted glass panel variant used by shell and client surfaces (`RUSTYOS-050`/`051`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum GlassPanelStyle {
     /// Floating bottom Dock container (`RUSTYOS-050`).
     Dock,
     /// Elevated menus, Control Center, Spotlight, Notification HUD & OSD (`RUSTYOS-051`).
     Popover,
-    /// Lighter inner glass tile/track inside Control Center (`RUSTYOS-051`).
+    /// Compact control pill / inner glass tile inside Control Center (`RUSTYOS-051`).
     ControlModule,
+    /// Subtle translucent sidebar glass with high diffusion blur for navigation panes.
+    Sidebar,
     /// Frosted uniform notification card used by Notification Center & HUD toasts (`RUSTYOS-110`).
     NotificationCard,
+    /// Custom client-configured glass with optional RGBA tint overlay (`rustyos_surface_glass_v1`).
+    Custom(Option<[u8; 4]>),
 }
 
-/// Interactive macOS-style window traffic light button kind (`RUSTYOS-051`), re-exported from `rusty-ui`.
+/// Interactive window traffic light button kind (`RUSTYOS-051`), re-exported from `rusty-ui`.
 pub use rusty_ui::TrafficLightKind;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

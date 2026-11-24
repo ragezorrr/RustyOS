@@ -9,6 +9,7 @@ members = [
     "apps/rusty-terminal",
     "apps/rusty-view",
     "crates/rusty-animation",
+    "crates/rusty-app",
     "crates/rusty-compositor",
     "crates/rusty-ipc",
     "crates/rusty-services",
@@ -28,6 +29,7 @@ fontdue = "0.9.5"
 gl_generator = "0.14.0"
 libc = "0.2.191"
 rusty-animation = { path = "crates/rusty-animation" }
+rusty-app = { path = "crates/rusty-app" }
 rusty-ipc = { path = "crates/rusty-ipc" }
 rusty-services = { path = "crates/rusty-services" }
 rusty-ui = { path = "crates/rusty-ui" }
@@ -43,6 +45,9 @@ smithay = { version = "0.7.0", default-features = false, features = [
     "wayland_frontend",
     "desktop",
     "xwayland",
+] }
+smithay-client-toolkit = { version = "0.19.2", default-features = false, features = [
+    "xkbcommon",
 ] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }

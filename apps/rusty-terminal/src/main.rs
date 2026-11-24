@@ -10,7 +10,7 @@
 mod font;
 mod gpu_egl;
 mod layout;
-mod liquid_glass;
+pub(crate) use rusty_app::liquid_glass;
 mod pty;
 mod renderer_shm;
 mod state;

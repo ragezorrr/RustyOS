@@ -841,13 +841,16 @@ fn base_glass_layer(
     glass_scale: f32,
 ) -> [f32; 4] {
     let (base_a, rgb) = match (is_dark, style) {
-        // RUSTYOS-100: RustyOS uniform glass layer across Dock, Popover (`popupGlass`), and ControlModule (`fishuiGlass`).
+        // RUSTYOS-100: RustyOS uniform glass layer across shell and client surface styles.
         (true, GlassPanelStyle::Dock) => (0.29 * (0.45 + 0.55 * glass_scale), [96.0, 96.0, 98.0]),
         (true, GlassPanelStyle::Popover) => {
             (0.68 * (0.50 + 0.50 * glass_scale), [42.0, 44.0, 48.0])
         }
         (true, GlassPanelStyle::ControlModule) => {
             (0.28 * (0.48 + 0.52 * glass_scale), [60.0, 60.0, 68.0])
+        }
+        (true, GlassPanelStyle::Sidebar) => {
+            (0.56 * (0.50 + 0.50 * glass_scale), [38.0, 40.0, 46.0])
         }
         (false, GlassPanelStyle::Dock) => {
             (0.25 * (0.44 + 0.56 * glass_scale), [153.0, 153.0, 153.0])
@@ -858,11 +861,24 @@ fn base_glass_layer(
         (false, GlassPanelStyle::ControlModule) => {
             (0.22 * (0.48 + 0.52 * glass_scale), [184.0, 188.0, 198.0])
         }
+        (false, GlassPanelStyle::Sidebar) => {
+            (0.48 * (0.50 + 0.50 * glass_scale), [235.0, 238.0, 244.0])
+        }
         (true, GlassPanelStyle::NotificationCard) => {
             (0.84 * (0.58 + 0.42 * glass_scale), [40.0, 40.0, 44.0])
         }
         (false, GlassPanelStyle::NotificationCard) => {
             (0.80 * (0.58 + 0.42 * glass_scale), [244.0, 244.0, 247.0])
+        }
+        (_, GlassPanelStyle::Custom(Some([r, g_c, b, a]))) => (
+            ((f32::from(a) / 255.0) * (0.45 + 0.55 * glass_scale)).clamp(0.0, 0.95),
+            [f32::from(r), f32::from(g_c), f32::from(b)],
+        ),
+        (true, GlassPanelStyle::Custom(None)) => {
+            (0.52 * (0.50 + 0.50 * glass_scale), [46.0, 48.0, 56.0])
+        }
+        (false, GlassPanelStyle::Custom(None)) => {
+            (0.46 * (0.50 + 0.50 * glass_scale), [230.0, 235.0, 244.0])
         }
     };
     [
@@ -946,11 +962,18 @@ pub(super) fn sample_glass_panel_pixel_themed(
             (true, GlassPanelStyle::Dock) => ([34.0, 34.0, 38.0], 246.0 / 255.0),
             (true, GlassPanelStyle::Popover) => ([38.0, 38.0, 42.0], 248.0 / 255.0),
             (true, GlassPanelStyle::ControlModule) => ([54.0, 54.0, 60.0], 232.0 / 255.0),
+            (true, GlassPanelStyle::Sidebar) => ([36.0, 38.0, 44.0], 244.0 / 255.0),
             (true, GlassPanelStyle::NotificationCard) => ([40.0, 40.0, 44.0], 250.0 / 255.0),
             (false, GlassPanelStyle::Dock) => ([236.0, 238.0, 243.0], 246.0 / 255.0),
             (false, GlassPanelStyle::Popover) => ([246.0, 247.0, 250.0], 248.0 / 255.0),
             (false, GlassPanelStyle::ControlModule) => ([238.0, 240.0, 245.0], 238.0 / 255.0),
+            (false, GlassPanelStyle::Sidebar) => ([238.0, 240.0, 246.0], 244.0 / 255.0),
             (false, GlassPanelStyle::NotificationCard) => ([246.0, 246.0, 249.0], 250.0 / 255.0),
+            (_, GlassPanelStyle::Custom(Some([r, g_c, b, _]))) => {
+                ([f32::from(r), f32::from(g_c), f32::from(b)], 244.0 / 255.0)
+            }
+            (true, GlassPanelStyle::Custom(None)) => ([42.0, 44.0, 50.0], 244.0 / 255.0),
+            (false, GlassPanelStyle::Custom(None)) => ([240.0, 242.0, 248.0], 244.0 / 255.0),
         };
         return premul_pixel(
             base_rgb[0] + dither,
@@ -972,6 +995,8 @@ pub(super) fn sample_glass_panel_pixel_themed(
         (true, GlassPanelStyle::Popover) => 0.14,
         (false, GlassPanelStyle::ControlModule) => 0.42,
         (false, GlassPanelStyle::NotificationCard) => 0.18,
+        (true, GlassPanelStyle::Sidebar | GlassPanelStyle::Custom(_)) => 0.22,
+        (false, GlassPanelStyle::Sidebar | GlassPanelStyle::Custom(_)) => 0.24,
     };
     let rim_alpha = glass_rim_alpha(ny, sd, rim_peak);
     if rim_alpha > 0.001 {

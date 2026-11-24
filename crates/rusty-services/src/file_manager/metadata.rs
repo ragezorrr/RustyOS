@@ -10,7 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use super::listing::build_file_entry;
 use super::types::{FileEntry, UserFileLocations};
 
-/// Detailed metadata displayed in Finder-style `Get Info` and `Gallery -> Information`.
+/// Detailed metadata displayed in `Get Info` and `Gallery -> Information`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileDetailedInfo {
     /// Display basename.
@@ -496,7 +496,7 @@ const fn from_hex_digit(b: u8) -> Option<u8> {
     }
 }
 
-/// Formats byte sizes in macOS decimal Finder units (`1 KB = 1000 B`).
+/// Formats byte sizes in decimal SI units (`1 KB = 1000 B`).
 #[must_use]
 pub fn format_byte_size(bytes: u64) -> String {
     const KB: u64 = 1_000;

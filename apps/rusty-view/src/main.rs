@@ -22,42 +22,20 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
+use rusty_app::{
+    AppConfig, AppContext, BTN_LEFT, ConfigureInfo, KeyEvent, Keysym, LiquidGlassConfig,
+    PointerEvent, PointerEventKind, RustyApp, WindowDecorationMode, run_app,
+};
 use rusty_ui::{
     ThemeMode, TrafficLightButtons, TrafficLightKind, UiCanvas, UiDrawList, UiFontEngine,
-    UiPainter, WindowHitTarget, render_draw_list_to_canvas,
-};
-use smithay_client_toolkit::{
-    compositor::{CompositorHandler, CompositorState},
-    delegate_compositor, delegate_keyboard, delegate_output, delegate_pointer, delegate_registry,
-    delegate_seat, delegate_shm, delegate_xdg_shell, delegate_xdg_window,
-    output::{OutputHandler, OutputState},
-    reexports::{calloop::EventLoop, calloop_wayland_source::WaylandSource},
-    registry::{ProvidesRegistryState, RegistryState},
-    registry_handlers,
-    seat::{
-        Capability, SeatHandler, SeatState,
-        keyboard::{KeyEvent, KeyboardHandler, Keysym, Modifiers},
-        pointer::{BTN_LEFT, PointerEvent, PointerEventKind, PointerHandler},
-    },
-    shell::{
-        WaylandSurface,
-        xdg::{
-            XdgShell,
-            window::{Window, WindowConfigure, WindowDecorations, WindowHandler},
-        },
-    },
-    shm::{Shm, ShmHandler, slot::SlotPool},
-};
-use wayland_client::{
-    Connection, QueueHandle,
-    globals::registry_queue_init,
-    protocol::{wl_keyboard, wl_output, wl_pointer, wl_seat, wl_shm, wl_surface},
+    UiPainter, WINDOW_RADIUS, WindowHitTarget, render_draw_list_to_canvas,
 };
 
 use state::{DEFAULT_VIEWER_HEIGHT, DEFAULT_VIEWER_WIDTH, ViewerState};
 
 const MIN_VIEWER_WIDTH: u32 = 400;
 const MIN_VIEWER_HEIGHT: u32 = 300;
+const VIEWER_GLASS_RADIUS: u32 = WINDOW_RADIUS;
 
 #[derive(Debug, Clone)]
 struct ViewerConfig {
@@ -118,277 +96,80 @@ fn parse_args() -> Result<ViewerConfig, String> {
 }
 
 struct ViewerApp {
-    registry_state: RegistryState,
-    seat_state: SeatState,
-    output_state: OutputState,
-    shm: Shm,
-    pool: SlotPool,
-    window: Window,
-    width: u32,
-    height: u32,
-    configured: bool,
-    exit: bool,
-    keyboard: Option<wl_keyboard::WlKeyboard>,
-    pointer: Option<wl_pointer::WlPointer>,
-    seat: Option<wl_seat::WlSeat>,
-    modifiers: Modifiers,
-    last_serial: u32,
-    pointer_pos: (f64, f64),
-    fonts: UiFontEngine,
     state: ViewerState,
-    frame_pending: bool,
-    last_title: String,
 }
 
 impl ViewerApp {
-    fn toggle_maximize(&mut self) {
-        if self.state.frame.is_maximized {
-            self.window.unset_maximized();
-            self.state.frame.is_maximized = false;
-        } else {
-            self.window.set_maximized();
-            self.state.frame.is_maximized = true;
-        }
-        self.state.dirty = true;
-    }
-
-    fn toggle_fullscreen(&mut self) {
+    fn sync_glass(&self, ctx: &mut AppContext<'_>) {
         if self.state.is_fullscreen {
-            self.window.unset_fullscreen();
-            self.state.is_fullscreen = false;
+            ctx.set_liquid_glass(None);
         } else {
-            self.window.set_fullscreen(None);
-            self.state.is_fullscreen = true;
+            ctx.set_liquid_glass(Some(LiquidGlassConfig::popover(VIEWER_GLASS_RADIUS)));
         }
+    }
+
+    fn toggle_maximize(&mut self, ctx: &mut AppContext<'_>) {
+        let next = !self.state.frame.is_maximized;
+        self.state.frame.is_maximized = next;
+        ctx.set_maximized(next);
         self.state.dirty = true;
     }
 
-    fn draw(&mut self, qh: &QueueHandle<Self>) {
-        if !self.configured {
-            return;
-        }
-
-        if self.last_title != self.state.frame.title {
-            self.last_title.clone_from(&self.state.frame.title);
-            self.window.set_title(&self.last_title);
-        }
-
-        let w = self.width.max(MIN_VIEWER_WIDTH);
-        let h = self.height.max(MIN_VIEWER_HEIGHT);
-
-        let _ = self.state.toolbar.update_visibility();
-
-        let mut list = UiDrawList::new();
-        {
-            let mut painter = UiPainter::new(&mut list);
-            self.state.paint(&mut painter, &mut self.fonts, w, h);
-        }
-
-        let stride = i32::try_from(w * 4).unwrap_or(3600);
-        let Ok((buffer, canvas_bytes)) = self.pool.create_buffer(
-            i32::try_from(w).unwrap_or(900),
-            i32::try_from(h).unwrap_or(650),
-            stride,
-            wl_shm::Format::Argb8888,
-        ) else {
-            return;
-        };
-
-        let mut canvas = UiCanvas::new(
-            canvas_bytes,
-            w,
-            h,
-            (w * 4) as usize,
-            rusty_ui::PixelFormat::Bgra8888,
-        );
-        canvas.clear([0, 0, 0, 0]);
-        render_draw_list_to_canvas(&list, &mut canvas, &mut self.fonts);
-
-        let surf = self.window.wl_surface();
-        surf.damage_buffer(
-            0,
-            0,
-            i32::try_from(w).unwrap_or(900),
-            i32::try_from(h).unwrap_or(650),
-        );
-        surf.frame(qh, surf.clone());
-        let _ = buffer.attach_to(surf);
-        surf.commit();
-        self.frame_pending = true;
-        self.state.dirty = false;
+    fn toggle_fullscreen(&mut self, ctx: &mut AppContext<'_>) {
+        let next = !self.state.is_fullscreen;
+        self.state.is_fullscreen = next;
+        ctx.set_fullscreen(next);
+        self.sync_glass(ctx);
+        self.state.dirty = true;
     }
 }
 
-impl CompositorHandler for ViewerApp {
-    fn scale_factor_changed(
-        &mut self,
-        _: &Connection,
-        _: &QueueHandle<Self>,
-        _: &wl_surface::WlSurface,
-        _: i32,
-    ) {
-    }
-    fn transform_changed(
-        &mut self,
-        _: &Connection,
-        _: &QueueHandle<Self>,
-        _: &wl_surface::WlSurface,
-        _: wl_output::Transform,
-    ) {
-    }
-    fn frame(&mut self, _: &Connection, qh: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: u32) {
-        self.frame_pending = false;
-        if self.state.dirty {
-            self.draw(qh);
-        }
-    }
-    fn surface_enter(
-        &mut self,
-        _: &Connection,
-        _: &QueueHandle<Self>,
-        _: &wl_surface::WlSurface,
-        _: &wl_output::WlOutput,
-    ) {
-    }
-    fn surface_leave(
-        &mut self,
-        _: &Connection,
-        _: &QueueHandle<Self>,
-        _: &wl_surface::WlSurface,
-        _: &wl_output::WlOutput,
-    ) {
-    }
-}
-
-impl OutputHandler for ViewerApp {
-    fn output_state(&mut self) -> &mut OutputState {
-        &mut self.output_state
-    }
-    fn new_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
-    fn update_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
-    fn output_destroyed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
-}
-
-impl WindowHandler for ViewerApp {
-    fn request_close(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &Window) {
-        self.exit = true;
-    }
-
-    fn configure(
-        &mut self,
-        _: &Connection,
-        qh: &QueueHandle<Self>,
-        _: &Window,
-        configure: WindowConfigure,
-        _: u32,
-    ) {
-        let (w, h) = configure.new_size;
-        let new_w = w.map_or(DEFAULT_VIEWER_WIDTH, |v| v.get().max(MIN_VIEWER_WIDTH));
-        let new_h = h.map_or(DEFAULT_VIEWER_HEIGHT, |v| v.get().max(MIN_VIEWER_HEIGHT));
-
-        self.width = new_w;
-        self.height = new_h;
-        self.state.frame.is_maximized = configure.is_maximized();
-        self.state.frame.is_focused = configure.is_activated();
-        self.state.is_fullscreen = configure.is_fullscreen();
-        self.state.frame.buttons = TrafficLightButtons::default_csd_for_width(new_w);
+impl RustyApp for ViewerApp {
+    fn on_configure(&mut self, ctx: &mut AppContext<'_>, info: ConfigureInfo) {
+        self.state.frame.is_maximized = info.is_maximized;
+        self.state.frame.is_focused = info.is_activated;
+        self.state.is_fullscreen = info.is_fullscreen;
+        self.state.frame.buttons = TrafficLightButtons::default_csd_for_width(info.width);
 
         if self.state.viewport.is_fitting {
-            self.state.action_fit(new_w, new_h);
+            self.state.action_fit(info.width, info.height);
         }
 
-        self.configured = true;
-        self.frame_pending = false;
+        self.sync_glass(ctx);
         self.state.dirty = true;
-        self.draw(qh);
     }
-}
 
-impl SeatHandler for ViewerApp {
-    fn seat_state(&mut self) -> &mut SeatState {
-        &mut self.seat_state
-    }
-    fn new_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, seat: wl_seat::WlSeat) {
-        self.seat = Some(seat);
-    }
-    fn new_capability(
-        &mut self,
-        _: &Connection,
-        qh: &QueueHandle<Self>,
-        seat: wl_seat::WlSeat,
-        capability: Capability,
-    ) {
-        self.seat = Some(seat.clone());
-        if capability == Capability::Keyboard && self.keyboard.is_none() {
-            self.keyboard = self.seat_state.get_keyboard(qh, &seat, None).ok();
+    fn on_tick(&mut self, ctx: &mut AppContext<'_>) {
+        if self.state.toolbar.update_visibility() {
+            self.state.dirty = true;
         }
-        if capability == Capability::Pointer && self.pointer.is_none() {
-            self.pointer = self.seat_state.get_pointer(qh, &seat).ok();
+        ctx.set_title(&self.state.frame.title);
+        if self.state.dirty {
+            ctx.request_redraw();
         }
     }
-    fn remove_capability(
-        &mut self,
-        _: &Connection,
-        _: &QueueHandle<Self>,
-        _: wl_seat::WlSeat,
-        capability: Capability,
-    ) {
-        if capability == Capability::Keyboard
-            && let Some(kb) = self.keyboard.take()
-        {
-            kb.release();
-        }
-        if capability == Capability::Pointer
-            && let Some(pt) = self.pointer.take()
-        {
-            pt.release();
-        }
-    }
-    fn remove_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat) {
-        self.seat = None;
-    }
-}
 
-impl KeyboardHandler for ViewerApp {
-    fn enter(
-        &mut self,
-        _: &Connection,
-        _: &QueueHandle<Self>,
-        _: &wl_keyboard::WlKeyboard,
-        _: &wl_surface::WlSurface,
-        _: u32,
-        _: &[u32],
-        _: &[Keysym],
-    ) {
+    fn poll_interval(&self) -> Duration {
+        if self.state.toolbar.opacity > 0.01 && !self.state.toolbar.is_pointer_inside {
+            Duration::from_millis(33)
+        } else {
+            Duration::from_millis(250)
+        }
     }
-    fn leave(
-        &mut self,
-        _: &Connection,
-        _: &QueueHandle<Self>,
-        _: &wl_keyboard::WlKeyboard,
-        _: &wl_surface::WlSurface,
-        _: u32,
-    ) {
-    }
-    fn press_key(
-        &mut self,
-        _: &Connection,
-        qh: &QueueHandle<Self>,
-        _: &wl_keyboard::WlKeyboard,
-        _: u32,
-        event: KeyEvent,
-    ) {
+
+    fn on_key(&mut self, ctx: &mut AppContext<'_>, event: KeyEvent) {
         let sym = event.keysym;
-        let w = self.width;
-        let h = self.height;
+        let w = ctx.width();
+        let h = ctx.height();
+        let mods = ctx.modifiers();
 
         match sym {
             Keysym::Escape | Keysym::q | Keysym::Q => {
-                self.exit = true;
+                ctx.request_exit();
                 return;
             }
             Keysym::F11 => {
-                self.toggle_fullscreen();
+                self.toggle_fullscreen(ctx);
             }
             Keysym::plus | Keysym::equal | Keysym::KP_Add => {
                 self.state.action_zoom_in(w, h);
@@ -403,7 +184,7 @@ impl KeyboardHandler for ViewerApp {
                 self.state.action_fit(w, h);
             }
             Keysym::r | Keysym::R => {
-                if self.modifiers.shift {
+                if mods.shift {
                     self.state.action_rotate_ccw(w, h);
                 } else {
                     self.state.action_rotate_cw(w, h);
@@ -425,9 +206,12 @@ impl KeyboardHandler for ViewerApp {
                 self.state.action_toggle_info();
             }
             _ => {
-                if self.modifiers.ctrl {
+                if mods.ctrl {
                     match sym {
-                        Keysym::q => self.exit = true,
+                        Keysym::q => {
+                            ctx.request_exit();
+                            return;
+                        }
                         Keysym::r => self.state.action_rotate_cw(w, h),
                         _ => {}
                     }
@@ -435,85 +219,44 @@ impl KeyboardHandler for ViewerApp {
             }
         }
 
+        ctx.set_title(&self.state.frame.title);
         self.state.dirty = true;
-        self.draw(qh);
+        ctx.request_redraw();
     }
-    fn release_key(
-        &mut self,
-        _: &Connection,
-        _: &QueueHandle<Self>,
-        _: &wl_keyboard::WlKeyboard,
-        _: u32,
-        _: KeyEvent,
-    ) {
-    }
-    fn update_modifiers(
-        &mut self,
-        _: &Connection,
-        _: &QueueHandle<Self>,
-        _: &wl_keyboard::WlKeyboard,
-        _: u32,
-        modifiers: Modifiers,
-        _: u32,
-    ) {
-        self.modifiers = modifiers;
-    }
-}
 
-impl PointerHandler for ViewerApp {
-    fn pointer_frame(
-        &mut self,
-        _: &Connection,
-        qh: &QueueHandle<Self>,
-        _: &wl_pointer::WlPointer,
-        events: &[PointerEvent],
-    ) {
-        let w = self.width;
-        let h = self.height;
+    fn on_pointer(&mut self, ctx: &mut AppContext<'_>, events: &[PointerEvent]) {
+        let w = ctx.width();
+        let h = ctx.height();
 
         for ev in events {
             match ev.kind {
-                PointerEventKind::Enter { serial } => {
-                    self.last_serial = serial;
-                    self.pointer_pos = ev.position;
-                    self.state
-                        .on_pointer_moved(ev.position.0, ev.position.1, w, h);
-                }
-                PointerEventKind::Motion { .. } => {
-                    self.pointer_pos = ev.position;
+                PointerEventKind::Enter { .. } | PointerEventKind::Motion { .. } => {
                     self.state
                         .on_pointer_moved(ev.position.0, ev.position.1, w, h);
                 }
                 PointerEventKind::Press { button, serial, .. } => {
-                    self.last_serial = serial;
-                    self.pointer_pos = ev.position;
                     if button == BTN_LEFT {
                         let target = self
                             .state
                             .on_pointer_down(ev.position.0, ev.position.1, w, h);
-                        if target == WindowHitTarget::TitlebarDrag
-                            && !self.state.is_fullscreen
-                            && let Some(seat) = &self.seat
-                        {
-                            self.window.move_(seat, serial);
+                        if target == WindowHitTarget::TitlebarDrag && !self.state.is_fullscreen {
+                            ctx.start_interactive_move(serial);
                         }
                     }
                 }
                 PointerEventKind::Release { button, .. } => {
                     if button == BTN_LEFT {
-                        let traffic =
-                            self.state
-                                .on_pointer_up(self.pointer_pos.0, self.pointer_pos.1, w, h);
-                        match traffic {
+                        let (px, py) = ctx.pointer_pos();
+                        match self.state.on_pointer_up(px, py, w, h) {
                             Some(TrafficLightKind::Close) => {
-                                self.exit = true;
+                                ctx.request_exit();
                                 return;
                             }
                             Some(TrafficLightKind::Minimize) => {
-                                self.window.set_minimized();
+                                ctx.set_minimized();
                             }
                             Some(TrafficLightKind::Maximize) => {
-                                self.toggle_maximize();
+                                self.toggle_maximize(ctx);
                             }
                             None => {}
                         }
@@ -526,8 +269,8 @@ impl PointerHandler for ViewerApp {
                         -vertical.absolute
                     };
                     if delta.abs() > 0.01 {
-                        self.state
-                            .on_wheel(delta, self.pointer_pos.0, self.pointer_pos.1, w, h);
+                        let (px, py) = ctx.pointer_pos();
+                        self.state.on_wheel(delta, px, py, w, h);
                     }
                 }
                 PointerEventKind::Leave { .. } => {
@@ -538,33 +281,22 @@ impl PointerHandler for ViewerApp {
         }
 
         if self.state.dirty {
-            self.draw(qh);
+            ctx.request_redraw();
         }
     }
-}
 
-impl ShmHandler for ViewerApp {
-    fn shm_state(&mut self) -> &mut Shm {
-        &mut self.shm
+    fn paint(
+        &mut self,
+        painter: &mut UiPainter<'_>,
+        fonts: &mut UiFontEngine,
+        width: u32,
+        height: u32,
+    ) {
+        let _ = self.state.toolbar.update_visibility();
+        self.state.paint(painter, fonts, width, height);
+        self.state.dirty = false;
     }
 }
-
-impl ProvidesRegistryState for ViewerApp {
-    fn registry(&mut self) -> &mut RegistryState {
-        &mut self.registry_state
-    }
-    registry_handlers![OutputState, SeatState];
-}
-
-delegate_registry!(ViewerApp);
-delegate_compositor!(ViewerApp);
-delegate_output!(ViewerApp);
-delegate_shm!(ViewerApp);
-delegate_seat!(ViewerApp);
-delegate_keyboard!(ViewerApp);
-delegate_pointer!(ViewerApp);
-delegate_xdg_shell!(ViewerApp);
-delegate_xdg_window!(ViewerApp);
 
 fn run_headless_tests() -> ExitCode {
     println!("rusty-view: running headless verification mode...");
@@ -648,50 +380,6 @@ fn main() -> ExitCode {
         return run_headless_tests();
     }
 
-    let Ok(conn) = Connection::connect_to_env() else {
-        eprintln!(
-            "rusty-view: failed to connect to Wayland display (WAYLAND_DISPLAY not set or unavailable)"
-        );
-        eprintln!("Hint: use --test for headless verification without a Wayland compositor");
-        return ExitCode::FAILURE;
-    };
-
-    let Ok((globals, event_queue)) = registry_queue_init(&conn) else {
-        eprintln!("rusty-view: failed to initialize Wayland registry");
-        return ExitCode::FAILURE;
-    };
-
-    let qh = event_queue.handle();
-    let Ok(compositor) = CompositorState::bind(&globals, &qh) else {
-        eprintln!("rusty-view: wl_compositor unavailable");
-        return ExitCode::FAILURE;
-    };
-    let Ok(xdg_shell) = XdgShell::bind(&globals, &qh) else {
-        eprintln!("rusty-view: xdg_wm_base unavailable");
-        return ExitCode::FAILURE;
-    };
-    let Ok(shm) = Shm::bind(&globals, &qh) else {
-        eprintln!("rusty-view: wl_shm unavailable");
-        return ExitCode::FAILURE;
-    };
-    let Ok(pool) = SlotPool::new(
-        (DEFAULT_VIEWER_WIDTH * DEFAULT_VIEWER_HEIGHT * 4) as usize,
-        &shm,
-    ) else {
-        eprintln!("rusty-view: failed to allocate shm pool");
-        return ExitCode::FAILURE;
-    };
-
-    let surface = compositor.create_surface(&qh);
-    let window = xdg_shell.create_window(surface, WindowDecorations::RequestClient, &qh);
-    window.set_title("Image Viewer");
-    window.set_app_id("org.rustyos.view");
-    window.set_min_size(Some((MIN_VIEWER_WIDTH, MIN_VIEWER_HEIGHT)));
-    if cfg.fullscreen {
-        window.set_fullscreen(None);
-    }
-    window.commit();
-
     let mut state = ViewerState::new(
         cfg.target_path.as_deref(),
         DEFAULT_VIEWER_WIDTH,
@@ -700,66 +388,23 @@ fn main() -> ExitCode {
     );
     state.is_fullscreen = cfg.fullscreen;
 
-    let mut app = ViewerApp {
-        registry_state: RegistryState::new(&globals),
-        seat_state: SeatState::new(&globals, &qh),
-        output_state: OutputState::new(&globals, &qh),
-        shm,
-        pool,
-        window,
-        width: DEFAULT_VIEWER_WIDTH,
-        height: DEFAULT_VIEWER_HEIGHT,
-        configured: false,
-        exit: false,
-        keyboard: None,
-        pointer: None,
-        seat: None,
-        modifiers: Modifiers::default(),
-        last_serial: 0,
-        pointer_pos: (0.0, 0.0),
-        fonts: UiFontEngine::new(),
-        state,
-        frame_pending: false,
-        last_title: "Image Viewer".to_owned(),
-    };
+    let mut host_cfg = AppConfig::new(
+        "Image Viewer",
+        "org.rustyos.view",
+        (DEFAULT_VIEWER_WIDTH, DEFAULT_VIEWER_HEIGHT),
+    )
+    .with_min_size(MIN_VIEWER_WIDTH, MIN_VIEWER_HEIGHT)
+    .with_decorations(WindowDecorationMode::Client)
+    .with_fullscreen(cfg.fullscreen);
 
-    run_wayland_loop(conn, event_queue, &qh, &mut app)
-}
-
-fn run_wayland_loop(
-    conn: Connection,
-    event_queue: wayland_client::EventQueue<ViewerApp>,
-    qh: &QueueHandle<ViewerApp>,
-    app: &mut ViewerApp,
-) -> ExitCode {
-    let Ok(mut event_loop) = EventLoop::<ViewerApp>::try_new() else {
-        eprintln!("rusty-view: failed to create event loop");
-        return ExitCode::FAILURE;
-    };
-    if WaylandSource::new(conn, event_queue)
-        .insert(event_loop.handle())
-        .is_err()
-    {
-        eprintln!("rusty-view: failed to register Wayland source");
-        return ExitCode::FAILURE;
+    if !cfg.fullscreen {
+        host_cfg = host_cfg.with_liquid_glass(LiquidGlassConfig::popover(VIEWER_GLASS_RADIUS));
     }
 
-    while !app.exit {
-        if app.state.toolbar.update_visibility() {
-            app.state.dirty = true;
-        }
-        if app.configured && app.state.dirty && !app.frame_pending {
-            app.draw(qh);
-        }
-
-        let timeout = if app.state.toolbar.opacity > 0.01 && !app.state.toolbar.is_pointer_inside {
-            Some(Duration::from_millis(33))
-        } else {
-            Some(Duration::from_millis(250))
-        };
-        if event_loop.dispatch(timeout, app).is_err() {
-            break;
-        }
+    if let Err(err) = run_app(host_cfg, ViewerApp { state }) {
+        eprintln!("rusty-view: {err}");
+        eprintln!("Hint: use --test for headless verification without a Wayland compositor");
+        return ExitCode::FAILURE;
     }
 
     ExitCode::SUCCESS

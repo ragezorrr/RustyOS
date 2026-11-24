@@ -9,10 +9,9 @@ description = "RustyOS PolicyKit graphical authentication agent in Liquid Glass 
 
 [dependencies]
 libc.workspace = true
+rusty-app.workspace = true
 rusty-services.workspace = true
 rusty-ui.workspace = true
-smithay-client-toolkit = { version = "0.19.2", default-features = false, features = ["calloop", "xkbcommon"] }
-wayland-client = "0.31.15"
 zbus.workspace = true
 
 [lints]

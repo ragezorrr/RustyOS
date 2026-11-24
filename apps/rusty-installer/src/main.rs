@@ -1,9 +1,9 @@
-//! Binary entry point for `rusty-installer`, RustyOS's macOS-style OS Installer & OOBE Setup Assistant
+//! Binary entry point for `rusty-installer`, RustyOS's native OS Installer & OOBE Setup Assistant
 //! (`RUSTYOS-115`, ADR-0065).
 
 mod disks;
 mod layout;
-mod liquid_glass;
+pub(crate) use rusty_app::liquid_glass;
 mod render;
 mod state;
 mod wayland;

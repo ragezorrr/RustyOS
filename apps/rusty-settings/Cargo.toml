@@ -9,12 +9,12 @@ description = "RustyOS standalone System Settings window (Wayland CSD)"
 
 [dependencies]
 rusty-services.workspace = true
+rusty-app.workspace = true
 rusty-ui.workspace = true
-smithay-client-toolkit = { version = "0.19.2", default-features = false, features = ["calloop", "xkbcommon"] }
+smithay-client-toolkit = { workspace = true, features = ["calloop"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
-wayland-client = "0.31.15"
-wayland-scanner.workspace = true
+wayland-client.workspace = true
 
 [lints]
 workspace = true

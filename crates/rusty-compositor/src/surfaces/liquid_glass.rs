@@ -418,7 +418,7 @@ pub(crate) fn compute_glass_material(
             tint_rgba: [0.17, 0.18, 0.20, 0.28 + 0.24 * g],
             sat_refract_rim_sheen: [1.18, 6.0, 0.22, 0.01],
         },
-        // ControlModule (Control Center islands, Lock Screen pill, client Sidebar/ControlPill): frosted `half_out`
+        // ControlModule (Control Center islands, Lock Screen pill, client ControlPill): frosted `half_out`
         // backdrop preventing sharp icon/label bleed-through (`RUSTYOS-104`) with crisp crystal rim refraction and Light/Dark polarity.
         (GlassPanelStyle::ControlModule, false) => GlassMaterialUniforms {
             tint_rgba: [0.72, 0.74, 0.78, 0.11 + 0.11 * g],
@@ -428,6 +428,15 @@ pub(crate) fn compute_glass_material(
             tint_rgba: [0.24, 0.24, 0.27, 0.15 + 0.15 * g],
             sat_refract_rim_sheen: [1.30, 34.0, 1.0, 0.01],
         },
+        // Sidebar: subtle high-diffusion navigation glass with softer rim and legible contrast.
+        (GlassPanelStyle::Sidebar, false) => GlassMaterialUniforms {
+            tint_rgba: [0.92, 0.93, 0.96, 0.30 + 0.22 * g],
+            sat_refract_rim_sheen: [1.14, 10.0, 0.28, 0.0],
+        },
+        (GlassPanelStyle::Sidebar, true) => GlassMaterialUniforms {
+            tint_rgba: [0.15, 0.16, 0.19, 0.36 + 0.22 * g],
+            sat_refract_rim_sheen: [1.14, 10.0, 0.28, 0.0],
+        },
         // NotificationCard (`RUSTYOS-110`): calm frosted veil suppressing color bleed and heavy edge lens.
         (GlassPanelStyle::NotificationCard, false) => GlassMaterialUniforms {
             tint_rgba: [0.94, 0.94, 0.95, 0.56 + 0.24 * g],
@@ -436,6 +445,27 @@ pub(crate) fn compute_glass_material(
         (GlassPanelStyle::NotificationCard, true) => GlassMaterialUniforms {
             tint_rgba: [0.16, 0.16, 0.18, 0.62 + 0.22 * g],
             sat_refract_rim_sheen: [1.0, 3.0, 0.22, 0.0],
+        },
+        // Custom: honors client-specified RGBA tint from `rustyos_surface_glass_v1.set_tint`.
+        (GlassPanelStyle::Custom(Some([r, g_c, b, a])), _) => {
+            let tint_a = (f32::from(a) / 255.0) * (0.45 + 0.55 * g);
+            GlassMaterialUniforms {
+                tint_rgba: [
+                    f32::from(r) / 255.0,
+                    f32::from(g_c) / 255.0,
+                    f32::from(b) / 255.0,
+                    tint_a.clamp(0.0, 0.95),
+                ],
+                sat_refract_rim_sheen: [1.16, 12.0, 0.30, 0.0],
+            }
+        }
+        (GlassPanelStyle::Custom(None), false) => GlassMaterialUniforms {
+            tint_rgba: [0.90, 0.92, 0.96, 0.24 + 0.22 * g],
+            sat_refract_rim_sheen: [1.16, 12.0, 0.30, 0.0],
+        },
+        (GlassPanelStyle::Custom(None), true) => GlassMaterialUniforms {
+            tint_rgba: [0.18, 0.19, 0.22, 0.30 + 0.22 * g],
+            sat_refract_rim_sheen: [1.16, 12.0, 0.30, 0.0],
         },
     }
 }
@@ -931,8 +961,10 @@ impl LiquidGlassPipeline {
         let half_tex = match style {
             GlassPanelStyle::Dock => buffers.half_a.clone(),
             GlassPanelStyle::ControlModule
+            | GlassPanelStyle::Sidebar
             | GlassPanelStyle::Popover
-            | GlassPanelStyle::NotificationCard => buffers.half_out.clone(),
+            | GlassPanelStyle::NotificationCard
+            | GlassPanelStyle::Custom(_) => buffers.half_out.clone(),
         };
         let half_size = half_tex.size();
         let blur_snapshot = buffers.blur_damage.snapshot();
@@ -1517,5 +1549,26 @@ mod tests {
         assert!(dark.tint_rgba[3] > 0.35 && dark.tint_rgba[3] < 0.55);
         assert!(dark.sat_refract_rim_sheen[1] <= 8.0);
         assert!(dark.sat_refract_rim_sheen[2] <= 0.30);
+    }
+
+    #[test]
+    fn sidebar_and_custom_glass_materials_are_distinct_and_honor_client_tint() {
+        let sidebar = compute_glass_material(GlassPanelStyle::Sidebar, 0.80, false);
+        let control = compute_glass_material(GlassPanelStyle::ControlModule, 0.80, false);
+        assert!(sidebar.tint_rgba[3] > control.tint_rgba[3]);
+        assert!(sidebar.sat_refract_rim_sheen[2] < control.sat_refract_rim_sheen[2]);
+
+        let custom_tinted = compute_glass_material(
+            GlassPanelStyle::Custom(Some([51, 102, 204, 180])),
+            0.80,
+            true,
+        );
+        assert!((custom_tinted.tint_rgba[0] - (51.0 / 255.0)).abs() < 0.005);
+        assert!((custom_tinted.tint_rgba[1] - (102.0 / 255.0)).abs() < 0.005);
+        assert!((custom_tinted.tint_rgba[2] - (204.0 / 255.0)).abs() < 0.005);
+        assert!(custom_tinted.tint_rgba[3] > 0.50 && custom_tinted.tint_rgba[3] < 0.80);
+
+        let custom_default = compute_glass_material(GlassPanelStyle::Custom(None), 0.80, false);
+        assert!(custom_default.tint_rgba[3] > 0.35 && custom_default.tint_rgba[3] < 0.50);
     }
 }

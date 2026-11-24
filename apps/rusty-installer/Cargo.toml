@@ -5,17 +5,17 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "RustyOS macOS-style OS installer & OOBE Setup Assistant (Wayland CSD)"
+description = "RustyOS native OS installer & OOBE Setup Assistant (Wayland CSD)"
 
 [dependencies]
 rusty-animation.workspace = true
 rusty-services.workspace = true
+rusty-app.workspace = true
 rusty-ui.workspace = true
-smithay-client-toolkit = { version = "0.19.2", default-features = false, features = ["calloop", "xkbcommon"] }
+smithay-client-toolkit = { workspace = true, features = ["calloop"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
-wayland-client = "0.31.15"
-wayland-scanner.workspace = true
+wayland-client.workspace = true
 
 [lints]
 workspace = true

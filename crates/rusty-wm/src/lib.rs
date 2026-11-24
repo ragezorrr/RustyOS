@@ -70,7 +70,7 @@ impl Rect {
 /// Layout mode applied to a workspace.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum LayoutMode {
-    /// macOS-like floating desktop with cascading initial placement and quick snap helpers.
+    /// Floating desktop with cascading initial placement and quick snap helpers.
     #[default]
     Floating,
     /// Deterministic master-stack tiling layout.

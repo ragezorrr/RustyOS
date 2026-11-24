@@ -43,7 +43,7 @@
     </enum>
 
     <enum name="style">
-      <description summary="pre-configured optical style presets conforming to macOS 27 Golden Gate">
+      <description summary="pre-configured optical style presets for RustyOS Liquid Glass">
         Style presets dictate backdrop blur strength, saturation boost,
         specular border highlights, and chromatic transmission.
       </description>

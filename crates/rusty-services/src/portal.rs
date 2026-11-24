@@ -2175,6 +2175,331 @@ impl SettingsPortalIface {
     }
 }
 
+/// Bitmask flags for `org.freedesktop.impl.portal.Inhibit`.
+pub const INHIBIT_LOGOUT: u32 = 1;
+/// Inhibit user switching.
+pub const INHIBIT_USER_SWITCH: u32 = 2;
+/// Inhibit system suspend.
+pub const INHIBIT_SUSPEND: u32 = 4;
+/// Inhibit session idle / screen lock.
+pub const INHIBIT_IDLE: u32 = 8;
+/// Supported inhibit flags mask.
+pub const INHIBIT_VALID_MASK: u32 =
+    INHIBIT_LOGOUT | INHIBIT_USER_SWITCH | INHIBIT_SUSPEND | INHIBIT_IDLE;
+
+/// Selects the best desktop application choice for `org.freedesktop.impl.portal.AppChooser`.
+#[must_use]
+pub fn select_preferred_app_choice(
+    choices: &[String],
+    last_choice: Option<&str>,
+) -> Option<String> {
+    if let Some(prev) = last_choice.map(str::trim).filter(|s| !s.is_empty())
+        && let Some(found) = choices.iter().find(|c| c.as_str() == prev)
+    {
+        return Some(found.clone());
+    }
+    if let Some(native) = choices.iter().find(|c| c.starts_with("org.rustyos.")) {
+        return Some(native.clone());
+    }
+    choices.iter().find(|c| !c.trim().is_empty()).cloned()
+}
+
+/// Maps `org.freedesktop.impl.portal.Notification` priority strings to freedesktop urgency (`0..=2`).
+#[must_use]
+pub fn parse_portal_notification_urgency<S: std::hash::BuildHasher>(
+    notification: &HashMap<String, OwnedValue, S>,
+) -> u8 {
+    let priority = notification
+        .get("priority")
+        .and_then(|v| <&str>::try_from(v).ok())
+        .unwrap_or("normal");
+    match priority {
+        "low" => 0,
+        "high" | "urgent" => 2,
+        _ => 1,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct InhibitRecord {
+    app_id: String,
+    flags: u32,
+    reason: String,
+}
+
+#[derive(Debug, Default)]
+struct InhibitRegistry {
+    entries: Mutex<HashMap<String, InhibitRecord>>,
+}
+
+impl InhibitRegistry {
+    fn acquire(&self, handle: &str, app_id: &str, flags: u32, reason: &str) {
+        let masked = flags & INHIBIT_VALID_MASK;
+        if masked == 0 {
+            return;
+        }
+        if let Ok(mut guard) = self.entries.lock() {
+            guard.insert(
+                handle.to_owned(),
+                InhibitRecord {
+                    app_id: app_id.to_owned(),
+                    flags: masked,
+                    reason: reason.to_owned(),
+                },
+            );
+        }
+    }
+
+    fn release(&self, handle: &str) -> bool {
+        self.entries
+            .lock()
+            .ok()
+            .and_then(|mut guard| guard.remove(handle))
+            .is_some()
+    }
+
+    fn active_flags(&self) -> u32 {
+        self.entries
+            .lock()
+            .ok()
+            .map_or(0, |guard| guard.values().fold(0, |acc, r| acc | r.flags))
+    }
+
+    #[cfg(test)]
+    fn active_count(&self) -> usize {
+        self.entries.lock().ok().map_or(0, |guard| guard.len())
+    }
+}
+
+struct InhibitRequestIface {
+    handle_key: String,
+    registry: Arc<InhibitRegistry>,
+}
+
+#[interface(name = "org.freedesktop.impl.portal.Request")]
+impl InhibitRequestIface {
+    fn close(&self) {
+        let _ = self.registry.release(&self.handle_key);
+    }
+}
+
+struct AppChooserPortalIface;
+
+#[interface(name = "org.freedesktop.impl.portal.AppChooser")]
+#[allow(clippy::unused_self, clippy::needless_pass_by_value)]
+impl AppChooserPortalIface {
+    fn choose_application(
+        &self,
+        handle: OwnedObjectPath,
+        app_id: &str,
+        parent_window: &str,
+        choices: Vec<String>,
+        options: HashMap<String, OwnedValue>,
+    ) -> (u32, HashMap<String, OwnedValue>) {
+        let _ = (&handle, app_id, parent_window);
+        let last_choice = options
+            .get("last_choice")
+            .and_then(|v| <&str>::try_from(v).ok());
+        if let Some(selected) = select_preferred_app_choice(&choices, last_choice) {
+            let mut results = HashMap::new();
+            if let Ok(val) = OwnedValue::try_from(Value::from(selected)) {
+                results.insert("choice".to_owned(), val);
+            }
+            (PORTAL_RESPONSE_OK, results)
+        } else {
+            (PORTAL_RESPONSE_CANCELLED, HashMap::new())
+        }
+    }
+
+    fn update_choices(&self, handle: OwnedObjectPath, choices: Vec<String>) {
+        let _ = (handle, choices);
+    }
+
+    #[zbus(property)]
+    fn version(&self) -> u32 {
+        2
+    }
+}
+
+struct NotificationPortalIface {
+    active_ids: Mutex<HashMap<(String, String), u32>>,
+}
+
+impl NotificationPortalIface {
+    fn new() -> Self {
+        Self {
+            active_ids: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+#[interface(name = "org.freedesktop.impl.portal.Notification")]
+#[allow(clippy::unused_self, clippy::needless_pass_by_value)]
+impl NotificationPortalIface {
+    async fn add_notification(
+        &self,
+        #[zbus(connection)] conn: &zbus::Connection,
+        id: &str,
+        app_id: &str,
+        notification: HashMap<String, OwnedValue>,
+    ) {
+        let title = notification
+            .get("title")
+            .and_then(|v| <&str>::try_from(v).ok())
+            .unwrap_or(app_id)
+            .to_owned();
+        let body = notification
+            .get("body")
+            .and_then(|v| <&str>::try_from(v).ok())
+            .unwrap_or("")
+            .to_owned();
+        let urgency = parse_portal_notification_urgency(&notification);
+
+        let mut hints: HashMap<&str, Value<'_>> = HashMap::new();
+        hints.insert("urgency", Value::from(urgency));
+        if !app_id.is_empty() {
+            hints.insert("desktop-entry", Value::from(app_id));
+        }
+
+        let replaces_id = self
+            .active_ids
+            .lock()
+            .ok()
+            .and_then(|map| map.get(&(app_id.to_owned(), id.to_owned())).copied())
+            .unwrap_or(0);
+
+        let actions: Vec<&str> = Vec::new();
+        let mut delivered_id = None;
+        for bus_name in ["org.freedesktop.Notifications", "org.rustyos.Notifications"] {
+            if let Ok(proxy) = zbus::Proxy::new(
+                conn,
+                bus_name,
+                "/org/freedesktop/Notifications",
+                "org.freedesktop.Notifications",
+            )
+            .await
+                && let Ok(nid) = proxy
+                    .call::<_, _, u32>(
+                        "Notify",
+                        &(
+                            app_id,
+                            replaces_id,
+                            "",
+                            title.as_str(),
+                            body.as_str(),
+                            actions.as_slice(),
+                            &hints,
+                            -1_i32,
+                        ),
+                    )
+                    .await
+            {
+                delivered_id = Some(nid);
+                break;
+            }
+        }
+
+        if let Some(nid) = delivered_id
+            && let Ok(mut map) = self.active_ids.lock()
+        {
+            map.insert((app_id.to_owned(), id.to_owned()), nid);
+        }
+    }
+
+    async fn remove_notification(
+        &self,
+        #[zbus(connection)] conn: &zbus::Connection,
+        id: &str,
+        app_id: &str,
+    ) {
+        let nid = self
+            .active_ids
+            .lock()
+            .ok()
+            .and_then(|mut map| map.remove(&(app_id.to_owned(), id.to_owned())));
+        let Some(nid) = nid else {
+            return;
+        };
+        for bus_name in ["org.freedesktop.Notifications", "org.rustyos.Notifications"] {
+            if let Ok(proxy) = zbus::Proxy::new(
+                conn,
+                bus_name,
+                "/org/freedesktop/Notifications",
+                "org.freedesktop.Notifications",
+            )
+            .await
+                && proxy
+                    .call::<_, _, ()>("CloseNotification", &(nid,))
+                    .await
+                    .is_ok()
+            {
+                break;
+            }
+        }
+    }
+
+    #[zbus(property)]
+    fn version(&self) -> u32 {
+        1
+    }
+}
+
+struct InhibitPortalIface {
+    registry: Arc<InhibitRegistry>,
+}
+
+#[interface(name = "org.freedesktop.impl.portal.Inhibit")]
+#[allow(clippy::unused_self, clippy::needless_pass_by_value)]
+impl InhibitPortalIface {
+    async fn inhibit(
+        &self,
+        #[zbus(object_server)] server: &zbus::ObjectServer,
+        handle: OwnedObjectPath,
+        app_id: &str,
+        window: &str,
+        flags: u32,
+        options: HashMap<String, OwnedValue>,
+    ) {
+        let _ = window;
+        let reason = options
+            .get("reason")
+            .and_then(|v| <&str>::try_from(v).ok())
+            .unwrap_or("");
+        let handle_key = handle.as_str().to_owned();
+        self.registry.acquire(&handle_key, app_id, flags, reason);
+        let req = InhibitRequestIface {
+            handle_key,
+            registry: Arc::clone(&self.registry),
+        };
+        let _ = server.at(handle, req).await;
+    }
+
+    fn create_monitor(
+        &self,
+        handle: OwnedObjectPath,
+        session_handle: OwnedObjectPath,
+        app_id: &str,
+        window: &str,
+    ) -> (u32, HashMap<String, OwnedValue>) {
+        let _ = (handle, session_handle, app_id, window);
+        let mut results = HashMap::new();
+        results.insert(
+            "active_inhibit_flags".to_owned(),
+            OwnedValue::from(self.registry.active_flags()),
+        );
+        (PORTAL_RESPONSE_OK, results)
+    }
+
+    fn query_end_response(&self, session_handle: OwnedObjectPath) {
+        let _ = session_handle;
+    }
+
+    #[zbus(property)]
+    fn version(&self) -> u32 {
+        3
+    }
+}
+
 fn run_portal_worker(
     shared: &Arc<PortalSharedState>,
     conn_slot: &Arc<Mutex<Option<zbus::Connection>>>,
@@ -2190,11 +2515,17 @@ fn run_portal_worker(
         let file_chooser_iface = FileChooserPortalIface {
             shared: Arc::clone(shared),
         };
+        let inhibit_iface = InhibitPortalIface {
+            registry: Arc::new(InhibitRegistry::default()),
+        };
         zbus::connection::Builder::session()?
             .serve_at(PORTAL_OBJECT_PATH, screenshot_iface)?
             .serve_at(PORTAL_OBJECT_PATH, screencast_iface)?
             .serve_at(PORTAL_OBJECT_PATH, file_chooser_iface)?
             .serve_at(PORTAL_OBJECT_PATH, SettingsPortalIface)?
+            .serve_at(PORTAL_OBJECT_PATH, AppChooserPortalIface)?
+            .serve_at(PORTAL_OBJECT_PATH, NotificationPortalIface::new())?
+            .serve_at(PORTAL_OBJECT_PATH, inhibit_iface)?
             .name(PORTAL_DBUS_NAME)?
             .build()
             .await
@@ -2391,5 +2722,58 @@ mod tests {
         assert_eq!(parse_portal_color_scheme_from_toml(toml_light), 2);
         let toml_dark = "[ui]\ntheme = \"dark\" # dark mode\n";
         assert_eq!(parse_portal_color_scheme_from_toml(toml_dark), 1);
+    }
+
+    #[test]
+    fn app_chooser_prefers_last_choice_then_rustyos_native_apps() {
+        let choices = vec![
+            "firefox.desktop".to_owned(),
+            "org.rustyos.view.desktop".to_owned(),
+        ];
+        assert_eq!(
+            select_preferred_app_choice(&choices, Some("firefox.desktop")).as_deref(),
+            Some("firefox.desktop")
+        );
+        assert_eq!(
+            select_preferred_app_choice(&choices, Some("missing.desktop")).as_deref(),
+            Some("org.rustyos.view.desktop")
+        );
+        assert_eq!(
+            select_preferred_app_choice(&choices, None).as_deref(),
+            Some("org.rustyos.view.desktop")
+        );
+        assert_eq!(select_preferred_app_choice(&[], None), None);
+    }
+
+    #[test]
+    fn notification_urgency_and_inhibit_registry_lifecycle()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut notif = HashMap::new();
+        assert_eq!(parse_portal_notification_urgency(&notif), 1);
+        notif.insert(
+            "priority".to_owned(),
+            OwnedValue::try_from(Value::from("urgent"))?,
+        );
+        assert_eq!(parse_portal_notification_urgency(&notif), 2);
+        notif.insert(
+            "priority".to_owned(),
+            OwnedValue::try_from(Value::from("low"))?,
+        );
+        assert_eq!(parse_portal_notification_urgency(&notif), 0);
+
+        let reg = InhibitRegistry::default();
+        assert_eq!(reg.active_flags(), 0);
+        reg.acquire(
+            "/req/1",
+            "org.example.video",
+            INHIBIT_IDLE | INHIBIT_SUSPEND,
+            "Playing video",
+        );
+        assert_eq!(reg.active_count(), 1);
+        assert_eq!(reg.active_flags(), INHIBIT_IDLE | INHIBIT_SUSPEND);
+        assert!(reg.release("/req/1"));
+        assert_eq!(reg.active_count(), 0);
+        assert_eq!(reg.active_flags(), 0);
+        Ok(())
     }
 }

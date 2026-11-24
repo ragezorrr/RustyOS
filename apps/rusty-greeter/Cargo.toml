@@ -8,7 +8,7 @@ authors.workspace = true
 
 [dependencies]
 rusty-ui.workspace = true
-smithay-client-toolkit = { version = "0.19.2", default-features = false, features = ["xkbcommon"] }
+smithay-client-toolkit.workspace = true
 wayland-client.workspace = true
 
 [lints]

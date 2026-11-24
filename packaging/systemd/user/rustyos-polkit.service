@@ -1,0 +1,14 @@
+[Unit]
+Description=RustyOS PolicyKit Authentication Agent
+Documentation=https://github.com/ragezorrr/RustyOS
+PartOf=rustyos-session.target
+After=rustyos-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/rusty-polkit
+Restart=on-failure
+RestartSec=1s
+
+[Install]
+WantedBy=rustyos-session.target

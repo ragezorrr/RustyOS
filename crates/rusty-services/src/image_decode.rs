@@ -16,11 +16,11 @@ pub const MAX_ICON_DIM: u32 = 512;
 pub const MAX_PNG_FILE_BYTES: usize = 2 * 1024 * 1024;
 /// Maximum inflated raw scanline bytes for icons (`4 MiB`).
 pub const MAX_INFLATE_BYTES: usize = 4 * 1024 * 1024;
-/// Maximum pixel dimension allowed for wallpapers and Finder image previews.
+/// Maximum pixel dimension allowed for wallpapers and file manager image previews.
 pub const MAX_WALLPAPER_DIM: u32 = 4096;
-/// Maximum file size allowed for wallpapers and Finder image previews (`32 MiB`).
+/// Maximum file size allowed for wallpapers and file manager image previews (`32 MiB`).
 pub const MAX_WALLPAPER_FILE_BYTES: usize = 32 * 1024 * 1024;
-/// Maximum inflated scanline bytes for wallpapers and Finder image previews (`80 MiB`).
+/// Maximum inflated scanline bytes for wallpapers and file manager image previews (`80 MiB`).
 pub const MAX_WALLPAPER_INFLATE_BYTES: usize = 80 * 1024 * 1024;
 
 /// Decoded image preview scaled into premultiplied `Argb8888` (`[B, G, R, A]`) pixels.

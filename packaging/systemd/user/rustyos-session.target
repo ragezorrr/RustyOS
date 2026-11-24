@@ -2,5 +2,5 @@
 Description=RustyOS compositor session
 Documentation=https://github.com/ragezorrr/RustyOS
 BindsTo=graphical-session.target
-Wants=graphical-session-pre.target pipewire.service pipewire-pulse.service wireplumber.service
+Wants=graphical-session-pre.target pipewire.service pipewire-pulse.service wireplumber.service xdg-desktop-portal.service rustyos-polkit.service
 After=graphical-session-pre.target

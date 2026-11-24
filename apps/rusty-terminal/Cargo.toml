@@ -12,13 +12,13 @@ fontdue.workspace = true
 libc = "0.2.191"
 rustix = { version = "1.1.6", features = ["fs", "process", "pty", "stdio", "termios"] }
 rusty-animation.workspace = true
+rusty-app.workspace = true
 rusty-ui.workspace = true
-smithay-client-toolkit = { version = "0.19.2", default-features = false, features = ["calloop", "xkbcommon"] }
+smithay-client-toolkit = { workspace = true, features = ["calloop"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
-wayland-client = "0.31.15"
+wayland-client.workspace = true
 wayland-egl = "0.32.11"
-wayland-scanner.workspace = true
 
 [build-dependencies]
 gl_generator = "0.14.0"

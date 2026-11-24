@@ -297,7 +297,7 @@ impl FileSortOrder {
     }
 }
 
-/// Local color tags modeled on macOS Finder Tags.
+/// Local color tags for file organization in RustyOS Files.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum FileTagColor {
     /// Red tag (`#FF3B30`).
@@ -488,7 +488,7 @@ impl FileEntry {
             .map(str::to_ascii_lowercase)
     }
 
-    /// Human-readable Finder-style "Kind" string.
+    /// Human-readable file "Kind" string.
     #[must_use]
     pub fn kind_label(&self) -> &'static str {
         match self.kind {

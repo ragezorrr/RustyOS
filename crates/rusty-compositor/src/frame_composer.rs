@@ -442,18 +442,23 @@ fn collect_dock_windows(
 
 const fn map_client_glass_style(
     preset: crate::state::liquid_glass::GlassStylePreset,
+    tint: Option<[u8; 4]>,
 ) -> crate::surfaces::GlassPanelStyle {
     match preset {
-        crate::state::liquid_glass::GlassStylePreset::Sidebar
-        | crate::state::liquid_glass::GlassStylePreset::ControlPill => {
+        crate::state::liquid_glass::GlassStylePreset::Sidebar => {
+            crate::surfaces::GlassPanelStyle::Sidebar
+        }
+        crate::state::liquid_glass::GlassStylePreset::ControlPill => {
             crate::surfaces::GlassPanelStyle::ControlModule
         }
         crate::state::liquid_glass::GlassStylePreset::BasePanel => {
             crate::surfaces::GlassPanelStyle::Dock
         }
-        crate::state::liquid_glass::GlassStylePreset::Popover
-        | crate::state::liquid_glass::GlassStylePreset::Custom => {
+        crate::state::liquid_glass::GlassStylePreset::Popover => {
             crate::surfaces::GlassPanelStyle::Popover
+        }
+        crate::state::liquid_glass::GlassStylePreset::Custom => {
+            crate::surfaces::GlassPanelStyle::Custom(tint)
         }
     }
 }
@@ -482,7 +487,7 @@ fn push_window_liquid_glass_elements(
         return;
     };
     let base_loc = Point::<i32, Logical>::from((origin.0, origin.1 + titlebar_h));
-    let style = map_client_glass_style(glass.style);
+    let style = map_client_glass_style(glass.style, glass.tint);
     let radius = if glass.corner_radius > 0 {
         glass.corner_radius as i32
     } else {
@@ -534,7 +539,7 @@ fn push_popup_glass_panels(
     let Some(glass) = crate::state::liquid_glass::surface_liquid_glass_state(popup_surface) else {
         return;
     };
-    let style = map_client_glass_style(glass.style);
+    let style = map_client_glass_style(glass.style, glass.tint);
     let radius = if glass.corner_radius > 0 {
         glass.corner_radius as i32
     } else {

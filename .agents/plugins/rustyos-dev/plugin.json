@@ -1,0 +1,12 @@
+{
+  "name": "rustyos-dev",
+  "displayName": "RustyOS Systems & Design Architect",
+  "version": "1.0.0",
+  "description": "Token-efficient Rust, Linux desktop OS architecture, Liquid Glass UI/UX design, and systematic debugging bundle for RustyOS.",
+  "author": "RustyOS Contributors",
+  "suggestedPrompts": [
+    "Audit a crate or app for bugs, panics, and Clippy pedantic compliance",
+    "Design and implement a new Liquid Glass UI component in rusty-ui",
+    "Plan a modular Linux system service or Wayland protocol extension for RustyOS"
+  ]
+}

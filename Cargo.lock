@@ -1672,6 +1672,17 @@ name = "rusty-animation"
 version = "0.1.0"
 
 [[package]]
+name = "rusty-app"
+version = "0.1.0"
+dependencies = [
+ "rusty-ui",
+ "smithay-client-toolkit",
+ "tracing",
+ "wayland-client",
+ "wayland-scanner",
+]
+
+[[package]]
 name = "rusty-compositor"
 version = "0.1.0"
 dependencies = [
@@ -1693,13 +1704,13 @@ name = "rusty-files"
 version = "0.1.0"
 dependencies = [
  "rusty-animation",
+ "rusty-app",
  "rusty-services",
  "rusty-ui",
  "smithay-client-toolkit",
  "tracing",
  "tracing-subscriber",
  "wayland-client",
- "wayland-scanner",
 ]
 
 [[package]]
@@ -1716,13 +1727,13 @@ name = "rusty-installer"
 version = "0.1.0"
 dependencies = [
  "rusty-animation",
+ "rusty-app",
  "rusty-services",
  "rusty-ui",
  "smithay-client-toolkit",
  "tracing",
  "tracing-subscriber",
  "wayland-client",
- "wayland-scanner",
 ]
 
 [[package]]
@@ -1734,10 +1745,9 @@ name = "rusty-polkit"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "rusty-app",
  "rusty-services",
  "rusty-ui",
- "smithay-client-toolkit",
- "wayland-client",
  "zbus",
 ]
 
@@ -1753,13 +1763,13 @@ dependencies = [
 name = "rusty-settings"
 version = "0.1.0"
 dependencies = [
+ "rusty-app",
  "rusty-services",
  "rusty-ui",
  "smithay-client-toolkit",
  "tracing",
  "tracing-subscriber",
  "wayland-client",
- "wayland-scanner",
 ]
 
 [[package]]
@@ -1771,13 +1781,13 @@ dependencies = [
  "libc",
  "rustix 1.1.6",
  "rusty-animation",
+ "rusty-app",
  "rusty-ui",
  "smithay-client-toolkit",
  "tracing",
  "tracing-subscriber",
  "wayland-client",
  "wayland-egl",
- "wayland-scanner",
 ]
 
 [[package]]
@@ -1797,10 +1807,9 @@ name = "rusty-view"
 version = "0.1.0"
 dependencies = [
  "rusty-animation",
+ "rusty-app",
  "rusty-services",
  "rusty-ui",
- "smithay-client-toolkit",
- "wayland-client",
 ]
 
 [[package]]

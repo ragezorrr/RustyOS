@@ -171,6 +171,8 @@ package() {
     "${pkgdir}/usr/lib/systemd/user/rustyos-session.target"
   install -m644 "${root}/packaging/systemd/user/rustyos-session-shutdown.target" \
     "${pkgdir}/usr/lib/systemd/user/rustyos-session-shutdown.target"
+  install -m644 "${root}/packaging/systemd/user/rustyos-polkit.service" \
+    "${pkgdir}/usr/lib/systemd/user/rustyos-polkit.service"
   install -Dm644 "${root}/packaging/arch/rustyos-greeter.sysusers" \
     "${pkgdir}/usr/lib/sysusers.d/rustyos-greeter.conf"
 

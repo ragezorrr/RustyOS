@@ -1,6 +1,6 @@
 //! `RustyOS` refresh-rate independent animation engine (`RUSTYOS-008`, ADR-0004).
 //!
-//! Provides monotonic time progression, macOS-inspired easing curves, interruptible
+//! Provides monotonic time progression, smooth easing curves, interruptible
 //! and reversible transitions (`retarget` / `reverse` / `cancel`), and first-class
 //! `reduced_motion` support without heap allocations on the hot rendering path.
 
@@ -52,7 +52,7 @@ pub enum Easing {
     EaseOutCubic,
     /// Symmetric acceleration and deceleration cubic curve, ideal for workspace slides.
     EaseInOutCubic,
-    /// Smooth, fast-out quartic curve (`1 - (1 - t)^4`) inspired by macOS window transitions.
+    /// Smooth, fast-out quartic curve (`1 - (1 - t)^4`) for responsive window transitions.
     EaseOutQuart,
 }
 
