@@ -142,6 +142,13 @@ fn test_focus_scope_tab_traversal_and_keyboard_activation() {
     // Shift+Tab moves back to Cancel
     dlg.cycle_focus(true);
     assert!(dlg.focus.is_focused(crate::dialog::focus_id_cancel()));
+
+    // Clicking back inside the password field restores focus to Password
+    dlg.update_layout(420, 240);
+    let px = dlg.pass_field.rect.x + 10;
+    let py = dlg.pass_field.rect.y + 10;
+    assert_eq!(dlg.on_pointer_click(px, py), None);
+    assert!(dlg.focus.is_focused(crate::dialog::focus_id_password()));
 }
 
 #[test]

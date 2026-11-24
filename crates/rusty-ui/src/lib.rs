@@ -653,4 +653,22 @@ mod tests {
         assert!(squircle_sdf_dist(hw, 0.0, hw, hh, hh).abs() < 1e-5);
         assert!(squircle_sdf_dist(hw, hh, hw, hh, hh) > 0.0);
     }
+
+    #[test]
+    fn cpu_stroke_rounded_rect_transparent_fill_has_no_dark_fringe() {
+        let mut fonts = UiFontEngine::new();
+        let mut dl = UiDrawList::new();
+        {
+            let mut painter = UiPainter::new(&mut dl);
+            painter.fill_rect(Rect::new(0, 0, 80, 80), [255, 255, 255, 255]);
+            painter.stroke_rounded_rect(Rect::new(10, 10, 60, 60), 8.0, 2.0, [255, 255, 255, 255]);
+        }
+        let mut buf = vec![0_u8; 80 * 80 * 4];
+        let mut canvas = UiCanvas::new(&mut buf, 80, 80, 80 * 4, PixelFormat::Bgra8888);
+        render_draw_list_to_canvas(&dl, &mut canvas, &mut fonts);
+        // White stroke over white background must stay pure white everywhere (zero black fringe).
+        for px in buf.as_chunks::<4>().0 {
+            assert_eq!(px, &[255, 255, 255, 255]);
+        }
+    }
 }

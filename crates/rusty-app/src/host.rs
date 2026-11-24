@@ -359,6 +359,7 @@ struct HostState {
     default_size: (u32, u32),
     width: u32,
     height: u32,
+    scale_factor: i32,
     configured: bool,
     frame_pending: bool,
     dirty: bool,
@@ -492,9 +493,18 @@ impl HostState {
 
         let surf = self.window.wl_surface();
         surf.frame(qh, surf.clone());
+        let scale = self.scale_factor.max(1);
 
         if let Some(gles) = self.gles.as_mut() {
-            match gles.render_draw_list(&self.draw_list, &mut self.fonts, wi, hi, clear) {
+            surf.set_buffer_scale(scale);
+            match gles.render_draw_list_scaled(
+                &self.draw_list,
+                &mut self.fonts,
+                wi,
+                hi,
+                scale,
+                clear,
+            ) {
                 Ok(()) => {
                     self.frame_pending = true;
                     self.dirty = false;
@@ -507,6 +517,8 @@ impl HostState {
                 }
             }
         }
+
+        surf.set_buffer_scale(1);
 
         let stride = wi.saturating_mul(4);
         let Ok((buffer, canvas_bytes)) =
@@ -558,10 +570,14 @@ impl CompositorHandler for HostState {
         &mut self,
         _: &Connection,
         _: &QueueHandle<Self>,
-        _: &wl_surface::WlSurface,
-        _: i32,
+        surface: &wl_surface::WlSurface,
+        new_factor: i32,
     ) {
-        self.dirty = true;
+        let scale = new_factor.max(1);
+        if self.window.wl_surface() == surface && self.scale_factor != scale {
+            self.scale_factor = scale;
+            self.dirty = true;
+        }
     }
 
     fn transform_changed(
@@ -871,6 +887,7 @@ pub fn run_app<A: RustyApp + 'static>(config: AppConfig, app: A) -> Result<(), A
         default_size: (init_w, init_h),
         width: init_w,
         height: init_h,
+        scale_factor: 1,
         configured: false,
         frame_pending: false,
         dirty: true,

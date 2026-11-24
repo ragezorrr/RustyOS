@@ -764,8 +764,29 @@ impl GlesSurfaceRenderer {
         height: i32,
         clear_rgba: [u8; 4],
     ) -> Result<(), String> {
+        self.render_draw_list_scaled(list, fonts, width, height, 1, clear_rgba)
+    }
+
+    /// Renders `list` at logical dimensions `width x height` into a `scale`-multiplied `HiDPI`
+    /// physical EGL surface (`scale >= 1`).
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if EGL context activation or `eglSwapBuffers` fails.
+    pub fn render_draw_list_scaled(
+        &mut self,
+        list: &UiDrawList,
+        fonts: &mut UiFontEngine,
+        width: i32,
+        height: i32,
+        scale: i32,
+        clear_rgba: [u8; 4],
+    ) -> Result<(), String> {
         let w = width.max(1);
         let h = height.max(1);
+        let s = scale.max(1);
+        let phys_w = w.saturating_mul(s);
+        let phys_h = h.saturating_mul(s);
         // SAFETY: Valid current EGL display, window surface, and ES2 context.
         unsafe {
             if self.egl.MakeCurrent(
@@ -778,7 +799,7 @@ impl GlesSurfaceRenderer {
                 return Err(String::from("eglMakeCurrent lost during frame"));
             }
         }
-        self.resize(w, h);
+        self.resize(phys_w, phys_h);
         self.rect_verts.clear();
         self.text_verts.clear();
         self.sprite_verts.clear();
@@ -788,7 +809,7 @@ impl GlesSurfaceRenderer {
         // SAFETY: Valid current ES2 context; clear framebuffer before compiling batches so
         // mid-frame glyph atlas overflows can safely flush accumulated text batches (`RUSTYOS-169`).
         unsafe {
-            self.gl.Viewport(0, 0, w, h);
+            self.gl.Viewport(0, 0, phys_w, phys_h);
             self.gl.Disable(gl_ffi::SCISSOR_TEST);
             self.gl.Enable(gl_ffi::BLEND);
             self.gl.BlendFunc(gl_ffi::ONE, gl_ffi::ONE_MINUS_SRC_ALPHA);
@@ -798,7 +819,7 @@ impl GlesSurfaceRenderer {
         }
 
         self.compile_batches(list, fonts, w, h);
-        self.flush_pending_batches(w, h);
+        self.flush_pending_batches_scaled(w, h, s);
 
         // SAFETY: Valid current ES2 context.
         unsafe {
@@ -811,6 +832,11 @@ impl GlesSurfaceRenderer {
     }
 
     fn flush_pending_batches(&mut self, w: i32, h: i32) {
+        self.flush_pending_batches_scaled(w, h, 1);
+    }
+
+    fn flush_pending_batches_scaled(&mut self, w: i32, h: i32, scale: i32) {
+        let s = scale.max(1);
         // SAFETY: Valid current ES2 context; VBO pointers/slices match active batch spans.
         unsafe {
             for span in &self.batches {
@@ -820,8 +846,12 @@ impl GlesSurfaceRenderer {
                     }
                     self.gl.Enable(gl_ffi::SCISSOR_TEST);
                     let sc_y = (h - (sc.y + sc.height as i32)).max(0);
-                    self.gl
-                        .Scissor(sc.x.max(0), sc_y, sc.width as i32, sc.height as i32);
+                    self.gl.Scissor(
+                        sc.x.max(0).saturating_mul(s),
+                        sc_y.saturating_mul(s),
+                        (sc.width as i32).saturating_mul(s),
+                        (sc.height as i32).saturating_mul(s),
+                    );
                 } else {
                     self.gl.Disable(gl_ffi::SCISSOR_TEST);
                 }
@@ -998,8 +1028,18 @@ impl GlesSurfaceRenderer {
                 bold,
                 color,
             } => {
-                let s = self.text_verts.len();
-                self.push_text_run(fonts, text, *x, *y_baseline, *size_px, *bold, *color);
+                let mut s = self.text_verts.len();
+                self.push_text_run(
+                    fonts,
+                    text,
+                    *x,
+                    *y_baseline,
+                    *size_px,
+                    *bold,
+                    *color,
+                    active_clip,
+                    &mut s,
+                );
                 let e = self.text_verts.len();
                 self.record_batch(DrawBatchKind::Text, active_clip, s, e);
             }
@@ -1165,6 +1205,8 @@ impl GlesSurfaceRenderer {
         size_px: f32,
         bold: bool,
         color: [u8; 4],
+        active_clip: Option<Rect>,
+        batch_start: &mut usize,
     ) {
         let col = rgba_u8_to_f32_straight(color);
         let weight = if bold {
@@ -1184,7 +1226,8 @@ impl GlesSurfaceRenderer {
             let entry_opt = if let Some(&cached) = self.atlas_entries.get(&key) {
                 cached
             } else {
-                let inserted = self.upload_glyph(fonts, key, ch, size_px, bold);
+                let inserted =
+                    self.upload_glyph(fonts, key, ch, size_px, bold, active_clip, batch_start);
                 self.atlas_entries.insert(key, inserted);
                 inserted
             };
@@ -1233,6 +1276,7 @@ impl GlesSurfaceRenderer {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn upload_glyph(
         &mut self,
         fonts: &mut UiFontEngine,
@@ -1240,6 +1284,8 @@ impl GlesSurfaceRenderer {
         ch: char,
         size_px: f32,
         bold: bool,
+        active_clip: Option<Rect>,
+        batch_start: &mut usize,
     ) -> Option<AtlasEntry> {
         let glyph = fonts.rasterize_glyph(ch, size_px, bold);
         if glyph.width == 0 || glyph.height == 0 {
@@ -1260,11 +1306,16 @@ impl GlesSurfaceRenderer {
         let (ax, ay) = if let Some(pos) = self.packer.allocate(w, h) {
             pos
         } else {
-            // Flush any already-queued text/rect/sprite batches before clearing the glyph atlas
-            // so earlier glyphs in the same frame are never corrupted (`RUSTYOS-169`).
+            // Record the in-progress text run before flushing so already-pushed glyphs
+            // are rendered rather than dropped when `flush_pending_batches` clears `text_verts`.
+            if self.text_verts.len() > *batch_start {
+                let end = self.text_verts.len();
+                self.record_batch(DrawBatchKind::Text, active_clip, *batch_start, end);
+            }
             if !self.batches.is_empty() || !self.text_verts.is_empty() {
                 self.flush_pending_batches(self.width, self.height);
             }
+            *batch_start = 0;
             self.reset_glyph_atlas();
             self.packer.allocate(w, h)?
         };
@@ -1344,6 +1395,11 @@ impl GlesSurfaceRenderer {
             return None;
         }
         if self.sprites.len() >= MAX_SPRITE_CACHE {
+            // Flush pending batches before deleting cached GL textures so sprites already
+            // referenced in the current frame draw cleanly before eviction.
+            if !self.batches.is_empty() {
+                self.flush_pending_batches(self.width, self.height);
+            }
             self.clear_sprite_cache();
         }
 

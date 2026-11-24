@@ -93,8 +93,16 @@ impl WindowFrame {
         false
     }
 
+    /// Updates traffic-light button geometry for a resized window width.
+    pub fn set_width(&mut self, window_width: u32) {
+        if self.buttons.placement == TrafficLightPlacement::Right {
+            self.buttons = TrafficLightButtons::default_csd_for_width(window_width);
+        }
+    }
+
     /// Handles pointer press at `(px, py)`. Returns the hit target.
     pub fn on_pointer_down(&mut self, px: f64, py: f64, window_width: u32) -> WindowHitTarget {
+        self.set_width(window_width);
         let target = self.hit_test(px, py, window_width);
         if let WindowHitTarget::TrafficLight(kind) = target {
             self.pressed_button = Some(kind);

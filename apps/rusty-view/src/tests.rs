@@ -43,6 +43,7 @@ fn test_document_rotations_and_flip() {
         1, 1, 1, 255, 2, 2, 2, 255, 3, 3, 3, 255, 4, 4, 4, 255, 5, 5, 5, 255, 6, 6, 6, 255,
     ];
     let mut doc = ImageDocument {
+        cache_key: 1,
         filename: "test.png".to_owned(),
         width: 2,
         height: 3,
@@ -199,4 +200,35 @@ fn test_viewer_state_initialization() {
     assert_eq!(state.hud.is_visible, hud_before);
     let _ = state.on_pointer_up(info_x, info_y, 1000, 700);
     assert_ne!(state.hud.is_visible, hud_before);
+}
+
+#[test]
+fn test_premultiply_rgba_and_cache_key_invalidation() {
+    let mut px = vec![200, 100, 50, 128, 255, 128, 64, 0, 10, 20, 30, 255];
+    crate::document::premultiply_rgba_in_place(&mut px);
+    assert_eq!(&px[0..4], &[100, 50, 25, 128]);
+    assert_eq!(&px[4..8], &[0, 0, 0, 0]);
+    assert_eq!(&px[8..12], &[10, 20, 30, 255]);
+
+    let mut doc = ImageDocument {
+        cache_key: 1,
+        filename: "sample.png".to_owned(),
+        width: 2,
+        height: 2,
+        pixels: std::sync::Arc::from(vec![255_u8; 16].into_boxed_slice()),
+        format: rusty_ui::PixelFormat::Rgba8888,
+        file_size_bytes: 16,
+        rotation_deg: 0,
+        flipped_h: false,
+    };
+    let k0 = doc.cache_key;
+    doc.flip_horizontal();
+    let k1 = doc.cache_key;
+    doc.rotate_cw();
+    let k2 = doc.cache_key;
+    doc.rotate_ccw();
+    let k3 = doc.cache_key;
+    assert_ne!(k0, k1);
+    assert_ne!(k1, k2);
+    assert_ne!(k2, k3);
 }

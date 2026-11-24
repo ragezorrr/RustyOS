@@ -3,15 +3,41 @@
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use rusty_services::image_decode::decode_image_rgba_limited;
 use rusty_ui::PixelFormat;
 
 const MAX_VIEW_DIMENSION: u32 = 16_384;
+static NEXT_DOC_CACHE_KEY: AtomicU64 = AtomicU64::new(1);
+
+fn next_cache_key() -> u64 {
+    NEXT_DOC_CACHE_KEY.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Premultiplies straight RGBA8888 pixels in-place for `UiDrawCmd::Image`.
+pub(crate) fn premultiply_rgba_in_place(rgba: &mut [u8]) {
+    for px in rgba.as_chunks_mut::<4>().0 {
+        let a = u16::from(px[3]);
+        if a == 255 {
+            continue;
+        }
+        if a == 0 {
+            px[0] = 0;
+            px[1] = 0;
+            px[2] = 0;
+            continue;
+        }
+        px[0] = ((u16::from(px[0]) * a + 127) / 255) as u8;
+        px[1] = ((u16::from(px[1]) * a + 127) / 255) as u8;
+        px[2] = ((u16::from(px[2]) * a + 127) / 255) as u8;
+    }
+}
 
 /// Represents an active loaded image in memory with its oriented pixels and metadata.
 #[derive(Debug, Clone)]
 pub(crate) struct ImageDocument {
+    pub(crate) cache_key: u64,
     pub(crate) filename: String,
     pub(crate) width: u32,
     pub(crate) height: u32,
@@ -32,7 +58,8 @@ impl ImageDocument {
         }
         let file_size_bytes = meta.len();
         let bytes = fs::read(path).ok()?;
-        let (w, h, rgba) = decode_image_rgba_limited(&bytes, MAX_VIEW_DIMENSION)?;
+        let (w, h, mut rgba) = decode_image_rgba_limited(&bytes, MAX_VIEW_DIMENSION)?;
+        premultiply_rgba_in_place(&mut rgba);
 
         let filename = path
             .file_name()
@@ -42,6 +69,7 @@ impl ImageDocument {
         let orig_h = u32::try_from(h).ok()?;
 
         Some(Self {
+            cache_key: next_cache_key(),
             filename,
             width: orig_w,
             height: orig_h,
@@ -62,6 +90,7 @@ impl ImageDocument {
     /// Rotates the image 90 degrees clockwise in-place.
     pub(crate) fn rotate_cw(&mut self) {
         let (new_w, new_h, rotated) = rotate_rgba_90_cw(&self.pixels, self.width, self.height);
+        self.cache_key = next_cache_key();
         self.width = new_w;
         self.height = new_h;
         self.pixels = Arc::from(rotated.into_boxed_slice());
@@ -71,6 +100,7 @@ impl ImageDocument {
     /// Rotates the image 90 degrees counter-clockwise in-place.
     pub(crate) fn rotate_ccw(&mut self) {
         let (new_w, new_h, rotated) = rotate_rgba_90_ccw(&self.pixels, self.width, self.height);
+        self.cache_key = next_cache_key();
         self.width = new_w;
         self.height = new_h;
         self.pixels = Arc::from(rotated.into_boxed_slice());
@@ -80,6 +110,7 @@ impl ImageDocument {
     /// Horizontally flips the image pixels in-place.
     pub(crate) fn flip_horizontal(&mut self) {
         let flipped = flip_rgba_h(&self.pixels, self.width, self.height);
+        self.cache_key = next_cache_key();
         self.pixels = Arc::from(flipped.into_boxed_slice());
         self.flipped_h = !self.flipped_h;
     }

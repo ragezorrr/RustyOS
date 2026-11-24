@@ -16,6 +16,8 @@ use rusty_ui::{
 
 const DEFAULT_WIDTH: u32 = 960;
 const DEFAULT_HEIGHT: u32 = 600;
+const MIN_WIDTH: u32 = 384;
+const MIN_HEIGHT: u32 = 300;
 const GREETER_CARD_RADIUS: u32 = 18;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -259,7 +261,8 @@ impl RustyApp for GreeterApp {
     }
 
     fn on_pointer(&mut self, ctx: &mut AppContext<'_>, events: &[PointerEvent]) {
-        let (user_rect, pass_rect, btn_rect, _) = layout_rects(ctx.width(), ctx.height());
+        let (user_rect, pass_rect, btn_rect, _) =
+            layout_rects(ctx.width().max(MIN_WIDTH), ctx.height().max(MIN_HEIGHT));
         for ev in events {
             if let PointerEventKind::Press {
                 button: BTN_LEFT, ..
@@ -291,14 +294,16 @@ impl RustyApp for GreeterApp {
         width: u32,
         height: u32,
     ) {
-        let w = width.max(320);
-        let h = height.max(240);
+        let w = width.max(MIN_WIDTH);
+        let h = height.max(MIN_HEIGHT);
         let pal = ThemePalette::new(self.cfg.theme_mode == ThemeMode::Dark, 0);
+        // Translucent backdrop + frosted card so compositor Liquid Glass shows through.
         let bg = if pal.is_dark {
-            [24, 28, 38, 255]
+            [18, 22, 32, 185]
         } else {
-            [236, 240, 248, 255]
+            [236, 240, 248, 185]
         };
+        let card_bg = [pal.card_bg[0], pal.card_bg[1], pal.card_bg[2], 210];
 
         let (user_rect, pass_rect, btn_rect, card_rect) = layout_rects(w, h);
         self.user_field.rect = user_rect;
@@ -322,7 +327,7 @@ impl RustyApp for GreeterApp {
             .to_string();
 
         painter.fill_rect(Rect::new(0, 0, w, h), bg);
-        painter.fill_rounded_rect(card_rect, 18.0, pal.card_bg);
+        painter.fill_rounded_rect(card_rect, 18.0, card_bg);
         let card_border = if pal.is_dark {
             [255, 255, 255, 28]
         } else {
@@ -383,7 +388,7 @@ fn main() {
         "org.rustyos.greeter",
         (DEFAULT_WIDTH, DEFAULT_HEIGHT),
     )
-    .with_min_size(320, 240)
+    .with_min_size(MIN_WIDTH, MIN_HEIGHT)
     .with_decorations(WindowDecorationMode::Server)
     .with_liquid_glass(glass_for_size(DEFAULT_WIDTH, DEFAULT_HEIGHT));
 

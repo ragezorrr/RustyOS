@@ -274,6 +274,7 @@ impl RustyApp for ViewerApp {
                     }
                 }
                 PointerEventKind::Leave { .. } => {
+                    self.state.frame.on_pointer_leave();
                     self.state.toolbar.is_pointer_inside = false;
                     self.state.dirty = true;
                 }

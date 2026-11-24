@@ -545,13 +545,22 @@ fn rasterize_rounded_rect_clipped(
             }
             let out_col = if has_border {
                 let b_mix = (sd + border_width + 0.5).clamp(0.0, 1.0);
-                let col = lerp_rgba(fill, border_color, b_mix);
-                [
-                    col[0],
-                    col[1],
-                    col[2],
-                    ((f32::from(col[3]) * cov).round() as u8),
-                ]
+                if fill[3] == 0 {
+                    [
+                        border_color[0],
+                        border_color[1],
+                        border_color[2],
+                        (f32::from(border_color[3]) * b_mix * cov).round() as u8,
+                    ]
+                } else {
+                    let col = lerp_rgba(fill, border_color, b_mix);
+                    [
+                        col[0],
+                        col[1],
+                        col[2],
+                        (f32::from(col[3]) * cov).round() as u8,
+                    ]
+                }
             } else {
                 [
                     fill[0],

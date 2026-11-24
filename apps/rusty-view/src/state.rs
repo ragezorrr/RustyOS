@@ -273,11 +273,12 @@ impl ViewerState {
     ) {
         let pal = ThemePalette::new(self.theme_mode == ThemeMode::Dark, 0);
 
-        // 1. Dark / Light neutral rounded CSD background
+        // 1. Dark / Light translucent CSD backdrop (opaque in fullscreen, Liquid Glass when windowed)
+        let bg_alpha = if self.is_fullscreen { 255 } else { 215 };
         let bg_color = if pal.is_dark {
-            [18, 19, 23, 255]
+            [18, 19, 23, bg_alpha]
         } else {
-            [240, 242, 247, 255]
+            [240, 242, 247, bg_alpha]
         };
         let window_radius = if self.is_fullscreen || self.frame.is_maximized {
             0.0
@@ -298,7 +299,7 @@ impl ViewerState {
                 .compute_dest_rect(win_w, win_h, doc.width, doc.height);
             painter.draw_image(
                 dst_rect,
-                0, // cache_key
+                doc.cache_key,
                 doc.width,
                 doc.height,
                 doc.pixels.clone(),

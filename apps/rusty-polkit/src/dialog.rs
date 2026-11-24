@@ -1,11 +1,11 @@
 //! Liquid Glass styled modal `PolicyKit` authentication dialog state and rendering.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rusty_services::{PolkitPromptRequest, SecretText};
 use rusty_ui::{
     ButtonStyle, FocusScope, InputModifiers, PushButton, Rect, TextField, TextInputEvent,
-    TextInputKey, ThemePalette, UiFontEngine, UiPainter, WidgetId,
+    TextInputKey, ThemePalette, UiFontEngine, UiPainter, WidgetId, WidgetState,
 };
 
 pub(crate) fn focus_id_password() -> WidgetId {
@@ -48,6 +48,7 @@ pub(crate) struct PolkitDialogState {
     pub(crate) cancel_rect: Rect,
     pub(crate) submit_rect: Rect,
     pub(crate) focus: FocusScope,
+    pub(crate) created_at: Instant,
 }
 
 impl PolkitDialogState {
@@ -78,6 +79,7 @@ impl PolkitDialogState {
             cancel_rect: Rect::new(208, 196, 90, 30),
             submit_rect: Rect::new(308, 196, 96, 30),
             focus,
+            created_at: Instant::now(),
         }
     }
 
@@ -180,9 +182,10 @@ impl PolkitDialogState {
                 }
             }
             _ => {
-                let ev =
-                    self.pass_field
-                        .handle_key(key, modifiers, Duration::ZERO, fonts, clipboard);
+                let elapsed = self.created_at.elapsed();
+                let ev = self
+                    .pass_field
+                    .handle_key(key, modifiers, elapsed, fonts, clipboard);
                 if ev != TextInputEvent::Ignored {
                     self.dirty = true;
                     if self.is_error {
@@ -195,9 +198,16 @@ impl PolkitDialogState {
         None
     }
 
-    /// Handles pointer click and triggers submit/cancel when matching buttons.
+    /// Handles pointer click and triggers submit/cancel or focuses the password field.
     pub(crate) fn on_pointer_click(&mut self, x: i32, y: i32) -> Option<DialogAction> {
         if self.checking {
+            return None;
+        }
+
+        if self.pass_field.rect.contains(x, y) {
+            self.focus
+                .set_focus(focus_id_password(), self.created_at.elapsed(), true);
+            self.dirty = true;
             return None;
         }
 
@@ -216,6 +226,7 @@ impl PolkitDialogState {
     }
 
     /// Paints the complete Liquid Glass styled card onto [`UiPainter`].
+    #[allow(clippy::cast_precision_loss)]
     pub(crate) fn paint(
         &mut self,
         painter: &mut UiPainter,
@@ -225,10 +236,11 @@ impl PolkitDialogState {
         h: u32,
     ) {
         let card_rect = Rect::new(0, 0, w, h);
+        // Translucent card tint so compositor Liquid Glass backdrop blur shows through cleanly.
         let card_bg = if pal.is_dark {
-            [28, 30, 36, 255]
+            [28, 30, 36, 204]
         } else {
-            [248, 249, 252, 255]
+            [248, 249, 252, 212]
         };
         painter.fill_rounded_rect(card_rect, 18.0, card_bg);
 
@@ -239,25 +251,24 @@ impl PolkitDialogState {
         };
         painter.stroke_rounded_rect(card_rect, 18.0, 1.0, border_color);
 
-        // Header icon badge: Lock / Shield
+        // Header icon badge: vector padlock (avoids missing-glyph emoji box in Inter font)
         let icon_rect = Rect::new(i32::try_from(w / 2 - 18).unwrap_or(192), 16, 36, 36);
         let icon_badge_bg = if pal.is_dark {
-            [38, 42, 52, 255]
+            [38, 42, 52, 230]
         } else {
-            [232, 236, 244, 255]
+            [232, 236, 244, 235]
         };
         painter.fill_rounded_rect(icon_rect, 18.0, icon_badge_bg);
         painter.stroke_rounded_rect(icon_rect, 18.0, 1.0, border_color);
 
-        // Draw lock glyph inside badge
-        let lock_glyph_rect = Rect::new(icon_rect.x + 10, icon_rect.y + 10, 16, 16);
-        painter.draw_text_centered(
-            fonts,
-            "🔒",
-            lock_glyph_rect,
-            13.0,
-            false,
-            [255, 255, 255, 255],
+        let lock_col = pal.accent;
+        let lock_cx = (icon_rect.x + 18) as f32;
+        let shackle_cy = (icon_rect.y + 14) as f32;
+        painter.stroke_circle(lock_cx, shackle_cy, 4.5, 1.8, lock_col);
+        painter.fill_rounded_rect(
+            Rect::new(icon_rect.x + 11, icon_rect.y + 16, 14, 11),
+            3.0,
+            lock_col,
         );
 
         // Title
@@ -271,13 +282,14 @@ impl PolkitDialogState {
             pal.text_primary,
         );
 
-        // Action explanation message
+        // Action explanation message (ellipsized to card width)
         let msg_rect = Rect::new(24, 82, w.saturating_sub(48), 24);
-        let display_msg = if self.message.is_empty() {
-            "Требуются привилегии администратора.".to_owned()
+        let raw_msg = if self.message.is_empty() {
+            "Требуются привилегии администратора."
         } else {
-            self.message.clone()
+            self.message.as_str()
         };
+        let display_msg = fonts.ellipsize(raw_msg, msg_rect.width as f32, 11.5, false);
         painter.draw_text_centered(
             fonts,
             display_msg,
@@ -311,7 +323,7 @@ impl PolkitDialogState {
             pal,
             pass_focused,
             if pass_focused { 1.0 } else { 0.0 },
-            Duration::from_millis(500),
+            self.created_at.elapsed(),
         );
 
         // Status or Error message
@@ -331,13 +343,21 @@ impl PolkitDialogState {
 
     fn paint_buttons(&self, painter: &mut UiPainter, fonts: &mut UiFontEngine, pal: &ThemePalette) {
         let cancel_btn = PushButton::new(self.cancel_rect, ButtonStyle::Secondary);
-        cancel_btn.paint_labeled(painter, fonts, "Отмена", pal, false);
-        if self.focus.is_focused(focus_id_cancel()) {
-            painter.stroke_rounded_rect(self.cancel_rect.inset(-2, -2), 8.0, 2.0, pal.accent);
-        }
+        cancel_btn.paint_labeled(
+            painter,
+            fonts,
+            "Отмена",
+            pal,
+            self.focus.is_focused(focus_id_cancel()),
+        );
 
         let submit_disabled = self.pass_field.buffer.as_str().trim().is_empty() || self.checking;
-        let submit_btn = PushButton::new(self.submit_rect, ButtonStyle::Primary);
+        let mut submit_btn = PushButton::new(self.submit_rect, ButtonStyle::Primary);
+        submit_btn.state = if submit_disabled {
+            WidgetState::Disabled
+        } else {
+            WidgetState::Normal
+        };
         submit_btn.paint_labeled(
             painter,
             fonts,
@@ -347,10 +367,7 @@ impl PolkitDialogState {
                 "Подтвердить"
             },
             pal,
-            submit_disabled,
+            self.focus.is_focused(focus_id_submit()),
         );
-        if self.focus.is_focused(focus_id_submit()) {
-            painter.stroke_rounded_rect(self.submit_rect.inset(-2, -2), 8.0, 2.0, pal.accent);
-        }
     }
 }

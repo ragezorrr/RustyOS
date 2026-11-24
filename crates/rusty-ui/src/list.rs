@@ -217,11 +217,25 @@ impl SelectableList {
         } else {
             rr.y as f32 + f32::midpoint(rr.height as f32, 13.0 * 0.72)
         };
-        let max_title_w = (rr.width as f32 - 64.0).max(20.0);
+        let text_left = if row.checked {
+            let cy = rr.y as f32 + rr.height as f32 * 0.5;
+            let cx = rr.x as f32 + 12.0;
+            let check_col = if accent_text {
+                [255, 255, 255, 240]
+            } else {
+                pal.accent
+            };
+            painter.draw_line(cx - 3.5, cy, cx - 1.0, cy + 3.0, 1.6, check_col);
+            painter.draw_line(cx - 1.0, cy + 3.0, cx + 4.0, cy - 3.5, 1.6, check_col);
+            26.0
+        } else {
+            14.0
+        };
+        let max_title_w = (rr.width as f32 - 50.0 - text_left).max(20.0);
         let title_fit = fonts.ellipsize(&row.title, max_title_w, 13.0, false);
         painter.draw_text(
             title_fit,
-            rr.x as f32 + 14.0,
+            rr.x as f32 + text_left,
             title_y,
             13.0,
             false,
@@ -237,7 +251,7 @@ impl SelectableList {
             let sub_fit = fonts.ellipsize(sub, max_title_w, 11.5, false);
             painter.draw_text(
                 sub_fit,
-                rr.x as f32 + 14.0,
+                rr.x as f32 + text_left,
                 rr.y as f32 + 31.0,
                 11.5,
                 false,
