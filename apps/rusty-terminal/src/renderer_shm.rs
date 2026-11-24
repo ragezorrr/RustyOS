@@ -105,7 +105,7 @@ impl ShmFallbackRenderer {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     fn render_shm_cell(
         &mut self,
         app: &TerminalAppState,
@@ -160,6 +160,31 @@ impl ShmFallbackRenderer {
                 app.theme.selection_bg,
                 Some(clip),
             );
+        }
+        if app.search.open && !app.search.query.is_empty() {
+            let qlen = app.search.query.chars().count();
+            let active_search = app.search.matches.get(app.search.active_idx).copied();
+            let hit_bg = active_search
+                .filter(|m| m.abs_line == abs_line && col >= m.col && col < m.col + qlen)
+                .map(|_| app.theme.search_current_bg)
+                .or_else(|| {
+                    app.search
+                        .matches
+                        .iter()
+                        .any(|m| m.abs_line == abs_line && col >= m.col && col < m.col + qlen)
+                        .then_some(app.theme.search_match_bg)
+                });
+            if let Some(hc) = hit_bg {
+                blend_rect(
+                    canvas,
+                    stride_px,
+                    layout.win_w,
+                    layout.win_h,
+                    cell_rect,
+                    hc,
+                    Some(clip),
+                );
+            }
         }
         if is_cursor && (!app.focused || app.cursor_blink_on) {
             let mut cur_c = app.theme.cursor_bg;
@@ -224,6 +249,17 @@ impl ShmFallbackRenderer {
     ) {
         self.render_chrome_buttons(app, layout, canvas, stride_px);
         self.render_chrome_tabs_and_title(app, layout, canvas, stride_px);
+        if let (Some(bar), Some(input), Some(prev), Some(next), Some(close)) = (
+            layout.search_bar_rect,
+            layout.search_input_rect,
+            layout.search_prev_rect,
+            layout.search_next_rect,
+            layout.search_close_rect,
+        ) {
+            self.render_search_bar(
+                app, layout, canvas, stride_px, bar, input, prev, next, close,
+            );
+        }
         if let Some(thumb) = layout.scrollbar_thumb {
             fill_rounded_rect_premul(
                 canvas,
@@ -389,6 +425,19 @@ impl ShmFallbackRenderer {
                     ty,
                     app.theme.text_primary,
                 );
+                self.draw_ui_text(
+                    canvas,
+                    stride_px,
+                    layout.win_w,
+                    layout.win_h,
+                    &app.fonts,
+                    "×",
+                    12.5,
+                    false,
+                    tl.close_btn.x + 4,
+                    ty,
+                    app.theme.text_secondary,
+                );
             }
         }
 
@@ -415,6 +464,104 @@ impl ShmFallbackRenderer {
                 true,
                 tx,
                 ty,
+                app.theme.text_primary,
+            );
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_search_bar(
+        &mut self,
+        app: &TerminalAppState,
+        layout: &TerminalLayout,
+        canvas: &mut [u8],
+        stride_px: i32,
+        bar: Rect,
+        input: Rect,
+        prev: Rect,
+        next: Rect,
+        close: Rect,
+    ) {
+        fill_rounded_rect_premul(
+            canvas,
+            stride_px,
+            layout.win_w,
+            layout.win_h,
+            bar,
+            10,
+            app.theme.search_bg,
+            Some(app.theme.search_border),
+        );
+        fill_rounded_rect_premul(
+            canvas,
+            stride_px,
+            layout.win_w,
+            layout.win_h,
+            input,
+            7,
+            app.theme.badge_bg,
+            Some(app.theme.tab_border),
+        );
+        for btn in [prev, next, close] {
+            fill_rounded_rect_premul(
+                canvas,
+                stride_px,
+                layout.win_w,
+                layout.win_h,
+                btn,
+                6,
+                app.theme.badge_bg,
+                None,
+            );
+        }
+        let q = if app.search.query.is_empty() {
+            String::from("Find in terminal...")
+        } else {
+            format!(
+                "{}  ({}/{})",
+                app.search.query,
+                if app.search.matches.is_empty() {
+                    0
+                } else {
+                    app.search.active_idx + 1
+                },
+                app.search.matches.len()
+            )
+        };
+        let qc = if app.search.query.is_empty() {
+            app.theme.text_secondary
+        } else {
+            app.theme.text_primary
+        };
+        let ty = input.y + app.fonts.ui_baseline_in_box(input.h, 12.5);
+        self.draw_ui_text(
+            canvas,
+            stride_px,
+            layout.win_w,
+            layout.win_h,
+            &app.fonts,
+            &q,
+            12.5,
+            false,
+            input.x + 8,
+            ty,
+            qc,
+        );
+        for (r, s) in [(prev, "↑"), (next, "↓"), (close, "×")] {
+            let tw = app.fonts.measure_ui_text(s, 13.0, true);
+            let bx = r.x + ((r.w as f32 - tw) * 0.5).round() as i32;
+            let by = r.y + app.fonts.ui_baseline_in_box(r.h, 13.0);
+            self.draw_ui_text(
+                canvas,
+                stride_px,
+                layout.win_w,
+                layout.win_h,
+                &app.fonts,
+                s,
+                13.0,
+                true,
+                bx,
+                by,
                 app.theme.text_primary,
             );
         }

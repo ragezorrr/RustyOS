@@ -213,6 +213,11 @@ pub struct GlesSurfaceRenderer {
     packer: ShelfPacker,
     atlas_entries: HashMap<GlyphRasterKey, Option<AtlasEntry>>,
     sprites: HashMap<u64, SpriteTexEntry>,
+    streaming_tex: u32,
+    streaming_w: u32,
+    streaming_h: u32,
+    streaming_scratch: Vec<u8>,
+    supports_bgra: bool,
     rect_verts: Vec<RectVertex>,
     text_verts: Vec<TextVertex>,
     sprite_verts: Vec<SpriteVertex>,
@@ -484,6 +489,14 @@ impl GlesSurfaceRenderer {
         width: i32,
         height: i32,
     ) -> Self {
+        let supports_bgra = unsafe {
+            let ext_ptr = gl.GetString(gl_ffi::EXTENSIONS);
+            !ext_ptr.is_null()
+                && CStr::from_ptr(ext_ptr.cast())
+                    .to_string_lossy()
+                    .split_whitespace()
+                    .any(|ext| ext == "GL_EXT_texture_format_BGRA8888")
+        };
         Self {
             dl_egl_handle,
             egl,
@@ -507,6 +520,11 @@ impl GlesSurfaceRenderer {
             packer: ShelfPacker::new(ATLAS_SIZE, ATLAS_SIZE),
             atlas_entries: HashMap::with_capacity(512),
             sprites: HashMap::with_capacity(64),
+            streaming_tex: 0,
+            streaming_w: 0,
+            streaming_h: 0,
+            streaming_scratch: Vec::new(),
+            supports_bgra,
             rect_verts: Vec::with_capacity(2048),
             text_verts: Vec::with_capacity(4096),
             sprite_verts: Vec::with_capacity(128),
@@ -525,6 +543,212 @@ impl GlesSurfaceRenderer {
             self.height = h;
             self.wl_egl_surface.resize(w, h, 0, 0);
         }
+    }
+
+    /// Presents a premultiplied `BGRA8888` CPU framebuffer using one reusable streaming GL texture
+    /// with optional partial-damage `glTexSubImage2D` upload (`RUSTYOS-169`).
+    ///
+    /// Eliminates per-frame `Arc<[u8]>` cloning, `glGenTextures` churn, and 700 MB–2.1 GB VRAM leaks.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if EGL context activation, buffer bounds validation, or `eglSwapBuffers` fails.
+    #[allow(clippy::too_many_lines)]
+    pub fn present_bgra_frame(
+        &mut self,
+        pixels: &[u8],
+        buf_w: u32,
+        buf_h: u32,
+        buffer_scale: i32,
+        damage: Option<Rect>,
+        clear_rgba: [u8; 4],
+    ) -> Result<(), String> {
+        const GL_BGRA_EXT: u32 = 0x80E1;
+
+        let w = i32::try_from(buf_w).unwrap_or(1).max(1);
+        let h = i32::try_from(buf_h).unwrap_or(1).max(1);
+        let scale = buffer_scale.max(1);
+        let vp_w = w.saturating_mul(scale);
+        let vp_h = h.saturating_mul(scale);
+        let expected_len = (buf_w as usize)
+            .saturating_mul(buf_h as usize)
+            .saturating_mul(4);
+        if pixels.len() < expected_len {
+            return Err(String::from(
+                "streaming BGRA buffer smaller than dimensions",
+            ));
+        }
+
+        // SAFETY: Valid current EGL display, window surface, and ES2 context.
+        unsafe {
+            if self.egl.MakeCurrent(
+                self.egl_display,
+                self.egl_surface,
+                self.egl_surface,
+                self.egl_context,
+            ) == egl_ffi::FALSE
+            {
+                return Err(String::from("eglMakeCurrent lost during streaming frame"));
+            }
+        }
+        self.resize(vp_w, vp_h);
+
+        let need_alloc =
+            self.streaming_tex == 0 || self.streaming_w != buf_w || self.streaming_h != buf_h;
+        let gl_fmt = if self.supports_bgra {
+            GL_BGRA_EXT
+        } else {
+            gl_ffi::RGBA
+        };
+
+        // SAFETY: Valid current ES2 context; texture upload slices are bounds-checked above.
+        unsafe {
+            if self.streaming_tex == 0 {
+                self.gl
+                    .GenTextures(1, ptr::from_mut(&mut self.streaming_tex));
+            }
+            self.gl.BindTexture(gl_ffi::TEXTURE_2D, self.streaming_tex);
+            self.gl.TexParameteri(
+                gl_ffi::TEXTURE_2D,
+                gl_ffi::TEXTURE_MIN_FILTER,
+                gl_ffi::LINEAR as i32,
+            );
+            self.gl.TexParameteri(
+                gl_ffi::TEXTURE_2D,
+                gl_ffi::TEXTURE_MAG_FILTER,
+                gl_ffi::LINEAR as i32,
+            );
+            self.gl.TexParameteri(
+                gl_ffi::TEXTURE_2D,
+                gl_ffi::TEXTURE_WRAP_S,
+                gl_ffi::CLAMP_TO_EDGE as i32,
+            );
+            self.gl.TexParameteri(
+                gl_ffi::TEXTURE_2D,
+                gl_ffi::TEXTURE_WRAP_T,
+                gl_ffi::CLAMP_TO_EDGE as i32,
+            );
+            self.gl.PixelStorei(gl_ffi::UNPACK_ALIGNMENT, 4);
+
+            if need_alloc {
+                let upload_ptr = if self.supports_bgra {
+                    pixels.as_ptr()
+                } else {
+                    swizzle_bgra_region_into(
+                        pixels,
+                        buf_w,
+                        0,
+                        0,
+                        buf_w,
+                        buf_h,
+                        &mut self.streaming_scratch,
+                    );
+                    self.streaming_scratch.as_ptr()
+                };
+                self.gl.TexImage2D(
+                    gl_ffi::TEXTURE_2D,
+                    0,
+                    gl_fmt as i32,
+                    w,
+                    h,
+                    0,
+                    gl_fmt,
+                    gl_ffi::UNSIGNED_BYTE,
+                    upload_ptr.cast(),
+                );
+                self.streaming_w = buf_w;
+                self.streaming_h = buf_h;
+            } else {
+                let (dx, dy, dw, dh) = clamp_damage_to_buffer(damage, buf_w, buf_h);
+                if dw > 0 && dh > 0 {
+                    let upload_ptr = if self.supports_bgra && dx == 0 && dw == buf_w {
+                        let start_byte = (dy as usize) * (buf_w as usize) * 4;
+                        pixels[start_byte..].as_ptr()
+                    } else if self.supports_bgra {
+                        copy_bgra_region_into(
+                            pixels,
+                            buf_w,
+                            dx,
+                            dy,
+                            dw,
+                            dh,
+                            &mut self.streaming_scratch,
+                        );
+                        self.streaming_scratch.as_ptr()
+                    } else {
+                        swizzle_bgra_region_into(
+                            pixels,
+                            buf_w,
+                            dx,
+                            dy,
+                            dw,
+                            dh,
+                            &mut self.streaming_scratch,
+                        );
+                        self.streaming_scratch.as_ptr()
+                    };
+                    self.gl.TexSubImage2D(
+                        gl_ffi::TEXTURE_2D,
+                        0,
+                        dx as i32,
+                        dy as i32,
+                        dw as i32,
+                        dh as i32,
+                        gl_fmt,
+                        gl_ffi::UNSIGNED_BYTE,
+                        upload_ptr.cast(),
+                    );
+                }
+            }
+
+            let clear_f = rgba_u8_to_f32_premul(clear_rgba);
+            self.gl.Viewport(0, 0, vp_w, vp_h);
+            self.gl.Disable(gl_ffi::SCISSOR_TEST);
+            self.gl.Enable(gl_ffi::BLEND);
+            self.gl.BlendFunc(gl_ffi::ONE, gl_ffi::ONE_MINUS_SRC_ALPHA);
+            self.gl
+                .ClearColor(clear_f[0], clear_f[1], clear_f[2], clear_f[3]);
+            self.gl.Clear(gl_ffi::COLOR_BUFFER_BIT);
+        }
+
+        let wf = w as f32;
+        let hf = h as f32;
+        self.sprite_verts.clear();
+        self.sprite_verts.extend_from_slice(&[
+            SpriteVertex {
+                pos: [0.0, 0.0],
+                uv: [0.0, 0.0],
+            },
+            SpriteVertex {
+                pos: [wf, 0.0],
+                uv: [1.0, 0.0],
+            },
+            SpriteVertex {
+                pos: [wf, hf],
+                uv: [1.0, 1.0],
+            },
+            SpriteVertex {
+                pos: [0.0, 0.0],
+                uv: [0.0, 0.0],
+            },
+            SpriteVertex {
+                pos: [wf, hf],
+                uv: [1.0, 1.0],
+            },
+            SpriteVertex {
+                pos: [0.0, hf],
+                uv: [0.0, 1.0],
+            },
+        ]);
+
+        // SAFETY: Valid ES2 context and `streaming_tex`.
+        unsafe {
+            self.flush_sprites(w, h, self.streaming_tex, 0, self.sprite_verts.len());
+            if self.egl.SwapBuffers(self.egl_display, self.egl_surface) == egl_ffi::FALSE {
+                return Err(String::from("eglSwapBuffers failed"));
+            }
+        }
+        Ok(())
     }
 
     /// Executes `draw_list` in exact layer order on GLES 2.0 and swaps buffers.
@@ -560,10 +784,9 @@ impl GlesSurfaceRenderer {
         self.sprite_verts.clear();
         self.batches.clear();
 
-        self.compile_batches(list, fonts, w, h);
-
         let clear_f = rgba_u8_to_f32_premul(clear_rgba);
-        // SAFETY: Valid current ES2 context; VBO pointers/slices match active batch spans.
+        // SAFETY: Valid current ES2 context; clear framebuffer before compiling batches so
+        // mid-frame glyph atlas overflows can safely flush accumulated text batches (`RUSTYOS-169`).
         unsafe {
             self.gl.Viewport(0, 0, w, h);
             self.gl.Disable(gl_ffi::SCISSOR_TEST);
@@ -572,7 +795,24 @@ impl GlesSurfaceRenderer {
             self.gl
                 .ClearColor(clear_f[0], clear_f[1], clear_f[2], clear_f[3]);
             self.gl.Clear(gl_ffi::COLOR_BUFFER_BIT);
+        }
 
+        self.compile_batches(list, fonts, w, h);
+        self.flush_pending_batches(w, h);
+
+        // SAFETY: Valid current ES2 context.
+        unsafe {
+            self.gl.Disable(gl_ffi::SCISSOR_TEST);
+            if self.egl.SwapBuffers(self.egl_display, self.egl_surface) == egl_ffi::FALSE {
+                return Err(String::from("eglSwapBuffers failed"));
+            }
+        }
+        Ok(())
+    }
+
+    fn flush_pending_batches(&mut self, w: i32, h: i32) {
+        // SAFETY: Valid current ES2 context; VBO pointers/slices match active batch spans.
+        unsafe {
             for span in &self.batches {
                 if let Some(sc) = span.clip {
                     if sc.width == 0 || sc.height == 0 {
@@ -595,12 +835,11 @@ impl GlesSurfaceRenderer {
                 }
             }
             self.gl.Disable(gl_ffi::SCISSOR_TEST);
-
-            if self.egl.SwapBuffers(self.egl_display, self.egl_surface) == egl_ffi::FALSE {
-                return Err(String::from("eglSwapBuffers failed"));
-            }
         }
-        Ok(())
+        self.rect_verts.clear();
+        self.text_verts.clear();
+        self.sprite_verts.clear();
+        self.batches.clear();
     }
 
     fn record_batch(&mut self, kind: DrawBatchKind, clip: Option<Rect>, start: usize, end: usize) {
@@ -836,11 +1075,17 @@ impl GlesSurfaceRenderer {
     }
 
     fn push_line_quad(&mut self, x0: f32, y0: f32, x1: f32, y1: f32, width: f32, color: [u8; 4]) {
-        if (y1 - y0).abs() <= 0.1 || (x1 - x0).abs() <= 0.1 {
+        let dx = x1 - x0;
+        let dy = y1 - y0;
+        let len = dx.hypot(dy);
+        if len < 0.01 {
+            return;
+        }
+        if dy.abs() <= 0.1 || dx.abs() <= 0.1 {
             let lx = x0.min(x1) - width * 0.5;
             let ly = y0.min(y1) - width * 0.5;
-            let lw = (x1 - x0).abs().max(width).ceil() as u32;
-            let lh = (y1 - y0).abs().max(width).ceil() as u32;
+            let lw = dx.abs().max(width).ceil() as u32;
+            let lh = dy.abs().max(width).ceil() as u32;
             self.push_rect_quad(
                 Rect::new(lx.floor() as i32, ly.floor() as i32, lw.max(1), lh.max(1)),
                 0.0,
@@ -852,20 +1097,28 @@ impl GlesSurfaceRenderer {
             );
             return;
         }
-        // Rotated segment quad rendered cleanly as thin capsule/line quad via center+angle fallback.
-        let min_x = x0.min(x1).floor() as i32;
-        let min_y = y0.min(y1).floor() as i32;
-        let w = (x0.max(x1) - x0.min(x1)).ceil().max(1.0) as u32;
-        let h = (y0.max(y1) - y0.min(y1)).ceil().max(1.0) as u32;
-        self.push_rect_quad(
-            Rect::new(min_x, min_y, w, h),
-            width * 0.5,
-            0.0,
-            0.0,
-            0.0,
-            color,
-            [0, 0, 0, 0],
-        );
+        // True rotated segment quad along normal `(-dy/len, dx/len) * half_w` (`RUSTYOS-169`).
+        let half_w = (width * 0.5).max(0.5);
+        let nx = (-dy / len) * half_w;
+        let ny = (dx / len) * half_w;
+        let fill_f = rgba_u8_to_f32_straight(color);
+        let cx = f32::midpoint(x0, x1);
+        let cy = f32::midpoint(y0, y1);
+        let big_half = (len + width).max(4.0);
+        let mk = |px: f32, py: f32| RectVertex {
+            pos: [px, py],
+            center: [cx, cy],
+            half: [big_half, big_half],
+            radius_border: [0.0, 0.0],
+            kind_sigma: [0.0, 0.0],
+            fill: fill_f,
+            stroke: [0.0, 0.0, 0.0, 0.0],
+        };
+        let p0 = mk(x0 + nx, y0 + ny);
+        let p1 = mk(x1 + nx, y1 + ny);
+        let p2 = mk(x1 - nx, y1 - ny);
+        let p3 = mk(x0 - nx, y0 - ny);
+        self.rect_verts.extend_from_slice(&[p0, p1, p2, p0, p2, p3]);
     }
 
     fn push_elevation_shadow(
@@ -1007,6 +1260,11 @@ impl GlesSurfaceRenderer {
         let (ax, ay) = if let Some(pos) = self.packer.allocate(w, h) {
             pos
         } else {
+            // Flush any already-queued text/rect/sprite batches before clearing the glyph atlas
+            // so earlier glyphs in the same frame are never corrupted (`RUSTYOS-169`).
+            if !self.batches.is_empty() || !self.text_verts.is_empty() {
+                self.flush_pending_batches(self.width, self.height);
+            }
             self.reset_glyph_atlas();
             self.packer.allocate(w, h)?
         };
@@ -1374,6 +1632,10 @@ impl Drop for GlesSurfaceRenderer {
             ) == egl_ffi::TRUE
             {
                 self.clear_sprite_cache();
+                if self.streaming_tex != 0 {
+                    self.gl
+                        .DeleteTextures(1, ptr::from_ref(&self.streaming_tex));
+                }
                 let bufs = [self.rect_vbo, self.text_vbo, self.sprite_vbo];
                 self.gl.DeleteBuffers(3, bufs.as_ptr());
                 self.gl.DeleteTextures(1, ptr::from_ref(&self.atlas_tex));
@@ -1389,6 +1651,71 @@ impl Drop for GlesSurfaceRenderer {
             if !self.dl_egl_handle.is_null() {
                 libc::dlclose(self.dl_egl_handle);
             }
+        }
+    }
+}
+
+fn clamp_damage_to_buffer(damage: Option<Rect>, buf_w: u32, buf_h: u32) -> (u32, u32, u32, u32) {
+    let Some(r) = damage else {
+        return (0, 0, buf_w, buf_h);
+    };
+    let x0 = r.x.max(0) as u32;
+    let y0 = r.y.max(0) as u32;
+    let x1 = (r.x.saturating_add(r.width as i32)).max(0) as u32;
+    let y1 = (r.y.saturating_add(r.height as i32)).max(0) as u32;
+    let cx0 = x0.min(buf_w);
+    let cy0 = y0.min(buf_h);
+    let cx1 = x1.min(buf_w);
+    let cy1 = y1.min(buf_h);
+    (cx0, cy0, cx1.saturating_sub(cx0), cy1.saturating_sub(cy0))
+}
+
+fn copy_bgra_region_into(
+    src: &[u8],
+    buf_w: u32,
+    dx: u32,
+    dy: u32,
+    dw: u32,
+    dh: u32,
+    out: &mut Vec<u8>,
+) {
+    let row_bytes = (dw as usize) * 4;
+    out.resize(row_bytes * (dh as usize), 0);
+    let stride = (buf_w as usize) * 4;
+    for row in 0..(dh as usize) {
+        let src_off = ((dy as usize) + row) * stride + (dx as usize) * 4;
+        let dst_off = row * row_bytes;
+        out[dst_off..dst_off + row_bytes].copy_from_slice(&src[src_off..src_off + row_bytes]);
+    }
+}
+
+fn swizzle_bgra_region_into(
+    src: &[u8],
+    buf_w: u32,
+    dx: u32,
+    dy: u32,
+    dw: u32,
+    dh: u32,
+    out: &mut Vec<u8>,
+) {
+    let row_bytes = (dw as usize) * 4;
+    out.resize(row_bytes * (dh as usize), 0);
+    let stride = (buf_w as usize) * 4;
+    for row in 0..(dh as usize) {
+        let src_off = ((dy as usize) + row) * stride + (dx as usize) * 4;
+        let dst_off = row * row_bytes;
+        let src_row = &src[src_off..src_off + row_bytes];
+        let dst_row = &mut out[dst_off..dst_off + row_bytes];
+        for (dst_px, src_px) in dst_row
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
+            .zip(src_row.as_chunks::<4>().0.iter())
+        {
+            dst_px[0] = src_px[2];
+            dst_px[1] = src_px[1];
+            dst_px[2] = src_px[0];
+            dst_px[3] = src_px[3];
         }
     }
 }
@@ -1719,3 +2046,36 @@ void main() {
     gl_FragColor = px;
 }
 ";
+
+#[cfg(test)]
+mod tests {
+    use super::{Rect, clamp_damage_to_buffer, copy_bgra_region_into, swizzle_bgra_region_into};
+
+    #[test]
+    fn clamps_damage_rect_to_buffer_bounds() {
+        assert_eq!(clamp_damage_to_buffer(None, 800, 600), (0, 0, 800, 600));
+        assert_eq!(
+            clamp_damage_to_buffer(Some(Rect::new(-10, 50, 100, 700)), 800, 600),
+            (0, 50, 90, 550)
+        );
+        assert_eq!(
+            clamp_damage_to_buffer(Some(Rect::new(900, 10, 50, 50)), 800, 600).2,
+            0
+        );
+    }
+
+    #[test]
+    fn copies_and_swizzles_bgra_subregion() {
+        // 2x2 BGRA buffer: (0,0)=[10,20,30,255], (1,0)=[1,2,3,255], (0,1)=[4,5,6,255], (1,1)=[7,8,9,255]
+        let bgra = [
+            10, 20, 30, 255, 1, 2, 3, 255, // row 0
+            4, 5, 6, 255, 7, 8, 9, 255, // row 1
+        ];
+        let mut scratch = Vec::new();
+        copy_bgra_region_into(&bgra, 2, 1, 0, 1, 2, &mut scratch);
+        assert_eq!(scratch, [1, 2, 3, 255, 7, 8, 9, 255]);
+
+        swizzle_bgra_region_into(&bgra, 2, 1, 0, 1, 2, &mut scratch);
+        assert_eq!(scratch, [3, 2, 1, 255, 9, 8, 7, 255]);
+    }
+}

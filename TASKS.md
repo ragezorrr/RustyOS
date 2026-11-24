@@ -2774,6 +2774,20 @@ hardware/software context и низкие накладные расходы.
   - `bash -n` по всем скриптам чисто; `cargo fmt --check` и `cargo clippy -D warnings` (0 предупреждений) по всем 5 пакетам; unit-тесты `240` (`rusty-compositor`), `75` (`rusty-services`), `28` (`rusty-files`), `15` (`rusty-installer`), `1` (`rusty-greeter`) — `359/359` passed; живой `--winit` Wayland Light/Dark прогон `rusty-files --save-file report.pdf` с 0 WARN/ERROR и визуально проверенным редактируемым полем имени.
 - **Risks:** Низкие; 0 новых Cargo-зависимостей, 0 `unsafe`, конфигурация хост-ОС не изменялась.
 
+### RUSTYOS-169 — Клиентский streaming GLES-презентер, HiDPI, исправления `rusty-terminal` и DnD в `rusty-files` (Фаза 2 аудита)
+- **Status:** Done
+- **Goal:** Устранить утечку VRAM и дефекты рендеринга/буфера обмена в `rusty-ui`, подключить целочисленный HiDPI `set_buffer_scale` в клиентских приложениях, закрыть баги вкладок/PTY/VT/поиска/`--no-gpu`/атласа в `rusty-terminal` и завершить внутренний/входящий DnD, групповые операции и `Ping`-пробуждение воркеров в `rusty-files` без новых Cargo-зависимостей.
+- **Dependencies:** `RUSTYOS-130`, `RUSTYOS-134`, `RUSTYOS-149`, `RUSTYOS-168`.
+- **Scope:**
+  - `crates/rusty-ui/src/{gpu_gles.rs, clipboard.rs}`: `present_bgra_frame` (streaming-текстура + partial damage + `buffer_scale`), повёрнутый `push_line_quad`, `flush_pending_batches` перед `reset_glyph_atlas`, неблокирующий `serve_send_request` и `.destroy()` старых `WlDataSource`.
+  - `apps/rusty-settings/src/wayland.rs`: переход на `present_bgra_frame` (с `DamageScope`) и HiDPI `scale_factor_changed` + `set_buffer_scale`.
+  - `apps/rusty-terminal/src/{state.rs, pty.rs, vt.rs, gpu_egl.rs, renderer_shm.rs, wayland.rs}`: вкладки без `StartInteractiveMove`, `kill_process_group(SIGHUP)` + фоновый reaper, `char_display_width` (0/1/2), `decode_percent_uri_path` для `OSC 7`, Unicode-поиск `search_scrollback`, панель поиска/подсветка/`'×'` в SHM, `last_window_title`, обнуление/пересборка глиф-атласа, неблокирующий clipboard и HiDPI `set_buffer_scale`.
+  - `apps/rusty-files/src/{wayland.rs, state/{mod.rs, navigation.rs, search.rs, clipboard.rs, input.rs}}`: `present_bgra_frame`, HiDPI `set_buffer_scale`, `resolve_drop_target_dir`, входящий `DataDeviceHandler` (`text/uri-list` + `parse_uri_list_paths`), сохранение мультивыделения при ПКМ, групповые `MoveToTrash`/`action_duplicate_selected`, `worker_ping` для всех воркеров и `active_archive_jobs` в `has_pending_jobs()`.
+  - `docs/adr/0098-client-gles-streaming-hidpi-terminal-and-files-dnd.md`, `DECISIONS.md` (`D-112`), `ARCHITECTURE.md` §7.
+- **Acceptance Criteria:**
+  - `cargo fmt --check`, `cargo clippy -p rusty-ui -p rusty-files -p rusty-settings -p rusty-terminal --tests -- -A clippy::map_unwrap_or -A clippy::needless_bool -D warnings` (0 предупреждений); `cargo test` (`16` `rusty-ui`, `28` `rusty-files`, `19` `rusty-settings`, `18` `rusty-terminal` — `81/81` passed); живой `--winit` Wayland Light/Dark прогон `rusty-files --light`, `rusty-settings --dark` и `rusty-terminal` с `0 WARN/ERROR` и визуально проверенными скриншотами.
+- **Risks:** Низкие; 0 новых Cargo-зависимостей, `unsafe` строго в существующих FFI-модулях (`gpu_gles.rs`, `gpu_egl.rs`).
+
 ## Правило добавления задач
 
 Каждая задача должна иметь ID, цель, scope, dependencies, acceptance

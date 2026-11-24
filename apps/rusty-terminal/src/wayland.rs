@@ -172,6 +172,9 @@ struct TerminalWaylandApp {
     configured: bool,
     initial_pty_spawned: bool,
     initial_title: Option<String>,
+    last_window_title: String,
+    buffer_scale: i32,
+    shm_scratch: Vec<u8>,
     frame_pending: bool,
     last_frame_sent: Instant,
     exit: bool,
@@ -276,6 +279,9 @@ pub(crate) fn run(opts: StartupOptions) -> Result<(), WaylandAppError> {
         configured: false,
         initial_pty_spawned: false,
         initial_title: opts.title,
+        last_window_title: String::new(),
+        buffer_scale: 1,
+        shm_scratch: Vec::new(),
         frame_pending: false,
         last_frame_sent: Instant::now(),
         exit: false,
@@ -391,12 +397,25 @@ impl TerminalWaylandApp {
         glass.commit();
     }
 
+    fn sync_window_title(&mut self) {
+        let title = self.app.active_tab().map_or_else(
+            || String::from("Terminal"),
+            super::state::TerminalTab::display_title,
+        );
+        if self.last_window_title != title {
+            self.window.set_title(&title);
+            self.last_window_title = title;
+        }
+    }
+
     fn draw(&mut self) {
         self.ensure_backend();
         self.sync_liquid_glass();
         let w = self.app.width;
         let h = self.app.height;
+        let scale = self.buffer_scale.max(1);
         let surf = self.window.wl_surface().clone();
+        surf.set_buffer_scale(scale);
 
         let fallback_needed = match self.backend.as_mut() {
             Some(RenderBackend::Gpu(gpu)) => {
@@ -404,29 +423,41 @@ impl TerminalWaylandApp {
                 surf.frame(&self.qh, surf.clone());
                 self.frame_pending = true;
                 self.last_frame_sent = Instant::now();
-                if let Err(err) = gpu.render(&self.app) {
+                if let Err(err) = gpu.render(&self.app, scale) {
                     tracing::warn!("GPU frame error ({err}); switching to wl_shm fallback");
                     true
                 } else {
                     self.app.damage = DamageLevel::None;
-                    let title = self.app.active_tab().map_or_else(
-                        || String::from("Terminal"),
-                        super::state::TerminalTab::display_title,
-                    );
-                    self.window.set_title(&title);
                     false
                 }
             }
             Some(RenderBackend::Shm { renderer, pool }) => {
-                let stride = w * 4;
+                let bw = w.saturating_mul(scale);
+                let bh = h.saturating_mul(scale);
+                let stride = bw * 4;
                 if let Ok((buffer, canvas)) =
-                    pool.create_buffer(w, h, stride, wl_shm::Format::Argb8888)
+                    pool.create_buffer(bw, bh, stride, wl_shm::Format::Argb8888)
                 {
-                    renderer.render(&self.app, canvas, w);
+                    if scale == 1 {
+                        renderer.render(&self.app, canvas, w);
+                    } else {
+                        let len = (w.max(1) as usize) * (h.max(1) as usize) * 4;
+                        if self.shm_scratch.len() != len {
+                            self.shm_scratch.resize(len, 0);
+                        }
+                        renderer.render(&self.app, &mut self.shm_scratch, w);
+                        blit_scale_bgra(
+                            &self.shm_scratch,
+                            w.max(1) as usize,
+                            h.max(1) as usize,
+                            canvas,
+                            scale as usize,
+                        );
+                    }
                     if let Err(err) = buffer.attach_to(&surf) {
                         tracing::warn!("SHM attach error: {err}");
                     } else {
-                        surf.damage_buffer(0, 0, w, h);
+                        surf.damage_buffer(0, 0, bw, bh);
                         surf.frame(&self.qh, surf.clone());
                         surf.commit();
                         self.frame_pending = true;
@@ -444,6 +475,8 @@ impl TerminalWaylandApp {
             self.force_shm = true;
             self.frame_pending = false;
             self.draw();
+        } else {
+            self.sync_window_title();
         }
     }
 
@@ -501,6 +534,9 @@ impl TerminalWaylandApp {
                 }
                 TerminalAction::CopyClipboard(text) | TerminalAction::CopyPrimary(text) => {
                     if let (Some(ddm), Some(dd)) = (&self.data_device_manager, &self.data_device) {
+                        for (old, _) in self.copy_sources.drain(..) {
+                            old.inner().destroy();
+                        }
                         let source =
                             ddm.create_copy_paste_source(&self.qh, CLIPBOARD_MIMES.iter().copied());
                         source.set_selection(dd, self.last_input_serial);
@@ -588,9 +624,15 @@ impl CompositorHandler for TerminalWaylandApp {
         &mut self,
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
-        _surface: &wl_surface::WlSurface,
-        _new_factor: i32,
+        surface: &wl_surface::WlSurface,
+        new_factor: i32,
     ) {
+        let scale = new_factor.max(1);
+        if self.window.wl_surface() == surface && self.buffer_scale != scale {
+            self.buffer_scale = scale;
+            surface.set_buffer_scale(scale);
+            self.app.mark_damage(DamageLevel::Full);
+        }
     }
 
     fn transform_changed(
@@ -1002,8 +1044,14 @@ impl DataSourceHandler for TerminalWaylandApp {
             return;
         }
         if let Some((_, text)) = self.copy_sources.iter().find(|(s, _)| s.inner() == source) {
-            let mut file = File::from(OwnedFd::from(write_pipe));
-            let _ = file.write_all(text.as_bytes());
+            let payload = text.as_bytes().to_vec();
+            let fd = OwnedFd::from(write_pipe);
+            let _ = std::thread::Builder::new()
+                .name(String::from("rusty-term-clip-send"))
+                .spawn(move || {
+                    let mut file = File::from(fd);
+                    let _ = file.write_all(&payload);
+                });
         }
     }
 
@@ -1103,6 +1151,24 @@ fn pick_clipboard_mime(mimes: &[String]) -> Option<String> {
                 })
                 .cloned()
         })
+}
+
+fn blit_scale_bgra(src: &[u8], src_w: usize, src_h: usize, dst: &mut [u8], scale: usize) {
+    let s = scale.max(1);
+    let dw = src_w * s;
+    for y in 0..src_h {
+        let src_row = &src[y * src_w * 4..(y + 1) * src_w * 4];
+        for sy in 0..s {
+            let dst_row_off = (y * s + sy) * dw * 4;
+            for x in 0..src_w {
+                let px = &src_row[x * 4..x * 4 + 4];
+                let dst_x = dst_row_off + x * s * 4;
+                for sx in 0..s {
+                    dst[dst_x + sx * 4..dst_x + sx * 4 + 4].copy_from_slice(px);
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]

@@ -129,6 +129,8 @@ pub(crate) struct FilesAppState {
     pub(crate) transfer_rx: mpsc::Receiver<TransferWorkerMsg>,
     pub(crate) archive_tx: mpsc::Sender<ArchiveJobResult>,
     pub(crate) archive_rx: mpsc::Receiver<ArchiveJobResult>,
+    pub(crate) active_archive_jobs: usize,
+    pub(crate) worker_ping: Option<smithay_client_toolkit::reexports::calloop::ping::Ping>,
 }
 
 impl FilesAppState {
@@ -263,6 +265,8 @@ impl FilesAppState {
             transfer_rx,
             archive_tx,
             archive_rx,
+            active_archive_jobs: 0,
+            worker_ping: None,
         };
 
         app.apply_startup_options(opts);
@@ -786,14 +790,19 @@ impl FilesAppState {
         };
         let name = path_display_title(&archive_path);
         self.status_message = Some(format!("Extracting {name}..."));
+        self.active_archive_jobs += 1;
         self.dirty = true;
         let tx = self.archive_tx.clone();
+        let ping = self.worker_ping.clone();
         std::thread::spawn(move || {
             let outcome = extract_archive_to_dir(&archive_path, &parent_dir, &name);
             let _ = tx.send(ArchiveJobResult {
                 target_dir: parent_dir,
                 outcome,
             });
+            if let Some(p) = ping {
+                p.ping();
+            }
         });
     }
 
@@ -813,14 +822,19 @@ impl FilesAppState {
         let zip_path = unique_zip_output_path(&parent_dir, &item_name);
         let zip_name = path_display_title(&zip_path);
         self.status_message = Some(format!("Compressing to {zip_name}..."));
+        self.active_archive_jobs += 1;
         self.dirty = true;
         let tx = self.archive_tx.clone();
+        let ping = self.worker_ping.clone();
         std::thread::spawn(move || {
             let outcome = compress_to_zip_archive(&parent_dir, &zip_path, &item_name, &zip_name);
             let _ = tx.send(ArchiveJobResult {
                 target_dir: parent_dir,
                 outcome,
             });
+            if let Some(p) = ping {
+                p.ping();
+            }
         });
     }
 }

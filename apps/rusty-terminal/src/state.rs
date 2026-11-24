@@ -560,8 +560,6 @@ impl TerminalAppState {
             HitTarget::NewTabButton => self.spawn_tab(None),
             HitTarget::Tab(idx) => {
                 self.select_tab(idx);
-                self.pending_actions
-                    .push(TerminalAction::StartInteractiveMove);
             }
             HitTarget::TabClose(idx) => self.close_tab(idx),
             HitTarget::HeaderDrag => {

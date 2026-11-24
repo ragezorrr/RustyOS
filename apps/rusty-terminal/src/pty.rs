@@ -15,8 +15,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread::{self, JoinHandle};
 
+use std::time::{Duration, Instant};
+
 use rustix::fs::{Mode, OFlags, fcntl_getfl, fcntl_setfl, open};
-use rustix::process::{ioctl_tiocsctty, setsid};
+use rustix::process::{Pid, Signal, ioctl_tiocsctty, kill_process_group, setsid};
 use rustix::pty::{OpenptFlags, grantpt, openpt, ptsname, unlockpt};
 use rustix::stdio::stdin;
 use rustix::termios::{Winsize, tcsetwinsize};
@@ -151,15 +153,40 @@ impl Drop for PtySession {
     fn drop(&mut self) {
         self.shutdown.store(true, Ordering::SeqCst);
         let _ = self.wake_tx.write(b"q");
-        if let Some(handle) = self.worker.take() {
-            let _ = handle.join();
+        let worker = self.worker.take();
+        let child_arc = Arc::clone(&self.child);
+        let pgid = child_arc
+            .lock()
+            .ok()
+            .and_then(|c| i32::try_from(c.id()).ok())
+            .and_then(Pid::from_raw);
+        if let Some(pgid) = pgid {
+            // Gracefully notify the foreground shell session group so shells flush history.
+            let _ = kill_process_group(pgid, Signal::HUP);
         }
-        if let Ok(mut child) = self.child.lock()
-            && child.try_wait().ok().flatten().is_none()
-        {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
+        // Reap worker and child off the UI thread so closing a tab never stalls Wayland dispatch.
+        let _ = thread::Builder::new()
+            .name(String::from("rusty-term-reaper"))
+            .spawn(move || {
+                if let Some(handle) = worker {
+                    let _ = handle.join();
+                }
+                let deadline = Instant::now() + Duration::from_millis(250);
+                if let Ok(mut child) = child_arc.lock() {
+                    loop {
+                        match child.try_wait() {
+                            Ok(Some(_)) | Err(_) => return,
+                            Ok(None) if Instant::now() >= deadline => break,
+                            Ok(None) => thread::sleep(Duration::from_millis(15)),
+                        }
+                    }
+                    if let Some(pgid) = pgid {
+                        let _ = kill_process_group(pgid, Signal::KILL);
+                    }
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+            });
     }
 }
 

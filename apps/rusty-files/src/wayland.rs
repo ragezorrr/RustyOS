@@ -2,8 +2,10 @@
 //! (`RUSTYOS-065`, ADR-0030).
 
 use std::fmt;
+use std::io::Read;
 use std::os::fd::OwnedFd;
-use std::sync::Arc;
+use std::path::PathBuf;
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use rusty_services::file_manager::ListingTarget;
@@ -195,6 +197,9 @@ struct WaylandClientData {
     data_device: Option<DataDevice>,
     clipboard: rusty_ui::WaylandClipboardBridge,
     active_dnd_source: Option<ActiveWaylandDragSource>,
+    incoming_dnd_pos: (f64, f64),
+    incoming_dnd_tx: mpsc::Sender<(Vec<PathBuf>, PathBuf, bool)>,
+    incoming_dnd_rx: mpsc::Receiver<(Vec<PathBuf>, PathBuf, bool)>,
     paste_ping: ping::Ping,
     last_input_serial: u32,
     xdg_shell: XdgShell,
@@ -206,7 +211,7 @@ struct WaylandClientData {
     gles: Option<rusty_ui::GlesSurfaceRenderer>,
     render_backend: RenderBackend,
     cpu_backbuf: Vec<u8>,
-    frame_rev: u64,
+    buffer_scale: i32,
     main_buffers: Vec<Buffer>,
     buffer_size: (u32, u32),
     frame_sent_at: Option<Instant>,
@@ -840,7 +845,15 @@ impl WaylandClientData {
 
         let (entry, dir) = match hit {
             Some(FilesHit::ColumnRow { col_idx, row_idx }) => {
-                self.app.select_entry(col_idx, row_idx, false);
+                let already_selected = self.app.active_column == col_idx
+                    && self
+                        .app
+                        .columns
+                        .get(col_idx)
+                        .is_some_and(|c| c.is_selected(row_idx));
+                if !already_selected {
+                    self.app.select_entry(col_idx, row_idx, false);
+                }
                 let e = self
                     .app
                     .columns
@@ -854,7 +867,14 @@ impl WaylandClientData {
                 | FilesHit::IconCell { idx: row_idx }
                 | FilesHit::GalleryThumb { idx: row_idx },
             ) => {
-                self.app.select_entry(0, row_idx, false);
+                let already_selected = self
+                    .app
+                    .columns
+                    .first()
+                    .is_some_and(|c| c.is_selected(row_idx));
+                if !already_selected {
+                    self.app.select_entry(0, row_idx, false);
+                }
                 let e = self
                     .app
                     .columns
@@ -1013,7 +1033,14 @@ impl WaylandClientData {
             PopupCommand::RunInTerminal(path) => {
                 self.app.action_run_in_terminal(&path);
             }
-            PopupCommand::MoveToTrash(entry) => self.app.trash_entry(&entry),
+            PopupCommand::MoveToTrash(entry) => {
+                let selected = self.app.selected_entries();
+                if selected.len() > 1 && selected.iter().any(|e| e.path == entry.path) {
+                    self.app.action_move_selected_to_trash();
+                } else {
+                    self.app.trash_entry(&entry);
+                }
+            }
             PopupCommand::RestoreEntry(entry) => self.app.restore_entry(&entry),
             PopupCommand::EmptyTrash => self.app.action_empty_trash(),
             PopupCommand::ToggleTag { path, color } => self.app.toggle_tag_on_path(&path, color),
@@ -1136,7 +1163,7 @@ pub(crate) fn run(options: &StartupOptions) -> Result<bool, WaylandAppError> {
         .map_err(|e| WaylandAppError::ShmPool(format!("{e:?}")))?;
 
     let locations = UserFileLocations::detect();
-    let app = FilesAppState::new(locations, options);
+    let mut app = FilesAppState::new(locations, options);
     let initial_title = app.window_title.clone();
 
     let surface = compositor_state.create_surface(&qh);
@@ -1158,6 +1185,8 @@ pub(crate) fn run(options: &StartupOptions) -> Result<bool, WaylandAppError> {
 
     let (paste_ping, paste_source) =
         ping::make_ping().map_err(|e| WaylandAppError::EventLoop(e.to_string()))?;
+    app.worker_ping = Some(paste_ping.clone());
+    let (incoming_dnd_tx, incoming_dnd_rx) = mpsc::channel();
     let mut event_loop: EventLoop<'static, WaylandClientData> =
         EventLoop::try_new().map_err(|e| WaylandAppError::EventLoop(e.to_string()))?;
     let loop_handle = event_loop.handle();
@@ -1183,6 +1212,9 @@ pub(crate) fn run(options: &StartupOptions) -> Result<bool, WaylandAppError> {
         data_device: None,
         clipboard: rusty_ui::WaylandClipboardBridge::new(),
         active_dnd_source: None,
+        incoming_dnd_pos: (0.0, 0.0),
+        incoming_dnd_tx,
+        incoming_dnd_rx,
         paste_ping,
         last_input_serial: 0,
         xdg_shell,
@@ -1194,7 +1226,7 @@ pub(crate) fn run(options: &StartupOptions) -> Result<bool, WaylandAppError> {
         gles: None,
         render_backend,
         cpu_backbuf: Vec::new(),
-        frame_rev: 0,
+        buffer_scale: 1,
         main_buffers: Vec::new(),
         buffer_size: (DEFAULT_WIDTH, DEFAULT_HEIGHT),
         frame_sent_at: None,
@@ -1305,6 +1337,26 @@ fn acquire_reusable_buffer(
     Ok(buffers.len() - 1)
 }
 
+fn blit_scale_bgra(src: &[u8], src_w: u32, src_h: u32, dst: &mut [u8], scale: u32) {
+    let sw = src_w as usize;
+    let sh = src_h as usize;
+    let s = scale.max(1) as usize;
+    let dw = sw * s;
+    for y in 0..sh {
+        let src_row = &src[y * sw * 4..(y + 1) * sw * 4];
+        for sy in 0..s {
+            let dst_row_off = (y * s + sy) * dw * 4;
+            for x in 0..sw {
+                let px = &src_row[x * 4..x * 4 + 4];
+                let dst_x = dst_row_off + x * s * 4;
+                for sx in 0..s {
+                    dst[dst_x + sx * 4..dst_x + sx * 4 + 4].copy_from_slice(px);
+                }
+            }
+        }
+    }
+}
+
 #[allow(clippy::cast_possible_wrap)]
 fn try_draw_files_gles(data: &mut WaylandClientData, layout: &FilesLayout, w: u32, h: u32) -> bool {
     if data.gles.is_none() {
@@ -1324,29 +1376,14 @@ fn try_draw_files_gles(data: &mut WaylandClientData, layout: &FilesLayout, w: u3
         false,
         sidebar_glass,
     );
-    data.frame_rev = data.frame_rev.wrapping_add(1);
-    let rev = data.frame_rev;
-    let pixels: Arc<[u8]> = Arc::from(data.cpu_backbuf.as_slice());
-    let mut dl = rusty_ui::UiDrawList::new();
-    {
-        let mut painter = rusty_ui::UiPainter::new(&mut dl);
-        painter.draw_image(
-            rusty_ui::Rect::new(0, 0, w, h),
-            rev,
-            w,
-            h,
-            pixels,
-            rusty_ui::PixelFormat::Bgra8888,
-        );
-    }
+    let scale = data.buffer_scale.max(1);
     if let Some(win) = &data.window {
+        win.wl_surface().set_buffer_scale(scale);
         win.set_window_geometry(0, 0, w, h);
         win.wl_surface().frame(&data.qh, win.wl_surface().clone());
     }
-    let wi = i32::try_from(w).unwrap_or(1);
-    let hi = i32::try_from(h).unwrap_or(1);
     let res = if let Some(gles) = &mut data.gles {
-        with_font_engine(|fe| gles.render_draw_list(&dl, fe, wi, hi, [0, 0, 0, 0]))
+        gles.present_bgra_frame(&data.cpu_backbuf, w, h, scale, None, [0, 0, 0, 0])
     } else {
         Ok(())
     };
@@ -1378,23 +1415,45 @@ fn draw_main_frame(data: &mut WaylandClientData) -> Result<(), WaylandAppError> 
     let Some(win) = &data.window else {
         return Ok(());
     };
-    if data.buffer_size != (w, h) {
+    let scale = data.buffer_scale.max(1);
+    let scale_u = u32::try_from(scale).unwrap_or(1);
+    let bw = w.saturating_mul(scale_u);
+    let bh = h.saturating_mul(scale_u);
+    if data.buffer_size != (bw, bh) {
         data.main_buffers.clear();
-        data.buffer_size = (w, h);
+        data.buffer_size = (bw, bh);
     }
-    let idx = acquire_reusable_buffer(&mut data.pool, &mut data.main_buffers, w, h)?;
+    let idx = acquire_reusable_buffer(&mut data.pool, &mut data.main_buffers, bw, bh)?;
     let buf_ref = &data.main_buffers[idx];
     let canvas = buf_ref
         .canvas(&mut data.pool)
         .ok_or_else(|| WaylandAppError::ShmPool(String::from("Main SHM slot unexpectedly busy")))?;
 
     let sidebar_glass = data.window_glass.is_some() && !data.app.reduce_transparency;
-    render_window_pixels_with_options(canvas, w, h, &data.app, &layout, false, sidebar_glass);
+    if scale_u == 1 {
+        render_window_pixels_with_options(canvas, w, h, &data.app, &layout, false, sidebar_glass);
+    } else {
+        let len = (w as usize) * (h as usize) * 4;
+        if data.cpu_backbuf.len() != len {
+            data.cpu_backbuf.resize(len, 0);
+        }
+        render_window_pixels_with_options(
+            &mut data.cpu_backbuf,
+            w,
+            h,
+            &data.app,
+            &layout,
+            false,
+            sidebar_glass,
+        );
+        blit_scale_bgra(&data.cpu_backbuf, w, h, canvas, scale_u);
+    }
+    win.wl_surface().set_buffer_scale(scale);
     win.set_window_geometry(0, 0, w, h);
     buf_ref
         .attach_to(win.wl_surface())
         .map_err(|e| WaylandAppError::ShmPool(format!("{e:?}")))?;
-    win.wl_surface().damage_buffer(0, 0, w as i32, h as i32);
+    win.wl_surface().damage_buffer(0, 0, bw as i32, bh as i32);
     win.wl_surface().frame(&data.qh, win.wl_surface().clone());
     win.commit();
     data.frame_sent_at = Some(Instant::now());
@@ -1496,9 +1555,20 @@ impl CompositorHandler for WaylandClientData {
         &mut self,
         _: &Connection,
         _: &QueueHandle<Self>,
-        _: &wl_surface::WlSurface,
-        _: i32,
+        surface: &wl_surface::WlSurface,
+        new_factor: i32,
     ) {
+        let scale = new_factor.max(1);
+        if self
+            .window
+            .as_ref()
+            .is_some_and(|w| w.wl_surface() == surface)
+            && self.buffer_scale != scale
+        {
+            self.buffer_scale = scale;
+            surface.set_buffer_scale(scale);
+            self.app.dirty = true;
+        }
     }
     fn transform_changed(
         &mut self,
@@ -1760,28 +1830,44 @@ impl PointerHandler for WaylandClientData {
                     if self.update_active_text_drag(px) {
                         self.apply_cursor_shape(CursorShape::Text);
                         self.app.dirty = true;
-                    } else if self.pointer_pressed
-                        && let Some(drag) = self.app.file_drag.as_mut()
-                    {
-                        drag.copy_mode = self.modifiers.ctrl;
-                        let is_active = drag.active;
-                        if drag.update_pos((px, py)) {
-                            self.app.dirty = true;
-                        }
+                    } else if self.pointer_pressed && self.app.file_drag.is_some() {
+                        let copy_mode = self.modifiers.ctrl;
                         let near_or_outside_edge = px <= 4.0
                             || py <= 4.0
                             || px >= f64::from(self.width) - 4.0
                             || py >= f64::from(self.height) - 4.0;
-                        if drag.active && near_or_outside_edge {
-                            let drag_sources = drag.sources.clone();
-                            if self.start_wayland_file_drag(&drag_sources) {
-                                self.app.file_drag = None;
-                                self.pointer_pressed = false;
+                        let mut drag_active = false;
+                        let mut start_external: Option<Vec<PathBuf>> = None;
+                        if let Some(drag) = self.app.file_drag.as_mut() {
+                            drag.copy_mode = copy_mode;
+                            if drag.update_pos((px, py)) {
                                 self.app.dirty = true;
-                                continue;
+                            }
+                            drag_active = drag.active;
+                            if drag.active && near_or_outside_edge {
+                                start_external = Some(drag.sources.clone());
                             }
                         }
-                        if is_active {
+                        if let Some(drag_sources) = start_external
+                            && self.start_wayland_file_drag(&drag_sources)
+                        {
+                            self.app.file_drag = None;
+                            self.pointer_pressed = false;
+                            self.app.dirty = true;
+                            continue;
+                        }
+                        if drag_active {
+                            let layout = compute_layout(&self.app, self.width, self.height);
+                            let hit = hit_test(&layout, px, py);
+                            let resolved = resolve_drop_target_dir(&self.app, hit.as_ref());
+                            if let Some(drag) = self.app.file_drag.as_mut() {
+                                let valid_target = resolved.filter(|d| drag.can_drop_on(d));
+                                if drag.target_dir != valid_target {
+                                    drag.target_dir = valid_target;
+                                    self.app.dirty = true;
+                                }
+                            }
+                            self.app.set_hovered_hit(hit);
                             self.apply_cursor_shape(CursorShape::Grabbing);
                         }
                     } else {
@@ -1884,6 +1970,9 @@ fn insert_files_sources(
                     data.app.dirty = true;
                 }
             }
+            while let Ok((sources, dest_dir, copy_mode)) = data.incoming_dnd_rx.try_recv() {
+                data.app.action_drop_paths(sources, dest_dir, copy_mode);
+            }
         })
         .map_err(|e| WaylandAppError::EventLoop(format!("{e:?}")))?;
     Ok(())
@@ -1949,20 +2038,29 @@ impl DataDeviceHandler for WaylandClientData {
         _: &Connection,
         _: &QueueHandle<Self>,
         _: &wl_data_device::WlDataDevice,
-        _: f64,
-        _: f64,
+        x: f64,
+        y: f64,
         _: &wl_surface::WlSurface,
     ) {
+        self.incoming_dnd_pos = (x, y);
+        self.accept_incoming_dnd_offer();
     }
-    fn leave(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_data_device::WlDataDevice) {}
+    fn leave(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_data_device::WlDataDevice) {
+        self.app.set_hovered_hit(None);
+    }
     fn motion(
         &mut self,
         _: &Connection,
         _: &QueueHandle<Self>,
         _: &wl_data_device::WlDataDevice,
-        _: f64,
-        _: f64,
+        x: f64,
+        y: f64,
     ) {
+        self.incoming_dnd_pos = (x, y);
+        let layout = compute_layout(&self.app, self.width, self.height);
+        let hit = hit_test(&layout, x, y);
+        self.app.set_hovered_hit(hit);
+        self.accept_incoming_dnd_offer();
     }
     fn selection(
         &mut self,
@@ -1977,7 +2075,143 @@ impl DataDeviceHandler for WaylandClientData {
         _: &QueueHandle<Self>,
         _: &wl_data_device::WlDataDevice,
     ) {
+        let Some(offer) = self
+            .data_device
+            .as_ref()
+            .and_then(|dd| dd.data().drag_offer())
+        else {
+            return;
+        };
+        let has_uri_list =
+            offer.with_mime_types(|mimes| mimes.iter().any(|m| m == "text/uri-list"));
+        if !has_uri_list {
+            return;
+        }
+        let layout = compute_layout(&self.app, self.width, self.height);
+        let hit = hit_test(&layout, self.incoming_dnd_pos.0, self.incoming_dnd_pos.1);
+        let Some(dest_dir) = resolve_drop_target_dir(&self.app, hit.as_ref())
+            .or_else(|| self.app.active_writable_directory())
+        else {
+            return;
+        };
+        let copy_mode = offer.selected_action != DndAction::Move;
+        let Ok(mut pipe) = offer.receive(String::from("text/uri-list")) else {
+            return;
+        };
+        offer.finish();
+        let tx = self.incoming_dnd_tx.clone();
+        let ping = self.paste_ping.clone();
+        let _ = std::thread::Builder::new()
+            .name(String::from("rusty-files-dnd-recv"))
+            .spawn(move || {
+                let mut buf = Vec::new();
+                let _ = pipe.by_ref().take(1024 * 1024).read_to_end(&mut buf);
+                let text = String::from_utf8_lossy(&buf);
+                let paths = parse_uri_list_paths(&text);
+                if !paths.is_empty() {
+                    let _ = tx.send((paths, dest_dir, copy_mode));
+                    ping.ping();
+                }
+            });
     }
+}
+
+impl WaylandClientData {
+    fn accept_incoming_dnd_offer(&self) {
+        let Some(offer) = self
+            .data_device
+            .as_ref()
+            .and_then(|dd| dd.data().drag_offer())
+        else {
+            return;
+        };
+        let has_uri_list =
+            offer.with_mime_types(|mimes| mimes.iter().any(|m| m == "text/uri-list"));
+        if has_uri_list {
+            offer.accept_mime_type(offer.serial, Some(String::from("text/uri-list")));
+            offer.set_actions(DndAction::Copy | DndAction::Move, DndAction::Copy);
+        } else {
+            offer.accept_mime_type(offer.serial, None);
+        }
+    }
+}
+
+pub(crate) fn resolve_drop_target_dir(
+    app: &FilesAppState,
+    hit: Option<&FilesHit>,
+) -> Option<PathBuf> {
+    match hit? {
+        FilesHit::ColumnRow { col_idx, row_idx } => app
+            .columns
+            .get(*col_idx)
+            .and_then(|c| c.visible_entries.get(*row_idx))
+            .filter(|e| e.is_navigable_dir())
+            .map(|e| e.path.clone()),
+        FilesHit::ListRow { row_idx }
+        | FilesHit::IconCell { idx: row_idx }
+        | FilesHit::GalleryThumb { idx: row_idx } => app
+            .columns
+            .first()
+            .and_then(|c| c.visible_entries.get(*row_idx))
+            .filter(|e| e.is_navigable_dir())
+            .map(|e| e.path.clone()),
+        FilesHit::SidebarItem(loc) => match app.locations.resolve_target(loc) {
+            ListingTarget::Directory(dir) => Some(dir),
+            _ => None,
+        },
+        FilesHit::PathCrumb(dir) => Some(dir.clone()),
+        FilesHit::ColumnEmpty { col_idx } => match app.columns.get(*col_idx).map(|c| &c.target) {
+            Some(ListingTarget::Directory(dir)) => Some(dir.clone()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+pub(crate) fn parse_uri_list_paths(raw: &str) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let Some(rest) = trimmed.strip_prefix("file://") else {
+            continue;
+        };
+        let path_part = if rest.starts_with('/') {
+            rest
+        } else if let Some((_, p)) = rest.split_once('/') {
+            // file://hostname/path -> strip host
+            &rest[rest.len() - p.len() - 1..]
+        } else {
+            continue;
+        };
+        let bytes = path_part.as_bytes();
+        let mut decoded = Vec::with_capacity(bytes.len());
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'%'
+                && i + 2 < bytes.len()
+                && let (Some(hi), Some(lo)) = (
+                    (bytes[i + 1] as char).to_digit(16),
+                    (bytes[i + 2] as char).to_digit(16),
+                )
+            {
+                if let Ok(byte) = u8::try_from((hi << 4) | lo) {
+                    decoded.push(byte);
+                }
+                i += 3;
+                continue;
+            }
+            decoded.push(bytes[i]);
+            i += 1;
+        }
+        let path_str = String::from_utf8_lossy(&decoded);
+        if path_str.starts_with('/') {
+            out.push(PathBuf::from(path_str.as_ref()));
+        }
+    }
+    out
 }
 
 impl DataOfferHandler for WaylandClientData {
@@ -2150,6 +2384,17 @@ mod tests {
         assert_eq!(
             encoded,
             "file:///home/alice/My%20Report%20%231.pdf\r\nfile:///tmp/notes.txt\r\n"
+        );
+        let decoded = super::parse_uri_list_paths(&format!(
+            "# comment\r\n{encoded}file://localhost/var/log/a%20b.log\r\n"
+        ));
+        assert_eq!(
+            decoded,
+            vec![
+                PathBuf::from("/home/alice/My Report #1.pdf"),
+                PathBuf::from("/tmp/notes.txt"),
+                PathBuf::from("/var/log/a b.log"),
+            ]
         );
     }
 }

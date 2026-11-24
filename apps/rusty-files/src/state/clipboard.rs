@@ -182,22 +182,21 @@ impl FilesAppState {
         self.start_background_transfer(clip.paths, dest_dir, clip.kind);
     }
 
-    /// Duplicates selected item in its parent folder (`Ctrl+D`).
+    /// Duplicates all selected items in their parent folder (`Ctrl+D`).
     pub(crate) fn action_duplicate_selected(&mut self) {
         self.popup = None;
-        if self.active_transfer.is_some() {
+        if self.active_transfer.is_some() || self.is_trash_view() {
             return;
         }
-        let Some(entry) = self.selected_entry().cloned() else {
-            return;
-        };
-        if self.is_trash_view() {
+        let selected = self.selected_entries();
+        if selected.is_empty() {
             return;
         }
-        let Some(dest_dir) = entry.path.parent().map(Path::to_path_buf) else {
+        let Some(dest_dir) = selected[0].path.parent().map(Path::to_path_buf) else {
             return;
         };
-        self.start_background_transfer(vec![entry.path], dest_dir, TransferKind::Copy);
+        let paths: Vec<PathBuf> = selected.into_iter().map(|e| e.path).collect();
+        self.start_background_transfer(paths, dest_dir, TransferKind::Copy);
     }
 
     /// Drops dragged file paths onto `dest_dir` via the background transfer worker (`RUSTYOS-134`).
@@ -250,6 +249,7 @@ impl FilesAppState {
             conflict: None,
         });
         let tx = self.transfer_tx.clone();
+        let ping = self.worker_ping.clone();
         thread::spawn(move || {
             let res = copy_or_move_with_progress(
                 &sources,
@@ -258,6 +258,9 @@ impl FilesAppState {
                 &cancel_flag,
                 |progress| {
                     let _ = tx.send(TransferWorkerMsg::Progress(progress.clone()));
+                    if let Some(p) = &ping {
+                        p.ping();
+                    }
                 },
                 |src, dst| {
                     let (reply_tx, reply_rx) = mpsc::sync_channel(1);
@@ -271,6 +274,9 @@ impl FilesAppState {
                     {
                         return TransferConflictDecision::Stop;
                     }
+                    if let Some(p) = &ping {
+                        p.ping();
+                    }
                     reply_rx.recv().unwrap_or(TransferConflictDecision::Stop)
                 },
             )
@@ -280,6 +286,9 @@ impl FilesAppState {
                 dest_dir,
                 result: res,
             });
+            if let Some(p) = ping {
+                p.ping();
+            }
         });
         self.dirty = true;
     }

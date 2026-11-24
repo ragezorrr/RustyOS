@@ -615,6 +615,7 @@ impl FilesAppState {
             || !self.pending_previews.is_empty()
             || self.pending_info_path.is_some()
             || self.active_transfer.is_some()
+            || self.active_archive_jobs > 0
     }
 
     #[must_use]

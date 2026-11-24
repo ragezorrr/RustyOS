@@ -2,7 +2,6 @@
 
 use std::fmt;
 use std::os::fd::OwnedFd;
-use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -158,7 +157,7 @@ struct SettingsClient {
     gles: Option<rusty_ui::GlesSurfaceRenderer>,
     render_backend: RenderBackend,
     cpu_backbuf: Vec<u8>,
-    frame_rev: u64,
+    buffer_scale: i32,
     buffers: Vec<Buffer>,
     buffer_size: (u32, u32),
     frame_sent_at: Option<Instant>,
@@ -731,7 +730,7 @@ pub(crate) fn run(opts: &StartupOptions) -> Result<(), WaylandAppError> {
         gles: None,
         render_backend,
         cpu_backbuf: Vec::new(),
-        frame_rev: 0,
+        buffer_scale: 1,
         buffers: Vec::new(),
         buffer_size: (DEFAULT_WIDTH, DEFAULT_HEIGHT),
         frame_sent_at: None,
@@ -890,6 +889,26 @@ fn damage_rect_for_scope(
     }
 }
 
+fn blit_scale_bgra(src: &[u8], src_w: u32, src_h: u32, dst: &mut [u8], scale: u32) {
+    let sw = src_w as usize;
+    let sh = src_h as usize;
+    let s = scale.max(1) as usize;
+    let dw = sw * s;
+    for y in 0..sh {
+        let src_row = &src[y * sw * 4..(y + 1) * sw * 4];
+        for sy in 0..s {
+            let dst_row_off = (y * s + sy) * dw * 4;
+            for x in 0..sw {
+                let px = &src_row[x * 4..x * 4 + 4];
+                let dst_x = dst_row_off + x * s * 4;
+                for sx in 0..s {
+                    dst[dst_x + sx * 4..dst_x + sx * 4 + 4].copy_from_slice(px);
+                }
+            }
+        }
+    }
+}
+
 #[allow(clippy::cast_possible_wrap)]
 fn try_draw_settings_gles(
     client: &mut SettingsClient,
@@ -914,35 +933,27 @@ fn try_draw_settings_gles(
         client.hover_hit.as_ref(),
         sidebar_glass,
     );
-    client.frame_rev = client.frame_rev.wrapping_add(1);
-    let rev = client.frame_rev;
-    let pixels: Arc<[u8]> = Arc::from(client.cpu_backbuf.as_slice());
-    let mut dl = rusty_ui::UiDrawList::new();
-    {
-        let mut painter = rusty_ui::UiPainter::new(&mut dl);
-        painter.draw_image(
-            rusty_ui::Rect::new(0, 0, w, h),
-            rev,
-            w,
-            h,
-            pixels,
-            rusty_ui::PixelFormat::Bgra8888,
-        );
-    }
+    let damage_scope = client.app.take_damage_scope();
+    let (dx, dy, dw, dh) = damage_rect_for_scope(damage_scope, layout, w, h);
+    let damage_rect = Some(rusty_ui::Rect::new(
+        dx.max(0),
+        dy.max(0),
+        u32::try_from(dw.max(0)).unwrap_or(0),
+        u32::try_from(dh.max(0)).unwrap_or(0),
+    ));
+    let scale = client.buffer_scale.max(1);
     if let Some(win) = &client.window {
+        win.wl_surface().set_buffer_scale(scale);
         win.set_window_geometry(0, 0, w, h);
         win.wl_surface().frame(&client.qh, win.wl_surface().clone());
     }
-    let wi = i32::try_from(w).unwrap_or(1);
-    let hi = i32::try_from(h).unwrap_or(1);
     let res = if let Some(gles) = &mut client.gles {
-        with_font_engine(|fe| gles.render_draw_list(&dl, fe, wi, hi, [0, 0, 0, 0]))
+        gles.present_bgra_frame(&client.cpu_backbuf, w, h, scale, damage_rect, [0, 0, 0, 0])
     } else {
         Ok(())
     };
     match res {
         Ok(()) => {
-            let _ = client.app.take_damage_scope();
             client.frame_sent_at = Some(Instant::now());
             true
         }
@@ -983,34 +994,61 @@ fn draw_frame(client: &mut SettingsClient) -> Result<(), WaylandAppError> {
     let Some(win) = &client.window else {
         return Ok(());
     };
-    if client.buffer_size != (w, h) {
+    let scale = client.buffer_scale.max(1);
+    let scale_u = u32::try_from(scale).unwrap_or(1);
+    let bw = w.saturating_mul(scale_u);
+    let bh = h.saturating_mul(scale_u);
+    if client.buffer_size != (bw, bh) {
         client.buffers.clear();
-        client.buffer_size = (w, h);
+        client.buffer_size = (bw, bh);
     }
-    let idx = acquire_reusable_buffer(&mut client.pool, &mut client.buffers, w, h)?;
+    let idx = acquire_reusable_buffer(&mut client.pool, &mut client.buffers, bw, bh)?;
     let buf_ref = &client.buffers[idx];
     let canvas = buf_ref
         .canvas(&mut client.pool)
         .ok_or_else(|| WaylandAppError::ShmPool(String::from("Settings SHM slot busy")))?;
 
     let sidebar_glass = client.window_glass.is_some() && !client.app.reduce_transparency;
-    render_window_pixels_with_glass(
-        canvas,
-        w,
-        h,
-        &client.app,
-        &layout,
-        client.hover_hit.as_ref(),
-        sidebar_glass,
-    );
+    if scale_u == 1 {
+        render_window_pixels_with_glass(
+            canvas,
+            w,
+            h,
+            &client.app,
+            &layout,
+            client.hover_hit.as_ref(),
+            sidebar_glass,
+        );
+    } else {
+        let len = (w as usize) * (h as usize) * 4;
+        if client.cpu_backbuf.len() != len {
+            client.cpu_backbuf.resize(len, 0);
+        }
+        render_window_pixels_with_glass(
+            &mut client.cpu_backbuf,
+            w,
+            h,
+            &client.app,
+            &layout,
+            client.hover_hit.as_ref(),
+            sidebar_glass,
+        );
+        blit_scale_bgra(&client.cpu_backbuf, w, h, canvas, scale_u);
+    }
     let damage_scope = client.app.take_damage_scope();
     let (dx, dy, dw, dh) = damage_rect_for_scope(damage_scope, &layout, w, h);
 
+    win.wl_surface().set_buffer_scale(scale);
     win.set_window_geometry(0, 0, w, h);
     buf_ref
         .attach_to(win.wl_surface())
         .map_err(|e| WaylandAppError::ShmPool(format!("{e:?}")))?;
-    win.wl_surface().damage_buffer(dx, dy, dw, dh);
+    win.wl_surface().damage_buffer(
+        dx.saturating_mul(scale),
+        dy.saturating_mul(scale),
+        dw.saturating_mul(scale),
+        dh.saturating_mul(scale),
+    );
     win.wl_surface().frame(&client.qh, win.wl_surface().clone());
     win.commit();
     client.frame_sent_at = Some(Instant::now());
@@ -1086,9 +1124,20 @@ impl CompositorHandler for SettingsClient {
         &mut self,
         _: &Connection,
         _: &QueueHandle<Self>,
-        _: &wl_surface::WlSurface,
-        _: i32,
+        surface: &wl_surface::WlSurface,
+        new_factor: i32,
     ) {
+        let scale = new_factor.max(1);
+        if self
+            .window
+            .as_ref()
+            .is_some_and(|w| w.wl_surface() == surface)
+            && self.buffer_scale != scale
+        {
+            self.buffer_scale = scale;
+            surface.set_buffer_scale(scale);
+            self.app.mark_dirty(DamageScope::Full);
+        }
     }
     fn transform_changed(
         &mut self,

@@ -369,7 +369,11 @@ impl TerminalEngine {
                 cells.len().saturating_sub(1)
             };
             if c0 <= c1 && c0 < cells.len() {
-                let mut line_str: String = cells[c0..=c1].iter().map(|c| c.ch).collect();
+                let mut line_str: String = cells[c0..=c1]
+                    .iter()
+                    .filter(|c| c.ch != '\0')
+                    .map(|c| c.ch)
+                    .collect();
                 while line_str.ends_with(' ') {
                     line_str.pop();
                 }
@@ -388,19 +392,30 @@ impl TerminalEngine {
         if needle.is_empty() {
             return Vec::new();
         }
-        let needle_lower = needle.to_ascii_lowercase();
+        let needle_lower = needle.to_lowercase();
         let total = self.total_lines();
         let mut matches = Vec::new();
         for abs_line in 0..total {
             let Some(cells) = self.row_cells(abs_line) else {
                 continue;
             };
-            let line_str: String = cells.iter().map(|c| c.ch).collect();
-            let lower = line_str.to_ascii_lowercase();
+            let mut lower = String::with_capacity(cells.len());
+            let mut byte_to_col: Vec<usize> = Vec::with_capacity(cells.len());
+            for (col, cell) in cells.iter().enumerate() {
+                if cell.ch == '\0' {
+                    continue;
+                }
+                for lc in cell.ch.to_lowercase() {
+                    let start_len = lower.len();
+                    lower.push(lc);
+                    byte_to_col.resize(lower.len(), col);
+                    debug_assert!(lower.len() > start_len);
+                }
+            }
             let mut offset = 0;
             while let Some(pos) = lower[offset..].find(&needle_lower) {
                 let byte_idx = offset + pos;
-                let col = line_str[..byte_idx].chars().count();
+                let col = byte_to_col.get(byte_idx).copied().unwrap_or(0);
                 matches.push(GridPoint { abs_line, col });
                 offset = byte_idx + needle_lower.len().max(1);
                 if matches.len() >= 2_000 {
@@ -599,9 +614,13 @@ impl TerminalEngine {
     }
 
     fn put_char(&mut self, ch: char) {
+        let width = char_display_width(ch);
+        if width == 0 {
+            return;
+        }
         let keep_sb = !self.modes.alt_screen;
         let s = self.active_screen_mut();
-        if s.cursor.pending_wrap {
+        if s.cursor.pending_wrap || (width == 2 && s.cursor.col + 1 >= s.cols && s.cols >= 2) {
             s.cursor.pending_wrap = false;
             s.cursor.col = 0;
             if s.cursor.row == s.scroll_bottom {
@@ -618,10 +637,19 @@ impl TerminalEngine {
             bg: s.cursor.bg,
             attrs: s.cursor.attrs,
         };
-        if s.cursor.col + 1 >= s.cols {
+        if width == 2 && c + 1 < s.cols {
+            s.lines[r][c + 1] = Cell {
+                ch: '\0',
+                fg: s.cursor.fg,
+                bg: s.cursor.bg,
+                attrs: s.cursor.attrs,
+            };
+        }
+        if s.cursor.col + width >= s.cols {
+            s.cursor.col = s.cols.saturating_sub(1);
             s.cursor.pending_wrap = true;
         } else {
-            s.cursor.col += 1;
+            s.cursor.col += width;
         }
     }
 
@@ -682,7 +710,7 @@ impl TerminalEngine {
                 if let Some(rest) = payload.trim().strip_prefix("file://")
                     && let Some((_, path)) = rest.split_once('/')
                 {
-                    let decoded = format!("/{path}");
+                    let decoded = decode_percent_uri_path(&format!("/{path}"));
                     self.cwd = Some(decoded);
                 }
             }
@@ -1125,6 +1153,79 @@ fn parse_extended_sgr_color(rest: &[u16]) -> Option<(TermColor, usize)> {
     None
 }
 
+/// Built-in terminal display width (`0`, `1`, or `2` columns) without external crates (`RUSTYOS-169`).
+#[must_use]
+pub(crate) fn char_display_width(ch: char) -> usize {
+    let cp = ch as u32;
+    if cp < 0x20 || (0x7F..=0x9F).contains(&cp) {
+        return 0;
+    }
+    if matches!(
+        cp,
+        0x0300..=0x036F
+            | 0x1AB0..=0x1AFF
+            | 0x1DC0..=0x1DFF
+            | 0x200B..=0x200F
+            | 0x202A..=0x202E
+            | 0x2060..=0x206F
+            | 0x20D0..=0x20FF
+            | 0xFE00..=0xFE0F
+            | 0xFE20..=0xFE2F
+            | 0xFEFF
+            | 0xE0100..=0xE01EF
+    ) {
+        return 0;
+    }
+    if matches!(
+        cp,
+        0x1100..=0x115F
+            | 0x2329..=0x232A
+            | 0x2E80..=0x303E
+            | 0x3040..=0xA4CF
+            | 0xAC00..=0xD7A3
+            | 0xF900..=0xFAFF
+            | 0xFE10..=0xFE19
+            | 0xFE30..=0xFE6F
+            | 0xFF00..=0xFF60
+            | 0xFFE0..=0xFFE6
+            | 0x1F300..=0x1FAFF
+            | 0x20000..=0x3FFFD
+    ) {
+        return 2;
+    }
+    1
+}
+
+/// Percent-decodes an `OSC 7` `file://` URI path (`%20`, UTF-8 sequences).
+#[must_use]
+pub(crate) fn decode_percent_uri_path(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let (Some(hi), Some(lo)) = (hex_nibble(bytes[i + 1]), hex_nibble(bytes[i + 2]))
+        {
+            out.push((hi << 4) | lo);
+            i += 3;
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+const fn hex_nibble(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
 const fn map_dec_special_graphics(ch: char) -> char {
     match ch {
         'j' => '┘',
@@ -1222,6 +1323,34 @@ mod tests {
         assert_eq!(vt.modes.cursor_style, CursorStyle::Underline);
         let _ = vt.process_bytes(b"\x1b[6 q");
         assert_eq!(vt.modes.cursor_style, CursorStyle::Bar);
+        Ok(())
+    }
+
+    #[test]
+    fn handles_wide_chars_combining_marks_osc7_percent_decode_and_unicode_search()
+    -> Result<(), &'static str> {
+        assert_eq!(char_display_width('a'), 1);
+        assert_eq!(char_display_width('\u{0301}'), 0);
+        assert_eq!(char_display_width('中'), 2);
+        assert_eq!(char_display_width('🚀'), 2);
+
+        let mut vt = TerminalEngine::new(20, 4);
+        let _ = vt.process_bytes("a\u{0301}中x\r\nПривет Мир".as_bytes());
+        let row0 = vt.row_cells(0).ok_or("row 0 missing")?;
+        assert_eq!(row0[0].ch, 'a');
+        assert_eq!(row0[1].ch, '中');
+        assert_eq!(row0[2].ch, '\0');
+        assert_eq!(row0[3].ch, 'x');
+
+        let matches = vt.search_scrollback("привет");
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].abs_line, 1);
+        assert_eq!(matches[0].col, 0);
+
+        let _ = vt.process_bytes(
+            b"\x1b]7;file://host/home/user/My%20Docs/%D0%9F%D1%80%D0%BE%D0%B5%D0%BA%D1%82\x07",
+        );
+        assert_eq!(vt.cwd.as_deref(), Some("/home/user/My Docs/Проект"));
         Ok(())
     }
 }

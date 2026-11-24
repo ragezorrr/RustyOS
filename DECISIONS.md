@@ -1314,6 +1314,17 @@
                            в `rusty-installer`; асинхронный `rusty-greeter` с `15 s` таймаутом; фиксы
                            `rustyos_installer_service.rs`, `rustyos-install.sh`, `install.sh`, `rustyos-session`
                            и `packaging/arch/{rustyos-greeter.sysusers, PKGBUILD}` (`0` новых крейтов, без `unsafe`)
+  D-112   2026-11-24  Accepted (ADR-0098)  Фаза 2 аудита (`RUSTYOS-169`): клиентский streaming GLES-презентер
+                           `GlesSurfaceRenderer::present_bgra_frame` (одна переиспользуемая `GL_BGRA_EXT`/swizzle
+                           текстура с частичным `glTexSubImage2D` по damage, без `Arc` клонирования и утечки VRAM),
+                           повёрнутый quad для диагональных линий в `push_line_quad`, flush перед `reset_glyph_atlas`,
+                           неблокирующий Wayland clipboard с `.destroy()` старых `WlDataSource`; целочисленный HiDPI
+                           `set_buffer_scale` в `rusty-files`, `rusty-settings` и `rusty-terminal`; в `rusty-terminal` —
+                           клик по вкладке без move, `killpg(SIGHUP)` + фоновый reaper, встроенная `char_display_width`
+                           (0/1/2), percent-decode `OSC 7`, Unicode-поиск, панель поиска/подсветка/`'×'` в `--no-gpu`,
+                           кэш заголовка окна и очистка глиф-атласа; в `rusty-files` — внутренний (`target_dir`) и
+                           входящий (`text/uri-list`) DnD, сохранение мультивыделения при ПКМ, групповые Duplicate/Trash
+                           и `Ping`-пробуждение всех фоновых воркеров (`0` новых Cargo-зависимостей)
   -----------------------------------------------------------------------
 
 ## Открытые решения

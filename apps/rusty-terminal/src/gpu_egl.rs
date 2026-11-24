@@ -173,6 +173,7 @@ pub(crate) struct GpuRenderer {
     atlas_tex: u32,
     packer: ShelfPacker,
     atlas_entries: HashMap<GlyphKey, Option<AtlasEntry>>,
+    atlas_reset_mid_frame: bool,
     rect_verts: Vec<RectVertex>,
     text_verts: Vec<TextVertex>,
     width: i32,
@@ -376,6 +377,7 @@ impl GpuRenderer {
             atlas_tex: tex,
             packer: ShelfPacker::new(ATLAS_SIZE, ATLAS_SIZE),
             atlas_entries: HashMap::with_capacity(512),
+            atlas_reset_mid_frame: false,
             rect_verts: Vec::with_capacity(2048),
             text_verts: Vec::with_capacity(4096),
             width,
@@ -394,7 +396,11 @@ impl GpuRenderer {
     }
 
     /// Renders complete RustyOS window + cells via 2 batched passes and presents via `eglSwapBuffers`.
-    pub(crate) fn render(&mut self, app: &TerminalAppState) -> Result<(), String> {
+    pub(crate) fn render(
+        &mut self,
+        app: &TerminalAppState,
+        buffer_scale: i32,
+    ) -> Result<(), String> {
         // SAFETY: Valid current EGL context.
         unsafe {
             if self.egl.MakeCurrent(
@@ -409,14 +415,25 @@ impl GpuRenderer {
         }
 
         let layout = app.layout();
-        self.resize(layout.win_w, layout.win_h);
+        let scale = buffer_scale.max(1);
+        let phys_w = layout.win_w.saturating_mul(scale);
+        let phys_h = layout.win_h.saturating_mul(scale);
+        self.resize(phys_w, phys_h);
         self.rect_verts.clear();
         self.text_verts.clear();
+        self.atlas_reset_mid_frame = false;
 
-        let (header_verts_end, chrome_text_start) = self.build_batches(app, &layout);
+        let (mut header_verts_end, mut chrome_text_start) = self.build_batches(app, &layout);
+        if self.atlas_reset_mid_frame {
+            // Re-emit once against the freshly cleared atlas so earlier glyphs have valid UVs.
+            self.rect_verts.clear();
+            self.text_verts.clear();
+            self.atlas_reset_mid_frame = false;
+            (header_verts_end, chrome_text_start) = self.build_batches(app, &layout);
+        }
 
         unsafe {
-            self.gl.Viewport(0, 0, layout.win_w, layout.win_h);
+            self.gl.Viewport(0, 0, phys_w, phys_h);
             self.gl.Disable(gl_ffi::SCISSOR_TEST);
             self.gl.Enable(gl_ffi::BLEND);
             self.gl.BlendFunc(gl_ffi::ONE, gl_ffi::ONE_MINUS_SRC_ALPHA);
@@ -430,9 +447,11 @@ impl GpuRenderer {
             self.gl.Enable(gl_ffi::SCISSOR_TEST);
             self.gl.Scissor(
                 0,
-                (layout.win_h - layout.header_rect.h).max(0),
-                layout.win_w.max(1),
-                layout.header_rect.h.max(1),
+                (layout.win_h - layout.header_rect.h)
+                    .max(0)
+                    .saturating_mul(scale),
+                layout.win_w.max(1).saturating_mul(scale),
+                layout.header_rect.h.max(1).saturating_mul(scale),
             );
             self.flush_rects(layout.win_w, layout.win_h, 6, header_verts_end);
             self.gl.Disable(gl_ffi::SCISSOR_TEST);
@@ -449,10 +468,10 @@ impl GpuRenderer {
             self.gl.Enable(gl_ffi::SCISSOR_TEST);
             let sc_y = layout.win_h - (layout.grid_rect.y + layout.grid_rect.h);
             self.gl.Scissor(
-                layout.grid_rect.x.max(0),
-                sc_y.max(0),
-                layout.grid_rect.w.max(1),
-                layout.grid_rect.h.max(1),
+                layout.grid_rect.x.max(0).saturating_mul(scale),
+                sc_y.max(0).saturating_mul(scale),
+                layout.grid_rect.w.max(1).saturating_mul(scale),
+                layout.grid_rect.h.max(1).saturating_mul(scale),
             );
             self.flush_text(layout.win_w, layout.win_h, 0, chrome_text_start);
             self.gl.Disable(gl_ffi::SCISSOR_TEST);
@@ -1153,6 +1172,26 @@ impl GpuRenderer {
         } else {
             self.packer.reset();
             self.atlas_entries.clear();
+            if !self.text_verts.is_empty() {
+                self.atlas_reset_mid_frame = true;
+            }
+            let zeros = vec![0u8; (ATLAS_SIZE * ATLAS_SIZE) as usize];
+            // SAFETY: Valid `atlas_tex` on current GLES2 context; `zeros` matches `ATLAS_SIZE^2`.
+            unsafe {
+                self.gl.BindTexture(gl_ffi::TEXTURE_2D, self.atlas_tex);
+                self.gl.PixelStorei(gl_ffi::UNPACK_ALIGNMENT, 1);
+                self.gl.TexImage2D(
+                    gl_ffi::TEXTURE_2D,
+                    0,
+                    gl_ffi::ALPHA as i32,
+                    ATLAS_SIZE as i32,
+                    ATLAS_SIZE as i32,
+                    0,
+                    gl_ffi::ALPHA,
+                    gl_ffi::UNSIGNED_BYTE,
+                    zeros.as_ptr().cast(),
+                );
+            }
             self.packer.allocate(glyph.width, glyph.height)?
         };
 

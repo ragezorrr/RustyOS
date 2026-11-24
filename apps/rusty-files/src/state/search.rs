@@ -61,6 +61,7 @@ impl FilesAppState {
 
     fn spawn_home_search_job(&mut self) {
         let tx = self.home_search_tx.clone();
+        let ping = self.worker_ping.clone();
         let gen_id = self.loader_gen;
         let root = self.locations.home.clone();
         let query = self.search_query.clone();
@@ -73,6 +74,9 @@ impl FilesAppState {
                 query,
                 entries,
             });
+            if let Some(p) = ping {
+                p.ping();
+            }
         });
     }
 
@@ -235,6 +239,7 @@ impl FilesAppState {
         let is_raster = is_supported_raster_name(&entry.name);
         self.pending_previews.insert(key.clone());
         let tx = self.preview_tx.clone();
+        let ping = self.worker_ping.clone();
         let path = entry.path.clone();
         thread::spawn(move || {
             let content = if is_raster {
@@ -245,6 +250,9 @@ impl FilesAppState {
                     .map_or(CachedPreview::Unavailable, CachedPreview::Text)
             };
             let _ = tx.send(PreviewJobResult { key, content });
+            if let Some(p) = ping {
+                p.ping();
+            }
         });
     }
 
@@ -256,11 +264,15 @@ impl FilesAppState {
         }
         self.pending_info_path = Some(path.to_path_buf());
         let tx = self.info_tx.clone();
+        let ping = self.worker_ping.clone();
         let target = path.to_path_buf();
         let locs = self.locations.clone();
         thread::spawn(move || {
             let info = inspect_entry_info(&target, &locs).map_err(|e| e.to_string());
             let _ = tx.send(InfoJobResult { path: target, info });
+            if let Some(p) = ping {
+                p.ping();
+            }
         });
     }
 

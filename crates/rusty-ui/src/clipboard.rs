@@ -109,11 +109,18 @@ impl WaylandClipboardBridge {
     }
 
     /// Registers a created Wayland data source with its payload for future `send_request` callbacks.
+    ///
+    /// Destroys any superseded selection sources so stale `WlDataSource` objects never accumulate
+    /// when a compositor declines `set_selection` (`RUSTYOS-169`).
     pub fn register_source(&mut self, source: wl_data_source::WlDataSource, text: String) {
+        for (old, _) in self.copy_sources.drain(..) {
+            old.destroy();
+        }
         self.copy_sources.push((source, text));
     }
 
-    /// Serves a `WlDataSource::Send` request on `write_fd` if `mime` is supported UTF-8 text.
+    /// Serves a `WlDataSource::Send` request on `write_fd` asynchronously on a background thread
+    /// so large payloads (`> 64 KiB`) or stalled receivers never freeze the UI event loop (`RUSTYOS-169`).
     pub fn serve_send_request(
         &self,
         source: &wl_data_source::WlDataSource,
@@ -128,8 +135,13 @@ impl WaylandClipboardBridge {
             .iter()
             .find(|(s, _)| s.id() == source.id())
         {
-            let mut file = File::from(write_fd);
-            let _ = file.write_all(text.as_bytes());
+            let payload = text.as_bytes().to_vec();
+            let _ = std::thread::Builder::new()
+                .name("rusty-ui-clip-send".to_owned())
+                .spawn(move || {
+                    let mut file = File::from(write_fd);
+                    let _ = file.write_all(&payload);
+                });
         }
     }
 

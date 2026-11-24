@@ -322,6 +322,7 @@ impl FilesAppState {
     fn poll_archive_jobs(&mut self) -> bool {
         let mut changed = false;
         while let Ok(job) = self.archive_rx.try_recv() {
+            self.active_archive_jobs = self.active_archive_jobs.saturating_sub(1);
             match job.outcome {
                 Ok(msg) => {
                     self.status_message = Some(msg);
@@ -339,6 +340,7 @@ impl FilesAppState {
 
     pub(crate) fn spawn_load_job(&self, col_idx: usize, target: ListingTarget) {
         let tx = self.result_tx.clone();
+        let ping = self.worker_ping.clone();
         let gen_id = self.loader_gen;
         let locations = self.locations.clone();
         let tags = self.tags_config.clone();
@@ -358,6 +360,9 @@ impl FilesAppState {
                 entries: res,
                 available_bytes,
             });
+            if let Some(p) = ping {
+                p.ping();
+            }
         });
     }
 
