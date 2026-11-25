@@ -2,6 +2,9 @@
 
 use std::path::PathBuf;
 use std::process::Command;
+use std::time::Duration;
+
+const STORAGE_CMD_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Removable/hotplug storage volume discovered for `rusty-files` Locations (`RUSTYOS-134`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -124,15 +127,14 @@ impl StorageService {
     /// Lists removable/hotplug volumes available to the user.
     #[must_use]
     pub fn list_removable_volumes() -> Vec<RemovableVolume> {
-        let Ok(output) = Command::new("lsblk")
-            .args([
-                "-P",
-                "-b",
-                "-o",
-                "NAME,LABEL,MOUNTPOINT,SIZE,RM,HOTPLUG,TYPE",
-            ])
-            .output()
-        else {
+        let mut cmd = Command::new("lsblk");
+        cmd.args([
+            "-P",
+            "-b",
+            "-o",
+            "NAME,LABEL,MOUNTPOINT,SIZE,RM,HOTPLUG,TYPE",
+        ]);
+        let Ok(output) = crate::run_command_bounded(&mut cmd, STORAGE_CMD_TIMEOUT) else {
             return Vec::new();
         };
         if !output.status.success() {
@@ -149,9 +151,9 @@ impl StorageService {
         if !is_valid_block_device_path(device) {
             return Err("invalid block device path".to_owned());
         }
-        let output = Command::new("udisksctl")
-            .args(["mount", "-b", device, "--no-user-interaction"])
-            .output()
+        let mut cmd = Command::new("udisksctl");
+        cmd.args(["mount", "-b", device, "--no-user-interaction"]);
+        let output = crate::run_command_bounded(&mut cmd, Duration::from_secs(20))
             .map_err(|err| format!("udisksctl unavailable: {err}"))?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();

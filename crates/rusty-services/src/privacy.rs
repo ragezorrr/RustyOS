@@ -58,7 +58,10 @@ impl DeviceUsageService {
     /// Returns an empty snapshot gracefully when PipeWire is unavailable.
     #[must_use]
     pub fn query_snapshot(&self) -> DeviceUsageSnapshot {
-        let Ok(output) = Command::new("pw-dump").arg("Node").output() else {
+        let Ok(output) = crate::run_command_bounded(
+            Command::new("pw-dump").arg("Node"),
+            std::time::Duration::from_secs(3),
+        ) else {
             return DeviceUsageSnapshot::default();
         };
         if !output.status.success() {

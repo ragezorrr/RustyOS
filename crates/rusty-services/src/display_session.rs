@@ -118,10 +118,11 @@ impl BrightnessService {
 
         // 3. Fallback to `brightnessctl`.
         let pct_arg = format!("{clamped}%");
-        Command::new("brightnessctl")
-            .args(["-d", &name, "set", &pct_arg])
-            .status()
-            .is_ok_and(|s| s.success())
+        crate::run_command_bounded(
+            Command::new("brightnessctl").args(["-d", &name, "set", &pct_arg]),
+            std::time::Duration::from_secs(3),
+        )
+        .is_ok_and(|out| out.status.success())
     }
 }
 
@@ -166,8 +167,10 @@ fn set_backlight_via_logind_dbus(device: &str, raw_value: u64) -> bool {
 /// Returns current local wall-clock time as `"HH:MM"` using system `date` (with UTC fallback).
 #[must_use]
 pub fn local_clock_hhmm() -> String {
-    if let Ok(output) = Command::new("date").arg("+%H:%M").output()
-        && output.status.success()
+    if let Ok(output) = crate::run_command_bounded(
+        Command::new("date").arg("+%H:%M"),
+        std::time::Duration::from_secs(2),
+    ) && output.status.success()
     {
         let text = String::from_utf8_lossy(&output.stdout).trim().to_owned();
         if text.len() == 5 && text.as_bytes().get(2) == Some(&b':') {
@@ -184,11 +187,11 @@ pub fn local_clock_hhmm() -> String {
 }
 
 fn run_c_locale_date(fmt_arg: &str, max_len: usize) -> Option<String> {
-    let output = Command::new("date")
-        .env("LC_ALL", "C")
-        .arg(fmt_arg)
-        .output()
-        .ok()?;
+    let output = crate::run_command_bounded(
+        Command::new("date").env("LC_ALL", "C").arg(fmt_arg),
+        std::time::Duration::from_secs(2),
+    )
+    .ok()?;
     if !output.status.success() {
         return None;
     }
@@ -619,30 +622,29 @@ impl SessionService {
         }
     }
 
+    fn run_systemctl_action(subcommand: &str) -> bool {
+        crate::run_command_bounded(
+            Command::new("systemctl").arg(subcommand),
+            std::time::Duration::from_secs(5),
+        )
+        .is_ok_and(|out| out.status.success())
+    }
+
     /// Requests system suspension (sleep) via logind.
     #[must_use]
     pub fn request_suspend(&self) -> bool {
-        Command::new("systemctl")
-            .arg("suspend")
-            .status()
-            .is_ok_and(|s| s.success())
+        Self::run_systemctl_action("suspend")
     }
 
     /// Requests system reboot via logind.
     #[must_use]
     pub fn request_reboot(&self) -> bool {
-        Command::new("systemctl")
-            .arg("reboot")
-            .status()
-            .is_ok_and(|s| s.success())
+        Self::run_systemctl_action("reboot")
     }
 
     /// Requests system poweroff via logind.
     #[must_use]
     pub fn request_poweroff(&self) -> bool {
-        Command::new("systemctl")
-            .arg("poweroff")
-            .status()
-            .is_ok_and(|s| s.success())
+        Self::run_systemctl_action("poweroff")
     }
 }

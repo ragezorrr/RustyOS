@@ -74,11 +74,10 @@ impl TimeDateService {
         if let Some(status) = query_timedate_via_dbus() {
             return status;
         }
-        if let Ok(out) = Command::new("timedatectl")
-            .arg("show")
-            .stdin(Stdio::null())
-            .output()
-            && out.status.success()
+        if let Ok(out) = crate::run_command_bounded(
+            Command::new("timedatectl").arg("show").stdin(Stdio::null()),
+            std::time::Duration::from_secs(5),
+        ) && out.status.success()
         {
             return parse_timedatectl_show(&String::from_utf8_lossy(&out.stdout));
         }
@@ -91,11 +90,12 @@ impl TimeDateService {
     /// Lists available IANA timezones via `timedatectl list-timezones` with a curated fallback.
     #[must_use]
     pub fn list_timezones(&self) -> Vec<String> {
-        if let Ok(out) = Command::new("timedatectl")
-            .arg("list-timezones")
-            .stdin(Stdio::null())
-            .output()
-            && out.status.success()
+        if let Ok(out) = crate::run_command_bounded(
+            Command::new("timedatectl")
+                .arg("list-timezones")
+                .stdin(Stdio::null()),
+            std::time::Duration::from_secs(5),
+        ) && out.status.success()
         {
             let zones: Vec<String> = String::from_utf8_lossy(&out.stdout)
                 .lines()
@@ -166,11 +166,13 @@ impl TimeDateService {
     /// Returns a diagnostic if the format is invalid, conversion fails, NTP is active, or Polkit denies.
     pub fn set_manual_datetime(&self, input: &str) -> Result<(), String> {
         let canonical = parse_manual_datetime_input(input)?;
-        let out = Command::new("date")
-            .args(["-d", &canonical, "+%s"])
-            .stdin(Stdio::null())
-            .output()
-            .map_err(|err| format!("Failed to convert local date/time: {err}"))?;
+        let out = crate::run_command_bounded(
+            Command::new("date")
+                .args(["-d", &canonical, "+%s"])
+                .stdin(Stdio::null()),
+            std::time::Duration::from_secs(5),
+        )
+        .map_err(|err| format!("Failed to convert local date/time: {err}"))?;
         if !out.status.success() {
             let err = String::from_utf8_lossy(&out.stderr).trim().to_owned();
             return Err(if err.is_empty() {

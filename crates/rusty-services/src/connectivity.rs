@@ -3,7 +3,8 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Command;
+use std::time::Duration;
 
 use zbus::zvariant::Value;
 
@@ -184,9 +185,9 @@ impl NetworkService {
             status.wifi_signal_percent = parse_proc_net_wireless_signal(&wireless, Some(iface));
         }
 
-        if let Ok(output) = Command::new("nmcli")
-            .args(["-t", "-f", "active,signal,ssid", "dev", "wifi"])
-            .output()
+        let mut wifi_cmd = Command::new("nmcli");
+        wifi_cmd.args(["-t", "-f", "active,signal,ssid", "dev", "wifi"]);
+        if let Ok(output) = crate::run_command_bounded(&mut wifi_cmd, Duration::from_secs(5))
             && output.status.success()
         {
             let text = String::from_utf8_lossy(&output.stdout);
@@ -361,13 +362,10 @@ impl NetworkService {
             return true;
         }
         let arg = if enabled { "on" } else { "off" };
-        Command::new("nmcli")
-            .args(["radio", "wifi", arg])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success())
+        let mut cmd = Command::new("nmcli");
+        cmd.args(["radio", "wifi", arg]);
+        crate::run_command_bounded(&mut cmd, Duration::from_secs(5))
+            .is_ok_and(|out| out.status.success())
     }
 }
 
@@ -560,10 +558,9 @@ pub fn parse_nmcli_wifi_list(
 }
 
 fn query_saved_wifi_ssids_nmcli() -> Vec<String> {
-    let Ok(output) = Command::new("nmcli")
-        .args(["-t", "-f", "NAME,TYPE", "connection", "show"])
-        .output()
-    else {
+    let mut cmd = Command::new("nmcli");
+    cmd.args(["-t", "-f", "NAME,TYPE", "connection", "show"]);
+    let Ok(output) = crate::run_command_bounded(&mut cmd, Duration::from_secs(5)) else {
         return Vec::new();
     };
     if !output.status.success() {
@@ -585,19 +582,23 @@ fn query_saved_wifi_ssids_nmcli() -> Vec<String> {
 
 fn list_wifi_networks_with_rescan(active_ssid: Option<&str>, rescan: bool) -> Vec<WifiAccessPoint> {
     let rescan_arg = if rescan { "yes" } else { "no" };
-    let Ok(output) = Command::new("nmcli")
-        .args([
-            "-t",
-            "-f",
-            "IN-USE,SSID,SIGNAL,SECURITY",
-            "dev",
-            "wifi",
-            "list",
-            "--rescan",
-            rescan_arg,
-        ])
-        .output()
-    else {
+    let mut cmd = Command::new("nmcli");
+    cmd.args([
+        "-t",
+        "-f",
+        "IN-USE,SSID,SIGNAL,SECURITY",
+        "dev",
+        "wifi",
+        "list",
+        "--rescan",
+        rescan_arg,
+    ]);
+    let timeout = if rescan {
+        Duration::from_secs(12)
+    } else {
+        Duration::from_secs(5)
+    };
+    let Ok(output) = crate::run_command_bounded(&mut cmd, timeout) else {
         return Vec::new();
     };
     if !output.status.success() {
@@ -1264,13 +1265,10 @@ fn remove_bluez_device_via_dbus(mac: &str) -> bool {
 }
 
 fn run_bluetoothctl(args: &[&str]) -> bool {
-    Command::new("bluetoothctl")
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success())
+    let mut cmd = Command::new("bluetoothctl");
+    cmd.args(args);
+    crate::run_command_bounded(&mut cmd, Duration::from_secs(5))
+        .is_ok_and(|out| out.status.success())
 }
 
 fn set_bluez_powered_via_dbus(powered: bool) -> bool {
@@ -1318,9 +1316,9 @@ fn query_bluetooth_snapshot_fallback() -> BluetoothSnapshot {
     if matches!(bluez_dbus_has_owner(), Some(false)) {
         return snap;
     }
-    if let Ok(output) = Command::new("bluetoothctl")
-        .args(["--timeout", "1", "show"])
-        .output()
+    let mut show_cmd = Command::new("bluetoothctl");
+    show_cmd.args(["--timeout", "1", "show"]);
+    if let Ok(output) = crate::run_command_bounded(&mut show_cmd, Duration::from_secs(4))
         && output.status.success()
     {
         let text = String::from_utf8_lossy(&output.stdout);
@@ -1338,9 +1336,9 @@ fn query_bluetooth_snapshot_fallback() -> BluetoothSnapshot {
                 }
             }
         }
-        if let Ok(devs_out) = Command::new("bluetoothctl")
-            .args(["--timeout", "1", "devices"])
-            .output()
+        let mut devs_cmd = Command::new("bluetoothctl");
+        devs_cmd.args(["--timeout", "1", "devices"]);
+        if let Ok(devs_out) = crate::run_command_bounded(&mut devs_cmd, Duration::from_secs(4))
             && devs_out.status.success()
         {
             snap.devices = parse_bluetoothctl_devices(&String::from_utf8_lossy(&devs_out.stdout));

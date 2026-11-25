@@ -2,7 +2,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::thread;
 
 /// Snapshot of RustyOS appearance settings synchronized to GTK 3/4 and `gsettings` (`RUSTYOS-135`).
@@ -316,12 +316,9 @@ fn apply_gsettings_best_effort(cfg: &ThemeSyncConfig) {
 }
 
 fn run_gsettings(args: &[&str]) {
-    let _ = Command::new("gsettings")
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+    let mut cmd = Command::new("gsettings");
+    cmd.args(args);
+    let _ = crate::run_command_bounded(&mut cmd, std::time::Duration::from_secs(3));
 }
 
 #[cfg(test)]

@@ -2,7 +2,6 @@
 
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 
 use zbus::zvariant::Value;
 
@@ -536,7 +535,9 @@ fn query_power_profiles() -> Option<(Option<PowerProfile>, Vec<PowerProfile>)> {
         return None;
     }
 
-    let out = Command::new("powerprofilesctl").arg("list").output().ok()?;
+    let mut cmd = std::process::Command::new("powerprofilesctl");
+    cmd.arg("list");
+    let out = crate::run_command_bounded(&mut cmd, std::time::Duration::from_secs(5)).ok()?;
     out.status
         .success()
         .then(|| parse_powerprofilesctl_list(&String::from_utf8_lossy(&out.stdout)))
@@ -574,10 +575,10 @@ fn set_power_profile_impl(profile: PowerProfile) -> bool {
         }
     }
 
-    Command::new("powerprofilesctl")
-        .args(["set", profile.as_str()])
-        .status()
-        .is_ok_and(|s| s.success())
+    let mut cmd = std::process::Command::new("powerprofilesctl");
+    cmd.args(["set", profile.as_str()]);
+    crate::run_command_bounded(&mut cmd, std::time::Duration::from_secs(5))
+        .is_ok_and(|out| out.status.success())
 }
 
 #[cfg(test)]

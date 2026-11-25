@@ -501,13 +501,9 @@ pub fn detect_local_pkgbuild_dir() -> Option<PathBuf> {
 }
 
 fn query_pacman_pkg_version(pkg: &str) -> Option<String> {
-    let out = Command::new("/usr/bin/pacman")
-        .args(["-Q", pkg])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
+    let mut cmd = Command::new("/usr/bin/pacman");
+    cmd.args(["-Q", pkg]);
+    let out = crate::run_command_bounded(&mut cmd, Duration::from_secs(5)).ok()?;
     if !out.status.success() {
         return None;
     }
@@ -923,12 +919,9 @@ impl UpdateTransactionHandle {
         if let Ok(guard) = self.child_pid.lock()
             && let Some(pid) = *guard
         {
-            let _ = Command::new("kill")
-                .args(["-TERM", &pid.to_string()])
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
+            let mut cmd = Command::new("kill");
+            cmd.args(["-TERM", &pid.to_string()]);
+            let _ = crate::run_command_bounded(&mut cmd, Duration::from_secs(3));
         }
     }
 }

@@ -152,44 +152,34 @@ impl AudioService {
         let mut status = AudioStatus::default();
 
         // 2. Try PipeWire's WirePlumber CLI: `wpctl get-volume @DEFAULT_AUDIO_SINK@`
-        if let Ok(output) = Command::new("wpctl")
-            .args(["get-volume", "@DEFAULT_AUDIO_SINK@"])
-            .output()
-            && output.status.success()
+        if let Some(text) = run_media_cmd_output("wpctl", &["get-volume", "@DEFAULT_AUDIO_SINK@"])
+            && let Some(rest) = text.strip_prefix("Volume:")
         {
-            let text = String::from_utf8_lossy(&output.stdout);
-            if let Some(rest) = text.strip_prefix("Volume:") {
-                let parts: Vec<&str> = rest.split_whitespace().collect();
-                if let Some(vol_str) = parts.first()
-                    && let Ok(vol_f) = vol_str.parse::<f32>()
+            let parts: Vec<&str> = rest.split_whitespace().collect();
+            if let Some(vol_str) = parts.first()
+                && let Ok(vol_f) = vol_str.parse::<f32>()
+            {
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
                 {
-                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                    {
-                        status.volume_percent = ((vol_f * 100.0).round() as u8).min(100);
-                    }
+                    status.volume_percent = ((vol_f * 100.0).round() as u8).min(100);
                 }
-                status.muted = text.contains("[MUTED]");
-                "wireplumber".clone_into(&mut status.backend);
-                status.outputs = self.list_outputs();
-                if let Some(def) = status
-                    .outputs
-                    .iter()
-                    .find(|o| o.is_default)
-                    .or_else(|| status.outputs.first())
-                {
-                    def.name.clone_into(&mut status.active_output_name);
-                }
-                return status;
             }
+            status.muted = text.contains("[MUTED]");
+            "wireplumber".clone_into(&mut status.backend);
+            status.outputs = self.list_outputs();
+            if let Some(def) = status
+                .outputs
+                .iter()
+                .find(|o| o.is_default)
+                .or_else(|| status.outputs.first())
+            {
+                def.name.clone_into(&mut status.active_output_name);
+            }
+            return status;
         }
 
         // 2. Fallback to `pactl get-sink-volume @DEFAULT_SINK@`
-        if let Ok(output) = Command::new("pactl")
-            .args(["get-sink-volume", "@DEFAULT_SINK@"])
-            .output()
-            && output.status.success()
-        {
-            let text = String::from_utf8_lossy(&output.stdout);
+        if let Some(text) = run_media_cmd_output("pactl", &["get-sink-volume", "@DEFAULT_SINK@"]) {
             if let Some(idx) = text.find('%') {
                 let prefix = &text[..idx];
                 if let Some(last_space) = prefix.rfind(' ')
@@ -216,31 +206,17 @@ impl AudioService {
     /// Lists available audio output sinks via `wpctl status` or `pactl list short sinks` (`RUSTYOS-156`).
     #[must_use]
     pub fn list_outputs(&self) -> Vec<AudioOutputDevice> {
-        if let Ok(output) = Command::new("wpctl").arg("status").output()
-            && output.status.success()
-        {
-            let text = String::from_utf8_lossy(&output.stdout);
+        if let Some(text) = run_media_cmd_output("wpctl", &["status"]) {
             let parsed = parse_wpctl_status_sinks(&text);
             if !parsed.is_empty() {
                 return parsed;
             }
         }
 
-        let default_sink = Command::new("pactl")
-            .arg("get-default-sink")
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map_or_else(String::new, |o| {
-                String::from_utf8_lossy(&o.stdout).trim().to_owned()
-            });
+        let default_sink = run_media_cmd_output("pactl", &["get-default-sink"])
+            .map_or_else(String::new, |s| s.trim().to_owned());
 
-        if let Ok(output) = Command::new("pactl")
-            .args(["list", "short", "sinks"])
-            .output()
-            && output.status.success()
-        {
-            let text = String::from_utf8_lossy(&output.stdout);
+        if let Some(text) = run_media_cmd_output("pactl", &["list", "short", "sinks"]) {
             let parsed = parse_pactl_short_sinks(&text, &default_sink);
             if !parsed.is_empty() {
                 return parsed;
@@ -265,17 +241,11 @@ impl AudioService {
             return true;
         }
         if trimmed.chars().all(|c| c.is_ascii_digit())
-            && Command::new("wpctl")
-                .args(["set-default", trimmed])
-                .status()
-                .is_ok_and(|s| s.success())
+            && run_media_cmd_status("wpctl", &["set-default", trimmed])
         {
             return true;
         }
-        Command::new("pactl")
-            .args(["set-default-sink", trimmed])
-            .status()
-            .is_ok_and(|s| s.success())
+        run_media_cmd_status("pactl", &["set-default-sink", trimmed])
     }
 
     /// Cycles to the next available audio output sink and returns the newly selected device (`RUSTYOS-156`).
@@ -300,13 +270,8 @@ impl AudioService {
     /// Ensures hardware ALSA mixer channels (`Master`, `Speaker`, `Headphone`, `PCM`) are unmuted
     /// on session startup so fresh Arch/RustyOS installations have working audio immediately (`RUSTYOS-156`).
     pub fn ensure_session_audio_ready(&self) {
-        use std::process::Stdio;
         for channel in ["Master", "Speaker", "Headphone", "PCM"] {
-            let _ = Command::new("amixer")
-                .args(["-q", "sset", channel, "unmute"])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
+            let _ = run_media_cmd_status("amixer", &["-q", "sset", channel, "unmute"]);
         }
     }
 
@@ -322,18 +287,11 @@ impl AudioService {
             return true;
         }
         let wpctl_arg = format_wpctl_volume(clamped);
-        if Command::new("wpctl")
-            .args(["set-volume", "@DEFAULT_AUDIO_SINK@", &wpctl_arg])
-            .status()
-            .is_ok_and(|s| s.success())
-        {
+        if run_media_cmd_status("wpctl", &["set-volume", "@DEFAULT_AUDIO_SINK@", &wpctl_arg]) {
             return true;
         }
         let pactl_arg = format!("{clamped}%");
-        Command::new("pactl")
-            .args(["set-sink-volume", "@DEFAULT_SINK@", &pactl_arg])
-            .status()
-            .is_ok_and(|s| s.success())
+        run_media_cmd_status("pactl", &["set-sink-volume", "@DEFAULT_SINK@", &pactl_arg])
     }
 
     /// Toggles master output mute via native PipeWire socket or `wpctl`/`pactl` fallbacks.
@@ -347,18 +305,27 @@ impl AudioService {
         }) {
             return toggled;
         }
-        if Command::new("wpctl")
-            .args(["set-mute", "@DEFAULT_AUDIO_SINK@", "toggle"])
-            .status()
-            .is_ok_and(|s| s.success())
-        {
+        if run_media_cmd_status("wpctl", &["set-mute", "@DEFAULT_AUDIO_SINK@", "toggle"]) {
             return true;
         }
-        Command::new("pactl")
-            .args(["set-sink-mute", "@DEFAULT_SINK@", "toggle"])
-            .status()
-            .is_ok_and(|s| s.success())
+        run_media_cmd_status("pactl", &["set-sink-mute", "@DEFAULT_SINK@", "toggle"])
     }
+}
+
+const MEDIA_CMD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
+fn run_media_cmd_output(program: &str, args: &[&str]) -> Option<String> {
+    let output =
+        crate::run_command_bounded(Command::new(program).args(args), MEDIA_CMD_TIMEOUT).ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn run_media_cmd_status(program: &str, args: &[&str]) -> bool {
+    crate::run_command_bounded(Command::new(program).args(args), MEDIA_CMD_TIMEOUT)
+        .is_ok_and(|out| out.status.success())
 }
 
 /// Media player control service interacting with MPRIS2 over Session D-Bus and `playerctl` (`RUSTYOS-031`).
@@ -378,12 +345,10 @@ impl MediaService {
         if let Some(status) = query_mpris_via_dbus() {
             return status;
         }
-        if let Ok(output) = Command::new("playerctl")
-            .args(["metadata", "--format", "{{status}}\t{{title}}\t{{artist}}"])
-            .output()
-            && output.status.success()
-        {
-            let text = String::from_utf8_lossy(&output.stdout);
+        if let Some(text) = run_media_cmd_output(
+            "playerctl",
+            &["metadata", "--format", "{{status}}\t{{title}}\t{{artist}}"],
+        ) {
             return parse_playerctl_status_line(&text);
         }
         MediaStatus::default()
@@ -401,10 +366,7 @@ impl MediaService {
             MediaAction::Previous => "previous",
             MediaAction::Stop => "stop",
         };
-        Command::new("playerctl")
-            .arg(arg)
-            .status()
-            .is_ok_and(|s| s.success())
+        run_media_cmd_status("playerctl", &[arg])
     }
 }
 
