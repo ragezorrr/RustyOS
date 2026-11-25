@@ -937,6 +937,7 @@ impl SettingsAppState {
     }
 
     #[must_use]
+    #[allow(dead_code)]
     pub(crate) fn take_damage_scope(&mut self) -> DamageScope {
         let scope = if self.dirty && self.damage_scope == DamageScope::None {
             DamageScope::Full
@@ -1426,6 +1427,7 @@ impl SettingsAppState {
         false
     }
 
+    #[allow(dead_code)]
     pub(crate) fn apply_search_paste(
         &mut self,
         text: &str,

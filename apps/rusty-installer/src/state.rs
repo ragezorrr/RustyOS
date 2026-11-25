@@ -532,10 +532,6 @@ impl InstallerAppState {
         st
     }
 
-    pub(crate) fn set_wake_ping(&mut self, ping: impl Fn() + Send + Sync + 'static) {
-        self.wake_ping = Some(Arc::new(ping));
-    }
-
     pub(crate) fn kick_initial_probes(&mut self) {
         if self.mode == WizardMode::Install && self.env_kind != RunEnv::Demo {
             self.spawn_disk_scan();

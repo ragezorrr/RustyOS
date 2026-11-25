@@ -376,6 +376,7 @@ impl SettingsAppState {
         true
     }
 
+    #[allow(dead_code)]
     pub(crate) fn handle_modal_paste(
         &mut self,
         text: &str,

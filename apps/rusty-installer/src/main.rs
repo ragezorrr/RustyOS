@@ -3,7 +3,6 @@
 
 mod disks;
 mod layout;
-pub(crate) use rusty_app::liquid_glass;
 mod render;
 mod state;
 mod wayland;

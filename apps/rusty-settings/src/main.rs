@@ -1,7 +1,6 @@
 //! Standalone Wayland CSD System Settings window (`RUSTYOS-103`).
 
 mod layout;
-pub(crate) use rusty_app::liquid_glass;
 mod render;
 mod state;
 mod svg_icons;

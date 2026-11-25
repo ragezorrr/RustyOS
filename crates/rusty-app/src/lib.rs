@@ -16,7 +16,8 @@ pub use app_menu::{
 };
 
 pub use host::{
-    AppConfig, AppContext, AppError, ConfigureInfo, RustyApp, WindowDecorationMode, run_app,
+    AppConfig, AppContext, AppError, ConfigureInfo, ResizeEdge, RustyApp, WindowDecorationMode,
+    run_app,
 };
 pub use liquid_glass::{
     GlassRegion, GlassStyle, LiquidGlassConfig, RustyosLiquidGlassManagerV1, RustyosSurfaceGlassV1,

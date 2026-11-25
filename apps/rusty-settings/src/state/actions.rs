@@ -754,6 +754,7 @@ impl SettingsAppState {
     }
 
     /// Updates connected Wayland outputs for per-output `Display` settings (`RUSTYOS-170`).
+    #[allow(dead_code)]
     pub(crate) fn sync_wayland_outputs(&mut self, names: Vec<String>) {
         let mut next = vec![String::from("All Displays")];
         for name in names {

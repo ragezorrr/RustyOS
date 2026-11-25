@@ -7,6 +7,7 @@ use rusty_ui::{
     GlesSurfaceRenderer, PixelFormat, UiCanvas, UiDrawList, UiFontEngine, UiPainter,
     render_draw_list_to_canvas,
 };
+pub use smithay_client_toolkit::reexports::protocols::xdg::shell::client::xdg_toplevel::ResizeEdge;
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState, Region},
     delegate_compositor, delegate_keyboard, delegate_output, delegate_pointer, delegate_registry,
@@ -76,6 +77,8 @@ pub struct AppConfig {
     pub decorations: WindowDecorationMode,
     /// Whether to start in fullscreen mode.
     pub fullscreen: bool,
+    /// Force CPU `wl_shm` rendering even when GLES2 is available.
+    pub no_gpu: bool,
     /// Optional initial Liquid Glass backdrop configuration.
     pub glass: Option<LiquidGlassConfig>,
 }
@@ -95,6 +98,7 @@ impl AppConfig {
             min_size: None,
             decorations: WindowDecorationMode::Client,
             fullscreen: false,
+            no_gpu: false,
             glass: None,
         }
     }
@@ -117,6 +121,13 @@ impl AppConfig {
     #[must_use]
     pub const fn with_fullscreen(mut self, fullscreen: bool) -> Self {
         self.fullscreen = fullscreen;
+        self
+    }
+
+    /// Forces CPU `wl_shm` rendering instead of GLES2 when `no_gpu` is `true`.
+    #[must_use]
+    pub const fn with_no_gpu(mut self, no_gpu: bool) -> Self {
+        self.no_gpu = no_gpu;
         self
     }
 
@@ -189,6 +200,7 @@ pub struct AppContext<'a> {
     desired_menu: &'a mut Option<Vec<AppMenuSectionSpec>>,
     menu_dirty: &'a mut bool,
     gpu_active: bool,
+    has_glass: bool,
 }
 
 impl fmt::Debug for AppContext<'_> {
@@ -231,6 +243,12 @@ impl AppContext<'_> {
     #[must_use]
     pub const fn is_gpu_accelerated(&self) -> bool {
         self.gpu_active
+    }
+
+    /// Returns `true` when the compositor advertised `rustyos_liquid_glass_v1` for this window.
+    #[must_use]
+    pub const fn has_liquid_glass(&self) -> bool {
+        self.has_glass
     }
 
     /// Mutable access to the shared [`UiFontEngine`] for text measurement/editing.
@@ -276,6 +294,13 @@ impl AppContext<'_> {
     pub fn start_interactive_move(&mut self, serial: u32) {
         if let Some(seat) = self.seat {
             self.window.move_(seat, serial);
+        }
+    }
+
+    /// Initiates an interactive compositor window resize along `edge` using `serial`.
+    pub fn start_interactive_resize(&mut self, edge: ResizeEdge, serial: u32) {
+        if let Some(seat) = self.seat {
+            self.window.resize(seat, serial, edge);
         }
     }
 
@@ -348,6 +373,20 @@ pub trait RustyApp {
         width: u32,
         height: u32,
     );
+
+    /// Optional direct premultiplied `BGRA8888` pixel-buffer paint callback.
+    ///
+    /// Return `true` when `canvas_bgra` (`width * height * 4` bytes) was populated
+    /// and should be presented directly instead of calling [`Self::paint`].
+    fn paint_bgra(
+        &mut self,
+        _canvas_bgra: &mut [u8],
+        _width: u32,
+        _height: u32,
+        _has_glass: bool,
+    ) -> bool {
+        false
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -392,6 +431,7 @@ struct HostState {
     last_title: String,
     fonts: UiFontEngine,
     draw_list: UiDrawList,
+    bgra_backbuf: Vec<u8>,
     app: Box<dyn RustyApp>,
 }
 
@@ -421,6 +461,7 @@ impl HostState {
             desired_menu: &mut self.desired_menu,
             menu_dirty: &mut self.menu_dirty,
             gpu_active: self.gles.is_some(),
+            has_glass: self.surface_glass.is_some(),
         };
         f(&mut *self.app, &mut ctx)
     }
@@ -540,8 +581,16 @@ impl HostState {
 
         self.sync_liquid_glass();
         self.sync_app_menu();
-        self.draw_list.clear();
-        {
+
+        let expected_len = (w as usize).saturating_mul(h as usize).saturating_mul(4);
+        if self.bgra_backbuf.len() != expected_len {
+            self.bgra_backbuf.resize(expected_len, 0);
+        }
+        let has_glass = self.surface_glass.is_some();
+        let used_bgra = self.app.paint_bgra(&mut self.bgra_backbuf, w, h, has_glass);
+
+        if !used_bgra {
+            self.draw_list.clear();
             let mut painter = UiPainter::new(&mut self.draw_list);
             self.app.paint(&mut painter, &mut self.fonts, w, h);
         }
@@ -552,15 +601,14 @@ impl HostState {
         let scale = self.scale_factor.max(1);
 
         if let Some(gles) = self.gles.as_mut() {
-            surf.set_buffer_scale(scale);
-            match gles.render_draw_list_scaled(
-                &self.draw_list,
-                &mut self.fonts,
-                wi,
-                hi,
-                scale,
-                clear,
-            ) {
+            let res = if used_bgra {
+                surf.set_buffer_scale(1);
+                gles.present_bgra_frame(&self.bgra_backbuf, w, h, 1, None, clear)
+            } else {
+                surf.set_buffer_scale(scale);
+                gles.render_draw_list_scaled(&self.draw_list, &mut self.fonts, wi, hi, scale, clear)
+            };
+            match res {
                 Ok(()) => {
                     self.frame_pending = true;
                     self.dirty = false;
@@ -584,10 +632,15 @@ impl HostState {
             return;
         };
 
-        let stride_usize = usize::try_from(stride).unwrap_or(0);
-        let mut canvas = UiCanvas::new(canvas_bytes, w, h, stride_usize, PixelFormat::Bgra8888);
-        canvas.clear(clear);
-        render_draw_list_to_canvas(&self.draw_list, &mut canvas, &mut self.fonts);
+        if used_bgra {
+            let copy_len = canvas_bytes.len().min(self.bgra_backbuf.len());
+            canvas_bytes[..copy_len].copy_from_slice(&self.bgra_backbuf[..copy_len]);
+        } else {
+            let stride_usize = usize::try_from(stride).unwrap_or(0);
+            let mut canvas = UiCanvas::new(canvas_bytes, w, h, stride_usize, PixelFormat::Bgra8888);
+            canvas.clear(clear);
+            render_draw_list_to_canvas(&self.draw_list, &mut canvas, &mut self.fonts);
+        }
 
         surf.damage_buffer(0, 0, wi, hi);
         let _ = buffer.attach_to(surf);
@@ -975,7 +1028,11 @@ pub fn run_app<A: RustyApp + 'static>(config: AppConfig, app: A) -> Result<(), A
         desired_menu: None,
         menu_dirty: false,
         gles: None,
-        render_backend: RenderBackend::Gpu,
+        render_backend: if config.no_gpu {
+            RenderBackend::Cpu
+        } else {
+            RenderBackend::Gpu
+        },
         min_size: config.min_size,
         default_size: (init_w, init_h),
         width: init_w,
@@ -993,6 +1050,7 @@ pub fn run_app<A: RustyApp + 'static>(config: AppConfig, app: A) -> Result<(), A
         last_title: config.title,
         fonts: UiFontEngine::new(),
         draw_list: UiDrawList::new(),
+        bgra_backbuf: Vec::new(),
         app: Box::new(app),
     };
 
