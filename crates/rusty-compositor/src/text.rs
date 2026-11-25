@@ -58,6 +58,7 @@ struct CachedLabelVariant {
     size_tenths: u16,
     color: [u8; 4],
     weight: FontWeight,
+    buffer_scale: i32,
     buffer: MemoryRenderBuffer,
     last_frame: u64,
 }
@@ -104,6 +105,7 @@ pub struct TextCache {
     fonts: &'static LoadedFonts,
     buffers: HashMap<String, Vec<CachedLabelVariant>>,
     frame_counter: u64,
+    active_scale: i32,
 }
 
 impl fmt::Debug for TextCache {
@@ -114,6 +116,7 @@ impl fmt::Debug for TextCache {
             .field("bold_font_loaded", &self.fonts.bold.is_some())
             .field("cached_labels", &variant_count)
             .field("frame_counter", &self.frame_counter)
+            .field("active_scale", &self.active_scale)
             .finish()
     }
 }
@@ -132,7 +135,14 @@ impl TextCache {
             fonts: shared_fonts(),
             buffers: HashMap::new(),
             frame_counter: 0,
+            active_scale: 1,
         }
+    }
+
+    /// Sets the integer backing scale (`1..=4`) used to rasterize labels sharply on `HiDPI` outputs.
+    #[allow(clippy::cast_possible_truncation)]
+    pub fn set_active_scale(&mut self, scale: f64) {
+        self.active_scale = scale.ceil().clamp(1.0, 4.0) as i32;
     }
 
     /// Advances the cache frame generation and prunes stale glyph buffers (`RUSTYOS-119`).
@@ -231,17 +241,21 @@ impl TextCache {
             return None;
         }
         let size_tenths = size_tenths_key(size_px);
+        let buffer_scale = self.active_scale.clamp(1, 4);
         let frame = self.frame_counter;
         if let Some(vars) = self.buffers.get_mut(text)
-            && let Some(v) = vars
-                .iter_mut()
-                .find(|v| v.size_tenths == size_tenths && v.color == rgba && v.weight == weight)
+            && let Some(v) = vars.iter_mut().find(|v| {
+                v.size_tenths == size_tenths
+                    && v.color == rgba
+                    && v.weight == weight
+                    && v.buffer_scale == buffer_scale
+            })
         {
             v.last_frame = frame;
             return element_from_label_buffer(renderer, &v.buffer, loc);
         }
 
-        let buf = self.rasterize_and_cache_label(text, weight, size_px, rgba)?;
+        let buf = self.rasterize_and_cache_label(text, weight, size_px, rgba, buffer_scale)?;
         element_from_label_buffer(renderer, buf, loc)
     }
 
@@ -251,16 +265,19 @@ impl TextCache {
         weight: FontWeight,
         size_px: f32,
         rgba: [u8; 4],
+        buffer_scale: i32,
     ) -> Option<&MemoryRenderBuffer> {
         let font = self.font_for_weight(weight)?;
         let metric_font = self.fonts.regular.as_ref().unwrap_or(font);
-        let (buffer, _size) = rasterize_label_buffer(font, metric_font, text, size_px, rgba)?;
+        let (buffer, _size) =
+            rasterize_label_buffer(font, metric_font, text, size_px, rgba, buffer_scale)?;
         let frame = self.frame_counter;
         let vars = self.buffers.entry(text.to_owned()).or_default();
         vars.push(CachedLabelVariant {
             size_tenths: size_tenths_key(size_px),
             color: rgba,
             weight,
+            buffer_scale,
             buffer,
             last_frame: frame,
         });
@@ -270,16 +287,20 @@ impl TextCache {
     #[cfg(test)]
     fn cache_or_touch_for_test(&mut self, text: &str, size_px: f32, rgba: [u8; 4]) -> bool {
         let size_tenths = size_tenths_key(size_px);
+        let buffer_scale = self.active_scale.clamp(1, 4);
         let frame = self.frame_counter;
         if let Some(vars) = self.buffers.get_mut(text)
             && let Some(v) = vars.iter_mut().find(|v| {
-                v.size_tenths == size_tenths && v.color == rgba && v.weight == FontWeight::Regular
+                v.size_tenths == size_tenths
+                    && v.color == rgba
+                    && v.weight == FontWeight::Regular
+                    && v.buffer_scale == buffer_scale
             })
         {
             v.last_frame = frame;
             return true;
         }
-        self.rasterize_and_cache_label(text, FontWeight::Regular, size_px, rgba)
+        self.rasterize_and_cache_label(text, FontWeight::Regular, size_px, rgba, buffer_scale)
             .is_some()
     }
 
@@ -382,26 +403,32 @@ fn rasterize_label_buffer(
     text: &str,
     size_px: f32,
     rgba: [u8; 4],
+    buffer_scale: i32,
 ) -> Option<(MemoryRenderBuffer, Size<i32, Logical>)> {
-    let line_metrics = metric_font.horizontal_line_metrics(size_px);
-    let ascent = line_metrics.map_or(size_px * 0.8, |m| m.ascent);
-    let descent = line_metrics.map_or(-size_px * 0.2, |m| m.descent);
-    let height = ((ascent - descent).ceil().max(size_px) as i32 + 2).max(1);
-    let baseline_y = ascent.ceil() + 1.0;
+    let scale_i = buffer_scale.clamp(1, 4);
+    let scale_f = scale_i as f32;
+    let scaled_px = size_px * scale_f;
+    let line_metrics = metric_font.horizontal_line_metrics(scaled_px);
+    let ascent = line_metrics.map_or(scaled_px * 0.8, |m| m.ascent);
+    let descent = line_metrics.map_or(-scaled_px * 0.2, |m| m.descent);
+    let raw_height = ((ascent - descent).ceil().max(scaled_px) as i32 + 2 * scale_i).max(scale_i);
+    let height = ((raw_height + scale_i - 1) / scale_i) * scale_i;
+    let baseline_y = ascent.ceil() + scale_f;
 
     let mut glyphs = Vec::with_capacity(text.len());
-    let mut cursor_x = 1.0f32;
+    let mut cursor_x = scale_f;
     for ch in text.chars() {
-        let (metrics, bitmap) = font.rasterize(ch, size_px);
+        let (metrics, bitmap) = font.rasterize(ch, scaled_px);
         glyphs.push((cursor_x, metrics, bitmap));
         cursor_x += metrics.advance_width;
     }
 
-    let width = (cursor_x.ceil() as i32 + 2).max(1);
+    let raw_width = (cursor_x.ceil() as i32 + scale_i).max(scale_i);
+    let width = ((raw_width + scale_i - 1) / scale_i) * scale_i;
     let mut mem_buf = MemoryRenderBuffer::new(
         Fourcc::Argb8888,
         (width, height),
-        1,
+        scale_i,
         Transform::Normal,
         None,
     );
@@ -528,5 +555,23 @@ mod tests {
         }
         assert_eq!(cache.cached_variant_count(), 1);
         assert!(cache.buffers.contains_key("Active Dock Label"));
+    }
+
+    #[test]
+    fn text_cache_rasterizes_distinct_hidpi_variants_by_scale() {
+        let mut cache = TextCache::new();
+        let white = [255, 255, 255, 255];
+
+        cache.set_active_scale(1.0);
+        assert!(cache.cache_or_touch_for_test("HiDPI Label", 14.0, white));
+        assert_eq!(cache.cached_variant_count(), 1);
+
+        cache.set_active_scale(2.0);
+        assert!(cache.cache_or_touch_for_test("HiDPI Label", 14.0, white));
+        assert_eq!(cache.cached_variant_count(), 2);
+
+        assert!(cache.buffers.get("HiDPI Label").is_some_and(|vars| {
+            vars.iter().any(|v| v.buffer_scale == 1) && vars.iter().any(|v| v.buffer_scale == 2)
+        }));
     }
 }

@@ -562,7 +562,8 @@ fn build_backdrop_render_elements(
                 .smithay_window_for_id(win_id)
                 .and_then(|sw| {
                     smithay::wayland::seat::WaylandFocus::wl_surface(&sw).map(|s| {
-                        crate::state::liquid_glass::surface_liquid_glass_state(&s).is_some()
+                        crate::state::liquid_glass::surface_liquid_glass_state(&s)
+                            .is_some_and(|g| g.has_effective_area())
                     })
                 })
                 .unwrap_or(false);
@@ -657,6 +658,7 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
     crate::shell_render::set_active_accent_index(state.user_config.ui_accent_index);
     crate::shell_render::begin_solid_element_frame(output_entry.id.0);
     text_cache.begin_frame();
+    text_cache.set_active_scale(output_entry.scale);
     shape_cache.begin_shadow_frame(output_entry.id.0);
     shape_cache.clear_active_liquid_glass_backdrop();
     let output_loc = output_entry.location;

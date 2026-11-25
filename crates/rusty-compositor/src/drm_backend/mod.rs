@@ -425,13 +425,18 @@ fn build_drm_output_state(
 }
 
 impl DrmOutputState {
+    fn vblank_timed_out(&self, now: Instant) -> bool {
+        self.vblank_pending
+            && self.vblank_queued_at.is_some_and(|queued| {
+                now.saturating_duration_since(queued) >= Duration::from_millis(500)
+            })
+    }
+
     fn reset_if_vblank_timed_out(&mut self) -> bool {
         if !self.vblank_pending {
             return true;
         }
-        let timed_out = self
-            .vblank_queued_at
-            .is_some_and(|queued| queued.elapsed() >= Duration::from_millis(500));
+        let timed_out = self.vblank_timed_out(Instant::now());
         if timed_out {
             warn!(
                 connector = %self.connector_name,
@@ -749,10 +754,7 @@ impl DrmRuntime {
         if let Some(wait) = earliest_ready {
             return wait;
         }
-        if state.has_active_compositor_animations()
-            || self.max_frames.is_some()
-            || state.wm.focused_window().is_some()
-        {
+        if state.has_active_compositor_animations() || self.max_frames.is_some() {
             return self.fastest_refresh_interval();
         }
         Duration::from_millis(50)
@@ -817,8 +819,11 @@ impl DrmRuntime {
         let crtcs = self.output_order.clone();
         for crtc in crtcs {
             let should_draw = self.outputs.get(&crtc).is_some_and(|out| {
-                (out.needs_redraw && out.requeue_delay_until.is_none_or(|d| now >= d))
-                    || (force_timer && out.vblank_pending)
+                if out.vblank_pending {
+                    force_timer && out.vblank_timed_out(now)
+                } else {
+                    out.needs_redraw && out.requeue_delay_until.is_none_or(|d| now >= d)
+                }
             });
             if should_draw {
                 self.render_and_queue_output(crtc, state);

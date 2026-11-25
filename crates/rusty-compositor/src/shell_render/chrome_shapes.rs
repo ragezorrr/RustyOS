@@ -789,6 +789,14 @@ fn push_dock_chrome_shapes_with_glass(
     ) {
         out.push(dock_glass);
     }
+    push_elevation_shadow(
+        out,
+        shape_cache,
+        renderer,
+        capsule,
+        radius,
+        rusty_ui::shadow::ShadowElevation::Dock,
+    );
 }
 
 #[allow(clippy::too_many_arguments)]

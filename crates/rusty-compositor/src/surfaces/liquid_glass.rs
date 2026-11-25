@@ -256,19 +256,19 @@ float tangentCoverage(vec2 p, vec2 halfSize, float r, float pixelSize) {
     return t > 0.0 ? 1.0 - tail : tail;
 }
 
-float roundedCoverage(vec2 p, vec2 halfSize, float r) {
+float roundedCoverage(vec2 p, vec2 halfSize, float r, float px) {
     float distance = roundedDistance(p, halfSize, r);
-    if (distance < -1.0) return 1.0;
-    if (distance > 1.0) return 0.0;
+    if (distance < -px) return 1.0;
+    if (distance > px) return 0.0;
     vec2 r_ext = cornerExtent(vec2(r), halfSize);
     vec2 corner = abs(p) - halfSize + r_ext;
-    if (min(r_ext.x, r_ext.y) <= 0.0 || min(corner.x, corner.y) < -0.5)
-        return tangentCoverage(p, halfSize, r, 1.0);
+    if (min(r_ext.x, r_ext.y) <= 0.0 || min(corner.x, corner.y) < -0.5 * px)
+        return tangentCoverage(p, halfSize, r, px);
     return 0.25 * (
-        tangentCoverage(p + vec2(-0.25, -0.25), halfSize, r, 0.5) +
-        tangentCoverage(p + vec2( 0.25, -0.25), halfSize, r, 0.5) +
-        tangentCoverage(p + vec2(-0.25,  0.25), halfSize, r, 0.5) +
-        tangentCoverage(p + vec2( 0.25,  0.25), halfSize, r, 0.5));
+        tangentCoverage(p + vec2(-0.25, -0.25) * px, halfSize, r, 0.5 * px) +
+        tangentCoverage(p + vec2( 0.25, -0.25) * px, halfSize, r, 0.5 * px) +
+        tangentCoverage(p + vec2(-0.25,  0.25) * px, halfSize, r, 0.5 * px) +
+        tangentCoverage(p + vec2( 0.25,  0.25) * px, halfSize, r, 0.5 * px));
 }
 
 float lensHeight(float sd, float band) {
@@ -333,8 +333,9 @@ void main() {
     vec2 p = panel_uv * panel_size - halfSize;
 
     float radius = clamp(u_size_radius.z, 0.0, min(halfSize.x, halfSize.y));
+    float px = 1.0 / max(u_size_radius.w, 1.0);
     float dist = roundedDistance(p, halfSize, radius);
-    float coverage = roundedCoverage(p, halfSize, radius);
+    float coverage = roundedCoverage(p, halfSize, radius, px);
     if (coverage <= 0.001) {
         gl_FragColor = vec4(0.0);
         return;
@@ -357,16 +358,17 @@ void main() {
     float rim_x = u_sat_refract.z;
     float lit = abs(outward.y) * mix(1.0, 0.35, 0.5 + 0.5 * outward.y);
     float inset = -dist;
-    float litWidth = 1.0;
-    float shadeWidth = 1.0;
+    float litWidth = px;
+    float shadeWidth = px;
+    float aa_half = 0.5 * px;
     float litStart = shadeWidth;
-    float hairline = clamp(min(inset + 0.5, litStart + litWidth) - max(inset - 0.5, litStart), 0.0, 1.0);
+    float hairline = clamp(min(inset + aa_half, litStart + litWidth) - max(inset - aa_half, litStart), 0.0, 1.0);
     float glow = exp(-max(inset - litStart - litWidth, 0.0) / 1.7)
-               * clamp(inset + 0.5 - litStart, 0.0, 1.0);
+               * clamp(inset + aa_half - litStart, 0.0, 1.0);
     float headroom = 1.0 - smoothstep(0.88, 1.0, dot(glass, vec3(0.2126, 0.7152, 0.0722)));
     glass += rim_x * lit * headroom * 0.075 * glow;
     glass = 1.0 - (1.0 - glass) * (1.0 - rim_x * lit * 0.43 * hairline);
-    float shade = (0.3 + 0.7 * outward.x * outward.x) * (1.0 - smoothstep(shadeWidth - 0.5, shadeWidth + 0.5, inset));
+    float shade = (0.3 + 0.7 * outward.x * outward.x) * (1.0 - smoothstep(shadeWidth - aa_half, shadeWidth + aa_half, inset));
     glass = mix(glass, glass * (1.0 - 0.1 * rim_x) - 0.05 * rim_x, shade);
     glass = clamp(glass, 0.0, 1.0);
 
@@ -959,8 +961,8 @@ impl LiquidGlassPipeline {
         let is_dark = crate::shell_render::active_appearance().is_dark();
 
         let half_tex = match style {
-            GlassPanelStyle::Dock => buffers.half_a.clone(),
-            GlassPanelStyle::ControlModule
+            GlassPanelStyle::Dock
+            | GlassPanelStyle::ControlModule
             | GlassPanelStyle::Sidebar
             | GlassPanelStyle::Popover
             | GlassPanelStyle::NotificationCard
@@ -973,8 +975,18 @@ impl LiquidGlassPipeline {
             compute_panel_src_and_uv(panel_rect, self.active_scale, buffers.phys_size, half_size);
         let material = compute_glass_material(style, f32::from(glass_pct) / 100.0, is_dark);
 
-        let params_hash =
-            compute_panel_params_hash(style, width, height, clamped_r, glass_pct, is_dark, uv_rect);
+        let panel_scale = (self.active_scale.clamp(1.0, 4.0)) as f32;
+        let scale_tenths = (panel_scale * 100.0).round() as u16;
+        let params_hash = compute_panel_params_hash(
+            style,
+            width,
+            height,
+            clamped_r,
+            glass_pct,
+            is_dark,
+            uv_rect,
+            scale_tenths,
+        );
         let stable_id = self.resolve_slot_id(output_id, style, draw_loc, w_u16, h_u16, params_hash);
 
         let inner = TextureRenderElement::from_texture_with_damage(
@@ -991,8 +1003,15 @@ impl LiquidGlassPipeline {
             blur_snapshot,
             Kind::Unspecified,
         );
-        let uniforms =
-            build_glass_uniforms(uv_rect, uv_bounds, w_u16, h_u16, r_u16, glass_pct, material);
+        let uniforms = build_glass_uniforms(
+            uv_rect,
+            uv_bounds,
+            w_u16,
+            h_u16,
+            r_u16,
+            panel_scale,
+            material,
+        );
 
         Some(LiquidGlassElement {
             id: stable_id,
@@ -1301,7 +1320,7 @@ fn build_glass_uniforms(
     width: u16,
     height: u16,
     radius: u16,
-    glass_pct: u8,
+    panel_scale: f32,
     material: GlassMaterialUniforms,
 ) -> Vec<Uniform<'static>> {
     vec![
@@ -1319,7 +1338,7 @@ fn build_glass_uniforms(
                 f32::from(width),
                 f32::from(height),
                 f32::from(radius),
-                f32::from(glass_pct) / 100.0,
+                panel_scale.clamp(1.0, 4.0),
             ),
         ),
         Uniform::new(
@@ -1343,6 +1362,7 @@ fn build_glass_uniforms(
     ]
 }
 
+#[allow(clippy::too_many_arguments)]
 fn compute_panel_params_hash(
     style: GlassPanelStyle,
     width: i32,
@@ -1351,6 +1371,7 @@ fn compute_panel_params_hash(
     glass_pct: u8,
     is_dark: bool,
     uv_rect: [f32; 4],
+    scale_tenths: u16,
 ) -> u64 {
     let mut hasher = DefaultHasher::new();
     style.hash(&mut hasher);
@@ -1359,6 +1380,7 @@ fn compute_panel_params_hash(
     radius.hash(&mut hasher);
     glass_pct.hash(&mut hasher);
     is_dark.hash(&mut hasher);
+    scale_tenths.hash(&mut hasher);
     for v in uv_rect {
         v.to_bits().hash(&mut hasher);
     }

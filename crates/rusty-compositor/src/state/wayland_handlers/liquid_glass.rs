@@ -79,6 +79,18 @@ pub struct LiquidGlassSurfaceCachedState {
     pub tint: Option<[u8; 4]>,
 }
 
+impl LiquidGlassSurfaceCachedState {
+    /// Returns `true` when Liquid Glass is active and covers at least one non-empty region.
+    #[must_use]
+    pub fn has_effective_area(&self) -> bool {
+        self.active
+            && self
+                .region
+                .as_ref()
+                .is_none_or(|rects| rects.iter().any(|r| r.size.w > 0 && r.size.h > 0))
+    }
+}
+
 impl compositor::Cacheable for LiquidGlassSurfaceCachedState {
     fn commit(&mut self, _dh: &DisplayHandle) -> Self {
         self.clone()
@@ -338,5 +350,39 @@ mod tests {
         assert_eq!(target.style, GlassStylePreset::Popover);
         assert_eq!(target.tint, Some([255, 255, 255, 30]));
         assert!(target.region.is_some());
+    }
+
+    #[test]
+    fn test_liquid_glass_has_effective_area_rejects_empty_regions() {
+        let inactive = LiquidGlassSurfaceCachedState::default();
+        assert!(!inactive.has_effective_area());
+
+        let full_surface = LiquidGlassSurfaceCachedState {
+            active: true,
+            region: None,
+            ..Default::default()
+        };
+        assert!(full_surface.has_effective_area());
+
+        let empty_region = LiquidGlassSurfaceCachedState {
+            active: true,
+            region: Some(Vec::new()),
+            ..Default::default()
+        };
+        assert!(!empty_region.has_effective_area());
+
+        let zero_rect = LiquidGlassSurfaceCachedState {
+            active: true,
+            region: Some(vec![Rectangle::new((0, 0).into(), (0, 200).into())]),
+            ..Default::default()
+        };
+        assert!(!zero_rect.has_effective_area());
+
+        let valid_rect = LiquidGlassSurfaceCachedState {
+            active: true,
+            region: Some(vec![Rectangle::new((0, 0).into(), (196, 600).into())]),
+            ..Default::default()
+        };
+        assert!(valid_rect.has_effective_area());
     }
 }

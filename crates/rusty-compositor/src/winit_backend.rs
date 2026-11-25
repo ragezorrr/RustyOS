@@ -279,20 +279,37 @@ pub fn run_nested_winit(config: &CompositorConfig) -> Result<BootstrapReport, Co
                 );
 
                 let tick_start = Instant::now();
-                if let Err(err) = render_winit_frame(
-                    &mut backend,
-                    &mut damage_tracker,
-                    &mut text_cache,
-                    &mut shape_cache,
-                    &mut portal_capture_cache,
-                    app_state,
-                    force_full_damage,
-                    rendered_frames,
-                ) {
-                    warn!(error = %err, "Frame render error on Winit backend");
-                }
+                let test_capture_active = std::env::var_os("RUSTYOS_TEST_CAPTURE_MENU").is_some();
+                let should_render = rendered_frames < 2
+                    || force_full_damage
+                    || bench_input
+                    || max_frames.is_some()
+                    || test_capture_active
+                    || app_state.take_client_surface_committed()
+                    || app_state.take_syncobj_unblocked()
+                    || app_state.take_shell_redraw_needed()
+                    || app_state.has_active_compositor_animations()
+                    || app_state.pending_screenshot.is_some()
+                    || app_state.pending_portal_capture.is_some()
+                    || app_state.has_due_screencast_frame(tick_start)
+                    || app_state.output_has_pending_frame_callbacks(&app_state.output);
 
-                rendered_frames = rendered_frames.saturating_add(1);
+                if should_render {
+                    if let Err(err) = render_winit_frame(
+                        &mut backend,
+                        &mut damage_tracker,
+                        &mut text_cache,
+                        &mut shape_cache,
+                        &mut portal_capture_cache,
+                        app_state,
+                        force_full_damage,
+                        rendered_frames,
+                    ) {
+                        warn!(error = %err, "Frame render error on Winit backend");
+                    }
+
+                    rendered_frames = rendered_frames.saturating_add(1);
+                }
                 if let Some(limit) = max_frames
                     && rendered_frames >= limit
                 {
@@ -391,6 +408,7 @@ fn handle_winit_event(event: WinitEvent, app_state: &mut RustyCompositorState) {
                 scale_factor
             };
             app_state.update_output_geometry(PRIMARY_OUTPUT_ID, size, effective_scale, 60_000);
+            app_state.shell_redraw_needed = true;
         }
         WinitEvent::CloseRequested => {
             info!("Winit window close requested");
@@ -398,8 +416,11 @@ fn handle_winit_event(event: WinitEvent, app_state: &mut RustyCompositorState) {
         }
         WinitEvent::Input(input_event) => {
             app_state.process_input_event(input_event);
+            app_state.shell_redraw_needed = true;
         }
-        WinitEvent::Focus(_) | WinitEvent::Redraw => {}
+        WinitEvent::Focus(_) | WinitEvent::Redraw => {
+            app_state.shell_redraw_needed = true;
+        }
     }
 }
 
