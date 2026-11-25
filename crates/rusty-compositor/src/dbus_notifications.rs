@@ -775,8 +775,49 @@ fn is_unsupported_emoji_char(ch: char) -> bool {
     cp >= 0x1_F000 || matches!(cp, 0x200D | 0x20E3 | 0x2600..=0x27BF | 0xFE0E | 0xFE0F)
 }
 
+fn strip_notification_markup(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut chars = raw.char_indices().peekable();
+    while let Some((idx, ch)) = chars.next() {
+        if ch == '<' {
+            let rest = &raw[idx + 1..];
+            if let Some(close_rel) = rest.find('>') {
+                let tag = rest[..close_rel].trim();
+                let is_html_tag = tag
+                    .strip_prefix('/')
+                    .unwrap_or(tag)
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_alphabetic());
+                if is_html_tag && !tag.contains('<') {
+                    if tag.eq_ignore_ascii_case("br") || tag.eq_ignore_ascii_case("br/") {
+                        out.push(' ');
+                    }
+                    let target = idx + 1 + close_rel;
+                    while let Some(&(next_idx, _)) = chars.peek() {
+                        if next_idx > target {
+                            break;
+                        }
+                        chars.next();
+                    }
+                    continue;
+                }
+            }
+        }
+        out.push(ch);
+    }
+    out.replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&#39;", "'")
+        .replace("&nbsp;", " ")
+}
+
 fn sanitize_single_line(raw: &str) -> String {
-    let filtered: String = raw
+    let unescaped = strip_notification_markup(raw);
+    let filtered: String = unescaped
         .chars()
         .filter(|&c| !is_unsupported_emoji_char(c))
         .collect();
@@ -844,6 +885,14 @@ mod tests {
             kept_filename,
             "RustyOS_2026-11-24_11-56-09.png (copied to clipboard)"
         );
+
+        let (tg_title, tg_body) = format_dbus_notification(
+            "Telegram Desktop",
+            "Генератор",
+            "<b>Vadym B</b> где то в локальной сети &amp; <a href=\"https://t.me\">link</a>",
+        );
+        assert_eq!(tg_title, "Генератор");
+        assert_eq!(tg_body, "Vadym B где то в локальной сети & link");
     }
 
     #[test]
