@@ -145,6 +145,10 @@ impl RustyApp for GetInfoWindowApp {
         }
     }
 
+    fn uses_bgra(&self) -> bool {
+        true
+    }
+
     fn paint(
         &mut self,
         _painter: &mut rusty_ui::UiPainter<'_>,

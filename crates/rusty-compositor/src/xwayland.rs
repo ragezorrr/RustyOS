@@ -212,14 +212,16 @@ impl XwmHandler for RustyCompositorState {
         let x11_id = window.window_id();
         let has_ssd = !window.is_decorated();
         if let Some(existing_id) = find_bound_window_id(self, x11_id) {
-            if let Some(wm_win) = self.wm.window(existing_id) {
+            let serial = SERIAL_COUNTER.next_serial();
+            if self.is_window_minimized(existing_id) {
+                self.restore_window(existing_id, serial);
+            } else if let Some(wm_win) = self.wm.window(existing_id) {
                 let _ = window.configure(compute_x11_client_rect_for_decoration(
                     wm_win.geometry,
                     has_ssd,
                 ));
             }
             let _ = window.set_mapped(true);
-            let serial = SERIAL_COUNTER.next_serial();
             self.sync_space_with_wm(serial);
             return;
         }

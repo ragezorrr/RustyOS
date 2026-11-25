@@ -131,6 +131,12 @@ pub(super) fn capture_window_thumbnails(
         if shape_cache.lifecycle_snapshot_matches_sig(win_id.0, sig) {
             continue;
         }
+        if !state.overview_active
+            && state.window_switcher.is_none()
+            && shape_cache.has_lifecycle_snapshot(win_id.0)
+        {
+            continue;
+        }
         let (actual_rect, scaled) = capture_window_local_elements(
             renderer,
             text_cache,
@@ -255,6 +261,12 @@ fn refresh_idle_close_lifecycle_snapshots(
         let probe_rect = state.resolved_window_global_rect(win_id).unwrap_or(rect);
         let sig = window_lifecycle_commit_sig(state, win_id, probe_rect, is_focused);
         if shape_cache.lifecycle_snapshot_matches_sig(win_id.0, sig) {
+            continue;
+        }
+        if !state.overview_active
+            && state.window_switcher.is_none()
+            && shape_cache.has_lifecycle_snapshot(win_id.0)
+        {
             continue;
         }
         let (actual_rect, scaled) = capture_window_local_elements(

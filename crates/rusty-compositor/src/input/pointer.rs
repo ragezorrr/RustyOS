@@ -138,6 +138,60 @@ impl RustyCompositorState {
             }
         };
         let time = Event::time_msec(event);
+        if let Some((_, ref surface, origin)) = self.target_surface_under(self.pointer_location) {
+            let local_pt = (self.pointer_location - origin).to_i32_round();
+            let mut action = None;
+            with_pointer_constraint(surface, &self.pointer, |constraint| {
+                let Some(c) = constraint else {
+                    return;
+                };
+                if !c.is_active() {
+                    if c.region().is_none_or(|r| r.contains(local_pt)) {
+                        c.activate();
+                    } else {
+                        return;
+                    }
+                }
+                action = Some(match &*c {
+                    PointerConstraint::Locked(_) => true,
+                    PointerConstraint::Confined(_) => false,
+                });
+            });
+            match action {
+                Some(true) => {
+                    self.pointer.clone().frame(self);
+                    return;
+                }
+                Some(false) => {
+                    let surface_bounds =
+                        self.surface_logical_bounds(surface).unwrap_or_else(|| {
+                            let total = self.total_output_bounds();
+                            Rectangle::new(
+                                total.loc.to_f64(),
+                                Size::from((
+                                    f64::from(total.size.w.max(1)),
+                                    f64::from(total.size.h.max(1)),
+                                )),
+                            )
+                        });
+                    let clamped = Point::from((
+                        pos.x.clamp(
+                            surface_bounds.loc.x,
+                            (surface_bounds.loc.x + surface_bounds.size.w - 1.0)
+                                .max(surface_bounds.loc.x),
+                        ),
+                        pos.y.clamp(
+                            surface_bounds.loc.y,
+                            (surface_bounds.loc.y + surface_bounds.size.h - 1.0)
+                                .max(surface_bounds.loc.y),
+                        ),
+                    ));
+                    self.apply_pointer_position(clamped, time);
+                    return;
+                }
+                None => {}
+            }
+        }
         self.apply_pointer_position(pos, time);
     }
 
@@ -696,11 +750,17 @@ impl RustyCompositorState {
                 let has_surface = self.target_surface_under(self.pointer_location).is_some();
                 self.update_compositor_cursor_for_pointer(self.pointer_location, has_surface);
                 self.shell_redraw_needed = true;
+                if std::mem::take(&mut self.compositor_pointer_grab) {
+                    return;
+                }
             } else if ended_resize {
                 self.sync_space_with_wm(serial);
                 let has_surface = self.target_surface_under(self.pointer_location).is_some();
                 self.update_compositor_cursor_for_pointer(self.pointer_location, has_surface);
                 self.shell_redraw_needed = true;
+                if std::mem::take(&mut self.compositor_pointer_grab) {
+                    return;
+                }
             }
             if button == 272
                 && let Some(drag) = self.dock_drag.take()
@@ -1113,6 +1173,7 @@ impl RustyCompositorState {
                             }
                             self.last_titlebar_click = Some((win_id, self.pointer_location, now));
                             if let Some(win) = self.wm.window(win_id) {
+                                self.compositor_pointer_grab = true;
                                 self.active_window_drag = Some(crate::state::WindowDragState::new(
                                     win_id,
                                     self.pointer_location,
@@ -1127,6 +1188,7 @@ impl RustyCompositorState {
                             self.wm.focus_and_raise(win_id);
                             self.sync_space_with_wm(serial);
                             if let Some(win) = self.wm.window(win_id) {
+                                self.compositor_pointer_grab = true;
                                 self.active_window_resize = Some(crate::state::WindowResizeState {
                                     window_id: win_id,
                                     edges,
@@ -1166,6 +1228,7 @@ impl RustyCompositorState {
                         self.wm.focus_and_raise(win_id);
                         self.sync_space_with_wm(serial);
                         if let Some(win) = self.wm.window(win_id) {
+                            self.compositor_pointer_grab = true;
                             self.active_window_resize = None;
                             self.active_window_drag = Some(crate::state::WindowDragState::new(
                                 win_id,

@@ -187,6 +187,18 @@ pub fn local_clock_hhmm() -> String {
 }
 
 fn run_c_locale_date(fmt_arg: &str, max_len: usize) -> Option<String> {
+    static CACHE: std::sync::Mutex<Option<(u64, &'static str, String)>> =
+        std::sync::Mutex::new(None);
+    let minute_bucket = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() / 60);
+    if let Ok(guard) = CACHE.lock()
+        && let Some((cached_min, cached_fmt, ref cached_text)) = *guard
+        && cached_min == minute_bucket
+        && cached_fmt == fmt_arg
+    {
+        return Some(cached_text.clone());
+    }
     let output = crate::run_command_bounded(
         Command::new("date").env("LC_ALL", "C").arg(fmt_arg),
         std::time::Duration::from_secs(2),
@@ -196,7 +208,23 @@ fn run_c_locale_date(fmt_arg: &str, max_len: usize) -> Option<String> {
         return None;
     }
     let text = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    (!text.is_empty() && text.len() <= max_len).then_some(text)
+    if text.is_empty() || text.len() > max_len {
+        return None;
+    }
+    if let Ok(mut guard) = CACHE.lock()
+        && let Some(static_fmt) = [
+            "+%a %b %-d  %H:%M",
+            "+%a %b %-d  %-I:%M %p",
+            "+%a %b %-d",
+            "+%H:%M",
+            "+%-I:%M",
+        ]
+        .into_iter()
+        .find(|&f| f == fmt_arg)
+    {
+        *guard = Some((minute_bucket, static_fmt, text.clone()));
+    }
+    Some(text)
 }
 
 /// Returns compact macOS-style `TopBar` date + time in neutral C locale (`RUSTYOS-049`), falling back to `HH:MM`.

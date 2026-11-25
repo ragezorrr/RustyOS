@@ -404,6 +404,10 @@ pub struct RustyCompositorState {
     /// Active client surfaces requesting compositor Liquid Glass effects (`RUSTYOS-092`).
     pub active_liquid_glass_surfaces:
         std::collections::HashSet<smithay::reexports::wayland_server::backend::ObjectId>,
+    /// Keycodes whose `Pressed` event was intercepted by the compositor (so matching `Released` is also swallowed).
+    pub swallowed_keycodes: std::collections::HashSet<u32>,
+    /// True when the active window drag/resize was initiated by compositor SSD/shortcut chrome.
+    pub compositor_pointer_grab: bool,
     /// Whether the Spotlight application launcher overlay is open (`RUSTYOS-018`).
     pub launcher_active: bool,
     /// Animated Spotlight transition progress (`0.0` closed -> `1.0` open) (`RUSTYOS-025`).
@@ -830,6 +834,8 @@ impl RustyCompositorState {
             notification_center_hover: None,
             notification_center_tasks: initial_nc_tasks,
             updates_notified_count: 0,
+            swallowed_keycodes: std::collections::HashSet::new(),
+            compositor_pointer_grab: false,
             launcher_active: false,
             launcher_anim: AnimatedValue::new_settled(0.0),
             launcher: crate::launcher::LauncherState::new(),

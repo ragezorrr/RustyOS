@@ -851,6 +851,9 @@ impl IpcClient {
     pub fn connect(socket_path: &Path, client_name: &str) -> Result<Self, IpcError> {
         let writer =
             UnixStream::connect(socket_path).map_err(|err| IpcError::Io(err.to_string()))?;
+        let timeout = Some(std::time::Duration::from_secs(3));
+        let _ = writer.set_read_timeout(timeout);
+        let _ = writer.set_write_timeout(timeout);
         let reader_stream = writer
             .try_clone()
             .map_err(|err| IpcError::Io(err.to_string()))?;

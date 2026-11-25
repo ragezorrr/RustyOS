@@ -572,6 +572,11 @@ pub trait RustyApp {
         height: u32,
     );
 
+    /// Returns `true` when this app renders via [`Self::paint_bgra`] instead of [`Self::paint`].
+    fn uses_bgra(&self) -> bool {
+        false
+    }
+
     /// Optional direct premultiplied `BGRA8888` pixel-buffer paint callback.
     ///
     /// Return `true` when `canvas_bgra` (`width * height * 4` bytes) was populated
@@ -1045,12 +1050,16 @@ impl HostState {
         self.sync_liquid_glass();
         self.sync_app_menu();
 
-        let expected_len = (w as usize).saturating_mul(h as usize).saturating_mul(4);
-        if self.bgra_backbuf.len() != expected_len {
-            self.bgra_backbuf.resize(expected_len, 0);
-        }
-        let has_glass = self.surface_glass.is_some();
-        let used_bgra = self.app.paint_bgra(&mut self.bgra_backbuf, w, h, has_glass);
+        let used_bgra = if self.app.uses_bgra() {
+            let expected_len = (w as usize).saturating_mul(h as usize).saturating_mul(4);
+            if self.bgra_backbuf.len() != expected_len {
+                self.bgra_backbuf.resize(expected_len, 0);
+            }
+            let has_glass = self.surface_glass.is_some();
+            self.app.paint_bgra(&mut self.bgra_backbuf, w, h, has_glass)
+        } else {
+            false
+        };
 
         if !used_bgra {
             self.draw_list.clear();
@@ -1650,6 +1659,7 @@ impl DataDeviceHandler for HostState {
         _: &QueueHandle<Self>,
         _: &wl_data_device::WlDataDevice,
     ) {
+        self.clipboard.clear_local_cache();
         self.with_ctx(|app, ctx| app.on_clipboard_offer_changed(ctx));
     }
 

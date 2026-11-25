@@ -1096,6 +1096,10 @@ impl WindowManager {
         let work_area = self.work_area_for_workspace(ws_id);
 
         if let Some(win) = self.windows.iter_mut().find(|w| w.id == win_id) {
+            if !enabled && win.fullscreen {
+                win.maximized = false;
+                return Some(win.geometry);
+            }
             win.fullscreen = false;
             win.maximized = enabled;
             if enabled {

@@ -479,7 +479,7 @@ fn render_winit_frame(
         backend.buffer_age().unwrap_or(0)
     };
 
-    if state.pending_screenshot.is_some() {
+    let pending_snap_list = if state.pending_screenshot.is_some() {
         let renderer = backend.renderer();
         let snap_list = frame_composer::build_frame_render_list(
             renderer,
@@ -490,7 +490,10 @@ fn render_winit_frame(
             false,
         );
         frame_composer::process_pending_screenshot(renderer, &snap_list, state, size);
-    }
+        Some(snap_list)
+    } else {
+        None
+    };
 
     if state.pending_portal_capture.is_some() || state.has_due_screencast_frame(Instant::now()) {
         let renderer = backend.renderer();
@@ -505,14 +508,16 @@ fn render_winit_frame(
 
     let render_list = {
         let renderer = backend.renderer();
-        let mut list = frame_composer::build_frame_render_list(
-            renderer,
-            text_cache,
-            shape_cache,
-            state,
-            size,
-            false,
-        );
+        let mut list = pending_snap_list.unwrap_or_else(|| {
+            frame_composer::build_frame_render_list(
+                renderer,
+                text_cache,
+                shape_cache,
+                state,
+                size,
+                false,
+            )
+        });
         if let CursorImageStatus::Surface(ref cursor_surf) = state.cursor_status
             && cursor_surf.alive()
         {

@@ -708,7 +708,7 @@ impl RustyApp for SettingsApp {
     }
 
     fn poll_interval(&self) -> Duration {
-        if self.app.is_ui_animating() || self.app.active_modal.is_some() {
+        if self.app.is_ui_animating() {
             Duration::from_millis(16)
         } else if self.app.search_focused {
             Duration::from_millis(120)

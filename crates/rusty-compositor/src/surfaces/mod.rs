@@ -267,9 +267,19 @@ struct DecodedWallpaperMsg {
     backdrop: Option<crate::shell_render::BarBackdropStyle>,
 }
 
+#[derive(Debug, Clone)]
+struct WallpaperProbeCache {
+    custom_path: Option<PathBuf>,
+    is_dark: bool,
+    revision: u64,
+    resolved: Option<(PathBuf, Option<std::time::SystemTime>, u64)>,
+    opposite: Option<(PathBuf, Option<std::time::SystemTime>)>,
+}
+
 #[derive(Debug)]
 struct CachedWallpaper {
     revision: u64,
+    probe: Option<WallpaperProbeCache>,
     slots: Vec<WallpaperCacheSlot>,
     pending: std::collections::HashSet<WallpaperCacheKey>,
     tx: std::sync::mpsc::Sender<DecodedWallpaperMsg>,
@@ -285,6 +295,7 @@ impl Default for CachedWallpaper {
         let (tx, rx) = std::sync::mpsc::channel();
         Self {
             revision: 0,
+            probe: None,
             slots: Vec::with_capacity(MAX_WALLPAPER_CACHE_SLOTS),
             pending: std::collections::HashSet::new(),
             tx,
@@ -538,6 +549,27 @@ impl UiShapeCache {
             SHAPE_AVATAR_PRUNE_THRESHOLD,
             SHAPE_CACHE_MAX_AGE_FRAMES,
         );
+        if self.circles.len() > 256 {
+            self.circles.clear();
+        }
+        if self.corners.len() > 256 {
+            self.corners.clear();
+        }
+        if self.shadow_corners.len() > 256 {
+            self.shadow_corners.clear();
+        }
+        if self.shadow_edges.len() > 256 {
+            self.shadow_edges.clear();
+        }
+        if self.traffic_lights.len() > 64 {
+            self.traffic_lights.clear();
+        }
+        if self.dock_icon_shadows.len() > 64 {
+            self.dock_icon_shadows.clear();
+        }
+        if self.xcursors.len() > 128 {
+            self.xcursors.clear();
+        }
     }
 
     /// Builds a hardware-accelerated seamless drop shadow element with explicit opacity scaling (`RUSTYOS-128`).
@@ -1094,6 +1126,7 @@ impl UiShapeCache {
     pub fn sync_wallpaper_revision(&mut self, revision: u64) {
         if self.wallpaper.revision != revision {
             self.wallpaper.revision = revision;
+            self.wallpaper.probe = None;
             self.liquid_glass.invalidate_all();
         }
     }
@@ -1206,26 +1239,54 @@ impl UiShapeCache {
         let _ = self.poll_background_wallpapers();
 
         let is_dark = crate::shell_render::active_appearance().is_dark();
-        let resolved_path = resolve_runtime_wallpaper_path(custom_path, is_dark);
+        let revision = self.wallpaper.revision;
+        let cache_hit = self.wallpaper.probe.as_ref().is_some_and(|p| {
+            p.is_dark == is_dark
+                && p.revision == revision
+                && p.custom_path.as_deref() == custom_path
+        });
+        if !cache_hit {
+            let resolved_path = resolve_runtime_wallpaper_path(custom_path, is_dark);
+            let resolved = resolved_path.map(|path| {
+                let meta = std::fs::metadata(&path).ok();
+                let mtime = meta.as_ref().and_then(|m| m.modified().ok());
+                let file_len = meta.as_ref().map_or(0, std::fs::Metadata::len);
+                (path, mtime, file_len)
+            });
+            let opposite = if custom_path.is_none() {
+                resolve_builtin_wallpaper_path(!is_dark).map(|opp| {
+                    let opp_mtime = std::fs::metadata(&opp).ok().and_then(|m| m.modified().ok());
+                    (opp, opp_mtime)
+                })
+            } else {
+                None
+            };
+            self.wallpaper.probe = Some(WallpaperProbeCache {
+                custom_path: custom_path.map(Path::to_path_buf),
+                is_dark,
+                revision,
+                resolved,
+                opposite,
+            });
+        }
+        let (resolved_entry, opposite_entry) = self
+            .wallpaper
+            .probe
+            .as_ref()
+            .map_or((None, None), |p| (p.resolved.clone(), p.opposite.clone()));
 
         #[cfg(not(test))]
-        if custom_path.is_none()
-            && let Some(opposite) = resolve_builtin_wallpaper_path(!is_dark)
-        {
-            let opp_mtime = std::fs::metadata(&opposite)
-                .ok()
-                .and_then(|m| m.modified().ok());
+        if let Some((opposite, opp_mtime)) = opposite_entry {
             self.spawn_wallpaper_decode(WallpaperCacheKey {
                 path: opposite,
                 size: (screen_size.w, screen_size.h),
                 mtime: opp_mtime,
             });
         }
+        #[cfg(test)]
+        let _ = opposite_entry;
 
-        if let Some(path) = resolved_path {
-            let meta = std::fs::metadata(&path).ok();
-            let mtime = meta.as_ref().and_then(|m| m.modified().ok());
-            let file_len = meta.as_ref().map_or(0, std::fs::Metadata::len);
+        if let Some((path, mtime, file_len)) = resolved_entry {
             let desired_key = WallpaperCacheKey {
                 path: path.clone(),
                 size: (screen_size.w, screen_size.h),

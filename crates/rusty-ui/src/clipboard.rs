@@ -192,6 +192,11 @@ impl WaylandClipboardBridge {
         }
         latest
     }
+
+    /// Clears the in-process clipboard cache when another Wayland client takes ownership.
+    pub fn clear_local_cache(&mut self) {
+        self.local_cache.clear();
+    }
 }
 
 impl ClipboardSink for WaylandClipboardBridge {

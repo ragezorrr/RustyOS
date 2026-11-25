@@ -224,6 +224,9 @@ pub struct GlesSurfaceRenderer {
     batches: Vec<BatchSpan>,
     width: i32,
     height: i32,
+    logical_width: i32,
+    logical_height: i32,
+    render_scale: i32,
 }
 
 impl std::fmt::Debug for GlesSurfaceRenderer {
@@ -531,6 +534,9 @@ impl GlesSurfaceRenderer {
             batches: Vec::with_capacity(64),
             width,
             height,
+            logical_width: width,
+            logical_height: height,
+            render_scale: 1,
         }
     }
 
@@ -800,6 +806,9 @@ impl GlesSurfaceRenderer {
             }
         }
         self.resize(phys_w, phys_h);
+        self.logical_width = w;
+        self.logical_height = h;
+        self.render_scale = s;
         self.rect_verts.clear();
         self.text_verts.clear();
         self.sprite_verts.clear();
@@ -829,10 +838,6 @@ impl GlesSurfaceRenderer {
             }
         }
         Ok(())
-    }
-
-    fn flush_pending_batches(&mut self, w: i32, h: i32) {
-        self.flush_pending_batches_scaled(w, h, 1);
     }
 
     fn flush_pending_batches_scaled(&mut self, w: i32, h: i32, scale: i32) {
@@ -1313,7 +1318,11 @@ impl GlesSurfaceRenderer {
                 self.record_batch(DrawBatchKind::Text, active_clip, *batch_start, end);
             }
             if !self.batches.is_empty() || !self.text_verts.is_empty() {
-                self.flush_pending_batches(self.width, self.height);
+                self.flush_pending_batches_scaled(
+                    self.logical_width,
+                    self.logical_height,
+                    self.render_scale,
+                );
             }
             *batch_start = 0;
             self.reset_glyph_atlas();
@@ -1398,7 +1407,11 @@ impl GlesSurfaceRenderer {
             // Flush pending batches before deleting cached GL textures so sprites already
             // referenced in the current frame draw cleanly before eviction.
             if !self.batches.is_empty() {
-                self.flush_pending_batches(self.width, self.height);
+                self.flush_pending_batches_scaled(
+                    self.logical_width,
+                    self.logical_height,
+                    self.render_scale,
+                );
             }
             self.clear_sprite_cache();
         }

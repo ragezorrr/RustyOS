@@ -148,7 +148,11 @@ impl RustyApp for PolkitApp {
     }
 
     fn poll_interval(&self) -> Duration {
-        Duration::from_millis(20)
+        if self.dialog.is_some() {
+            Duration::from_millis(20)
+        } else {
+            Duration::from_millis(250)
+        }
     }
 
     fn on_close_requested(&mut self, ctx: &mut AppContext<'_>) -> bool {

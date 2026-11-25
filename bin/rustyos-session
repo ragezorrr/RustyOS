@@ -299,7 +299,7 @@ ensure_runtime_environment() {
 run_drm_compositor() {
     LOG_FILE="${XDG_RUNTIME_DIR}/rustyos-session.log"
     LOG_FIFO="${XDG_RUNTIME_DIR}/rustyos-session.fifo.$$"
-    LATEST_ERR_LOG="/tmp/rustyos-session-last-error.log"
+    LATEST_ERR_LOG="${XDG_RUNTIME_DIR}/rustyos-session-last-error.log"
 
     {
         printf '=== RustyOS DRM/KMS session start (%s) ===\n' "$(date -Is 2>/dev/null || date)"
@@ -339,7 +339,6 @@ run_drm_compositor() {
             printf 'RustyOS DRM/KMS compositor exited with code %s.\n' "$drm_rc"
             tail -n 40 "$LOG_FILE" 2>/dev/null || true
         } >"$LATEST_ERR_LOG" 2>/dev/null || true
-        chmod 0644 "$LATEST_ERR_LOG" 2>/dev/null || true
         printf 'Error: RustyOS compositor exited with code %s (see %s)\n' "$drm_rc" "$LOG_FILE" >&2
     fi
     return "$drm_rc"

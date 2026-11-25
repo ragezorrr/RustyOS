@@ -21,6 +21,7 @@ impl RustyCompositorState {
         let key_state = event.state();
         let keyboard = self.keyboard.clone();
 
+        let raw_code = u32::from(event.key_code());
         let intercepted = keyboard.input(
             self,
             event.key_code(),
@@ -28,16 +29,27 @@ impl RustyCompositorState {
             serial,
             time,
             |state, modifiers, handle| {
+                if key_state == KeyState::Released {
+                    return if state.swallowed_keycodes.remove(&raw_code) {
+                        FilterResult::Intercept(KeyIntercept::LockScreenConsume)
+                    } else {
+                        FilterResult::Forward
+                    };
+                }
                 let sym = handle.modified_sym();
                 let utf8 = sym.key_char().map(|ch| ch.to_string());
-                classify_keyboard_input(
+                let res = classify_keyboard_input(
                     state,
                     state.is_keyboard_shortcuts_inhibited(),
                     *modifiers,
                     sym,
                     key_state,
                     utf8.as_deref(),
-                )
+                );
+                if matches!(res, FilterResult::Intercept(_)) {
+                    state.swallowed_keycodes.insert(raw_code);
+                }
+                res
             },
         );
 

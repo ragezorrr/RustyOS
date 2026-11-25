@@ -1294,7 +1294,11 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
             let quick_pop_view = state
                 .top_bar_quick_popover
                 .map(|kind| state.top_bar_quick_popover_render_state(logical_size.w, kind, &tel));
-            let nc_items = state.build_notification_center_items();
+            let nc_items = if state.notification_center_open {
+                state.build_notification_center_items()
+            } else {
+                Vec::new()
+            };
             let nc_view = state
                 .notification_center_open
                 .then(|| state.notification_center_render_state(&nc_items, lock_hidden_preview));

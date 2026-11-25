@@ -195,6 +195,9 @@ impl IconCache {
             ICON_CACHE_SHM_PRUNE_THRESHOLD,
             ICON_CACHE_MAX_AGE_FRAMES,
         );
+        if self.builtin_squircles.len() > 128 {
+            self.builtin_squircles.clear();
+        }
     }
 
     #[cfg(test)]
