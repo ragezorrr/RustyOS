@@ -213,6 +213,261 @@ impl AnimatedValue {
     }
 }
 
+/// Physical parameters for a damped harmonic oscillator spring solver.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SpringConfig {
+    /// Spring stiffness (`k`, higher values track targets faster).
+    pub stiffness: f64,
+    /// Damping coefficient (`c`, controls oscillation decay).
+    pub damping: f64,
+    /// Oscillator mass (`m`, controls inertia).
+    pub mass: f64,
+    /// Settling threshold for position error `|current - target|`.
+    pub epsilon_pos: f64,
+    /// Settling threshold for velocity `|velocity|`.
+    pub epsilon_vel: f64,
+}
+
+impl Default for SpringConfig {
+    fn default() -> Self {
+        Self::dock_reveal()
+    }
+}
+
+impl SpringConfig {
+    /// Creates a spring configuration, clamping physical parameters to safe positive bounds.
+    #[must_use]
+    pub const fn new(stiffness: f64, damping: f64, mass: f64) -> Self {
+        Self {
+            stiffness: stiffness.max(1.0),
+            damping: damping.max(0.1),
+            mass: mass.max(0.05),
+            epsilon_pos: 0.001,
+            epsilon_vel: 0.005,
+        }
+    }
+
+    /// Overrides the settling position and velocity tolerances.
+    #[must_use]
+    pub const fn with_tolerances(mut self, epsilon_pos: f64, epsilon_vel: f64) -> Self {
+        self.epsilon_pos = epsilon_pos.max(1e-6);
+        self.epsilon_vel = epsilon_vel.max(1e-6);
+        self
+    }
+
+    /// Crisp, responsive spring tuned for normalized Dock reveal/hide glides (`0.0..=1.0`).
+    #[must_use]
+    pub const fn dock_reveal() -> Self {
+        Self::new(980.0, 62.0, 1.0).with_tolerances(0.002, 0.01)
+    }
+
+    /// Sub-pixel spring tuned for pixel-space Dock slot gliding and capsule width transitions.
+    #[must_use]
+    pub const fn dock_layout() -> Self {
+        Self::new(1020.0, 64.0, 1.0).with_tolerances(0.3, 1.0)
+    }
+
+    /// Tightly damped spring tuned for cursor-following icon magnification.
+    #[must_use]
+    pub const fn dock_magnification() -> Self {
+        Self::new(620.0, 49.0, 1.0).with_tolerances(0.001, 0.005)
+    }
+
+    /// Lightly underdamped spring tuned for icon launch bounce impulses.
+    #[must_use]
+    pub const fn bounce() -> Self {
+        Self::new(340.0, 18.0, 1.0).with_tolerances(0.001, 0.005)
+    }
+}
+
+/// Interruptible, velocity-preserving scalar spring animation driven by monotonic timestamps.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SpringValue {
+    current: f64,
+    velocity: f64,
+    target: f64,
+    last_time: Option<Duration>,
+    config: SpringConfig,
+    speed_multiplier: f64,
+    active: bool,
+}
+
+impl SpringValue {
+    /// Creates a settled [`SpringValue`] resting at `initial`.
+    #[must_use]
+    pub const fn new_settled(initial: f64, config: SpringConfig) -> Self {
+        Self {
+            current: initial,
+            velocity: 0.0,
+            target: initial,
+            last_time: None,
+            config,
+            speed_multiplier: 1.0,
+            active: false,
+        }
+    }
+
+    /// Returns the current simulated value.
+    #[must_use]
+    pub const fn current(&self) -> f64 {
+        self.current
+    }
+
+    /// Returns the current velocity in units per second.
+    #[must_use]
+    pub const fn velocity(&self) -> f64 {
+        self.velocity
+    }
+
+    /// Returns the target equilibrium value.
+    #[must_use]
+    pub const fn target(&self) -> f64 {
+        self.target
+    }
+
+    /// Returns the active spring parameters.
+    #[must_use]
+    pub const fn config(&self) -> SpringConfig {
+        self.config
+    }
+
+    /// Returns `true` if the spring has not yet settled at `target`.
+    #[must_use]
+    pub const fn is_active(&self) -> bool {
+        self.active
+    }
+
+    /// Adjusts the time-scale multiplier (clamped to `[0.25, 3.0]`).
+    pub fn set_speed_multiplier(&mut self, speed: f64) {
+        self.speed_multiplier = if speed.is_finite() {
+            speed.clamp(0.25, 3.0)
+        } else {
+            1.0
+        };
+    }
+
+    /// Retargets the spring to `new_target` while preserving its instantaneous velocity.
+    ///
+    /// When `reduced_motion` is `true`, snaps immediately to `new_target` with zero velocity.
+    pub fn retarget(&mut self, new_target: f64, now: Duration, reduced_motion: bool) {
+        if self.active {
+            let _ = self.tick(now);
+        }
+
+        if reduced_motion {
+            self.current = new_target;
+            self.velocity = 0.0;
+            self.target = new_target;
+            self.last_time = Some(now);
+            self.active = false;
+            return;
+        }
+
+        let pos_err = (new_target - self.current).abs();
+        if pos_err <= self.config.epsilon_pos && self.velocity.abs() <= self.config.epsilon_vel {
+            self.current = new_target;
+            self.velocity = 0.0;
+            self.target = new_target;
+            self.last_time = Some(now);
+            self.active = false;
+            return;
+        }
+
+        self.target = new_target;
+        self.last_time = Some(now);
+        self.active = true;
+    }
+
+    /// Updates the spring configuration and retargets to `new_target`.
+    pub fn retarget_with_config(
+        &mut self,
+        new_target: f64,
+        config: SpringConfig,
+        now: Duration,
+        reduced_motion: bool,
+    ) {
+        self.config = config;
+        self.retarget(new_target, now, reduced_motion);
+    }
+
+    /// Applies an instantaneous velocity impulse (for example, a launch bounce).
+    pub fn impulse(&mut self, delta_velocity: f64, now: Duration, reduced_motion: bool) {
+        if reduced_motion {
+            self.snap_to_target();
+            return;
+        }
+        if self.active {
+            let _ = self.tick(now);
+        }
+        self.velocity += delta_velocity;
+        self.last_time = Some(now);
+        self.active = true;
+    }
+
+    /// Immediately settles at the target value with zero velocity.
+    pub fn snap_to_target(&mut self) {
+        self.current = self.target;
+        self.velocity = 0.0;
+        self.last_time = None;
+        self.active = false;
+    }
+
+    /// Stops motion at the current value with zero velocity.
+    pub fn cancel_at_current(&mut self) {
+        self.target = self.current;
+        self.velocity = 0.0;
+        self.last_time = None;
+        self.active = false;
+    }
+
+    /// Integrates the spring forward to monotonic timestamp `now` and returns the new value.
+    pub fn tick(&mut self, now: Duration) -> f64 {
+        if !self.active {
+            self.last_time = Some(now);
+            return self.current;
+        }
+
+        let Some(prev) = self.last_time else {
+            self.last_time = Some(now);
+            return self.current;
+        };
+
+        let raw_dt = now.saturating_sub(prev).as_secs_f64();
+        self.last_time = Some(now);
+        if raw_dt <= 0.0 {
+            return self.current;
+        }
+
+        let dt = raw_dt.min(2.0) * self.speed_multiplier;
+        // 240 Hz max substep keeps stiff springs numerically stable across 60..240 Hz monitors.
+        let mut substeps = 1_u32;
+        while f64::from(substeps) < dt * 240.0 && substeps < 480 {
+            substeps += 1;
+        }
+        let h = dt / f64::from(substeps);
+        let k = self.config.stiffness;
+        let c = self.config.damping;
+        let m = self.config.mass;
+
+        for _ in 0..substeps {
+            let disp = self.current - self.target;
+            let accel = (-k * disp - c * self.velocity) / m;
+            self.velocity += accel * h;
+            self.current += self.velocity * h;
+        }
+
+        if (self.current - self.target).abs() <= self.config.epsilon_pos
+            && self.velocity.abs() <= self.config.epsilon_vel
+        {
+            self.current = self.target;
+            self.velocity = 0.0;
+            self.active = false;
+        }
+
+        self.current
+    }
+}
+
 /// Integer rectangle `(x, y, width, height)` in logical compositor coordinates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LogicalRect {
@@ -684,5 +939,49 @@ mod tests {
         assert!(!val.is_active());
         assert!((val.current() - 140.0).abs() < 1e-5);
         assert!((val.target() - 140.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn spring_value_converges_preserves_velocity_and_respects_reduced_motion() {
+        let mut spring = SpringValue::new_settled(0.0, SpringConfig::dock_magnification());
+        spring.retarget(1.6, Duration::ZERO, false);
+        assert!(spring.is_active());
+
+        // Step in 120 Hz frames for ~1.5s until settled.
+        let mut now = Duration::ZERO;
+        for _ in 0..180 {
+            now += Duration::from_micros(8333);
+            let _ = spring.tick(now);
+        }
+        assert!(!spring.is_active());
+        assert!((spring.current() - 1.6).abs() < 1e-3);
+
+        // Interrupt mid-flight and verify instantaneous velocity is preserved smoothly.
+        spring.retarget(0.0, now, false);
+        now += Duration::from_millis(24);
+        let current_pos = spring.tick(now);
+        let captured_velocity = spring.velocity();
+        assert!(current_pos < 1.6 && captured_velocity < -0.5);
+
+        spring.retarget(0.8, now, false);
+        assert!(spring.is_active());
+        assert!((spring.velocity() - captured_velocity).abs() < 1e-9);
+
+        // Underdamped bounce impulse overshoots target then decays back.
+        let mut bounce = SpringValue::new_settled(0.0, SpringConfig::bounce());
+        bounce.impulse(120.0, Duration::ZERO, false);
+        let mut peak = 0.0_f64;
+        for step in 1..=200 {
+            let v = bounce.tick(Duration::from_millis(step * 8));
+            peak = peak.max(v);
+        }
+        assert!(peak > 3.0);
+        assert!((bounce.current() - 0.0).abs() < 1e-2);
+
+        // Reduced motion snaps immediately without residual velocity.
+        spring.retarget(0.25, now, true);
+        assert!(!spring.is_active());
+        assert!((spring.current() - 0.25).abs() < 1e-9);
+        assert!(spring.velocity().abs() < 1e-9);
     }
 }

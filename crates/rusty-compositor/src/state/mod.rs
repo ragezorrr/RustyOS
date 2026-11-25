@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
-use rusty_animation::{AnimatedValue, AnimationEngine};
+use rusty_animation::{AnimatedValue, AnimationEngine, SpringConfig, SpringValue};
 use rusty_wm::{OutputId, Rect, WindowId, WindowManager, WmAction, WorkspaceId};
 use smithay::{
     backend::{
@@ -253,14 +253,18 @@ pub struct RustyCompositorState {
     pub overview_anim: AnimatedValue,
     /// Currently hovered Dock slot index (`RUSTYOS-023` / `RUSTYOS-073`).
     pub dock_hover_slot: Option<usize>,
-    /// Animated Dock hover lift progress (`0.0` rest -> `1.0` lifted, 120 ms) (`RUSTYOS-048`).
-    pub dock_hover_anim: AnimatedValue,
+    /// Continuous cursor coordinate along the active Dock axis for proximity magnification.
+    pub dock_pointer_axis_pos: Option<f64>,
+    /// Keyboard-focused Dock slot index during Dock keyboard navigation.
+    pub dock_focused_slot: Option<usize>,
+    /// Animated Dock magnification / hover lift progress (`0.0` rest -> `1.0` active) (`RUSTYOS-048`).
+    pub dock_hover_anim: SpringValue,
     /// Up to 4 recently closed unpinned Dock applications (`RUSTYOS-073`).
     pub recent_unpinned_apps: Vec<RecentDockApp>,
     /// Active launch/notification Dock icon bounce timers (`RUSTYOS-073`).
     pub app_bounces: Vec<DockBounceState>,
     /// Animated auto-hide reveal progress (`0.0` hidden offscreen -> `1.0` revealed) on primary output (`RUSTYOS-073`).
-    pub dock_auto_hide_anim: AnimatedValue,
+    pub dock_auto_hide_anim: SpringValue,
     /// True when the pointer is within the edge reveal strip or hovering an open Dock/Stack on primary output (`RUSTYOS-073`).
     pub dock_auto_hide_hovered: bool,
     /// Independent per-output Dock visibility, occlusion, reveal, and presentation state (`RUSTYOS-161`).
@@ -735,10 +739,15 @@ impl RustyCompositorState {
             overview_active: false,
             overview_anim: AnimatedValue::new_settled(0.0),
             dock_hover_slot: None,
-            dock_hover_anim: AnimatedValue::new_settled(0.0),
+            dock_pointer_axis_pos: None,
+            dock_focused_slot: None,
+            dock_hover_anim: SpringValue::new_settled(0.0, SpringConfig::dock_magnification()),
             recent_unpinned_apps: Vec::new(),
             app_bounces: Vec::new(),
-            dock_auto_hide_anim: AnimatedValue::new_settled(initial_dock_reveal),
+            dock_auto_hide_anim: SpringValue::new_settled(
+                initial_dock_reveal,
+                SpringConfig::dock_reveal(),
+            ),
             dock_auto_hide_hovered: false,
             output_docks: initial_output_docks,
             active_dock_output: Some(PRIMARY_OUTPUT_ID),

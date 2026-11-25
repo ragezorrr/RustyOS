@@ -491,3 +491,35 @@ fn parses_dock_visibility_modes_and_preserves_legacy_auto_hide_compat() {
         DockVisibilityMode::AlwaysShow
     );
 }
+
+#[test]
+fn parses_dock_magnification_speed_and_tooltip_settings_and_roundtrips() {
+    let defaults = UserConfig::default();
+    assert_eq!(defaults.dock_icon_size, DEFAULT_DOCK_ICON_SIZE);
+    assert!(defaults.dock_magnification_enabled);
+    assert!((defaults.dock_magnification_max - DEFAULT_DOCK_MAGNIFICATION_MAX).abs() < 1e-6);
+    assert!((defaults.dock_animation_speed - 1.0).abs() < 1e-6);
+    assert!(defaults.dock_show_tooltips);
+
+    let custom = UserConfig::parse_toml(
+        "[dock]\nmagnification_enabled = false\nmagnification_max = 1.45\nanimation_speed = 1.75\nshow_tooltips = false\n",
+    );
+    assert!(!custom.dock_magnification_enabled);
+    assert!((custom.dock_magnification_max - 1.45).abs() < 1e-6);
+    assert!((custom.dock_animation_speed - 1.75).abs() < 1e-6);
+    assert!(!custom.dock_show_tooltips);
+
+    let clamped =
+        UserConfig::parse_toml("[dock]\nmagnification_max = 9.0\nanimation_speed = 0.01\n");
+    assert!((clamped.dock_magnification_max - 2.0).abs() < 1e-6);
+    assert!((clamped.dock_animation_speed - 0.25).abs() < 1e-6);
+
+    let reparsed = UserConfig::parse_toml(&custom.to_toml_string());
+    assert_eq!(
+        reparsed.dock_magnification_enabled,
+        custom.dock_magnification_enabled
+    );
+    assert!((reparsed.dock_magnification_max - custom.dock_magnification_max).abs() < 1e-6);
+    assert!((reparsed.dock_animation_speed - custom.dock_animation_speed).abs() < 1e-6);
+    assert_eq!(reparsed.dock_show_tooltips, custom.dock_show_tooltips);
+}

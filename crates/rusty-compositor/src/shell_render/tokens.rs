@@ -210,36 +210,36 @@ pub const TOP_BAR_FONT_SIZE: f32 = 14.0;
 /// Server-Side Decoration (SSD) titlebar height in logical pixels (`RUSTYOS-019`).
 pub const TITLEBAR_HEIGHT: i32 = 36;
 
-/// Dock container height in logical pixels (`RUSTYOS-050`: 50 px icon + concentric padding & 4 px dot).
-pub const DOCK_HEIGHT: i32 = 68;
+/// Dock container height in logical pixels (Golden Gate target `76..=88`: `54` icon + `11*2+2` padding/rim).
+pub const DOCK_HEIGHT: i32 = 78;
 
 /// Dock bottom margin from screen edge.
-pub const DOCK_MARGIN_BOTTOM: i32 = 4;
+pub const DOCK_MARGIN_BOTTOM: i32 = 6;
 
-/// Dock hit-slot width/height in logical pixels (`RUSTYOS-050`).
-pub const DOCK_ITEM_SIZE: i32 = 52;
+/// Dock hit-slot width/height in logical pixels (`54` icon + `2` slot cushion).
+pub const DOCK_ITEM_SIZE: i32 = 56;
 
 /// Horizontal gap between Dock icons in logical pixels (`RUSTYOS-050`).
 pub const DOCK_ITEM_GAP: i32 = 6;
 
-/// Dock inner horizontal/vertical padding in logical pixels (`RUSTYOS-050`).
-pub const DOCK_PADDING: i32 = 8;
+/// Dock inner horizontal/vertical padding in logical pixels (Golden Gate capsule proportion).
+pub const DOCK_PADDING: i32 = 11;
 
-/// Dock corner radius in logical pixels (`RUSTYOS-094`: flat frosted glass container matching reference, radius 18px).
-pub const DOCK_RADIUS: i32 = 18;
+/// Dock corner radius in logical pixels (Golden Gate target `26..=32` at default `78` px height).
+pub const DOCK_RADIUS: i32 = 27;
 
-/// Computes dynamic Dock corner radius calibrated to `RustyOS` standard (`thickness * 28 / 86`) (`RUSTYOS-098`).
+/// Computes dynamic Dock corner radius calibrated to Golden Gate proportions (`thickness * 30 / 86`).
 #[must_use]
 pub fn compute_dock_radius(thickness: i32) -> i32 {
-    let raw = (thickness * 28 + 43) / 86;
+    let raw = (thickness * 30 + 43) / 86;
     raw.clamp(12, (thickness / 2).max(12))
 }
 
 /// Extra horizontal spacing allocated for the hairline divider before Downloads/Trash (`RUSTYOS-050`).
 pub const DOCK_DIVIDER_GAP: i32 = 14;
 
-/// Resting app icon edge length inside a Dock slot (`RUSTYOS-050`).
-pub const DOCK_ICON_SIZE: i32 = 50;
+/// Resting app icon edge length inside a Dock slot (Golden Gate target `48..=56`).
+pub const DOCK_ICON_SIZE: i32 = 54;
 
 /// Number of left-side pinned app slots before running windows (`RUSTYOS-050`).
 pub const DOCK_PINNED_COUNT: usize = 6;

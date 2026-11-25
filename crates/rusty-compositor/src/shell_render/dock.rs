@@ -3,7 +3,10 @@
 use smithay::backend::renderer::element::solid::SolidColorRenderElement;
 use smithay::utils::{Point, Rectangle, Size};
 
-use crate::config::{DEFAULT_DOCK_ICON_SIZE, DockPosition, clamp_dock_icon_size};
+use crate::config::{
+    DEFAULT_DOCK_ICON_SIZE, DEFAULT_DOCK_MAGNIFICATION_MAX, DockPosition, clamp_dock_icon_size,
+    clamp_dock_magnification_max,
+};
 
 use super::tokens::{
     COLOR_ACCENT, COLOR_ACCENT_HOVER, COLOR_ACCENT_MUTED, COLOR_BORDER_HIGHLIGHT, COLOR_MUTED,
@@ -367,6 +370,7 @@ pub fn dock_hit_for_pinned_key(app_key: &str, pinned_idx: usize) -> DockHit {
 
 /// Dock view state describing tiles, local icon hover, auto-hide reveal, and drag preview (`RUSTYOS-023` / `RUSTYOS-073`).
 #[derive(Debug, Clone, Copy)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct DockViewState<'a> {
     /// Legacy XDG icon hints preserved for struct literal compatibility.
     pub pinned_icons: [Option<&'a str>; 2],
@@ -400,6 +404,16 @@ pub struct DockViewState<'a> {
     pub presented_layout: Option<&'a ComputedDockLayout>,
     /// Active external/desktop/Spotlight drop-target visual highlight (`RUSTYOS-163`).
     pub drop_highlight: Option<DockDropHighlight<'a>>,
+    /// Continuous cursor coordinate along the active Dock axis for wave proximity magnification.
+    pub pointer_axis_pos: Option<f64>,
+    /// Currently keyboard-focused Dock slot index (when navigating Dock via keyboard).
+    pub focused_slot: Option<usize>,
+    /// Whether cursor-following icon magnification is enabled (`[dock].magnification_enabled`).
+    pub magnification_enabled: bool,
+    /// Peak magnification scale factor (`1.0..=2.0`, default `1.6`) (`[dock].magnification_max`).
+    pub magnification_max: f64,
+    /// Whether hover tooltips appear above Dock icons (`[dock].show_tooltips`).
+    pub show_tooltips: bool,
 }
 
 impl Default for DockViewState<'_> {
@@ -421,7 +435,38 @@ impl Default for DockViewState<'_> {
             top_inset: TOP_BAR_HEIGHT,
             presented_layout: None,
             drop_highlight: None,
+            pointer_axis_pos: None,
+            focused_slot: None,
+            magnification_enabled: true,
+            magnification_max: DEFAULT_DOCK_MAGNIFICATION_MAX,
+            show_tooltips: true,
         }
+    }
+}
+
+/// Formats a rich accessibility label describing the tile name, state, and badge count.
+#[must_use]
+pub fn dock_accessibility_label(tile: &DockAppTile) -> String {
+    let mut parts = Vec::with_capacity(4);
+    if tile.has_indicator {
+        if tile.is_active {
+            parts.push("active".to_owned());
+        } else {
+            parts.push("running".to_owned());
+        }
+    }
+    if tile.window_count > 1 {
+        parts.push(format!("{} windows", tile.window_count));
+    } else if tile.has_minimized {
+        parts.push("minimized".to_owned());
+    }
+    if tile.badge_count > 0 {
+        parts.push(format!("{} unread", tile.badge_count));
+    }
+    if parts.is_empty() {
+        tile.label.clone()
+    } else {
+        format!("{}, {}", tile.label, parts.join(", "))
     }
 }
 
@@ -703,6 +748,78 @@ struct AxisGeometry<'a> {
     capsule_axis_start: i32,
     scale_fit: f64,
     divider_before: &'a [bool],
+    slot_scales: &'a [f64],
+    extra_spans: &'a [f64],
+}
+
+#[allow(clippy::cast_possible_truncation)]
+fn compute_proximity_scales_and_spans(
+    tiles: &[DockAppTile],
+    dock_view: &DockViewState<'_>,
+    base_icon: i32,
+    slot_span_f: f64,
+    scale_fit: f64,
+    rest_centers: &[f64],
+    available_extra_len: f64,
+) -> (Vec<f64>, Vec<f64>) {
+    let mag_max = clamp_dock_magnification_max(dock_view.magnification_max);
+    let hp = dock_view.hover_progress.clamp(0.0, 1.0);
+    let cursor_axis = if !dock_view.magnification_enabled
+        || dock_view.reduced_motion
+        || dock_view.drag_preview.is_some()
+        || hp <= 0.001
+    {
+        None
+    } else {
+        dock_view.pointer_axis_pos.or_else(|| {
+            dock_view
+                .hover_slot
+                .and_then(|idx| rest_centers.get(idx).copied())
+        })
+    };
+
+    let influence_radius = (slot_span_f * 2.55).max(36.0);
+    let base_draw_f = (f64::from(base_icon) * scale_fit).max(16.0);
+    let mut scales = Vec::with_capacity(tiles.len());
+    let mut raw_extras = Vec::with_capacity(tiles.len());
+
+    for (i, &rest_center) in rest_centers.iter().enumerate() {
+        let drop_targeted = matches!(
+            dock_view.drop_highlight,
+            Some(DockDropHighlight::Slot { slot_idx, .. }) if slot_idx == i
+        );
+        let proximity_scale = if let Some(cursor) = cursor_axis {
+            let dist = (cursor - rest_center).abs();
+            if dist < influence_radius {
+                let u = dist / influence_radius;
+                let weight = f64::midpoint(1.0, (std::f64::consts::PI * u).cos());
+                1.0 + (mag_max - 1.0) * weight * hp
+            } else {
+                1.0
+            }
+        } else {
+            1.0
+        };
+        let scale = if drop_targeted {
+            proximity_scale.max(1.12)
+        } else {
+            proximity_scale
+        };
+        let scaled_draw = base_draw_f * scale;
+        let extra = ((scaled_draw - base_draw_f) * 0.92).max(0.0);
+        scales.push(scale);
+        raw_extras.push(extra);
+    }
+
+    let sum_extra: f64 = raw_extras.iter().sum();
+    if sum_extra > available_extra_len && sum_extra > 1e-3 {
+        let ratio = available_extra_len.max(0.0) / sum_extra;
+        for (extra, scale) in raw_extras.iter_mut().zip(scales.iter_mut()) {
+            *extra *= ratio;
+            *scale = 1.0 + (*scale - 1.0) * ratio;
+        }
+    }
+    (scales, raw_extras)
 }
 
 #[allow(clippy::cast_possible_truncation)]
@@ -718,11 +835,12 @@ fn build_dock_slots_along_axis(
     let mut slots = Vec::with_capacity(tiles.len());
     let mut cur_axis =
         f64::from(geom.capsule_axis_start) + f64::from(DOCK_PADDING) * geom.scale_fit;
-    let slot_span_f = f64::from(geom.base_slot) * geom.scale_fit;
-    let slot_span = slot_span_f.round().max(16.0) as i32;
+    let base_slot_span_f = f64::from(geom.base_slot) * geom.scale_fit;
     let base_draw = (f64::from(geom.base_icon) * geom.scale_fit)
         .round()
         .max(16.0) as i32;
+    let div_cross_pad = (DOCK_PADDING + 5).min(geom.thickness / 3);
+    let mag_denom = (clamp_dock_magnification_max(dock_view.magnification_max) - 1.0).max(0.15);
 
     for (i, tile) in tiles.iter().enumerate() {
         if i > 0 {
@@ -734,13 +852,16 @@ fn build_dock_slots_along_axis(
             dividers.push(map_axis_rect(
                 geom.pos,
                 div_axis,
-                geom.cross_origin + 15,
+                geom.cross_origin + div_cross_pad,
                 1,
-                (geom.thickness - 30).max(16),
+                (geom.thickness - div_cross_pad * 2).max(16),
             ));
             cur_axis += f64::from(DOCK_DIVIDER_GAP) * geom.scale_fit;
         }
 
+        let extra_span = geom.extra_spans.get(i).copied().unwrap_or(0.0);
+        let slot_span_f = base_slot_span_f + extra_span;
+        let slot_span = slot_span_f.round().max(16.0) as i32;
         let slot_axis = cur_axis.round() as i32;
         cur_axis += slot_span_f;
 
@@ -753,18 +874,23 @@ fn build_dock_slots_along_axis(
             dock_view.drop_highlight,
             Some(DockDropHighlight::Slot { slot_idx, .. }) if slot_idx == i
         );
-        let hovered = dock_view.hover_slot == Some(i) || drop_targeted;
-        let (hover_scale_px, hover_lift_px) = if hovered {
-            if dock_view.reduced_motion {
-                (0.0, 2.0)
-            } else if drop_targeted {
-                (6.0, 5.0)
+        let slot_scale = geom.slot_scales.get(i).copied().unwrap_or(1.0);
+        let keyboard_focused = dock_view.focused_slot == Some(i);
+        let hover_norm = ((slot_scale - 1.0) / mag_denom).clamp(0.0, 1.0);
+        let (hover_scale_px, hover_lift_px) = if dock_view.reduced_motion {
+            let lift = if dock_view.hover_slot == Some(i) || keyboard_focused || drop_targeted {
+                2.0
             } else {
-                let hp = dock_view.hover_progress.clamp(0.35, 1.0);
-                (8.0 * hp, 6.0 * hp)
-            }
+                0.0
+            };
+            (0.0, lift)
         } else {
-            (0.0, 0.0)
+            let drop_px = if drop_targeted { 6.0 } else { 0.0 };
+            let mag_scale_px = (f64::from(geom.base_icon) * (slot_scale - 1.0)).max(drop_px);
+            let lift = (5.0 * hover_norm)
+                .max(if drop_targeted { 5.0 } else { 0.0 })
+                .max(if keyboard_focused { 4.0 } else { 0.0 });
+            (mag_scale_px, lift)
         };
         let lift_f = hover_lift_px + bounce_px;
 
@@ -843,6 +969,39 @@ fn insert_pin_drop_placeholder(
     Some(pos_idx)
 }
 
+fn compute_resting_dock_centers(
+    rest_capsule_start: i32,
+    scale_fit: f64,
+    slot_span_f: f64,
+    divider_before: &[bool],
+) -> Vec<f64> {
+    let mut centers = Vec::with_capacity(divider_before.len());
+    let mut cur = f64::from(rest_capsule_start) + f64::from(DOCK_PADDING) * scale_fit;
+    for (i, &has_div) in divider_before.iter().enumerate() {
+        if i > 0 {
+            cur += f64::from(DOCK_ITEM_GAP) * scale_fit;
+        }
+        if has_div {
+            cur += f64::from(DOCK_DIVIDER_GAP) * scale_fit;
+        }
+        centers.push(cur + slot_span_f * 0.5);
+        cur += slot_span_f;
+    }
+    centers
+}
+
+fn compute_divider_flags(tiles: &[DockAppTile]) -> (Vec<bool>, i32) {
+    let mut divider_before = vec![false; tiles.len()];
+    let mut div_count = 0_i32;
+    for i in 1..tiles.len() {
+        if has_divider_between(tiles[i - 1].section, tiles[i].section) {
+            divider_before[i] = true;
+            div_count += 1;
+        }
+    }
+    (divider_before, div_count)
+}
+
 /// Computes single-source-of-truth Dock geometry across `Bottom`/`Left`/`Right`, local icon hover,
 /// auto-hide offset, bounces, and drag preview (`RUSTYOS-073`).
 #[must_use]
@@ -873,14 +1032,7 @@ pub fn compute_dock_layout(
         }
     };
 
-    let mut divider_before = vec![false; tiles.len()];
-    let mut div_count = 0_i32;
-    for i in 1..tiles.len() {
-        if has_divider_between(tiles[i - 1].section, tiles[i].section) {
-            divider_before[i] = true;
-            div_count += 1;
-        }
-    }
+    let (divider_before, div_count) = compute_divider_flags(&tiles);
 
     let tile_count_i32 = i32::try_from(tiles.len()).unwrap_or(0);
     let gap_count_i32 = i32::try_from(tiles.len().saturating_sub(1)).unwrap_or(0);
@@ -889,14 +1041,35 @@ pub fn compute_dock_layout(
         + DOCK_PADDING * 2
         + div_count * DOCK_DIVIDER_GAP;
     let max_len = (screen_axis - 36).max(160);
-    let capsule_len = raw_len.clamp(120, max_len);
-    let capsule_axis_start = axis_origin_offset + (screen_axis - capsule_len) / 2;
+    let rest_capsule_len = raw_len.clamp(120, max_len);
+    let rest_capsule_start = axis_origin_offset + (screen_axis - rest_capsule_len) / 2;
     let cross_origin = dock_cross_origin(screen_size, pos, thickness, dock_view.auto_hide_reveal);
     let scale_fit = if raw_len > max_len && raw_len > 1 {
         f64::from(max_len) / f64::from(raw_len)
     } else {
         1.0
     };
+
+    let slot_span_f = f64::from(base_slot) * scale_fit;
+    let rest_centers =
+        compute_resting_dock_centers(rest_capsule_start, scale_fit, slot_span_f, &divider_before);
+
+    let avail_extra = f64::from((max_len - rest_capsule_len).max(0));
+    let (slot_scales, extra_spans) = compute_proximity_scales_and_spans(
+        &tiles,
+        dock_view,
+        base_icon,
+        slot_span_f,
+        scale_fit,
+        &rest_centers,
+        avail_extra,
+    );
+    let extra_len_i32 = (extra_spans.iter().sum::<f64>()).round() as i32;
+    let capsule_len = (raw_len + extra_len_i32).clamp(120, max_len);
+    let min_axis_start = axis_origin_offset + 18;
+    let max_axis_start = (axis_origin_offset + screen_axis - capsule_len - 18).max(min_axis_start);
+    let capsule_axis_start = (axis_origin_offset + (screen_axis - capsule_len) / 2)
+        .clamp(min_axis_start, max_axis_start);
 
     let geom = AxisGeometry {
         pos,
@@ -907,6 +1080,8 @@ pub fn compute_dock_layout(
         capsule_axis_start,
         scale_fit,
         divider_before: &divider_before,
+        slot_scales: &slot_scales,
+        extra_spans: &extra_spans,
     };
     let (dividers, mut slots) = build_dock_slots_along_axis(&tiles, &geom, dock_view);
     let mut drop_insert_rect = None;
@@ -1096,7 +1271,10 @@ pub(super) fn dock_tooltip_rect_and_label(
             (anchor, text)
         }
         None => {
-            let slot_idx = dock_view.hover_slot?;
+            if !dock_view.show_tooltips {
+                return None;
+            }
+            let slot_idx = dock_view.hover_slot.or(dock_view.focused_slot)?;
             let slot = layout.slots.iter().find(|s| s.slot_idx == slot_idx)?;
             (slot.icon_rect, slot.tile.label.clone())
         }

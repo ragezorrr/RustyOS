@@ -4,8 +4,6 @@ mod dock_and_config;
 mod notifications;
 mod overview;
 
-use std::time::Duration;
-
 use rusty_animation::{Easing, MotionTokens};
 use rusty_ipc::Urgency;
 use rusty_wm::{WindowId, WmAction};
@@ -639,18 +637,33 @@ impl RustyCompositorState {
         self.set_compositor_cursor_override(None);
     }
 
-    /// Updates hovered Dock slot and triggers a 120 ms lift transition (`RUSTYOS-048`).
+    /// Updates hovered Dock slot and triggers a spring hover/magnification transition (`RUSTYOS-048`).
     pub fn set_dock_hover_slot(&mut self, next: Option<usize>) {
-        if self.dock_hover_slot != next {
+        self.set_dock_hover_state(next, None);
+    }
+
+    /// Updates hovered Dock slot and continuous pointer axis coordinate for smooth wave magnification.
+    pub fn set_dock_hover_state(&mut self, next: Option<usize>, axis_pos: Option<f64>) {
+        let now = self.elapsed();
+        self.dock_hover_anim
+            .set_speed_multiplier(self.user_config.dock_animation_speed);
+        let active = next.is_some() || axis_pos.is_some();
+        let target = if active { 1.0 } else { 0.0 };
+        if let Some(pos) = axis_pos {
+            let changed = self
+                .dock_pointer_axis_pos
+                .is_none_or(|prev| (prev - pos).abs() > 0.25);
+            self.dock_pointer_axis_pos = Some(pos);
+            if changed && self.user_config.dock_magnification_enabled {
+                self.shell_redraw_needed = true;
+            }
+        } else if next.is_some() {
+            self.dock_pointer_axis_pos = None;
+        }
+        if self.dock_hover_slot != next || (self.dock_hover_anim.target() - target).abs() > 1e-4 {
             self.dock_hover_slot = next;
-            let now = self.elapsed();
-            self.dock_hover_anim.retarget(
-                if next.is_some() { 1.0 } else { 0.0 },
-                now,
-                Duration::from_millis(120),
-                Easing::EaseOutCubic,
-                self.animations.reduced_motion(),
-            );
+            self.dock_hover_anim
+                .retarget(target, now, self.animations.reduced_motion());
             self.shell_redraw_needed = true;
         }
     }

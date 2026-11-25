@@ -913,9 +913,9 @@ fn macos27_top_bar_dynamic_left_right_and_menu_popover_hit_testing() {
 
 #[test]
 fn macos_dock_divider_gap_tooltip_and_radii_constants() {
-    assert_eq!(DOCK_HEIGHT, 68);
-    assert_eq!(DOCK_RADIUS, 18);
-    assert_eq!(DOCK_ICON_SIZE, 50);
+    assert_eq!(DOCK_HEIGHT, 78);
+    assert_eq!(DOCK_RADIUS, 27);
+    assert_eq!(DOCK_ICON_SIZE, 54);
     assert_eq!(DOCK_ITEM_GAP, 6);
     assert_eq!(WINDOW_RADIUS, 14);
     let last_app_slot_opt = dock_slot_rect(1280, 800, 2, 7);
@@ -1885,11 +1885,13 @@ fn dock_hover_edge_positions_and_auto_hide_work() {
         ..rest_view
     };
     let bottom = compute_dock_layout(screen, &view);
-    assert_eq!(bottom.capsule_rect, rest.capsule_rect);
-    assert_eq!(bottom.slots[1].icon_rect.size.w, 58);
+    assert!(bottom.capsule_rect.size.w > rest.capsule_rect.size.w);
+    assert_eq!(bottom.slots[1].icon_rect.size.w, 80);
     assert!(bottom.slots[1].icon_rect.loc.y < rest.slots[1].icon_rect.loc.y);
-    assert_eq!(bottom.slots[0].icon_rect, rest.slots[0].icon_rect);
-    assert_eq!(bottom.slots[2].icon_rect, rest.slots[2].icon_rect);
+    assert!(bottom.slots[0].icon_rect.size.w > 50);
+    assert!(bottom.slots[2].icon_rect.size.w > 50);
+    assert!(bottom.slots[1].icon_rect.size.w > bottom.slots[0].icon_rect.size.w);
+    assert!(bottom.slots[1].icon_rect.size.w > bottom.slots[2].icon_rect.size.w);
 
     let reduced = compute_dock_layout(
         screen,
@@ -2507,4 +2509,97 @@ fn fullscreen_and_maximized_frame_hit_testing_suppress_illegal_ssd_and_resize_gr
     );
     assert_eq!(check_window_frame_hit(&list_max, 1.0, 400.0), None);
     assert_eq!(check_window_frame_hit(&list_max, 1279.0, 799.0), None);
+}
+
+#[test]
+fn dock_proximity_magnification_wave_symmetry_neighbors_and_edge_clamp() {
+    let screen = Size::from((1280, 800));
+    let tiles = build_default_dock_tiles(&[], false);
+    let rest_view = DockViewState {
+        tiles: &tiles,
+        icon_size: 54,
+        ..DockViewState::default()
+    };
+    let rest = compute_dock_layout(screen, &rest_view);
+
+    // 1. Resting center of middle tile yields ~1.6x peak, symmetric decay across neighbors.
+    let mid_idx = 3;
+    let mid_center = f64::from(rest.slots[mid_idx].hit_rect.loc.x)
+        + f64::from(rest.slots[mid_idx].hit_rect.size.w) * 0.5;
+    let peak_view = DockViewState {
+        pointer_axis_pos: Some(mid_center),
+        hover_slot: Some(mid_idx),
+        hover_progress: 1.0,
+        ..rest_view
+    };
+    let peak = compute_dock_layout(screen, &peak_view);
+    assert_eq!(peak.slots[mid_idx].icon_rect.size.w, 86); // (54 * 1.6).round() == 86
+    assert!(peak.slots[mid_idx - 1].icon_rect.size.w > 54);
+    assert_eq!(
+        peak.slots[mid_idx - 1].icon_rect.size.w,
+        peak.slots[mid_idx + 1].icon_rect.size.w
+    );
+    assert!(peak.slots[mid_idx - 2].icon_rect.size.w > 54);
+    assert!(peak.slots[mid_idx - 1].icon_rect.size.w > peak.slots[mid_idx - 2].icon_rect.size.w);
+    // Neighboring slots spread outward cleanly and capsule grows to hold them.
+    assert!(peak.capsule_rect.size.w > rest.capsule_rect.size.w);
+    assert!(peak.slots[mid_idx - 1].hit_rect.loc.x < rest.slots[mid_idx - 1].hit_rect.loc.x);
+    assert!(peak.slots[mid_idx + 1].hit_rect.loc.x > rest.slots[mid_idx + 1].hit_rect.loc.x);
+
+    // 2. Narrow screen edge clamping keeps magnified Dock inside horizontal screen bounds.
+    let narrow = Size::from((580, 700));
+    let edge_view = DockViewState {
+        pointer_axis_pos: Some(120.0),
+        hover_progress: 1.0,
+        ..rest_view
+    };
+    let edge_layout = compute_dock_layout(narrow, &edge_view);
+    assert!(edge_layout.capsule_rect.loc.x >= 18);
+    assert!(edge_layout.capsule_rect.loc.x + edge_layout.capsule_rect.size.w <= 580 - 18);
+
+    // 3. Disabling magnification or hover tooltips honors user settings cleanly.
+    let disabled_mag = compute_dock_layout(
+        screen,
+        &DockViewState {
+            magnification_enabled: false,
+            ..peak_view
+        },
+    );
+    assert_eq!(disabled_mag.slots[mid_idx].icon_rect.size.w, 54);
+    assert_eq!(disabled_mag.capsule_rect, rest.capsule_rect);
+
+    assert!(
+        dock_tooltip_rect_and_label(
+            1280,
+            800,
+            &DockViewState {
+                show_tooltips: false,
+                ..peak_view
+            }
+        )
+        .is_none()
+    );
+    assert!(
+        dock_tooltip_rect_and_label(
+            1280,
+            800,
+            &DockViewState {
+                hover_slot: None,
+                focused_slot: Some(0),
+                ..rest_view
+            }
+        )
+        .is_some_and(|(_, label)| label == "Files")
+    );
+
+    // 4. Rich accessibility label summarizes active/running/unread status.
+    let mut active_tile = tiles[0].clone();
+    active_tile.has_indicator = true;
+    active_tile.is_active = true;
+    active_tile.window_count = 3;
+    active_tile.badge_count = 5;
+    assert_eq!(
+        dock_accessibility_label(&active_tile),
+        "Files, active, 3 windows, 5 unread"
+    );
 }

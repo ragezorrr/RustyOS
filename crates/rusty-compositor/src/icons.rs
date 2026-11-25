@@ -550,7 +550,8 @@ impl IconCache {
         size_px: i32,
         loc: Point<i32, Logical>,
     ) -> Option<MemoryRenderBufferRenderElement<GlesRenderer>> {
-        let size_u16 = u16::try_from(size_px).ok()?;
+        let raster_px = dock_raster_bucket_px(size_px);
+        let size_u16 = u16::try_from(raster_px).ok()?;
         if icon_name.trim().is_empty() || size_px <= 0 {
             return None;
         }
@@ -607,10 +608,11 @@ impl IconCache {
         size_px: i32,
         loc: Point<i32, Logical>,
     ) -> Option<MemoryRenderBufferRenderElement<GlesRenderer>> {
-        let size_u16 = u16::try_from(size_px).ok()?;
         if size_px <= 0 {
             return None;
         }
+        let raster_px = dock_raster_bucket_px(size_px);
+        let size_u16 = u16::try_from(raster_px).ok()?;
         let is_dark = matches!(
             crate::shell_render::active_appearance(),
             crate::config::AppearanceMode::Dark
@@ -620,9 +622,20 @@ impl IconCache {
             .builtin_squircles
             .entry((icon, size_u16, is_dark, accent_idx))
             .or_insert_with(|| {
-                rasterize_builtin_squircle_buffer(icon, size_px, is_dark, accent_idx)
+                rasterize_builtin_squircle_buffer(icon, raster_px, is_dark, accent_idx)
             });
         element_from_icon_buffer(renderer, buf, size_px, loc)
+    }
+}
+
+/// Maps transient magnified icon sizes (`> 58 px`) to a single `@2x` `96 px` (`192 dev px`)
+/// GPU-cached raster bucket so smooth cursor sweeps never re-rasterize 30 intermediate pixmaps.
+#[must_use]
+const fn dock_raster_bucket_px(size_px: i32) -> i32 {
+    if size_px > 58 && size_px <= 112 {
+        96
+    } else {
+        size_px
     }
 }
 
@@ -689,10 +702,7 @@ fn element_from_icon_buffer(
         loc.to_f64().to_physical(1.0),
         buf,
         None,
-        Some(Rectangle::<f64, Logical>::from_size(Size::from((
-            f64::from(size_px),
-            f64::from(size_px),
-        )))),
+        None,
         Some(Size::from((size_px, size_px))),
         Kind::Unspecified,
     )

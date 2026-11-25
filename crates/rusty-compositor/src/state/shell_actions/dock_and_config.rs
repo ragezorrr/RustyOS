@@ -318,6 +318,19 @@ impl RustyCompositorState {
             top_inset: crate::shell_render::TOP_BAR_HEIGHT,
             presented_layout: None,
             drop_highlight: self.dock_drop_highlight_for_output(primary_id),
+            pointer_axis_pos: if self.active_dock_output == Some(primary_id) {
+                self.dock_pointer_axis_pos
+            } else {
+                None
+            },
+            focused_slot: if self.active_dock_output == Some(primary_id) {
+                self.dock_focused_slot
+            } else {
+                None
+            },
+            magnification_enabled: self.user_config.dock_magnification_enabled,
+            magnification_max: self.user_config.dock_magnification_max,
+            show_tooltips: self.user_config.dock_show_tooltips,
         }
     }
 
@@ -927,6 +940,108 @@ impl RustyCompositorState {
                 }
             }
         }
+    }
+
+    /// Focuses the Dock for keyboard navigation on the active output and reveals auto-hide if active.
+    pub fn focus_dock(&mut self) {
+        let tiles = self.build_dock_tiles();
+        if tiles.is_empty() {
+            return;
+        }
+        let primary_id = self.output_map.primary().id;
+        if self.active_dock_output.is_none() {
+            self.active_dock_output = Some(primary_id);
+        }
+        let default_idx = self
+            .dock_hover_slot
+            .or(self.dock_focused_slot)
+            .unwrap_or(0)
+            .min(tiles.len() - 1);
+        self.dock_focused_slot = Some(default_idx);
+        self.sync_dock_visibility_for_all_outputs(false);
+        self.shell_redraw_needed = true;
+    }
+
+    /// Moves Dock keyboard selection by `delta` (`-1` / `+1`, or `isize::MIN`/`isize::MAX` for Home/End).
+    pub fn step_dock_focus(&mut self, delta: isize) {
+        let tiles = self.build_dock_tiles();
+        let count = tiles.len();
+        if count == 0 {
+            self.dock_focused_slot = None;
+            return;
+        }
+        let next_idx = if delta == isize::MIN {
+            0
+        } else if delta == isize::MAX {
+            count - 1
+        } else {
+            let cur = self
+                .dock_focused_slot
+                .unwrap_or(if delta > 0 { count - 1 } else { 0 });
+            let wrapped = (isize::try_from(cur).unwrap_or(0) + delta)
+                .rem_euclid(isize::try_from(count).unwrap_or(1));
+            usize::try_from(wrapped).unwrap_or(0)
+        };
+        self.dock_focused_slot = Some(next_idx);
+        self.shell_redraw_needed = true;
+    }
+
+    /// Dismisses Dock keyboard focus and allows auto-hide to re-engage if appropriate.
+    pub fn clear_dock_focus(&mut self) {
+        if self.dock_focused_slot.take().is_some() {
+            self.sync_dock_visibility_for_all_outputs(true);
+            self.shell_redraw_needed = true;
+        }
+    }
+
+    /// Activates the currently keyboard-focused Dock slot.
+    pub fn activate_focused_dock_slot(&mut self, serial: Serial) {
+        let Some(slot_idx) = self.dock_focused_slot else {
+            return;
+        };
+        let tiles = self.build_dock_tiles();
+        let Some(tile) = tiles.get(slot_idx) else {
+            self.clear_dock_focus();
+            return;
+        };
+        let hit = tile.hit;
+        self.clear_dock_focus();
+        self.handle_dock_hit(hit, serial);
+    }
+
+    /// Opens the context menu for the currently keyboard-focused Dock slot.
+    pub fn open_focused_dock_context_menu(&mut self) {
+        let Some(slot_idx) = self.dock_focused_slot else {
+            return;
+        };
+        let output_id = self
+            .active_dock_output
+            .unwrap_or_else(|| self.output_map.primary().id);
+        let logical_size = self.output_logical_size(output_id);
+        let tiles = self.build_dock_tiles();
+        let layout = self.dock_layout_for_output(output_id, &tiles);
+        let Some(slot) = layout.slots.iter().find(|s| s.slot_idx == slot_idx) else {
+            return;
+        };
+        let geo = self
+            .output_map
+            .get(output_id)
+            .unwrap_or_else(|| self.output_map.primary())
+            .logical_geometry();
+        let anchor_local_x = f64::from(slot.icon_rect.loc.x + slot.icon_rect.size.w / 2);
+        let anchor_local_y = f64::from(slot.icon_rect.loc.y + slot.icon_rect.size.h / 2);
+        let anchor = smithay::utils::Point::from((
+            f64::from(geo.loc.x) + anchor_local_x,
+            f64::from(geo.loc.y) + anchor_local_y,
+        ));
+        let alt_held = self.keyboard.modifier_state().alt;
+        self.open_dock_context_menu_on_output(
+            output_id,
+            slot.tile.hit,
+            logical_size,
+            anchor,
+            alt_held,
+        );
     }
 
     /// Launches the currently highlighted candidate from Spotlight and closes the overlay.

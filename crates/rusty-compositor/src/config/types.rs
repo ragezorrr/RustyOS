@@ -224,13 +224,36 @@ pub fn clamp_display_scale(scale: f64) -> f64 {
     }
 }
 
-/// Default resting Dock app icon size in logical pixels (`36..=68`).
-pub const DEFAULT_DOCK_ICON_SIZE: i32 = 50;
+/// Default resting Dock app icon size in logical pixels (`36..=68`, Golden Gate target `48..=56`).
+pub const DEFAULT_DOCK_ICON_SIZE: i32 = 54;
 
 /// Clamps Dock resting icon size into `36..=68` logical pixels.
 #[must_use]
 pub fn clamp_dock_icon_size(px: i32) -> i32 {
     px.clamp(36, 68)
+}
+
+/// Default Golden Gate Dock peak magnification multiplier (`1.6x`).
+pub const DEFAULT_DOCK_MAGNIFICATION_MAX: f64 = 1.6;
+
+/// Clamps Dock peak magnification factor into `1.0..=2.0`.
+#[must_use]
+pub fn clamp_dock_magnification_max(raw: f64) -> f64 {
+    if raw.is_finite() {
+        raw.clamp(1.0, 2.0)
+    } else {
+        DEFAULT_DOCK_MAGNIFICATION_MAX
+    }
+}
+
+/// Clamps Dock animation time-scale multiplier into `0.25..=3.0`.
+#[must_use]
+pub fn clamp_dock_animation_speed(raw: f64) -> f64 {
+    if raw.is_finite() {
+        raw.clamp(0.25, 3.0)
+    } else {
+        1.0
+    }
 }
 
 /// Default pinned Dock application keys (`RUSTYOS-073`).

@@ -873,6 +873,38 @@ fn push_dock_slot_shape(
         dock_icons.push(el);
     }
 
+    push_dock_slot_rings(dock_icons, shape_cache, renderer, dock_view, pal, slot);
+}
+
+fn push_dock_slot_rings(
+    dock_icons: &mut Vec<CompositorRenderElement>,
+    shape_cache: &mut crate::surfaces::UiShapeCache,
+    renderer: &mut GlesRenderer,
+    dock_view: &DockViewState<'_>,
+    pal: &ThemePalette,
+    slot: &ComputedDockSlot,
+) {
+    if dock_view.focused_slot == Some(slot.slot_idx) {
+        let (fill, border) = if pal.is_dark {
+            ([10, 132, 255, 36], [110, 185, 255, 225])
+        } else {
+            ([0, 122, 255, 28], [0, 122, 255, 220])
+        };
+        let ring = Rectangle::new(
+            Point::from((slot.icon_rect.loc.x - 3, slot.icon_rect.loc.y - 3)),
+            Size::from((slot.icon_rect.size.w + 6, slot.icon_rect.size.h + 6)),
+        );
+        push_rounded_glass_box(
+            dock_icons,
+            shape_cache,
+            renderer,
+            ring,
+            15,
+            fill,
+            Some(border),
+        );
+    }
+
     if let Some(super::DockDropHighlight::Slot { slot_idx, kind, .. }) = dock_view.drop_highlight
         && slot_idx == slot.slot_idx
     {

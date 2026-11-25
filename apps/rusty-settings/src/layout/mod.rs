@@ -10,7 +10,7 @@ pub(crate) use hit_test::{
     dropdown_trigger_rect, hit_test, shortcut_pill_rect, stepper_rects, switch_rect,
 };
 use pages::{
-    build_standard_page_sections, place_card_section, row_choice, row_stepper, row_switch,
+    RowSpec, build_standard_page_sections, place_card_section, row_choice, row_stepper, row_switch,
 };
 
 use crate::state::{RowControlId, SettingsAppState, SettingsPage, ThemeChoice};
@@ -667,12 +667,36 @@ fn build_dock_layout(
     };
 
     let mut cur_y = card_rect.bottom() + 18;
-    let rows = vec![
+    let sec = place_card_section(None, content_x, &mut cur_y, content_w, build_dock_rows(app));
+    (dock_positions, vec![sec])
+}
+
+#[must_use]
+#[allow(clippy::cast_possible_truncation)]
+fn build_dock_rows(app: &SettingsAppState) -> Vec<RowSpec> {
+    vec![
         row_stepper(
             "Dock Size",
             RowControlId::DockSizeDown,
             RowControlId::DockSizeUp,
             format!("{} px", app.dock_icon_size),
+        ),
+        row_switch(
+            "Magnification",
+            RowControlId::DockMagnificationToggle,
+            app.dock_magnification_enabled,
+        ),
+        row_stepper(
+            "Peak Magnification",
+            RowControlId::DockMagnificationDown,
+            RowControlId::DockMagnificationUp,
+            format!("{:.1}x", app.dock_magnification_max),
+        ),
+        row_stepper(
+            "Dock Animation Speed",
+            RowControlId::DockAnimationSpeedDown,
+            RowControlId::DockAnimationSpeedUp,
+            format!("{:.2}x", app.dock_animation_speed),
         ),
         row_switch(
             "Reduce Transparency",
@@ -715,7 +739,10 @@ fn build_dock_layout(
             RowControlId::DockRecentToggle,
             app.dock_show_recent,
         ),
-    ];
-    let sec = place_card_section(None, content_x, &mut cur_y, content_w, rows);
-    (dock_positions, vec![sec])
+        row_switch(
+            "Show icon labels on hover",
+            RowControlId::DockTooltipsToggle,
+            app.dock_show_tooltips,
+        ),
+    ]
 }

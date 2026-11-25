@@ -95,8 +95,16 @@ pub struct UserConfig {
     pub lock_on_sleep: bool,
     /// Enable the native compositor `org.freedesktop.PolicyKit1.AuthenticationAgent` (`RUSTYOS-056`).
     pub enable_polkit_agent: bool,
-    /// Resting Dock app icon edge size in logical pixels (`36..=68`, default `50`) (`RUSTYOS-073`).
+    /// Resting Dock app icon edge size in logical pixels (`36..=68`, default `54`) (`RUSTYOS-073`).
     pub dock_icon_size: i32,
+    /// Enable cursor-following wave magnification across Dock icons.
+    pub dock_magnification_enabled: bool,
+    /// Peak magnification multiplier (`1.0..=2.0`, default `1.6`).
+    pub dock_magnification_max: f64,
+    /// Animation speed multiplier for Dock springs (`0.25..=3.0`, default `1.0`).
+    pub dock_animation_speed: f64,
+    /// Show hover/focus tooltip labels above Dock icons.
+    pub dock_show_tooltips: bool,
     /// Screen edge anchoring the Dock (`Bottom`, `Left`, `Right`) (`RUSTYOS-073`).
     pub dock_position: DockPosition,
     /// Animation used when minimizing/restoring windows (`Genie` or `Scale`) (`RUSTYOS-073`).
@@ -209,6 +217,10 @@ impl Default for UserConfig {
             lock_on_sleep: true,
             enable_polkit_agent: true,
             dock_icon_size: DEFAULT_DOCK_ICON_SIZE,
+            dock_magnification_enabled: true,
+            dock_magnification_max: DEFAULT_DOCK_MAGNIFICATION_MAX,
+            dock_animation_speed: 1.0,
+            dock_show_tooltips: true,
             dock_position: DockPosition::Bottom,
             dock_minimize_effect: DockMinimizeEffect::Genie,
             dock_minimize_into_app: false,
@@ -543,6 +555,26 @@ impl UserConfig {
             "downloads_sort" => {
                 if let Some(mode) = DownloadsSortMode::parse(val) {
                     self.downloads_sort = mode;
+                }
+            }
+            "magnification_enabled" => {
+                if let Ok(b) = val.parse::<bool>() {
+                    self.dock_magnification_enabled = b;
+                }
+            }
+            "magnification_max" => {
+                if let Ok(scale) = val.parse::<f64>() {
+                    self.dock_magnification_max = clamp_dock_magnification_max(scale);
+                }
+            }
+            "animation_speed" => {
+                if let Ok(speed) = val.parse::<f64>() {
+                    self.dock_animation_speed = clamp_dock_animation_speed(speed);
+                }
+            }
+            "show_tooltips" => {
+                if let Ok(b) = val.parse::<bool>() {
+                    self.dock_show_tooltips = b;
                 }
             }
             // Also accepts deprecated `[dock].magnification_size` silently for backwards compatibility.
@@ -1080,6 +1112,22 @@ impl UserConfig {
             "icon_size = {}",
             clamp_dock_icon_size(self.dock_icon_size)
         );
+        let _ = writeln!(
+            out,
+            "magnification_enabled = {}",
+            self.dock_magnification_enabled
+        );
+        let _ = writeln!(
+            out,
+            "magnification_max = {:.2}",
+            clamp_dock_magnification_max(self.dock_magnification_max)
+        );
+        let _ = writeln!(
+            out,
+            "animation_speed = {:.2}",
+            clamp_dock_animation_speed(self.dock_animation_speed)
+        );
+        let _ = writeln!(out, "show_tooltips = {}", self.dock_show_tooltips);
         let _ = writeln!(out, "position = \"{}\"", self.dock_position.as_str());
         let _ = writeln!(
             out,

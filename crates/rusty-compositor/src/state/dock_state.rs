@@ -4,7 +4,6 @@
 
 use std::time::Duration;
 
-use rusty_animation::Easing;
 use rusty_wm::{OutputId, Rect, WindowId};
 use smithay::utils::{Logical, Physical, Point, Size};
 
@@ -186,9 +185,12 @@ impl RustyCompositorState {
         let has_menu = self.context_menu.as_ref().is_some_and(|ctx| {
             ctx.output_id == output_id && matches!(ctx.target, ContextMenuTarget::DockSlot(_))
         });
+        let active_out = self.active_dock_output.unwrap_or(primary_id);
+        let has_kdb_focus = self.dock_focused_slot.is_some() && active_out == output_id;
         let overview_visible = self.overview_active && output_id == primary_id;
         let now = self.elapsed();
         let reduced_motion = self.animations.reduced_motion();
+        let anim_speed = self.user_config.dock_animation_speed;
 
         let initial = if matches!(vis, DockVisibilityMode::AlwaysHide) {
             0.0
@@ -200,8 +202,9 @@ impl RustyCompositorState {
             .entry(output_id)
             .or_insert_with(|| OutputDockState::new(initial));
         state.obstructed = obstructed;
+        state.reveal_anim.set_speed_multiplier(anim_speed);
 
-        let interactive = state.hovered || has_stack || has_drag || has_menu;
+        let interactive = state.hovered || has_stack || has_drag || has_menu || has_kdb_focus;
         let should_show = match vis {
             DockVisibilityMode::AlwaysShow => true,
             DockVisibilityMode::SmartHide => !obstructed || interactive || overview_visible,
@@ -211,13 +214,7 @@ impl RustyCompositorState {
         if should_show {
             state.hide_deadline = None;
             if (state.reveal_anim.target() - 1.0).abs() > 1e-4 {
-                state.reveal_anim.retarget(
-                    1.0,
-                    now,
-                    Duration::from_millis(180),
-                    Easing::EaseOutCubic,
-                    reduced_motion,
-                );
+                state.reveal_anim.retarget(1.0, now, reduced_motion);
                 self.shell_redraw_needed = true;
             }
         } else if allow_hide_delay && !reduced_motion && state.reveal_anim.target() > 0.5 {
@@ -228,13 +225,7 @@ impl RustyCompositorState {
         } else {
             state.hide_deadline = None;
             if state.reveal_anim.target().abs() > 1e-4 {
-                state.reveal_anim.retarget(
-                    0.0,
-                    now,
-                    Duration::from_millis(180),
-                    Easing::EaseInOutCubic,
-                    reduced_motion,
-                );
+                state.reveal_anim.retarget(0.0, now, reduced_motion);
                 self.shell_redraw_needed = true;
             }
         }
@@ -262,20 +253,18 @@ impl RustyCompositorState {
     /// and graceful app Quit grace timers (`RUSTYOS-161`).
     pub(crate) fn tick_dock_states(&mut self, now: Duration) {
         let reduced_motion = self.animations.reduced_motion();
+        let anim_speed = self.user_config.dock_animation_speed;
+        self.dock_hover_anim.set_speed_multiplier(anim_speed);
         let mut redraw = false;
         for dock in self.output_docks.values_mut() {
+            dock.reveal_anim.set_speed_multiplier(anim_speed);
+            dock.presentation.set_speed_multiplier(anim_speed);
             if let Some(deadline) = dock.hide_deadline
                 && now >= deadline
             {
                 dock.hide_deadline = None;
                 if dock.reveal_anim.target().abs() > 1e-4 {
-                    dock.reveal_anim.retarget(
-                        0.0,
-                        now,
-                        Duration::from_millis(180),
-                        Easing::EaseInOutCubic,
-                        reduced_motion,
-                    );
+                    dock.reveal_anim.retarget(0.0, now, reduced_motion);
                     redraw = true;
                 }
             }
@@ -288,6 +277,12 @@ impl RustyCompositorState {
             if dock.presentation.tick(now) {
                 redraw = true;
             }
+        }
+        if !self.dock_hover_anim.is_active()
+            && self.dock_hover_anim.current() <= 0.002
+            && self.dock_hover_slot.is_none()
+        {
+            self.dock_pointer_axis_pos = None;
         }
         self.mirror_primary_dock_state();
         if redraw {
@@ -370,6 +365,19 @@ impl RustyCompositorState {
             top_inset: if is_primary { TOP_BAR_HEIGHT } else { 0 },
             presented_layout,
             drop_highlight: self.dock_drop_highlight_for_output(output_id),
+            pointer_axis_pos: if self.active_dock_output == Some(output_id) {
+                self.dock_pointer_axis_pos
+            } else {
+                None
+            },
+            focused_slot: if self.active_dock_output == Some(output_id) {
+                self.dock_focused_slot
+            } else {
+                None
+            },
+            magnification_enabled: self.user_config.dock_magnification_enabled,
+            magnification_max: self.user_config.dock_magnification_max,
+            show_tooltips: self.user_config.dock_show_tooltips,
         }
     }
 
@@ -419,6 +427,8 @@ impl RustyCompositorState {
             .output_docks
             .entry(output_id)
             .or_insert_with(|| OutputDockState::new(initial));
+        dock.presentation
+            .set_speed_multiplier(self.user_config.dock_animation_speed);
         dock.presentation
             .sync_target(&target, pos, screen_size, now, reduced_motion);
         dock.presentation.apply(&target, pos)

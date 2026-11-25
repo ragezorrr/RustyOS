@@ -67,7 +67,18 @@ impl RustyCompositorState {
         let dock_view =
             self.dock_view_state_for_output(output_id, &tiles, &[], &bounces, Some(&layout));
 
-        let mut hovered_this_dock = next_slot.is_some();
+        let c = layout.capsule_rect;
+        let inside_capsule = local_x >= f64::from(c.loc.x)
+            && local_x < f64::from(c.loc.x + c.size.w)
+            && local_y >= f64::from(c.loc.y)
+            && local_y < f64::from(c.loc.y + c.size.h);
+        let axis_coord = match self.user_config.dock_position {
+            crate::config::DockPosition::Bottom => local_x,
+            crate::config::DockPosition::Left | crate::config::DockPosition::Right => local_y,
+        };
+        let next_axis = (next_slot.is_some() || inside_capsule).then_some(axis_coord);
+
+        let mut hovered_this_dock = next_slot.is_some() || inside_capsule;
         if self
             .user_config
             .effective_dock_visibility()
@@ -81,7 +92,6 @@ impl RustyCompositorState {
                 local_x,
                 local_y,
             );
-            let c = layout.capsule_rect;
             let pad = 14;
             let near_capsule = reveal > 0.05
                 && local_x >= f64::from(c.loc.x - pad)
@@ -98,13 +108,13 @@ impl RustyCompositorState {
             self.set_dock_hovered_on_output(output_id, hovered_this_dock);
         }
 
-        if hovered_this_dock || (is_primary && next_slot.is_some()) {
+        if hovered_this_dock || (is_primary && (next_slot.is_some() || inside_capsule)) {
             self.active_dock_output = Some(output_id);
         }
         if self.active_dock_output == Some(output_id) {
-            self.set_dock_hover_slot(next_slot);
+            self.set_dock_hover_state(next_slot, next_axis);
         } else {
-            self.set_dock_hover_slot(None);
+            self.set_dock_hover_state(None, None);
         }
     }
 

@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use rusty_animation::{AnimatedValue, Easing};
+use rusty_animation::{SpringConfig, SpringValue};
 use smithay::utils::{Physical, Point, Rectangle, Size};
 
 use crate::config::DockPosition;
@@ -31,22 +31,24 @@ pub fn dock_tile_presentation_key(tile: &DockAppTile) -> String {
 #[derive(Debug, Clone)]
 struct PresentedSlot {
     key: String,
-    axis_center: AnimatedValue,
-    appearance: AnimatedValue,
+    axis_center: SpringValue,
+    appearance: SpringValue,
     leaving: bool,
     last_slot: ComputedDockSlot,
 }
 
 /// Per-output Dock presentation animator smoothing slot gliding, icon appearance/departure,
-/// section dividers, and capsule length changes (`RUSTYOS-161`).
+/// section dividers, and capsule length changes using spring physics (`RUSTYOS-161`).
 #[derive(Debug)]
 pub struct DockPresentation {
     initialized: bool,
     last_position: DockPosition,
     last_screen_size: Size<i32, Physical>,
-    capsule_axis_start: AnimatedValue,
-    capsule_axis_len: AnimatedValue,
-    dividers: Vec<AnimatedValue>,
+    animation_speed: f64,
+    last_slot_keys: Vec<String>,
+    capsule_axis_start: SpringValue,
+    capsule_axis_len: SpringValue,
+    dividers: Vec<SpringValue>,
     slots: Vec<PresentedSlot>,
 }
 
@@ -64,10 +66,32 @@ impl DockPresentation {
             initialized: false,
             last_position: DockPosition::Bottom,
             last_screen_size: Size::from((0, 0)),
-            capsule_axis_start: AnimatedValue::new_settled(0.0),
-            capsule_axis_len: AnimatedValue::new_settled(0.0),
+            animation_speed: 1.0,
+            last_slot_keys: Vec::new(),
+            capsule_axis_start: SpringValue::new_settled(0.0, SpringConfig::dock_layout()),
+            capsule_axis_len: SpringValue::new_settled(0.0, SpringConfig::dock_layout()),
             dividers: Vec::new(),
             slots: Vec::new(),
+        }
+    }
+
+    /// Sets the Dock presentation animation speed multiplier (`0.25..=3.0`).
+    pub fn set_speed_multiplier(&mut self, speed: f64) {
+        self.animation_speed = if speed.is_finite() {
+            speed.clamp(0.25, 3.0)
+        } else {
+            1.0
+        };
+        self.capsule_axis_start
+            .set_speed_multiplier(self.animation_speed);
+        self.capsule_axis_len
+            .set_speed_multiplier(self.animation_speed);
+        for div in &mut self.dividers {
+            div.set_speed_multiplier(self.animation_speed);
+        }
+        for slot in &mut self.slots {
+            slot.axis_center.set_speed_multiplier(self.animation_speed);
+            slot.appearance.set_speed_multiplier(self.animation_speed);
         }
     }
 
@@ -77,7 +101,7 @@ impl DockPresentation {
         self.initialized
             && (self.capsule_axis_start.is_active()
                 || self.capsule_axis_len.is_active()
-                || self.dividers.iter().any(AnimatedValue::is_active)
+                || self.dividers.iter().any(SpringValue::is_active)
                 || self.slots.iter().any(|slot| {
                     slot.leaving || slot.axis_center.is_active() || slot.appearance.is_active()
                 }))
@@ -86,6 +110,7 @@ impl DockPresentation {
     /// Resets presentation so the next layout sync snaps immediately without trailing animation.
     pub fn reset(&mut self) {
         self.initialized = false;
+        self.last_slot_keys.clear();
         self.dividers.clear();
         self.slots.clear();
     }
@@ -96,7 +121,7 @@ impl DockPresentation {
         if !self.initialized {
             return false;
         }
-        let tick_val = |anim: &mut AnimatedValue| -> bool {
+        let tick_val = |anim: &mut SpringValue| -> bool {
             let was_active = anim.is_active();
             let prev = anim.current();
             let next = anim.tick(now);
@@ -131,9 +156,21 @@ impl DockPresentation {
         now: Duration,
         reduced_motion: bool,
     ) {
-        let (cap_start, cap_len) = rect_axis_bounds(pos, target.capsule_rect);
+        let next_keys: Vec<String> = target
+            .slots
+            .iter()
+            .map(|s| dock_tile_presentation_key(&s.tile))
+            .collect();
+        let structural_unchanged = self.initialized
+            && !self.is_active()
+            && self.last_position == pos
+            && self.last_screen_size == screen_size
+            && self.last_slot_keys == next_keys
+            && self.dividers.len() == target.dividers.len();
+
         if !self.initialized
             || reduced_motion
+            || structural_unchanged
             || self.last_position != pos
             || self.last_screen_size != screen_size
         {
@@ -141,8 +178,20 @@ impl DockPresentation {
             return;
         }
 
-        retarget_if_changed(&mut self.capsule_axis_start, cap_start, now);
-        retarget_if_changed(&mut self.capsule_axis_len, cap_len, now);
+        let (cap_start, cap_len) = rect_axis_bounds(pos, target.capsule_rect);
+        self.last_slot_keys = next_keys;
+        retarget_if_changed(
+            &mut self.capsule_axis_start,
+            cap_start,
+            now,
+            self.animation_speed,
+        );
+        retarget_if_changed(
+            &mut self.capsule_axis_len,
+            cap_len,
+            now,
+            self.animation_speed,
+        );
         self.sync_dividers(target, pos, now);
         self.sync_slots(target, pos, now);
     }
@@ -155,20 +204,23 @@ impl DockPresentation {
             .collect();
         if self.dividers.len() == target_div_positions.len() {
             for (anim, &dst) in self.dividers.iter_mut().zip(&target_div_positions) {
-                retarget_if_changed(anim, dst, now);
+                retarget_if_changed(anim, dst, now, self.animation_speed);
             }
             return;
         }
         let old = std::mem::take(&mut self.dividers);
+        let speed = self.animation_speed;
         self.dividers = target_div_positions
             .into_iter()
             .enumerate()
             .map(|(idx, dst)| {
                 if let Some(mut existing) = old.get(idx).copied() {
-                    retarget_if_changed(&mut existing, dst, now);
+                    retarget_if_changed(&mut existing, dst, now, speed);
                     existing
                 } else {
-                    AnimatedValue::new_settled(dst)
+                    let mut val = SpringValue::new_settled(dst, SpringConfig::dock_layout());
+                    val.set_speed_multiplier(speed);
+                    val
                 }
             })
             .collect();
@@ -186,37 +238,31 @@ impl DockPresentation {
             .map(|slot| (slot.key.clone(), slot))
             .collect();
         let mut next_slots = Vec::with_capacity(target.slots.len() + 2);
+        let speed = self.animation_speed;
 
         for slot in &target.slots {
             let key = dock_tile_presentation_key(&slot.tile);
             let (start, len) = rect_axis_bounds(pos, slot.hit_rect);
             let target_center = start + len * 0.5;
             if let Some(mut entry) = existing_by_key.remove(&key) {
-                retarget_if_changed(&mut entry.axis_center, target_center, now);
+                retarget_if_changed(&mut entry.axis_center, target_center, now, speed);
                 if entry.leaving || (entry.appearance.target() - 1.0).abs() > 1e-4 {
                     entry.leaving = false;
-                    entry.appearance.retarget(
-                        1.0,
-                        now,
-                        DOCK_PRESENTATION_DURATION,
-                        Easing::EaseOutCubic,
-                        false,
-                    );
+                    entry.appearance.set_speed_multiplier(speed);
+                    entry.appearance.retarget(1.0, now, false);
                 }
                 entry.last_slot = slot.clone();
                 next_slots.push(entry);
             } else {
-                let mut appearance = AnimatedValue::new_settled(0.0);
-                appearance.retarget(
-                    1.0,
-                    now,
-                    DOCK_PRESENTATION_DURATION,
-                    Easing::EaseOutCubic,
-                    false,
-                );
+                let mut appearance = SpringValue::new_settled(0.0, SpringConfig::dock_reveal());
+                appearance.set_speed_multiplier(speed);
+                appearance.retarget(1.0, now, false);
+                let mut axis_center =
+                    SpringValue::new_settled(target_center, SpringConfig::dock_layout());
+                axis_center.set_speed_multiplier(speed);
                 next_slots.push(PresentedSlot {
                     key,
-                    axis_center: AnimatedValue::new_settled(target_center),
+                    axis_center,
                     appearance,
                     leaving: false,
                     last_slot: slot.clone(),
@@ -230,13 +276,8 @@ impl DockPresentation {
             }
             if !leftover.leaving {
                 leftover.leaving = true;
-                leftover.appearance.retarget(
-                    0.0,
-                    now,
-                    DOCK_LEAVE_DURATION,
-                    Easing::EaseInOutCubic,
-                    false,
-                );
+                leftover.appearance.set_speed_multiplier(speed);
+                leftover.appearance.retarget(0.0, now, false);
             }
             if leftover.appearance.is_active() && leftover.appearance.current() > 0.02 {
                 next_slots.push(leftover);
@@ -329,25 +370,45 @@ impl DockPresentation {
         screen_size: Size<i32, Physical>,
     ) {
         let (cap_start, cap_len) = rect_axis_bounds(pos, target.capsule_rect);
+        let speed = self.animation_speed;
         self.initialized = true;
         self.last_position = pos;
         self.last_screen_size = screen_size;
-        self.capsule_axis_start = AnimatedValue::new_settled(cap_start);
-        self.capsule_axis_len = AnimatedValue::new_settled(cap_len);
+        self.last_slot_keys = target
+            .slots
+            .iter()
+            .map(|s| dock_tile_presentation_key(&s.tile))
+            .collect();
+        self.capsule_axis_start = SpringValue::new_settled(cap_start, SpringConfig::dock_layout());
+        self.capsule_axis_start.set_speed_multiplier(speed);
+        self.capsule_axis_len = SpringValue::new_settled(cap_len, SpringConfig::dock_layout());
+        self.capsule_axis_len.set_speed_multiplier(speed);
         self.dividers = target
             .dividers
             .iter()
-            .map(|r| AnimatedValue::new_settled(rect_axis_bounds(pos, *r).0))
+            .map(|r| {
+                let mut val = SpringValue::new_settled(
+                    rect_axis_bounds(pos, *r).0,
+                    SpringConfig::dock_layout(),
+                );
+                val.set_speed_multiplier(speed);
+                val
+            })
             .collect();
         self.slots = target
             .slots
             .iter()
             .map(|slot| {
                 let (start, len) = rect_axis_bounds(pos, slot.hit_rect);
+                let mut axis_center =
+                    SpringValue::new_settled(start + len * 0.5, SpringConfig::dock_layout());
+                axis_center.set_speed_multiplier(speed);
+                let mut appearance = SpringValue::new_settled(1.0, SpringConfig::dock_reveal());
+                appearance.set_speed_multiplier(speed);
                 PresentedSlot {
                     key: dock_tile_presentation_key(&slot.tile),
-                    axis_center: AnimatedValue::new_settled(start + len * 0.5),
-                    appearance: AnimatedValue::new_settled(1.0),
+                    axis_center,
+                    appearance,
                     leaving: false,
                     last_slot: slot.clone(),
                 }
@@ -356,15 +417,10 @@ impl DockPresentation {
     }
 }
 
-fn retarget_if_changed(anim: &mut AnimatedValue, target: f64, now: Duration) {
+fn retarget_if_changed(anim: &mut SpringValue, target: f64, now: Duration, speed: f64) {
+    anim.set_speed_multiplier(speed);
     if (anim.target() - target).abs() > 0.5 {
-        anim.retarget(
-            target,
-            now,
-            DOCK_PRESENTATION_DURATION,
-            Easing::EaseOutCubic,
-            false,
-        );
+        anim.retarget(target, now, false);
     }
 }
 

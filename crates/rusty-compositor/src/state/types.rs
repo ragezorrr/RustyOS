@@ -2,7 +2,7 @@
 
 use std::time::{Duration, Instant};
 
-use rusty_animation::AnimatedValue;
+use rusty_animation::{AnimatedValue, SpringConfig, SpringValue};
 use rusty_ipc::Urgency;
 use rusty_wm::{OutputId, Rect, WindowId};
 use smithay::{
@@ -125,7 +125,7 @@ pub struct DockStackState {
 #[derive(Debug)]
 pub struct OutputDockState {
     /// Animated reveal progress (`0.0` hidden offscreen -> `1.0` revealed).
-    pub reveal_anim: AnimatedValue,
+    pub reveal_anim: SpringValue,
     /// True when the pointer is within this output's reveal strip, near the Dock, or inside its Stack.
     pub hovered: bool,
     /// True when a visible or maximized window on this output currently obstructs the resting Dock area.
@@ -141,7 +141,7 @@ impl OutputDockState {
     #[must_use]
     pub fn new(initial_reveal: f64) -> Self {
         Self {
-            reveal_anim: AnimatedValue::new_settled(initial_reveal),
+            reveal_anim: SpringValue::new_settled(initial_reveal, SpringConfig::dock_reveal()),
             hovered: false,
             obstructed: false,
             hide_deadline: None,

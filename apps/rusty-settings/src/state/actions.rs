@@ -278,6 +278,36 @@ impl SettingsAppState {
                     &self.dock_minimize_effect,
                 )]);
             }
+            RowControlId::DockMagnificationToggle => {
+                self.dock_magnification_enabled = !self.dock_magnification_enabled;
+                let v = bool_str(self.dock_magnification_enabled);
+                let _ = update_config_entries(&[("dock", "magnification_enabled", v)]);
+            }
+            RowControlId::DockMagnificationDown => {
+                self.dock_magnification_max = (self.dock_magnification_max - 0.1).clamp(1.0, 2.0);
+                let v = format!("{:.2}", self.dock_magnification_max);
+                let _ = update_config_entries(&[("dock", "magnification_max", &v)]);
+            }
+            RowControlId::DockMagnificationUp => {
+                self.dock_magnification_max = (self.dock_magnification_max + 0.1).clamp(1.0, 2.0);
+                let v = format!("{:.2}", self.dock_magnification_max);
+                let _ = update_config_entries(&[("dock", "magnification_max", &v)]);
+            }
+            RowControlId::DockAnimationSpeedDown => {
+                self.dock_animation_speed = (self.dock_animation_speed - 0.25).clamp(0.5, 2.0);
+                let v = format!("{:.2}", self.dock_animation_speed);
+                let _ = update_config_entries(&[("dock", "animation_speed", &v)]);
+            }
+            RowControlId::DockAnimationSpeedUp => {
+                self.dock_animation_speed = (self.dock_animation_speed + 0.25).clamp(0.5, 2.0);
+                let v = format!("{:.2}", self.dock_animation_speed);
+                let _ = update_config_entries(&[("dock", "animation_speed", &v)]);
+            }
+            RowControlId::DockTooltipsToggle => {
+                self.dock_show_tooltips = !self.dock_show_tooltips;
+                let v = bool_str(self.dock_show_tooltips);
+                let _ = update_config_entries(&[("dock", "show_tooltips", v)]);
+            }
             other => self.apply_system_action(other),
         }
     }

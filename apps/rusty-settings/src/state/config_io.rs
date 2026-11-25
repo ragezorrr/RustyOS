@@ -196,6 +196,22 @@ impl SettingsAppState {
             }
             ("dock", "show_indicators") => self.dock_show_indicators = parse_bool(val),
             ("dock", "show_recent") => self.dock_show_recent = parse_bool(val),
+            ("dock", "magnification_enabled") => self.dock_magnification_enabled = parse_bool(val),
+            ("dock", "magnification_max") => {
+                if let Ok(v) = val.parse::<f64>()
+                    && v.is_finite()
+                {
+                    self.dock_magnification_max = v.clamp(1.0, 2.0);
+                }
+            }
+            ("dock", "animation_speed") => {
+                if let Ok(v) = val.parse::<f64>()
+                    && v.is_finite()
+                {
+                    self.dock_animation_speed = v.clamp(0.25, 3.0);
+                }
+            }
+            ("dock", "show_tooltips") => self.dock_show_tooltips = parse_bool(val),
             ("display", "scale") => {
                 if let Ok(v) = val.parse::<f64>() {
                     self.display_scale = v.clamp(1.0, 3.0);

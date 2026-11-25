@@ -2718,3 +2718,58 @@ fn multimonitor_remove_output_and_floating_work_area_preserve_windows() -> Resul
     assert_eq!(compositor.floating_work_area_for_window(w_sec).x, 0);
     Ok(())
 }
+
+#[test]
+fn dock_keyboard_navigation_focus_steps_wraps_and_clears() -> Result<(), Box<dyn Error>> {
+    let display: Display<RustyCompositorState> = Display::new()?;
+    let event_loop: EventLoop<RustyCompositorState> = EventLoop::try_new()?;
+    let mut compositor = RustyCompositorState::new(
+        &display,
+        "rusty-test-dock-kbd".to_owned(),
+        event_loop.get_signal(),
+        event_loop.handle(),
+        (1280, 800).into(),
+    )?;
+
+    let count = compositor.build_dock_tiles().len();
+    assert!(count >= 4);
+
+    // 1. Ctrl+F3 focus enters Dock keyboard selection and reveals AlwaysHide Dock.
+    compositor.user_config.dock_visibility = crate::config::DockVisibilityMode::AlwaysHide;
+    compositor.user_config.dock_auto_hide = true;
+    compositor.focus_dock();
+    assert_eq!(compositor.dock_focused_slot, Some(0));
+    let out_id = compositor.output_map.primary().id;
+    assert!(
+        compositor
+            .output_docks
+            .get(&out_id)
+            .is_some_and(|d| (d.reveal_anim.target() - 1.0).abs() < 1e-4)
+    );
+
+    // 2. Step right/left wraps around and Home/End jump cleanly.
+    compositor.step_dock_focus(-1);
+    assert_eq!(compositor.dock_focused_slot, Some(count - 1));
+    compositor.step_dock_focus(1);
+    assert_eq!(compositor.dock_focused_slot, Some(0));
+    compositor.step_dock_focus(isize::MAX);
+    assert_eq!(compositor.dock_focused_slot, Some(count - 1));
+    compositor.step_dock_focus(isize::MIN);
+    assert_eq!(compositor.dock_focused_slot, Some(0));
+
+    // 3. Activating focused toggle-overview item flips overview_active and clears focus.
+    compositor.step_dock_focus(1);
+    compositor.activate_focused_dock_slot(smithay::utils::Serial::from(1));
+    assert!(compositor.dock_focused_slot.is_none());
+    assert!(compositor.overview_active);
+
+    // 4. Continuous hover state sets pointer axis coordinate and retargets magnification spring.
+    compositor.set_dock_hover_state(Some(2), Some(640.5));
+    assert_eq!(compositor.dock_hover_slot, Some(2));
+    assert_eq!(compositor.dock_pointer_axis_pos, Some(640.5));
+    assert!((compositor.dock_hover_anim.target() - 1.0).abs() < 1e-4);
+    compositor.set_dock_hover_state(None, None);
+    assert!(compositor.dock_hover_slot.is_none());
+    assert!(compositor.dock_hover_anim.target().abs() < 1e-4);
+    Ok(())
+}

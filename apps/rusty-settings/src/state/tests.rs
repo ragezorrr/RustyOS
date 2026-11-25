@@ -343,3 +343,21 @@ fn glass_opacity_slider_clamps_to_compositor_bounds() {
     st.set_glass_opacity(110);
     assert!((st.glass_opacity - 1.0).abs() < 1e-4);
 }
+
+#[test]
+fn dock_magnification_speed_and_tooltip_config_parse_and_clamp() {
+    let mut st = SettingsAppState::defaults_with_page(SettingsPage::DockDesktop);
+    assert!(st.dock_magnification_enabled);
+    assert!((st.dock_magnification_max - 1.6).abs() < 1e-6);
+    assert!((st.dock_animation_speed - 1.0).abs() < 1e-6);
+    assert!(st.dock_show_tooltips);
+
+    st.apply_toml_device_kv("dock", "magnification_enabled", "false");
+    st.apply_toml_device_kv("dock", "magnification_max", "5.0");
+    st.apply_toml_device_kv("dock", "animation_speed", "0.1");
+    st.apply_toml_device_kv("dock", "show_tooltips", "false");
+    assert!(!st.dock_magnification_enabled);
+    assert!((st.dock_magnification_max - 2.0).abs() < 1e-6);
+    assert!((st.dock_animation_speed - 0.25).abs() < 1e-6);
+    assert!(!st.dock_show_tooltips);
+}
