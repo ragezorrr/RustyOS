@@ -12,7 +12,7 @@ use crate::layout::{
     InstallerHit, InstallerLayout, MIN_HEIGHT, MIN_WIDTH, ResizeEdgeZone, WINDOW_CORNER_RADIUS,
     compute_layout, hit_test,
 };
-use crate::render::{render_window_pixels, with_font_engine};
+use crate::render::{render_window_painter, with_font_engine};
 use crate::state::{
     DiskInstallMode, InstallPhase, InstallStep, InstallerAppState, StartupOptions, TextFieldId,
     WizardMode,
@@ -26,6 +26,7 @@ struct InstallerApp {
     clipboard: rusty_ui::MemoryClipboard,
     width: u32,
     height: u32,
+    has_glass: bool,
     pointer_pos: (f64, f64),
     pointer_pressed: bool,
     click_streak: u8,
@@ -43,6 +44,7 @@ impl InstallerApp {
             clipboard: rusty_ui::MemoryClipboard::default(),
             width: DEFAULT_WIDTH,
             height: DEFAULT_HEIGHT,
+            has_glass: false,
             pointer_pos: (0.0, 0.0),
             pointer_pressed: false,
             click_streak: 0,
@@ -366,6 +368,7 @@ impl RustyApp for InstallerApp {
             self.height = info.height;
             self.layout_cache = None;
         }
+        self.has_glass = ctx.has_liquid_glass();
         self.app.win.maximized = info.is_maximized;
         self.app.win.focused = info.is_activated;
         self.app.win.dirty = true;
@@ -453,34 +456,25 @@ impl RustyApp for InstallerApp {
 
     fn paint(
         &mut self,
-        _painter: &mut rusty_ui::UiPainter<'_>,
-        _fonts: &mut rusty_ui::UiFontEngine,
-        _width: u32,
-        _height: u32,
-    ) {
-    }
-
-    fn paint_bgra(
-        &mut self,
-        canvas_bgra: &mut [u8],
+        painter: &mut rusty_ui::UiPainter<'_>,
+        fonts: &mut rusty_ui::UiFontEngine,
         width: u32,
         height: u32,
-        has_glass: bool,
-    ) -> bool {
+    ) {
         self.width = width;
         self.height = height;
         let layout = self.current_layout();
-        render_window_pixels(
-            canvas_bgra,
+        render_window_painter(
+            painter,
+            fonts,
             width,
             height,
             &self.app,
             &layout,
             self.hover_hit,
-            has_glass,
+            self.has_glass,
         );
         self.app.win.dirty = false;
-        true
     }
 }
 

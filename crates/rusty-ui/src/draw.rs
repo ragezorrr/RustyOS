@@ -118,6 +118,10 @@ impl<'a> UiPainter<'a> {
         self.list
     }
 
+    pub fn draw_list_mut(&mut self) -> &mut UiDrawList {
+        self.list
+    }
+
     pub fn fill_rect(&mut self, rect: Rect, color: [u8; 4]) {
         if rect.width > 0 && rect.height > 0 && color[3] > 0 {
             self.list.commands.push(UiDrawCmd::Rect { rect, color });

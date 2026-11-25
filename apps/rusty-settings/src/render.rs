@@ -7,6 +7,8 @@
 )]
 
 use std::cell::RefCell;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::layout::{
     AppearanceCardsLayout, CARD_CORNER_RADIUS, CardRowControl, CardRowLayout, CardSectionLayout,
@@ -17,10 +19,11 @@ use crate::layout::{
 };
 use crate::state::{ACCENT_COLORS, RowControlId, SettingsAppState, SettingsPage, ThemeChoice};
 
+static NEXT_SPRITE_CACHE_KEY: AtomicU64 = AtomicU64::new(1000);
+
 thread_local! {
     static FONT_ENGINE: RefCell<rusty_ui::UiFontEngine> =
         RefCell::new(rusty_ui::UiFontEngine::new());
-    static SPRITE_CACHE: RefCell<Vec<(SpriteKey, Vec<u8>)>> = RefCell::new(Vec::with_capacity(32));
 }
 
 pub(crate) fn with_font_engine<R>(f: impl FnOnce(&mut rusty_ui::UiFontEngine) -> R) -> R {
@@ -29,18 +32,6 @@ pub(crate) fn with_font_engine<R>(f: impl FnOnce(&mut rusty_ui::UiFontEngine) ->
 
 fn to_ui_rect(r: Rect) -> rusty_ui::Rect {
     rusty_ui::Rect::new(r.x, r.y, r.w.max(0) as u32, r.h.max(0) as u32)
-}
-
-fn make_ui_canvas(buf: &mut [u8], w: i32, h: i32) -> rusty_ui::UiCanvas<'_> {
-    let uw = w.max(0) as u32;
-    let uh = h.max(0) as u32;
-    rusty_ui::UiCanvas::new(
-        buf,
-        uw,
-        uh,
-        (uw as usize) * 4,
-        rusty_ui::PixelFormat::Bgra8888,
-    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,34 +45,13 @@ enum SpriteKey {
 fn blit_cached_sprite(
     c: &mut Canvas<'_>,
     dst: Rect,
-    key: SpriteKey,
+    _key: SpriteKey,
     draw: impl FnOnce(&mut Canvas<'_>, Rect),
 ) {
     if c.is_clipped_out(dst) || dst.w <= 0 || dst.h <= 0 {
         return;
     }
-    SPRITE_CACHE.with(|cache| {
-        let mut cache = cache.borrow_mut();
-        if let Some((_, sprite)) = cache.iter().find(|(k, _)| *k == key) {
-            c.blit_premul_bgra(dst, sprite);
-            return;
-        }
-        let Ok(byte_len) =
-            usize::try_from(dst.w).and_then(|w| usize::try_from(dst.h).map(|h| w * h * 4))
-        else {
-            return;
-        };
-        let mut sprite = vec![0_u8; byte_len];
-        let local_rect = Rect::new(0, 0, dst.w, dst.h);
-        {
-            let mut sc = Canvas::new(&mut sprite, dst.w as u32, dst.h as u32);
-            draw(&mut sc, local_rect);
-        }
-        c.blit_premul_bgra(dst, &sprite);
-        if cache.len() < 96 {
-            cache.push((key, sprite));
-        }
-    });
+    draw(c, dst);
 }
 
 #[derive(Clone, Copy)]
@@ -141,355 +111,92 @@ fn palette_for(app: &SettingsAppState) -> Palette {
     }
 }
 
-#[inline]
-const fn div_255(v: u16) -> u16 {
-    (v + 1 + (v >> 8)) >> 8
-}
-
-#[allow(clippy::cast_precision_loss)]
-fn sd_rounded_box(px: f32, py: f32, w: f32, h: f32, r: f32) -> f32 {
-    let hw = w * 0.5;
-    let hh = h * 0.5;
-    let rad = r.min(hw).min(hh).max(0.0);
-    let qx = px.abs() - (hw - rad);
-    let qy = py.abs() - (hh - rad);
-    qx.max(0.0).hypot(qy.max(0.0)) + qx.max(qy).min(0.0) - rad
-}
-
-#[allow(clippy::cast_precision_loss)]
-fn sd_segment(px: f32, py: f32, ax: f32, ay: f32, bx: f32, by: f32, rad: f32) -> f32 {
-    let pax = px - ax;
-    let pay = py - ay;
-    let bax = bx - ax;
-    let bay = by - ay;
-    let denom = bax * bax + bay * bay;
-    let t = if denom <= 1e-6 {
-        0.0
-    } else {
-        ((pax * bax + pay * bay) / denom).clamp(0.0, 1.0)
-    };
-    (pax - bax * t).hypot(pay - bay * t) - rad
-}
-
-/// 4-tap rotated-grid supersampled edge coverage `0..=255` for a signed-distance field, evaluated at
-/// the pixel `(px, py)` in absolute canvas coordinates (`RUSTYOS-111`).
-#[allow(
-    clippy::cast_precision_loss,
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss
-)]
-fn aa_cov8(px: i32, py: i32, sd: impl Fn(f32, f32) -> f32) -> u8 {
-    const TAPS: [(f32, f32); 4] = [
-        (-0.375, -0.125),
-        (0.125, -0.375),
-        (0.375, 0.125),
-        (-0.125, 0.375),
-    ];
-    let cx = px as f32 + 0.5;
-    let cy = py as f32 + 0.5;
-    let d0 = sd(cx, cy);
-    if d0 <= -1.0 {
-        return 255;
-    }
-    if d0 >= 1.2 {
-        return 0;
-    }
-    let mut sum = 0.0_f32;
-    for (ox, oy) in TAPS {
-        sum += (0.5 - sd(cx + ox, cy + oy)).clamp(0.0, 1.0);
-    }
-    (sum * 0.25 * 255.0).round() as u8
-}
-
 struct Canvas<'a> {
-    buf: &'a mut [u8],
-    w: i32,
-    h: i32,
+    list: &'a mut rusty_ui::UiDrawList,
+    fonts: &'a mut rusty_ui::UiFontEngine,
     clip: Option<Rect>,
+    clip_pushed: bool,
 }
 
 impl<'a> Canvas<'a> {
-    fn new(buf: &'a mut [u8], width: u32, height: u32) -> Self {
+    fn new(
+        list: &'a mut rusty_ui::UiDrawList,
+        fonts: &'a mut rusty_ui::UiFontEngine,
+        _width: u32,
+        _height: u32,
+    ) -> Self {
         Self {
-            buf,
-            w: i32::try_from(width).unwrap_or(0),
-            h: i32::try_from(height).unwrap_or(0),
+            list,
+            fonts,
             clip: None,
+            clip_pushed: false,
         }
     }
 
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    fn blend_px(&mut self, x: i32, y: i32, rgba: [u8; 4], cov: u8) {
-        if x < 0 || y < 0 || x >= self.w || y >= self.h || cov == 0 || rgba[3] == 0 {
-            return;
+    fn set_clip(&mut self, next: Option<Rect>) {
+        if self.clip_pushed {
+            rusty_ui::UiPainter::new(self.list).pop_clip();
+            self.clip_pushed = false;
         }
-        if let Some(clip) = self.clip
-            && (x < clip.x || x >= clip.right() || y < clip.y || y >= clip.bottom())
-        {
-            return;
+        self.clip = next;
+        if let Some(r) = next {
+            rusty_ui::UiPainter::new(self.list).push_clip(to_ui_rect(r));
+            self.clip_pushed = true;
         }
-        let alpha = div_255(u16::from(rgba[3]) * u16::from(cov));
-        if alpha == 0 {
-            return;
-        }
-        let idx = ((y * self.w + x) * 4) as usize;
-        if idx + 3 >= self.buf.len() {
-            return;
-        }
-        if alpha == 255 {
-            self.buf[idx] = rgba[2];
-            self.buf[idx + 1] = rgba[1];
-            self.buf[idx + 2] = rgba[0];
-            self.buf[idx + 3] = 255;
-            return;
-        }
-        let inv = 255 - alpha;
-        let sb = div_255(u16::from(rgba[2]) * alpha);
-        let sg = div_255(u16::from(rgba[1]) * alpha);
-        let sr = div_255(u16::from(rgba[0]) * alpha);
-        let db = div_255(u16::from(self.buf[idx]) * inv);
-        let dg = div_255(u16::from(self.buf[idx + 1]) * inv);
-        let dr = div_255(u16::from(self.buf[idx + 2]) * inv);
-        let da = div_255(u16::from(self.buf[idx + 3]) * inv);
-        self.buf[idx] = (sb + db).min(255) as u8;
-        self.buf[idx + 1] = (sg + dg).min(255) as u8;
-        self.buf[idx + 2] = (sr + dr).min(255) as u8;
-        self.buf[idx + 3] = (alpha + da).min(255) as u8;
-    }
-
-    fn clamped_bounds(&self, rect: Rect) -> (i32, i32, i32, i32) {
-        let mut x0 = rect.x.max(0);
-        let mut y0 = rect.y.max(0);
-        let mut x1 = rect.right().min(self.w);
-        let mut y1 = rect.bottom().min(self.h);
-        if let Some(clip) = self.clip {
-            x0 = x0.max(clip.x);
-            y0 = y0.max(clip.y);
-            x1 = x1.min(clip.right());
-            y1 = y1.min(clip.bottom());
-        }
-        (x0, y0, x1, y1)
     }
 
     fn is_clipped_out(&self, rect: Rect) -> bool {
-        let (x0, y0, x1, y1) = self.clamped_bounds(rect);
-        x0 >= x1 || y0 >= y1
-    }
-
-    fn blend_span_opaque(&mut self, py: i32, x0: i32, x1: i32, color: [u8; 4]) {
-        if py < 0 || py >= self.h || x0 >= x1 || color[3] == 0 {
-            return;
-        }
-        let row_start = (py * self.w + x0) as usize * 4;
-        let row_end = (py * self.w + x1) as usize * 4;
-        if row_end > self.buf.len() {
-            return;
-        }
-        if color[3] == 255 {
-            let px = [color[2], color[1], color[0], 255];
-            let (chunks, _) = self.buf[row_start..row_end].as_chunks_mut::<4>();
-            chunks.fill(px);
-            return;
-        }
-        let alpha = u16::from(color[3]);
-        let inv = 255 - alpha;
-        let sb = div_255(u16::from(color[2]) * alpha);
-        let sg = div_255(u16::from(color[1]) * alpha);
-        let sr = div_255(u16::from(color[0]) * alpha);
-        for dst in self.buf[row_start..row_end].as_chunks_mut::<4>().0 {
-            let db = div_255(u16::from(dst[0]) * inv);
-            let dg = div_255(u16::from(dst[1]) * inv);
-            let dr = div_255(u16::from(dst[2]) * inv);
-            let da = div_255(u16::from(dst[3]) * inv);
-            dst[0] = (sb + db).min(255) as u8;
-            dst[1] = (sg + dg).min(255) as u8;
-            dst[2] = (sr + dr).min(255) as u8;
-            dst[3] = (alpha + da).min(255) as u8;
-        }
-    }
-
-    fn blit_premul_bgra(&mut self, dst: Rect, sprite: &[u8]) {
-        let (x0, y0, x1, y1) = self.clamped_bounds(dst);
-        if x0 >= x1 || y0 >= y1 || dst.w <= 0 || dst.h <= 0 {
-            return;
-        }
-        for py in y0..y1 {
-            let sy = (py - dst.y) as usize;
-            let row_src_base = sy * dst.w as usize;
-            let row_dst_base = (py * self.w) as usize;
-            for px in x0..x1 {
-                let sx = (px - dst.x) as usize;
-                let s_idx = (row_src_base + sx) * 4;
-                let sa = sprite[s_idx + 3];
-                if sa == 0 {
-                    continue;
-                }
-                let d_idx = (row_dst_base + px as usize) * 4;
-                if d_idx + 3 >= self.buf.len() {
-                    break;
-                }
-                if sa == 255 {
-                    self.buf[d_idx..d_idx + 4].copy_from_slice(&sprite[s_idx..s_idx + 4]);
-                    continue;
-                }
-                let inv = 255 - u16::from(sa);
-                for ch in 0..4 {
-                    let s_ch = u16::from(sprite[s_idx + ch]);
-                    let d_ch = div_255(u16::from(self.buf[d_idx + ch]) * inv);
-                    self.buf[d_idx + ch] = (s_ch + d_ch).min(255) as u8;
-                }
-            }
+        if let Some(clip) = self.clip {
+            rect.right() <= clip.x
+                || rect.x >= clip.right()
+                || rect.bottom() <= clip.y
+                || rect.y >= clip.bottom()
+        } else {
+            false
         }
     }
 
     fn fill_rect(&mut self, rect: Rect, color: [u8; 4]) {
-        let (x0, y0, x1, y1) = self.clamped_bounds(rect);
-        if x0 >= x1 || y0 >= y1 {
+        if rect.w <= 0 || rect.h <= 0 || color[3] == 0 || self.is_clipped_out(rect) {
             return;
         }
-        for py in y0..y1 {
-            self.blend_span_opaque(py, x0, x1, color);
-        }
+        rusty_ui::UiPainter::new(self.list).fill_rect(to_ui_rect(rect), color);
     }
 
-    fn rounded_interior_span(
-        rect: Rect,
-        margin_edge: i32,
-        margin_corner: i32,
-        x0: i32,
-        x1: i32,
-        py: i32,
-    ) -> Option<(i32, i32)> {
-        if py < rect.y + margin_edge || py >= rect.bottom() - margin_edge {
-            return None;
-        }
-        let pad_x = if py >= rect.y + margin_corner && py < rect.bottom() - margin_corner {
-            margin_edge
-        } else {
-            margin_corner
-        };
-        let sx0 = (rect.x + pad_x).max(x0);
-        let sx1 = (rect.right() - pad_x).min(x1);
-        (sx0 < sx1).then_some((sx0, sx1))
-    }
-
-    #[allow(
-        clippy::cast_possible_truncation,
-        clippy::cast_precision_loss,
-        clippy::cast_sign_loss
-    )]
     fn fill_rounded_rect(&mut self, rect: Rect, radius: i32, color: [u8; 4]) {
-        let (x0, y0, x1, y1) = self.clamped_bounds(rect);
-        if x0 >= x1 || y0 >= y1 {
+        if rect.w <= 0 || rect.h <= 0 || color[3] == 0 || self.is_clipped_out(rect) {
             return;
         }
-        let cx = rect.x as f32 + rect.w as f32 * 0.5;
-        let cy = rect.y as f32 + rect.h as f32 * 0.5;
-        let rw = rect.w as f32;
-        let rh = rect.h as f32;
-        let rad = (radius as f32).min(rw * 0.5).min(rh * 0.5).max(0.0);
-        let corner_pad = rad.ceil() as i32 + 2;
-        for py in y0..y1 {
-            if let Some((sx0, sx1)) = Self::rounded_interior_span(rect, 2, corner_pad, x0, x1, py) {
-                for px in x0..sx0 {
-                    let cov = aa_cov8(px, py, |x, y| sd_rounded_box(x - cx, y - cy, rw, rh, rad));
-                    if cov > 0 {
-                        self.blend_px(px, py, color, cov);
-                    }
-                }
-                self.blend_span_opaque(py, sx0, sx1, color);
-                for px in sx1..x1 {
-                    let cov = aa_cov8(px, py, |x, y| sd_rounded_box(x - cx, y - cy, rw, rh, rad));
-                    if cov > 0 {
-                        self.blend_px(px, py, color, cov);
-                    }
-                }
-            } else {
-                for px in x0..x1 {
-                    let cov = aa_cov8(px, py, |x, y| sd_rounded_box(x - cx, y - cy, rw, rh, rad));
-                    if cov > 0 {
-                        self.blend_px(px, py, color, cov);
-                    }
-                }
-            }
+        let mut painter = rusty_ui::UiPainter::new(self.list);
+        if radius <= 0 {
+            painter.fill_rect(to_ui_rect(rect), color);
+        } else {
+            painter.fill_rounded_rect(to_ui_rect(rect), radius as f32, color);
         }
     }
 
-    #[allow(
-        clippy::cast_possible_truncation,
-        clippy::cast_precision_loss,
-        clippy::cast_sign_loss
-    )]
     fn stroke_rounded_rect(&mut self, rect: Rect, radius: f32, stroke_w: f32, color: [u8; 4]) {
-        let (x0, y0, x1, y1) = self.clamped_bounds(rect);
-        if x0 >= x1 || y0 >= y1 {
+        if rect.w <= 0 || rect.h <= 0 || color[3] == 0 || self.is_clipped_out(rect) {
             return;
         }
-        let cx = rect.x as f32 + rect.w as f32 * 0.5;
-        let cy = rect.y as f32 + rect.h as f32 * 0.5;
-        let rw = rect.w as f32;
-        let rh = rect.h as f32;
-        let rad = radius.min(rw * 0.5).min(rh * 0.5).max(0.0);
-        let edge_pad = stroke_w.ceil() as i32 + 2;
-        let corner_pad = rad.ceil() as i32 + edge_pad;
-        for py in y0..y1 {
-            if let Some((sx0, sx1)) =
-                Self::rounded_interior_span(rect, edge_pad, corner_pad, x0, x1, py)
-            {
-                for px in (x0..sx0).chain(sx1..x1) {
-                    let cov = aa_cov8(px, py, |x, y| {
-                        let d = sd_rounded_box(x - cx, y - cy, rw, rh, rad);
-                        (d + stroke_w * 0.5).abs() - stroke_w * 0.5
-                    });
-                    if cov > 0 {
-                        self.blend_px(px, py, color, cov);
-                    }
-                }
-            } else {
-                for px in x0..x1 {
-                    let cov = aa_cov8(px, py, |x, y| {
-                        let d = sd_rounded_box(x - cx, y - cy, rw, rh, rad);
-                        (d + stroke_w * 0.5).abs() - stroke_w * 0.5
-                    });
-                    if cov > 0 {
-                        self.blend_px(px, py, color, cov);
-                    }
-                }
-            }
-        }
-    }
-
-    #[allow(
-        clippy::cast_possible_truncation,
-        clippy::cast_precision_loss,
-        clippy::cast_sign_loss
-    )]
-    fn fill_circle(&mut self, cx: f32, cy: f32, radius: f32, color: [u8; 4]) {
-        let bounds = Rect::new(
-            (cx - radius - 1.5).floor() as i32,
-            (cy - radius - 1.5).floor() as i32,
-            ((radius + 1.5) * 2.0).ceil() as i32 + 1,
-            ((radius + 1.5) * 2.0).ceil() as i32 + 1,
+        rusty_ui::UiPainter::new(self.list).stroke_rounded_rect(
+            to_ui_rect(rect),
+            radius.max(0.0),
+            stroke_w,
+            color,
         );
-        let (x0, y0, x1, y1) = self.clamped_bounds(bounds);
-        for py in y0..y1 {
-            for px in x0..x1 {
-                let cov = aa_cov8(px, py, |x, y| (x - cx).hypot(y - cy) - radius);
-                if cov > 0 {
-                    self.blend_px(px, py, color, cov);
-                }
-            }
-        }
     }
 
-    #[allow(
-        clippy::cast_possible_truncation,
-        clippy::cast_precision_loss,
-        clippy::cast_sign_loss
-    )]
+    fn fill_circle(&mut self, cx: f32, cy: f32, radius: f32, color: [u8; 4]) {
+        if color[3] == 0 || radius <= 0.0 {
+            return;
+        }
+        rusty_ui::UiPainter::new(self.list).fill_circle(cx, cy, radius, color);
+    }
+
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     fn fill_gradient_squircle(&mut self, rect: Rect, radius: i32, bottom_tint: [u8; 4]) {
-        let (x0, y0, x1, y1) = self.clamped_bounds(rect);
-        if x0 >= x1 || y0 >= y1 {
+        if rect.w <= 0 || rect.h <= 0 || self.is_clipped_out(rect) {
             return;
         }
         let top_tint = [
@@ -498,85 +205,57 @@ impl<'a> Canvas<'a> {
             (f32::from(bottom_tint[2]) * 1.15).round().min(255.0) as u8,
             255,
         ];
-        let cx = rect.x as f32 + rect.w as f32 * 0.5;
-        let cy = rect.y as f32 + rect.h as f32 * 0.5;
-        let rw = rect.w as f32;
-        let rh = rect.h as f32;
-        let rad = (radius as f32).min(rw * 0.5).min(rh * 0.5).max(0.0);
-        let corner_pad = rad.ceil() as i32 + 2;
-        for py in y0..y1 {
-            let t = ((py - rect.y) as f32 / rh.max(1.0)).clamp(0.0, 1.0);
-            let col = lerp_rgba(top_tint, bottom_tint, t);
-            if let Some((sx0, sx1)) = Self::rounded_interior_span(rect, 2, corner_pad, x0, x1, py) {
-                for px in x0..sx0 {
-                    let cov = aa_cov8(px, py, |x, y| sd_rounded_box(x - cx, y - cy, rw, rh, rad));
-                    if cov > 0 {
-                        self.blend_px(px, py, col, cov);
-                    }
-                }
-                self.blend_span_opaque(py, sx0, sx1, col);
-                for px in sx1..x1 {
-                    let cov = aa_cov8(px, py, |x, y| sd_rounded_box(x - cx, y - cy, rw, rh, rad));
-                    if cov > 0 {
-                        self.blend_px(px, py, col, cov);
-                    }
-                }
-            } else {
-                for px in x0..x1 {
-                    let cov = aa_cov8(px, py, |x, y| sd_rounded_box(x - cx, y - cy, rw, rh, rad));
-                    if cov > 0 {
-                        self.blend_px(px, py, col, cov);
-                    }
-                }
-            }
-        }
+        let mid = [
+            u8::midpoint(top_tint[0], bottom_tint[0]),
+            u8::midpoint(top_tint[1], bottom_tint[1]),
+            u8::midpoint(top_tint[2], bottom_tint[2]),
+            255,
+        ];
+        rusty_ui::UiPainter::new(self.list).fill_squircle(
+            to_ui_rect(rect),
+            radius.max(0) as f32,
+            mid,
+        );
     }
 
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     fn draw_segment(&mut self, ax: f32, ay: f32, bx: f32, by: f32, radius: f32, color: [u8; 4]) {
-        let bx0 = (ax.min(bx) - radius - 2.0).floor() as i32;
-        let by0 = (ay.min(by) - radius - 2.0).floor() as i32;
-        let bx1 = (ax.max(bx) + radius + 2.0).ceil() as i32;
-        let by1 = (ay.max(by) + radius + 2.0).ceil() as i32;
-        let (x0, y0, x1, y1) = self.clamped_bounds(Rect::new(bx0, by0, bx1 - bx0, by1 - by0));
-        for py in y0..y1 {
-            for px in x0..x1 {
-                let cov = aa_cov8(px, py, |x, y| sd_segment(x, y, ax, ay, bx, by, radius));
-                if cov > 0 {
-                    self.blend_px(px, py, color, cov);
-                }
-            }
+        if color[3] == 0 {
+            return;
         }
+        rusty_ui::UiPainter::new(self.list).draw_line(
+            ax,
+            ay,
+            bx,
+            by,
+            (radius * 2.0).max(1.0),
+            color,
+        );
     }
 
     #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
-    fn measure_text(&self, text: &str, size_px: f32, bold: bool) -> i32 {
-        let _ = self.w;
-        with_font_engine(|fe| fe.measure_width(text, size_px, bold).round() as i32)
+    fn measure_text(&mut self, text: &str, size_px: f32, bold: bool) -> i32 {
+        self.fonts.measure_width(text, size_px, bold).round() as i32
     }
 
     #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
     fn draw_text(&mut self, text: &str, x: i32, y: i32, size_px: f32, bold: bool, color: [u8; 4]) {
+        if text.is_empty() || color[3] == 0 {
+            return;
+        }
         if let Some(clip) = self.clip
             && (y >= clip.bottom() || y + size_px.ceil() as i32 + 4 <= clip.y || x >= clip.right())
         {
             return;
         }
         let baseline = y + (size_px * 0.84).round() as i32;
-        let clip_ui = self.clip.map(to_ui_rect);
-        let mut uc = make_ui_canvas(self.buf, self.w, self.h);
-        with_font_engine(|fe| {
-            fe.draw_text_on_canvas(
-                &mut uc,
-                text,
-                x as f32,
-                baseline as f32,
-                size_px,
-                bold,
-                color,
-                clip_ui,
-            );
-        });
+        rusty_ui::UiPainter::new(self.list).draw_text(
+            text,
+            x as f32,
+            baseline as f32,
+            size_px,
+            bold,
+            color,
+        );
     }
 
     fn draw_text_centered(
@@ -587,57 +266,89 @@ impl<'a> Canvas<'a> {
         bold: bool,
         color: [u8; 4],
     ) {
-        let tw = self.measure_text(text, size_px, bold);
-        let th = size_px.round() as i32;
-        let x = rect.x + (rect.w - tw) / 2;
-        let y = rect.y + (rect.h - th) / 2;
-        self.draw_text(text, x, y, size_px, bold, color);
-    }
-
-    /// Masks outer window frame pixels cleanly to rounded corner shape (`14px` radius).
-    #[allow(
-        clippy::cast_possible_truncation,
-        clippy::cast_precision_loss,
-        clippy::cast_sign_loss
-    )]
-    fn apply_window_corner_mask(&mut self, radius: i32) {
-        let cx = self.w as f32 * 0.5;
-        let cy = self.h as f32 * 0.5;
-        let rw = self.w as f32;
-        let rh = self.h as f32;
-        let rad = radius as f32;
-        let corner_pad = radius + 2;
-        for py in 0..self.h {
-            let near_v = py < corner_pad || py >= self.h - corner_pad;
-            for px in 0..self.w {
-                if !near_v && px >= corner_pad && px < self.w - corner_pad {
-                    continue;
-                }
-                let d = sd_rounded_box(px as f32 + 0.5 - cx, py as f32 + 0.5 - cy, rw, rh, rad);
-                let cov = ((0.5 - d).clamp(0.0, 1.0) * 255.0).round() as u16;
-                let idx = ((py * self.w + px) * 4) as usize;
-                if cov == 0 {
-                    self.buf[idx..idx + 4].fill(0);
-                } else if cov < 255 {
-                    for c in &mut self.buf[idx..idx + 4] {
-                        *c = div_255(u16::from(*c) * cov) as u8;
-                    }
-                }
-            }
+        if text.is_empty() || color[3] == 0 {
+            return;
         }
+        rusty_ui::UiPainter::new(self.list).draw_text_centered(
+            self.fonts,
+            text,
+            to_ui_rect(rect),
+            size_px,
+            bold,
+            color,
+        );
     }
 }
 
-#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-fn lerp_rgba(a: [u8; 4], b: [u8; 4], t: f32) -> [u8; 4] {
-    let f = |x: u8, y: u8| -> u8 {
-        (f32::from(x) + (f32::from(y) - f32::from(x)) * t)
-            .round()
-            .clamp(0.0, 255.0) as u8
-    };
-    [f(a[0], b[0]), f(a[1], b[1]), f(a[2], b[2]), f(a[3], b[3])]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn render_window_painter(
+    painter: &mut rusty_ui::UiPainter<'_>,
+    fonts: &mut rusty_ui::UiFontEngine,
+    width: u32,
+    height: u32,
+    app: &SettingsAppState,
+    layout: &SettingsLayout,
+    hover: Option<&SettingsHit>,
+    sidebar_glass: bool,
+) {
+    let mut list = rusty_ui::UiDrawList::new();
+    let pal = palette_for(app);
+    {
+        let mut c = Canvas::new(&mut list, fonts, width, height);
+
+        let sidebar_bg = if sidebar_glass {
+            if pal.is_dark {
+                [34, 35, 39, 158]
+            } else {
+                [242, 243, 247, 152]
+            }
+        } else {
+            pal.sidebar_bg
+        };
+        c.fill_rect(layout.sidebar_rect, sidebar_bg);
+        c.fill_rect(Rect::new(layout.divider_x, 0, 1, layout.win_h), pal.divider);
+        c.fill_rect(layout.page_rect, pal.page_bg);
+
+        render_sidebar(&mut c, app, layout, &pal, hover, sidebar_glass);
+
+        c.set_clip(Some(layout.page_viewport));
+        if let Some(app_cards) = &layout.appearance {
+            render_appearance_page(&mut c, app, app_cards, hover, &pal);
+        } else if let Some(dp) = &layout.dock_positions {
+            render_dock_positions_card(&mut c, dp, &pal);
+        }
+        for sec in &layout.sections {
+            render_card_section(&mut c, app, sec, hover, &pal);
+        }
+        c.set_clip(None);
+        render_page_header(&mut c, app, layout, &pal);
+        if let Some(thumb) = layout.page_scrollbar_thumb {
+            let hovered = matches!(hover, Some(SettingsHit::ScrollbarThumb));
+            let thumb_col = if pal.is_dark {
+                [255, 255, 255, if hovered { 128 } else { 92 }]
+            } else {
+                [0, 0, 0, if hovered { 104 } else { 68 }]
+            };
+            c.fill_rounded_rect(thumb, 2, thumb_col);
+        }
+
+        render_floating_overlays(&mut c, app, layout, &pal);
+
+        c.stroke_rounded_rect(
+            Rect::new(0, 0, layout.win_w, layout.win_h),
+            WINDOW_CORNER_RADIUS as f32,
+            1.0,
+            if pal.is_dark {
+                [255, 255, 255, 22]
+            } else {
+                [0, 0, 0, 24]
+            },
+        );
+    }
+    painter.draw_list_mut().commands.extend(list.commands);
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn render_window_pixels_with_glass(
     buf: &mut [u8],
     width: u32,
@@ -647,63 +358,31 @@ pub(crate) fn render_window_pixels_with_glass(
     hover: Option<&SettingsHit>,
     sidebar_glass: bool,
 ) {
-    let pal = palette_for(app);
-    buf.fill(0);
-    let mut c = Canvas::new(buf, width, height);
-
-    // 1. Split-pane background: translucent frosted sidebar (or solid fallback) left + solid canvas right.
-    let sidebar_bg = if sidebar_glass {
-        if pal.is_dark {
-            [34, 35, 39, 158]
-        } else {
-            [242, 243, 247, 152]
+    let mut list = rusty_ui::UiDrawList::new();
+    with_font_engine(|fe| {
+        {
+            let mut painter = rusty_ui::UiPainter::new(&mut list);
+            render_window_painter(
+                &mut painter,
+                fe,
+                width,
+                height,
+                app,
+                layout,
+                hover,
+                sidebar_glass,
+            );
         }
-    } else {
-        pal.sidebar_bg
-    };
-    c.fill_rect(layout.sidebar_rect, sidebar_bg);
-    c.fill_rect(Rect::new(layout.divider_x, 0, 1, layout.win_h), pal.divider);
-    c.fill_rect(layout.page_rect, pal.page_bg);
-
-    // 2. Left sidebar header (traffic lights + borderless capsule search) and scrollable items.
-    render_sidebar(&mut c, app, layout, &pal, hover, sidebar_glass);
-
-    // 3. Scrollable right page content clipped cleanly below header, then header + scrollbar thumb.
-    c.clip = Some(layout.page_viewport);
-    if let Some(app_cards) = &layout.appearance {
-        render_appearance_page(&mut c, app, app_cards, hover, &pal);
-    } else if let Some(dp) = &layout.dock_positions {
-        render_dock_positions_card(&mut c, dp, &pal);
-    }
-    for sec in &layout.sections {
-        render_card_section(&mut c, app, sec, hover, &pal);
-    }
-    c.clip = None;
-    render_page_header(&mut c, app, layout, &pal);
-    if let Some(thumb) = layout.page_scrollbar_thumb {
-        let hovered = matches!(hover, Some(SettingsHit::ScrollbarThumb));
-        let thumb_col = if pal.is_dark {
-            [255, 255, 255, if hovered { 128 } else { 92 }]
-        } else {
-            [0, 0, 0, if hovered { 104 } else { 68 }]
-        };
-        c.fill_rounded_rect(thumb, 2, thumb_col);
-    }
-
-    render_floating_overlays(&mut c, app, layout, &pal);
-
-    // 4. 1px hairline border clipped cleanly by anti-aliased outer rounded corners (radius = 14px).
-    c.stroke_rounded_rect(
-        Rect::new(0, 0, layout.win_w, layout.win_h),
-        WINDOW_CORNER_RADIUS as f32,
-        1.0,
-        if pal.is_dark {
-            [255, 255, 255, 22]
-        } else {
-            [0, 0, 0, 24]
-        },
-    );
-    c.apply_window_corner_mask(WINDOW_CORNER_RADIUS);
+        let mut uc = rusty_ui::UiCanvas::new(
+            buf,
+            width,
+            height,
+            (width as usize) * 4,
+            rusty_ui::PixelFormat::Bgra8888,
+        );
+        uc.clear([0, 0, 0, 0]);
+        rusty_ui::render_draw_list_to_canvas(&list, &mut uc, fe);
+    });
 }
 
 fn render_sidebar_traffic_and_search(
@@ -758,20 +437,15 @@ fn render_sidebar_traffic_and_search(
     let ui_pal = rusty_ui::ThemePalette::new(pal.is_dark, app.accent_index);
     let focus_alpha = app.focus.ring_alpha();
     let elapsed = app.epoch.elapsed();
-    let mut dl = rusty_ui::UiDrawList::new();
-    with_font_engine(|fe| {
-        let mut painter = rusty_ui::UiPainter::new(&mut dl);
-        sf.paint(
-            &mut painter,
-            fe,
-            &ui_pal,
-            app.search_focused,
-            focus_alpha,
-            elapsed,
-        );
-        let mut uc = make_ui_canvas(c.buf, c.w, c.h);
-        rusty_ui::render_draw_list_to_canvas(&dl, &mut uc, fe);
-    });
+    let mut painter = rusty_ui::UiPainter::new(c.list);
+    sf.paint(
+        &mut painter,
+        c.fonts,
+        &ui_pal,
+        app.search_focused,
+        focus_alpha,
+        elapsed,
+    );
 }
 
 fn render_sidebar(
@@ -784,7 +458,7 @@ fn render_sidebar(
 ) {
     render_sidebar_traffic_and_search(c, app, layout, pal, hover);
 
-    c.clip = Some(layout.sidebar_viewport);
+    c.set_clip(Some(layout.sidebar_viewport));
     for cat in &layout.categories {
         if c.is_clipped_out(cat.rect) {
             continue;
@@ -837,7 +511,7 @@ fn render_sidebar(
             pal.text_primary,
         );
     }
-    c.clip = None;
+    c.set_clip(None);
 }
 
 fn render_page_header(
@@ -971,42 +645,30 @@ fn blit_rgba_sprite_rounded(
     src_w: usize,
     src_h: usize,
     rgba: &[u8],
-    radius: f32,
+    _radius: f32,
     tint_white: bool,
 ) {
-    if dst.w <= 0 || dst.h <= 0 || src_w == 0 || src_h == 0 {
+    if dst.w <= 0 || dst.h <= 0 || src_w == 0 || src_h == 0 || c.is_clipped_out(dst) {
         return;
     }
-    let cx = dst.x as f32 + dst.w as f32 * 0.5;
-    let cy = dst.y as f32 + dst.h as f32 * 0.5;
-    let rw = dst.w as f32;
-    let rh = dst.h as f32;
-    for py in dst.y..dst.bottom() {
-        let sy = ((py - dst.y) as usize * src_h / dst.h as usize).min(src_h - 1);
-        for px in dst.x..dst.right() {
-            let sx = ((px - dst.x) as usize * src_w / dst.w as usize).min(src_w - 1);
-            let off = (sy * src_w + sx) * 4;
-            let src_a = rgba[off + 3];
-            if src_a == 0 {
-                continue;
-            }
-            let cov = if radius > 0.0 {
-                let d = sd_rounded_box(px as f32 + 0.5 - cx, py as f32 + 0.5 - cy, rw, rh, radius);
-                if d >= 0.6 {
-                    continue;
-                }
-                ((0.6 - d).clamp(0.0, 1.0) * 255.0).round() as u8
-            } else {
-                255
-            };
-            let color = if tint_white {
-                [255, 255, 255, src_a]
-            } else {
-                [rgba[off], rgba[off + 1], rgba[off + 2], src_a]
-            };
-            c.blend_px(px, py, color, cov);
-        }
-    }
+    let bytes: Vec<u8> = if tint_white {
+        rgba.as_chunks::<4>()
+            .0
+            .iter()
+            .flat_map(|px| [255, 255, 255, px[3]])
+            .collect()
+    } else {
+        rgba.to_vec()
+    };
+    let cache_key = NEXT_SPRITE_CACHE_KEY.fetch_add(1, Ordering::Relaxed);
+    rusty_ui::UiPainter::new(c.list).draw_image(
+        to_ui_rect(dst),
+        cache_key,
+        src_w as u32,
+        src_h as u32,
+        Arc::from(bytes),
+        rusty_ui::PixelFormat::Rgba8888,
+    );
 }
 
 #[allow(
@@ -1026,45 +688,20 @@ fn render_theme_preview_direct(c: &mut Canvas<'_>, art: Rect, choice: ThemeChoic
         blit_rgba_sprite_rounded(c, art, sw, sh, &rgba, 10.0, false);
         return;
     }
-    let cx = art.x as f32 + art.w as f32 * 0.5;
-    let cy = art.y as f32 + art.h as f32 * 0.5;
-    let rw = art.w as f32;
-    let rh = art.h as f32;
     let win_rect = Rect::new(art.x, art.y + 16, 78, 52);
-
-    for py in art.y..art.bottom() {
-        for px in art.x..art.right() {
-            let lx = px as f32 + 0.5;
-            let ly = py as f32 + 0.5;
-            let d = sd_rounded_box(lx - cx, ly - cy, rw, rh, 10.0);
-            if d >= 0.6 {
-                continue;
-            }
-            let cov = ((0.6 - d).clamp(0.0, 1.0) * 255.0).round() as u8;
-            let ux = (lx - art.x as f32) / rw;
-            let uy = (ly - art.y as f32) / rh;
-            // Warm sand/pastel backdrop visible in top and right strips like light_mode.svg
-            let bg = [
-                (176.0 + ux * 46.0 + uy * 18.0).clamp(0.0, 255.0) as u8,
-                (194.0 - ux * 16.0 - uy * 8.0).clamp(0.0, 255.0) as u8,
-                (204.0 - ux * 42.0 - uy * 26.0).clamp(0.0, 255.0) as u8,
-                255,
-            ];
-            let in_win = px < win_rect.right() && py >= win_rect.y;
-            let mut color = bg;
-            if in_win {
-                let dark_half = match choice {
-                    ThemeChoice::Light => false,
-                    ThemeChoice::Dark => true,
-                    ThemeChoice::Auto => ux > 0.44 + (0.5 - uy) * 0.20,
-                };
-                color = if dark_half {
-                    [20, 20, 22, 255]
-                } else {
-                    [248, 249, 252, 255]
-                };
-            }
-            c.blend_px(px, py, color, cov);
+    c.fill_rounded_rect(art, 10, [196, 188, 192, 255]);
+    match choice {
+        ThemeChoice::Light => c.fill_rounded_rect(win_rect, 6, [248, 249, 252, 255]),
+        ThemeChoice::Dark => c.fill_rounded_rect(win_rect, 6, [20, 20, 22, 255]),
+        ThemeChoice::Auto => {
+            c.fill_rounded_rect(win_rect, 6, [248, 249, 252, 255]);
+            let dark_rect = Rect::new(
+                win_rect.x + win_rect.w / 2,
+                win_rect.y,
+                win_rect.w - win_rect.w / 2,
+                win_rect.h,
+            );
+            c.fill_rounded_rect(dark_rect, 4, [20, 20, 22, 255]);
         }
     }
 
@@ -1705,21 +1342,8 @@ fn paint_with_ui_painter(
     ),
 ) {
     let ui_pal = rusty_ui::ThemePalette::new(pal.is_dark, app.accent_index);
-    let mut dl = rusty_ui::UiDrawList::new();
-    with_font_engine(|fe| {
-        {
-            let mut painter = rusty_ui::UiPainter::new(&mut dl);
-            if let Some(clip) = c.clip {
-                painter.push_clip(to_ui_rect(clip));
-            }
-            paint_fn(&mut painter, fe, &ui_pal);
-            if c.clip.is_some() {
-                painter.pop_clip();
-            }
-        }
-        let mut uc = make_ui_canvas(c.buf, c.w, c.h);
-        rusty_ui::render_draw_list_to_canvas(&dl, &mut uc, fe);
-    });
+    let mut painter = rusty_ui::UiPainter::new(c.list);
+    paint_fn(&mut painter, c.fonts, &ui_pal);
 }
 
 fn render_floating_overlays(
@@ -1932,21 +1556,8 @@ fn draw_toggle_switch(
     }
     let progress = app.switch_progress(action, active);
     let ui_pal = rusty_ui::ThemePalette::new(pal.is_dark, app.accent_index);
-    let mut dl = rusty_ui::UiDrawList::new();
-    {
-        let mut painter = rusty_ui::UiPainter::new(&mut dl);
-        if let Some(clip) = c.clip {
-            painter.push_clip(to_ui_rect(clip));
-        }
-        sw.paint_animated(&mut painter, progress, &ui_pal);
-        if c.clip.is_some() {
-            painter.pop_clip();
-        }
-    }
-    let mut uc = make_ui_canvas(c.buf, c.w, c.h);
-    with_font_engine(|fe| {
-        rusty_ui::render_draw_list_to_canvas(&dl, &mut uc, fe);
-    });
+    let mut painter = rusty_ui::UiPainter::new(c.list);
+    sw.paint_animated(&mut painter, progress, &ui_pal);
 }
 
 fn draw_service_badge_glyph(c: &mut Canvas<'_>, rect: Rect, kind: ServiceBadgeKind) {
@@ -2076,22 +1687,8 @@ fn draw_sidebar_glyph(c: &mut Canvas<'_>, rect: Rect, page: SettingsPage) {
             c.draw_segment(cx - 6.0, cy, cx + 6.0, cy, 0.55, w);
         }
         SettingsPage::Appearance => {
-            // White ring + filled left half
-            for py in rect.y + 4..rect.bottom() - 4 {
-                for px in rect.x + 4..rect.right() - 4 {
-                    let cov = aa_cov8(px, py, |x, y| {
-                        let dx = x - cx;
-                        let dy = y - cy;
-                        let r = dx.hypot(dy);
-                        let ring_d = (r - 5.9).abs() - 0.75;
-                        let fill_d = (r - 6.2).max(dx);
-                        ring_d.min(fill_d)
-                    });
-                    if cov > 0 {
-                        c.blend_px(px, py, w, cov);
-                    }
-                }
-            }
+            c.stroke_rounded_rect(Rect::new(rect.x + 6, rect.y + 6, 12, 12), 6.0, 1.4, w);
+            c.fill_rounded_rect(Rect::new(rect.x + 6, rect.y + 6, 6, 12), 3, w);
         }
         SettingsPage::Wallpaper => {
             c.stroke_rounded_rect(Rect::new(rect.x + 5, rect.y + 6, 14, 12), 2.5, 1.2, w);
@@ -2187,27 +1784,11 @@ fn draw_extra_sidebar_glyph(c: &mut Canvas<'_>, rect: Rect, page: SettingsPage) 
     }
 }
 
-#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 fn draw_wifi_arc(c: &mut Canvas<'_>, cx: f32, cy: f32, r: f32, col: [u8; 4]) {
-    let x0 = (cx - r - 1.5).floor() as i32;
-    let y0 = (cy - r - 1.5).floor() as i32;
-    let x1 = (cx + r + 1.5).ceil() as i32;
-    let y1 = cy.ceil() as i32;
-    for py in y0..y1 {
-        for px in x0..x1 {
-            let cov = aa_cov8(px, py, |x, y| {
-                let dx = x - cx;
-                let dy = y - cy;
-                if dy > -dx.abs() * 0.8 {
-                    return 1.0e3;
-                }
-                (dx.hypot(dy) - r).abs() - 0.65
-            });
-            if cov > 0 {
-                c.blend_px(px, py, col, cov);
-            }
-        }
-    }
+    let dx = r * 0.65;
+    let dy = r * 0.65;
+    c.draw_segment(cx - dx, cy - dy * 0.45, cx, cy - r, 0.65, col);
+    c.draw_segment(cx, cy - r, cx + dx, cy - dy * 0.45, 0.65, col);
 }
 
 fn draw_chevron(c: &mut Canvas<'_>, cx: f32, cy: f32, left: bool, col: [u8; 4]) {
@@ -2221,34 +1802,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn fast_rounded_rect_matches_bruteforce_sdf_coverage() {
-        let w = 80_u32;
-        let h = 50_u32;
-        let rect = Rect::new(8, 6, 60, 34);
-        let color = [0x22, 0x66, 0xAA, 0xFF];
-
-        let mut fast_buf = vec![0_u8; (w * h * 4) as usize];
-        let mut fast = Canvas::new(&mut fast_buf, w, h);
-        fast.fill_rounded_rect(rect, 10, color);
-
-        let mut ref_buf = vec![0_u8; (w * h * 4) as usize];
-        let mut ref_c = Canvas::new(&mut ref_buf, w, h);
-        let cx = rect.x as f32 + rect.w as f32 * 0.5;
-        let cy = rect.y as f32 + rect.h as f32 * 0.5;
-        for py in rect.y..rect.bottom() {
-            for px in rect.x..rect.right() {
-                let cov = aa_cov8(px, py, |x, y| {
-                    sd_rounded_box(x - cx, y - cy, rect.w as f32, rect.h as f32, 10.0)
-                });
-                if cov > 0 {
-                    ref_c.blend_px(px, py, color, cov);
-                }
-            }
-        }
-        assert_eq!(fast_buf, ref_buf);
-    }
-
-    #[test]
     fn cached_row_icon_and_theme_preview_match_direct_render() {
         let w = 140_u32;
         let h = 90_u32;
@@ -2256,18 +1809,42 @@ mod tests {
         let preview_rect = Rect::new(20, 12, 108, 68);
 
         let mut direct_buf = vec![240_u8; (w * h * 4) as usize];
-        {
-            let mut dc = Canvas::new(&mut direct_buf, w, h);
-            render_row_icon_direct(&mut dc, icon_rect, SettingsPage::Appearance);
-            render_theme_preview_direct(&mut dc, preview_rect, ThemeChoice::Auto);
-        }
+        with_font_engine(|fe| {
+            let mut dl = rusty_ui::UiDrawList::new();
+            {
+                let mut dc = Canvas::new(&mut dl, fe, w, h);
+                render_row_icon_direct(&mut dc, icon_rect, SettingsPage::Appearance);
+                render_theme_preview_direct(&mut dc, preview_rect, ThemeChoice::Auto);
+            }
+            let mut uc = rusty_ui::UiCanvas::new(
+                &mut direct_buf,
+                w,
+                h,
+                (w as usize) * 4,
+                rusty_ui::PixelFormat::Bgra8888,
+            );
+            rusty_ui::render_draw_list_to_canvas(&dl, &mut uc, fe);
+        });
 
         let mut cached_buf = vec![240_u8; (w * h * 4) as usize];
         for _ in 0..2 {
             cached_buf.fill(240);
-            let mut cc = Canvas::new(&mut cached_buf, w, h);
-            render_row_icon(&mut cc, icon_rect, SettingsPage::Appearance);
-            render_theme_preview_artwork(&mut cc, preview_rect, ThemeChoice::Auto);
+            with_font_engine(|fe| {
+                let mut dl = rusty_ui::UiDrawList::new();
+                {
+                    let mut cc = Canvas::new(&mut dl, fe, w, h);
+                    render_row_icon(&mut cc, icon_rect, SettingsPage::Appearance);
+                    render_theme_preview_artwork(&mut cc, preview_rect, ThemeChoice::Auto);
+                }
+                let mut uc = rusty_ui::UiCanvas::new(
+                    &mut cached_buf,
+                    w,
+                    h,
+                    (w as usize) * 4,
+                    rusty_ui::PixelFormat::Bgra8888,
+                );
+                rusty_ui::render_draw_list_to_canvas(&dl, &mut uc, fe);
+            });
         }
 
         assert_eq!(cached_buf, direct_buf);

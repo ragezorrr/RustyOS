@@ -16,7 +16,7 @@ use crate::layout::{
     HEADER_HEIGHT, MIN_HEIGHT, MIN_WIDTH, ResizeEdgeZone, SIDEBAR_WIDTH, SettingsHit,
     SettingsLayout, WINDOW_CORNER_RADIUS, compute_layout, hit_test,
 };
-use crate::render::{render_window_pixels_with_glass, with_font_engine};
+use crate::render::{render_window_painter, with_font_engine};
 use crate::state::{
     DamageScope, ServiceCommand, ServiceSnapshot, SettingsAppState, SettingsPage, StartupOptions,
     execute_coalesced_service_batch,
@@ -39,6 +39,7 @@ struct SettingsApp {
     service_rx: Receiver<ServiceSnapshot>,
     width: u32,
     height: u32,
+    has_glass: bool,
     pointer_pos: (f64, f64),
     pointer_pressed: bool,
     scrollbar_drag: Option<(f64, i32)>,
@@ -62,6 +63,7 @@ impl SettingsApp {
             service_rx,
             width: DEFAULT_WIDTH,
             height: DEFAULT_HEIGHT,
+            has_glass: false,
             pointer_pos: (0.0, 0.0),
             pointer_pressed: false,
             scrollbar_drag: None,
@@ -586,6 +588,7 @@ impl SettingsApp {
 impl RustyApp for SettingsApp {
     fn on_configure(&mut self, ctx: &mut AppContext<'_>, info: ConfigureInfo) {
         let size_changed = info.width != self.width || info.height != self.height;
+        self.has_glass = ctx.has_liquid_glass();
         let max_changed = self.app.maximized != info.is_maximized;
         if size_changed || max_changed || self.app.focused != info.is_activated {
             self.width = info.width;
@@ -721,34 +724,26 @@ impl RustyApp for SettingsApp {
 
     fn paint(
         &mut self,
-        _painter: &mut rusty_ui::UiPainter<'_>,
-        _fonts: &mut rusty_ui::UiFontEngine,
-        _width: u32,
-        _height: u32,
-    ) {
-    }
-
-    fn paint_bgra(
-        &mut self,
-        canvas_bgra: &mut [u8],
+        painter: &mut rusty_ui::UiPainter<'_>,
+        fonts: &mut rusty_ui::UiFontEngine,
         width: u32,
         height: u32,
-        has_glass: bool,
-    ) -> bool {
+    ) {
         self.width = width;
         self.height = height;
         let layout = self.current_layout();
-        render_window_pixels_with_glass(
-            canvas_bgra,
+        let sidebar_glass = self.has_glass && !self.app.reduce_transparency;
+        render_window_painter(
+            painter,
+            fonts,
             width,
             height,
             &self.app,
             &layout,
             self.hover_hit.as_ref(),
-            has_glass,
+            sidebar_glass,
         );
         self.app.dirty = false;
-        true
     }
 }
 
