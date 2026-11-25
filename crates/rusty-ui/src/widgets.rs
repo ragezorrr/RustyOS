@@ -228,11 +228,31 @@ impl PushButton {
                 }
             }
             ButtonStyle::Destructive => {
-                let base = [0xFF, 0x3B, 0x30, 255];
+                let base = if pal.is_dark {
+                    crate::theme::ACCENT_DARK_PALETTE[1]
+                } else {
+                    crate::theme::ACCENT_PALETTE[1]
+                };
                 match self.state {
-                    WidgetState::Pressed => ([0xCC, 0x2F, 0x26, 255], None),
-                    WidgetState::Hover => ([0xE6, 0x35, 0x2B, 255], None),
-                    WidgetState::Disabled => ([0xFF, 0x3B, 0x30, 100], None),
+                    WidgetState::Pressed => (
+                        [
+                            (u16::from(base[0]) * 8 / 10) as u8,
+                            (u16::from(base[1]) * 8 / 10) as u8,
+                            (u16::from(base[2]) * 8 / 10) as u8,
+                            255,
+                        ],
+                        None,
+                    ),
+                    WidgetState::Hover => (
+                        [
+                            (u16::from(base[0]) * 9 / 10) as u8,
+                            (u16::from(base[1]) * 9 / 10) as u8,
+                            (u16::from(base[2]) * 9 / 10) as u8,
+                            255,
+                        ],
+                        None,
+                    ),
+                    WidgetState::Disabled => ([base[0], base[1], base[2], 100], None),
                     WidgetState::Normal => (base, None),
                 }
             }

@@ -117,7 +117,7 @@ pub(super) fn push_popup_glass_panels(
     let radius = if glass.corner_radius > 0 {
         glass.corner_radius as i32
     } else {
-        13
+        rusty_ui::menu::MENU_RADIUS
     };
     if let Some(ref regions) = glass.region {
         for region_rect in regions {

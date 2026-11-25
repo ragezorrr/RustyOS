@@ -786,7 +786,7 @@ impl SettingsAppState {
     }
 
     pub(crate) fn set_glass_opacity(&mut self, pct: u8) {
-        let clamped = pct.clamp(15, 95);
+        let clamped = pct.clamp(35, 100);
         let next = f32::from(clamped) / 100.0;
         if (self.glass_opacity - next).abs() < 1e-3 {
             return;
@@ -794,6 +794,8 @@ impl SettingsAppState {
         self.glass_opacity = next;
         let v = format!("{:.2}", self.glass_opacity);
         let _ = update_config_entries(&[("ui", "glass_opacity", &v)]);
+        self.last_config_mtime = current_config_mtime();
+        notify_compositor_reload();
         self.mark_dirty(DamageScope::Page);
     }
 }

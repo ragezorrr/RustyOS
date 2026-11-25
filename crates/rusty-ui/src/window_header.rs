@@ -6,8 +6,8 @@ pub use crate::window_frame::{WindowFrame, WindowHitTarget};
 /// Standard client-side decoration header height (40 px).
 pub const CSD_TITLEBAR_HEIGHT: u32 = 40;
 
-/// Standard server-side decoration header height (28 px).
-pub const SSD_TITLEBAR_HEIGHT: u32 = 28;
+/// Standard server-side decoration header height (`36 px`, matching [`crate::geometry::SSD_TITLEBAR_HEIGHT`]).
+pub const SSD_TITLEBAR_HEIGHT: u32 = crate::geometry::SSD_TITLEBAR_HEIGHT;
 
 /// Standard modal dialog header height (42 px = 2 * 10 px inset + 22 px button).
 pub const DIALOG_HEADER_HEIGHT: u32 = 42;
@@ -123,5 +123,17 @@ impl WindowHeader {
     /// Checks double click on titlebar for toggle maximize.
     pub fn check_double_click_maximize(&mut self, px: f64, py: f64, window_width: u32) -> bool {
         self.frame.check_double_click_maximize(px, py, window_width)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn ssd_titlebar_height_matches_geometry_constant() {
+        assert_eq!(
+            super::SSD_TITLEBAR_HEIGHT,
+            crate::geometry::SSD_TITLEBAR_HEIGHT
+        );
+        assert_eq!(super::SSD_TITLEBAR_HEIGHT, 36);
     }
 }

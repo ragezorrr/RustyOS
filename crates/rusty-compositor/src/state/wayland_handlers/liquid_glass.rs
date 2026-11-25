@@ -101,6 +101,10 @@ impl compositor::Cacheable for LiquidGlassSurfaceCachedState {
     }
 }
 
+/// Tracks whether an active `rustyos_surface_glass_v1` handle is currently bound to a `WlSurface`.
+#[derive(Debug, Default)]
+struct LiquidGlassAttached(std::sync::atomic::AtomicBool);
+
 /// User data attached to [`RustyosSurfaceGlassV1`].
 #[derive(Debug, Clone)]
 pub struct LiquidGlassSurfaceUserData {
@@ -122,6 +126,41 @@ impl LiquidGlassSurfaceUserData {
         if let Ok(mut guard) = self.surface.lock() {
             *guard = None;
         }
+    }
+}
+
+fn mark_glass_attached(surface: &WlSurface, attached: bool) -> bool {
+    compositor::with_states(surface, |states| {
+        let marker = states
+            .data_map
+            .get_or_insert::<LiquidGlassAttached, _>(LiquidGlassAttached::default);
+        if attached {
+            marker
+                .0
+                .compare_exchange(
+                    false,
+                    true,
+                    std::sync::atomic::Ordering::AcqRel,
+                    std::sync::atomic::Ordering::Acquire,
+                )
+                .is_ok()
+        } else {
+            marker.0.store(false, std::sync::atomic::Ordering::Release);
+            true
+        }
+    })
+}
+
+/// Synchronizes `active_liquid_glass_surfaces` from double-buffered committed state on `wl_surface.commit`.
+pub(crate) fn sync_surface_liquid_glass_on_commit(
+    state: &mut RustyCompositorState,
+    surface: &WlSurface,
+) {
+    let active = surface_liquid_glass_state(surface).is_some();
+    if active {
+        state.active_liquid_glass_surfaces.insert(surface.id());
+    } else {
+        state.active_liquid_glass_surfaces.remove(&surface.id());
     }
 }
 
@@ -156,16 +195,24 @@ impl Dispatch<RustyosLiquidGlassManagerV1, ()> for RustyCompositorState {
     fn request(
         state: &mut Self,
         _client: &Client,
-        _resource: &RustyosLiquidGlassManagerV1,
+        resource: &RustyosLiquidGlassManagerV1,
         request: protocol::rustyos_liquid_glass_manager_v1::Request,
         _data: &(),
-        _dh: &DisplayHandle,
+        dh: &DisplayHandle,
         data_init: &mut DataInit<'_, Self>,
     ) {
         use protocol::rustyos_liquid_glass_manager_v1::Request;
 
         match request {
             Request::GetSurfaceGlass { id, surface } => {
+                if !mark_glass_attached(&surface, true) {
+                    dh.post_error(
+                        resource,
+                        GlassError::AlreadyConstructed as u32,
+                        "liquid glass already exists for this surface".to_owned(),
+                    );
+                    return;
+                }
                 let user_data = LiquidGlassSurfaceUserData::new(surface.clone());
                 let _glass_res = data_init.init(id, user_data);
 
@@ -173,13 +220,14 @@ impl Dispatch<RustyosLiquidGlassManagerV1, ()> for RustyCompositorState {
                 compositor::with_states(&surface, |states| {
                     let mut cached = states.cached_state.get::<LiquidGlassSurfaceCachedState>();
                     cached.pending().active = true;
-                    // Default corner radius to 16 for popovers
+                    // Default corner radius matches `rusty_ui::menu::MENU_RADIUS` (14 px)
                     if cached.pending().corner_radius == 0 {
-                        cached.pending().corner_radius = 16;
+                        cached.pending().corner_radius =
+                            u32::try_from(rusty_ui::menu::MENU_RADIUS).unwrap_or(14);
                     }
                 });
 
-                state.active_liquid_glass_surfaces.insert(surface.id());
+                let _ = state;
             }
             Request::Destroy => {}
         }
@@ -267,7 +315,8 @@ impl Dispatch<RustyosSurfaceGlassV1, LiquidGlassSurfaceUserData> for RustyCompos
                     let mut cached = states.cached_state.get::<LiquidGlassSurfaceCachedState>();
                     cached.pending().active = false;
                 });
-                state.active_liquid_glass_surfaces.remove(&surface.id());
+                let _ = mark_glass_attached(&surface, false);
+                let _ = state;
                 data.clear();
             }
         }

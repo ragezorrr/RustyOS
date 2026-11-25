@@ -82,6 +82,10 @@ impl CompositorHandler for RustyCompositorState {
         compositor::add_pre_commit_hook::<Self, _>(surface, Self::handle_syncobj_pre_commit);
     }
 
+    fn destroyed(&mut self, surface: &WlSurface) {
+        self.active_liquid_glass_surfaces.remove(&surface.id());
+    }
+
     fn commit(&mut self, surface: &WlSurface) {
         on_commit_buffer_handler::<Self>(surface);
         let surface_scale = self.preferred_scale_for_surface(surface);
@@ -168,6 +172,7 @@ impl CompositorHandler for RustyCompositorState {
             }
         }
         self.popups.commit(surface);
+        super::liquid_glass::sync_surface_liquid_glass_on_commit(self, surface);
         self.cleanup_ime_popups();
         self.commit_layer_surface(surface);
         self.shell_redraw_needed = true;

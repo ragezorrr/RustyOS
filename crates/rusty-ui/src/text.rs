@@ -23,6 +23,8 @@ pub enum FontWeight {
     #[default]
     Regular,
     SemiBold,
+    Bold,
+    Mono,
 }
 
 /// Cache key identifying one rasterized glyph bitmap.
@@ -48,6 +50,8 @@ pub struct RasterizedGlyph {
 pub struct UiFontEngine {
     regular: Option<Font>,
     semibold: Option<Font>,
+    bold: Option<Font>,
+    mono: Option<Font>,
     glyphs: HashMap<GlyphRasterKey, RasterizedGlyph>,
     empty_glyph: RasterizedGlyph,
 }
@@ -67,16 +71,24 @@ impl Default for UiFontEngine {
 }
 
 impl UiFontEngine {
-    /// Creates a new font engine with bundled `Inter Regular` and `Inter SemiBold`.
+    /// Creates a new font engine with bundled `Inter` and `JetBrains Mono` fonts.
     #[must_use]
     pub fn new() -> Self {
         let regular = Font::from_bytes(INTER_REGULAR_BYTES, FontSettings::default()).ok();
         let semibold = Font::from_bytes(INTER_SEMIBOLD_BYTES, FontSettings::default())
             .ok()
             .or_else(|| regular.clone());
+        let bold = Font::from_bytes(INTER_BOLD_BYTES, FontSettings::default())
+            .ok()
+            .or_else(|| semibold.clone());
+        let mono = Font::from_bytes(JETBRAINS_MONO_REGULAR_BYTES, FontSettings::default())
+            .ok()
+            .or_else(|| regular.clone());
         Self {
             regular,
             semibold,
+            bold,
+            mono,
             glyphs: HashMap::with_capacity(512),
             empty_glyph: RasterizedGlyph {
                 width: 0,
@@ -94,13 +106,23 @@ impl UiFontEngine {
         (size_px.clamp(6.0, 200.0) * 10.0).round() as u16
     }
 
-    /// Returns a reference to the cached rasterized glyph for `(ch, size_px, weight)`.
+    /// Returns a reference to the cached rasterized glyph for `(ch, size_px, bold)`.
     pub fn rasterize_glyph(&mut self, ch: char, size_px: f32, bold: bool) -> &RasterizedGlyph {
         let weight = if bold {
             FontWeight::SemiBold
         } else {
             FontWeight::Regular
         };
+        self.rasterize_glyph_weighted(ch, size_px, weight)
+    }
+
+    /// Returns a reference to the cached rasterized glyph for `(ch, size_px, weight)`.
+    pub fn rasterize_glyph_weighted(
+        &mut self,
+        ch: char,
+        size_px: f32,
+        weight: FontWeight,
+    ) -> &RasterizedGlyph {
         let key = GlyphRasterKey {
             weight,
             size_tenths: Self::size_tenths(size_px),
@@ -110,6 +132,8 @@ impl UiFontEngine {
             let font_opt = match weight {
                 FontWeight::Regular => self.regular.as_ref(),
                 FontWeight::SemiBold => self.semibold.as_ref(),
+                FontWeight::Bold => self.bold.as_ref(),
+                FontWeight::Mono => self.mono.as_ref(),
             };
             let Some(font) = font_opt else {
                 return &self.empty_glyph;
@@ -388,4 +412,23 @@ pub fn next_word_boundary(text: &str, cursor: usize) -> usize {
         end = cur + rel_idx + ch.len_utf8();
     }
     end
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn font_engine_supports_bold_and_mono_weights() {
+        let mut engine = UiFontEngine::new();
+        let bold_a = engine.rasterize_glyph_weighted('A', 14.0, FontWeight::Bold);
+        assert!(bold_a.width > 0 && bold_a.height > 0);
+        let adv_i = engine
+            .rasterize_glyph_weighted('i', 14.0, FontWeight::Mono)
+            .advance_x;
+        let adv_w = engine
+            .rasterize_glyph_weighted('W', 14.0, FontWeight::Mono)
+            .advance_x;
+        assert!((adv_i - adv_w).abs() < 0.01);
+    }
 }

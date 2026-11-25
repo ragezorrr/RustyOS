@@ -47,7 +47,7 @@
         Style presets dictate backdrop blur strength, saturation boost,
         specular border highlights, and chromatic transmission.
       </description>
-      <entry name="popover" value="0" summary="High vibrancy menu/popover glass (16px corner radius default, saturated backdrop)"/>
+      <entry name="popover" value="0" summary="High vibrancy menu/popover glass (14px corner radius default, saturated backdrop)"/>
       <entry name="sidebar" value="1" summary="Subtle translucent sidebar glass (12px corner radius, high diffusion blur)"/>
       <entry name="control_pill" value="2" summary="Compact segmented pill glass (fully rounded capsule)"/>
       <entry name="base_panel" value="3" summary="Top bar or dock base panel glass"/>

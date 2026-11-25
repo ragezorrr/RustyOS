@@ -1198,7 +1198,7 @@ impl SettingsClient {
                 self.app.set_display_scale(f64::from(next_pct) / 100.0);
             }
             StepperDragKind::GlassOpacity => {
-                let next = (start_val + (dx / 2.0).round() as i32).clamp(15, 95);
+                let next = (start_val + (dx / 2.0).round() as i32).clamp(35, 100);
                 self.app.set_glass_opacity(u8::try_from(next).unwrap_or(80));
             }
         }

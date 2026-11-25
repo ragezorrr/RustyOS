@@ -334,3 +334,12 @@ fn datetime_ntp_timezone_and_manual_time_modals_work() {
         ]
     );
 }
+
+#[test]
+fn glass_opacity_slider_clamps_to_compositor_bounds() {
+    let mut st = SettingsAppState::defaults_with_page(SettingsPage::Appearance);
+    st.set_glass_opacity(10);
+    assert!((st.glass_opacity - 0.35).abs() < 1e-4);
+    st.set_glass_opacity(110);
+    assert!((st.glass_opacity - 1.0).abs() < 1e-4);
+}

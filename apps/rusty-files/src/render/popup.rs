@@ -2,10 +2,10 @@
 //! (`RUSTYOS-087`, `RUSTYOS-107`, ADR-0043, ADR-0058).
 //!
 //! Provides 1:1 visual parity with compositor-managed popovers (`crates/rusty-compositor/src/shell_render/context_menu.rs`):
-//! - Concentric corner radius `MENU_POPOVER_RADIUS = 13` with `HOVER_PILL_RADIUS = 7` and `5 px` padding;
+//! - Concentric corner radius `MENU_POPOVER_RADIUS = 14` with `HOVER_PILL_RADIUS = 9` and `5 px` padding;
 //! - Multi-stage soft Gaussian drop shadow;
 //! - Translucent Liquid Glass material with specular top rim highlight;
-//! - Inset floating hover pills (`HOVER_PILL_RADIUS = 7`, `HOVER_PILL_INSET_H = 5`, `HOVER_PILL_INSET_V = 1`);
+//! - Inset floating hover pills (`HOVER_PILL_RADIUS = 9`, `HOVER_PILL_INSET_H = 5`, `HOVER_PILL_INSET_V = 1`);
 //! - Two-mode left alignment (`14 px` without checkmarks/swatches; `28 px` with checkmarks; `36 px` with tag swatches);
 //! - Right-aligned keyboard shortcut column (`⌘O`, `⌘I`, `⌘⌫`, `^⌘F`, `⌘M`, `⌘W`);
 //! - Hairline dividers with 12px horizontal inset;
@@ -91,7 +91,7 @@ pub(crate) fn render_popup_surface_pixels(
 
 /// Renders a standalone native `xdg_popup` surface buffer (`ARGB8888`); when
 /// `has_compositor_glass == true`, skips CPU shadow/opaque fill so the compositor
-/// `LiquidGlassElement` (`GlassPanelStyle::Popover`, `r = 13`) provides live blur and rim.
+/// `LiquidGlassElement` (`GlassPanelStyle::Popover`, `r = 14`) provides live blur and rim.
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn render_popup_surface_pixels_with_glass(
     buf: &mut [u8],
