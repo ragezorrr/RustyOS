@@ -1321,7 +1321,7 @@ pub(crate) fn run(options: &StartupOptions) -> Result<bool, WaylandAppError> {
     let window = xdg_shell.create_window(surface, WindowDecorations::RequestClient, &qh);
     window.set_title(&initial_title);
     window.set_app_id("org.rustyos.Files");
-    window.set_min_size(Some((720, 440)));
+    window.set_min_size(Some((crate::layout::MIN_WIDTH, crate::layout::MIN_HEIGHT)));
 
     let glass_manager: Option<RustyosLiquidGlassManagerV1> = globals.bind(&qh, 1..=1, ()).ok();
     let window_glass = glass_manager.as_ref().map(|mgr| {
@@ -1856,12 +1856,12 @@ impl WindowHandler for WaylandClientData {
             .new_size
             .0
             .map_or(DEFAULT_WIDTH, std::num::NonZeroU32::get)
-            .max(480);
+            .max(crate::layout::MIN_WIDTH);
         let new_h = configure
             .new_size
             .1
             .map_or(DEFAULT_HEIGHT, std::num::NonZeroU32::get)
-            .max(360);
+            .max(crate::layout::MIN_HEIGHT);
         if (self.width, self.height) != (new_w, new_h) {
             self.main_buffers.clear();
             self.layout_cache = None;

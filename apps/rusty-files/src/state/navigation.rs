@@ -160,6 +160,22 @@ impl FilesAppState {
         }
         if changed {
             self.ensure_stage_b_assets_requested();
+            if (self.pending_quick_look || self.pending_get_info)
+                && self
+                    .columns
+                    .get(self.active_column)
+                    .is_some_and(|c| !c.visible_entries.is_empty())
+            {
+                let ql = std::mem::take(&mut self.pending_quick_look);
+                let gi = std::mem::take(&mut self.pending_get_info);
+                self.select_first_file_or_entry();
+                if ql {
+                    self.toggle_quick_look_selected();
+                }
+                if gi {
+                    self.open_get_info_selected();
+                }
+            }
         }
         changed
     }
@@ -204,6 +220,22 @@ impl FilesAppState {
         }
         if changed {
             self.ensure_stage_b_assets_requested();
+            if (self.pending_quick_look || self.pending_get_info)
+                && self
+                    .columns
+                    .get(self.active_column)
+                    .is_some_and(|c| !c.visible_entries.is_empty())
+            {
+                let ql = std::mem::take(&mut self.pending_quick_look);
+                let gi = std::mem::take(&mut self.pending_get_info);
+                self.select_first_file_or_entry();
+                if ql {
+                    self.toggle_quick_look_selected();
+                }
+                if gi {
+                    self.open_get_info_selected();
+                }
+            }
         }
         changed
     }

@@ -147,8 +147,8 @@ pub use top_bar::{
     check_top_bar_menu_popover_click_with_app_menu, check_top_bar_menu_popover_hover_row_for_width,
     dynamic_app_menu_slots, prefers_light_foreground, relative_luminance,
     resolve_top_bar_menu_entries_for_width, resolve_top_bar_menu_entries_with_app_menu,
-    top_bar_menu_popover_rect_for_width, top_bar_menu_popover_rect_with_app_menu,
-    visible_top_bar_menu_slots,
+    top_bar_menu_anchor_span, top_bar_menu_popover_rect_for_width,
+    top_bar_menu_popover_rect_with_app_menu, visible_top_bar_menu_slots,
 };
 pub use top_bar::{
     MAX_TOP_BAR_TRAY_ITEMS, MAX_VISIBLE_NOTIFICATIONS, MENU_POPOVER_RADIUS, NotificationToastView,

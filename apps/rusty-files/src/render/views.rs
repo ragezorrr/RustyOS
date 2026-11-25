@@ -1285,10 +1285,19 @@ pub(crate) fn draw_framed_thumbnail(
     bounds: Rect,
     pal: &Palette,
 ) {
-    let w = i32::try_from(img.width).unwrap_or(1).max(1);
-    let h = i32::try_from(img.height).unwrap_or(1).max(1);
-    let dst_w = w.min(bounds.w - 4);
-    let dst_h = h.min(bounds.h - 4);
+    let iw = i32::try_from(img.width).unwrap_or(1).max(1);
+    let ih = i32::try_from(img.height).unwrap_or(1).max(1);
+    let max_w = (bounds.w - 4).max(16);
+    let max_h = (bounds.h - 4).max(16);
+    let (dst_w, dst_h) = if iw * max_h >= ih * max_w {
+        let tw = iw.min(max_w);
+        let th = ((ih * tw) / iw).max(1);
+        (tw, th)
+    } else {
+        let th = ih.min(max_h);
+        let tw = ((iw * th) / ih).max(1);
+        (tw, th)
+    };
     let dx = bounds.x + (bounds.w - dst_w) / 2;
     let dy = bounds.y + (bounds.h - dst_h) / 2;
     let frame = Rect::new(dx - 2, dy - 2, dst_w + 4, dst_h + 4);
@@ -1409,6 +1418,7 @@ pub(crate) fn wrap_two_lines(
         return (name.to_owned(), String::new());
     }
     let mut split_idx = 0_usize;
+    let mut last_break_idx: Option<usize> = None;
     let mut acc_w = 0_i32;
     for (byte_idx, ch) in name.char_indices() {
         let mut buf = [0_u8; 4];
@@ -1419,8 +1429,17 @@ pub(crate) fn wrap_two_lines(
         }
         acc_w += cw;
         split_idx = byte_idx + ch.len_utf8();
+        if matches!(ch, ' ' | '-' | '_' | '.') {
+            last_break_idx = Some(split_idx);
+        }
     }
-    let line1 = &name[..split_idx];
+    if let Some(brk) = last_break_idx
+        && brk >= split_idx / 2
+        && brk < name.len()
+    {
+        split_idx = brk;
+    }
+    let line1 = name[..split_idx].trim_end();
     let rest = name[split_idx..].trim_start();
     let line2 = if rest.is_empty() {
         String::new()

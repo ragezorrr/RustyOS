@@ -21,6 +21,8 @@ pub(crate) const CARD_CORNER_RADIUS: i32 = 12;
 pub(crate) const SIDEBAR_WIDTH: i32 = 230;
 pub(crate) const HEADER_HEIGHT: i32 = 40;
 pub(crate) const PAGE_MARGIN: i32 = 24;
+pub(crate) const MIN_WIDTH: u32 = 480;
+pub(crate) const MIN_HEIGHT: u32 = 220;
 const RESIZE_BORDER_PX: i32 = 5;
 
 /// Axis-aligned rectangle in surface-local logical coordinates.
@@ -288,8 +290,8 @@ pub(crate) struct SettingsLayout {
 
 #[must_use]
 pub(crate) fn compute_layout(app: &SettingsAppState, width: u32, height: u32) -> SettingsLayout {
-    let win_w = i32::try_from(width.max(640)).unwrap_or(882);
-    let win_h = i32::try_from(height.max(500)).unwrap_or(600);
+    let win_w = i32::try_from(width.max(MIN_WIDTH)).unwrap_or(882);
+    let win_h = i32::try_from(height.max(MIN_HEIGHT)).unwrap_or(600);
     let sidebar_rect = Rect::new(0, 0, SIDEBAR_WIDTH, win_h);
     let divider_x = SIDEBAR_WIDTH;
     let page_rect = Rect::new(divider_x + 1, 0, (win_w - divider_x - 1).max(100), win_h);
@@ -564,14 +566,18 @@ fn build_appearance_layout(
         (ThemeChoice::Dark, "Dark"),
         (ThemeChoice::Auto, "Auto"),
     ];
-    let tile_x0 = content_x + 16;
-    let tile_stride = 132.min(((content_w - 32 - 108) / 2).max(116));
+    let side_pad = if content_w >= 412 { 16 } else { 12 };
+    let tile_x0 = content_x + side_pad;
+    let inner_w = (content_w - side_pad * 2).max(120);
+    let tile_gap = if inner_w >= 380 { 24 } else { 8 };
+    let tile_w = ((inner_w - tile_gap * 2) / 3).clamp(48, 108);
+    let tile_stride = tile_w + tile_gap;
     let tiles = std::array::from_fn(|i| {
         #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
         let rx = tile_x0 + (i as i32) * tile_stride;
-        let ring_rect = Rect::new(rx, 90, 108, 76);
-        let artwork_rect = Rect::new(rx + 4, 94, 100, 68);
-        let label_rect = Rect::new(rx, 171, 108, 18);
+        let ring_rect = Rect::new(rx, 90, tile_w, 76);
+        let artwork_rect = Rect::new(rx + 4, 94, (tile_w - 8).max(32), 68);
+        let label_rect = Rect::new(rx, 171, tile_w, 18);
         AppearanceTileLayout {
             choice: tile_specs[i].0,
             label: tile_specs[i].1,
@@ -585,12 +591,19 @@ fn build_appearance_layout(
     let accent_label_rect = Rect::new(content_x + 16, 218, 180, 18);
     let accent_card_rect = Rect::new(content_x, 240, content_w, 64);
     let swatch_x0 = content_x + 14;
-    let swatch_stride = 52;
+    let (swatch_size, swatch_stride) = if inner_w >= 360 {
+        (38, 52)
+    } else {
+        let stride = ((content_w - 28) / 7).max(26);
+        let size = (stride - 8).clamp(20, 38);
+        (size, stride)
+    };
+    let swatch_y = 253 + (38 - swatch_size) / 2;
     let swatches = std::array::from_fn(|i| {
         #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
         let sx = swatch_x0 + (i as i32) * swatch_stride;
         (
-            Rect::new(sx, 253, 38, 38),
+            Rect::new(sx, swatch_y, swatch_size, swatch_size),
             crate::state::ACCENT_COLORS[i],
             app.accent_index == i,
         )

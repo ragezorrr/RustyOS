@@ -513,6 +513,32 @@ pub(crate) struct DialogOverlaysLayout {
     pub inline_rename_rect: Option<Rect>,
 }
 
+fn compute_get_info_layout(width: i32, height: i32) -> GetInfoLayout {
+    let mw = 304.min(width - 40);
+    let mh = 436.min(height - 36);
+    let mx = (width - mw - 28).max(20);
+    let my = ((height - mh) / 2).max(18);
+    let modal_rect = Rect::new(mx, my, mw, mh);
+    let tags_y = my + 98;
+    let mut tags = Vec::with_capacity(FileTagColor::ALL.len());
+    for (i, color) in FileTagColor::ALL.iter().enumerate() {
+        let tx = mx + 58 + i32::try_from(i).unwrap_or(0) * 30;
+        tags.push((*color, Rect::new(tx, tags_y, 22, 22)));
+    }
+    let preview_h = (mh - 316).clamp(0, 84);
+    GetInfoLayout {
+        close_rect: Rect::new(mx + 12, my + 10, 18, 18),
+        more_toggle_rect: Rect::new(mx + mw - 72, my + 242, 58, 18),
+        tags,
+        preview_rect: if preview_h >= 32 {
+            Rect::new(mx + 18, my + mh - preview_h - 14, mw - 36, preview_h)
+        } else {
+            Rect::new(0, 0, 0, 0)
+        },
+        modal_rect,
+    }
+}
+
 /// Computes active dialog overlay geometries within a `width x height` window.
 #[must_use]
 pub(crate) fn compute_dialog_overlays_layout(
@@ -543,24 +569,7 @@ pub(crate) fn compute_dialog_overlays_layout(
     }
 
     if state.get_info.is_some() {
-        let mw = 304.min(width - 40);
-        let mh = 436.min(height - 36);
-        let mx = (width - mw - 28).max(20);
-        let my = ((height - mh) / 2).max(18);
-        let modal_rect = Rect::new(mx, my, mw, mh);
-        let tags_y = my + 98;
-        let mut tags = Vec::with_capacity(FileTagColor::ALL.len());
-        for (i, color) in FileTagColor::ALL.iter().enumerate() {
-            let tx = mx + 58 + i32::try_from(i).unwrap_or(0) * 30;
-            tags.push((*color, Rect::new(tx, tags_y, 22, 22)));
-        }
-        out.get_info = Some(GetInfoLayout {
-            close_rect: Rect::new(mx + 12, my + 10, 18, 18),
-            more_toggle_rect: Rect::new(mx + mw - 72, my + 242, 58, 18),
-            tags,
-            preview_rect: Rect::new(mx + 18, my + mh - 98, mw - 36, 84),
-            modal_rect,
-        });
+        out.get_info = Some(compute_get_info_layout(width, height));
     }
 
     if let Some(gt) = &state.go_to_folder {

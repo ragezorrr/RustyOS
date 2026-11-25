@@ -130,6 +130,7 @@ package() {
   install -m755 "${target_dir}/rusty-view" "${pkgdir}/usr/bin/rusty-view"
   install -m755 "${target_dir}/rusty-greeter" "${pkgdir}/usr/bin/rusty-greeter"
   install -m755 "${target_dir}/rusty-installer" "${pkgdir}/usr/bin/rusty-installer"
+  install -m755 "${target_dir}/rusty-polkit" "${pkgdir}/usr/bin/rusty-polkit"
   install -m755 "${target_dir}/rustyos-update-helper" \
     "${pkgdir}/usr/lib/rustyos/rustyos-update-helper"
   install -m755 "${target_dir}/rustyos-installer-service" \

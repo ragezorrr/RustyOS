@@ -244,30 +244,18 @@ pub(crate) fn compute_layout(app: &InstallerAppState, width: u32, height: u32) -
     let is_install = app.mode == WizardMode::Install;
     let tl = rusty_ui::TrafficLightButtons::default_csd();
     let btn_d = i32::try_from(tl.close_rect.width).unwrap_or(14);
-    let (traffic_close, traffic_min, traffic_max) = if is_install {
-        (
-            Rect::new(0, 0, 0, 0),
-            Rect::new(0, 0, 0, 0),
-            Rect::new(0, 0, 0, 0),
-        )
-    } else {
-        (
-            Rect::new(tl.close_rect.x, tl.close_rect.y, btn_d, btn_d),
-            Rect::new(tl.minimize_rect.x, tl.minimize_rect.y, btn_d, btn_d),
-            Rect::new(tl.maximize_rect.x, tl.maximize_rect.y, btn_d, btn_d),
-        )
-    };
-    let header_rect = Rect::new(0, 0, win_w, if is_install { 32 } else { HEADER_HEIGHT });
-    let content_rect = if is_install {
-        Rect::new(32, 32, win_w - 64, win_h - 32 - 36 - 44)
-    } else {
-        Rect::new(
-            36,
-            HEADER_HEIGHT + 6,
-            win_w - 72,
-            win_h - HEADER_HEIGHT - FOOTER_HEIGHT - 12,
-        )
-    };
+    let (traffic_close, traffic_min, traffic_max) = (
+        Rect::new(tl.close_rect.x, tl.close_rect.y, btn_d, btn_d),
+        Rect::new(tl.minimize_rect.x, tl.minimize_rect.y, btn_d, btn_d),
+        Rect::new(tl.maximize_rect.x, tl.maximize_rect.y, btn_d, btn_d),
+    );
+    let header_rect = Rect::new(0, 0, win_w, HEADER_HEIGHT);
+    let content_rect = Rect::new(
+        36,
+        HEADER_HEIGHT + 6,
+        win_w - 72,
+        win_h - HEADER_HEIGHT - FOOTER_HEIGHT - 12,
+    );
     let footer_rect = Rect::new(0, win_h - FOOTER_HEIGHT, win_w, FOOTER_HEIGHT);
 
     let (step_count, active_step_idx, show_back, back_label, primary_label) = footer_meta(app);
@@ -1044,7 +1032,7 @@ mod tests {
             hit_test(&l0, f64::from(p.x + 10), f64::from(p.y + 10)),
             Some(InstallerHit::PrimaryButton)
         );
-        assert_eq!(hit_test(&l0, 22.0, 22.0), Some(InstallerHit::WindowDrag));
+        assert_eq!(hit_test(&l0, 22.0, 22.0), Some(InstallerHit::TrafficClose));
 
         app.install_step = InstallStep::Partition;
         app.disk_mode = DiskInstallMode::DualBoot;

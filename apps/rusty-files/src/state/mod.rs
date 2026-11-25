@@ -102,6 +102,8 @@ pub(crate) struct FilesAppState {
     pub(crate) pending_uri_clipboard: Option<ClipboardItemSet>,
     pub(crate) pending_external_uri_paste_dir: Option<PathBuf>,
     pub(crate) has_external_uri_clipboard: bool,
+    pub(crate) pending_quick_look: bool,
+    pub(crate) pending_get_info: bool,
     pub quick_look: Option<QuickLookState>,
     pub get_info: Option<GetInfoState>,
     pub go_to_folder: Option<GoToFolderState>,
@@ -233,6 +235,8 @@ impl FilesAppState {
             pending_uri_clipboard: None,
             pending_external_uri_paste_dir: None,
             has_external_uri_clipboard: false,
+            pending_quick_look: false,
+            pending_get_info: false,
             quick_look: None,
             get_info: None,
             go_to_folder: None,
@@ -315,6 +319,24 @@ impl FilesAppState {
         f
     }
 
+    pub(crate) fn select_first_file_or_entry(&mut self) {
+        if self.selected_entry().is_some() {
+            return;
+        }
+        let Some(col) = self.columns.get(self.active_column) else {
+            return;
+        };
+        if col.visible_entries.is_empty() {
+            return;
+        }
+        let pick = col
+            .visible_entries
+            .iter()
+            .position(|e| !e.is_navigable_dir())
+            .unwrap_or(0);
+        self.select_entry(self.active_column, pick, false);
+    }
+
     fn apply_startup_options(&mut self, opts: &StartupOptions) {
         if opts.open_trash {
             self.navigate_sidebar(SidebarLocation::Trash, false);
@@ -325,7 +347,31 @@ impl FilesAppState {
         } else {
             self.navigate_sidebar(SidebarLocation::Home, false);
         }
+        if let Some(view) = opts.initial_view {
+            self.set_view_mode(view);
+        }
+        if let Some(query) = &opts.initial_search {
+            self.set_search_query(query.clone());
+        }
         self.tabs.push(self.snapshot_active_tab());
+        if opts.open_quick_look || opts.open_get_info {
+            let has_entries = self
+                .columns
+                .get(self.active_column)
+                .is_some_and(|c| !c.visible_entries.is_empty());
+            if has_entries {
+                self.select_first_file_or_entry();
+                if opts.open_quick_look {
+                    self.toggle_quick_look_selected();
+                }
+                if opts.open_get_info {
+                    self.open_get_info_selected();
+                }
+            } else {
+                self.pending_quick_look = opts.open_quick_look;
+                self.pending_get_info = opts.open_get_info;
+            }
+        }
         if opts.open_test_popup {
             self.popup = Some(OpenPopupMenu::ActionsMenu);
             self.dirty = true;

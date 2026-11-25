@@ -419,10 +419,6 @@ fn render_header(
     hover: Option<InstallerHit>,
     pal: &Palette,
 ) {
-    if app.mode == crate::state::WizardMode::Install {
-        return;
-    }
-
     let tl_hovered = matches!(
         hover,
         Some(

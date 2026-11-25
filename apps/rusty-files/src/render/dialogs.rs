@@ -476,24 +476,26 @@ pub(crate) fn render_get_info_more_and_preview(
         );
     }
 
-    c.fill_rounded_rect(gi.preview_rect, 8, pal.row_alt);
-    c.stroke_rounded_rect(gi.preview_rect, 8, pal.divider);
-    if let Some(entry) = state.selected_entry()
-        && entry.path == gs.target_path
-    {
-        if let Some(CachedPreview::Image(img)) = state.cached_preview_for(entry, 96, 96) {
-            draw_framed_thumbnail(c, img, gi.preview_rect, pal);
-        } else {
-            #[allow(clippy::cast_precision_loss)]
-            draw_large_entry_artwork(
-                c,
-                gi.preview_rect.x as f32 + gi.preview_rect.w as f32 * 0.5,
-                gi.preview_rect.y as f32 + gi.preview_rect.h as f32 * 0.52,
-                54.0,
-                entry,
-                assigned.first().copied(),
-                pal,
-            );
+    if gi.preview_rect.h >= 32 {
+        c.fill_rounded_rect(gi.preview_rect, 8, pal.row_alt);
+        c.stroke_rounded_rect(gi.preview_rect, 8, pal.divider);
+        if let Some(entry) = state.selected_entry()
+            && entry.path == gs.target_path
+        {
+            if let Some(CachedPreview::Image(img)) = state.cached_preview_for(entry, 96, 96) {
+                draw_framed_thumbnail(c, img, gi.preview_rect, pal);
+            } else {
+                #[allow(clippy::cast_precision_loss)]
+                draw_large_entry_artwork(
+                    c,
+                    gi.preview_rect.x as f32 + gi.preview_rect.w as f32 * 0.5,
+                    gi.preview_rect.y as f32 + gi.preview_rect.h as f32 * 0.52,
+                    54.0,
+                    entry,
+                    assigned.first().copied(),
+                    pal,
+                );
+            }
         }
     }
 }

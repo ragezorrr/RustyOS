@@ -20,8 +20,8 @@ use super::top_bar_menus::ResolvedTopBarMenuItem;
 use super::{
     COLOR_ACCENT, COLOR_BORDER, COLOR_DANGER, CompositorRenderElement, DockAppTile, DockSection,
     DockViewState, MENU_POPOVER_RADIUS, OverviewRenderState, ShellOverlayView, TOP_BAR_HEIGHT,
-    TOP_BAR_ITEM_H, TOP_BAR_ITEM_Y, TOP_BAR_LOGO_W, TOP_BAR_LOGO_X, TopBarMenuHit, TopBarTelemetry,
-    WS_BTN_STRIDE, WS_BTN_WIDTH, compute_dock_layout, compute_dock_radius,
+    TOP_BAR_ITEM_H, TOP_BAR_ITEM_Y, TOP_BAR_LOGO_X, TopBarMenuHit, TopBarTelemetry, WS_BTN_STRIDE,
+    WS_BTN_WIDTH, compute_dock_layout, compute_dock_radius,
     compute_top_bar_left_layout_for_profile, compute_top_bar_right_layout_with_options,
     dock_tooltip_hidden_by_overlay, make_solid_element, overview_card_close_rect,
     overview_card_rects, overview_space_rects, tray_slot_rects_with_options,
@@ -253,40 +253,31 @@ fn build_chrome_shapes_with_dock(
         .active_menu
         .filter(|m| *m != TopBarMenuHit::Go || left_layout.has_go)
     {
-        let (visible_menus, _) = super::visible_top_bar_menu_slots(
+        if let Some((ax, aw)) = super::top_bar_menu_anchor_span(
             app_profile,
             active_app_name,
+            open_menu,
             top_telemetry.app_menu_tree,
             max_left_menu_x,
-        );
-        let (anchor_x, anchor_w) = match open_menu {
-            TopBarMenuHit::SystemLogo => (TOP_BAR_LOGO_X - 2, TOP_BAR_LOGO_W + 4),
-            TopBarMenuHit::ActiveApp => (left_layout.app_x - 2, left_layout.app_w + 4),
-            other => visible_menus
-                .iter()
-                .find(|(hit, _, _, _)| *hit == other)
-                .map_or(
-                    (left_layout.file_x - 2, left_layout.file_w + 4),
-                    |(_, _, x, w)| (x - 2, w + 4),
+        ) {
+            let plate_bg = if pal.is_dark {
+                [255, 255, 255, 51]
+            } else {
+                [0, 0, 0, 26]
+            };
+            push_rounded_glass_box(
+                &mut out,
+                shape_cache,
+                renderer,
+                Rectangle::new(
+                    Point::from((ax - 2, TOP_BAR_ITEM_Y)),
+                    Size::from((aw + 4, TOP_BAR_ITEM_H)),
                 ),
-        };
-        let plate_bg = if pal.is_dark {
-            [255, 255, 255, 51]
-        } else {
-            [0, 0, 0, 26]
-        };
-        push_rounded_glass_box(
-            &mut out,
-            shape_cache,
-            renderer,
-            Rectangle::new(
-                Point::from((anchor_x, TOP_BAR_ITEM_Y)),
-                Size::from((anchor_w, TOP_BAR_ITEM_H)),
-            ),
-            8,
-            plate_bg,
-            None,
-        );
+                8,
+                plate_bg,
+                None,
+            );
+        }
         let (mx, my, mw, mh) = super::top_bar_menu_popover_rect_for_width(
             app_profile,
             active_app_name,

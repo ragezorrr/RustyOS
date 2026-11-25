@@ -260,6 +260,27 @@ pub fn run_nested_winit(config: &CompositorConfig) -> Result<BootstrapReport, Co
                             app_state.toggle_top_bar_quick_popover(
                                 crate::shell_render::TopBarQuickPopoverKind::Battery,
                             );
+                        } else if menu_test == "control_center" {
+                            app_state.toggle_quick_settings();
+                            app_state.quick_settings_anim.snap_to_target();
+                        } else if menu_test == "wifi_popover" {
+                            app_state.open_wifi_popover();
+                        } else if menu_test == "notification_center" {
+                            app_state.open_notification_center();
+                        } else if menu_test == "dock_hover" {
+                            app_state.set_dock_hover_slot(Some(2));
+                            app_state.dock_hover_anim.snap_to_target();
+                        } else if menu_test == "dock_context_menu" {
+                            app_state.open_dock_context_menu(
+                                crate::shell_render::DockHit::PinnedApp(0),
+                                backend.window_size(),
+                                smithay::utils::Point::from((420.0, 740.0)),
+                                false,
+                            );
+                        } else if menu_test == "desktop_context_menu" {
+                            app_state.open_desktop_context_menu(smithay::utils::Point::from((
+                                360.0, 220.0,
+                            )));
                         }
                         app_state.pending_screenshot =
                             Some(crate::screenshot::ScreenshotRequest::FullScreen);

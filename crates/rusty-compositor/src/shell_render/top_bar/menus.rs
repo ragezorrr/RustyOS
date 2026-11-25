@@ -1101,6 +1101,31 @@ pub fn resolve_top_bar_menu_entries_for_width(
     entries
 }
 
+/// Resolves the horizontal `(x, width)` anchor in the `TopBar` for `menu`,
+/// returning `None` when `menu` is absent from the active menu bar (`RUSTYOS-145`).
+#[must_use]
+pub fn top_bar_menu_anchor_span(
+    profile: TopBarAppProfile,
+    active_app_name: &str,
+    menu: TopBarMenuHit,
+    app_menu: Option<&crate::app_menu::AppMenuTree>,
+    max_x: i32,
+) -> Option<(i32, i32)> {
+    let left = compute_top_bar_left_layout_for_profile(profile, active_app_name, false);
+    match menu {
+        TopBarMenuHit::SystemLogo => Some((TOP_BAR_LOGO_X, TOP_BAR_LOGO_W)),
+        TopBarMenuHit::ActiveApp => Some((left.app_x, left.app_w)),
+        other => {
+            let (visible, _) =
+                visible_top_bar_menu_slots(profile, active_app_name, app_menu, max_x);
+            visible
+                .iter()
+                .find(|(hit, _, _, _)| *hit == other)
+                .map(|(_, _, x, w)| (*x, *w))
+        }
+    }
+}
+
 /// Width-aware dropdown popover bounds supporting [`TopBarMenuHit::Overflow`].
 #[must_use]
 pub fn top_bar_menu_popover_rect_for_width(
@@ -1110,15 +1135,21 @@ pub fn top_bar_menu_popover_rect_for_width(
     app_menu: Option<&crate::app_menu::AppMenuTree>,
     max_x: i32,
 ) -> (i32, i32, i32, i32) {
-    if !matches!(menu, TopBarMenuHit::Dynamic(_) | TopBarMenuHit::Overflow) {
+    if !matches!(menu, TopBarMenuHit::Dynamic(_) | TopBarMenuHit::Overflow) && app_menu.is_none() {
         return top_bar_menu_popover_rect_for_profile(profile, active_app_name, menu);
     }
     let left = compute_top_bar_left_layout_for_profile(profile, active_app_name, false);
-    let (visible, _) = visible_top_bar_menu_slots(profile, active_app_name, app_menu, max_x);
-    let anchor_x = visible
-        .iter()
-        .find(|(h, _, _, _)| *h == menu)
-        .map_or(left.file_x, |(_, _, x, _)| *x);
+    let anchor_x = top_bar_menu_anchor_span(profile, active_app_name, menu, app_menu, max_x)
+        .map_or_else(
+            || {
+                if matches!(menu, TopBarMenuHit::Dynamic(_) | TopBarMenuHit::Overflow) {
+                    left.file_x
+                } else {
+                    left.app_x
+                }
+            },
+            |(x, _)| x,
+        );
     let entries =
         resolve_top_bar_menu_entries_for_width(profile, active_app_name, menu, app_menu, max_x);
     let mut content_h = 0;
@@ -1406,5 +1437,38 @@ mod dynamic_app_menu_tests {
             click,
             TopBarMenuPopoverClick::Action(TopBarMenuAction::DbusMenuItem(42))
         );
+    }
+
+    #[test]
+    fn missing_window_menu_on_app_menu_does_not_highlight_file_or_offset_popover() {
+        let tree = AppMenuTree {
+            service_name: ":1.99".to_owned(),
+            object_path: "/MenuBar/1".to_owned(),
+            sections: vec![AppMenuSection {
+                id: 1,
+                title: "File".to_owned(),
+                items: vec![],
+            }],
+        };
+        assert_eq!(
+            top_bar_menu_anchor_span(
+                TopBarAppProfile::Files,
+                "Image Viewer",
+                TopBarMenuHit::Window,
+                Some(&tree),
+                1000,
+            ),
+            None
+        );
+        let left =
+            compute_top_bar_left_layout_for_profile(TopBarAppProfile::Files, "Image Viewer", false);
+        let (px, _, _, _) = top_bar_menu_popover_rect_for_width(
+            TopBarAppProfile::Files,
+            "Image Viewer",
+            TopBarMenuHit::Window,
+            Some(&tree),
+            1000,
+        );
+        assert_eq!(px, left.app_x);
     }
 }

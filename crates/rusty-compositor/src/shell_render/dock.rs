@@ -806,7 +806,7 @@ fn compute_proximity_scales_and_spans(
             proximity_scale
         };
         let scaled_draw = base_draw_f * scale;
-        let extra = ((scaled_draw - base_draw_f) * 0.92).max(0.0);
+        let extra = ((scaled_draw - base_draw_f) * 1.08).max(0.0);
         scales.push(scale);
         raw_extras.push(extra);
     }
@@ -1287,7 +1287,8 @@ pub(super) fn dock_tooltip_rect_and_label(
         DockPosition::Bottom => {
             let cx = anchor_rect.loc.x + anchor_rect.size.w / 2;
             let pill_x = (cx - pill_w / 2).clamp(12, (width - pill_w - 12).max(12));
-            let pill_y = (layout.capsule_rect.loc.y - pill_h - 14).max(min_top);
+            let anchor_top = layout.capsule_rect.loc.y.min(anchor_rect.loc.y);
+            let pill_y = (anchor_top - pill_h - 10).max(min_top);
             Rectangle::new(Point::from((pill_x, pill_y)), Size::from((pill_w, pill_h)))
         }
         DockPosition::Left => {

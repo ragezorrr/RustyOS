@@ -809,12 +809,17 @@ pub(super) fn render_notification_center_text(
         );
     }
 
+    let heading_color = if pal.is_dark {
+        [255, 255, 255, 244]
+    } else {
+        [24, 26, 32, 240]
+    };
     push_bold_label(
         text_cache,
         renderer,
         "Notification Center",
         15.0,
-        [255, 255, 255, 244],
+        heading_color,
         (layout.header_rect.loc.x, layout.header_rect.loc.y + 2),
         elements,
     );

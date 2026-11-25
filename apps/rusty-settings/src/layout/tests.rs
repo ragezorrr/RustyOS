@@ -239,3 +239,18 @@ fn new_settings_pages_build_sections_and_hit_targets() {
         assert_ne!(l.sections.len(), 0);
     }
 }
+
+#[test]
+fn compact_tiled_layout_respects_min_size_without_overflow() {
+    let app = SettingsAppState::new(&StartupOptions::default());
+    let l = compute_layout(&app, 480, 220);
+    assert_eq!(l.sidebar_rect.h, 220);
+    assert!(l.page_viewport.w >= 200);
+    assert!(l.page_viewport.h >= 120);
+    if let Some(cards) = &l.appearance {
+        let last_tile = &cards.tiles[2];
+        assert!(last_tile.ring_rect.right() <= cards.mode_card_rect.right());
+        let last_swatch = cards.swatches[6].0;
+        assert!(last_swatch.right() <= cards.accent_card_rect.right());
+    }
+}

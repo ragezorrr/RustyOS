@@ -367,18 +367,22 @@ struct ListAreaLayout {
 }
 
 /// Computes pixel-accurate layout for `state` at `(surface_w, surface_h)`.
+pub(crate) const MIN_WIDTH: u32 = 440;
+pub(crate) const MIN_HEIGHT: u32 = 220;
+const SIDEBAR_TOP_Y: i32 = 46;
+
 #[must_use]
 #[allow(clippy::too_many_lines)]
 pub(crate) fn compute_layout(state: &FilesAppState, surface_w: u32, surface_h: u32) -> FilesLayout {
-    let width = i32::try_from(surface_w).unwrap_or(1060).max(480);
-    let height = i32::try_from(surface_h).unwrap_or(660).max(360);
+    let width = i32::try_from(surface_w.max(MIN_WIDTH)).unwrap_or(1060);
+    let height = i32::try_from(surface_h.max(MIN_HEIGHT)).unwrap_or(660);
 
     let sidebar_rect = Rect::new(0, 0, SIDEBAR_WIDTH, height);
     let sidebar_clip_rect = Rect::new(
         0,
-        50,
+        SIDEBAR_TOP_Y,
         SIDEBAR_WIDTH - 1,
-        (sidebar_rect.bottom() - 6 - 50).max(40),
+        (sidebar_rect.bottom() - 6 - SIDEBAR_TOP_Y).max(40),
     );
     let tl = rusty_ui::TrafficLightButtons::default_csd();
     let btn_d = i32::try_from(tl.close_rect.width).unwrap_or(14);
@@ -663,7 +667,7 @@ fn layout_sidebar_rows(
 ) -> (Vec<SidebarRowLayout>, Vec<SidebarSectionHeaderLayout>) {
     let mut rows = Vec::with_capacity(state.sidebar_items.len());
     let mut sections = Vec::with_capacity(4);
-    let mut y = 50 - state.sidebar_scroll_y;
+    let mut y = SIDEBAR_TOP_Y - state.sidebar_scroll_y;
     let mut current_section: Option<&'static str> = None;
     for (index, item) in state.sidebar_items.iter().enumerate() {
         if let Some(sec_title) = item.section {

@@ -30,6 +30,29 @@ where
             "--light" => opts.theme_override = Some(FilesThemeMode::Light),
             "--dark" => opts.theme_override = Some(FilesThemeMode::Dark),
             "--open-popup" => opts.open_test_popup = true,
+            "--quick-look" => opts.open_quick_look = true,
+            "--get-info" => opts.open_get_info = true,
+            "--view" => {
+                let Some(mode) = iter.next() else {
+                    return Err(String::from(
+                        "--view requires icons, list, columns, or gallery",
+                    ));
+                };
+                let parsed = match mode.to_ascii_lowercase().as_str() {
+                    "icons" | "icon" => rusty_services::file_manager::FileViewMode::Icons,
+                    "list" => rusty_services::file_manager::FileViewMode::List,
+                    "columns" | "column" => rusty_services::file_manager::FileViewMode::Columns,
+                    "gallery" => rusty_services::file_manager::FileViewMode::Gallery,
+                    other => return Err(format!("unknown --view mode '{other}'")),
+                };
+                opts.initial_view = Some(parsed);
+            }
+            "--search" => {
+                let Some(q) = iter.next() else {
+                    return Err(String::from("--search requires a query argument"));
+                };
+                opts.initial_search = Some(q);
+            }
             "--no-gpu" => opts.no_gpu = true,
             "--pick-file" => opts.picker_mode = Some(FilePickerMode::OpenFile),
             "--pick-files" => opts.picker_mode = Some(FilePickerMode::OpenFiles),
@@ -138,14 +161,9 @@ mod tests {
         assert_eq!(
             parse_args(["--trash".to_owned(), "--dark".to_owned()]),
             Ok(Some(StartupOptions {
-                initial_path: None,
                 open_trash: true,
-                open_recents: false,
                 theme_override: Some(FilesThemeMode::Dark),
-                open_test_popup: false,
-                no_gpu: false,
-                picker_mode: None,
-                picker_title: None,
+                ..StartupOptions::default()
             }))
         );
         assert_eq!(
@@ -156,26 +174,31 @@ mod tests {
             ]),
             Ok(Some(StartupOptions {
                 initial_path: Some(PathBuf::from("/tmp/demo")),
-                open_trash: false,
-                open_recents: false,
                 theme_override: Some(FilesThemeMode::Light),
-                open_test_popup: false,
-                no_gpu: false,
-                picker_mode: None,
-                picker_title: None,
+                ..StartupOptions::default()
             }))
         );
         assert_eq!(
             parse_args(["--open-popup".to_owned(), "--no-gpu".to_owned()]),
             Ok(Some(StartupOptions {
-                initial_path: None,
-                open_trash: false,
-                open_recents: false,
-                theme_override: None,
                 open_test_popup: true,
                 no_gpu: true,
-                picker_mode: None,
-                picker_title: None,
+                ..StartupOptions::default()
+            }))
+        );
+        assert_eq!(
+            parse_args([
+                "--view".to_owned(),
+                "list".to_owned(),
+                "--quick-look".to_owned(),
+                "--search".to_owned(),
+                "Cargo".to_owned(),
+            ]),
+            Ok(Some(StartupOptions {
+                initial_view: Some(rusty_services::file_manager::FileViewMode::List),
+                open_quick_look: true,
+                initial_search: Some(String::from("Cargo")),
+                ..StartupOptions::default()
             }))
         );
         assert_eq!(

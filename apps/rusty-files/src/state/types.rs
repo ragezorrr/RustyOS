@@ -17,9 +17,9 @@ pub(crate) const MILLER_COLUMN_WIDTH: i32 = 216;
 /// Row height for Miller column rows.
 pub(crate) const ROW_HEIGHT: i32 = 26;
 /// Row height for RustyOS sidebar rows.
-pub(crate) const SIDEBAR_ROW_HEIGHT: i32 = 22;
+pub(crate) const SIDEBAR_ROW_HEIGHT: i32 = 20;
 /// Section header + top inter-section gap height in the RustyOS sidebar.
-pub(crate) const SIDEBAR_SECTION_HEIGHT: i32 = 24;
+pub(crate) const SIDEBAR_SECTION_HEIGHT: i32 = 22;
 /// List view row height.
 pub(crate) const LIST_ROW_HEIGHT: i32 = 28;
 /// Icon grid cell width.
@@ -595,6 +595,10 @@ pub(crate) struct StartupOptions {
     pub open_recents: bool,
     pub theme_override: Option<FilesThemeMode>,
     pub open_test_popup: bool,
+    pub open_quick_look: bool,
+    pub open_get_info: bool,
+    pub initial_view: Option<rusty_services::file_manager::FileViewMode>,
+    pub initial_search: Option<String>,
     pub no_gpu: bool,
     pub picker_mode: Option<FilePickerMode>,
     pub picker_title: Option<String>,

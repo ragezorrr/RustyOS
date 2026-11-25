@@ -727,7 +727,7 @@ pub(crate) fn run(opts: &StartupOptions) -> Result<(), WaylandAppError> {
     let window = xdg_shell.create_window(surface, WindowDecorations::RequestClient, &qh);
     window.set_title("Settings");
     window.set_app_id("org.rustyos.Settings");
-    window.set_min_size(Some((640, 500)));
+    window.set_min_size(Some((crate::layout::MIN_WIDTH, crate::layout::MIN_HEIGHT)));
 
     let (glass_mgr, window_glass) = bind_settings_glass(&globals, &qh, &window);
 
@@ -1292,12 +1292,12 @@ impl WindowHandler for SettingsClient {
             .new_size
             .0
             .map_or(DEFAULT_WIDTH, std::num::NonZeroU32::get)
-            .max(640);
+            .max(crate::layout::MIN_WIDTH);
         let next_h = configure
             .new_size
             .1
             .map_or(DEFAULT_HEIGHT, std::num::NonZeroU32::get)
-            .max(500);
+            .max(crate::layout::MIN_HEIGHT);
         let next_focused = configure.state.contains(WindowState::ACTIVATED);
         let focus_changed = self.app.focused != next_focused;
         let max_changed = self.app.maximized != configure.is_maximized();

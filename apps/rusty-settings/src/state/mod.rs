@@ -831,7 +831,7 @@ impl SettingsAppState {
             toggle_anims: Vec::new(),
             reduce_transparency: false,
             reduced_motion: false,
-            glass_opacity: 1.0,
+            glass_opacity: 0.78,
             custom_wallpaper: None,
             dock_icon_size: 54,
             dock_magnification_enabled: true,
