@@ -2,6 +2,7 @@
 
 mod actions;
 mod config_io;
+pub(crate) mod default_apps;
 mod modals;
 #[cfg(test)]
 mod tests;
@@ -61,6 +62,7 @@ pub(crate) enum SettingsPage {
     MenuBar,
     Notifications,
     DateTime,
+    DefaultApps,
     Language,
     SoftwareUpdate,
     Display,
@@ -75,13 +77,14 @@ pub(crate) enum SettingsPage {
 }
 
 impl SettingsPage {
-    pub(crate) const SIDEBAR: [Self; 20] = [
+    pub(crate) const SIDEBAR: [Self; 21] = [
         Self::Wifi,
         Self::Bluetooth,
         Self::Network,
         Self::About,
         Self::Battery,
         Self::Users,
+        Self::DefaultApps,
         Self::DateTime,
         Self::Language,
         Self::SoftwareUpdate,
@@ -113,6 +116,7 @@ impl SettingsPage {
             "menubar" | "menu-bar" | "topbar" | "top-bar" => Self::MenuBar,
             "notifications" => Self::Notifications,
             "datetime" | "date" | "time" | "clock" => Self::DateTime,
+            "default-apps" | "defaultapps" | "defaults" => Self::DefaultApps,
             "language" | "region" | "locale" => Self::Language,
             "display" | "displays" => Self::Display,
             "sound" | "audio" => Self::Sound,
@@ -142,6 +146,7 @@ impl SettingsPage {
             Self::MenuBar => "Menu Bar",
             Self::Notifications => "Notifications",
             Self::DateTime => "Date & Time",
+            Self::DefaultApps => "Default Apps",
             Self::Language => "Language & Region",
             Self::SoftwareUpdate => "Software Update",
             Self::Display => "Display",
@@ -163,6 +168,7 @@ impl SettingsPage {
             Self::About
             | Self::Battery
             | Self::Users
+            | Self::DefaultApps
             | Self::DateTime
             | Self::Language
             | Self::SoftwareUpdate => Some("System"),
@@ -197,7 +203,7 @@ impl SettingsPage {
             Self::Battery | Self::IconTheme => [0x34, 0xC7, 0x59, 0xFF],
             Self::Appearance => [0x03, 0xB4, 0xCB, 0xFF],
             Self::Wallpaper => [0x34, 0xB4, 0xA7, 0xFF],
-            Self::DockDesktop => [0x58, 0x56, 0xD6, 0xFF],
+            Self::DockDesktop | Self::DefaultApps => [0x58, 0x56, 0xD6, 0xFF],
             Self::Notifications => [0xFF, 0x3B, 0x30, 0xFF],
             Self::SoftwareUpdate | Self::Display | Self::MenuBar => [0x00, 0x87, 0xED, 0xFF],
             Self::DateTime => [0x41, 0x8C, 0xFF, 0xFF],
@@ -228,6 +234,9 @@ impl SettingsPage {
             Self::MenuBar => "menubar topbar wifi battery volume bluetooth clock contrast tray",
             Self::Notifications => "alerts banners do not disturb previews",
             Self::DateTime => "date time clock timezone 24-hour ntp sync",
+            Self::DefaultApps => {
+                "default applications browser files terminal editor image media mime"
+            }
             Self::Language => "language region locale english russian ukrainian formats",
             Self::SoftwareUpdate => "updates packages upgrade software check version pacman",
             Self::Display => "monitor screen scale hidpi refresh rate vrr rotation",
@@ -291,6 +300,8 @@ pub(crate) enum RowControlId {
     RepeatDelayUp,
     LockPasswordToggle,
     LockSleepToggle,
+    DefaultAppCycle(default_apps::DefaultAppKind),
+    NetworkProxyModeCycle,
     PolkitToggle,
     VolumeDown,
     VolumeUp,
@@ -734,6 +745,8 @@ pub(crate) struct SettingsAppState {
     pub(crate) power_display_sleep_minutes: u32,
     pub(crate) power_auto_lock_minutes: u32,
     pub(crate) power_dim_on_battery: bool,
+    pub(crate) network_proxy_mode: String,
+    pub(crate) default_apps: default_apps::DefaultAppsState,
     pub(crate) shortcuts: [String; SHORTCUT_DEFS.len()],
 
     // Interactive rusty-ui stateful widgets & modals (`RUSTYOS-131`)
@@ -882,6 +895,8 @@ impl SettingsAppState {
             power_display_sleep_minutes: 10,
             power_auto_lock_minutes: 0,
             power_dim_on_battery: true,
+            network_proxy_mode: String::from("none"),
+            default_apps: default_apps::DefaultAppsState::load(),
             shortcuts,
             battery_tab: default_battery_tab(),
             battery_tab_animating: false,

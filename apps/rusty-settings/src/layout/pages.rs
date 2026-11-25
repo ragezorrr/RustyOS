@@ -14,6 +14,7 @@ pub(super) fn build_standard_page_sections(
     let mut cur_y = 56;
     match page {
         SettingsPage::Wallpaper
+        | SettingsPage::DefaultApps
         | SettingsPage::MenuBar
         | SettingsPage::Notifications
         | SettingsPage::DateTime
@@ -229,6 +230,34 @@ fn build_system_page_sections(
                     ],
                 ),
             ]
+        }
+        SettingsPage::DefaultApps => {
+            use crate::state::default_apps::DefaultAppKind;
+            let kinds = [
+                DefaultAppKind::Browser,
+                DefaultAppKind::FileManager,
+                DefaultAppKind::Terminal,
+                DefaultAppKind::TextEditor,
+                DefaultAppKind::ImageViewer,
+                DefaultAppKind::MediaPlayer,
+            ];
+            let rows = kinds
+                .into_iter()
+                .map(|kind| {
+                    row_choice(
+                        kind.label(),
+                        RowControlId::DefaultAppCycle(kind),
+                        app.default_apps.display_name(kind),
+                    )
+                })
+                .collect();
+            vec![place_card_section(
+                Some("Default Applications"),
+                content_x,
+                cur_y,
+                content_w,
+                rows,
+            )]
         }
         SettingsPage::Language => {
             vec![place_card_section(
@@ -468,6 +497,39 @@ fn build_battery_page_sections(
     }
     sections.push(place_card_section(
         None, content_x, cur_y, content_w, top_rows,
+    ));
+    let screen_off_label = if app.power_display_sleep_minutes == 0 {
+        String::from("Never")
+    } else {
+        format!("{} min", app.power_display_sleep_minutes)
+    };
+    let auto_lock_label = if app.power_auto_lock_minutes == 0 {
+        String::from("Never")
+    } else {
+        format!("{} min", app.power_auto_lock_minutes)
+    };
+    sections.push(place_card_section(
+        Some("Power & Sleep"),
+        content_x,
+        cur_y,
+        content_w,
+        vec![
+            row_choice(
+                "Turn Off Display After",
+                RowControlId::PowerDisplaySleepCycle,
+                screen_off_label,
+            ),
+            row_choice(
+                "Auto-Lock Screen After",
+                RowControlId::PowerAutoLockCycle,
+                auto_lock_label,
+            ),
+            row_switch(
+                "Dim Display on Battery",
+                RowControlId::PowerDimOnBatteryToggle,
+                app.power_dim_on_battery,
+            ),
+        ],
     ));
     sections.push(build_battery_details_section(
         app, content_x, cur_y, content_w,
@@ -1061,6 +1123,7 @@ fn append_wifi_network_sections(
     ));
 }
 
+#[allow(clippy::too_many_lines)]
 fn build_network_page_sections(
     app: &SettingsAppState,
     content_x: i32,
@@ -1144,6 +1207,24 @@ fn build_network_page_sections(
             },
         }],
         20,
+    ));
+
+    let proxy_label = match app.network_proxy_mode.as_str() {
+        "manual" => String::from("Manual"),
+        "auto" => String::from("Automatic"),
+        _ => String::from("Off"),
+    };
+    sections.push(place_card_section_with_gap(
+        Some("Network Proxy"),
+        content_x,
+        cur_y,
+        content_w,
+        vec![row_choice(
+            "Proxy Mode",
+            RowControlId::NetworkProxyModeCycle,
+            proxy_label,
+        )],
+        16,
     ));
 
     sections.push(place_card_section(

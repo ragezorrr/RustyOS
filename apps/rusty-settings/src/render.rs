@@ -1700,6 +1700,12 @@ fn draw_sidebar_glyph(c: &mut Canvas<'_>, rect: Rect, page: SettingsPage) {
             c.stroke_rounded_rect(Rect::new(rect.x + 5, rect.y + 6, 14, 12), 2.5, 1.2, w);
             c.fill_rounded_rect(Rect::new(rect.x + 8, rect.y + 14, 8, 2), 1, w);
         }
+        SettingsPage::DefaultApps => {
+            c.fill_rounded_rect(Rect::new(rect.x + 5, rect.y + 5, 6, 6), 1, w);
+            c.fill_rounded_rect(Rect::new(rect.x + 13, rect.y + 5, 6, 6), 1, w);
+            c.fill_rounded_rect(Rect::new(rect.x + 5, rect.y + 13, 6, 6), 1, w);
+            c.stroke_rounded_rect(Rect::new(rect.x + 13, rect.y + 13, 6, 6), 1.5, 1.2, w);
+        }
         SettingsPage::Notifications => {
             c.stroke_rounded_rect(Rect::new(rect.x + 7, rect.y + 6, 10, 10), 4.0, 1.2, w);
             c.draw_segment(cx - 5.2, cy + 3.8, cx + 5.2, cy + 3.8, 0.7, w);

@@ -161,6 +161,18 @@ impl SettingsAppState {
                 self.pending_service_cmds
                     .push(ServiceCommand::SetPowerProfile(next));
             }
+            RowControlId::DefaultAppCycle(kind) => {
+                self.default_apps.cycle(kind);
+            }
+            RowControlId::NetworkProxyModeCycle => {
+                self.network_proxy_mode = match self.network_proxy_mode.as_str() {
+                    "none" => String::from("manual"),
+                    "manual" => String::from("auto"),
+                    _ => String::from("none"),
+                };
+                let _ =
+                    update_config_entries(&[("network", "proxy_mode", &self.network_proxy_mode)]);
+            }
             _ => return false,
         }
         self.mark_dirty(DamageScope::Page);

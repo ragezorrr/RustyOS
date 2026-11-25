@@ -14,6 +14,7 @@ const PNG_BATTERY: &[u8] = include_bytes!("../../../assets/icons/settings/png/ba
 const PNG_BLUETOOTH: &[u8] = include_bytes!("../../../assets/icons/settings/png/bluetooth.png");
 const PNG_CURSOR: &[u8] = include_bytes!("../../../assets/icons/settings/png/cursor.png");
 const PNG_DATETIME: &[u8] = include_bytes!("../../../assets/icons/settings/png/datetime.png");
+const PNG_DEFAULTAPPS: &[u8] = include_bytes!("../../../assets/icons/settings/png/defaultapps.png");
 const PNG_DISPLAY: &[u8] = include_bytes!("../../../assets/icons/settings/png/display.png");
 const PNG_DOCK: &[u8] = include_bytes!("../../../assets/icons/settings/png/dock.png");
 const PNG_FONTS: &[u8] = include_bytes!("../../../assets/icons/settings/png/fonts.png");
@@ -57,6 +58,7 @@ pub(crate) const fn sidebar_icon_png(page: SettingsPage) -> &'static [u8] {
         SettingsPage::Mouse | SettingsPage::CursorStyle => PNG_CURSOR,
         SettingsPage::Touchpad => PNG_TOUCHPAD,
         SettingsPage::DateTime => PNG_DATETIME,
+        SettingsPage::DefaultApps => PNG_DEFAULTAPPS,
         SettingsPage::Language => PNG_GLOBE,
         SettingsPage::Fonts => PNG_FONTS,
         SettingsPage::IconTheme => PNG_ICONTHEME,

@@ -169,6 +169,7 @@ impl SettingsAppState {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     pub(super) fn apply_toml_device_kv(&mut self, section: &str, key: &str, val: &str) {
         match (section, key) {
             ("dock", "icon_size") => {
@@ -258,6 +259,14 @@ impl SettingsAppState {
                 }
             }
             ("power", "dim_on_battery") => self.power_dim_on_battery = parse_bool(val),
+            ("network", "proxy_mode") => {
+                let norm = match val.trim().to_ascii_lowercase().as_str() {
+                    "manual" => "manual",
+                    "auto" => "auto",
+                    _ => "none",
+                };
+                self.network_proxy_mode = String::from(norm);
+            }
             ("shortcuts", key) => {
                 if let Some(idx) = SHORTCUT_DEFS.iter().position(|d| d.key == key)
                     && let Ok(canon) = validate_shortcut_input(val)

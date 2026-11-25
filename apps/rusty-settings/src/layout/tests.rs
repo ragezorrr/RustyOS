@@ -6,7 +6,7 @@ fn default_appearance_layout_matches_882x600_metrics() {
     let mut app = SettingsAppState::new(&StartupOptions::default());
     let l = compute_layout(&app, 882, 600);
     assert_eq!(l.sidebar_rect.w, 230);
-    assert_eq!(l.sidebar_items.len(), 20);
+    assert_eq!(l.sidebar_items.len(), 21);
     assert!(l.max_page_scroll > 0);
     assert!(l.page_scrollbar_thumb.is_some());
     assert_eq!(hit_test(&l, 20.0, 20.0), Some(SettingsHit::TrafficClose));
