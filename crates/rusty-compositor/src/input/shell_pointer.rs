@@ -474,7 +474,10 @@ impl RustyCompositorState {
             None
         };
 
-        let visible_toast_count = if self.focus_mode {
+        let suppress_toasts = self.focus_mode
+            || !self.user_config.notifications_allow
+            || (self.is_session_locked() && !self.user_config.notifications_when_locked);
+        let visible_toast_count = if suppress_toasts {
             0
         } else {
             self.notifications

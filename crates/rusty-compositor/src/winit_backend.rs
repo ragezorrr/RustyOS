@@ -96,6 +96,7 @@ pub fn run_nested_winit(config: &CompositorConfig) -> Result<BootstrapReport, Co
     loop_handle
         .insert_source(ping_source, move |_event, _metadata, app_state| {
             app_state.drain_dock_dnd_events();
+            app_state.drain_dbus_notifications();
             app_state.drain_telemetry_updates();
             app_state.drain_app_catalog_updates();
             app_state.drain_trash_monitor_updates();
@@ -299,6 +300,10 @@ pub fn run_nested_winit(config: &CompositorConfig) -> Result<BootstrapReport, Co
                     &mut last_winit_cursor,
                 );
 
+                app_state.drain_dbus_notifications();
+                if app_state.expire_notifications() {
+                    app_state.shell_redraw_needed = true;
+                }
                 let tick_start = Instant::now();
                 let test_capture_active = std::env::var_os("RUSTYOS_TEST_CAPTURE_MENU").is_some();
                 let should_render = rendered_frames < 2

@@ -806,7 +806,10 @@ impl DrmRuntime {
         }
         self.flush_due_empty_frame_callbacks(state);
         if force_timer {
-            state.expire_notifications();
+            state.drain_dbus_notifications();
+            if state.expire_notifications() {
+                state.shell_redraw_needed = true;
+            }
             if state.take_shell_redraw_needed()
                 || state.has_active_compositor_animations()
                 || self.max_frames.is_some()
@@ -1665,6 +1668,7 @@ fn try_run_native_drm_session_once(
     loop_handle
         .insert_source(ping_source, move |_event, _metadata, app_state| {
             app_state.drain_dock_dnd_events();
+            app_state.drain_dbus_notifications();
             app_state.drain_telemetry_updates();
             app_state.drain_app_catalog_updates();
             app_state.drain_trash_monitor_updates();

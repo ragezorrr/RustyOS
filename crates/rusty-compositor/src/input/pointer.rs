@@ -971,20 +971,21 @@ impl RustyCompositorState {
             }
 
             // Handle floating Notification HUD toast clicks to dismiss (`RUSTYOS-024`)
-            let output_phys = self
-                .space
-                .output_geometry(&self.output)
-                .map_or_else(|| Size::from((1280, 800)), |geo| geo.size)
-                .to_physical(1);
-            let (_, is_on_primary, primary_local_x, primary_local_y) =
+            let suppress_toasts = self.focus_mode
+                || !self.user_config.notifications_allow
+                || (self.is_session_locked() && !self.user_config.notifications_when_locked);
+            let (output_phys, is_on_primary, primary_local_x, primary_local_y) =
                 self.primary_local_coords(self.pointer_location);
-            let visible_toast_ids: Vec<u64> = self
-                .notifications
-                .iter()
-                .rev()
-                .take(crate::shell_render::MAX_VISIBLE_NOTIFICATIONS)
-                .map(|n| n.id)
-                .collect();
+            let visible_toast_ids: Vec<u64> = if suppress_toasts {
+                Vec::new()
+            } else {
+                self.notifications
+                    .iter()
+                    .rev()
+                    .take(crate::shell_render::MAX_VISIBLE_NOTIFICATIONS)
+                    .map(|n| n.id)
+                    .collect()
+            };
             if is_on_primary
                 && let Some(toast_idx) = crate::shell_render::check_notification_click(
                     output_phys,
