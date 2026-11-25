@@ -431,13 +431,7 @@ impl IconCache {
         }
         let frame = self.frame_counter;
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        std::hash::Hash::hash(&rgba.len(), &mut hasher);
-        if let Some(&first) = rgba.first() {
-            std::hash::Hash::hash(&first, &mut hasher);
-        }
-        if let Some(&last) = rgba.last() {
-            std::hash::Hash::hash(&last, &mut hasher);
-        }
+        std::hash::Hash::hash(rgba, &mut hasher);
         let fp = std::hash::Hasher::finish(&hasher);
         let key = IconCacheKey {
             source_key: format!("avatar:{avatar_key}"),
@@ -449,9 +443,33 @@ impl IconCache {
             let dev_px = i32::from(size_u16) * scale;
             let value = (|| {
                 let dev_usize = usize::try_from(dev_px).ok()?;
+                let sw = src_w as usize;
+                let sh = src_h as usize;
+                let (crop_w, crop_h, crop_buf);
+                let crop_slice: &[u8] = if sw == sh {
+                    crop_w = sw;
+                    crop_h = sh;
+                    rgba
+                } else {
+                    let side = sw.min(sh);
+                    let x0 = (sw - side) / 2;
+                    let y0 = (sh - side) / 2;
+                    let mut cropped =
+                        Vec::with_capacity(side.saturating_mul(side).saturating_mul(4));
+                    for y in 0..side {
+                        let start = ((y0 + y) * sw + x0) * 4;
+                        let end = start + side * 4;
+                        if end <= rgba.len() {
+                            cropped.extend_from_slice(&rgba[start..end]);
+                        }
+                    }
+                    crop_w = side;
+                    crop_h = side;
+                    crop_buf = cropped;
+                    &crop_buf
+                };
                 #[allow(clippy::cast_possible_truncation)]
-                let scaled_bgra =
-                    scale_rgba_to_premul_bgra(src_w as usize, src_h as usize, rgba, dev_usize)?;
+                let scaled_bgra = scale_rgba_to_premul_bgra(crop_w, crop_h, crop_slice, dev_usize)?;
                 // Apply antialiased circular mask
                 #[allow(clippy::cast_precision_loss)]
                 let radius = (dev_px as f32) * 0.5;

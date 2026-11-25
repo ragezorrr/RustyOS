@@ -603,7 +603,12 @@ pub fn parse_notification_avatar(
                 #[allow(clippy::cast_sign_loss)]
                 let height = h as u32;
                 let ch = channels as usize;
-                let stride = rowstride as usize;
+                let min_stride = (width as usize).saturating_mul(ch);
+                let stride = if rowstride > 0 {
+                    (rowstride as usize).max(min_stride)
+                } else {
+                    min_stride
+                };
                 let mut rgba = Vec::with_capacity((width * height * 4) as usize);
                 for y in 0..height {
                     let row_start = (y as usize).saturating_mul(stride);
@@ -634,33 +639,31 @@ pub fn parse_notification_avatar(
     }
 
     let path_val = hints.get("image-path").or_else(|| hints.get("image_path"));
-    if let Some(val) = path_val {
-        if let Ok(path_str) = String::try_from(val.clone()) {
-            let p = path_str.strip_prefix("file://").unwrap_or(&path_str);
-            if let Ok(bytes) = std::fs::read(p) {
-                if let Some((w, h, rgba)) = crate::icons::decode_png_rgba(&bytes) {
-                    #[allow(clippy::cast_possible_truncation)]
-                    return Some(crate::state::NotificationAvatar {
-                        width: w as u32,
-                        height: h as u32,
-                        rgba,
-                    });
-                }
-            }
+    if let Some(val) = path_val
+        && let Ok(path_str) = String::try_from(val.clone())
+    {
+        let p = path_str.strip_prefix("file://").unwrap_or(&path_str);
+        if let Some((width, height, rgba)) =
+            rusty_services::image_decode::decode_image_path_rgba(std::path::Path::new(p), 2048)
+        {
+            return Some(crate::state::NotificationAvatar {
+                width,
+                height,
+                rgba,
+            });
         }
     }
 
     if app_icon.starts_with('/') || app_icon.starts_with("file://") {
         let p = app_icon.strip_prefix("file://").unwrap_or(app_icon);
-        if let Ok(bytes) = std::fs::read(p) {
-            if let Some((w, h, rgba)) = crate::icons::decode_png_rgba(&bytes) {
-                #[allow(clippy::cast_possible_truncation)]
-                return Some(crate::state::NotificationAvatar {
-                    width: w as u32,
-                    height: h as u32,
-                    rgba,
-                });
-            }
+        if let Some((width, height, rgba)) =
+            rusty_services::image_decode::decode_image_path_rgba(std::path::Path::new(p), 2048)
+        {
+            return Some(crate::state::NotificationAvatar {
+                width,
+                height,
+                rgba,
+            });
         }
     }
 
@@ -871,5 +874,31 @@ mod tests {
             Some("firefox".to_owned())
         );
         assert_eq!(resolve_notification_app_key(None, "notify-send"), None);
+    }
+
+    #[test]
+    fn parse_notification_avatar_handles_image_data_and_zero_rowstride() {
+        let mut hints = HashMap::new();
+        let pixels = vec![
+            10_u8, 20, 30, 255, 40, 50, 60, 255, // row 0
+            70, 80, 90, 255, 100, 110, 120, 255, // row 1
+        ];
+        let val =
+            zbus::zvariant::Value::from((2_i32, 2_i32, 0_i32, true, 8_i32, 4_i32, pixels.clone()));
+        assert!(OwnedValue::try_from(val).is_ok());
+        let val =
+            zbus::zvariant::Value::from((2_i32, 2_i32, 0_i32, true, 8_i32, 4_i32, pixels.clone()));
+        if let Ok(owned) = OwnedValue::try_from(val) {
+            hints.insert("image-data".to_owned(), owned);
+            let av = parse_notification_avatar(&hints, "");
+            assert_eq!(
+                av,
+                Some(crate::state::NotificationAvatar {
+                    width: 2,
+                    height: 2,
+                    rgba: pixels,
+                })
+            );
+        }
     }
 }

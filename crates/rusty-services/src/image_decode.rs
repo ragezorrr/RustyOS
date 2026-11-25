@@ -1787,6 +1787,45 @@ pub fn decode_image_rgba_limited(data: &[u8], max_dim: u32) -> Option<(usize, us
     }
 }
 
+/// Decodes a raster or vector image file at `path` (PNG, BMP, PPM, JPEG, WebP, SVG, or ffmpeg-supported)
+/// into `(width, height, straight_rgba)`, capping dimensions at `max_dim`.
+#[must_use]
+pub fn decode_image_path_rgba(path: &Path, max_dim: u32) -> Option<(u32, u32, Vec<u8>)> {
+    let meta = fs::metadata(path).ok()?;
+    let header_kind = read_magic_kind(path);
+    let ext_kind = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .and_then(classify_preview_filename);
+    let kind = header_kind.or(ext_kind)?;
+
+    let (w, h, rgba) = if matches!(
+        kind,
+        PreviewMediaKind::Png | PreviewMediaKind::Ppm | PreviewMediaKind::OtherRaster
+    ) && usize::try_from(meta.len()).unwrap_or(usize::MAX)
+        <= MAX_WALLPAPER_FILE_BYTES
+        && let Ok(bytes) = fs::read(path)
+        && let Some(decoded) = decode_image_rgba_limited(&bytes, max_dim)
+    {
+        decoded
+    } else {
+        match kind {
+            PreviewMediaKind::Svg => decode_svg_rgba(path, 256, 256)?,
+            PreviewMediaKind::OtherRaster => decode_other_raster_rgba(path)?,
+            PreviewMediaKind::Png
+            | PreviewMediaKind::Ppm
+            | PreviewMediaKind::Pdf
+            | PreviewMediaKind::Video => return None,
+        }
+    };
+    let wu = u32::try_from(w).ok()?;
+    let hu = u32::try_from(h).ok()?;
+    if wu == 0 || hu == 0 || wu > max_dim || hu > max_dim {
+        return None;
+    }
+    Some((wu, hu, rgba))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
