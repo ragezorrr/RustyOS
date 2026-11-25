@@ -1491,7 +1491,13 @@ fn build_software_update_sections(
     let mut sections = Vec::new();
 
     // Section 1: Update Status
-    let mut status_rows = Vec::new();
+    let mut status_rows = vec![row_info_string(
+        "Current System".to_owned(),
+        format!(
+            "{} · Kernel {}",
+            app.about_info.os_name, app.about_info.kernel
+        ),
+    )];
     if app.updates_checking {
         status_rows.push(row_info("Status", "Checking for updates...".to_owned()));
     } else if let Some(phase) = app.updates_tx_phase {

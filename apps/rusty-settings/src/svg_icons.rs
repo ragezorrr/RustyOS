@@ -92,8 +92,8 @@ mod tests {
             let decoded = decode_png(sidebar_icon_png(page));
             assert!(decoded.is_some());
             if let Some((w, h, rgba)) = decoded {
-                assert_eq!(w, 32);
-                assert_eq!(h, 32);
+                assert_eq!(w, 64);
+                assert_eq!(h, 64);
                 assert_eq!(rgba.len(), w * h * 4);
             }
         }

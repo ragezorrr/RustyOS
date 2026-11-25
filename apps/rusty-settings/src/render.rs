@@ -639,14 +639,14 @@ fn render_theme_preview_artwork(c: &mut Canvas<'_>, art: Rect, choice: ThemeChoi
     clippy::cast_precision_loss,
     clippy::cast_sign_loss
 )]
-fn blit_rgba_sprite_rounded(
+fn blit_rgba_sprite_rounded_keyed(
     c: &mut Canvas<'_>,
     dst: Rect,
     src_w: usize,
     src_h: usize,
     rgba: &[u8],
-    _radius: f32,
     tint_white: bool,
+    stable_key: Option<u64>,
 ) {
     if dst.w <= 0 || dst.h <= 0 || src_w == 0 || src_h == 0 || c.is_clipped_out(dst) {
         return;
@@ -660,7 +660,8 @@ fn blit_rgba_sprite_rounded(
     } else {
         rgba.to_vec()
     };
-    let cache_key = NEXT_SPRITE_CACHE_KEY.fetch_add(1, Ordering::Relaxed);
+    let cache_key =
+        stable_key.unwrap_or_else(|| NEXT_SPRITE_CACHE_KEY.fetch_add(1, Ordering::Relaxed));
     rusty_ui::UiPainter::new(c.list).draw_image(
         to_ui_rect(dst),
         cache_key,
@@ -669,6 +670,18 @@ fn blit_rgba_sprite_rounded(
         Arc::from(bytes),
         rusty_ui::PixelFormat::Rgba8888,
     );
+}
+
+fn blit_rgba_sprite_rounded(
+    c: &mut Canvas<'_>,
+    dst: Rect,
+    src_w: usize,
+    src_h: usize,
+    rgba: &[u8],
+    _radius: f32,
+    tint_white: bool,
+) {
+    blit_rgba_sprite_rounded_keyed(c, dst, src_w, src_h, rgba, tint_white, None);
 }
 
 #[allow(
@@ -1656,7 +1669,15 @@ fn render_row_icon_direct(c: &mut Canvas<'_>, rect: Rect, page: SettingsPage) {
             (rect.w - pad * 2).max(8),
             (rect.h - pad * 2).max(8),
         );
-        blit_rgba_sprite_rounded(c, glyph_rect, sw, sh, &rgba, 0.0, true);
+        blit_rgba_sprite_rounded_keyed(
+            c,
+            glyph_rect,
+            sw,
+            sh,
+            &rgba,
+            true,
+            Some(0x5354_0000_0000_0000 | (page as u64)),
+        );
     } else {
         draw_sidebar_glyph(c, rect, page);
     }
