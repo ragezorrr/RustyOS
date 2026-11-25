@@ -1187,6 +1187,7 @@ impl RustyCompositorState {
         self.notification_center_tasks = cfg.notifications_reminders_done;
 
         self.sync_output_configs(&cfg);
+        self.sync_xwayland_xsettings();
 
         let keyboard = self.keyboard.clone();
         if repeat_changed {

@@ -26,7 +26,7 @@ use smithay::wayland::selection::{
 };
 use smithay::wayland::xwayland_shell::{XWaylandShellHandler, XWaylandShellState};
 use smithay::xwayland::xwm::{
-    Reorder, ResizeEdge, WmWindowProperty, WmWindowType, X11Window, XwmId,
+    Reorder, ResizeEdge, WmWindowProperty, WmWindowType, X11Window, XwmId, settings::Value,
 };
 use smithay::xwayland::{X11Surface, X11Wm, XWayland, XWaylandEvent, XwmHandler};
 use tracing::{debug, info, warn};
@@ -55,6 +55,48 @@ pub fn compute_x11_client_rect_for_decoration(
         Point::from((wm_rect.x, wm_rect.y + top_reserve)),
         Size::from((wm_rect.width.max(64), client_h)),
     )
+}
+
+/// Computes standard `(Xft/DPI, Gdk/WindowScalingFactor, Gdk/UnscaledDPI)` `XSettings`
+/// values (in 1024ths of a DPI) for the given display scale.
+#[must_use]
+#[allow(clippy::cast_possible_truncation)]
+pub fn compute_xsettings_dpi_values(scale: f64) -> (i32, i32, i32) {
+    let clamped = crate::config::clamp_display_scale(scale);
+    let dpi = ((96.0 * clamped).round() as i32).clamp(72, 384);
+    let int_scale = if clamped >= 1.75 {
+        (clamped.round() as i32).clamp(1, 4)
+    } else {
+        1
+    };
+    let unscaled_dpi = (dpi / int_scale).max(72);
+    (dpi * 1024, int_scale, unscaled_dpi * 1024)
+}
+
+impl RustyCompositorState {
+    /// Publishes `Xft/DPI`, `Gdk/WindowScalingFactor`, and `Gdk/UnscaledDPI` via `XSETTINGS`
+    /// so XWayland apps (including Chrome/Chromium) scale UI and page content uniformly.
+    pub fn sync_xwayland_xsettings(&mut self) {
+        let scale = self.output_map.primary().scale;
+        let (xft_dpi, gdk_scale, gdk_unscaled_dpi) = compute_xsettings_dpi_values(scale);
+        let Some(xwm) = self.xwm.as_mut() else {
+            return;
+        };
+        let settings = [
+            (String::from("Xft/DPI"), Value::Integer(xft_dpi)),
+            (
+                String::from("Gdk/WindowScalingFactor"),
+                Value::Integer(gdk_scale),
+            ),
+            (
+                String::from("Gdk/UnscaledDPI"),
+                Value::Integer(gdk_unscaled_dpi),
+            ),
+        ];
+        if let Err(err) = xwm.set_xsettings(settings.into_iter()) {
+            warn!(error = %err, "Failed to update XWayland XSETTINGS DPI");
+        }
+    }
 }
 
 /// Starts `XWayland` in the compositor `calloop` event loop without blocking startup.
@@ -95,6 +137,7 @@ pub fn spawn_xwayland_source(
                     state.xwm = Some(wm);
                     state.x11_loop_handle = Some(cb_loop.clone());
                     state.set_xwayland_display(Some(display_number));
+                    state.sync_xwayland_xsettings();
                     info!(
                         display = %format!(":{display_number}"),
                         "XWayland ready and X11 Window Manager attached"
