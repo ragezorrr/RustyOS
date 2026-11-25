@@ -35,6 +35,9 @@ use wayland_client::{
     protocol::{wl_keyboard, wl_output, wl_pointer, wl_seat, wl_shm, wl_surface},
 };
 
+use crate::app_menu::{
+    AppMenuSectionSpec, RustyosAppMenuManagerV1, RustyosSurfaceAppMenuV1, SurfaceAppMenuEvent,
+};
 use crate::liquid_glass::{
     GlassRegion, LiquidGlassConfig, RustyosLiquidGlassManagerV1, RustyosSurfaceGlassV1,
 };
@@ -183,6 +186,8 @@ pub struct AppContext<'a> {
     last_title: &'a mut String,
     desired_glass: &'a mut Option<LiquidGlassConfig>,
     glass_dirty: &'a mut bool,
+    desired_menu: &'a mut Option<Vec<AppMenuSectionSpec>>,
+    menu_dirty: &'a mut bool,
     gpu_active: bool,
 }
 
@@ -283,6 +288,15 @@ impl AppContext<'_> {
         }
     }
 
+    /// Exports or updates this window's sections in the compositor's Global Menu Bar (`rustyos_app_menu_v1`).
+    pub fn set_app_menu(&mut self, sections: Vec<AppMenuSectionSpec>) {
+        let next = (!sections.is_empty()).then_some(sections);
+        if *self.desired_menu != next {
+            *self.desired_menu = next;
+            *self.menu_dirty = true;
+        }
+    }
+
     /// Marks the window dirty so it will repaint on the next frame.
     pub fn request_redraw(&mut self) {
         *self.dirty = true;
@@ -304,6 +318,9 @@ pub trait RustyApp {
 
     /// Called for each batch of Wayland pointer events.
     fn on_pointer(&mut self, _ctx: &mut AppContext<'_>, _events: &[PointerEvent]) {}
+
+    /// Called when the user activates an exported Menu Bar item (`rustyos_app_menu_v1`).
+    fn on_menu_item(&mut self, _ctx: &mut AppContext<'_>, _item_id: i32) {}
 
     /// Called once per event-loop iteration before drawing (for background polling or animations).
     fn on_tick(&mut self, _ctx: &mut AppContext<'_>) {}
@@ -353,6 +370,9 @@ struct HostState {
     desired_glass: Option<LiquidGlassConfig>,
     applied_glass: Option<LiquidGlassConfig>,
     glass_dirty: bool,
+    surface_app_menu: Option<RustyosSurfaceAppMenuV1>,
+    desired_menu: Option<Vec<AppMenuSectionSpec>>,
+    menu_dirty: bool,
     gles: Option<GlesSurfaceRenderer>,
     render_backend: RenderBackend,
     min_size: Option<(u32, u32)>,
@@ -398,6 +418,8 @@ impl HostState {
             last_title: &mut self.last_title,
             desired_glass: &mut self.desired_glass,
             glass_dirty: &mut self.glass_dirty,
+            desired_menu: &mut self.desired_menu,
+            menu_dirty: &mut self.menu_dirty,
             gpu_active: self.gles.is_some(),
         };
         f(&mut *self.app, &mut ctx)
@@ -472,6 +494,39 @@ impl HostState {
         }
     }
 
+    fn sync_app_menu(&mut self) {
+        let Some(ref menu_ctrl) = self.surface_app_menu else {
+            self.menu_dirty = false;
+            return;
+        };
+        if !self.menu_dirty {
+            return;
+        }
+        self.menu_dirty = false;
+        menu_ctrl.begin_update();
+        if let Some(ref sections) = self.desired_menu {
+            for sec in sections {
+                menu_ctrl.begin_section(sec.id, sec.title.clone());
+                for item in &sec.items {
+                    let checked = match item.checked {
+                        Some(true) => 1,
+                        Some(false) => 0,
+                        None => -1,
+                    };
+                    menu_ctrl.add_item(
+                        item.id,
+                        item.label.clone(),
+                        item.shortcut.clone().unwrap_or_default(),
+                        u32::from(item.enabled),
+                        u32::from(item.separator),
+                        checked,
+                    );
+                }
+            }
+        }
+        menu_ctrl.commit();
+    }
+
     fn draw(&mut self, qh: &QueueHandle<Self>) {
         if !self.configured {
             return;
@@ -484,6 +539,7 @@ impl HostState {
         let hi = i32::try_from(h).unwrap_or(1).max(1);
 
         self.sync_liquid_glass();
+        self.sync_app_menu();
         self.draw_list.clear();
         {
             let mut painter = UiPainter::new(&mut self.draw_list);
@@ -562,6 +618,36 @@ impl Dispatch<RustyosSurfaceGlassV1, ()> for HostState {
         _conn: &Connection,
         _qhandle: &QueueHandle<Self>,
     ) {
+    }
+}
+
+impl Dispatch<RustyosAppMenuManagerV1, ()> for HostState {
+    fn event(
+        _state: &mut Self,
+        _proxy: &RustyosAppMenuManagerV1,
+        _event: <RustyosAppMenuManagerV1 as wayland_client::Proxy>::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qhandle: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<RustyosSurfaceAppMenuV1, ()> for HostState {
+    fn event(
+        state: &mut Self,
+        _proxy: &RustyosSurfaceAppMenuV1,
+        event: SurfaceAppMenuEvent,
+        _data: &(),
+        _conn: &Connection,
+        qh: &QueueHandle<Self>,
+    ) {
+        let SurfaceAppMenuEvent::ItemActivated { id } = event;
+        state.with_ctx(|app, ctx| app.on_menu_item(ctx, id));
+        state.sync_app_menu();
+        if state.dirty && !state.exit && !state.frame_pending {
+            state.draw(qh);
+        }
     }
 }
 
@@ -856,6 +942,10 @@ pub fn run_app<A: RustyApp + 'static>(config: AppConfig, app: A) -> Result<(), A
         .bind::<RustyosLiquidGlassManagerV1, _, _>(&qh, 1..=1, ())
         .ok()
         .map(|mgr| mgr.get_surface_glass(&surface, &qh, ()));
+    let surface_app_menu = globals
+        .bind::<RustyosAppMenuManagerV1, _, _>(&qh, 1..=1, ())
+        .ok()
+        .map(|mgr| mgr.get_menu_surface(&surface, &qh, ()));
 
     let window = xdg_shell.create_window(surface, config.decorations.to_sctk(), &qh);
     window.set_title(&config.title);
@@ -881,6 +971,9 @@ pub fn run_app<A: RustyApp + 'static>(config: AppConfig, app: A) -> Result<(), A
         desired_glass: config.glass,
         applied_glass: None,
         glass_dirty: config.glass.is_some(),
+        surface_app_menu,
+        desired_menu: None,
+        menu_dirty: false,
         gles: None,
         render_backend: RenderBackend::Gpu,
         min_size: config.min_size,

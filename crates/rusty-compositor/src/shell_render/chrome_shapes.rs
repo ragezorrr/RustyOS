@@ -40,9 +40,33 @@ pub fn generate_shell_chrome_composite_elements(
     top_telemetry: &TopBarTelemetry<'_>,
     overlay: ShellOverlayView<'_>,
 ) -> Vec<CompositorRenderElement> {
-    let mut out = Vec::new();
-    let mut chrome_text = Vec::new();
-    append_chrome_text(
+    generate_shell_chrome_composite_with_dock(
+        text_cache,
+        shape_cache,
+        renderer,
+        screen_size,
+        active_workspace,
+        layout_mode,
+        Some(dock_view),
+        top_telemetry,
+        overlay,
+    )
+}
+
+/// Generates desktop chrome (`TopBar`, optional menu popover, and optional `Dock`) for secondary outputs.
+#[allow(clippy::too_many_arguments)]
+pub fn generate_secondary_shell_chrome_elements(
+    text_cache: &mut crate::text::TextCache,
+    shape_cache: &mut crate::surfaces::UiShapeCache,
+    renderer: &mut GlesRenderer,
+    screen_size: Size<i32, smithay::utils::Physical>,
+    active_workspace: u8,
+    layout_mode: &str,
+    dock_view: Option<&DockViewState<'_>>,
+    top_telemetry: &TopBarTelemetry<'_>,
+    overlay: ShellOverlayView<'_>,
+) -> Vec<CompositorRenderElement> {
+    generate_shell_chrome_composite_with_dock(
         text_cache,
         shape_cache,
         renderer,
@@ -52,10 +76,39 @@ pub fn generate_shell_chrome_composite_elements(
         dock_view,
         top_telemetry,
         overlay,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn generate_shell_chrome_composite_with_dock(
+    text_cache: &mut crate::text::TextCache,
+    shape_cache: &mut crate::surfaces::UiShapeCache,
+    renderer: &mut GlesRenderer,
+    screen_size: Size<i32, smithay::utils::Physical>,
+    active_workspace: u8,
+    layout_mode: &str,
+    dock_view: Option<&DockViewState<'_>>,
+    top_telemetry: &TopBarTelemetry<'_>,
+    overlay: ShellOverlayView<'_>,
+) -> Vec<CompositorRenderElement> {
+    let mut out = Vec::new();
+    let mut chrome_text = Vec::new();
+    let dummy_dock = DockViewState::default();
+    let dock_ref = dock_view.unwrap_or(&dummy_dock);
+    append_chrome_text(
+        text_cache,
+        shape_cache,
+        renderer,
+        screen_size,
+        active_workspace,
+        layout_mode,
+        dock_ref,
+        top_telemetry,
+        overlay,
         &mut chrome_text,
     );
     out.extend(chrome_text.into_iter().map(CompositorRenderElement::Memory));
-    out.extend(build_chrome_shapes(
+    out.extend(build_chrome_shapes_with_dock(
         shape_cache,
         renderer,
         screen_size,
@@ -142,13 +195,13 @@ pub fn generate_shell_overview_elements(
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
-fn build_chrome_shapes(
+fn build_chrome_shapes_with_dock(
     shape_cache: &mut crate::surfaces::UiShapeCache,
     renderer: &mut GlesRenderer,
     screen_size: Size<i32, smithay::utils::Physical>,
     active_workspace: u8,
     layout_mode: &str,
-    dock_view: &DockViewState<'_>,
+    dock_view: Option<&DockViewState<'_>>,
     top_telemetry: &TopBarTelemetry<'_>,
     overlay: ShellOverlayView<'_>,
 ) -> Vec<CompositorRenderElement> {
@@ -169,10 +222,13 @@ fn build_chrome_shapes(
         compute_top_bar_right_layout_with_options(width, top_telemetry.clock_hhmm, opts);
 
     let light_opaque_bar = top_telemetry.reduce_transparency && !pal.is_dark;
-    let logo_ink = if light_opaque_bar {
-        [28, 29, 34, 255]
-    } else {
+    let use_light_bar_ink = top_telemetry
+        .backdrop
+        .map_or(!light_opaque_bar, |b| b.prefer_light_text);
+    let logo_ink = if use_light_bar_ink {
         [255, 255, 255, 255]
+    } else {
+        [28, 29, 34, 255]
     };
     let logo_loc = Point::from((TOP_BAR_LOGO_X + 1, TOP_BAR_ITEM_Y + 1));
     if let Some(el) = shape_cache.ui_glyph_element(
@@ -192,28 +248,27 @@ fn build_chrome_shapes(
         top_telemetry,
     );
 
+    let max_left_menu_x = right_layout.tray_anchor_x - 10;
     if let Some(open_menu) = top_telemetry
         .active_menu
         .filter(|m| *m != TopBarMenuHit::Go || left_layout.has_go)
     {
+        let (visible_menus, _) = super::visible_top_bar_menu_slots(
+            app_profile,
+            active_app_name,
+            top_telemetry.app_menu_tree,
+            max_left_menu_x,
+        );
         let (anchor_x, anchor_w) = match open_menu {
             TopBarMenuHit::SystemLogo => (TOP_BAR_LOGO_X - 2, TOP_BAR_LOGO_W + 4),
             TopBarMenuHit::ActiveApp => (left_layout.app_x - 2, left_layout.app_w + 4),
-            TopBarMenuHit::File => (left_layout.file_x - 2, left_layout.file_w + 4),
-            TopBarMenuHit::Edit => (left_layout.edit_x - 2, left_layout.edit_w + 4),
-            TopBarMenuHit::View => (left_layout.view_x - 2, left_layout.view_w + 4),
-            TopBarMenuHit::Go => (left_layout.go_x - 2, left_layout.go_w + 4),
-            TopBarMenuHit::Window => (left_layout.win_x - 2, left_layout.win_w + 4),
-            TopBarMenuHit::Help => (left_layout.help_x - 2, left_layout.help_w + 4),
-            TopBarMenuHit::Dynamic(idx) => top_telemetry
-                .app_menu_tree
-                .and_then(|tree| {
-                    super::dynamic_app_menu_slots(&left_layout, tree)
-                        .into_iter()
-                        .find(|(i, _, _, _)| *i == idx)
-                        .map(|(_, _, x, w)| (x - 2, w + 4))
-                })
-                .unwrap_or((left_layout.file_x - 2, left_layout.file_w + 4)),
+            other => visible_menus
+                .iter()
+                .find(|(hit, _, _, _)| *hit == other)
+                .map_or(
+                    (left_layout.file_x - 2, left_layout.file_w + 4),
+                    |(_, _, x, w)| (x - 2, w + 4),
+                ),
         };
         let plate_bg = if pal.is_dark {
             [255, 255, 255, 51]
@@ -232,19 +287,21 @@ fn build_chrome_shapes(
             plate_bg,
             None,
         );
-        let (mx, my, mw, mh) = super::top_bar_menu_popover_rect_with_app_menu(
+        let (mx, my, mw, mh) = super::top_bar_menu_popover_rect_for_width(
             app_profile,
             active_app_name,
             open_menu,
             top_telemetry.app_menu_tree,
+            max_left_menu_x,
         );
         let menu_rect = Rectangle::new(Point::from((mx, my)), Size::from((mw, mh)));
         let mut row_y = my + MENU_POPOVER_PAD_Y;
-        for (entry_idx, entry) in super::resolve_top_bar_menu_entries_with_app_menu(
+        for (entry_idx, entry) in super::resolve_top_bar_menu_entries_for_width(
             app_profile,
             active_app_name,
             open_menu,
             top_telemetry.app_menu_tree,
+            max_left_menu_x,
         )
         .into_iter()
         .enumerate()
@@ -521,16 +578,18 @@ fn build_chrome_shapes(
     }
 
     // 4. Dock macOS glass container, 4x4 SSAA/XDG icons, local hover, drag overlay & indicators (`RUSTYOS-050`/`073`)
-    push_dock_chrome_shapes(
-        &mut out,
-        shape_cache,
-        renderer,
-        screen_size,
-        dock_view,
-        top_telemetry,
-        overlay,
-        &pal,
-    );
+    if let Some(dock) = dock_view {
+        push_dock_chrome_shapes(
+            &mut out,
+            shape_cache,
+            renderer,
+            screen_size,
+            dock,
+            top_telemetry,
+            overlay,
+            &pal,
+        );
+    }
 
     out
 }

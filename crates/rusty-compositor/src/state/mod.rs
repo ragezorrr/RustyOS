@@ -375,10 +375,22 @@ pub struct RustyCompositorState {
     pub wifi_popover_hover: Option<crate::shell_render::WifiPopoverHit>,
     /// Active compact `TopBar` popover (`Volume`, `Battery`, `Bluetooth`) (`RUSTYOS-141`).
     pub top_bar_quick_popover: Option<crate::shell_render::TopBarQuickPopoverKind>,
+    /// Output currently hosting open `TopBar` menus or status popovers (multi-monitor).
+    pub top_bar_output: Option<OutputId>,
     /// Currently hovered row inside the open compact `TopBar` popover (`RUSTYOS-141`).
     pub top_bar_quick_popover_hover: Option<crate::shell_render::TopBarQuickPopoverHit>,
     /// Background D-Bus `com.canonical.AppMenu.Registrar` handle (`RUSTYOS-143`).
     pub app_menu: crate::app_menu::AppMenuHandle,
+    /// Native Wayland global Menu Bar protocol state (`rustyos_app_menu_v1`).
+    pub app_menu_protocol_state: wayland_handlers::app_menu::AppMenuManagerState,
+    /// Published per-surface Wayland Menu Bar trees and controllers.
+    pub wayland_app_menus: HashMap<
+        smithay::reexports::wayland_server::backend::ObjectId,
+        (
+            crate::app_menu::AppMenuTree,
+            wayland_handlers::app_menu::RustyosSurfaceAppMenuV1,
+        ),
+    >,
     /// Whether the right-edge `Notification Center` drawer is open (`RUSTYOS-109`).
     pub notification_center_open: bool,
     /// Currently hovered interactive region inside `Notification Center` (`RUSTYOS-109`).
@@ -586,6 +598,8 @@ impl RustyCompositorState {
         );
         let liquid_glass_state =
             wayland_handlers::liquid_glass::LiquidGlassManagerState::new(&display_handle);
+        let app_menu_protocol_state =
+            wayland_handlers::app_menu::AppMenuManagerState::new(&display_handle);
 
         let user_config = if cfg!(test) {
             crate::config::UserConfig::default()
@@ -807,8 +821,11 @@ impl RustyCompositorState {
             wifi_popover_open: false,
             wifi_popover_hover: None,
             top_bar_quick_popover: None,
+            top_bar_output: None,
             top_bar_quick_popover_hover: None,
             app_menu: crate::app_menu::AppMenuHandle::noop(),
+            app_menu_protocol_state,
+            wayland_app_menus: HashMap::new(),
             notification_center_open: false,
             notification_center_hover: None,
             notification_center_tasks: initial_nc_tasks,

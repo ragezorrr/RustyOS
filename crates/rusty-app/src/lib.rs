@@ -7,8 +7,13 @@
 
 #![forbid(unsafe_code)]
 
+pub mod app_menu;
 pub mod host;
 pub mod liquid_glass;
+
+pub use app_menu::{
+    AppMenuItemSpec, AppMenuSectionSpec, RustyosAppMenuManagerV1, RustyosSurfaceAppMenuV1,
+};
 
 pub use host::{
     AppConfig, AppContext, AppError, ConfigureInfo, RustyApp, WindowDecorationMode, run_app,

@@ -200,9 +200,22 @@ impl RustyCompositorState {
                 self.close_notification_center();
                 info!("Closed Notification Center");
             }
+            KeyIntercept::TopBarMenuOpen => {
+                self.open_top_bar_menu_bar();
+                info!("Opened TopBar Menu Bar via keyboard");
+            }
             KeyIntercept::TopBarMenuClose => {
                 self.close_top_bar_menu();
                 info!("Closed TopBar menu popover");
+            }
+            KeyIntercept::TopBarMenuHeaderStep(delta) => {
+                self.step_top_bar_menu_header(delta);
+            }
+            KeyIntercept::TopBarMenuRowStep(delta) => {
+                self.step_top_bar_menu_row(delta);
+            }
+            KeyIntercept::TopBarMenuActivate => {
+                self.activate_top_bar_menu_selected(serial);
             }
             KeyIntercept::DockStackClose => self.close_dock_stack(),
             KeyIntercept::DockStackStep(delta) => {
@@ -604,8 +617,10 @@ pub(super) fn classify_keyboard_input(
     {
         return FilterResult::Intercept(intercept);
     }
-    if state.active_top_bar_menu.is_some() && sym.raw() == Keysym::Escape.raw() {
-        return FilterResult::Intercept(KeyIntercept::TopBarMenuClose);
+    if state.active_top_bar_menu.is_some()
+        && let Some(intercept) = classify_top_bar_menu_key(modifiers, sym)
+    {
+        return FilterResult::Intercept(intercept);
     }
     if state.overview_active
         && let Some(intercept) = classify_overview_key(modifiers, sym)
@@ -711,6 +726,30 @@ fn classify_dock_key(modifiers: ModifiersState, sym: Keysym) -> Option<KeyInterc
         Keysym::Home | Keysym::KP_Home => Some(KeyIntercept::DockStep(isize::MIN)),
         Keysym::End | Keysym::KP_End => Some(KeyIntercept::DockStep(isize::MAX)),
         Keysym::Return | Keysym::KP_Enter | Keysym::space => Some(KeyIntercept::DockActivate),
+        _ => None,
+    }
+}
+
+fn classify_top_bar_menu_key(modifiers: ModifiersState, sym: Keysym) -> Option<KeyIntercept> {
+    if sym.raw() == Keysym::Escape.raw() {
+        return Some(KeyIntercept::TopBarMenuClose);
+    }
+    if modifiers.ctrl || modifiers.alt || modifiers.logo {
+        return None;
+    }
+    match sym {
+        Keysym::Left | Keysym::KP_Left => Some(KeyIntercept::TopBarMenuHeaderStep(-1)),
+        Keysym::Right | Keysym::KP_Right => Some(KeyIntercept::TopBarMenuHeaderStep(1)),
+        Keysym::Up | Keysym::KP_Up | Keysym::ISO_Left_Tab => {
+            Some(KeyIntercept::TopBarMenuRowStep(-1))
+        }
+        Keysym::Down | Keysym::KP_Down => Some(KeyIntercept::TopBarMenuRowStep(1)),
+        Keysym::Tab => Some(KeyIntercept::TopBarMenuRowStep(if modifiers.shift {
+            -1
+        } else {
+            1
+        })),
+        Keysym::Return | Keysym::KP_Enter | Keysym::space => Some(KeyIntercept::TopBarMenuActivate),
         _ => None,
     }
 }
@@ -822,6 +861,9 @@ pub(super) fn match_shortcut_with_config(
     }
     if let Some(hw) = match_hardware_shortcut(modifiers, sym) {
         return Some(hw);
+    }
+    if modifiers.ctrl && !modifiers.alt && !modifiers.logo && sym.raw() == Keysym::F2.raw() {
+        return Some(KeyIntercept::TopBarMenuOpen);
     }
     if modifiers.ctrl && !modifiers.alt && !modifiers.logo && sym.raw() == Keysym::F3.raw() {
         return Some(KeyIntercept::DockFocus);

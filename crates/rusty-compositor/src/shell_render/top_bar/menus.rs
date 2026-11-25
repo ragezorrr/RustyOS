@@ -31,6 +31,8 @@ pub enum TopBarMenuHit {
     Help,
     /// Live D-Bus `AppMenu` section index (`RUSTYOS-145`).
     Dynamic(usize),
+    /// Collapsed overflow menus (`>>`) when left menus exceed available horizontal space.
+    Overflow,
 }
 
 /// Action triggered from an open `TopBar` menu dropdown popover (`RUSTYOS-048`/`049`).
@@ -519,7 +521,7 @@ pub const fn top_bar_menu_entries(menu: TopBarMenuHit) -> &'static [TopBarMenuEn
         TopBarMenuHit::Go => MENU_GO,
         TopBarMenuHit::Window => MENU_WINDOW,
         TopBarMenuHit::Help => MENU_HELP,
-        TopBarMenuHit::Dynamic(_) => &[],
+        TopBarMenuHit::Dynamic(_) | TopBarMenuHit::Overflow => &[],
     }
 }
 
@@ -604,7 +606,7 @@ pub const fn top_bar_menu_items(
             ("Keyboard Shortcuts", TopBarMenuAction::ShowShortcuts),
             ("Refresh Metrics", TopBarMenuAction::RefreshMetrics),
         ],
-        TopBarMenuHit::Dynamic(_) => &[],
+        TopBarMenuHit::Dynamic(_) | TopBarMenuHit::Overflow => &[],
     }
 }
 
@@ -642,7 +644,7 @@ pub fn top_bar_menu_popover_rect_for_profile(
         TopBarMenuHit::View => left.view_x,
         TopBarMenuHit::Go => left.go_x,
         TopBarMenuHit::Window => left.win_x,
-        TopBarMenuHit::Help => left.help_x,
+        TopBarMenuHit::Help | TopBarMenuHit::Overflow => left.help_x,
     };
     let entries = resolve_top_bar_menu_entries(profile, active_app_name, menu);
     let mut content_h = 0;
@@ -662,7 +664,7 @@ pub fn top_bar_menu_popover_rect_for_profile(
                     13.0,
                     crate::text::FontWeight::Regular,
                 );
-                let shortcut_w = shortcut.map_or(0, |s| {
+                let shortcut_w = shortcut.as_deref().map_or(0, |s| {
                     crate::text::measure_ui_text_width(s, 12.0, crate::text::FontWeight::Regular)
                         + 18
                 });
@@ -896,7 +898,7 @@ pub fn resolve_top_bar_menu_entries_with_app_menu(
                     ResolvedTopBarMenuItem::Item {
                         label: label.into(),
                         icon: None,
-                        shortcut: None,
+                        shortcut: item.shortcut.clone().map(std::borrow::Cow::Owned),
                         action: TopBarMenuAction::DbusMenuItem(item.id),
                         enabled: item.enabled,
                     }
@@ -930,14 +932,23 @@ pub fn top_bar_menu_popover_rect_with_app_menu(
     let mut pop_w = 220;
     for entry in &entries {
         match entry {
-            ResolvedTopBarMenuItem::Item { label, .. } => {
+            ResolvedTopBarMenuItem::Item {
+                label, shortcut, ..
+            } => {
                 content_h += MENU_ITEM_HEIGHT;
                 let label_w = crate::text::measure_ui_text_width(
                     label,
                     13.0,
                     crate::text::FontWeight::Regular,
                 );
-                pop_w = pop_w.max(14 + label_w + 24);
+                let shortcut_w = shortcut.as_deref().map_or(0, |s| {
+                    18 + crate::text::measure_ui_text_width(
+                        s,
+                        12.0,
+                        crate::text::FontWeight::Regular,
+                    )
+                });
+                pop_w = pop_w.max(14 + label_w + shortcut_w + 24);
             }
             ResolvedTopBarMenuItem::Separator => {
                 content_h += MENU_SEPARATOR_HEIGHT;
@@ -946,6 +957,311 @@ pub fn top_bar_menu_popover_rect_with_app_menu(
     }
     let pop_h = content_h + MENU_POPOVER_PAD_Y * 2;
     (anchor_x.max(4), TOP_BAR_HEIGHT + 2, pop_w, pop_h)
+}
+
+/// Visible left Menu Bar slot `(hit, title, x, w)`.
+pub type TopBarVisibleMenuSlot<'a> = (TopBarMenuHit, std::borrow::Cow<'a, str>, i32, i32);
+/// Collapsed overflow menu entry `(hit, title)` moved under the `"»"` overflow pill.
+pub type TopBarOverflowMenuItem<'a> = (TopBarMenuHit, std::borrow::Cow<'a, str>);
+/// Partitioned `(visible_slots, overflowed_items)` computed by [`visible_top_bar_menu_slots`].
+pub type TopBarMenuSlotLayout<'a> = (
+    Vec<TopBarVisibleMenuSlot<'a>>,
+    Vec<TopBarOverflowMenuItem<'a>>,
+);
+
+/// Computes visible left Menu Bar slots `(hit, title, x, w)` before `max_x` and any
+/// overflowing sections collapsed into the `"»"` overflow pill.
+#[must_use]
+pub fn visible_top_bar_menu_slots<'a>(
+    profile: TopBarAppProfile,
+    active_app_name: &str,
+    app_menu: Option<&'a crate::app_menu::AppMenuTree>,
+    max_x: i32,
+) -> TopBarMenuSlotLayout<'a> {
+    use std::borrow::Cow;
+
+    let left = compute_top_bar_left_layout_for_profile(profile, active_app_name, false);
+    let candidates: Vec<(TopBarMenuHit, Cow<'a, str>, i32, i32)> = if let Some(tree) = app_menu {
+        dynamic_app_menu_slots(&left, tree)
+            .into_iter()
+            .map(|(idx, title, x, w)| (TopBarMenuHit::Dynamic(idx), Cow::Borrowed(title), x, w))
+            .collect()
+    } else {
+        let mut list = vec![
+            (
+                TopBarMenuHit::File,
+                Cow::Borrowed("File"),
+                left.file_x,
+                left.file_w,
+            ),
+            (
+                TopBarMenuHit::Edit,
+                Cow::Borrowed("Edit"),
+                left.edit_x,
+                left.edit_w,
+            ),
+            (
+                TopBarMenuHit::View,
+                Cow::Borrowed("View"),
+                left.view_x,
+                left.view_w,
+            ),
+        ];
+        if left.has_go {
+            list.push((TopBarMenuHit::Go, Cow::Borrowed("Go"), left.go_x, left.go_w));
+        }
+        list.push((
+            TopBarMenuHit::Window,
+            Cow::Borrowed("Window"),
+            left.win_x,
+            left.win_w,
+        ));
+        list.push((
+            TopBarMenuHit::Help,
+            Cow::Borrowed("Help"),
+            left.help_x,
+            left.help_w,
+        ));
+        list
+    };
+
+    let mut visible = Vec::with_capacity(candidates.len() + 1);
+    let mut overflowed = Vec::new();
+    let overflow_btn_w = 28;
+    let total_last_right = candidates
+        .last()
+        .map_or(left.app_x + left.app_w, |(_, _, x, w)| *x + *w);
+    let needs_overflow = total_last_right > max_x;
+    let cutoff = if needs_overflow {
+        max_x - overflow_btn_w - 6
+    } else {
+        max_x
+    };
+
+    for (hit, title, x, w) in candidates {
+        if !overflowed.is_empty() || x + w > cutoff {
+            overflowed.push((hit, title));
+        } else {
+            visible.push((hit, title, x, w));
+        }
+    }
+    if !overflowed.is_empty() {
+        let ox = visible
+            .last()
+            .map_or(left.app_x + left.app_w + 10, |(_, _, x, w)| *x + *w + 4);
+        if ox + overflow_btn_w <= max_x + 4 {
+            visible.push((
+                TopBarMenuHit::Overflow,
+                Cow::Borrowed("»"),
+                ox,
+                overflow_btn_w,
+            ));
+        }
+    }
+    (visible, overflowed)
+}
+
+/// Resolves dropdown entries for any [`TopBarMenuHit`], including [`TopBarMenuHit::Overflow`].
+#[must_use]
+pub fn resolve_top_bar_menu_entries_for_width(
+    profile: TopBarAppProfile,
+    active_app_name: &str,
+    menu: TopBarMenuHit,
+    app_menu: Option<&crate::app_menu::AppMenuTree>,
+    max_x: i32,
+) -> Vec<ResolvedTopBarMenuItem> {
+    if menu != TopBarMenuHit::Overflow {
+        return resolve_top_bar_menu_entries_with_app_menu(
+            profile,
+            active_app_name,
+            menu,
+            app_menu,
+        );
+    }
+    let (_, overflowed) = visible_top_bar_menu_slots(profile, active_app_name, app_menu, max_x);
+    let mut entries = Vec::new();
+    for (idx, (hit, title)) in overflowed.into_iter().enumerate() {
+        if idx > 0 {
+            entries.push(ResolvedTopBarMenuItem::Separator);
+        }
+        entries.push(ResolvedTopBarMenuItem::Item {
+            label: std::borrow::Cow::Owned(title.into_owned()),
+            icon: None,
+            shortcut: None,
+            action: TopBarMenuAction::ShowShortcuts,
+            enabled: false,
+        });
+        entries.extend(resolve_top_bar_menu_entries_with_app_menu(
+            profile,
+            active_app_name,
+            hit,
+            app_menu,
+        ));
+    }
+    entries
+}
+
+/// Width-aware dropdown popover bounds supporting [`TopBarMenuHit::Overflow`].
+#[must_use]
+pub fn top_bar_menu_popover_rect_for_width(
+    profile: TopBarAppProfile,
+    active_app_name: &str,
+    menu: TopBarMenuHit,
+    app_menu: Option<&crate::app_menu::AppMenuTree>,
+    max_x: i32,
+) -> (i32, i32, i32, i32) {
+    if !matches!(menu, TopBarMenuHit::Dynamic(_) | TopBarMenuHit::Overflow) {
+        return top_bar_menu_popover_rect_for_profile(profile, active_app_name, menu);
+    }
+    let left = compute_top_bar_left_layout_for_profile(profile, active_app_name, false);
+    let (visible, _) = visible_top_bar_menu_slots(profile, active_app_name, app_menu, max_x);
+    let anchor_x = visible
+        .iter()
+        .find(|(h, _, _, _)| *h == menu)
+        .map_or(left.file_x, |(_, _, x, _)| *x);
+    let entries =
+        resolve_top_bar_menu_entries_for_width(profile, active_app_name, menu, app_menu, max_x);
+    let mut content_h = 0;
+    let mut pop_w = 220;
+    for entry in &entries {
+        match entry {
+            ResolvedTopBarMenuItem::Item {
+                label, shortcut, ..
+            } => {
+                content_h += MENU_ITEM_HEIGHT;
+                let label_w = crate::text::measure_ui_text_width(
+                    label,
+                    13.0,
+                    crate::text::FontWeight::Regular,
+                );
+                let shortcut_w = shortcut.as_deref().map_or(0, |s| {
+                    18 + crate::text::measure_ui_text_width(
+                        s,
+                        12.0,
+                        crate::text::FontWeight::Regular,
+                    )
+                });
+                pop_w = pop_w.max(14 + label_w + shortcut_w + 24);
+            }
+            ResolvedTopBarMenuItem::Separator => {
+                content_h += MENU_SEPARATOR_HEIGHT;
+            }
+        }
+    }
+    let pop_h = content_h + MENU_POPOVER_PAD_Y * 2;
+    (anchor_x.max(4), TOP_BAR_HEIGHT + 2, pop_w, pop_h)
+}
+
+/// Width-aware `TopBar` left header hit-test supporting both live `AppMenuTree` and `Overflow`.
+#[must_use]
+pub fn check_top_bar_menu_click_for_width(
+    profile: TopBarAppProfile,
+    active_app_name: &str,
+    app_menu: Option<&crate::app_menu::AppMenuTree>,
+    max_x: i32,
+    x: f64,
+    y: f64,
+) -> Option<TopBarMenuHit> {
+    if y < 0.0 || y > f64::from(TOP_BAR_HEIGHT) {
+        return None;
+    }
+    let left = compute_top_bar_left_layout_for_profile(profile, active_app_name, false);
+    if x >= f64::from(TOP_BAR_LOGO_X) && x < f64::from(TOP_BAR_LOGO_X + TOP_BAR_LOGO_W) {
+        return Some(TopBarMenuHit::SystemLogo);
+    }
+    if x >= f64::from(left.app_x) && x < f64::from(left.app_x + left.app_w) {
+        return Some(TopBarMenuHit::ActiveApp);
+    }
+    let (visible, _) = visible_top_bar_menu_slots(profile, active_app_name, app_menu, max_x);
+    for (hit, _, bx, bw) in visible {
+        if x >= f64::from(bx) && x < f64::from(bx + bw) {
+            return Some(hit);
+        }
+    }
+    None
+}
+
+/// Width-aware popover click hit-test supporting static, dynamic, and overflow menus.
+#[must_use]
+pub fn check_top_bar_menu_popover_click_for_width(
+    profile: TopBarAppProfile,
+    active_app_name: &str,
+    menu: TopBarMenuHit,
+    app_menu: Option<&crate::app_menu::AppMenuTree>,
+    max_x: i32,
+    x: f64,
+    y: f64,
+) -> TopBarMenuPopoverClick {
+    let (px, py, pw, ph) =
+        top_bar_menu_popover_rect_for_width(profile, active_app_name, menu, app_menu, max_x);
+    if x < f64::from(px) || x >= f64::from(px + pw) || y < f64::from(py) || y >= f64::from(py + ph)
+    {
+        return TopBarMenuPopoverClick::Outside;
+    }
+    let mut row_y = py + MENU_POPOVER_PAD_Y;
+    for entry in
+        resolve_top_bar_menu_entries_for_width(profile, active_app_name, menu, app_menu, max_x)
+    {
+        match entry {
+            ResolvedTopBarMenuItem::Item {
+                action, enabled, ..
+            } => {
+                if y >= f64::from(row_y) && y < f64::from(row_y + MENU_ITEM_HEIGHT) {
+                    return if enabled {
+                        TopBarMenuPopoverClick::Action(action)
+                    } else {
+                        TopBarMenuPopoverClick::Inside
+                    };
+                }
+                row_y += MENU_ITEM_HEIGHT;
+            }
+            ResolvedTopBarMenuItem::Separator => {
+                row_y += MENU_SEPARATOR_HEIGHT;
+            }
+        }
+    }
+    TopBarMenuPopoverClick::Inside
+}
+
+/// Computes the hovered entry index (`0..entries.len()`) across static, live `AppMenu`, and `Overflow` menus.
+#[must_use]
+pub fn check_top_bar_menu_popover_hover_row_for_width(
+    profile: TopBarAppProfile,
+    active_app_name: &str,
+    menu: TopBarMenuHit,
+    app_menu: Option<&crate::app_menu::AppMenuTree>,
+    max_x: i32,
+    x: f64,
+    y: f64,
+) -> Option<usize> {
+    if menu == TopBarMenuHit::Go && !profile.has_go_menu() {
+        return None;
+    }
+    let (px, py, pw, ph) =
+        top_bar_menu_popover_rect_for_width(profile, active_app_name, menu, app_menu, max_x);
+    if x < f64::from(px) || x >= f64::from(px + pw) || y < f64::from(py) || y >= f64::from(py + ph)
+    {
+        return None;
+    }
+    let mut row_y = py + MENU_POPOVER_PAD_Y;
+    for (idx, entry) in
+        resolve_top_bar_menu_entries_for_width(profile, active_app_name, menu, app_menu, max_x)
+            .into_iter()
+            .enumerate()
+    {
+        match entry {
+            ResolvedTopBarMenuItem::Item { enabled, .. } => {
+                if y >= f64::from(row_y) && y < f64::from(row_y + MENU_ITEM_HEIGHT) {
+                    return enabled.then_some(idx);
+                }
+                row_y += MENU_ITEM_HEIGHT;
+            }
+            ResolvedTopBarMenuItem::Separator => {
+                row_y += MENU_SEPARATOR_HEIGHT;
+            }
+        }
+    }
+    None
 }
 
 /// Hit-tests `TopBar` left menu headers using live `AppMenuTree` when present (`RUSTYOS-145`).

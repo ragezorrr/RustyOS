@@ -949,471 +949,483 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
         ));
     }
 
-    if is_primary {
+    let dock_prepared = (is_primary || dock_visible_here).then(|| {
         let dock_tiles = state.build_dock_tiles();
         let presented_dock = state.sync_dock_presentation_for_output(output_entry.id, &dock_tiles);
-        let tray_views: Vec<TopBarTrayItem<'_>> = state
-            .tray_items
-            .iter()
-            .take(MAX_TOP_BAR_TRAY_ITEMS)
-            .map(|item| TopBarTrayItem {
-                key: &item.key,
-                label: &item.badge,
-                icon_name: &item.icon_name,
-                icon_pixmap: item.icon_pixmap.as_ref(),
-                attention: item.status == crate::tray::TrayStatus::NeedsAttention,
-                passive: item.status == crate::tray::TrayStatus::Passive,
-            })
-            .collect();
-        let clock_label = if state.clock_24h {
-            &tel.clock_date_24h
-        } else {
-            &tel.clock_date_hhmm
-        };
-        let (active_app_name, app_profile) = state.active_top_bar_app_context();
-        let live_app_menu = state.active_app_menu_tree();
-        let active_top_bar_menu = state
+        (dock_tiles, presented_dock)
+    });
+
+    let tray_views: Vec<TopBarTrayItem<'_>> = state
+        .tray_items
+        .iter()
+        .take(MAX_TOP_BAR_TRAY_ITEMS)
+        .map(|item| TopBarTrayItem {
+            key: &item.key,
+            label: &item.badge,
+            icon_name: &item.icon_name,
+            icon_pixmap: item.icon_pixmap.as_ref(),
+            attention: item.status == crate::tray::TrayStatus::NeedsAttention,
+            passive: item.status == crate::tray::TrayStatus::Passive,
+        })
+        .collect();
+    let clock_label = if state.clock_24h {
+        &tel.clock_date_24h
+    } else {
+        &tel.clock_date_hhmm
+    };
+    let (active_app_name, app_profile) = state.active_top_bar_app_context();
+    let live_app_menu = state.active_app_menu_tree();
+    let menu_on_this_output = state.top_bar_output.is_none_or(|id| id == output_entry.id);
+    let active_top_bar_menu = if menu_on_this_output {
+        state
             .active_top_bar_menu
-            .filter(|m| *m != crate::shell_render::TopBarMenuHit::Go || app_profile.has_go_menu());
-        let top_telemetry = TopBarTelemetry {
-            clock_hhmm: clock_label,
-            battery_percent: tel.power.percentage,
-            has_battery: tel.power.has_battery,
-            ac_online: tel.power.ac_online,
-            battery_charging: tel.power.state == rusty_services::BatteryState::Charging,
-            net_connected: tel.network.connected,
-            wired_connected: tel.network.wired_connected,
-            wifi_connected: tel.network.wifi_connected,
-            wifi_enabled: tel.network.wifi_enabled,
-            wifi_signal_percent: tel.network.wifi_signal_percent,
-            volume_percent: tel.audio.volume_percent,
-            audio_muted: tel.audio.muted,
-            quick_settings_open: state.quick_settings_active,
-            notification_center_open: state.notification_center_open,
-            wifi_open: state.wifi_popover_open,
-            updates_open: state.updates_popover_open,
-            show_updates: state.should_show_top_bar_updates(),
-            update_count: u32::try_from(state.updates_status.total_count).unwrap_or(u32::MAX),
-            update_checking: state.updates_status.state
-                == rusty_services::UpdateCheckState::Checking,
-            rustyos_update_available: state.updates_status.rustyos_available,
-            notification_count: state.notification_count,
-            kbd_layout: &state.active_kbd_layout,
-            tray_items: &tray_views,
-            active_app_name: &active_app_name,
-            app_profile,
-            active_menu: active_top_bar_menu,
-            menu_hover_row: active_top_bar_menu.and(state.top_bar_menu_hover_row),
-            glass_opacity: state.glass_opacity,
-            reduce_transparency: state.reduce_transparency,
-            show_workspaces: state.menubar_show_workspaces,
-            show_tray: state.menubar_show_tray,
-            show_input_source: state.menubar_show_input_source,
-            show_volume: state.menubar_show_volume,
-            show_wifi: state.user_config.menubar_show_wifi,
-            show_battery: state.user_config.menubar_show_battery,
-            show_battery_percentage: state.user_config.menubar_show_battery_percentage,
-            show_bluetooth: state.user_config.menubar_show_bluetooth,
-            bluetooth_powered: tel.bluetooth.powered,
-            mic_active: tel.device_usage.mic_active,
-            camera_active: tel.device_usage.camera_active,
-            recording_active: !state.active_screencasts.is_empty(),
-            backdrop: state
-                .user_config
-                .menubar_adaptive_contrast
-                .then(|| shape_cache.wallpaper_top_bar_backdrop())
-                .flatten(),
-            quick_popover: state.top_bar_quick_popover,
-            app_menu_tree: live_app_menu.as_ref(),
-        };
+            .filter(|m| *m != crate::shell_render::TopBarMenuHit::Go || app_profile.has_go_menu())
+    } else {
+        None
+    };
+    let bar_backdrop = state
+        .user_config
+        .menubar_adaptive_contrast
+        .then(|| shape_cache.wallpaper_top_bar_backdrop())
+        .flatten();
+    let base_top_telemetry = TopBarTelemetry {
+        clock_hhmm: clock_label,
+        battery_percent: tel.power.percentage,
+        has_battery: tel.power.has_battery,
+        ac_online: tel.power.ac_online,
+        battery_charging: tel.power.state == rusty_services::BatteryState::Charging,
+        net_connected: tel.network.connected,
+        wired_connected: tel.network.wired_connected,
+        wifi_connected: tel.network.wifi_connected,
+        wifi_enabled: tel.network.wifi_enabled,
+        wifi_signal_percent: tel.network.wifi_signal_percent,
+        volume_percent: tel.audio.volume_percent,
+        audio_muted: tel.audio.muted,
+        quick_settings_open: state.quick_settings_active && menu_on_this_output,
+        notification_center_open: state.notification_center_open && menu_on_this_output,
+        wifi_open: state.wifi_popover_open && menu_on_this_output,
+        updates_open: state.updates_popover_open && menu_on_this_output,
+        show_updates: state.should_show_top_bar_updates(),
+        update_count: u32::try_from(state.updates_status.total_count).unwrap_or(u32::MAX),
+        update_checking: state.updates_status.state == rusty_services::UpdateCheckState::Checking,
+        rustyos_update_available: state.updates_status.rustyos_available,
+        notification_count: state.notification_count,
+        kbd_layout: &state.active_kbd_layout,
+        tray_items: &tray_views,
+        active_app_name: &active_app_name,
+        app_profile,
+        active_menu: active_top_bar_menu,
+        menu_hover_row: active_top_bar_menu.and(state.top_bar_menu_hover_row),
+        glass_opacity: state.glass_opacity,
+        reduce_transparency: state.reduce_transparency,
+        show_workspaces: state.menubar_show_workspaces,
+        show_tray: state.menubar_show_tray,
+        show_input_source: state.menubar_show_input_source,
+        show_volume: state.menubar_show_volume,
+        show_wifi: state.user_config.menubar_show_wifi,
+        show_battery: state.user_config.menubar_show_battery,
+        show_battery_percentage: state.user_config.menubar_show_battery_percentage,
+        show_bluetooth: state.user_config.menubar_show_bluetooth,
+        bluetooth_powered: tel.bluetooth.powered,
+        mic_active: tel.device_usage.mic_active,
+        camera_active: tel.device_usage.camera_active,
+        recording_active: !state.active_screencasts.is_empty(),
+        backdrop: bar_backdrop,
+        quick_popover: menu_on_this_output
+            .then_some(state.top_bar_quick_popover)
+            .flatten(),
+        app_menu_tree: live_app_menu.as_ref(),
+    };
 
-        let lock_hidden_preview = matches!(
-            state.user_config.notifications_show_previews,
-            crate::config::NotificationPreviewsMode::Never
-        ) || (state.is_session_locked()
-            && matches!(
+    if is_primary {
+        if let Some((dock_tiles, presented_dock)) = dock_prepared {
+            let top_telemetry = base_top_telemetry;
+
+            let lock_hidden_preview = matches!(
                 state.user_config.notifications_show_previews,
-                crate::config::NotificationPreviewsMode::WhenUnlocked
-            ));
-        let suppress_toasts = state.focus_mode
-            || !state.user_config.notifications_allow
-            || (state.is_session_locked() && !state.user_config.notifications_when_locked);
-        let toast_views: Vec<NotificationToastView<'_>> = if suppress_toasts {
-            Vec::new()
-        } else {
-            state
-                .notifications
-                .iter()
-                .rev()
-                .take(MAX_VISIBLE_NOTIFICATIONS)
-                .enumerate()
-                .map(|(idx, n)| NotificationToastView {
-                    id: n.id,
-                    urgency: n.urgency,
-                    app_key: n.app_key.as_deref(),
-                    app_name: n.app_display_name.as_deref(),
-                    title: &n.title,
-                    body: if lock_hidden_preview {
-                        "Notification preview hidden"
-                    } else {
-                        &n.body
-                    },
-                    hovered: state.hovered_notification_idx == Some(idx),
-                    avatar: n.avatar.as_ref(),
-                })
-                .collect()
-        };
-
-        let launcher_progress = state.launcher_anim.current();
-        let show_launcher = state.launcher_active || launcher_progress > 0.01;
-        let qs_progress = state.quick_settings_anim.current();
-        let show_qs = !show_launcher && (state.quick_settings_active || qs_progress > 0.01);
-        let ov_progress = state.overview_anim.current();
-        let show_ov = !show_launcher && !show_qs && (state.overview_active || ov_progress > 0.01);
-
-        let dock_windows = collect_dock_windows(state, &visible_windows, focused_win, show_ov);
-        let dock_bounces = state.dock_bounce_offsets();
-        let dock_view = state.dock_view_state_for_output(
-            output_entry.id,
-            &dock_tiles,
-            &dock_windows,
-            &dock_bounces,
-            Some(&presented_dock),
-        );
-
-        let switcher_cards: Vec<WindowSwitcherCard<'_>> =
-            state.window_switcher.as_ref().map_or_default(|sw| {
-                sw.window_ids
+                crate::config::NotificationPreviewsMode::Never
+            ) || (state.is_session_locked()
+                && matches!(
+                    state.user_config.notifications_show_previews,
+                    crate::config::NotificationPreviewsMode::WhenUnlocked
+                ));
+            let suppress_toasts = state.focus_mode
+                || !state.user_config.notifications_allow
+                || (state.is_session_locked() && !state.user_config.notifications_when_locked);
+            let toast_views: Vec<NotificationToastView<'_>> = if suppress_toasts {
+                Vec::new()
+            } else {
+                state
+                    .notifications
                     .iter()
-                    .filter_map(|&win_id| {
+                    .rev()
+                    .take(MAX_VISIBLE_NOTIFICATIONS)
+                    .enumerate()
+                    .map(|(idx, n)| NotificationToastView {
+                        id: n.id,
+                        urgency: n.urgency,
+                        app_key: n.app_key.as_deref(),
+                        app_name: n.app_display_name.as_deref(),
+                        title: &n.title,
+                        body: if lock_hidden_preview {
+                            "Notification preview hidden"
+                        } else {
+                            &n.body
+                        },
+                        hovered: state.hovered_notification_idx == Some(idx),
+                        avatar: n.avatar.as_ref(),
+                    })
+                    .collect()
+            };
+
+            let launcher_progress = state.launcher_anim.current();
+            let show_launcher = state.launcher_active || launcher_progress > 0.01;
+            let qs_progress = state.quick_settings_anim.current();
+            let show_qs = !show_launcher && (state.quick_settings_active || qs_progress > 0.01);
+            let ov_progress = state.overview_anim.current();
+            let show_ov =
+                !show_launcher && !show_qs && (state.overview_active || ov_progress > 0.01);
+
+            let dock_windows = collect_dock_windows(state, &visible_windows, focused_win, show_ov);
+            let dock_bounces = state.dock_bounce_offsets();
+            let dock_view = state.dock_view_state_for_output(
+                output_entry.id,
+                &dock_tiles,
+                &dock_windows,
+                &dock_bounces,
+                Some(&presented_dock),
+            );
+
+            let switcher_cards: Vec<WindowSwitcherCard<'_>> =
+                state.window_switcher.as_ref().map_or_default(|sw| {
+                    sw.window_ids
+                        .iter()
+                        .filter_map(|&win_id| {
+                            dock_windows
+                                .iter()
+                                .find(|entry| entry.id == win_id)
+                                .map(|entry| WindowSwitcherCard {
+                                    title: &entry.title,
+                                    badge: &entry.badge,
+                                    window_id: entry.id,
+                                    icon_name: entry.icon_name.as_deref(),
+                                    toplevel_icon: entry.toplevel_icon.as_ref(),
+                                    minimized: entry.minimized,
+                                })
+                        })
+                        .collect()
+                });
+            let switcher_view = state.window_switcher.as_ref().and_then(|sw| {
+                (!switcher_cards.is_empty()).then_some(WindowSwitcherRenderState {
+                    cards: &switcher_cards,
+                    selected: sw.selected.min(switcher_cards.len() - 1),
+                    hovered: sw.hovered.filter(|&i| i < switcher_cards.len()),
+                    hovered_close: sw.hovered_close.filter(|&i| i < switcher_cards.len()),
+                })
+            });
+
+            let (win_start, visible_items) = if show_launcher {
+                state.launcher.visible_window(5)
+            } else {
+                (0, Vec::new())
+            };
+            let cursor_offset_x = if show_launcher && !state.launcher.query.is_empty() {
+                text_cache.measure_text(&state.launcher.query, 14.5).0
+            } else {
+                0
+            };
+            let spotlight_view = show_launcher.then_some(SpotlightRenderState {
+                query: &state.launcher.query,
+                selected_in_window: state.launcher.selected_index.saturating_sub(win_start),
+                cursor_offset_x,
+                items: &visible_items,
+                progress: launcher_progress,
+            });
+
+            let qs_view = show_qs.then(|| QuickSettingsRenderState {
+                layout_mode: layout_str,
+                reduced_motion: state.animations.reduced_motion(),
+                network_label: &tel.network.status_label,
+                net_connected: tel.network.connected,
+                wifi_enabled: tel.network.wifi_enabled,
+                wifi_connected: tel.network.wifi_connected,
+                wifi_ssid: tel.network.wifi_ssid.as_deref(),
+                wifi_signal_percent: tel.network.wifi_signal_percent,
+                bt_available: tel.bluetooth.available,
+                bt_powered: tel.bluetooth.powered,
+                bt_label: &tel.bluetooth.status_label,
+                battery_percent: tel.power.percentage,
+                has_battery: tel.power.has_battery,
+                ac_online: tel.power.ac_online,
+                battery_charging: tel.power.state == rusty_services::BatteryState::Charging,
+                brightness_available: tel.brightness.available,
+                brightness_percent: tel.brightness.percentage,
+                volume_percent: tel.audio.volume_percent,
+                audio_muted: tel.audio.muted,
+                audio_output_name: &tel.audio.active_output_name,
+                media_active: tel.media.active,
+                media_playing: tel.media.playing,
+                media_title: &tel.media.title,
+                focus_mode: state.focus_mode,
+                frame_p50_us: state.frame_timing.interval_p50_us(),
+                window_count,
+                progress: qs_progress,
+                glass_opacity: state.glass_opacity,
+                reduce_transparency: state.reduce_transparency,
+            });
+
+            let overview_spaces = if show_ov {
+                state.overview_workspace_spaces()
+            } else {
+                Vec::new()
+            };
+            let overview_filtered_windows: Option<Vec<DockWindowEntry>> =
+                if show_ov && state.overview_filter_app.is_some() {
+                    let allowed: std::collections::HashSet<_> =
+                        state.overview_window_ids().into_iter().collect();
+                    Some(
                         dock_windows
                             .iter()
-                            .find(|entry| entry.id == win_id)
-                            .map(|entry| WindowSwitcherCard {
-                                title: &entry.title,
-                                badge: &entry.badge,
-                                window_id: entry.id,
-                                icon_name: entry.icon_name.as_deref(),
-                                toplevel_icon: entry.toplevel_icon.as_ref(),
-                                minimized: entry.minimized,
-                            })
-                    })
-                    .collect()
+                            .filter(|w| allowed.contains(&w.id))
+                            .cloned()
+                            .collect(),
+                    )
+                } else {
+                    None
+                };
+            let overview_filter_label = show_ov
+                .then_some(state.overview_filter_app.as_deref())
+                .flatten()
+                .map(|key| {
+                    format!(
+                        "App Expose: {}",
+                        crate::shell_render::dock_label_for_key(key)
+                    )
+                });
+            let ov_windows = overview_filtered_windows
+                .as_deref()
+                .unwrap_or(&dock_windows);
+            #[allow(clippy::cast_possible_truncation)]
+            let ov_dragging_card = state.overview_drag.as_ref().and_then(|drag| {
+                drag.dragging.then(|| {
+                    let dx = (drag.current_pos.x - drag.start_pos.x).round() as i32;
+                    let dy = (drag.current_pos.y - drag.start_pos.y).round() as i32;
+                    (drag.card_index, Point::from((dx, dy)))
+                })
             });
-        let switcher_view = state.window_switcher.as_ref().and_then(|sw| {
-            (!switcher_cards.is_empty()).then_some(WindowSwitcherRenderState {
-                cards: &switcher_cards,
-                selected: sw.selected.min(switcher_cards.len() - 1),
-                hovered: sw.hovered.filter(|&i| i < switcher_cards.len()),
-                hovered_close: sw.hovered_close.filter(|&i| i < switcher_cards.len()),
-            })
-        });
-
-        let (win_start, visible_items) = if show_launcher {
-            state.launcher.visible_window(5)
-        } else {
-            (0, Vec::new())
-        };
-        let cursor_offset_x = if show_launcher && !state.launcher.query.is_empty() {
-            text_cache.measure_text(&state.launcher.query, 14.5).0
-        } else {
-            0
-        };
-        let spotlight_view = show_launcher.then_some(SpotlightRenderState {
-            query: &state.launcher.query,
-            selected_in_window: state.launcher.selected_index.saturating_sub(win_start),
-            cursor_offset_x,
-            items: &visible_items,
-            progress: launcher_progress,
-        });
-
-        let qs_view = show_qs.then(|| QuickSettingsRenderState {
-            layout_mode: layout_str,
-            reduced_motion: state.animations.reduced_motion(),
-            network_label: &tel.network.status_label,
-            net_connected: tel.network.connected,
-            wifi_enabled: tel.network.wifi_enabled,
-            wifi_connected: tel.network.wifi_connected,
-            wifi_ssid: tel.network.wifi_ssid.as_deref(),
-            wifi_signal_percent: tel.network.wifi_signal_percent,
-            bt_available: tel.bluetooth.available,
-            bt_powered: tel.bluetooth.powered,
-            bt_label: &tel.bluetooth.status_label,
-            battery_percent: tel.power.percentage,
-            has_battery: tel.power.has_battery,
-            ac_online: tel.power.ac_online,
-            battery_charging: tel.power.state == rusty_services::BatteryState::Charging,
-            brightness_available: tel.brightness.available,
-            brightness_percent: tel.brightness.percentage,
-            volume_percent: tel.audio.volume_percent,
-            audio_muted: tel.audio.muted,
-            audio_output_name: &tel.audio.active_output_name,
-            media_active: tel.media.active,
-            media_playing: tel.media.playing,
-            media_title: &tel.media.title,
-            focus_mode: state.focus_mode,
-            frame_p50_us: state.frame_timing.interval_p50_us(),
-            window_count,
-            progress: qs_progress,
-            glass_opacity: state.glass_opacity,
-            reduce_transparency: state.reduce_transparency,
-        });
-
-        let overview_spaces = if show_ov {
-            state.overview_workspace_spaces()
-        } else {
-            Vec::new()
-        };
-        let overview_filtered_windows: Option<Vec<DockWindowEntry>> =
-            if show_ov && state.overview_filter_app.is_some() {
-                let allowed: std::collections::HashSet<_> =
-                    state.overview_window_ids().into_iter().collect();
-                Some(
-                    dock_windows
-                        .iter()
-                        .filter(|w| allowed.contains(&w.id))
-                        .cloned()
-                        .collect(),
-                )
-            } else {
-                None
-            };
-        let overview_filter_label = show_ov
-            .then_some(state.overview_filter_app.as_deref())
-            .flatten()
-            .map(|key| {
-                format!(
-                    "App Expose: {}",
-                    crate::shell_render::dock_label_for_key(key)
-                )
+            let ov_view = show_ov.then_some(OverviewRenderState {
+                active_workspace: active_ws,
+                layout_mode: layout_str,
+                windows: ov_windows,
+                spaces: &overview_spaces,
+                progress: ov_progress,
+                filter_label: overview_filter_label.as_deref(),
+                hovered_card: state
+                    .overview_hovered_card
+                    .filter(|&i| i < ov_windows.len()),
+                hovered_close: state
+                    .overview_hovered_close
+                    .filter(|&i| i < ov_windows.len()),
+                hovered_space: state.overview_hovered_space,
+                selected_card: state
+                    .overview_selected_card
+                    .filter(|&i| i < ov_windows.len()),
+                drag_target_workspace: state
+                    .overview_drag
+                    .as_ref()
+                    .filter(|d| d.dragging)
+                    .and_then(|d| d.target_workspace),
+                dragging_card: ov_dragging_card.filter(|(idx, _)| *idx < ov_windows.len()),
             });
-        let ov_windows = overview_filtered_windows
-            .as_deref()
-            .unwrap_or(&dock_windows);
-        #[allow(clippy::cast_possible_truncation)]
-        let ov_dragging_card = state.overview_drag.as_ref().and_then(|drag| {
-            drag.dragging.then(|| {
-                let dx = (drag.current_pos.x - drag.start_pos.x).round() as i32;
-                let dy = (drag.current_pos.y - drag.start_pos.y).round() as i32;
-                (drag.card_index, Point::from((dx, dy)))
-            })
-        });
-        let ov_view = show_ov.then_some(OverviewRenderState {
-            active_workspace: active_ws,
-            layout_mode: layout_str,
-            windows: ov_windows,
-            spaces: &overview_spaces,
-            progress: ov_progress,
-            filter_label: overview_filter_label.as_deref(),
-            hovered_card: state
-                .overview_hovered_card
-                .filter(|&i| i < ov_windows.len()),
-            hovered_close: state
-                .overview_hovered_close
-                .filter(|&i| i < ov_windows.len()),
-            hovered_space: state.overview_hovered_space,
-            selected_card: state
-                .overview_selected_card
-                .filter(|&i| i < ov_windows.len()),
-            drag_target_workspace: state
-                .overview_drag
+
+            let polkit_display = state
+                .polkit_prompt
                 .as_ref()
-                .filter(|d| d.dragging)
-                .and_then(|d| d.target_workspace),
-            dragging_card: ov_dragging_card.filter(|(idx, _)| *idx < ov_windows.len()),
-        });
+                .map(|pk| state.polkit_password.visible_or_masked(pk.echo_on, 48));
+            let polkit_view = state
+                .polkit_prompt
+                .as_ref()
+                .zip(polkit_display.as_deref())
+                .map(|(pk, display)| PolkitPromptRenderState {
+                    message: &pk.message,
+                    action_id: &pk.action_id,
+                    identity_user: &pk.identity_user,
+                    prompt_label: &pk.prompt_label,
+                    input_display: display,
+                    checking: pk.checking,
+                    error_message: pk.error_message.as_deref(),
+                    info_message: pk.info_message.as_deref(),
+                });
 
-        let polkit_display = state
-            .polkit_prompt
-            .as_ref()
-            .map(|pk| state.polkit_password.visible_or_masked(pk.echo_on, 48));
-        let polkit_view = state
-            .polkit_prompt
-            .as_ref()
-            .zip(polkit_display.as_deref())
-            .map(|(pk, display)| PolkitPromptRenderState {
-                message: &pk.message,
-                action_id: &pk.action_id,
-                identity_user: &pk.identity_user,
-                prompt_label: &pk.prompt_label,
-                input_display: display,
-                checking: pk.checking,
-                error_message: pk.error_message.as_deref(),
-                info_message: pk.info_message.as_deref(),
-            });
+            let portal_rows: Vec<PortalSourceRow<'_>> =
+                state.portal_prompt.as_ref().map_or_default(|p| {
+                    p.candidates
+                        .iter()
+                        .map(|c| PortalSourceRow {
+                            label: &c.label,
+                            detail: &c.detail,
+                            is_window: c.is_window,
+                        })
+                        .collect()
+                });
+            let portal_view = state
+                .portal_prompt
+                .as_ref()
+                .map(|p| PortalPromptRenderState {
+                    app_id: &p.app_id,
+                    is_screencast: p.is_screencast,
+                    include_cursor: p.include_cursor,
+                    cursor_mode_editable: p.cursor_mode_editable,
+                    rows: &portal_rows,
+                    selected: p.selected,
+                });
 
-        let portal_rows: Vec<PortalSourceRow<'_>> =
-            state.portal_prompt.as_ref().map_or_default(|p| {
-                p.candidates
-                    .iter()
-                    .map(|c| PortalSourceRow {
-                        label: &c.label,
-                        detail: &c.detail,
-                        is_window: c.is_window,
-                    })
-                    .collect()
-            });
-        let portal_view = state
-            .portal_prompt
-            .as_ref()
-            .map(|p| PortalPromptRenderState {
-                app_id: &p.app_id,
-                is_screencast: p.is_screencast,
-                include_cursor: p.include_cursor,
-                cursor_mode_editable: p.cursor_mode_editable,
-                rows: &portal_rows,
-                selected: p.selected,
-            });
+            let context_menu_view = state
+                .context_menu
+                .as_ref()
+                .filter(|ctx| ctx.output_id == output_entry.id);
+            let dock_stack_view = state.dock_stack_render_state_for_output(output_entry.id);
+            let updates_view = state
+                .updates_popover_open
+                .then(|| state.updates_render_state(logical_size.w));
+            let wifi_view = state
+                .wifi_popover_open
+                .then(|| state.wifi_render_state(logical_size.w, &tel.network));
+            let quick_pop_view = state
+                .top_bar_quick_popover
+                .map(|kind| state.top_bar_quick_popover_render_state(logical_size.w, kind, &tel));
+            let nc_items = state.build_notification_center_items();
+            let nc_view = state
+                .notification_center_open
+                .then(|| state.notification_center_render_state(&nc_items, lock_hidden_preview));
 
-        let context_menu_view = state
-            .context_menu
-            .as_ref()
-            .filter(|ctx| ctx.output_id == output_entry.id);
-        let dock_stack_view = state.dock_stack_render_state_for_output(output_entry.id);
-        let updates_view = state
-            .updates_popover_open
-            .then(|| state.updates_render_state(logical_size.w));
-        let wifi_view = state
-            .wifi_popover_open
-            .then(|| state.wifi_render_state(logical_size.w, &tel.network));
-        let quick_pop_view = state
-            .top_bar_quick_popover
-            .map(|kind| state.top_bar_quick_popover_render_state(logical_size.w, kind, &tel));
-        let nc_items = state.build_notification_center_items();
-        let nc_view = state
-            .notification_center_open
-            .then(|| state.notification_center_render_state(&nc_items, lock_hidden_preview));
+            let overlay = if let Some(pk) = polkit_view.as_ref() {
+                ShellOverlayView::Polkit(pk)
+            } else if let Some(pt) = portal_view.as_ref() {
+                ShellOverlayView::Portal(pt)
+            } else if let Some(sw) = switcher_view.as_ref() {
+                ShellOverlayView::Switcher(sw)
+            } else if let Some(spot) = spotlight_view.as_ref() {
+                ShellOverlayView::Spotlight(spot)
+            } else if let Some(qs) = qs_view.as_ref() {
+                ShellOverlayView::QuickSettings(qs)
+            } else if let Some(up) = updates_view.as_ref() {
+                ShellOverlayView::Updates(up)
+            } else if let Some(wifi) = wifi_view.as_ref() {
+                ShellOverlayView::Wifi(wifi)
+            } else if let Some(qpop) = quick_pop_view.as_ref() {
+                ShellOverlayView::TopBarQuickPopover(qpop)
+            } else if let Some(nc) = nc_view.as_ref() {
+                ShellOverlayView::NotificationCenter(nc)
+            } else if let Some(ctx) = context_menu_view {
+                ShellOverlayView::ContextMenu(ctx)
+            } else if let Some(stack) = dock_stack_view.as_ref() {
+                ShellOverlayView::DockStack(stack)
+            } else if let Some(ov) = ov_view.as_ref() {
+                ShellOverlayView::Overview(ov)
+            } else if let Some(pick) = state.portal_pick_color.as_ref() {
+                ShellOverlayView::PickColor(&pick.app_id)
+            } else if let Some(hud) = state.screenshot_hud.as_ref() {
+                ShellOverlayView::ScreenshotHud(hud)
+            } else {
+                ShellOverlayView::None
+            };
 
-        let overlay = if let Some(pk) = polkit_view.as_ref() {
-            ShellOverlayView::Polkit(pk)
-        } else if let Some(pt) = portal_view.as_ref() {
-            ShellOverlayView::Portal(pt)
-        } else if let Some(sw) = switcher_view.as_ref() {
-            ShellOverlayView::Switcher(sw)
-        } else if let Some(spot) = spotlight_view.as_ref() {
-            ShellOverlayView::Spotlight(spot)
-        } else if let Some(qs) = qs_view.as_ref() {
-            ShellOverlayView::QuickSettings(qs)
-        } else if let Some(up) = updates_view.as_ref() {
-            ShellOverlayView::Updates(up)
-        } else if let Some(wifi) = wifi_view.as_ref() {
-            ShellOverlayView::Wifi(wifi)
-        } else if let Some(qpop) = quick_pop_view.as_ref() {
-            ShellOverlayView::TopBarQuickPopover(qpop)
-        } else if let Some(nc) = nc_view.as_ref() {
-            ShellOverlayView::NotificationCenter(nc)
-        } else if let Some(ctx) = context_menu_view {
-            ShellOverlayView::ContextMenu(ctx)
-        } else if let Some(stack) = dock_stack_view.as_ref() {
-            ShellOverlayView::DockStack(stack)
-        } else if let Some(ov) = ov_view.as_ref() {
-            ShellOverlayView::Overview(ov)
-        } else if let Some(pick) = state.portal_pick_color.as_ref() {
-            ShellOverlayView::PickColor(&pick.app_id)
-        } else if let Some(hud) = state.screenshot_hud.as_ref() {
-            ShellOverlayView::ScreenshotHud(hud)
-        } else {
-            ShellOverlayView::None
-        };
-
-        if let ShellOverlayView::Switcher(sw) = overlay {
-            let sw_ids: Vec<rusty_wm::WindowId> = sw.cards.iter().map(|c| c.window_id).collect();
-            capture_window_thumbnails(
-                renderer,
-                text_cache,
-                shape_cache,
-                state,
-                output_loc,
-                &output_windows,
-                focused_win,
-                output_scale,
-                &sw_ids,
-            );
-        }
-        let overlay_elements = crate::shell_render::generate_shell_foreground_overlay_elements(
-            text_cache,
-            shape_cache,
-            renderer,
-            logical_size,
-            &top_telemetry,
-            overlay,
-            &toast_views,
-        );
-        let chrome_elements = if !top_layer_surfaces_present && !hide_chrome_for_fullscreen {
-            crate::shell_render::generate_shell_chrome_composite_elements(
+            if let ShellOverlayView::Switcher(sw) = overlay {
+                let sw_ids: Vec<rusty_wm::WindowId> =
+                    sw.cards.iter().map(|c| c.window_id).collect();
+                capture_window_thumbnails(
+                    renderer,
+                    text_cache,
+                    shape_cache,
+                    state,
+                    output_loc,
+                    &output_windows,
+                    focused_win,
+                    output_scale,
+                    &sw_ids,
+                );
+            }
+            let overlay_elements = crate::shell_render::generate_shell_foreground_overlay_elements(
                 text_cache,
                 shape_cache,
                 renderer,
                 logical_size,
-                active_ws,
-                layout_str,
-                &dock_view,
                 &top_telemetry,
                 overlay,
-            )
-        } else {
-            Vec::new()
-        };
+                &toast_views,
+            );
+            let chrome_elements = if !top_layer_surfaces_present && !hide_chrome_for_fullscreen {
+                crate::shell_render::generate_shell_chrome_composite_elements(
+                    text_cache,
+                    shape_cache,
+                    renderer,
+                    logical_size,
+                    active_ws,
+                    layout_str,
+                    &dock_view,
+                    &top_telemetry,
+                    overlay,
+                )
+            } else {
+                Vec::new()
+            };
 
-        let mut popup_elements = Vec::new();
-        push_xwayland_override_redirect_elements(
-            &mut popup_elements,
-            renderer,
-            state,
-            output_geo,
-            output_scale,
-        );
-        push_client_popup_elements(
-            &mut popup_elements,
-            renderer,
-            shape_cache,
-            state,
-            output_loc,
-            output_scale,
-            &output_windows,
-            fullscreen_win,
-        );
-        render_list.extend(overlay_elements);
-        render_list.extend(top_layer_elements);
-        render_list.extend(popup_elements);
-        render_list.extend(chrome_elements);
-
-        let overview_overlay = if matches!(overlay, ShellOverlayView::ContextMenu(_))
-            && let Some(ov) = ov_view.as_ref()
-        {
-            ShellOverlayView::Overview(ov)
-        } else {
-            overlay
-        };
-        if let ShellOverlayView::Overview(ov) = overview_overlay {
-            let ov_ids: Vec<rusty_wm::WindowId> = ov.windows.iter().map(|w| w.id).collect();
-            capture_window_thumbnails(
+            let mut popup_elements = Vec::new();
+            push_xwayland_override_redirect_elements(
+                &mut popup_elements,
                 renderer,
-                text_cache,
+                state,
+                output_geo,
+                output_scale,
+            );
+            push_client_popup_elements(
+                &mut popup_elements,
+                renderer,
                 shape_cache,
                 state,
                 output_loc,
-                &output_windows,
-                focused_win,
                 output_scale,
-                &ov_ids,
+                &output_windows,
+                fullscreen_win,
             );
+            render_list.extend(overlay_elements);
+            render_list.extend(top_layer_elements);
+            render_list.extend(popup_elements);
+            render_list.extend(chrome_elements);
+
+            let overview_overlay = if matches!(overlay, ShellOverlayView::ContextMenu(_))
+                && let Some(ov) = ov_view.as_ref()
+            {
+                ShellOverlayView::Overview(ov)
+            } else {
+                overlay
+            };
+            if let ShellOverlayView::Overview(ov) = overview_overlay {
+                let ov_ids: Vec<rusty_wm::WindowId> = ov.windows.iter().map(|w| w.id).collect();
+                capture_window_thumbnails(
+                    renderer,
+                    text_cache,
+                    shape_cache,
+                    state,
+                    output_loc,
+                    &output_windows,
+                    focused_win,
+                    output_scale,
+                    &ov_ids,
+                );
+            }
+            render_list.extend(crate::shell_render::generate_shell_overview_elements(
+                text_cache,
+                shape_cache,
+                renderer,
+                logical_size,
+                &top_telemetry,
+                overview_overlay,
+            ));
         }
-        render_list.extend(crate::shell_render::generate_shell_overview_elements(
-            text_cache,
-            shape_cache,
-            renderer,
-            logical_size,
-            &top_telemetry,
-            overview_overlay,
-        ));
     } else {
-        let secondary_dock_prepared = dock_visible_here.then(|| {
-            let dock_tiles = state.build_dock_tiles();
-            let presented_dock =
-                state.sync_dock_presentation_for_output(output_entry.id, &dock_tiles);
-            (dock_tiles, presented_dock)
-        });
+        let secondary_dock_prepared = dock_prepared;
         let secondary_context_menu = (!top_layer_surfaces_present
             && fullscreen_win.is_none()
             && !state.greeter_mode
@@ -1484,15 +1496,27 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
             &output_windows,
             fullscreen_win,
         );
-        if let Some((ref dock_tiles, ref presented_dock)) = secondary_dock_prepared {
+        let secondary_chrome_allowed = !top_layer_surfaces_present
+            && fullscreen_win.is_none()
+            && !state.greeter_mode
+            && !state.should_hide_shell_chrome_for_fullscreen_on(output_entry.id)
+            && !state.is_session_locked()
+            && state.polkit_prompt.is_none()
+            && state.portal_prompt.is_none();
+        if secondary_chrome_allowed {
             let dock_bounces = state.dock_bounce_offsets();
-            let dock_view = state.dock_view_state_for_output(
-                output_entry.id,
-                dock_tiles,
-                &[],
-                &dock_bounces,
-                Some(presented_dock),
-            );
+            let dock_view_owned =
+                secondary_dock_prepared
+                    .as_ref()
+                    .map(|(dock_tiles, presented_dock)| {
+                        state.dock_view_state_for_output(
+                            output_entry.id,
+                            dock_tiles,
+                            &[],
+                            &dock_bounces,
+                            Some(presented_dock),
+                        )
+                    });
             let secondary_overlay = if let Some(ctx) = secondary_context_menu {
                 ShellOverlayView::ContextMenu(ctx)
             } else if let Some(ref stack) = secondary_stack {
@@ -1500,16 +1524,19 @@ pub(crate) fn build_frame_render_list_for_output_with_cursor(
             } else {
                 ShellOverlayView::None
             };
-            render_list.extend(crate::shell_render::generate_dock_only_chrome_elements(
-                text_cache,
-                shape_cache,
-                renderer,
-                logical_size,
-                &dock_view,
-                state.glass_opacity,
-                state.reduce_transparency,
-                secondary_overlay,
-            ));
+            render_list.extend(
+                crate::shell_render::generate_secondary_shell_chrome_elements(
+                    text_cache,
+                    shape_cache,
+                    renderer,
+                    logical_size,
+                    active_ws,
+                    layout_str,
+                    dock_view_owned.as_ref(),
+                    &base_top_telemetry,
+                    secondary_overlay,
+                ),
+            );
         }
     }
 

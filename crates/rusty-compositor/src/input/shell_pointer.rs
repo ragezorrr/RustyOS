@@ -408,7 +408,7 @@ impl RustyCompositorState {
     }
 
     #[allow(clippy::too_many_lines)]
-    pub(super) fn update_shell_hover_states(&mut self, pos: Point<f64, Logical>) {
+    pub(crate) fn update_shell_hover_states(&mut self, pos: Point<f64, Logical>) {
         if self.context_menu.is_some() {
             self.update_context_menu_hover_at(pos);
             return;
@@ -424,21 +424,48 @@ impl RustyCompositorState {
         let ptr_output = self
             .output_under(pos)
             .unwrap_or_else(|| self.output_map.primary().id);
+        let (_, _, ptr_size, ptr_local_x, ptr_local_y) = self.output_local_coords(pos);
+        let ptr_chrome_hidden = self.has_foreground_layer_surfaces_on_id(ptr_output)
+            || self.should_hide_shell_chrome_for_fullscreen_on(ptr_output);
         let fullscreen_active = self.topmost_fullscreen_window_on(ptr_output).is_some();
 
+        let prev_menu = self.active_top_bar_menu;
         let prev_menu_hover = self.top_bar_menu_hover_row;
         let prev_notif_hover = self.hovered_notification_idx;
         let prev_tl_hover = self.hovered_traffic_light_window;
 
-        self.top_bar_menu_hover_row = if is_on_primary && !chrome_hidden {
-            if let Some(menu) = self.active_top_bar_menu {
+        let menu_output = self
+            .top_bar_output
+            .unwrap_or_else(|| self.output_map.primary().id);
+        self.top_bar_menu_hover_row = if ptr_output == menu_output && !ptr_chrome_hidden {
+            if let Some(mut menu) = self.active_top_bar_menu {
                 let (active_app, app_profile) = self.active_top_bar_app_context();
-                crate::shell_render::check_top_bar_menu_popover_hover_row_for_profile(
+                let live_app_menu = self.active_app_menu_tree();
+                let max_x = self.top_bar_max_left_menu_x(ptr_size.w);
+                if ptr_local_y >= 0.0
+                    && ptr_local_y <= f64::from(crate::shell_render::TOP_BAR_HEIGHT)
+                    && let Some(hovered_header) =
+                        crate::shell_render::check_top_bar_menu_click_for_width(
+                            app_profile,
+                            &active_app,
+                            live_app_menu.as_ref(),
+                            max_x,
+                            ptr_local_x,
+                            ptr_local_y,
+                        )
+                    && hovered_header != menu
+                {
+                    menu = hovered_header;
+                    self.active_top_bar_menu = Some(hovered_header);
+                }
+                crate::shell_render::check_top_bar_menu_popover_hover_row_for_width(
                     app_profile,
                     &active_app,
                     menu,
-                    local_x,
-                    local_y,
+                    live_app_menu.as_ref(),
+                    max_x,
+                    ptr_local_x,
+                    ptr_local_y,
                 )
             } else {
                 None
@@ -578,7 +605,8 @@ impl RustyCompositorState {
             }
         }
 
-        if self.top_bar_menu_hover_row != prev_menu_hover
+        if self.active_top_bar_menu != prev_menu
+            || self.top_bar_menu_hover_row != prev_menu_hover
             || self.hovered_notification_idx != prev_notif_hover
             || self.hovered_traffic_light_window != prev_tl_hover
         {
@@ -807,16 +835,23 @@ impl RustyCompositorState {
     ) -> bool {
         let (active_app_name, app_profile) = self.active_top_bar_app_context();
         let live_app_menu = self.active_app_menu_tree();
-        let x = self.pointer_location.x;
-        let y = self.pointer_location.y;
+        let (output_id, is_primary, local_size, x, y) =
+            self.output_local_coords(self.pointer_location);
+        let eff_width = if is_primary {
+            output_width
+        } else {
+            local_size.w
+        };
+        let max_left_x = self.top_bar_max_left_menu_x(eff_width);
         let was_menu_open = self.active_top_bar_menu.is_some();
 
         if let Some(open_menu) = self.active_top_bar_menu {
-            match crate::shell_render::check_top_bar_menu_popover_click_with_app_menu(
+            match crate::shell_render::check_top_bar_menu_popover_click_for_width(
                 app_profile,
                 &active_app_name,
                 open_menu,
                 live_app_menu.as_ref(),
+                max_left_x,
                 x,
                 y,
             ) {
@@ -836,13 +871,15 @@ impl RustyCompositorState {
             }
         }
 
-        if let Some(menu_hit) = crate::shell_render::check_top_bar_menu_click_with_app_menu(
+        if let Some(menu_hit) = crate::shell_render::check_top_bar_menu_click_for_width(
             app_profile,
             &active_app_name,
             live_app_menu.as_ref(),
+            max_left_x,
             x,
             y,
         ) {
+            self.top_bar_output = Some(output_id);
             self.toggle_top_bar_menu(menu_hit);
             return true;
         }
@@ -873,7 +910,8 @@ impl RustyCompositorState {
             return true;
         }
 
-        if self.handle_top_bar_right_cluster_click(output_width, button, x, y) {
+        if self.handle_top_bar_right_cluster_click(eff_width, button, x, y) {
+            self.top_bar_output = Some(output_id);
             return true;
         }
 

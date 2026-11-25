@@ -2603,3 +2603,115 @@ fn dock_proximity_magnification_wave_symmetry_neighbors_and_edge_clamp() {
         "Files, active, 3 windows, 5 unread"
     );
 }
+
+#[test]
+fn topbar_overflow_collapses_trailing_menus_into_overflow_pill() {
+    let (visible, overflowed) =
+        visible_top_bar_menu_slots(TopBarAppProfile::Files, "Files", None, 240);
+    assert!(
+        visible
+            .iter()
+            .any(|(hit, title, _, _)| *hit == TopBarMenuHit::Overflow && title == "»")
+    );
+    assert_ne!(overflowed.len(), 0);
+
+    let overflow_entries = resolve_top_bar_menu_entries_for_width(
+        TopBarAppProfile::Files,
+        "Files",
+        TopBarMenuHit::Overflow,
+        None,
+        240,
+    );
+    assert!(
+        overflow_entries
+            .iter()
+            .any(|e| matches!(e, ResolvedTopBarMenuItem::Item { enabled: true, .. }))
+    );
+}
+
+#[test]
+fn topbar_hover_row_tracks_dynamic_app_menu_and_skips_separators() {
+    use crate::app_menu::{AppMenuItem, AppMenuSection, AppMenuTree};
+
+    let tree = AppMenuTree {
+        service_name: "__wayland__".to_owned(),
+        object_path: "surf-1".to_owned(),
+        sections: vec![AppMenuSection {
+            id: 1,
+            title: "Document".to_owned(),
+            items: vec![
+                AppMenuItem {
+                    id: 11,
+                    label: "Save".to_owned(),
+                    shortcut: Some("Ctrl+S".to_owned()),
+                    enabled: true,
+                    separator: false,
+                    checked: None,
+                },
+                AppMenuItem {
+                    id: 12,
+                    label: String::new(),
+                    shortcut: None,
+                    enabled: false,
+                    separator: true,
+                    checked: None,
+                },
+                AppMenuItem {
+                    id: 13,
+                    label: "Export...".to_owned(),
+                    shortcut: None,
+                    enabled: true,
+                    separator: false,
+                    checked: None,
+                },
+            ],
+        }],
+    };
+    let entries = resolve_top_bar_menu_entries_for_width(
+        TopBarAppProfile::Files,
+        "Viewer",
+        TopBarMenuHit::Dynamic(0),
+        Some(&tree),
+        1200,
+    );
+    assert!(matches!(
+        &entries[0],
+        ResolvedTopBarMenuItem::Item {
+            shortcut: Some(s),
+            ..
+        } if s == "Ctrl+S"
+    ));
+    let (px, py, _, _) = top_bar_menu_popover_rect_for_width(
+        TopBarAppProfile::Files,
+        "Viewer",
+        TopBarMenuHit::Dynamic(0),
+        Some(&tree),
+        1200,
+    );
+    assert_eq!(
+        check_top_bar_menu_popover_hover_row_for_width(
+            TopBarAppProfile::Files,
+            "Viewer",
+            TopBarMenuHit::Dynamic(0),
+            Some(&tree),
+            1200,
+            f64::from(px + 20),
+            f64::from(py + rusty_ui::menu::VERTICAL_CONTENT_MARGIN + 6),
+        ),
+        Some(0)
+    );
+    assert_eq!(
+        check_top_bar_menu_popover_hover_row_for_width(
+            TopBarAppProfile::Files,
+            "Viewer",
+            TopBarMenuHit::Dynamic(0),
+            Some(&tree),
+            1200,
+            f64::from(px + 20),
+            f64::from(
+                py + rusty_ui::menu::VERTICAL_CONTENT_MARGIN + rusty_ui::menu::ROW_HEIGHT + 2
+            ),
+        ),
+        None
+    );
+}

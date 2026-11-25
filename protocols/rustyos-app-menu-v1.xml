@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<protocol name="rustyos_app_menu_v1">
+  <copyright><![CDATA[
+    SPDX-FileCopyrightText: 2026 RustyOS Contributors
+    SPDX-License-Identifier: MIT OR Apache-2.0
+  ]]></copyright>
+
+  <interface name="rustyos_app_menu_manager_v1" version="1">
+    <description summary="Global Menu Bar export manager for native Wayland applications">
+      Allows Wayland clients to export structured File/Edit/View/Window/Help
+      menu bar sections for a toplevel wl_surface and receive item activation
+      events directly from the compositor Menu Bar.
+    </description>
+
+    <request name="destroy" type="destructor">
+      <description summary="destroy the manager object"/>
+    </request>
+
+    <request name="get_menu_surface">
+      <description summary="attach a global menu exporter to a wl_surface">
+        Creates a rustyos_surface_app_menu_v1 controller bound to the given surface.
+      </description>
+      <arg name="id" type="new_id" interface="rustyos_surface_app_menu_v1" summary="new menu controller"/>
+      <arg name="surface" type="object" interface="wl_surface" summary="target window wl_surface"/>
+    </request>
+  </interface>
+
+  <interface name="rustyos_surface_app_menu_v1" version="1">
+    <description summary="Per-surface Menu Bar tree exporter and activation receiver">
+      Clients bracket updates with begin_update -> begin_section / add_item -> commit.
+      When the user clicks an exported item in the compositor Menu Bar, the
+      compositor emits item_activated with the application-defined item id.
+    </description>
+
+    <request name="destroy" type="destructor">
+      <description summary="destroy the menu controller and clear its exported menus"/>
+    </request>
+
+    <request name="begin_update">
+      <description summary="clear pending menu sections prior to repopulating them"/>
+    </request>
+
+    <request name="begin_section">
+      <description summary="start a new top-level Menu Bar section"/>
+      <arg name="id" type="int" summary="section identifier"/>
+      <arg name="title" type="string" summary="Menu Bar header title"/>
+    </request>
+
+    <request name="add_item">
+      <description summary="append an item or separator to the current section">
+        checked semantics: -1 = none, 0 = unchecked, 1 = checked.
+      </description>
+      <arg name="id" type="int" summary="application action identifier"/>
+      <arg name="label" type="string" summary="menu row label"/>
+      <arg name="shortcut" type="string" summary="optional shortcut hint or empty string"/>
+      <arg name="enabled" type="uint" summary="1 if interactive, 0 if disabled"/>
+      <arg name="separator" type="uint" summary="1 if horizontal separator, 0 for normal row"/>
+      <arg name="checked" type="int" summary="-1 none, 0 unchecked, 1 checked"/>
+    </request>
+
+    <request name="commit">
+      <description summary="publish pending sections atomically to the compositor Menu Bar"/>
+    </request>
+
+    <event name="item_activated">
+      <description summary="user activated an exported Menu Bar item"/>
+      <arg name="id" type="int" summary="activated application action identifier"/>
+    </event>
+  </interface>
+</protocol>

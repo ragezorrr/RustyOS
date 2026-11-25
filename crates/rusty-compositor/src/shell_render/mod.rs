@@ -58,8 +58,8 @@ mod updates_popover;
 mod wifi_popover;
 
 pub use chrome_shapes::{
-    generate_dock_only_chrome_elements, generate_shell_chrome_composite_elements,
-    generate_shell_overview_elements,
+    generate_dock_only_chrome_elements, generate_secondary_shell_chrome_elements,
+    generate_shell_chrome_composite_elements, generate_shell_overview_elements,
 };
 pub use overlay_shapes::generate_shell_foreground_overlay_elements;
 pub use text_pass::generate_shell_text_elements;
@@ -141,10 +141,14 @@ pub use tokens::{
     compute_dock_radius, usable_work_area, usable_work_area_for_output, usable_work_area_with_dock,
 };
 pub use top_bar::{
-    BarBackdropStyle, analyze_top_bar_backdrop_bgra, check_top_bar_menu_click_with_app_menu,
-    check_top_bar_menu_popover_click_with_app_menu, dynamic_app_menu_slots,
-    prefers_light_foreground, relative_luminance, resolve_top_bar_menu_entries_with_app_menu,
-    top_bar_menu_popover_rect_with_app_menu,
+    BarBackdropStyle, TopBarMenuSlotLayout, TopBarOverflowMenuItem, TopBarVisibleMenuSlot,
+    analyze_top_bar_backdrop_bgra, check_top_bar_menu_click_for_width,
+    check_top_bar_menu_click_with_app_menu, check_top_bar_menu_popover_click_for_width,
+    check_top_bar_menu_popover_click_with_app_menu, check_top_bar_menu_popover_hover_row_for_width,
+    dynamic_app_menu_slots, prefers_light_foreground, relative_luminance,
+    resolve_top_bar_menu_entries_for_width, resolve_top_bar_menu_entries_with_app_menu,
+    top_bar_menu_popover_rect_for_width, top_bar_menu_popover_rect_with_app_menu,
+    visible_top_bar_menu_slots,
 };
 pub use top_bar::{
     MAX_TOP_BAR_TRAY_ITEMS, MAX_VISIBLE_NOTIFICATIONS, MENU_POPOVER_RADIUS, NotificationToastView,

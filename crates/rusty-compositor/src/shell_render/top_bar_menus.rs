@@ -65,7 +65,7 @@ pub enum ResolvedTopBarMenuItem {
     Item {
         label: Cow<'static, str>,
         icon: Option<UiGlyphKind>,
-        shortcut: Option<&'static str>,
+        shortcut: Option<Cow<'static, str>>,
         action: TopBarMenuAction,
         enabled: bool,
     },
@@ -84,7 +84,7 @@ impl From<&TopBarMenuEntry> for ResolvedTopBarMenuItem {
             } => Self::Item {
                 label: Cow::Borrowed(label),
                 icon: *icon,
-                shortcut: *shortcut,
+                shortcut: shortcut.map(Cow::Borrowed),
                 action: *action,
                 enabled: *enabled,
             },
@@ -382,7 +382,10 @@ const fn item(
     ResolvedTopBarMenuItem::Item {
         label: Cow::Borrowed(label),
         icon,
-        shortcut,
+        shortcut: match shortcut {
+            Some(s) => Some(Cow::Borrowed(s)),
+            None => None,
+        },
         action,
         enabled: true,
     }
@@ -774,6 +777,6 @@ pub fn resolve_top_bar_menu_entries(
             .iter()
             .map(ResolvedTopBarMenuItem::from)
             .collect(),
-        TopBarMenuHit::Dynamic(_) => Vec::new(),
+        TopBarMenuHit::Dynamic(_) | TopBarMenuHit::Overflow => Vec::new(),
     }
 }

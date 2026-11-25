@@ -867,13 +867,11 @@ impl RustyCompositorState {
                 return;
             }
 
-            let output_width = self
-                .space
-                .output_geometry(&self.output)
-                .map_or(1280, |geo| geo.size.w);
+            let (ptr_output, _, ptr_size, _, _) = self.output_local_coords(self.pointer_location);
+            let output_width = ptr_size.w;
 
-            let shell_chrome_visible = !self.has_foreground_layer_surfaces()
-                && !self.should_hide_shell_chrome_for_fullscreen();
+            let shell_chrome_visible = !self.has_foreground_layer_surfaces_on_id(ptr_output)
+                && !self.should_hide_shell_chrome_for_fullscreen_on(ptr_output);
 
             // Enforce `xdg_popup` grab before shell chrome/window hit-testing (`RUSTYOS-034`).
             if self

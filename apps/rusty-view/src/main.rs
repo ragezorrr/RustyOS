@@ -23,8 +23,9 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use rusty_app::{
-    AppConfig, AppContext, BTN_LEFT, ConfigureInfo, KeyEvent, Keysym, LiquidGlassConfig,
-    PointerEvent, PointerEventKind, RustyApp, WindowDecorationMode, run_app,
+    AppConfig, AppContext, AppMenuItemSpec, AppMenuSectionSpec, BTN_LEFT, ConfigureInfo, KeyEvent,
+    Keysym, LiquidGlassConfig, PointerEvent, PointerEventKind, RustyApp, WindowDecorationMode,
+    run_app,
 };
 use rusty_ui::{
     ThemeMode, TrafficLightButtons, TrafficLightKind, UiCanvas, UiDrawList, UiFontEngine,
@@ -120,7 +121,50 @@ impl ViewerApp {
         self.state.is_fullscreen = next;
         ctx.set_fullscreen(next);
         self.sync_glass(ctx);
+        self.sync_app_menu(ctx);
         self.state.dirty = true;
+    }
+
+    fn sync_app_menu(&self, ctx: &mut AppContext<'_>) {
+        let sections = vec![
+            AppMenuSectionSpec::new(
+                1,
+                "File",
+                vec![
+                    AppMenuItemSpec::action(101, "Previous Image").with_shortcut("Left"),
+                    AppMenuItemSpec::action(102, "Next Image").with_shortcut("Right"),
+                    AppMenuItemSpec::separator(),
+                    AppMenuItemSpec::action(103, "Close Window").with_shortcut("Ctrl+Q"),
+                ],
+            ),
+            AppMenuSectionSpec::new(
+                2,
+                "View",
+                vec![
+                    AppMenuItemSpec::action(201, "Zoom In").with_shortcut("+"),
+                    AppMenuItemSpec::action(202, "Zoom Out").with_shortcut("-"),
+                    AppMenuItemSpec::action(203, "Actual Size").with_shortcut("0"),
+                    AppMenuItemSpec::action(204, "Fit to Window")
+                        .with_shortcut("F")
+                        .with_checked(self.state.viewport.is_fitting),
+                    AppMenuItemSpec::separator(),
+                    AppMenuItemSpec::action(205, "Show Info").with_shortcut("I"),
+                    AppMenuItemSpec::action(206, "Enter Full Screen")
+                        .with_shortcut("F11")
+                        .with_checked(self.state.is_fullscreen),
+                ],
+            ),
+            AppMenuSectionSpec::new(
+                3,
+                "Image",
+                vec![
+                    AppMenuItemSpec::action(301, "Rotate Right").with_shortcut("R"),
+                    AppMenuItemSpec::action(302, "Rotate Left").with_shortcut("Shift+R"),
+                    AppMenuItemSpec::action(303, "Flip Horizontal").with_shortcut("H"),
+                ],
+            ),
+        ];
+        ctx.set_app_menu(sections);
     }
 }
 
@@ -136,7 +180,35 @@ impl RustyApp for ViewerApp {
         }
 
         self.sync_glass(ctx);
+        self.sync_app_menu(ctx);
         self.state.dirty = true;
+    }
+
+    fn on_menu_item(&mut self, ctx: &mut AppContext<'_>, item_id: i32) {
+        let w = ctx.width();
+        let h = ctx.height();
+        match item_id {
+            101 => self.state.action_prev(w, h),
+            102 => self.state.action_next(w, h),
+            103 => {
+                ctx.request_exit();
+                return;
+            }
+            201 => self.state.action_zoom_in(w, h),
+            202 => self.state.action_zoom_out(w, h),
+            203 => self.state.action_actual_size(),
+            204 => self.state.action_fit(w, h),
+            205 => self.state.action_toggle_info(),
+            206 => self.toggle_fullscreen(ctx),
+            301 => self.state.action_rotate_cw(w, h),
+            302 => self.state.action_rotate_ccw(w, h),
+            303 => self.state.action_flip_h(),
+            _ => return,
+        }
+        ctx.set_title(&self.state.frame.title);
+        self.sync_app_menu(ctx);
+        self.state.dirty = true;
+        ctx.request_redraw();
     }
 
     fn on_tick(&mut self, ctx: &mut AppContext<'_>) {

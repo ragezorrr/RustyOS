@@ -306,6 +306,9 @@ pub(super) fn append_chrome_text(
         active_app_name,
         top_telemetry.show_workspaces,
     );
+    let right_layout =
+        compute_top_bar_right_layout_with_options(width, top_telemetry.clock_hhmm, opts);
+    let max_left_menu_x = right_layout.tray_anchor_x - 10;
 
     let app_bounds = Rectangle::new(
         Point::from((left_layout.app_x, ws_y)),
@@ -336,78 +339,28 @@ pub(super) fn append_chrome_text(
     } else {
         [28, 29, 34, 240]
     };
-    if let Some(tree) = top_telemetry.app_menu_tree {
-        for (idx, title, x, w) in super::dynamic_app_menu_slots(&left_layout, tree) {
-            let color = if top_telemetry.active_menu == Some(TopBarMenuHit::Dynamic(idx)) {
-                bar_fg
-            } else {
-                text_menu
-            };
-            let bounds = Rectangle::new(Point::from((x, ws_y)), Size::from((w, ws_btn_height)));
-            if let Some(el) = text_cache.render_label_centered_weighted(
-                renderer,
-                title,
-                crate::text::FontWeight::Regular,
-                TOP_BAR_FONT_SIZE,
-                color,
-                bounds,
-            ) {
-                elements.push(el);
-            }
-        }
-    } else {
-        for (menu_kind, name, x, w) in [
-            (
-                TopBarMenuHit::File,
-                "File",
-                left_layout.file_x,
-                left_layout.file_w,
-            ),
-            (
-                TopBarMenuHit::Edit,
-                "Edit",
-                left_layout.edit_x,
-                left_layout.edit_w,
-            ),
-            (
-                TopBarMenuHit::View,
-                "View",
-                left_layout.view_x,
-                left_layout.view_w,
-            ),
-            (TopBarMenuHit::Go, "Go", left_layout.go_x, left_layout.go_w),
-            (
-                TopBarMenuHit::Window,
-                "Window",
-                left_layout.win_x,
-                left_layout.win_w,
-            ),
-            (
-                TopBarMenuHit::Help,
-                "Help",
-                left_layout.help_x,
-                left_layout.help_w,
-            ),
-        ] {
-            if menu_kind == TopBarMenuHit::Go && !left_layout.has_go {
-                continue;
-            }
-            let color = if top_telemetry.active_menu == Some(menu_kind) {
-                bar_fg
-            } else {
-                text_menu
-            };
-            let bounds = Rectangle::new(Point::from((x, ws_y)), Size::from((w, ws_btn_height)));
-            if let Some(el) = text_cache.render_label_centered_weighted(
-                renderer,
-                name,
-                crate::text::FontWeight::Regular,
-                TOP_BAR_FONT_SIZE,
-                color,
-                bounds,
-            ) {
-                elements.push(el);
-            }
+    let (visible_menus, _) = super::visible_top_bar_menu_slots(
+        app_profile,
+        active_app_name,
+        top_telemetry.app_menu_tree,
+        max_left_menu_x,
+    );
+    for (menu_hit, title, x, w) in visible_menus {
+        let color = if top_telemetry.active_menu == Some(menu_hit) {
+            bar_fg
+        } else {
+            text_menu
+        };
+        let bounds = Rectangle::new(Point::from((x, ws_y)), Size::from((w, ws_btn_height)));
+        if let Some(el) = text_cache.render_label_centered_weighted(
+            renderer,
+            title.as_ref(),
+            crate::text::FontWeight::Regular,
+            TOP_BAR_FONT_SIZE,
+            color,
+            bounds,
+        ) {
+            elements.push(el);
         }
     }
 
@@ -416,18 +369,20 @@ pub(super) fn append_chrome_text(
         .active_menu
         .filter(|m| *m != TopBarMenuHit::Go || left_layout.has_go)
     {
-        let (mx, my, mw, _) = super::top_bar_menu_popover_rect_with_app_menu(
+        let (mx, my, mw, _) = super::top_bar_menu_popover_rect_for_width(
             app_profile,
             active_app_name,
             open_menu,
             top_telemetry.app_menu_tree,
+            max_left_menu_x,
         );
         let mut row_y = my + MENU_POPOVER_PAD_Y;
-        for (entry_idx, entry) in super::resolve_top_bar_menu_entries_with_app_menu(
+        for (entry_idx, entry) in super::resolve_top_bar_menu_entries_for_width(
             app_profile,
             active_app_name,
             open_menu,
             top_telemetry.app_menu_tree,
+            max_left_menu_x,
         )
         .into_iter()
         .enumerate()
@@ -461,7 +416,7 @@ pub(super) fn append_chrome_text(
                         elements.push(el);
                     }
                     if let Some(hint) = shortcut {
-                        let (hint_w, _) = text_cache.measure_text(hint, 12.0);
+                        let (hint_w, _) = text_cache.measure_text(hint.as_ref(), 12.0);
                         let hint_fg = if hovered {
                             [255, 255, 255, 255]
                         } else {
@@ -469,7 +424,7 @@ pub(super) fn append_chrome_text(
                         };
                         if let Some(el) = text_cache.render_label(
                             renderer,
-                            hint,
+                            hint.as_ref(),
                             12.0,
                             hint_fg,
                             Point::from((mx + mw - 14 - hint_w, label_y + 1)),
@@ -492,10 +447,10 @@ pub(super) fn append_chrome_text(
         for ws in 1..=9 {
             let color = if ws == active_workspace {
                 [255, 255, 255, 255]
-            } else if light_opaque_bar {
-                [90, 92, 100, 220]
-            } else {
+            } else if use_light_bar_ink {
                 [214, 214, 222, 220]
+            } else {
+                [74, 76, 84, 225]
             };
             let bounds = Rectangle::new(
                 Point::from((start_x, ws_y)),
@@ -526,8 +481,6 @@ pub(super) fn append_chrome_text(
     }
 
     // 4. Right status cluster live clock and optional kbd / notification badge / tray (`RUSTYOS-049`)
-    let right_layout =
-        compute_top_bar_right_layout_with_options(width, top_telemetry.clock_hhmm, opts);
     let clock_bounds = Rectangle::new(
         Point::from((right_layout.clock_x, ws_y)),
         Size::from((right_layout.clock_w, ws_btn_height)),

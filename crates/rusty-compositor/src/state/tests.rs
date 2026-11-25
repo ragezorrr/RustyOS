@@ -2773,3 +2773,75 @@ fn dock_keyboard_navigation_focus_steps_wraps_and_clears() -> Result<(), Box<dyn
     assert!(compositor.dock_hover_anim.target().abs() < 1e-4);
     Ok(())
 }
+
+#[test]
+fn topbar_hover_glide_secondary_output_click_and_keyboard_navigation() -> Result<(), Box<dyn Error>>
+{
+    use smithay::output::{Mode, PhysicalProperties, Scale, Subpixel};
+
+    let display: Display<RustyCompositorState> = Display::new()?;
+    let event_loop: EventLoop<RustyCompositorState> = EventLoop::try_new()?;
+    let mut compositor = RustyCompositorState::new(
+        &display,
+        "rusty-test-topbar-nav".to_owned(),
+        event_loop.get_signal(),
+        event_loop.handle(),
+        (1280, 800).into(),
+    )?;
+
+    // 1. Keyboard Menu Bar navigation: open -> step header -> step row -> close.
+    compositor.open_top_bar_menu_bar();
+    assert_eq!(
+        compositor.active_top_bar_menu,
+        Some(crate::shell_render::TopBarMenuHit::SystemLogo)
+    );
+    assert!(compositor.top_bar_menu_hover_row.is_some());
+    compositor.step_top_bar_menu_header(1);
+    assert_eq!(
+        compositor.active_top_bar_menu,
+        Some(crate::shell_render::TopBarMenuHit::ActiveApp)
+    );
+    compositor.step_top_bar_menu_header(1);
+    assert_eq!(
+        compositor.active_top_bar_menu,
+        Some(crate::shell_render::TopBarMenuHit::File)
+    );
+
+    // 2. Hover-glide switches open menu cleanly when pointer moves over another header.
+    let (active_app, profile) = compositor.active_top_bar_app_context();
+    let left =
+        crate::shell_render::compute_top_bar_left_layout_for_profile(profile, &active_app, false);
+    let edit_center = f64::from(left.edit_x + left.edit_w / 2);
+    compositor.update_shell_hover_states((edit_center, 12.0).into());
+    assert_eq!(
+        compositor.active_top_bar_menu,
+        Some(crate::shell_render::TopBarMenuHit::Edit)
+    );
+    compositor.close_top_bar_menu();
+    assert!(compositor.active_top_bar_menu.is_none());
+
+    // 3. Secondary output TopBar clicks use output-local coordinates and track top_bar_output.
+    let sec_id = compositor.add_output(
+        "DP-3".to_owned(),
+        PhysicalProperties {
+            size: smithay::utils::Size::from((300, 200)),
+            subpixel: Subpixel::Unknown,
+            make: "Test".to_owned(),
+            model: "DP-3".to_owned(),
+        },
+        Mode {
+            size: smithay::utils::Size::from((1280, 720)),
+            refresh: 60_000,
+        },
+        Scale::Integer(1),
+        smithay::utils::Point::from((1280, 0)),
+    );
+    compositor.pointer_location = (1280.0 + 18.0, 12.0).into();
+    assert!(compositor.handle_top_bar_pointer_click(1280, smithay::utils::Serial::from(2), 272));
+    assert_eq!(
+        compositor.active_top_bar_menu,
+        Some(crate::shell_render::TopBarMenuHit::SystemLogo)
+    );
+    assert_eq!(compositor.top_bar_output, Some(sec_id));
+    Ok(())
+}

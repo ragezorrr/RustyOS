@@ -7,6 +7,7 @@ mod overview;
 use rusty_animation::{Easing, MotionTokens};
 use rusty_ipc::Urgency;
 use rusty_wm::{WindowId, WmAction};
+use smithay::reexports::wayland_server::Resource;
 use smithay::utils::Serial;
 use tracing::info;
 
@@ -357,10 +358,23 @@ impl RustyCompositorState {
         self.shell_redraw_needed = true;
     }
 
-    /// Returns the live D-Bus `AppMenuTree` for the currently focused window, if registered (`RUSTYOS-145`).
+    /// Returns the live `AppMenuTree` (Wayland `rustyos_app_menu_v1`, XWayland XID, or D-Bus)
+    /// for the currently focused window, if registered (`RUSTYOS-145`).
     #[must_use]
     pub fn active_app_menu_tree(&self) -> Option<crate::app_menu::AppMenuTree> {
         let wid = self.wm.focused_window()?;
+        if let Some(sw) = self.smithay_window_for_id(wid) {
+            if let Some(tl) = sw.toplevel()
+                && let Some((tree, _)) = self.wayland_app_menus.get(&tl.wl_surface().id())
+            {
+                return Some(tree.clone());
+            }
+            if let Some(x11) = sw.x11_surface()
+                && let Some(tree) = self.app_menu.menu_for_window(x11.window_id())
+            {
+                return Some(tree);
+            }
+        }
         let id = u32::try_from(wid.0).ok()?;
         self.app_menu.menu_for_window(id)
     }
@@ -605,6 +619,10 @@ impl RustyCompositorState {
             self.close_wifi_popover();
             self.close_notification_center();
             self.close_launcher();
+            let out_id = self
+                .output_under(self.pointer_location)
+                .unwrap_or_else(|| self.output_map.primary().id);
+            self.top_bar_output = Some(out_id);
             self.active_top_bar_menu = Some(menu);
             self.top_bar_menu_hover_row = None;
         }
@@ -614,6 +632,153 @@ impl RustyCompositorState {
     pub fn close_top_bar_menu(&mut self) {
         self.active_top_bar_menu = None;
         self.top_bar_menu_hover_row = None;
+        self.top_bar_output = None;
+    }
+
+    /// Computes horizontal cutoff before right status icons where left `TopBar` menus collapse into `»`.
+    #[must_use]
+    pub fn top_bar_max_left_menu_x(&self, output_width: i32) -> i32 {
+        let tel = self.telemetry.snapshot();
+        let clock_label = if self.clock_24h {
+            tel.clock_date_24h.as_str()
+        } else {
+            tel.clock_date_hhmm.as_str()
+        };
+        let opts = self.top_bar_layout_options_for(&tel);
+        let right = crate::shell_render::compute_top_bar_right_layout_with_options(
+            output_width,
+            clock_label,
+            opts,
+        );
+        right.tray_anchor_x - 10
+    }
+
+    /// Opens the Menu Bar (`Ctrl+F2`) for keyboard navigation on the focused/hovered output.
+    pub fn open_top_bar_menu_bar(&mut self) {
+        self.toggle_top_bar_menu(crate::shell_render::TopBarMenuHit::SystemLogo);
+        if self.active_top_bar_menu.is_some() {
+            self.step_top_bar_menu_row(1);
+        }
+    }
+
+    /// Moves keyboard focus between top-level Menu Bar headers (`SystemLogo`, `ActiveApp`, visible menus).
+    pub fn step_top_bar_menu_header(&mut self, delta: isize) {
+        let Some(current) = self.active_top_bar_menu else {
+            return;
+        };
+        let output_id = self
+            .top_bar_output
+            .unwrap_or_else(|| self.output_map.primary().id);
+        let output_width = self.output_logical_size(output_id).w;
+        let max_x = self.top_bar_max_left_menu_x(output_width);
+        let (active_app, profile) = self.active_top_bar_app_context();
+        let live_menu = self.active_app_menu_tree();
+        let (visible, _) = crate::shell_render::visible_top_bar_menu_slots(
+            profile,
+            &active_app,
+            live_menu.as_ref(),
+            max_x,
+        );
+        let mut headers = Vec::with_capacity(2 + visible.len());
+        headers.push(crate::shell_render::TopBarMenuHit::SystemLogo);
+        headers.push(crate::shell_render::TopBarMenuHit::ActiveApp);
+        for (hit, _, _, _) in visible {
+            headers.push(hit);
+        }
+        let len = headers.len();
+        if len == 0 {
+            return;
+        }
+        let cur_idx = headers.iter().position(|&h| h == current).unwrap_or(0);
+        let next_idx = usize::try_from(
+            (isize::try_from(cur_idx).unwrap_or(0) + delta)
+                .rem_euclid(isize::try_from(len).unwrap_or(1)),
+        )
+        .unwrap_or(0);
+        self.active_top_bar_menu = Some(headers[next_idx]);
+        self.top_bar_menu_hover_row = None;
+        self.step_top_bar_menu_row(1);
+        self.shell_redraw_needed = true;
+    }
+
+    /// Steps highlighted row inside an open `TopBar` dropdown menu, skipping separators/disabled items.
+    pub fn step_top_bar_menu_row(&mut self, delta: isize) {
+        let Some(open_menu) = self.active_top_bar_menu else {
+            return;
+        };
+        let output_id = self
+            .top_bar_output
+            .unwrap_or_else(|| self.output_map.primary().id);
+        let max_x = self.top_bar_max_left_menu_x(self.output_logical_size(output_id).w);
+        let (active_app, profile) = self.active_top_bar_app_context();
+        let live_menu = self.active_app_menu_tree();
+        let entries = crate::shell_render::resolve_top_bar_menu_entries_for_width(
+            profile,
+            &active_app,
+            open_menu,
+            live_menu.as_ref(),
+            max_x,
+        );
+        let enabled_indices: Vec<usize> = entries
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, e)| match e {
+                crate::shell_render::ResolvedTopBarMenuItem::Item { enabled: true, .. } => {
+                    Some(idx)
+                }
+                _ => None,
+            })
+            .collect();
+        if enabled_indices.is_empty() {
+            self.top_bar_menu_hover_row = None;
+            return;
+        }
+        let next_pos = match self
+            .top_bar_menu_hover_row
+            .and_then(|row| enabled_indices.iter().position(|&idx| idx == row))
+        {
+            Some(pos) => usize::try_from(
+                (isize::try_from(pos).unwrap_or(0) + delta)
+                    .rem_euclid(isize::try_from(enabled_indices.len()).unwrap_or(1)),
+            )
+            .unwrap_or(0),
+            None if delta < 0 => enabled_indices.len() - 1,
+            None => 0,
+        };
+        self.top_bar_menu_hover_row = Some(enabled_indices[next_pos]);
+        self.shell_redraw_needed = true;
+    }
+
+    /// Activates the keyboard-selected item inside the open `TopBar` dropdown menu.
+    pub fn activate_top_bar_menu_selected(&mut self, serial: Serial) {
+        let Some(open_menu) = self.active_top_bar_menu else {
+            return;
+        };
+        let Some(row_idx) = self.top_bar_menu_hover_row else {
+            self.close_top_bar_menu();
+            return;
+        };
+        let output_id = self
+            .top_bar_output
+            .unwrap_or_else(|| self.output_map.primary().id);
+        let max_x = self.top_bar_max_left_menu_x(self.output_logical_size(output_id).w);
+        let (active_app, profile) = self.active_top_bar_app_context();
+        let live_menu = self.active_app_menu_tree();
+        let entries = crate::shell_render::resolve_top_bar_menu_entries_for_width(
+            profile,
+            &active_app,
+            open_menu,
+            live_menu.as_ref(),
+            max_x,
+        );
+        if let Some(crate::shell_render::ResolvedTopBarMenuItem::Item {
+            action,
+            enabled: true,
+            ..
+        }) = entries.get(row_idx)
+        {
+            self.dispatch_top_bar_menu_action(*action, serial);
+        }
     }
 
     /// Clears transient shell hover and active slider drag states (`RUSTYOS-051`).
@@ -748,7 +913,14 @@ impl RustyCompositorState {
             }
             TopBarMenuAction::ShowShortcuts => self.open_settings_page(Some("shortcuts")),
             TopBarMenuAction::DbusMenuItem(item_id) => {
-                if let Some(tree) = self.active_app_menu_tree() {
+                if let Some(wid) = self.wm.focused_window()
+                    && let Some(sw) = self.smithay_window_for_id(wid)
+                    && let Some(tl) = sw.toplevel()
+                    && let Some((_, controller)) = self.wayland_app_menus.get(&tl.wl_surface().id())
+                {
+                    controller.item_activated(item_id);
+                    let _ = self.display_handle.flush_clients();
+                } else if let Some(tree) = self.active_app_menu_tree() {
                     self.app_menu
                         .activate_item(tree.service_name, tree.object_path, item_id);
                 }
