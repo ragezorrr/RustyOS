@@ -126,10 +126,33 @@ pub fn validate_installer_request(req: &InstallerPlanRequest) -> Result<(), Stri
         return Err(format!("invalid hostname: {}", req.hostname));
     }
     if req.timezone.is_empty()
+        || req.timezone.len() > 64
         || req.timezone.contains("..")
-        || req.timezone.chars().any(char::is_control)
+        || !req
+            .timezone
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_alphanumeric)
+        || !req
+            .timezone
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'/' | b'+' | b'-'))
     {
         return Err(format!("invalid timezone: {}", req.timezone));
+    }
+    if req.keyboard_layout.is_empty()
+        || req.keyboard_layout.len() > 32
+        || !req
+            .keyboard_layout
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_alphanumeric)
+        || !req
+            .keyboard_layout
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+    {
+        return Err(format!("invalid keyboard layout: {}", req.keyboard_layout));
     }
     if let InstallSource::LiveSquashFs(path) = &req.source
         && !req.dry_run
@@ -267,6 +290,14 @@ mod tests {
         let mut bad_host = valid.clone();
         bad_host.hostname = "-bad!".to_owned();
         assert!(validate_installer_request(&bad_host).is_err());
+
+        let mut bad_tz = valid.clone();
+        bad_tz.timezone = "/etc/passwd".to_owned();
+        assert!(validate_installer_request(&bad_tz).is_err());
+
+        let mut bad_kb = valid.clone();
+        bad_kb.keyboard_layout = "--flag;rm".to_owned();
+        assert!(validate_installer_request(&bad_kb).is_err());
 
         let ev = InstallerStageEvent::StageProgress {
             pct: 68,

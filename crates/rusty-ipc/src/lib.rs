@@ -9,7 +9,7 @@ use std::error::Error;
 use std::fmt::{self, Write as _};
 use std::fs;
 use std::io::{self, BufRead, BufReader, Write};
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 
@@ -472,18 +472,22 @@ impl CompositorEvent {
             }
             Self::StateSnapshot(snap) => {
                 let mut wins_buf = String::new();
-                for (idx, w) in snap.windows.iter().enumerate() {
-                    if idx > 0 {
-                        wins_buf.push(',');
-                    }
-                    let _ = write!(
-                        wins_buf,
+                for w in &snap.windows {
+                    let entry = format!(
                         "{}:{}:{}:{}",
                         w.id,
                         w.workspace,
                         u8::from(w.focused),
                         u8::from(w.maximized)
                     );
+                    let extra = entry.len() + usize::from(!wins_buf.is_empty());
+                    if wins_buf.len() + extra + 512 >= MAX_IPC_MESSAGE_BYTES {
+                        break;
+                    }
+                    if !wins_buf.is_empty() {
+                        wins_buf.push(',');
+                    }
+                    wins_buf.push_str(&entry);
                 }
                 if wins_buf.is_empty() {
                     wins_buf.push('-');
@@ -698,8 +702,23 @@ where
 /// Computes the default IPC socket path for a given Wayland socket name (e.g. `wayland-2`).
 #[must_use]
 pub fn default_ipc_socket_path(wayland_socket_name: &str) -> PathBuf {
-    let base_dir = env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".to_owned());
-    PathBuf::from(base_dir).join(format!("rustyos-ipc-{wayland_socket_name}.sock"))
+    let base_dir = env::var("XDG_RUNTIME_DIR")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .map_or_else(
+            || {
+                let uid = fs::metadata("/proc/self").map_or(0, |m| m.uid());
+                PathBuf::from(format!("/tmp/rustyos-{uid}"))
+            },
+            PathBuf::from,
+        );
+    base_dir.join(format!("rustyos-ipc-{wayland_socket_name}.sock"))
+}
+
+#[derive(Debug)]
+struct ClientConn {
+    stream: UnixStream,
+    buf: Vec<u8>,
 }
 
 /// Non-blocking Unix Domain Socket IPC server hosted by `rusty-compositor`.
@@ -707,7 +726,7 @@ pub fn default_ipc_socket_path(wayland_socket_name: &str) -> PathBuf {
 pub struct IpcServer {
     listener: UnixListener,
     socket_path: PathBuf,
-    clients: Vec<UnixStream>,
+    clients: Vec<ClientConn>,
 }
 
 impl IpcServer {
@@ -717,6 +736,16 @@ impl IpcServer {
     ///
     /// Returns [`IpcError::Io`] if the socket cannot be bound or its permissions cannot be set.
     pub fn bind(socket_path: PathBuf) -> Result<Self, IpcError> {
+        if let Some(parent) = socket_path.parent()
+            && !parent.as_os_str().is_empty()
+            && !parent.exists()
+        {
+            fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(parent)
+                .map_err(|err| IpcError::Io(err.to_string()))?;
+        }
         if socket_path.exists() {
             let _ = fs::remove_file(&socket_path);
         }
@@ -752,33 +781,48 @@ impl IpcServer {
     {
         while let Ok((stream, _addr)) = self.listener.accept() {
             if stream.set_nonblocking(true).is_ok() {
-                self.clients.push(stream);
+                self.clients.push(ClientConn {
+                    stream,
+                    buf: Vec::new(),
+                });
             }
         }
 
         let mut alive_clients = Vec::with_capacity(self.clients.len());
-        for mut stream in self.clients.drain(..) {
-            if let Ok((lines, still_connected)) = read_nonblocking_lines(&mut stream) {
-                let mut write_ok = true;
-                for line in lines {
-                    let response = match ShellRequest::decode_line(&line) {
-                        Ok(req) => handler(req),
-                        Err(err) => CompositorEvent::Error {
-                            code: "INVALID_REQUEST".to_owned(),
-                            message: err.to_string(),
-                        },
-                    };
-                    if write_ok {
-                        let encoded = response.encode_line();
-                        if stream.write_all(encoded.as_bytes()).is_err() || stream.flush().is_err()
-                        {
-                            write_ok = false;
-                        }
+        for mut conn in self.clients.drain(..) {
+            let (lines, still_connected) = match read_nonblocking_lines(&mut conn) {
+                Ok(res) => res,
+                Err(err) => {
+                    let encoded = CompositorEvent::Error {
+                        code: "INVALID_REQUEST".to_owned(),
+                        message: err.to_string(),
+                    }
+                    .encode_line();
+                    let _ = conn.stream.write_all(encoded.as_bytes());
+                    let _ = conn.stream.flush();
+                    continue;
+                }
+            };
+            let mut write_ok = true;
+            for line in lines {
+                let response = match ShellRequest::decode_line(&line) {
+                    Ok(req) => handler(req),
+                    Err(err) => CompositorEvent::Error {
+                        code: "INVALID_REQUEST".to_owned(),
+                        message: err.to_string(),
+                    },
+                };
+                if write_ok {
+                    let encoded = response.encode_line();
+                    if conn.stream.write_all(encoded.as_bytes()).is_err()
+                        || conn.stream.flush().is_err()
+                    {
+                        write_ok = false;
                     }
                 }
-                if still_connected && write_ok {
-                    alive_clients.push(stream);
-                }
+            }
+            if still_connected && write_ok {
+                alive_clients.push(conn);
             }
         }
         self.clients = alive_clients;
@@ -839,6 +883,7 @@ impl IpcClient {
     ///
     /// Returns [`IpcError`] if socket I/O or response decoding fails.
     pub fn send_request(&mut self, request: &ShellRequest) -> Result<CompositorEvent, IpcError> {
+        use io::Read as _;
         let encoded = request.encode_line();
         self.writer
             .write_all(encoded.as_bytes())
@@ -850,34 +895,59 @@ impl IpcClient {
         let mut line = String::new();
         let bytes = self
             .reader
+            .by_ref()
+            .take((MAX_IPC_MESSAGE_BYTES + 1) as u64)
             .read_line(&mut line)
             .map_err(|err| IpcError::Io(err.to_string()))?;
         if bytes == 0 {
             return Err(IpcError::Io("compositor closed IPC connection".to_owned()));
         }
+        if bytes > MAX_IPC_MESSAGE_BYTES {
+            return Err(IpcError::MessageTooLarge(bytes));
+        }
         CompositorEvent::decode_line(&line)
     }
 }
 
-fn read_nonblocking_lines(stream: &mut UnixStream) -> Result<(Vec<String>, bool), IpcError> {
+fn read_nonblocking_lines(conn: &mut ClientConn) -> Result<(Vec<String>, bool), IpcError> {
     use io::Read as _;
-    let mut buf = [0_u8; MAX_IPC_MESSAGE_BYTES];
-    match stream.read(&mut buf) {
-        Ok(0) => Ok((Vec::new(), false)),
-        Ok(n) => {
-            let text = std::str::from_utf8(&buf[..n])
-                .map_err(|_| IpcError::InvalidFrame("non-UTF8 IPC payload".to_owned()))?;
-            let lines = text
-                .lines()
-                .map(str::trim)
-                .filter(|l| !l.is_empty())
-                .map(ToOwned::to_owned)
-                .collect();
-            Ok((lines, true))
+    let mut chunk = [0_u8; 4096];
+    let mut still_connected = true;
+    loop {
+        match conn.stream.read(&mut chunk) {
+            Ok(0) => {
+                still_connected = false;
+                break;
+            }
+            Ok(n) => {
+                if conn.buf.len() + n > MAX_IPC_MESSAGE_BYTES * 2 {
+                    return Err(IpcError::MessageTooLarge(conn.buf.len() + n));
+                }
+                conn.buf.extend_from_slice(&chunk[..n]);
+            }
+            Err(err) if err.kind() == io::ErrorKind::WouldBlock => break,
+            Err(err) => return Err(IpcError::Io(err.to_string())),
         }
-        Err(err) if err.kind() == io::ErrorKind::WouldBlock => Ok((Vec::new(), true)),
-        Err(err) => Err(IpcError::Io(err.to_string())),
     }
+
+    let mut lines = Vec::new();
+    while let Some(nl_pos) = conn.buf.iter().position(|&b| b == b'\n') {
+        let raw_line = &conn.buf[..=nl_pos];
+        if raw_line.len() > MAX_IPC_MESSAGE_BYTES {
+            return Err(IpcError::MessageTooLarge(raw_line.len()));
+        }
+        let text = std::str::from_utf8(raw_line)
+            .map_err(|_| IpcError::InvalidFrame("non-UTF8 IPC payload".to_owned()))?;
+        let trimmed = text.trim();
+        if !trimmed.is_empty() {
+            lines.push(trimmed.to_owned());
+        }
+        conn.buf.drain(..=nl_pos);
+    }
+    if conn.buf.len() > MAX_IPC_MESSAGE_BYTES {
+        return Err(IpcError::MessageTooLarge(conn.buf.len()));
+    }
+    Ok((lines, still_connected))
 }
 
 fn parse_version_tag(tag: &str) -> Result<u16, IpcError> {
@@ -1147,6 +1217,67 @@ mod tests {
             );
         }
 
+        Ok(())
+    }
+
+    #[test]
+    fn partial_split_frames_and_oversized_snapshot_stay_bounded()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let dir = env::temp_dir();
+        let sock_path = dir.join(format!(
+            "rustyos-ipc-split-test-{}.sock",
+            std::process::id()
+        ));
+        let mut server = IpcServer::bind(sock_path.clone())?;
+
+        // 1. Partial writes split across two polls + split multi-byte UTF-8 character
+        let mut stream =
+            UnixStream::connect(&sock_path).map_err(|e| IpcError::Io(e.to_string()))?;
+        let full_req = ShellRequest::LaunchCommand {
+            command: "тест-приложение".to_owned(),
+        }
+        .encode_line();
+        let split_at = full_req.len() / 2;
+        stream.write_all(&full_req.as_bytes()[..split_at])?;
+        stream.flush()?;
+
+        let mut launched = Vec::new();
+        server.poll_requests(|req| {
+            if let ShellRequest::LaunchCommand { command } = req {
+                launched.push(command);
+            }
+            CompositorEvent::StateSnapshot(DesktopStateSnapshot::default())
+        });
+        assert_eq!(launched.len(), 0);
+
+        stream.write_all(&full_req.as_bytes()[split_at..])?;
+        stream.flush()?;
+        server.poll_requests(|req| {
+            if let ShellRequest::LaunchCommand { command } = req {
+                launched.push(command);
+            }
+            CompositorEvent::StateSnapshot(DesktopStateSnapshot::default())
+        });
+        assert_eq!(launched, vec!["тест-приложение"]);
+
+        // 2. Large window lists encode cleanly within MAX_IPC_MESSAGE_BYTES
+        let many_windows: Vec<WindowSummary> = (1..=600)
+            .map(|id| WindowSummary {
+                id,
+                workspace: 1,
+                focused: id == 1,
+                maximized: false,
+            })
+            .collect();
+        let snap_line = CompositorEvent::StateSnapshot(DesktopStateSnapshot {
+            windows: many_windows,
+            ..DesktopStateSnapshot::default()
+        })
+        .encode_line();
+        assert!(snap_line.len() <= MAX_IPC_MESSAGE_BYTES);
+        assert!(CompositorEvent::decode_line(&snap_line).is_ok());
+
+        let _ = fs::remove_file(sock_path);
         Ok(())
     }
 }

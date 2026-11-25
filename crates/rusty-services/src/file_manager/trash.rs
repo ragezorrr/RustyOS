@@ -69,35 +69,36 @@ fn parse_trashinfo(content: &str) -> (Option<PathBuf>, Option<String>) {
 /// # Errors
 /// Returns an `io::Error` if the path is invalid, protected, or filesystem operations fail.
 pub fn move_to_trash(source: &Path, trash_dir: &Path) -> io::Result<PathBuf> {
-    if source == Path::new("/") {
+    let abs_source = absolutize_path(source)?;
+    let abs_trash = absolutize_path(trash_dir)?;
+    if abs_source == Path::new("/") {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "Refusing to trash filesystem root",
         ));
     }
-    if source == trash_dir || source.starts_with(trash_dir) {
+    if abs_source == abs_trash || abs_source.starts_with(&abs_trash) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "Path is already inside Trash",
         ));
     }
-    let meta = fs::symlink_metadata(source)?;
-    let orig_name = source
+    let meta = fs::symlink_metadata(&abs_source)?;
+    let orig_name = abs_source
         .file_name()
         .and_then(|n| n.to_str())
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "Missing file name"))?;
 
-    let files_dir = trash_dir.join("files");
-    let info_dir = trash_dir.join("info");
+    let files_dir = abs_trash.join("files");
+    let info_dir = abs_trash.join("info");
     fs::create_dir_all(&files_dir)?;
     fs::create_dir_all(&info_dir)?;
 
-    let abs_source = absolutize_path(source)?;
     let (trash_name, info_path) =
         reserve_trash_slot(&files_dir, &info_dir, orig_name, &abs_source)?;
     let dest = files_dir.join(&trash_name);
 
-    let move_res = move_entry_no_follow(source, &dest, meta.file_type().is_dir());
+    let move_res = move_entry_no_follow(&abs_source, &dest, meta.file_type().is_dir());
     if let Err(err) = move_res {
         let _ = fs::remove_file(&info_path);
         return Err(err);

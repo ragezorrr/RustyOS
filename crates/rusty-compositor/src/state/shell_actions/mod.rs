@@ -911,6 +911,35 @@ impl RustyCompositorState {
         }
     }
 
+    /// Clears active overlays, grabs, drags, and pointer constraints when locking the session.
+    pub(in crate::state) fn reset_interactive_state_for_lock(&mut self) {
+        self.abort_portal_activity_for_lock();
+        self.dismiss_active_popup_grabs();
+        self.close_context_menu();
+        self.close_screenshot_hud();
+        self.window_switcher = None;
+        self.dnd_icon = None;
+        self.close_launcher();
+        self.close_quick_settings();
+        self.close_updates_popover();
+        self.close_wifi_popover();
+        self.close_notification_center();
+        self.close_top_bar_menu();
+        self.close_overview();
+        self.active_window_drag = None;
+        self.active_window_resize = None;
+        self.pressed_ssd_button = None;
+        self.dock_drag = None;
+        self.desktop_drag = None;
+        self.overview_drag = None;
+        self.spotlight_drag = None;
+        self.qs_slider_drag = None;
+        self.clear_shell_hover_states();
+        self.touchpad_swipe = TouchpadSwipeState::default();
+        self.deactivate_focused_shortcut_inhibitor();
+        self.deactivate_active_pointer_constraint();
+    }
+
     /// Engages or disengages the interactive session Lock Screen with smooth transition (`RUSTYOS-025`).
     pub fn set_screen_locked(&mut self, locked: bool, serial: Serial) {
         self.screen_locked = locked;
@@ -922,25 +951,21 @@ impl RustyCompositorState {
         self.lock_auth_error = None;
         if locked {
             self.polkit_password.clear();
-            self.abort_portal_activity_for_lock();
-            self.close_context_menu();
-            self.window_switcher = None;
-            self.dnd_icon = None;
-            self.close_launcher();
-            self.close_quick_settings();
-            self.close_updates_popover();
-            self.close_wifi_popover();
-            self.close_notification_center();
-            self.close_top_bar_menu();
-            self.close_overview();
-            self.active_window_drag = None;
-            self.active_window_resize = None;
-            self.clear_shell_hover_states();
-            self.touchpad_swipe = TouchpadSwipeState::default();
-            self.deactivate_focused_shortcut_inhibitor();
+            self.reset_interactive_state_for_lock();
             self.telemetry.request_refresh();
             let keyboard = self.keyboard.clone();
             keyboard.set_focus(self, None, serial);
+            let pointer = self.pointer.clone();
+            pointer.motion(
+                self,
+                None,
+                &smithay::input::pointer::MotionEvent {
+                    location: self.pointer_location,
+                    serial,
+                    time: u32::try_from(self.elapsed().as_millis()).unwrap_or(0),
+                },
+            );
+            pointer.frame(self);
         } else {
             self.suppressed_inhibitor_surface = None;
             self.sync_portal_snapshot();

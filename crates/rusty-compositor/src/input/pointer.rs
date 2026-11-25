@@ -168,15 +168,6 @@ impl RustyCompositorState {
     pub(crate) fn apply_pointer_position(&mut self, pos: Point<f64, Logical>, time: u32) {
         self.pointer_location = pos;
 
-        if self.screenshot_hud.is_some() {
-            self.set_compositor_cursor_override(Some(
-                smithay::input::pointer::CursorIcon::Crosshair,
-            ));
-            self.handle_screenshot_hud_motion(pos);
-            self.dispatch_pointer_motion_to_surface(pos, None, time);
-            return;
-        }
-
         if self.ext_session_locked
             || self.screen_locked
             || self.polkit_prompt.is_some()
@@ -194,6 +185,15 @@ impl RustyCompositorState {
                     .then_some(smithay::input::pointer::CursorIcon::Default),
             );
             self.dispatch_pointer_motion_to_surface(pos, under, time);
+            return;
+        }
+
+        if self.screenshot_hud.is_some() {
+            self.set_compositor_cursor_override(Some(
+                smithay::input::pointer::CursorIcon::Crosshair,
+            ));
+            self.handle_screenshot_hud_motion(pos);
+            self.dispatch_pointer_motion_to_surface(pos, None, time);
             return;
         }
 
@@ -604,7 +604,7 @@ impl RustyCompositorState {
                 }
                 return;
             }
-            if self.screenshot_hud.is_some() {
+            if self.screenshot_hud.is_some() && !self.is_session_locked() {
                 self.handle_screenshot_hud_button(false);
                 return;
             }
@@ -943,6 +943,8 @@ impl RustyCompositorState {
                 .output_geometry(&self.output)
                 .map_or_else(|| Size::from((1280, 800)), |geo| geo.size)
                 .to_physical(1);
+            let (_, is_on_primary, primary_local_x, primary_local_y) =
+                self.primary_local_coords(self.pointer_location);
             let visible_toast_ids: Vec<u64> = self
                 .notifications
                 .iter()
@@ -950,12 +952,14 @@ impl RustyCompositorState {
                 .take(crate::shell_render::MAX_VISIBLE_NOTIFICATIONS)
                 .map(|n| n.id)
                 .collect();
-            if let Some(toast_idx) = crate::shell_render::check_notification_click(
-                output_phys,
-                visible_toast_ids.len(),
-                self.pointer_location.x,
-                self.pointer_location.y,
-            ) && let Some(&toast_id) = visible_toast_ids.get(toast_idx)
+            if is_on_primary
+                && let Some(toast_idx) = crate::shell_render::check_notification_click(
+                    output_phys,
+                    visible_toast_ids.len(),
+                    primary_local_x,
+                    primary_local_y,
+                )
+                && let Some(&toast_id) = visible_toast_ids.get(toast_idx)
             {
                 let rects = crate::shell_render::notification_toast_rects(
                     output_phys,
@@ -964,10 +968,10 @@ impl RustyCompositorState {
                 let hit_close = rects.get(toast_idx).is_some_and(|card| {
                     let cx = f64::from(card.loc.x + card.size.w - 28);
                     let cy = f64::from(card.loc.y + 10);
-                    self.pointer_location.x >= cx
-                        && self.pointer_location.x < cx + 20.0
-                        && self.pointer_location.y >= cy
-                        && self.pointer_location.y < cy + 20.0
+                    primary_local_x >= cx
+                        && primary_local_x < cx + 20.0
+                        && primary_local_y >= cy
+                        && primary_local_y < cy + 20.0
                 });
                 if hit_close {
                     self.dismiss_notification(toast_id);
@@ -985,8 +989,6 @@ impl RustyCompositorState {
             let dock_chrome_visible_here = !self
                 .has_foreground_layer_surfaces_on_id(cursor_output_id)
                 && !self.should_hide_shell_chrome_for_fullscreen_on(cursor_output_id);
-            let (_, is_on_primary, primary_local_x, primary_local_y) =
-                self.primary_local_coords(self.pointer_location);
             let ordered_ids = self.ordered_visible_window_ids();
             if dock_chrome_visible_here
                 && self.handle_dock_pointer_press(

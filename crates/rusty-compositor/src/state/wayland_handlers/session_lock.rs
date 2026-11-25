@@ -12,7 +12,7 @@ use smithay::{
     },
 };
 
-use super::super::{RustyCompositorState, TouchpadSwipeState};
+use super::super::RustyCompositorState;
 
 impl IdleNotifierHandler for RustyCompositorState {
     fn idle_notifier_state(&mut self) -> &mut IdleNotifierState<Self> {
@@ -49,21 +49,7 @@ impl SessionLockHandler for RustyCompositorState {
             return;
         }
         self.ext_session_locked = true;
-        self.abort_portal_activity_for_lock();
-        self.window_switcher = None;
-        self.dnd_icon = None;
-        self.close_launcher();
-        self.close_quick_settings();
-        self.close_updates_popover();
-        self.close_wifi_popover();
-        self.close_notification_center();
-        self.close_overview();
-        self.active_window_drag = None;
-        self.active_window_resize = None;
-        self.dock_hover_slot = None;
-        self.touchpad_swipe = TouchpadSwipeState::default();
-        self.deactivate_focused_shortcut_inhibitor();
-        self.deactivate_active_pointer_constraint();
+        self.reset_interactive_state_for_lock();
 
         let serial = smithay::utils::SERIAL_COUNTER.next_serial();
         let keyboard = self.keyboard.clone();
@@ -110,6 +96,7 @@ impl SessionLockHandler for RustyCompositorState {
         surface.with_pending_state(|state| {
             state.size = Some(logical_size);
         });
+        surface.send_configure();
         let lock_wl = surface.wl_surface().clone();
         self.ext_lock_surfaces.push((resolved_output, surface));
 

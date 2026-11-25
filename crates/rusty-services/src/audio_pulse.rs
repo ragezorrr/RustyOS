@@ -35,6 +35,10 @@ pub const PA_INVALID_INDEX: u32 = 0xFFFF_FFFF;
 pub const PA_SUBSCRIPTION_MASK_SINK: u32 = 0x0001;
 pub const PA_SUBSCRIPTION_MASK_SERVER: u32 = 0x0010;
 
+/// Upper bound on a single PulseAudio wire packet payload (`1 MiB`) to prevent OOM DoS.
+pub const MAX_PA_PACKET_BYTES: usize = 1024 * 1024;
+const MAX_PROPLIST_NESTING_DEPTH: usize = 16;
+
 /// Information about an audio output sink retrieved from the audio daemon.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PulseSinkInfo {
@@ -269,6 +273,15 @@ impl<'a> TagReader<'a> {
     }
 
     pub fn skip_one(&mut self) -> Result<(), PulseError> {
+        self.skip_one_depth(0)
+    }
+
+    fn skip_one_depth(&mut self, depth: usize) -> Result<(), PulseError> {
+        if depth > MAX_PROPLIST_NESTING_DEPTH {
+            return Err(PulseError::Protocol(
+                "PulseAudio tag nesting exceeds limit".into(),
+            ));
+        }
         if self.pos >= self.data.len() {
             return Ok(());
         }
@@ -276,13 +289,13 @@ impl<'a> TagReader<'a> {
         self.pos += 1;
         match tag {
             b'L' => {
-                if self.pos + 4 > self.data.len() {
+                if self.pos.checked_add(4).is_none_or(|n| n > self.data.len()) {
                     return Err(PulseError::Protocol("EOF in skip L".into()));
                 }
                 self.pos += 4;
             }
             b'U' | b's' => {
-                if self.pos + 8 > self.data.len() {
+                if self.pos.checked_add(8).is_none_or(|n| n > self.data.len()) {
                     return Err(PulseError::Protocol("EOF in skip U/s".into()));
                 }
                 self.pos += 8;
@@ -296,7 +309,7 @@ impl<'a> TagReader<'a> {
                 }
             }
             b'a' => {
-                if self.pos + 6 > self.data.len() {
+                if self.pos.checked_add(6).is_none_or(|n| n > self.data.len()) {
                     return Err(PulseError::Protocol("EOF in skip a".into()));
                 }
                 self.pos += 6;
@@ -306,32 +319,57 @@ impl<'a> TagReader<'a> {
                     return Err(PulseError::Protocol("EOF in skip m".into()));
                 }
                 let ch = self.data[self.pos] as usize;
-                self.pos += 1 + ch;
+                let next = self
+                    .pos
+                    .checked_add(1)
+                    .and_then(|p| p.checked_add(ch))
+                    .ok_or_else(|| PulseError::Protocol("overflow in skip m".into()))?;
+                if next > self.data.len() {
+                    return Err(PulseError::Protocol("EOF in skip m".into()));
+                }
+                self.pos = next;
             }
             b'v' => {
                 if self.pos >= self.data.len() {
                     return Err(PulseError::Protocol("EOF in skip v".into()));
                 }
                 let ch = self.data[self.pos] as usize;
-                self.pos += 1 + ch * 4;
+                let next = self
+                    .pos
+                    .checked_add(1)
+                    .and_then(|p| p.checked_add(ch.saturating_mul(4)))
+                    .ok_or_else(|| PulseError::Protocol("overflow in skip v".into()))?;
+                if next > self.data.len() {
+                    return Err(PulseError::Protocol("EOF in skip v".into()));
+                }
+                self.pos = next;
             }
             b'x' => {
-                if self.pos + 4 > self.data.len() {
+                if self.pos.checked_add(4).is_none_or(|n| n > self.data.len()) {
                     return Err(PulseError::Protocol("EOF in skip x len".into()));
                 }
                 let bytes: [u8; 4] = self.data[self.pos..self.pos + 4]
                     .try_into()
                     .map_err(|_| PulseError::Protocol("slice to array conversion failed".into()))?;
                 let len = u32::from_be_bytes(bytes) as usize;
-                self.pos += 4 + len;
+                let next = self
+                    .pos
+                    .checked_add(4)
+                    .and_then(|p| p.checked_add(len))
+                    .ok_or_else(|| PulseError::Protocol("overflow in skip x".into()))?;
+                if next > self.data.len() {
+                    return Err(PulseError::Protocol("EOF in skip x".into()));
+                }
+                self.pos = next;
             }
             b'P' => {
                 while self.pos < self.data.len() && self.data[self.pos] != b'N' {
-                    self.skip_one()?;
+                    self.skip_one_depth(depth + 1)?;
                 }
-                if self.pos < self.data.len() {
-                    self.pos += 1;
+                if self.pos >= self.data.len() {
+                    return Err(PulseError::Protocol("EOF in skip P".into()));
                 }
+                self.pos += 1;
             }
             _ => {}
         }
@@ -487,10 +525,14 @@ impl PulseClient {
         Ok(Self { stream, tag_seq: 2 })
     }
 
-    /// Reads a 20-byte framed packet from the underlying socket with a specified timeout.
+    /// Reads a 20-byte framed packet from the underlying socket with a specified timeout,
+    /// restoring the previous socket read timeout afterward.
     pub fn read_packet_with_timeout(&mut self, timeout: Duration) -> Result<Vec<u8>, PulseError> {
+        let prev = self.stream.read_timeout().ok().flatten();
         self.stream.set_read_timeout(Some(timeout))?;
-        Self::read_packet(&mut self.stream)
+        let res = Self::read_packet(&mut self.stream);
+        let _ = self.stream.set_read_timeout(prev);
+        res
     }
 
     /// Reads a 20-byte framed packet from the underlying socket.
@@ -501,9 +543,42 @@ impl PulseClient {
             .try_into()
             .map_err(|_| PulseError::Protocol("header slice to array conversion failed".into()))?;
         let length = u32::from_be_bytes(len_bytes) as usize;
+        if length > MAX_PA_PACKET_BYTES {
+            return Err(PulseError::Protocol(format!(
+                "packet length {length} exceeds maximum {MAX_PA_PACKET_BYTES}"
+            )));
+        }
         let mut body = vec![0u8; length];
         stream.read_exact(&mut body)?;
         Ok(body)
+    }
+
+    fn read_reply_for_tag(&mut self, expected_tag: u32, op: &str) -> Result<Vec<u8>, PulseError> {
+        for _ in 0..64 {
+            let resp = Self::read_packet(&mut self.stream)?;
+            let mut r = TagReader::new(&resp);
+            let cmd = r.get_u32()?;
+            if cmd == PA_COMMAND_SUBSCRIBE_EVENT {
+                continue;
+            }
+            let resp_tag = r.get_u32()?;
+            if cmd == PA_COMMAND_ERROR {
+                let err_code = r.get_u32().unwrap_or(0);
+                return Err(PulseError::Server {
+                    code: err_code,
+                    message: format!("{op} failed"),
+                });
+            }
+            if cmd != PA_COMMAND_REPLY || resp_tag != expected_tag {
+                return Err(PulseError::Protocol(format!(
+                    "unexpected response to {op}: cmd={cmd}, tag={resp_tag}"
+                )));
+            }
+            return Ok(resp);
+        }
+        Err(PulseError::Protocol(format!(
+            "exceeded subscribe event limit waiting for {op} reply"
+        )))
     }
 
     fn next_tag(&mut self) -> u32 {
@@ -522,22 +597,10 @@ impl PulseClient {
         w.put_string("@DEFAULT_SINK@");
         self.stream.write_all(&w.finish_packet())?;
 
-        let resp = Self::read_packet(&mut self.stream)?;
+        let resp = self.read_reply_for_tag(tag, "GET_SINK_INFO")?;
         let mut r = TagReader::new(&resp);
-        let cmd = r.get_u32()?;
-        let resp_tag = r.get_u32()?;
-        if cmd == PA_COMMAND_ERROR {
-            let err_code = r.get_u32().unwrap_or(0);
-            return Err(PulseError::Server {
-                code: err_code,
-                message: "Failed to query default sink".into(),
-            });
-        }
-        if cmd != PA_COMMAND_REPLY || resp_tag != tag {
-            return Err(PulseError::Protocol(format!(
-                "unexpected response to GET_SINK_INFO: cmd={cmd}, tag={resp_tag}"
-            )));
-        }
+        let _ = r.get_u32()?;
+        let _ = r.get_u32()?;
         parse_sink_info_fields(&mut r)
     }
 
@@ -555,14 +618,7 @@ impl PulseClient {
         w.put_cvolume(&[vol, vol]); // stereo channels
         self.stream.write_all(&w.finish_packet())?;
 
-        let resp = Self::read_packet(&mut self.stream)?;
-        let mut r = TagReader::new(&resp);
-        let cmd = r.get_u32()?;
-        if cmd != PA_COMMAND_REPLY {
-            return Err(PulseError::Protocol(format!(
-                "unexpected reply to SET_SINK_VOLUME: {cmd}"
-            )));
-        }
+        let _ = self.read_reply_for_tag(tag, "SET_SINK_VOLUME")?;
         Ok(())
     }
 
@@ -577,14 +633,7 @@ impl PulseClient {
         w.put_bool(mute);
         self.stream.write_all(&w.finish_packet())?;
 
-        let resp = Self::read_packet(&mut self.stream)?;
-        let mut r = TagReader::new(&resp);
-        let cmd = r.get_u32()?;
-        if cmd != PA_COMMAND_REPLY {
-            return Err(PulseError::Protocol(format!(
-                "unexpected reply to SET_SINK_MUTE: {cmd}"
-            )));
-        }
+        let _ = self.read_reply_for_tag(tag, "SET_SINK_MUTE")?;
         Ok(())
     }
 
@@ -597,14 +646,7 @@ impl PulseClient {
         w.put_string(sink_name);
         self.stream.write_all(&w.finish_packet())?;
 
-        let resp = Self::read_packet(&mut self.stream)?;
-        let mut r = TagReader::new(&resp);
-        let cmd = r.get_u32()?;
-        if cmd != PA_COMMAND_REPLY {
-            return Err(PulseError::Protocol(format!(
-                "unexpected reply to SET_DEFAULT_SINK: {cmd}"
-            )));
-        }
+        let _ = self.read_reply_for_tag(tag, "SET_DEFAULT_SINK")?;
         Ok(())
     }
 
@@ -617,14 +659,7 @@ impl PulseClient {
         w.put_u32(mask);
         self.stream.write_all(&w.finish_packet())?;
 
-        let resp = Self::read_packet(&mut self.stream)?;
-        let mut r = TagReader::new(&resp);
-        let cmd = r.get_u32()?;
-        if cmd != PA_COMMAND_REPLY {
-            return Err(PulseError::Protocol(format!(
-                "unexpected reply to SUBSCRIBE: {cmd}"
-            )));
-        }
+        let _ = self.read_reply_for_tag(tag, "SUBSCRIBE")?;
         Ok(())
     }
 }
@@ -687,5 +722,46 @@ mod tests {
         assert_eq!(sink.description, "Built-in Speaker");
         assert_eq!(sink.volume_percent, 50);
         assert!(!sink.muted);
+    }
+
+    #[test]
+    fn tag_reader_rejects_truncated_and_deeply_nested_proplists() {
+        let mut truncated_m = TagReader::new(&[b'm', 8, 1, 2]);
+        assert!(truncated_m.skip_one().is_err());
+
+        let mut truncated_x = TagReader::new(&[b'x', 0, 0, 0, 20, 1, 2]);
+        assert!(truncated_x.skip_one().is_err());
+
+        let mut deep_p = vec![b'P'; 32];
+        deep_p.extend(std::iter::repeat_n(b'N', 32));
+        let mut nested = TagReader::new(&deep_p);
+        assert!(nested.skip_one().is_err());
+    }
+
+    #[test]
+    fn read_packet_rejects_oversized_header_and_skips_subscribe_events() {
+        let (mut srv, mut cli) = UnixStream::pair().unwrap();
+        // 1. Oversized 16 MiB packet header must fail without allocating 16 MiB.
+        let mut bad_hdr = [0u8; 20];
+        bad_hdr[0..4].copy_from_slice(&(16_u32 * 1024 * 1024).to_be_bytes());
+        srv.write_all(&bad_hdr).unwrap();
+        assert!(PulseClient::read_packet(&mut cli).is_err());
+
+        // 2. Interleaved PA_COMMAND_SUBSCRIBE_EVENT is skipped before PA_COMMAND_REPLY.
+        let mut evt = TagWriter::new();
+        evt.put_u32(PA_COMMAND_SUBSCRIBE_EVENT);
+        evt.put_u32(0);
+        srv.write_all(&evt.finish_packet()).unwrap();
+
+        let mut reply = TagWriter::new();
+        reply.put_u32(PA_COMMAND_REPLY);
+        reply.put_u32(7);
+        srv.write_all(&reply.finish_packet()).unwrap();
+
+        let mut client = PulseClient {
+            stream: cli,
+            tag_seq: 8,
+        };
+        assert!(client.read_reply_for_tag(7, "TEST").is_ok());
     }
 }

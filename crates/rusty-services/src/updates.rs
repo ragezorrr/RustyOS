@@ -5,13 +5,13 @@
 //! is never mutated outside explicit privileged `pacman -Syu` execution.
 
 use std::fmt;
-use std::io::{BufRead as _, BufReader, Read as _};
+use std::io::{BufRead as _, BufReader};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::display_session::local_clock_hhmm;
 
@@ -413,65 +413,37 @@ fn execute_checkupdates_probe_with_limit(max_items: Option<usize>) -> UpdateStat
     } else {
         "checkupdates"
     };
-    let Ok(mut child) = Command::new(bin)
-        .arg("--nocolor")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-    else {
-        return UpdateStatusSnapshot {
-            state: UpdateCheckState::Unavailable,
-            last_checked_label: format!("Today {}", local_clock_hhmm()),
-            error_hint: Some("Install 'pacman-contrib' (checkupdates)".to_owned()),
-            ..UpdateStatusSnapshot::default()
-        };
-    };
-
-    let deadline = Instant::now() + CHECK_TIMEOUT;
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                let mut buf = Vec::new();
-                if let Some(out) = child.stdout.take() {
-                    let _ = out.take(MAX_STDOUT_BYTES as u64).read_to_end(&mut buf);
-                }
-                let code = status.code().unwrap_or(-1);
-                if code == 0 || code == 2 {
-                    let parsed = parse_checkupdates_output(&String::from_utf8_lossy(&buf));
-                    return build_snapshot_from_items_with_limit(parsed, max_items);
-                }
-                return UpdateStatusSnapshot {
+    let mut cmd = Command::new(bin);
+    cmd.arg("--nocolor");
+    match crate::run_command_bounded(&mut cmd, CHECK_TIMEOUT) {
+        Ok(output) => {
+            let code = output.status.code().unwrap_or(-1);
+            if code == 0 || code == 2 {
+                let end = output.stdout.len().min(MAX_STDOUT_BYTES);
+                let parsed =
+                    parse_checkupdates_output(&String::from_utf8_lossy(&output.stdout[..end]));
+                build_snapshot_from_items_with_limit(parsed, max_items)
+            } else {
+                UpdateStatusSnapshot {
                     state: UpdateCheckState::Unavailable,
                     last_checked_label: format!("Today {}", local_clock_hhmm()),
                     error_hint: Some(format!("checkupdates exited with code {code}")),
                     ..UpdateStatusSnapshot::default()
-                };
-            }
-            Ok(None) => {
-                if Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return UpdateStatusSnapshot {
-                        state: UpdateCheckState::Unavailable,
-                        last_checked_label: format!("Today {}", local_clock_hhmm()),
-                        error_hint: Some("Update check timed out".to_owned()),
-                        ..UpdateStatusSnapshot::default()
-                    };
                 }
-                thread::sleep(Duration::from_millis(80));
-            }
-            Err(err) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return UpdateStatusSnapshot {
-                    state: UpdateCheckState::Unavailable,
-                    last_checked_label: format!("Today {}", local_clock_hhmm()),
-                    error_hint: Some(format!("checkupdates wait error: {err}")),
-                    ..UpdateStatusSnapshot::default()
-                };
             }
         }
+        Err(err) if err.kind() == std::io::ErrorKind::TimedOut => UpdateStatusSnapshot {
+            state: UpdateCheckState::Unavailable,
+            last_checked_label: format!("Today {}", local_clock_hhmm()),
+            error_hint: Some("Update check timed out".to_owned()),
+            ..UpdateStatusSnapshot::default()
+        },
+        Err(_) => UpdateStatusSnapshot {
+            state: UpdateCheckState::Unavailable,
+            last_checked_label: format!("Today {}", local_clock_hhmm()),
+            error_hint: Some("Install 'pacman-contrib' (checkupdates)".to_owned()),
+            ..UpdateStatusSnapshot::default()
+        },
     }
 }
 

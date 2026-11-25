@@ -790,6 +790,7 @@ impl WindowManager {
                 }
             }
         } else {
+            let focus_target = self.active_modal_descendant(win_id).unwrap_or(win_id);
             if let Some(output) = self.outputs.iter().find(|o| o.active_workspace == ws_id) {
                 self.focused_output = output.id;
             }
@@ -798,7 +799,7 @@ impl WindowManager {
                     let id = ws.stacking.remove(pos);
                     ws.stacking.push(id);
                 }
-                ws.focused = Some(win_id);
+                ws.focused = Some(focus_target);
             }
             self.enforce_transient_stacking_order(ws_id);
         }
@@ -1511,12 +1512,16 @@ fn compute_initial_floating_rect(
     existing_count: i32,
     preferred_size: Option<(i32, i32)>,
 ) -> Rect {
-    let default_w = ((work_area.width * 3) / 5).clamp(320, work_area.width);
-    let default_h = ((work_area.height * 2) / 3).clamp(240, work_area.height);
+    let min_def_w = 320.min(work_area.width);
+    let min_def_h = 240.min(work_area.height);
+    let default_w = ((work_area.width * 3) / 5).clamp(min_def_w, work_area.width);
+    let default_h = ((work_area.height * 2) / 3).clamp(min_def_h, work_area.height);
+    let min_pref_w = 200.min(work_area.width);
+    let min_pref_h = 150.min(work_area.height);
     let (w, h) = preferred_size.map_or((default_w, default_h), |(pw, ph)| {
         (
-            pw.clamp(200, work_area.width),
-            ph.clamp(150, work_area.height),
+            pw.clamp(min_pref_w, work_area.width),
+            ph.clamp(min_pref_h, work_area.height),
         )
     });
 
@@ -1531,8 +1536,10 @@ fn compute_initial_floating_rect(
 }
 
 fn clamp_rect_to_work_area(rect: Rect, work_area: Rect) -> Rect {
-    let width = rect.width.clamp(120, work_area.width);
-    let height = rect.height.clamp(100, work_area.height);
+    let min_w = 120.min(work_area.width);
+    let min_h = 100.min(work_area.height);
+    let width = rect.width.clamp(min_w, work_area.width);
+    let height = rect.height.clamp(min_h, work_area.height);
     let max_x = work_area.x + work_area.width - width;
     let max_y = work_area.y + work_area.height - height;
     let x = rect.x.clamp(work_area.x, max_x.max(work_area.x));
@@ -1917,5 +1924,26 @@ mod tests {
         // Closing modal dialog returns focus directly to its parent.
         let next_focus = wm.unmap_window(dialog);
         assert_eq!(next_focus, Some(parent));
+    }
+
+    #[test]
+    fn tiny_work_area_and_unminimize_modal_parent_preserve_invariants() {
+        // Small work area < 320x240 must clamp safely without panicking.
+        let mut tiny_wm = WindowManager::new(Rect::new(0, 0, 180, 140));
+        let w = tiny_wm.next_window_id();
+        let rect = tiny_wm.map_window(w, Some((400, 300)));
+        assert!(rect.width <= 180 && rect.height <= 140);
+
+        // Unminimizing a parent with an active modal descendant must focus the modal, not parent.
+        let mut wm = WindowManager::new(Rect::new(0, 0, 1280, 800));
+        let parent = wm.next_window_id();
+        let _ = wm.map_window(parent, None);
+        let dialog = wm.next_window_id();
+        let _ = wm.map_window(dialog, None);
+        assert!(wm.set_window_parent(dialog, Some(parent)));
+        assert!(wm.set_window_dialog_flags(dialog, true, true));
+        assert!(wm.set_window_minimized(parent, true));
+        assert!(wm.focus_and_raise(parent));
+        assert_eq!(wm.focused_window(), Some(dialog));
     }
 }

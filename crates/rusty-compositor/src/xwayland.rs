@@ -277,13 +277,15 @@ impl XwmHandler for RustyCompositorState {
             {
                 let work_area = self.floating_work_area_for_window(win_id);
                 let (min_w, min_h) = self.effective_window_min_size(win_id);
+                let max_w = work_area.width.max(min_w);
+                let max_h = work_area.height.max(min_h);
                 let req_w = w
                     .and_then(|v| i32::try_from(v).ok())
-                    .map_or(wm_win.geometry.width, |v| v.clamp(min_w, work_area.width));
+                    .map_or(wm_win.geometry.width, |v| v.clamp(min_w, max_w));
                 let req_h = h
                     .and_then(|v| i32::try_from(v).ok())
                     .map_or(wm_win.geometry.height, |v| {
-                        v.saturating_add(extra_h).clamp(min_h, work_area.height)
+                        v.saturating_add(extra_h).clamp(min_h, max_h)
                     });
                 let max_x = work_area.x + (work_area.width - req_w).max(0);
                 let max_y = work_area.y + (work_area.height - req_h).max(0);

@@ -427,9 +427,12 @@ impl XdgShellHandler for RustyCompositorState {
         &mut self,
         surface: ToplevelSurface,
         _seat: smithay::reexports::wayland_server::protocol::wl_seat::WlSeat,
-        _serial: Serial,
+        serial: Serial,
         location: Point<i32, Logical>,
     ) {
+        if self.is_session_locked() || !self.is_valid_pointer_grab_request(Some(serial)) {
+            return;
+        }
         if let Some(win_id) = self.window_id_for_toplevel(&surface)
             && let Some(win) = self.wm.window(win_id)
         {
