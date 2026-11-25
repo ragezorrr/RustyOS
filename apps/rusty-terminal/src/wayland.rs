@@ -9,6 +9,14 @@ use std::path::PathBuf;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+use rusty_app::app_menu::{
+    AppMenuItemSpec, AppMenuSectionSpec, RustyosAppMenuManagerV1, RustyosSurfaceAppMenuV1,
+    SurfaceAppMenuEvent,
+};
+use rusty_ui::{
+    PixelFormat, Rect as UiRect, UiCanvas, UiDrawList, UiFontEngine, UiPainter,
+    render_draw_list_to_canvas,
+};
 use smithay_client_toolkit::{
     compositor::{CompositorHandler, CompositorState},
     data_device_manager::{
@@ -18,17 +26,26 @@ use smithay_client_toolkit::{
         data_source::{CopyPasteSource, DataSourceHandler},
     },
     delegate_compositor, delegate_data_device, delegate_keyboard, delegate_output,
-    delegate_pointer, delegate_registry, delegate_seat, delegate_shm, delegate_xdg_shell,
-    delegate_xdg_window,
+    delegate_pointer, delegate_registry, delegate_seat, delegate_shm, delegate_xdg_popup,
+    delegate_xdg_shell, delegate_xdg_window,
     output::{OutputHandler, OutputState},
     reexports::{
         calloop::{EventLoop, LoopHandle, ping::make_ping},
         calloop_wayland_source::WaylandSource,
         protocols::{
-            wp::cursor_shape::v1::client::wp_cursor_shape_device_v1::{
-                Shape as CursorShape, WpCursorShapeDeviceV1,
+            wp::{
+                cursor_shape::v1::client::wp_cursor_shape_device_v1::{
+                    Shape as CursorShape, WpCursorShapeDeviceV1,
+                },
+                text_input::zv3::client::{
+                    zwp_text_input_manager_v3::ZwpTextInputManagerV3,
+                    zwp_text_input_v3::{Event as TextInputEvent, ZwpTextInputV3},
+                },
             },
-            xdg::shell::client::xdg_toplevel::ResizeEdge,
+            xdg::shell::client::{
+                xdg_positioner::{Anchor, ConstraintAdjustment, Gravity},
+                xdg_toplevel::ResizeEdge,
+            },
         },
     },
     registry::{ProvidesRegistryState, RegistryState},
@@ -44,7 +61,8 @@ use smithay_client_toolkit::{
     shell::{
         WaylandSurface,
         xdg::{
-            XdgShell,
+            XdgPositioner, XdgShell, XdgSurface,
+            popup::{Popup, PopupConfigure, PopupHandler},
             window::{Window, WindowConfigure, WindowDecorations, WindowHandler},
         },
     },
@@ -144,12 +162,32 @@ enum RenderBackend {
     },
 }
 
+struct ContextMenuItem {
+    id: i32,
+    label: &'static str,
+    enabled: bool,
+    separator_before: bool,
+}
+
+struct ActiveContextPopup {
+    popup: Popup,
+    _glass: Option<RustyosSurfaceGlassV1>,
+    items: Vec<ContextMenuItem>,
+    hover_idx: Option<usize>,
+    width: u32,
+    height: u32,
+    configured: bool,
+    backbuf: Vec<u8>,
+}
+
 #[allow(clippy::struct_excessive_bools)]
 struct TerminalWaylandApp {
     conn: Connection,
     qh: QueueHandle<Self>,
     loop_handle: LoopHandle<'static, Self>,
     registry_state: RegistryState,
+    compositor_state: CompositorState,
+    xdg_shell: XdgShell,
     seat_state: SeatState,
     output_state: OutputState,
     shm: Shm,
@@ -160,11 +198,17 @@ struct TerminalWaylandApp {
     paste_rx: mpsc::Receiver<String>,
     liquid_glass_mgr: Option<RustyosLiquidGlassManagerV1>,
     surface_glass: Option<RustyosSurfaceGlassV1>,
+    _surface_app_menu: Option<RustyosSurfaceAppMenuV1>,
     window: Window,
+    active_popup: Option<ActiveContextPopup>,
+    popup_pool: SlotPool,
+    ui_fonts: UiFontEngine,
     keyboard: Option<wl_keyboard::WlKeyboard>,
     pointer: Option<wl_pointer::WlPointer>,
     cursor_shape_manager: Option<CursorShapeManager>,
     cursor_shape_device: Option<WpCursorShapeDeviceV1>,
+    _text_input: Option<ZwpTextInputV3>,
+    pending_ime_commit: Option<String>,
     pointer_enter_serial: u32,
     last_cursor_shape: Option<CursorShape>,
     active_seat: Option<wl_seat::WlSeat>,
@@ -207,8 +251,19 @@ pub(crate) fn run(opts: StartupOptions) -> Result<(), WaylandAppError> {
     let liquid_glass_mgr = globals
         .bind::<RustyosLiquidGlassManagerV1, _, _>(&qh, 1..=1, ())
         .ok();
+    let app_menu_mgr = globals
+        .bind::<RustyosAppMenuManagerV1, _, _>(&qh, 1..=1, ())
+        .ok();
 
     let surface = compositor.create_surface(&qh);
+    let surface_app_menu = app_menu_mgr
+        .as_ref()
+        .map(|mgr| mgr.get_menu_surface(&surface, &qh, ()));
+    if let Some(menu) = &surface_app_menu {
+        publish_terminal_app_menu(menu);
+    }
+    let popup_pool = SlotPool::new(260 * 300 * 4, &shm)
+        .map_err(|e| WaylandAppError::EventLoop(format!("{e:?}")))?;
     let window = xdg_shell.create_window(surface, WindowDecorations::RequestClient, &qh);
     window.set_title(opts.title.as_deref().unwrap_or("Terminal"));
     window.set_app_id("org.rustyos.Terminal");
@@ -245,20 +300,76 @@ pub(crate) fn run(opts: StartupOptions) -> Result<(), WaylandAppError> {
         false,
     );
     let seat_state = SeatState::new(&globals, &qh);
+    let mut wayland_app = build_wayland_app(
+        conn,
+        &qh,
+        loop_handle,
+        &globals,
+        compositor,
+        xdg_shell,
+        shm,
+        data_device_manager,
+        liquid_glass_mgr,
+        surface_app_menu,
+        popup_pool,
+        window,
+        paste_tx,
+        paste_rx,
+        app_state,
+        seat_state,
+        opts.title,
+        opts.force_shm,
+        wake_ping,
+    );
+
+    run_event_loop(&mut event_loop, &mut wayland_app)?;
+    wayland_app.backend = None;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_wayland_app(
+    conn: Connection,
+    qh: &QueueHandle<TerminalWaylandApp>,
+    loop_handle: LoopHandle<'static, TerminalWaylandApp>,
+    globals: &wayland_client::globals::GlobalList,
+    compositor_state: CompositorState,
+    xdg_shell: XdgShell,
+    shm: Shm,
+    data_device_manager: Option<DataDeviceManagerState>,
+    liquid_glass_mgr: Option<RustyosLiquidGlassManagerV1>,
+    surface_app_menu: Option<RustyosSurfaceAppMenuV1>,
+    popup_pool: SlotPool,
+    window: Window,
+    paste_tx: mpsc::Sender<String>,
+    paste_rx: mpsc::Receiver<String>,
+    app: TerminalAppState,
+    seat_state: SeatState,
+    initial_title: Option<String>,
+    force_shm: bool,
+    paste_ping: smithay_client_toolkit::reexports::calloop::ping::Ping,
+) -> TerminalWaylandApp {
     let initial_seat = seat_state.seats().next();
+    let text_input = initial_seat.as_ref().and_then(|seat| {
+        globals
+            .bind::<ZwpTextInputManagerV3, _, _>(qh, 1..=1, ())
+            .ok()
+            .map(|mgr| mgr.get_text_input(seat, qh, ()))
+    });
     let initial_data_device = initial_seat.as_ref().and_then(|s| {
         data_device_manager
             .as_ref()
-            .map(|m| m.get_data_device(&qh, s))
+            .map(|m| m.get_data_device(qh, s))
     });
-
-    let mut wayland_app = TerminalWaylandApp {
-        conn: conn.clone(),
+    TerminalWaylandApp {
+        conn,
         qh: qh.clone(),
-        loop_handle: loop_handle.clone(),
-        registry_state: RegistryState::new(&globals),
+        loop_handle,
+        registry_state: RegistryState::new(globals),
+        compositor_state,
+        xdg_shell,
         seat_state,
-        output_state: OutputState::new(&globals, &qh),
+        output_state: OutputState::new(globals, qh),
         shm,
         data_device_manager,
         data_device: initial_data_device,
@@ -267,33 +378,35 @@ pub(crate) fn run(opts: StartupOptions) -> Result<(), WaylandAppError> {
         paste_rx,
         liquid_glass_mgr,
         surface_glass: None,
+        _surface_app_menu: surface_app_menu,
         window,
+        active_popup: None,
+        popup_pool,
+        ui_fonts: UiFontEngine::new(),
         keyboard: None,
         pointer: None,
-        cursor_shape_manager: CursorShapeManager::bind(&globals, &qh).ok(),
+        cursor_shape_manager: CursorShapeManager::bind(globals, qh).ok(),
         cursor_shape_device: None,
+        _text_input: text_input,
+        pending_ime_commit: None,
         pointer_enter_serial: 0,
         last_cursor_shape: None,
         active_seat: initial_seat,
         last_input_serial: 0,
         configured: false,
         initial_pty_spawned: false,
-        initial_title: opts.title,
+        initial_title,
         last_window_title: String::new(),
         buffer_scale: 1,
         shm_scratch: Vec::new(),
         frame_pending: false,
         last_frame_sent: Instant::now(),
         exit: false,
-        force_shm: opts.force_shm,
+        force_shm,
         backend: None,
-        app: app_state,
-        paste_ping: wake_ping,
-    };
-
-    run_event_loop(&mut event_loop, &mut wayland_app)?;
-    wayland_app.backend = None;
-    Ok(())
+        app,
+        paste_ping,
+    }
 }
 
 fn run_event_loop(
@@ -495,6 +608,8 @@ impl TerminalWaylandApp {
                 ResizeEdge::TopRight | ResizeEdge::BottomLeft => CursorShape::NeswResize,
                 _ => CursorShape::Default,
             }
+        } else if self.app.hovered_link.is_some() {
+            CursorShape::Pointer
         } else if py >= f64::from(crate::layout::HEADER_HEIGHT) {
             CursorShape::Text
         } else if self.app.hover.is_some() {
@@ -547,6 +662,12 @@ impl TerminalWaylandApp {
                 TerminalAction::UpdateGlassStyle => {
                     self.sync_liquid_glass();
                     self.app.mark_damage(DamageLevel::Full);
+                }
+                TerminalAction::OpenUrl(url) => {
+                    let _ = std::process::Command::new("xdg-open").arg(&url).spawn();
+                }
+                TerminalAction::OpenContextMenu { x, y } => {
+                    self.open_context_menu(x, y);
                 }
             }
         }
@@ -887,7 +1008,16 @@ impl PointerHandler for TerminalWaylandApp {
         _: &wl_pointer::WlPointer,
         events: &[PointerEvent],
     ) {
+        let popup_surf = self
+            .active_popup
+            .as_ref()
+            .map(|p| p.popup.wl_surface().clone());
+        let mut popup_events = Vec::new();
         for ev in events {
+            if popup_surf.as_ref() == Some(&ev.surface) {
+                popup_events.push(ev.clone());
+                continue;
+            }
             if self.window.wl_surface() != &ev.surface {
                 continue;
             }
@@ -956,6 +1086,9 @@ impl PointerHandler for TerminalWaylandApp {
                     }
                 }
             }
+        }
+        if !popup_events.is_empty() {
+            self.handle_popup_pointer(&popup_events);
         }
     }
 }
@@ -1128,8 +1261,444 @@ delegate_keyboard!(TerminalWaylandApp);
 delegate_pointer!(TerminalWaylandApp);
 delegate_xdg_shell!(TerminalWaylandApp);
 delegate_xdg_window!(TerminalWaylandApp);
+delegate_xdg_popup!(TerminalWaylandApp);
 delegate_data_device!(TerminalWaylandApp);
 delegate_registry!(TerminalWaylandApp);
+
+impl TerminalWaylandApp {
+    fn open_context_menu(&mut self, x: i32, y: i32) {
+        self.active_popup = None;
+        let items = default_context_menu_items(self.app.has_selection());
+        let sep_count = items.iter().filter(|i| i.separator_before).count();
+        let height = u32::try_from(12 + items.len() * 28 + sep_count * 7).unwrap_or(180);
+        let width = 200;
+        let Ok(positioner) = XdgPositioner::new(&self.xdg_shell) else {
+            return;
+        };
+        positioner.set_size(
+            i32::try_from(width).unwrap_or(200),
+            i32::try_from(height).unwrap_or(180),
+        );
+        positioner.set_anchor_rect(x, y, 1, 1);
+        positioner.set_anchor(Anchor::TopLeft);
+        positioner.set_gravity(Gravity::BottomRight);
+        positioner.set_constraint_adjustment(
+            ConstraintAdjustment::FlipX
+                | ConstraintAdjustment::FlipY
+                | ConstraintAdjustment::SlideX
+                | ConstraintAdjustment::SlideY,
+        );
+        let surface = self.compositor_state.create_surface(&self.qh);
+        let glass = self.liquid_glass_mgr.as_ref().map(|mgr| {
+            let g = mgr.get_surface_glass(&surface, &self.qh, ());
+            g.set_style(GlassStyle::Popover);
+            g.set_corner_radius(u32::try_from(rusty_ui::menu::MENU_RADIUS).unwrap_or(10));
+            g.commit();
+            g
+        });
+        let Ok(popup) = Popup::from_surface(
+            Some(self.window.xdg_surface()),
+            &positioner,
+            &self.qh,
+            surface,
+            &self.xdg_shell,
+        ) else {
+            return;
+        };
+        if let Some(seat) = &self.active_seat {
+            popup.xdg_popup().grab(seat, self.last_input_serial);
+        }
+        popup.wl_surface().commit();
+        self.active_popup = Some(ActiveContextPopup {
+            popup,
+            _glass: glass,
+            items,
+            hover_idx: None,
+            width,
+            height,
+            configured: false,
+            backbuf: Vec::new(),
+        });
+    }
+
+    fn draw_popup(&mut self) {
+        let Some(ap) = self.active_popup.as_mut() else {
+            return;
+        };
+        if !ap.configured {
+            return;
+        }
+        let w = ap.width.max(1);
+        let h = ap.height.max(1);
+        let stride = i32::try_from(w * 4).unwrap_or(4);
+        let Ok((buf, canvas)) = self.popup_pool.create_buffer(
+            i32::try_from(w).unwrap_or(1),
+            i32::try_from(h).unwrap_or(1),
+            stride,
+            wl_shm::Format::Argb8888,
+        ) else {
+            return;
+        };
+        let len = (w as usize) * (h as usize) * 4;
+        if ap.backbuf.len() != len {
+            ap.backbuf.resize(len, 0);
+        }
+        ap.backbuf.fill(0);
+        let dark = self.app.theme.window_bg[0] < 128;
+        let draw_list = build_popup_draw_list(&ap.items, ap.hover_idx, w, h, dark);
+        let mut ui_canvas = UiCanvas::new(
+            &mut ap.backbuf,
+            w,
+            h,
+            (w as usize) * 4,
+            PixelFormat::Bgra8888,
+        );
+        render_draw_list_to_canvas(&draw_list, &mut ui_canvas, &mut self.ui_fonts);
+        canvas.copy_from_slice(&ap.backbuf);
+        ap.popup.xdg_surface().set_window_geometry(
+            0,
+            0,
+            i32::try_from(w).unwrap_or(1),
+            i32::try_from(h).unwrap_or(1),
+        );
+        let _ = buf.attach_to(ap.popup.wl_surface());
+        ap.popup.wl_surface().damage_buffer(
+            0,
+            0,
+            i32::try_from(w).unwrap_or(1),
+            i32::try_from(h).unwrap_or(1),
+        );
+        ap.popup.wl_surface().commit();
+    }
+
+    fn handle_popup_pointer(&mut self, events: &[PointerEvent]) {
+        let mut clicked_id: Option<i32> = None;
+        let mut close = false;
+        let mut redraw = false;
+        if let Some(ap) = self.active_popup.as_mut() {
+            for ev in events {
+                let (_, py) = ev.position;
+                match ev.kind {
+                    PointerEventKind::Enter { .. } | PointerEventKind::Motion { .. } => {
+                        let next = popup_item_at(&ap.items, py);
+                        if next != ap.hover_idx {
+                            ap.hover_idx = next;
+                            redraw = true;
+                        }
+                    }
+                    PointerEventKind::Leave { .. } => {
+                        if ap.hover_idx.take().is_some() {
+                            redraw = true;
+                        }
+                    }
+                    PointerEventKind::Press {
+                        button: BTN_LEFT, ..
+                    } => {
+                        if let Some(idx) = popup_item_at(&ap.items, py)
+                            && ap.items[idx].enabled
+                        {
+                            clicked_id = Some(ap.items[idx].id);
+                        } else {
+                            close = true;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if let Some(id) = clicked_id {
+            self.active_popup = None;
+            self.app.execute_menu_action(id);
+            self.process_pending_actions();
+        } else if close {
+            self.active_popup = None;
+        } else if redraw {
+            self.draw_popup();
+        }
+    }
+}
+
+fn default_context_menu_items(has_selection: bool) -> Vec<ContextMenuItem> {
+    vec![
+        ContextMenuItem {
+            id: 201,
+            label: "Copy",
+            enabled: has_selection,
+            separator_before: false,
+        },
+        ContextMenuItem {
+            id: 202,
+            label: "Paste",
+            enabled: true,
+            separator_before: false,
+        },
+        ContextMenuItem {
+            id: 101,
+            label: "New Tab",
+            enabled: true,
+            separator_before: true,
+        },
+        ContextMenuItem {
+            id: 103,
+            label: "Split Right",
+            enabled: true,
+            separator_before: false,
+        },
+        ContextMenuItem {
+            id: 104,
+            label: "Split Down",
+            enabled: true,
+            separator_before: false,
+        },
+        ContextMenuItem {
+            id: 203,
+            label: "Find...",
+            enabled: true,
+            separator_before: false,
+        },
+        ContextMenuItem {
+            id: 204,
+            label: "Clear Scrollback",
+            enabled: true,
+            separator_before: true,
+        },
+        ContextMenuItem {
+            id: 304,
+            label: "Toggle Liquid Glass",
+            enabled: true,
+            separator_before: false,
+        },
+    ]
+}
+
+impl Dispatch<ZwpTextInputManagerV3, ()> for TerminalWaylandApp {
+    fn event(
+        _: &mut Self,
+        _: &ZwpTextInputManagerV3,
+        _: <ZwpTextInputManagerV3 as wayland_client::Proxy>::Event,
+        (): &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<ZwpTextInputV3, ()> for TerminalWaylandApp {
+    fn event(
+        state: &mut Self,
+        ti: &ZwpTextInputV3,
+        event: TextInputEvent,
+        (): &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match event {
+            TextInputEvent::Enter { .. } => {
+                ti.enable();
+                ti.commit();
+            }
+            TextInputEvent::Leave { .. } => {
+                ti.disable();
+                ti.commit();
+                state.pending_ime_commit = None;
+            }
+            TextInputEvent::CommitString { text } => {
+                state.pending_ime_commit = text;
+            }
+            TextInputEvent::Done { .. } => {
+                if let Some(text) = state.pending_ime_commit.take()
+                    && !text.is_empty()
+                    && let Some(tab) = state.app.active_tab_mut()
+                    && let Some(pty) = &mut tab.pty
+                {
+                    pty.write_bytes(text.as_bytes());
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn build_popup_draw_list(
+    items: &[ContextMenuItem],
+    hover_idx: Option<usize>,
+    w: u32,
+    h: u32,
+    dark: bool,
+) -> UiDrawList {
+    let mut draw_list = UiDrawList::new();
+    let mut painter = UiPainter::new(&mut draw_list);
+    let (bg, border, hover_bg, text_col, disabled_col, sep_col) = if dark {
+        (
+            [38, 41, 48, 224],
+            [255, 255, 255, 36],
+            [72, 134, 245, 210],
+            [240, 243, 248, 255],
+            [130, 136, 146, 200],
+            [255, 255, 255, 24],
+        )
+    } else {
+        (
+            [248, 249, 252, 232],
+            [0, 0, 0, 26],
+            [36, 110, 235, 215],
+            [28, 32, 40, 255],
+            [150, 155, 164, 200],
+            [0, 0, 0, 20],
+        )
+    };
+    painter.fill_rounded_rect(UiRect::new(0, 0, w, h), 10.0, bg);
+    painter.stroke_rounded_rect(UiRect::new(0, 0, w, h), 10.0, 1.0, border);
+    let mut y = 6_i32;
+    for (idx, item) in items.iter().enumerate() {
+        if item.separator_before {
+            painter.fill_rect(UiRect::new(10, y + 3, w.saturating_sub(20), 1), sep_col);
+            y += 7;
+        }
+        let row_rect = UiRect::new(6, y, w.saturating_sub(12), 26);
+        let hovered = hover_idx == Some(idx) && item.enabled;
+        if hovered {
+            painter.fill_rounded_rect(row_rect, 6.0, hover_bg);
+        }
+        let fg = if !item.enabled {
+            disabled_col
+        } else if hovered {
+            [255, 255, 255, 255]
+        } else {
+            text_col
+        };
+        painter.draw_text(item.label, 16.0, (y + 18) as f32, 13.0, false, fg);
+        y += 28;
+    }
+    draw_list
+}
+
+fn popup_item_at(items: &[ContextMenuItem], py: f64) -> Option<usize> {
+    let mut y = 6.0;
+    for (idx, item) in items.iter().enumerate() {
+        if item.separator_before {
+            y += 7.0;
+        }
+        if py >= y && py < y + 26.0 {
+            return Some(idx);
+        }
+        y += 28.0;
+    }
+    None
+}
+
+impl PopupHandler for TerminalWaylandApp {
+    fn configure(
+        &mut self,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+        popup: &Popup,
+        config: PopupConfigure,
+    ) {
+        if let Some(ap) = self.active_popup.as_mut()
+            && ap.popup.wl_surface() == popup.wl_surface()
+        {
+            ap.width = u32::try_from(config.width.max(1)).unwrap_or(1);
+            ap.height = u32::try_from(config.height.max(1)).unwrap_or(1);
+            ap.configured = true;
+            self.draw_popup();
+        }
+    }
+
+    fn done(&mut self, _: &Connection, _: &QueueHandle<Self>, popup: &Popup) {
+        if let Some(ap) = &self.active_popup
+            && ap.popup.wl_surface() == popup.wl_surface()
+        {
+            self.active_popup = None;
+        }
+    }
+}
+
+impl Dispatch<RustyosAppMenuManagerV1, ()> for TerminalWaylandApp {
+    fn event(
+        _: &mut Self,
+        _: &RustyosAppMenuManagerV1,
+        _: <RustyosAppMenuManagerV1 as wayland_client::Proxy>::Event,
+        (): &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<RustyosSurfaceAppMenuV1, ()> for TerminalWaylandApp {
+    fn event(
+        state: &mut Self,
+        _: &RustyosSurfaceAppMenuV1,
+        event: SurfaceAppMenuEvent,
+        (): &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let SurfaceAppMenuEvent::ItemActivated { id } = event {
+            state.app.execute_menu_action(id);
+            state.process_pending_actions();
+        }
+    }
+}
+
+fn publish_terminal_app_menu(menu_ctrl: &RustyosSurfaceAppMenuV1) {
+    let sections = vec![
+        AppMenuSectionSpec::new(
+            1,
+            "Shell",
+            vec![
+                AppMenuItemSpec::action(101, "New Tab").with_shortcut("Ctrl+Shift+T"),
+                AppMenuItemSpec::action(103, "Split Right").with_shortcut("Ctrl+Shift+D"),
+                AppMenuItemSpec::action(104, "Split Down").with_shortcut("Ctrl+Shift+E"),
+                AppMenuItemSpec::separator(),
+                AppMenuItemSpec::action(102, "Close Pane / Tab").with_shortcut("Ctrl+Shift+W"),
+            ],
+        ),
+        AppMenuSectionSpec::new(
+            2,
+            "Edit",
+            vec![
+                AppMenuItemSpec::action(201, "Copy").with_shortcut("Ctrl+Shift+C"),
+                AppMenuItemSpec::action(202, "Paste").with_shortcut("Ctrl+Shift+V"),
+                AppMenuItemSpec::separator(),
+                AppMenuItemSpec::action(203, "Find...").with_shortcut("Ctrl+Shift+F"),
+                AppMenuItemSpec::action(204, "Clear Scrollback").with_shortcut("Ctrl+Shift+K"),
+            ],
+        ),
+        AppMenuSectionSpec::new(
+            3,
+            "View",
+            vec![
+                AppMenuItemSpec::action(301, "Zoom In").with_shortcut("Ctrl++"),
+                AppMenuItemSpec::action(302, "Zoom Out").with_shortcut("Ctrl+-"),
+                AppMenuItemSpec::action(303, "Reset Zoom").with_shortcut("Ctrl+0"),
+                AppMenuItemSpec::separator(),
+                AppMenuItemSpec::action(304, "Toggle Liquid Glass"),
+            ],
+        ),
+    ];
+    menu_ctrl.begin_update();
+    for sec in sections {
+        menu_ctrl.begin_section(sec.id, sec.title);
+        for item in sec.items {
+            let checked = match item.checked {
+                Some(true) => 1,
+                Some(false) => 0,
+                None => -1,
+            };
+            menu_ctrl.add_item(
+                item.id,
+                item.label,
+                item.shortcut.unwrap_or_default(),
+                u32::from(item.enabled),
+                u32::from(item.separator),
+                checked,
+            );
+        }
+    }
+    menu_ctrl.commit();
+}
 
 fn pick_clipboard_mime(mimes: &[String]) -> Option<String> {
     for candidate in CLIPBOARD_MIMES {

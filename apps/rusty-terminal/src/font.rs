@@ -54,6 +54,7 @@ pub(crate) struct CellMetrics {
 pub(crate) struct FontSet {
     mono_regular: Font,
     mono_bold: Option<Font>,
+    mono_fallbacks: Vec<Font>,
     ui_regular: Font,
     ui_bold: Font,
 }
@@ -76,9 +77,11 @@ impl FontSet {
             .unwrap_or_else(|_| empty_fallback_font());
 
         let (mono_regular, mono_bold) = load_system_monospace(&ui_regular, &ui_bold);
+        let mono_fallbacks = load_system_fallbacks();
         Self {
             mono_regular,
             mono_bold,
+            mono_fallbacks,
             ui_regular,
             ui_bold,
         }
@@ -140,10 +143,15 @@ impl FontSet {
         }
 
         let font = match key.kind {
-            GlyphKind::MonoRegular => pick_font(key.ch, &self.mono_regular, &self.ui_regular),
+            GlyphKind::MonoRegular => pick_font(
+                key.ch,
+                &self.mono_regular,
+                &self.mono_fallbacks,
+                &self.ui_regular,
+            ),
             GlyphKind::MonoBold => {
                 let primary = self.mono_bold.as_ref().unwrap_or(&self.mono_regular);
-                pick_font(key.ch, primary, &self.ui_bold)
+                pick_font(key.ch, primary, &self.mono_fallbacks, &self.ui_bold)
             }
             GlyphKind::UiRegular => &self.ui_regular,
             GlyphKind::UiBold => &self.ui_bold,
@@ -229,12 +237,52 @@ fn unreachable_empty_loop() -> Font {
     }
 }
 
-fn pick_font<'a>(ch: char, primary: &'a Font, fallback: &'a Font) -> &'a Font {
+fn pick_font<'a>(
+    ch: char,
+    primary: &'a Font,
+    fallbacks: &'a [Font],
+    ui_fallback: &'a Font,
+) -> &'a Font {
     if primary.lookup_glyph_index(ch) != 0 {
-        primary
-    } else {
-        fallback
+        return primary;
     }
+    for fb in fallbacks {
+        if fb.lookup_glyph_index(ch) != 0 {
+            return fb;
+        }
+    }
+    ui_fallback
+}
+
+fn load_system_fallbacks() -> Vec<Font> {
+    const FALLBACK_PATHS: &[&str] = &[
+        "/usr/share/fonts/TTF/SymbolsNerdFontMono-Regular.ttf",
+        "/usr/share/fonts/TTF/SymbolsNerdFont-Regular.ttf",
+        "/usr/share/fonts/nerd-fonts-complete/TTF/SymbolsNerdFontMono-Regular.ttf",
+        "/usr/share/fonts/noto/NotoSansSymbols2-Regular.ttf",
+        "/usr/share/fonts/noto/NotoSansSymbols-Regular.ttf",
+        "/usr/share/fonts/TTF/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/noto/NotoSans-Regular.ttf",
+    ];
+    let mut out = Vec::new();
+    for path in FALLBACK_PATHS {
+        if let Some(font) = load_font_file(Path::new(path)) {
+            out.push(font);
+        }
+    }
+    for pattern in [
+        "Symbols Nerd Font Mono",
+        "Noto Sans Symbols 2",
+        "Noto Emoji",
+    ] {
+        if let Some(path) = fc_match_path(pattern)
+            && let Some(font) = load_font_file(Path::new(&path))
+        {
+            out.push(font);
+        }
+    }
+    out
 }
 
 fn load_system_monospace(ui_reg: &Font, ui_bold: &Font) -> (Font, Option<Font>) {

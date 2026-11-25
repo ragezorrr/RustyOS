@@ -46,6 +46,175 @@ impl Rect {
     }
 }
 
+/// Direction for splitting a terminal pane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SplitDirection {
+    /// Side-by-side (left | right).
+    Horizontal,
+    /// Stacked (top / bottom).
+    Vertical,
+}
+
+/// Binary split tree node representing panes inside a tab.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum PaneNode {
+    Leaf(u64),
+    Split {
+        dir: SplitDirection,
+        ratio: f32,
+        first: Box<Self>,
+        second: Box<Self>,
+    },
+}
+
+/// Computed screen rectangle and grid dimensions for one pane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PaneRect {
+    pub(crate) pane_id: u64,
+    pub(crate) rect: Rect,
+    pub(crate) cols: u16,
+    pub(crate) rows: u16,
+}
+
+impl PaneNode {
+    #[must_use]
+    pub(crate) fn split_leaf(&mut self, target_id: u64, new_id: u64, dir: SplitDirection) -> bool {
+        match self {
+            Self::Leaf(id) if *id == target_id => {
+                *self = Self::Split {
+                    dir,
+                    ratio: 0.5,
+                    first: Box::new(Self::Leaf(target_id)),
+                    second: Box::new(Self::Leaf(new_id)),
+                };
+                true
+            }
+            Self::Leaf(_) => false,
+            Self::Split { first, second, .. } => {
+                first.split_leaf(target_id, new_id, dir)
+                    || second.split_leaf(target_id, new_id, dir)
+            }
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn remove_leaf(self, target_id: u64) -> Option<Self> {
+        match self {
+            Self::Leaf(id) => (id != target_id).then_some(Self::Leaf(id)),
+            Self::Split {
+                dir,
+                ratio,
+                first,
+                second,
+            } => {
+                let f = first.remove_leaf(target_id);
+                let s = second.remove_leaf(target_id);
+                match (f, s) {
+                    (Some(a), Some(b)) => Some(Self::Split {
+                        dir,
+                        ratio,
+                        first: Box::new(a),
+                        second: Box::new(b),
+                    }),
+                    (Some(only), None) | (None, Some(only)) => Some(only),
+                    (None, None) => None,
+                }
+            }
+        }
+    }
+
+    pub(crate) fn collect_rects(
+        &self,
+        bounds: Rect,
+        metrics: CellMetrics,
+        out: &mut Vec<PaneRect>,
+        dividers: &mut Vec<Rect>,
+    ) {
+        match self {
+            Self::Leaf(id) => {
+                let cols = ((bounds.w / metrics.cell_w.max(1)).clamp(4, 512)) as u16;
+                let rows = ((bounds.h / metrics.cell_h.max(1)).clamp(2, 256)) as u16;
+                out.push(PaneRect {
+                    pane_id: *id,
+                    rect: bounds,
+                    cols,
+                    rows,
+                });
+            }
+            Self::Split {
+                dir,
+                ratio,
+                first,
+                second,
+            } => {
+                let pad = 6_i32;
+                match dir {
+                    SplitDirection::Horizontal => {
+                        let usable_w = (bounds.w - pad * 2 - 1).max(2);
+                        let w1 = ((usable_w as f32) * ratio.clamp(0.2, 0.8)).round() as i32;
+                        let div_x = bounds.x + w1 + pad;
+                        dividers.push(Rect::new(div_x, bounds.y, 1, bounds.h));
+                        let r1 = Rect::new(bounds.x, bounds.y, w1.max(1), bounds.h);
+                        let r2 = Rect::new(
+                            div_x + 1 + pad,
+                            bounds.y,
+                            (bounds.right() - (div_x + 1 + pad)).max(1),
+                            bounds.h,
+                        );
+                        first.collect_rects(r1, metrics, out, dividers);
+                        second.collect_rects(r2, metrics, out, dividers);
+                    }
+                    SplitDirection::Vertical => {
+                        let usable_h = (bounds.h - pad * 2 - 1).max(2);
+                        let h1 = ((usable_h as f32) * ratio.clamp(0.2, 0.8)).round() as i32;
+                        let div_y = bounds.y + h1 + pad;
+                        dividers.push(Rect::new(bounds.x, div_y, bounds.w, 1));
+                        let r1 = Rect::new(bounds.x, bounds.y, bounds.w, h1.max(1));
+                        let r2 = Rect::new(
+                            bounds.x,
+                            div_y + 1 + pad,
+                            bounds.w,
+                            (bounds.bottom() - (div_y + 1 + pad)).max(1),
+                        );
+                        first.collect_rects(r1, metrics, out, dividers);
+                        second.collect_rects(r2, metrics, out, dividers);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Maps window coordinates `(px, py)` to a cell inside an arbitrary [`PaneRect`].
+#[must_use]
+pub(crate) fn point_to_cell_in_rect(
+    pane: PaneRect,
+    metrics: CellMetrics,
+    scrollback_len: usize,
+    scroll_offset_lines: f64,
+    px: i32,
+    py: i32,
+) -> (GridPoint, usize, usize) {
+    let rel_x = (px - pane.rect.x).max(0);
+    let rel_y = (py - pane.rect.y).max(0);
+    let col = usize::try_from(rel_x / metrics.cell_w.max(1))
+        .unwrap_or(0)
+        .min(usize::from(pane.cols).saturating_sub(1));
+    let row = usize::try_from(rel_y / metrics.cell_h.max(1))
+        .unwrap_or(0)
+        .min(usize::from(pane.rows).saturating_sub(1));
+    let whole_back = scroll_offset_lines.floor().max(0.0) as usize;
+    let top_abs = scrollback_len.saturating_sub(whole_back.min(scrollback_len));
+    (
+        GridPoint {
+            abs_line: top_abs + row,
+            col,
+        },
+        col,
+        row,
+    )
+}
+
 /// Interactive region hit target in the CSD window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HitTarget {

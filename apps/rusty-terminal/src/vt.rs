@@ -35,6 +35,7 @@ pub(crate) struct Cell {
     pub(crate) fg: TermColor,
     pub(crate) bg: TermColor,
     pub(crate) attrs: CellAttrs,
+    pub(crate) hyperlink: u16,
 }
 
 impl Default for Cell {
@@ -44,6 +45,7 @@ impl Default for Cell {
             fg: TermColor::DefaultFg,
             bg: TermColor::DefaultBg,
             attrs: CellAttrs::default(),
+            hyperlink: 0,
         }
     }
 }
@@ -196,6 +198,7 @@ impl ScreenBuffer {
                 fg: TermColor::DefaultFg,
                 bg: self.cursor.bg,
                 attrs: CellAttrs::default(),
+                hyperlink: 0,
             };
             self.cols
         ]
@@ -284,6 +287,9 @@ pub(crate) struct TerminalEngine {
     utf8_buf: [u8; 4],
     utf8_len: usize,
     utf8_expected: usize,
+    active_hyperlink: u16,
+    pub(crate) hyperlinks: Vec<String>,
+    kitty_keyboard_stack: Vec<u8>,
 }
 
 impl TerminalEngine {
@@ -302,7 +308,24 @@ impl TerminalEngine {
             utf8_buf: [0; 4],
             utf8_len: 0,
             utf8_expected: 0,
+            active_hyperlink: 0,
+            hyperlinks: Vec::new(),
+            kitty_keyboard_stack: Vec::new(),
         }
+    }
+
+    /// Resolves an `OSC 8` hyperlink ID (`1..`) back to its URI.
+    #[must_use]
+    pub(crate) fn hyperlink_url(&self, id: u16) -> Option<&str> {
+        id.checked_sub(1)
+            .and_then(|idx| self.hyperlinks.get(usize::from(idx)))
+            .map(String::as_str)
+    }
+
+    /// Active Kitty keyboard protocol enhancement flags (top of stack, `0` when disabled).
+    #[must_use]
+    pub(crate) fn kitty_keyboard_flags(&self) -> u8 {
+        self.kitty_keyboard_stack.last().copied().unwrap_or(0)
     }
 
     #[must_use]
@@ -619,6 +642,7 @@ impl TerminalEngine {
             return;
         }
         let keep_sb = !self.modes.alt_screen;
+        let hyperlink = self.active_hyperlink;
         let s = self.active_screen_mut();
         if s.cursor.pending_wrap || (width == 2 && s.cursor.col + 1 >= s.cols && s.cols >= 2) {
             s.cursor.pending_wrap = false;
@@ -636,6 +660,7 @@ impl TerminalEngine {
             fg: s.cursor.fg,
             bg: s.cursor.bg,
             attrs: s.cursor.attrs,
+            hyperlink,
         };
         if width == 2 && c + 1 < s.cols {
             s.lines[r][c + 1] = Cell {
@@ -643,6 +668,7 @@ impl TerminalEngine {
                 fg: s.cursor.fg,
                 bg: s.cursor.bg,
                 attrs: s.cursor.attrs,
+                hyperlink,
             };
         }
         if s.cursor.col + width >= s.cols {
@@ -714,6 +740,19 @@ impl TerminalEngine {
                     self.cwd = Some(decoded);
                 }
             }
+            "8" => {
+                if let Some((_, uri_raw)) = payload.split_once(';') {
+                    let uri = uri_raw.trim();
+                    if uri.is_empty() {
+                        self.active_hyperlink = 0;
+                    } else if let Some(pos) = self.hyperlinks.iter().position(|u| u == uri) {
+                        self.active_hyperlink = u16::try_from(pos + 1).unwrap_or(0);
+                    } else if self.hyperlinks.len() < usize::from(u16::MAX - 1) {
+                        self.hyperlinks.push(uri.to_owned());
+                        self.active_hyperlink = u16::try_from(self.hyperlinks.len()).unwrap_or(0);
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -722,9 +761,13 @@ impl TerminalEngine {
         let private = seq
             .first()
             .copied()
-            .filter(|&b| matches!(b, b'?' | b'>' | b'='));
+            .filter(|&b| matches!(b, b'?' | b'>' | b'<' | b'='));
         let body = if private.is_some() { &seq[1..] } else { seq };
         let params = parse_csi_params(body);
+        if final_byte == b'u' && private.is_some() {
+            self.dispatch_kitty_keyboard(private, &params, replies);
+            return;
+        }
         if private == Some(b'?') {
             self.dispatch_dec_private(&params, final_byte);
             return;
@@ -929,6 +972,48 @@ impl TerminalEngine {
                 }
             }
             b'c' if p0 == 0 => replies.push(b"\x1b[?62;22c".to_vec()),
+            _ => {}
+        }
+    }
+
+    fn dispatch_kitty_keyboard(
+        &mut self,
+        prefix: Option<u8>,
+        params: &[u16],
+        replies: &mut Vec<Vec<u8>>,
+    ) {
+        match prefix {
+            Some(b'?') => {
+                let flags = self.kitty_keyboard_flags();
+                replies.push(format!("\x1b[?{flags}u").into_bytes());
+            }
+            Some(b'>') => {
+                let flags = u8::try_from(params.first().copied().unwrap_or(0)).unwrap_or(0);
+                if self.kitty_keyboard_stack.len() >= 16 {
+                    self.kitty_keyboard_stack.remove(0);
+                }
+                self.kitty_keyboard_stack.push(flags);
+            }
+            Some(b'<') => {
+                let count = usize::from(params.first().copied().unwrap_or(1).max(1));
+                let new_len = self.kitty_keyboard_stack.len().saturating_sub(count);
+                self.kitty_keyboard_stack.truncate(new_len);
+            }
+            Some(b'=') => {
+                let flags = u8::try_from(params.first().copied().unwrap_or(0)).unwrap_or(0);
+                let mode = params.get(1).copied().unwrap_or(1);
+                let cur = self.kitty_keyboard_flags();
+                let next = match mode {
+                    2 => cur | flags,
+                    3 => cur & !flags,
+                    _ => flags,
+                };
+                if let Some(top) = self.kitty_keyboard_stack.last_mut() {
+                    *top = next;
+                } else {
+                    self.kitty_keyboard_stack.push(next);
+                }
+            }
             _ => {}
         }
     }

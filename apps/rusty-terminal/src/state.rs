@@ -9,7 +9,10 @@ use smithay_client_toolkit::reexports::calloop::ping::Ping;
 use smithay_client_toolkit::seat::keyboard::{Keysym, Modifiers};
 
 use crate::font::{CellMetrics, FontSet};
-use crate::layout::{HitTarget, MIN_HEIGHT, MIN_WIDTH, TerminalLayout};
+use crate::layout::{
+    HitTarget, MIN_HEIGHT, MIN_WIDTH, PaneNode, PaneRect, Rect, SplitDirection, TerminalLayout,
+    point_to_cell_in_rect,
+};
 use crate::pty::{PtyEvent, PtySession, PtySpawnConfig};
 use crate::theme::{ConfigWatcher, TerminalTheme};
 use crate::vt::{GridPoint, TerminalEngine, TerminalModes, TextSelection};
@@ -29,6 +32,17 @@ pub(crate) enum TerminalAction {
     CopyPrimary(String),
     RequestPaste,
     UpdateGlassStyle,
+    OpenUrl(String),
+    OpenContextMenu { x: i32, y: i32 },
+}
+
+/// Active hovered hyperlink (`OSC 8` or detected URL) under `Ctrl+Hover`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HoveredLink {
+    pub(crate) url: String,
+    pub(crate) abs_line: usize,
+    pub(crate) start_col: usize,
+    pub(crate) end_col: usize,
 }
 
 /// Incremental damage granularity to minimize GPU/SHM work on idle/blink frames.
@@ -62,6 +76,10 @@ pub(crate) struct TerminalTab {
     pub(crate) selecting: bool,
     pub(crate) last_click_at: Option<Instant>,
     pub(crate) click_streak: u8,
+    pub(crate) bell_unread: bool,
+    pub(crate) split_tree: Option<PaneNode>,
+    pub(crate) active_pane_id: u64,
+    pub(crate) extra_panes: Vec<TerminalTab>,
 }
 
 impl TerminalTab {
@@ -79,7 +97,74 @@ impl TerminalTab {
             selecting: false,
             last_click_at: None,
             click_streak: 0,
+            bell_unread: false,
+            split_tree: None,
+            active_pane_id: id,
+            extra_panes: Vec::new(),
         }
+    }
+
+    #[must_use]
+    pub(crate) fn active_pane(&self) -> &Self {
+        if self.active_pane_id == self.id {
+            self
+        } else {
+            self.extra_panes
+                .iter()
+                .find(|p| p.id == self.active_pane_id)
+                .unwrap_or(self)
+        }
+    }
+
+    pub(crate) fn active_pane_mut(&mut self) -> &mut Self {
+        let target = self.active_pane_id;
+        if target == self.id {
+            self
+        } else if let Some(idx) = self.extra_panes.iter().position(|p| p.id == target) {
+            &mut self.extra_panes[idx]
+        } else {
+            self
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn find_pane(&self, id: u64) -> Option<&Self> {
+        if self.id == id {
+            Some(self)
+        } else {
+            self.extra_panes.iter().find(|p| p.id == id)
+        }
+    }
+
+    pub(crate) fn find_pane_mut(&mut self, id: u64) -> Option<&mut Self> {
+        if self.id == id {
+            Some(self)
+        } else {
+            self.extra_panes.iter_mut().find(|p| p.id == id)
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn pane_rects(
+        &self,
+        bounds: Rect,
+        metrics: CellMetrics,
+    ) -> (Vec<PaneRect>, Vec<Rect>) {
+        let mut rects = Vec::new();
+        let mut dividers = Vec::new();
+        if let Some(tree) = &self.split_tree {
+            tree.collect_rects(bounds, metrics, &mut rects, &mut dividers);
+        } else {
+            let cols = ((bounds.w / metrics.cell_w.max(1)).clamp(4, 512)) as u16;
+            let rows = ((bounds.h / metrics.cell_h.max(1)).clamp(2, 256)) as u16;
+            rects.push(PaneRect {
+                pane_id: self.id,
+                rect: bounds,
+                cols,
+                rows,
+            });
+        }
+        (rects, dividers)
     }
 
     #[must_use]
@@ -89,10 +174,11 @@ impl TerminalTab {
         } else {
             self.engine.title.trim()
         };
+        let prefix = if self.bell_unread { "• " } else { "" };
         if let Some(code) = self.exited_code {
-            format!("{base} (exit {code})")
+            format!("{prefix}{base} (exit {code})")
         } else {
-            base.to_owned()
+            format!("{prefix}{base}")
         }
     }
 }
@@ -112,6 +198,7 @@ pub(crate) struct TerminalAppState {
     pub(crate) focused: bool,
     pub(crate) pointer_pos: Option<(f64, f64)>,
     pub(crate) hover: Option<HitTarget>,
+    pub(crate) hovered_link: Option<HoveredLink>,
     pub(crate) modifiers: Modifiers,
     pub(crate) font_size: f32,
     pub(crate) fonts: FontSet,
@@ -167,6 +254,7 @@ impl TerminalAppState {
             focused: true,
             pointer_pos: None,
             hover: None,
+            hovered_link: None,
             modifiers: Modifiers::default(),
             font_size,
             fonts,
@@ -223,11 +311,109 @@ impl TerminalAppState {
 
     #[must_use]
     pub(crate) fn active_tab(&self) -> Option<&TerminalTab> {
-        self.tabs.get(self.active_tab)
+        self.tabs.get(self.active_tab).map(TerminalTab::active_pane)
     }
 
     pub(crate) fn active_tab_mut(&mut self) -> Option<&mut TerminalTab> {
-        self.tabs.get_mut(self.active_tab)
+        self.tabs
+            .get_mut(self.active_tab)
+            .map(TerminalTab::active_pane_mut)
+    }
+
+    #[must_use]
+    pub(crate) fn active_tab_root(&self) -> Option<&TerminalTab> {
+        self.tabs.get(self.active_tab)
+    }
+
+    pub(crate) fn split_active_pane(&mut self, dir: SplitDirection) {
+        let inherited_cwd = self
+            .active_tab()
+            .and_then(|t| t.engine.cwd.as_deref())
+            .map(PathBuf::from)
+            .or_else(|| self.initial_cwd.clone());
+        let new_id = self.next_tab_id;
+        self.next_tab_id += 1;
+        let layout = self.layout();
+        let cfg = PtySpawnConfig {
+            tab_id: new_id,
+            program: self.program.clone(),
+            args: self.program_args.clone(),
+            working_dir: inherited_cwd,
+            cols: (layout.cols / 2).max(4),
+            rows: (layout.rows / 2).max(2),
+            pixel_w: u16::try_from(layout.grid_rect.w.max(1)).unwrap_or(u16::MAX),
+            pixel_h: u16::try_from(layout.grid_rect.h.max(1)).unwrap_or(u16::MAX),
+        };
+        let pty = PtySession::spawn(&cfg, self.pty_tx.clone(), self.pty_ping.clone()).ok();
+        let pane = TerminalTab::new(new_id, usize::from(cfg.cols), usize::from(cfg.rows), pty);
+        if let Some(root) = self.tabs.get_mut(self.active_tab) {
+            let target_id = root.active_pane_id;
+            let mut tree = root.split_tree.take().unwrap_or(PaneNode::Leaf(root.id));
+            if tree.split_leaf(target_id, new_id, dir) {
+                root.split_tree = Some(tree);
+                root.extra_panes.push(pane);
+                root.active_pane_id = new_id;
+            }
+        }
+        self.sync_all_tabs_grid_size();
+        self.mark_damage(DamageLevel::Full);
+    }
+
+    pub(crate) fn close_active_pane_or_tab(&mut self) {
+        let Some(root) = self.tabs.get_mut(self.active_tab) else {
+            return;
+        };
+        if root.extra_panes.is_empty() {
+            self.close_tab(self.active_tab);
+            return;
+        }
+        let target_id = root.active_pane_id;
+        if target_id == root.id {
+            let mut promoted = root.extra_panes.remove(0);
+            promoted.extra_panes = std::mem::take(&mut root.extra_panes);
+            promoted.split_tree = root
+                .split_tree
+                .take()
+                .and_then(|t| t.remove_leaf(target_id));
+            promoted.active_pane_id = promoted.id;
+            if promoted.extra_panes.is_empty() {
+                promoted.split_tree = None;
+            }
+            *root = promoted;
+        } else {
+            root.extra_panes.retain(|p| p.id != target_id);
+            root.split_tree = root
+                .split_tree
+                .take()
+                .and_then(|t| t.remove_leaf(target_id));
+            root.active_pane_id = root.id;
+            if root.extra_panes.is_empty() {
+                root.split_tree = None;
+            }
+        }
+        self.sync_all_tabs_grid_size();
+        self.mark_damage(DamageLevel::Full);
+    }
+
+    pub(crate) fn focus_next_pane(&mut self, backward: bool) {
+        let Some(root) = self.tabs.get_mut(self.active_tab) else {
+            return;
+        };
+        if root.extra_panes.is_empty() {
+            return;
+        }
+        let mut ids = Vec::with_capacity(1 + root.extra_panes.len());
+        ids.push(root.id);
+        ids.extend(root.extra_panes.iter().map(|p| p.id));
+        if let Some(pos) = ids.iter().position(|&id| id == root.active_pane_id) {
+            let next = if backward {
+                (pos + ids.len() - 1) % ids.len()
+            } else {
+                (pos + 1) % ids.len()
+            };
+            root.active_pane_id = ids[next];
+            self.mark_damage(DamageLevel::Full);
+        }
     }
 
     pub(crate) fn mark_damage(&mut self, level: DamageLevel) {
@@ -299,6 +485,9 @@ impl TerminalAppState {
     pub(crate) fn select_tab(&mut self, idx: usize) {
         if idx < self.tabs.len() && idx != self.active_tab {
             self.active_tab = idx;
+            if let Some(tab) = self.tabs.get_mut(idx) {
+                tab.bell_unread = false;
+            }
             self.refresh_search_matches();
             self.mark_damage(DamageLevel::Full);
         }
@@ -335,16 +524,20 @@ impl TerminalAppState {
 
     fn sync_all_tabs_grid_size(&mut self) {
         let layout = self.layout();
-        let cols_u = usize::from(layout.cols);
-        let rows_u = usize::from(layout.rows);
-        let pw = u16::try_from(layout.grid_rect.w.max(1)).unwrap_or(u16::MAX);
-        let ph = u16::try_from(layout.grid_rect.h.max(1)).unwrap_or(u16::MAX);
         for tab in &mut self.tabs {
-            tab.engine.resize(cols_u, rows_u);
-            let max_sb = tab.engine.scrollback_len() as f64;
-            tab.scroll_target = tab.scroll_target.clamp(0.0, max_sb);
-            if let Some(pty) = &tab.pty {
-                pty.resize(layout.cols, layout.rows, pw, ph);
+            let (rects, _) = tab.pane_rects(layout.grid_rect, self.metrics);
+            for pr in rects {
+                if let Some(pane) = tab.find_pane_mut(pr.pane_id) {
+                    pane.engine
+                        .resize(usize::from(pr.cols), usize::from(pr.rows));
+                    let max_sb = pane.engine.scrollback_len() as f64;
+                    pane.scroll_target = pane.scroll_target.clamp(0.0, max_sb);
+                    let pw = u16::try_from(pr.rect.w.max(1)).unwrap_or(u16::MAX);
+                    let ph = u16::try_from(pr.rect.h.max(1)).unwrap_or(u16::MAX);
+                    if let Some(pty) = &pane.pty {
+                        pty.resize(pr.cols, pr.rows, pw, ph);
+                    }
+                }
             }
         }
     }
@@ -359,16 +552,16 @@ impl TerminalAppState {
                 PtyEvent::Output { tab_id, bytes } => {
                     let reduced = self.theme.reduced_motion;
                     let now = self.start_time.elapsed();
-                    if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
-                        let replies = tab.engine.process_bytes(&bytes);
-                        if let Some(pty) = &mut tab.pty {
+                    if let Some(pane) = self.tabs.iter_mut().find_map(|t| t.find_pane_mut(tab_id)) {
+                        let replies = pane.engine.process_bytes(&bytes);
+                        if let Some(pty) = &mut pane.pty {
                             for reply in replies {
                                 pty.write_bytes(&reply);
                             }
                         }
-                        if tab.scroll_target > 0.0 && tab.engine.modes.alt_screen {
-                            tab.scroll_target = 0.0;
-                            tab.scroll_lines.retarget(
+                        if pane.scroll_target > 0.0 && pane.engine.modes.alt_screen {
+                            pane.scroll_target = 0.0;
+                            pane.scroll_lines.retarget(
                                 0.0,
                                 now,
                                 Duration::ZERO,
@@ -380,15 +573,41 @@ impl TerminalAppState {
                     self.mark_damage(DamageLevel::Full);
                 }
                 PtyEvent::Exited { tab_id, code } => {
-                    if let Some((idx, tab)) = self
+                    if let Some((idx, root)) = self
                         .tabs
                         .iter_mut()
                         .enumerate()
-                        .find(|(_, t)| t.id == tab_id)
+                        .find(|(_, t)| t.find_pane(tab_id).is_some())
                     {
-                        tab.exited_code = Some(code.unwrap_or(0));
-                        tab.pty = None;
-                        close_indices.push(idx);
+                        if let Some(pane) = root.find_pane_mut(tab_id) {
+                            pane.exited_code = Some(code.unwrap_or(0));
+                            pane.pty = None;
+                        }
+                        if root.extra_panes.is_empty() {
+                            close_indices.push(idx);
+                        } else if tab_id == root.id {
+                            let mut promoted = root.extra_panes.remove(0);
+                            promoted.extra_panes = std::mem::take(&mut root.extra_panes);
+                            promoted.split_tree =
+                                root.split_tree.take().and_then(|t| t.remove_leaf(tab_id));
+                            promoted.active_pane_id = promoted.id;
+                            if promoted.extra_panes.is_empty() {
+                                promoted.split_tree = None;
+                            }
+                            *root = promoted;
+                            self.sync_all_tabs_grid_size();
+                        } else {
+                            root.extra_panes.retain(|p| p.id != tab_id);
+                            root.split_tree =
+                                root.split_tree.take().and_then(|t| t.remove_leaf(tab_id));
+                            if root.active_pane_id == tab_id {
+                                root.active_pane_id = root.id;
+                            }
+                            if root.extra_panes.is_empty() {
+                                root.split_tree = None;
+                            }
+                            self.sync_all_tabs_grid_size();
+                        }
                     }
                 }
             }
@@ -414,6 +633,13 @@ impl TerminalAppState {
         let mut animating = false;
 
         for (idx, tab) in self.tabs.iter_mut().enumerate() {
+            if tab.engine.bell_pending {
+                tab.engine.bell_pending = false;
+                if idx != self.active_tab && !tab.bell_unread {
+                    tab.bell_unread = true;
+                    self.damage = DamageLevel::Full;
+                }
+            }
             if tab.scroll_lines.is_active() {
                 let _ = tab.scroll_lines.tick(elapsed);
                 if idx == self.active_tab {
@@ -494,6 +720,18 @@ impl TerminalAppState {
         }
 
         if target == HitTarget::TerminalGrid {
+            if pressed
+                && let Some(root) = self.tabs.get_mut(self.active_tab)
+                && !root.extra_panes.is_empty()
+            {
+                let (rects, _) = root.pane_rects(layout.grid_rect, self.metrics);
+                if let Some(pr) = rects.iter().find(|r| r.rect.contains(ix, iy))
+                    && pr.pane_id != root.active_pane_id
+                {
+                    root.active_pane_id = pr.pane_id;
+                    self.mark_damage(DamageLevel::Full);
+                }
+            }
             let modes = self
                 .active_tab()
                 .map_or_else(TerminalModes::default, |t| t.engine.modes);
@@ -509,25 +747,19 @@ impl TerminalAppState {
                 return;
             }
             if button == 0 {
+                if pressed
+                    && self.modifiers.ctrl
+                    && let Some(link) = self.hovered_link.clone()
+                {
+                    self.pending_actions.push(TerminalAction::OpenUrl(link.url));
+                    return;
+                }
                 self.handle_selection_button(&layout, ix, iy, pressed);
             } else if !pressed && button == 1 {
                 self.pending_actions.push(TerminalAction::RequestPaste);
             } else if !pressed && button == 2 {
-                let copied = self.active_tab().and_then(|tab| {
-                    let sel = tab.selection?;
-                    let text = tab.engine.extract_selection_text(sel);
-                    (!text.is_empty()).then_some(text)
-                });
-                if let Some(text) = copied {
-                    if let Some(tab) = self.active_tab_mut() {
-                        tab.selection = None;
-                    }
-                    self.pending_actions
-                        .push(TerminalAction::CopyClipboard(text));
-                    self.mark_damage(DamageLevel::Full);
-                } else {
-                    self.pending_actions.push(TerminalAction::RequestPaste);
-                }
+                self.pending_actions
+                    .push(TerminalAction::OpenContextMenu { x: ix, y: iy });
             }
         } else if !pressed
             && button == 0
@@ -615,6 +847,25 @@ impl TerminalAppState {
         }
     }
 
+    fn point_to_cell_active(
+        &self,
+        layout: &TerminalLayout,
+        sb: usize,
+        off: f64,
+        ix: i32,
+        iy: i32,
+    ) -> (GridPoint, usize, usize) {
+        if let Some(root) = self.active_tab_root()
+            && !root.extra_panes.is_empty()
+        {
+            let (rects, _) = root.pane_rects(layout.grid_rect, self.metrics);
+            if let Some(&pr) = rects.iter().find(|r| r.pane_id == root.active_pane_id) {
+                return point_to_cell_in_rect(pr, self.metrics, sb, off, ix, iy);
+            }
+        }
+        layout.point_to_cell(self.metrics, sb, off, ix, iy)
+    }
+
     fn handle_selection_button(
         &mut self,
         layout: &TerminalLayout,
@@ -622,7 +873,11 @@ impl TerminalAppState {
         iy: i32,
         pressed: bool,
     ) {
-        let Some(tab) = self.tabs.get_mut(self.active_tab) else {
+        let (sb, off) = self.active_tab().map_or((0, 0.0), |t| {
+            (t.engine.scrollback_len(), t.scroll_lines.current())
+        });
+        let (point, _, _) = self.point_to_cell_active(layout, sb, off, ix, iy);
+        let Some(tab) = self.active_tab_mut() else {
             return;
         };
         if !pressed {
@@ -646,14 +901,6 @@ impl TerminalAppState {
             1
         };
         tab.last_click_at = Some(now);
-
-        let (point, _, _) = layout.point_to_cell(
-            self.metrics,
-            tab.engine.scrollback_len(),
-            tab.scroll_lines.current(),
-            ix,
-            iy,
-        );
 
         match tab.click_streak {
             2 => {
@@ -746,6 +993,34 @@ impl TerminalAppState {
                 }
             }
         }
+        self.update_hovered_link(&layout, ix, iy, next_hover);
+    }
+
+    fn update_hovered_link(
+        &mut self,
+        layout: &TerminalLayout,
+        ix: i32,
+        iy: i32,
+        hover: Option<HitTarget>,
+    ) {
+        let next = if self.modifiers.ctrl && hover == Some(HitTarget::TerminalGrid) {
+            self.active_tab().and_then(|tab| {
+                let (pt, _, _) = layout.point_to_cell(
+                    self.metrics,
+                    tab.engine.scrollback_len(),
+                    tab.scroll_lines.current(),
+                    ix,
+                    iy,
+                );
+                link_at_cell(&tab.engine, pt.abs_line, pt.col)
+            })
+        } else {
+            None
+        };
+        if next != self.hovered_link {
+            self.hovered_link = next;
+            self.mark_damage(DamageLevel::GridAndScrollbar);
+        }
     }
 
     pub(crate) fn handle_scroll_wheel(&mut self, vertical_steps: f64) {
@@ -794,10 +1069,13 @@ impl TerminalAppState {
         if self.search.open && self.handle_search_key(keysym, utf8) {
             return;
         }
-        let modes = self
-            .active_tab()
-            .map_or_else(TerminalModes::default, |t| t.engine.modes);
-        if let Some(bytes) = encode_key_to_vt(keysym, utf8, self.modifiers, modes) {
+        let (modes, kitty_flags) = self.active_tab().map_or_else(
+            || (TerminalModes::default(), 0),
+            |t| (t.engine.modes, t.engine.kitty_keyboard_flags()),
+        );
+        if let Some(bytes) =
+            encode_key_to_vt_with_kitty(keysym, utf8, self.modifiers, modes, kitty_flags)
+        {
             self.snap_scroll_to_bottom();
             self.cursor_blink_on = true;
             self.last_blink_flip = Instant::now();
@@ -839,20 +1117,15 @@ impl TerminalAppState {
     }
 
     fn handle_shortcut(&mut self, keysym: Keysym) -> bool {
+        if self.handle_pane_tab_shortcut(keysym) {
+            return true;
+        }
         let ctrl_shift = self.modifiers.ctrl && self.modifiers.shift;
         let super_only = self.modifiers.logo && !self.modifiers.ctrl && !self.modifiers.alt;
         if (ctrl_shift || super_only) && is_copy_keysym(keysym)
             || (self.modifiers.ctrl && keysym == Keysym::Insert)
         {
-            if let Some(tab) = self.active_tab()
-                && let Some(sel) = tab.selection
-            {
-                let text = tab.engine.extract_selection_text(sel);
-                if !text.is_empty() {
-                    self.pending_actions
-                        .push(TerminalAction::CopyClipboard(text));
-                }
-            }
+            self.execute_menu_action(201);
             return true;
         }
         if (ctrl_shift || super_only) && is_paste_keysym(keysym)
@@ -862,44 +1135,12 @@ impl TerminalAppState {
             self.pending_actions.push(TerminalAction::RequestPaste);
             return true;
         }
-        if (ctrl_shift || super_only) && is_new_tab_keysym(keysym) {
-            self.spawn_tab(None);
-            return true;
-        }
-        if ctrl_shift && is_close_tab_keysym(keysym) {
-            self.close_tab(self.active_tab);
-            return true;
-        }
         if (ctrl_shift || super_only) && is_search_keysym(keysym) {
             self.toggle_search();
             return true;
         }
         if (ctrl_shift || super_only) && is_clear_keysym(keysym) {
-            if let Some(tab) = self.active_tab_mut() {
-                tab.engine.clear_scrollback_and_reset_view();
-                tab.scroll_target = 0.0;
-                self.snap_scroll_to_bottom();
-                self.mark_damage(DamageLevel::Full);
-            }
-            return true;
-        }
-        if self.modifiers.ctrl
-            && matches!(
-                keysym,
-                Keysym::Tab | Keysym::ISO_Left_Tab | Keysym::Page_Down | Keysym::Page_Up
-            )
-        {
-            if self.tabs.len() > 1 {
-                let back = self.modifiers.shift
-                    || keysym == Keysym::Page_Up
-                    || keysym == Keysym::ISO_Left_Tab;
-                let next = if back {
-                    (self.active_tab + self.tabs.len() - 1) % self.tabs.len()
-                } else {
-                    (self.active_tab + 1) % self.tabs.len()
-                };
-                self.select_tab(next);
-            }
+            self.execute_menu_action(204);
             return true;
         }
         if self.modifiers.ctrl && matches!(keysym, Keysym::plus | Keysym::equal | Keysym::KP_Add) {
@@ -925,6 +1166,106 @@ impl TerminalAppState {
             return true;
         }
         false
+    }
+
+    fn handle_pane_tab_shortcut(&mut self, keysym: Keysym) -> bool {
+        let ctrl_shift = self.modifiers.ctrl && self.modifiers.shift;
+        let super_only = self.modifiers.logo && !self.modifiers.ctrl && !self.modifiers.alt;
+        if (ctrl_shift || super_only) && is_new_tab_keysym(keysym) {
+            self.spawn_tab(None);
+            return true;
+        }
+        if ctrl_shift && matches!(keysym, Keysym::D | Keysym::d) {
+            self.split_active_pane(SplitDirection::Horizontal);
+            return true;
+        }
+        if ctrl_shift && matches!(keysym, Keysym::E | Keysym::e) {
+            self.split_active_pane(SplitDirection::Vertical);
+            return true;
+        }
+        if ctrl_shift && matches!(keysym, Keysym::bracketright | Keysym::braceright) {
+            self.focus_next_pane(false);
+            return true;
+        }
+        if ctrl_shift && matches!(keysym, Keysym::bracketleft | Keysym::braceleft) {
+            self.focus_next_pane(true);
+            return true;
+        }
+        if ctrl_shift && is_close_tab_keysym(keysym) {
+            self.close_active_pane_or_tab();
+            return true;
+        }
+        if self.modifiers.ctrl
+            && matches!(
+                keysym,
+                Keysym::Tab | Keysym::ISO_Left_Tab | Keysym::Page_Down | Keysym::Page_Up
+            )
+        {
+            if self.tabs.len() > 1 {
+                let back = self.modifiers.shift
+                    || keysym == Keysym::Page_Up
+                    || keysym == Keysym::ISO_Left_Tab;
+                let next = if back {
+                    (self.active_tab + self.tabs.len() - 1) % self.tabs.len()
+                } else {
+                    (self.active_tab + 1) % self.tabs.len()
+                };
+                self.select_tab(next);
+            }
+            return true;
+        }
+        false
+    }
+
+    /// Returns `true` when the active terminal tab has a non-empty text selection.
+    #[must_use]
+    pub(crate) fn has_selection(&self) -> bool {
+        self.active_tab().is_some_and(|t| t.selection.is_some())
+    }
+
+    /// Executes a Global Menu Bar or context menu action by id.
+    pub(crate) fn execute_menu_action(&mut self, id: i32) {
+        match id {
+            101 => self.spawn_tab(None),
+            102 => self.close_active_pane_or_tab(),
+            103 => self.split_active_pane(SplitDirection::Horizontal),
+            104 => self.split_active_pane(SplitDirection::Vertical),
+            201 => {
+                if let Some(tab) = self.active_tab()
+                    && let Some(sel) = tab.selection
+                {
+                    let text = tab.engine.extract_selection_text(sel);
+                    if !text.is_empty() {
+                        self.pending_actions
+                            .push(TerminalAction::CopyClipboard(text));
+                    }
+                }
+            }
+            202 => self.pending_actions.push(TerminalAction::RequestPaste),
+            203 => self.toggle_search(),
+            204 => {
+                if let Some(tab) = self.active_tab_mut() {
+                    tab.engine.clear_scrollback_and_reset_view();
+                    tab.scroll_target = 0.0;
+                    self.snap_scroll_to_bottom();
+                    self.mark_damage(DamageLevel::Full);
+                }
+            }
+            301 => self.adjust_font_size(1.0, false),
+            302 => self.adjust_font_size(-1.0, false),
+            303 => self.adjust_font_size(0.0, true),
+            304 => {
+                let next = !self
+                    .glass_override
+                    .unwrap_or(!self.theme.reduce_transparency);
+                self.glass_override = Some(next);
+                self.theme =
+                    TerminalTheme::from_config(&self.config_watcher.current, self.glass_override);
+                self.pending_actions.push(TerminalAction::UpdateGlassStyle);
+                self.mark_damage(DamageLevel::Full);
+            }
+            _ => {}
+        }
     }
 
     fn toggle_search(&mut self) {
@@ -1025,6 +1366,7 @@ fn is_word_char(ch: char) -> bool {
 }
 
 /// Encodes keyboard keysyms + modifiers + UTF-8 text into VT/xterm escape sequences.
+#[cfg_attr(not(test), allow(dead_code))]
 #[must_use]
 pub(crate) fn encode_key_to_vt(
     keysym: Keysym,
@@ -1032,7 +1374,25 @@ pub(crate) fn encode_key_to_vt(
     mods: Modifiers,
     term_modes: TerminalModes,
 ) -> Option<Vec<u8>> {
+    encode_key_to_vt_with_kitty(keysym, utf8, mods, term_modes, 0)
+}
+
+/// Encodes keyboard input with optional Kitty keyboard protocol (`CSI u`) disambiguation.
+#[must_use]
+pub(crate) fn encode_key_to_vt_with_kitty(
+    keysym: Keysym,
+    utf8: Option<&str>,
+    mods: Modifiers,
+    term_modes: TerminalModes,
+    kitty_flags: u8,
+) -> Option<Vec<u8>> {
     let mod_param = xterm_modifier_param(mods);
+
+    if (kitty_flags & 1) != 0
+        && let Some(seq) = encode_kitty_csi_u(keysym, mod_param, mods)
+    {
+        return Some(seq);
+    }
 
     if let Some(seq) = encode_special_key(keysym, mod_param, term_modes) {
         return Some(seq);
@@ -1055,6 +1415,91 @@ pub(crate) fn encode_key_to_vt(
             return Some(out);
         }
         return Some(txt.as_bytes().to_vec());
+    }
+    None
+}
+
+fn encode_kitty_csi_u(keysym: Keysym, mod_param: u8, mods: Modifiers) -> Option<Vec<u8>> {
+    if mod_param == 0 {
+        return None;
+    }
+    let code: u32 = match keysym {
+        Keysym::Return | Keysym::KP_Enter => 13,
+        Keysym::Tab | Keysym::ISO_Left_Tab => 9,
+        Keysym::BackSpace => 127,
+        Keysym::Escape => 27,
+        _ if mods.ctrl || mods.alt => {
+            let ch = keysym.key_char()?;
+            let lower = ch.to_ascii_lowercase();
+            if lower.is_ascii_graphic() {
+                u32::from(lower)
+            } else {
+                return None;
+            }
+        }
+        _ => return None,
+    };
+    Some(format!("\x1b[{code};{mod_param}u").into_bytes())
+}
+
+fn link_at_cell(engine: &TerminalEngine, abs_line: usize, col: usize) -> Option<HoveredLink> {
+    let row = engine.row_cells(abs_line)?;
+    let cell = row.get(col)?;
+    if cell.hyperlink != 0
+        && let Some(url) = engine.hyperlink_url(cell.hyperlink)
+    {
+        let mut start = col;
+        while start > 0
+            && row
+                .get(start - 1)
+                .is_some_and(|c| c.hyperlink == cell.hyperlink)
+        {
+            start -= 1;
+        }
+        let mut end = col;
+        while end + 1 < row.len()
+            && row
+                .get(end + 1)
+                .is_some_and(|c| c.hyperlink == cell.hyperlink)
+        {
+            end += 1;
+        }
+        return Some(HoveredLink {
+            url: url.to_owned(),
+            abs_line,
+            start_col: start,
+            end_col: end,
+        });
+    }
+    let line: String = row
+        .iter()
+        .map(|c| if c.ch == '\0' { ' ' } else { c.ch })
+        .collect();
+    for prefix in ["https://", "http://", "file://"] {
+        let mut search_from = 0;
+        while let Some(rel) = line[search_from..].find(prefix) {
+            let byte_start = search_from + rel;
+            let byte_end = line[byte_start..]
+                .find(|ch: char| {
+                    ch.is_whitespace() || matches!(ch, '"' | '\'' | '<' | '>' | ')' | ']' | '}')
+                })
+                .map_or(line.len(), |off| byte_start + off);
+            let start_col = line[..byte_start].chars().count();
+            let trimmed_end = line[byte_start..byte_end]
+                .trim_end_matches(['.', ',', ';', ':'])
+                .len()
+                + byte_start;
+            let end_col = line[..trimmed_end].chars().count().saturating_sub(1);
+            if col >= start_col && col <= end_col && trimmed_end > byte_start + prefix.len() {
+                return Some(HoveredLink {
+                    url: line[byte_start..trimmed_end].to_owned(),
+                    abs_line,
+                    start_col,
+                    end_col,
+                });
+            }
+            search_from = byte_end.max(byte_start + prefix.len());
+        }
     }
     None
 }
@@ -1321,9 +1766,49 @@ mod tests {
         assert_eq!(app.pending_actions, vec![TerminalAction::RequestPaste]);
         app.pending_actions.clear();
 
-        // Right-click release on terminal grid pastes when nothing is selected
+        // Middle-click release on terminal grid pastes directly; right-click opens context menu.
         app.modifiers.logo = false;
-        app.handle_pointer_button(200.0, 200.0, 2, false);
+        app.handle_pointer_button(200.0, 200.0, 1, false);
         assert_eq!(app.pending_actions, vec![TerminalAction::RequestPaste]);
+        app.pending_actions.clear();
+
+        app.handle_pointer_button(200.0, 200.0, 2, false);
+        assert_eq!(
+            app.pending_actions,
+            vec![TerminalAction::OpenContextMenu { x: 200, y: 200 }]
+        );
+    }
+
+    #[test]
+    fn kitty_keyboard_disambiguates_shift_enter_and_ctrl_i() {
+        let mods = Modifiers {
+            shift: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            super::encode_key_to_vt_with_kitty(
+                Keysym::Return,
+                None,
+                mods,
+                TerminalModes::default(),
+                1
+            ),
+            Some(b"\x1b[13;2u".to_vec())
+        );
+
+        let ctrl = Modifiers {
+            ctrl: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            super::encode_key_to_vt_with_kitty(
+                Keysym::i,
+                Some("i"),
+                ctrl,
+                TerminalModes::default(),
+                1
+            ),
+            Some(b"\x1b[105;5u".to_vec())
+        );
     }
 }

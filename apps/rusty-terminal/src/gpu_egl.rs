@@ -543,51 +543,79 @@ impl GpuRenderer {
     }
 
     fn emit_grid_pass(&mut self, app: &TerminalAppState, layout: &TerminalLayout) {
-        let Some(tab) = app.active_tab() else {
+        let Some(root) = app.active_tab_root() else {
             return;
         };
         let cw = app.metrics.cell_w;
         let ch = app.metrics.cell_h;
-        let sb_len = tab.engine.scrollback_len();
-        let scroll_px = tab.scroll_lines.current() * f64::from(ch);
-        let scroll_rows_f = scroll_px / f64::from(ch.max(1));
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let whole_back = scroll_rows_f.floor().max(0.0) as usize;
-        let frac_px = ((scroll_rows_f - whole_back as f64) * f64::from(ch)) as f32;
-        let top_abs = sb_len.saturating_sub(whole_back.min(sb_len));
-        let visible_rows = usize::from(layout.rows) + 2;
+        let (rects, dividers) = root.pane_rects(layout.grid_rect, app.metrics);
+        let div_col = if app.theme.window_bg[0] < 128 {
+            [255, 255, 255, 38]
+        } else {
+            [0, 0, 0, 32]
+        };
+        for d in dividers {
+            self.push_rect_f(
+                d.x as f32,
+                d.y as f32,
+                d.w as f32,
+                d.h as f32,
+                0.0,
+                0.0,
+                div_col,
+                [0, 0, 0, 0],
+            );
+        }
 
         let search_highlights = &app.search.matches;
         let active_search = search_highlights.get(app.search.active_idx).copied();
-        let (cur_col, cur_row) = tab.engine.cursor_pos();
-        let cur_abs = sb_len + cur_row;
-
-        for rel_r in 0..visible_rows {
-            let abs_line = top_abs.saturating_sub(usize::from(frac_px > 0.5)) + rel_r;
-            let Some(cells) = tab.engine.row_cells(abs_line) else {
+        for pr in rects {
+            let Some(tab) = root.find_pane(pr.pane_id) else {
                 continue;
             };
-            let row_y = layout.grid_rect.y as f32
-                + (rel_r as f32 - if frac_px > 0.5 { 1.0 } else { 0.0 }) * ch as f32
-                + frac_px;
+            let is_active_pane = pr.pane_id == root.active_pane_id;
+            let sb_len = tab.engine.scrollback_len();
+            let scroll_px = tab.scroll_lines.current() * f64::from(ch);
+            let scroll_rows_f = scroll_px / f64::from(ch.max(1));
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let whole_back = scroll_rows_f.floor().max(0.0) as usize;
+            let frac_px = ((scroll_rows_f - whole_back as f64) * f64::from(ch)) as f32;
+            let top_abs = sb_len.saturating_sub(whole_back.min(sb_len));
+            let visible_rows = usize::from(pr.rows) + 2;
+            let (cur_col, cur_row) = tab.engine.cursor_pos();
+            let cur_abs = sb_len + cur_row;
 
-            for (col, cell) in cells.iter().enumerate().take(usize::from(layout.cols)) {
-                let x = layout.grid_rect.x as f32 + (col as f32) * (cw as f32);
-                self.emit_cell(
-                    app,
-                    tab,
-                    cell,
-                    abs_line,
-                    col,
-                    x,
-                    row_y,
-                    cw,
-                    ch,
-                    search_highlights,
-                    active_search,
-                    cur_abs,
-                    cur_col,
-                );
+            for rel_r in 0..visible_rows {
+                let abs_line = top_abs.saturating_sub(usize::from(frac_px > 0.5)) + rel_r;
+                let Some(cells) = tab.engine.row_cells(abs_line) else {
+                    continue;
+                };
+                let row_y = pr.rect.y as f32
+                    + (rel_r as f32 - if frac_px > 0.5 { 1.0 } else { 0.0 }) * ch as f32
+                    + frac_px;
+
+                for (col, cell) in cells.iter().enumerate().take(usize::from(pr.cols)) {
+                    let x = pr.rect.x as f32 + (col as f32) * (cw as f32);
+                    self.emit_cell(
+                        app,
+                        tab,
+                        cell,
+                        abs_line,
+                        col,
+                        x,
+                        row_y,
+                        cw,
+                        ch,
+                        if is_active_pane {
+                            search_highlights
+                        } else {
+                            &[]
+                        },
+                        if is_active_pane { active_search } else { None },
+                        if is_active_pane { cur_abs } else { usize::MAX },
+                        cur_col,
+                    );
+                }
             }
         }
     }
@@ -666,6 +694,20 @@ impl GpuRenderer {
         }
 
         self.emit_cell_glyph_and_decor(app, cell, x, y, cw, ch, fg);
+        if app.hovered_link.as_ref().is_some_and(|link| {
+            link.abs_line == abs_line && col >= link.start_col && col <= link.end_col
+        }) {
+            self.push_rect_f(
+                x,
+                y + app.metrics.baseline_y as f32 + 2.0,
+                cw as f32,
+                1.0,
+                0.0,
+                0.0,
+                app.theme.search_current_bg,
+                [0, 0, 0, 0],
+            );
+        }
     }
 
     #[allow(clippy::too_many_arguments)]

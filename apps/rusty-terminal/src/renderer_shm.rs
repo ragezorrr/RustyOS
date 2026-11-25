@@ -69,38 +69,48 @@ impl ShmFallbackRenderer {
         canvas: &mut [u8],
         stride_px: i32,
     ) {
-        let Some(tab) = app.active_tab() else {
+        let Some(root) = app.active_tab_root() else {
             return;
         };
         let cw = app.metrics.cell_w;
         let ch = app.metrics.cell_h;
-        let sb_len = tab.engine.scrollback_len();
-        let whole_back = tab.scroll_lines.current().floor().max(0.0) as usize;
-        let top_abs = sb_len.saturating_sub(whole_back.min(sb_len));
-        let (cur_col, cur_row) = tab.engine.cursor_pos();
-        let cur_abs = sb_len + cur_row;
-
-        for r in 0..usize::from(layout.rows) {
-            let abs_line = top_abs + r;
-            let Some(cells) = tab.engine.row_cells(abs_line) else {
+        let (rects, _) = root.pane_rects(layout.grid_rect, app.metrics);
+        for pr in rects {
+            let Some(tab) = root.find_pane(pr.pane_id) else {
                 continue;
             };
-            let py = layout.grid_rect.y + (r as i32) * ch;
-            for (c, cell) in cells.iter().enumerate().take(usize::from(layout.cols)) {
-                let px = layout.grid_rect.x + (c as i32) * cw;
-                self.render_shm_cell(
-                    app,
-                    tab,
-                    layout,
-                    canvas,
-                    stride_px,
-                    cell,
-                    abs_line,
-                    c,
-                    px,
-                    py,
-                    abs_line == cur_abs && c == cur_col && tab.engine.modes.cursor_visible,
-                );
+            let is_active_pane = pr.pane_id == root.active_pane_id;
+            let sb_len = tab.engine.scrollback_len();
+            let whole_back = tab.scroll_lines.current().floor().max(0.0) as usize;
+            let top_abs = sb_len.saturating_sub(whole_back.min(sb_len));
+            let (cur_col, cur_row) = tab.engine.cursor_pos();
+            let cur_abs = sb_len + cur_row;
+
+            for r in 0..usize::from(pr.rows) {
+                let abs_line = top_abs + r;
+                let Some(cells) = tab.engine.row_cells(abs_line) else {
+                    continue;
+                };
+                let py = pr.rect.y + (r as i32) * ch;
+                for (c, cell) in cells.iter().enumerate().take(usize::from(pr.cols)) {
+                    let px = pr.rect.x + (c as i32) * cw;
+                    self.render_shm_cell(
+                        app,
+                        tab,
+                        layout,
+                        canvas,
+                        stride_px,
+                        cell,
+                        abs_line,
+                        c,
+                        px,
+                        py,
+                        is_active_pane
+                            && abs_line == cur_abs
+                            && c == cur_col
+                            && tab.engine.modes.cursor_visible,
+                    );
+                }
             }
         }
     }
