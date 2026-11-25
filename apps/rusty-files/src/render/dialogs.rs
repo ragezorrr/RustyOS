@@ -13,7 +13,7 @@ use crate::render::canvas::{
 use crate::render::views::{
     draw_aspect_fitted_preview, draw_framed_thumbnail, render_text_preview_card,
 };
-use crate::render::{Palette, rgba};
+use crate::render::{Palette, palette_for_with_accent, rgba};
 use crate::state::{BatchRenameMode, CachedPreview, FilesAppState, InlineRenameState};
 
 /// Renders active Stage B overlays cleanly in back-to-front order.
@@ -222,7 +222,43 @@ pub(crate) fn render_quick_look_stage(
     });
 }
 
+pub(crate) fn render_get_info_window(
+    buf: &mut [u8],
+    width: u32,
+    height: u32,
+    state: &FilesAppState,
+    gi: &GetInfoLayout,
+    has_glass: bool,
+) {
+    let pal = palette_for_with_accent(state.theme, state.accent_index);
+    let mut c = Canvas::new(buf, width, height);
+    c.clear();
+    let r = gi.modal_rect;
+    let bg = if has_glass && !state.reduce_transparency {
+        let a = u8::try_from((u16::from(pal.popup_bg[3]) * 78) / 100).unwrap_or(200);
+        rgba(pal.popup_bg[0], pal.popup_bg[1], pal.popup_bg[2], a)
+    } else {
+        rgba(pal.popup_bg[0], pal.popup_bg[1], pal.popup_bg[2], 248)
+    };
+    c.fill_rounded_rect(r, 12, bg);
+    c.stroke_rounded_rect(r, 12, pal.popup_border);
+    render_get_info_body(&mut c, state, gi, &pal);
+}
+
 pub(crate) fn render_get_info_sheet(
+    c: &mut Canvas<'_>,
+    state: &FilesAppState,
+    gi: &GetInfoLayout,
+    pal: &Palette,
+) {
+    if state.get_info.is_none() {
+        return;
+    }
+    draw_modal_shadow_and_frame(c, gi.modal_rect, 12, pal);
+    render_get_info_body(c, state, gi, pal);
+}
+
+fn render_get_info_body(
     c: &mut Canvas<'_>,
     state: &FilesAppState,
     gi: &GetInfoLayout,
@@ -231,7 +267,6 @@ pub(crate) fn render_get_info_sheet(
     let Some(gs) = &state.get_info else {
         return;
     };
-    draw_modal_shadow_and_frame(c, gi.modal_rect, 12, pal);
 
     c.with_clip(gi.modal_rect, |c| {
         c.fill_rounded_rect(gi.close_rect, 9, pal.pill_bg);

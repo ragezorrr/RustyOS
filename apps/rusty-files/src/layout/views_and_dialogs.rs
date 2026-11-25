@@ -513,12 +513,11 @@ pub(crate) struct DialogOverlaysLayout {
     pub inline_rename_rect: Option<Rect>,
 }
 
-fn compute_get_info_layout(width: i32, height: i32) -> GetInfoLayout {
-    let mw = 304.min(width - 40);
-    let mh = 436.min(height - 36);
-    let mx = (width - mw - 28).max(20);
-    let my = ((height - mh) / 2).max(18);
-    let modal_rect = Rect::new(mx, my, mw, mh);
+pub(crate) fn compute_get_info_layout_in_rect(modal_rect: Rect) -> GetInfoLayout {
+    let mx = modal_rect.x;
+    let my = modal_rect.y;
+    let mw = modal_rect.w;
+    let mh = modal_rect.h;
     let tags_y = my + 98;
     let mut tags = Vec::with_capacity(FileTagColor::ALL.len());
     for (i, color) in FileTagColor::ALL.iter().enumerate() {
@@ -537,6 +536,14 @@ fn compute_get_info_layout(width: i32, height: i32) -> GetInfoLayout {
         },
         modal_rect,
     }
+}
+
+fn compute_get_info_layout(width: i32, height: i32) -> GetInfoLayout {
+    let mw = 304.min(width - 40);
+    let mh = 436.min(height - 36);
+    let mx = (width - mw - 28).max(20);
+    let my = ((height - mh) / 2).max(18);
+    compute_get_info_layout_in_rect(Rect::new(mx, my, mw, mh))
 }
 
 /// Computes active dialog overlay geometries within a `width x height` window.

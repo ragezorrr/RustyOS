@@ -593,7 +593,13 @@ pub trait RustyApp {
     fn on_popup_closed(&mut self, _ctx: &mut AppContext<'_>) {}
 
     /// Optional `BGRA8888` pixel-buffer paint callback for the active `xdg_popup`.
-    fn paint_popup_bgra(&mut self, _canvas_bgra: &mut [u8], _width: u32, _height: u32) -> bool {
+    fn paint_popup_bgra(
+        &mut self,
+        _canvas_bgra: &mut [u8],
+        _width: u32,
+        _height: u32,
+        _has_glass: bool,
+    ) -> bool {
         false
     }
 
@@ -643,7 +649,7 @@ enum RenderBackend {
 
 struct HostPopup {
     popup: Popup,
-    _glass: Option<RustyosSurfaceGlassV1>,
+    glass: Option<RustyosSurfaceGlassV1>,
     width: u32,
     height: u32,
     configured: bool,
@@ -877,7 +883,7 @@ impl HostState {
         popup.wl_surface().commit();
         self.active_popup = Some(HostPopup {
             popup,
-            _glass: glass,
+            glass,
             width: cfg.width.max(1),
             height: cfg.height.max(1),
             configured: false,
@@ -900,7 +906,8 @@ impl HostState {
         if ap.backbuf.len() != len {
             ap.backbuf.resize(len, 0);
         }
-        let painted = self.app.paint_popup_bgra(&mut ap.backbuf, w, h);
+        let has_glass = ap.glass.is_some();
+        let painted = self.app.paint_popup_bgra(&mut ap.backbuf, w, h, has_glass);
         if painted {
             let wi = i32::try_from(w).unwrap_or(1).max(1);
             let hi = i32::try_from(h).unwrap_or(1).max(1);

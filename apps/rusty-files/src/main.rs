@@ -1,6 +1,7 @@
 //! Binary entry point for `rusty-files`, RustyOS's standalone RustyOS file manager
 //! (`RUSTYOS-065`, ADR-0030).
 
+mod get_info_window;
 mod icons;
 mod layout;
 pub(crate) use rusty_app::liquid_glass;
@@ -32,6 +33,12 @@ where
             "--open-popup" => opts.open_test_popup = true,
             "--quick-look" => opts.open_quick_look = true,
             "--get-info" => opts.open_get_info = true,
+            "--get-info-window" => {
+                let Some(target) = iter.next() else {
+                    return Err(String::from("--get-info-window requires a target path"));
+                };
+                opts.get_info_window = Some(PathBuf::from(target));
+            }
             "--view" => {
                 let Some(mode) = iter.next() else {
                     return Err(String::from(
@@ -142,7 +149,12 @@ fn main() -> ExitCode {
         }
     };
 
-    match wayland::run(&opts) {
+    let res = if let Some(target) = &opts.get_info_window {
+        get_info_window::run(target, &opts)
+    } else {
+        wayland::run(&opts)
+    };
+    match res {
         Ok(true) => ExitCode::SUCCESS,
         Ok(false) => ExitCode::from(1),
         Err(err) => {

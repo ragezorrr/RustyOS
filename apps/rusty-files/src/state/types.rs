@@ -602,6 +602,7 @@ pub(crate) struct StartupOptions {
     pub no_gpu: bool,
     pub picker_mode: Option<FilePickerMode>,
     pub picker_title: Option<String>,
+    pub get_info_window: Option<PathBuf>,
 }
 
 /// Window maximize state requested by compositor or traffic-light toggle.

@@ -56,8 +56,19 @@ impl FilesAppState {
         }
     }
 
-    /// Opens `Get Info` sheet for `path` and schedules non-blocking metadata/preview loading.
+    /// Opens `Get Info` for `path` (spawning a movable window when enabled, or opening the in-window sheet).
     pub(crate) fn open_get_info_for_path(&mut self, path: &Path) {
+        self.popup = None;
+        if self.spawn_get_info_externally {
+            self.pending_get_info_window = Some(path.to_path_buf());
+            self.dirty = true;
+            return;
+        }
+        self.open_get_info_sheet_for_path(path);
+    }
+
+    /// Opens the in-window `Get Info` sheet for `path` and schedules non-blocking metadata/preview loading.
+    pub(crate) fn open_get_info_sheet_for_path(&mut self, path: &Path) {
         self.popup = None;
         if let Some(entry) = self.selected_entry().cloned()
             && entry.path == path

@@ -226,6 +226,28 @@ impl FilesApp {
         )));
     }
 
+    fn sync_get_info_window(&mut self) {
+        let Some(target) = self.app.pending_get_info_window.take() else {
+            return;
+        };
+        let spawned = std::env::current_exe().is_ok_and(|exe| {
+            let mut cmd = std::process::Command::new(exe);
+            cmd.arg("--get-info-window").arg(&target);
+            match self.app.theme {
+                rusty_services::file_manager::FilesThemeMode::Light => {
+                    cmd.arg("--light");
+                }
+                rusty_services::file_manager::FilesThemeMode::Dark => {
+                    cmd.arg("--dark");
+                }
+            }
+            cmd.spawn().is_ok()
+        });
+        if !spawned {
+            self.app.open_get_info_sheet_for_path(&target);
+        }
+    }
+
     fn sync_popup(&mut self, ctx: &mut AppContext<'_>) {
         if self.app.popup == self.last_popup {
             return;
@@ -242,6 +264,22 @@ impl FilesApp {
         self.active_popup_spec = Some(spec.clone());
         self.popup_hover_idx = None;
         let radius = u32::try_from(rusty_ui::menu::MENU_RADIUS).unwrap_or(10);
+        let base_glass = match self.app.theme {
+            rusty_services::file_manager::FilesThemeMode::Dark => {
+                LiquidGlassConfig::custom(radius, [28, 28, 32, 185])
+            }
+            rusty_services::file_manager::FilesThemeMode::Light => {
+                LiquidGlassConfig::popover(radius)
+            }
+        };
+        let glass = (!self.app.reduce_transparency).then(|| {
+            base_glass.with_region(GlassRegion::Rect {
+                x: POPUP_SHADOW_PAD,
+                y: POPUP_SHADOW_PAD,
+                width: spec.layout.rect.w,
+                height: spec.layout.rect.h,
+            })
+        });
         ctx.open_popup(PopupConfig {
             width: u32::try_from(spec.surface_width.max(1)).unwrap_or(1),
             height: u32::try_from(spec.surface_height.max(1)).unwrap_or(1),
@@ -249,8 +287,8 @@ impl FilesApp {
             anchor_y: spec.anchor_y,
             offset_x: -POPUP_SHADOW_PAD,
             offset_y: -POPUP_SHADOW_PAD,
-            grab_serial: Some(self.last_input_serial),
-            glass: (!self.app.reduce_transparency).then(|| LiquidGlassConfig::popover(radius)),
+            grab_serial: (self.last_input_serial != 0).then_some(self.last_input_serial),
+            glass,
         });
     }
 
@@ -1118,6 +1156,7 @@ impl RustyApp for FilesApp {
             }
         }
         self.sync_popup(ctx);
+        self.sync_get_info_window();
         self.sync_clipboard_io(ctx);
     }
 
@@ -1205,6 +1244,7 @@ impl RustyApp for FilesApp {
         let title = format!("{} - RustyOS Files", self.app.window_title);
         ctx.set_title(&title);
         self.sync_popup(ctx);
+        self.sync_get_info_window();
         self.sync_clipboard_io(ctx);
         if !self.app.is_running() {
             let ok = self.app.picker_mode.is_none()
@@ -1342,10 +1382,17 @@ impl RustyApp for FilesApp {
         true
     }
 
-    fn paint_popup_bgra(&mut self, canvas_bgra: &mut [u8], width: u32, height: u32) -> bool {
+    fn paint_popup_bgra(
+        &mut self,
+        canvas_bgra: &mut [u8],
+        width: u32,
+        height: u32,
+        has_glass: bool,
+    ) -> bool {
         let Some(spec) = &self.active_popup_spec else {
             return false;
         };
+        let popup_glass = has_glass && !self.app.reduce_transparency;
         render_popup_surface_pixels_with_style(
             canvas_bgra,
             width,
@@ -1354,7 +1401,7 @@ impl RustyApp for FilesApp {
             self.popup_hover_idx,
             self.app.theme,
             self.app.accent_index,
-            !self.app.reduce_transparency,
+            popup_glass,
         );
         true
     }
@@ -1494,7 +1541,8 @@ fn keysym_to_name_and_text(keysym: Keysym, utf8: Option<&str>) -> (&'static str,
 /// Returns [`AppError`] on Wayland connection, global binding, or event loop failure.
 pub(crate) fn run(options: &StartupOptions) -> Result<bool, AppError> {
     let locs = UserFileLocations::detect();
-    let app = FilesAppState::new(locs, options);
+    let mut app = FilesAppState::new(locs, options);
+    app.spawn_get_info_externally = true;
     let initial_title = format!("{} - RustyOS Files", app.window_title);
     let glass = (!app.reduce_transparency).then(|| {
         let wi = i32::try_from(DEFAULT_WIDTH).unwrap_or(1).max(1);
