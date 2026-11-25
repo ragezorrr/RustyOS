@@ -286,6 +286,20 @@ impl RustyCompositorState {
         }
     }
 
+    /// Scrolls an active context menu vertically when taller than the screen (`RUSTYOS-064`).
+    pub fn scroll_context_menu(&mut self, delta_y: f64) {
+        let Some(ref mut ctx) = self.context_menu else {
+            return;
+        };
+        let Some(entry) = self.output_map.get(ctx.output_id) else {
+            return;
+        };
+        let screen_size = entry.logical_geometry().size.to_physical(1);
+        if crate::shell_render::scroll_context_menu(screen_size, ctx, entry.is_primary, delta_y) {
+            self.shell_redraw_needed = true;
+        }
+    }
+
     /// Updates hovered row/submenu state for an open [`ContextMenuState`] (`RUSTYOS-064`).
     pub fn update_context_menu_hover_at(&mut self, global_pos: Point<f64, Logical>) {
         let Some(ref mut ctx) = self.context_menu else {

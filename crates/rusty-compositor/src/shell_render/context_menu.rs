@@ -257,6 +257,10 @@ pub struct ContextMenuState {
     pub open_submenu_parent: Option<usize>,
     /// Highlighted row index inside the expanded submenu.
     pub submenu_selected_row: Option<usize>,
+    /// Vertical scroll offset in logical pixels when menu exceeds screen height.
+    pub scroll_offset: i32,
+    /// Pointer anchor inside the parent submenu row for triangular safe-zone tracking.
+    pub submenu_safe_anchor: Option<(i32, i32)>,
 }
 
 impl ContextMenuState {
@@ -276,6 +280,8 @@ impl ContextMenuState {
             selected_row: None,
             open_submenu_parent: None,
             submenu_selected_row: None,
+            scroll_offset: 0,
+            submenu_safe_anchor: None,
         }
     }
 
@@ -349,13 +355,19 @@ fn measure_panel_size(entries: &[ContextMenuEntry]) -> (i32, i32) {
                 let shown = truncate_ascii(label, 28);
                 let left_x = if icon.is_some() { 35 } else { 14 };
                 let label_w = crate::text::measure_ui_text_width(&shown, 13.0, FontWeight::Regular);
-                let right_w = if !submenu.is_empty() || *checked {
+                let check_w = if !submenu.is_empty() || *checked {
                     24
-                } else if let Some(hint) = right_hint {
+                } else {
+                    0
+                };
+                let hint_w = if submenu.is_empty()
+                    && let Some(hint) = right_hint
+                {
                     crate::text::measure_ui_text_width(hint, 12.0, FontWeight::Regular) + 18
                 } else {
                     0
                 };
+                let right_w = check_w + hint_w;
                 max_w = max_w.max(left_x + label_w + 18 + right_w + 14);
                 content_h += MENU_ITEM_HEIGHT;
             }
@@ -373,9 +385,10 @@ fn measure_panel_size(entries: &[ContextMenuEntry]) -> (i32, i32) {
 fn build_panel_rows(
     panel_rect: Rectangle<i32, smithay::utils::Physical>,
     entries: &[ContextMenuEntry],
+    scroll_offset: i32,
 ) -> Vec<Rectangle<i32, smithay::utils::Physical>> {
     let mut rows = Vec::with_capacity(entries.len());
-    let mut cursor_y = panel_rect.loc.y + MENU_POPOVER_PAD_Y;
+    let mut cursor_y = panel_rect.loc.y + MENU_POPOVER_PAD_Y - scroll_offset.max(0);
     for entry in entries {
         let h = match entry {
             ContextMenuEntry::Item { .. } => MENU_ITEM_HEIGHT,
@@ -388,6 +401,15 @@ fn build_panel_rows(
         cursor_y += h;
     }
     rows
+}
+
+const fn row_visible_in_panel(
+    panel_rect: Rectangle<i32, smithay::utils::Physical>,
+    row_rect: Rectangle<i32, smithay::utils::Physical>,
+) -> bool {
+    let min_y = panel_rect.loc.y + MENU_POPOVER_PAD_Y;
+    let max_y = panel_rect.loc.y + panel_rect.size.h - MENU_POPOVER_PAD_Y;
+    row_rect.loc.y >= min_y && row_rect.loc.y + row_rect.size.h <= max_y
 }
 
 fn clamp_panel_in_output(
@@ -431,7 +453,9 @@ pub fn compute_context_menu_layout(
     };
     let primary_rect =
         clamp_panel_in_output(screen_size, is_primary_output, raw_x, raw_y, raw_w, raw_h);
-    let primary_rows = build_panel_rows(primary_rect, &state.entries);
+    let max_scroll = (raw_h - primary_rect.size.h).max(0);
+    let effective_scroll = state.scroll_offset.clamp(0, max_scroll);
+    let primary_rows = build_panel_rows(primary_rect, &state.entries, effective_scroll);
 
     let submenu = state
         .open_submenu_parent
@@ -448,7 +472,7 @@ pub fn compute_context_menu_layout(
             let sub_y = parent_row.loc.y - MENU_POPOVER_PAD_Y;
             let sub_rect =
                 clamp_panel_in_output(screen_size, is_primary_output, sub_x, sub_y, sw, sh);
-            let sub_rows = build_panel_rows(sub_rect, sub_entries);
+            let sub_rows = build_panel_rows(sub_rect, sub_entries, 0);
             Some((sub_rect, sub_rows))
         });
 
@@ -459,6 +483,30 @@ pub fn compute_context_menu_layout(
     }
 }
 
+/// Scrolls the primary context menu vertically when entries overflow the viewport.
+pub fn scroll_context_menu(
+    screen_size: Size<i32, smithay::utils::Physical>,
+    state: &mut ContextMenuState,
+    is_primary_output: bool,
+    delta_y: f64,
+) -> bool {
+    let (_, raw_h) = measure_panel_size(&state.entries);
+    let layout = compute_context_menu_layout(screen_size, state, is_primary_output);
+    let max_scroll = (raw_h - layout.primary_rect.size.h).max(0);
+    if max_scroll <= 0 {
+        if state.scroll_offset != 0 {
+            state.scroll_offset = 0;
+            return true;
+        }
+        return false;
+    }
+    #[allow(clippy::cast_possible_truncation)]
+    let step = (delta_y * 2.0).round() as i32;
+    let prev = state.scroll_offset;
+    state.scroll_offset = (prev + step).clamp(0, max_scroll);
+    state.scroll_offset != prev
+}
+
 fn rect_contains(rect: Rectangle<i32, smithay::utils::Physical>, x: f64, y: f64) -> bool {
     let rx = f64::from(rect.loc.x);
     let ry = f64::from(rect.loc.y);
@@ -466,11 +514,43 @@ fn rect_contains(rect: Rectangle<i32, smithay::utils::Physical>, x: f64, y: f64)
 }
 
 fn hit_row_index(
+    panel_rect: Rectangle<i32, smithay::utils::Physical>,
     rows: &[Rectangle<i32, smithay::utils::Physical>],
     x: f64,
     y: f64,
 ) -> Option<usize> {
-    rows.iter().position(|row| rect_contains(*row, x, y))
+    rows.iter()
+        .position(|row| row_visible_in_panel(panel_rect, *row) && rect_contains(*row, x, y))
+}
+
+fn point_in_submenu_safe_zone(
+    px: f64,
+    py: f64,
+    anchor: (i32, i32),
+    sub_rect: Rectangle<i32, smithay::utils::Physical>,
+) -> bool {
+    let ax = f64::from(anchor.0);
+    let ay = f64::from(anchor.1);
+    let sub_left = f64::from(sub_rect.loc.x);
+    let sub_right = f64::from(sub_rect.loc.x + sub_rect.size.w);
+    let near_x = if ax <= sub_left { sub_left } else { sub_right };
+    if (near_x - ax).abs() < 1.0 {
+        return false;
+    }
+    let bx = near_x;
+    let by = f64::from(sub_rect.loc.y - 6);
+    let cx = near_x;
+    let cy = f64::from(sub_rect.loc.y + sub_rect.size.h + 6);
+
+    let sign = |x1: f64, y1: f64, x2: f64, y2: f64, x3: f64, y3: f64| -> f64 {
+        (x1 - x3) * (y2 - y3) - (x2 - x3) * (y1 - y3)
+    };
+    let d1 = sign(px, py, ax, ay, bx, by);
+    let d2 = sign(px, py, bx, by, cx, cy);
+    let d3 = sign(px, py, cx, cy, ax, ay);
+    let has_neg = (d1 < 0.0) || (d2 < 0.0) || (d3 < 0.0);
+    let has_pos = (d1 > 0.0) || (d2 > 0.0) || (d3 > 0.0);
+    !(has_neg && has_pos)
 }
 
 /// Hit-tests `(local_x, local_y)` against an open context menu and its cascade submenu (`RUSTYOS-064`).
@@ -488,7 +568,7 @@ pub fn hit_test_context_menu(
         && rect_contains(sub_rect, local_x, local_y)
     {
         if let Some(sub_entries) = state.open_submenu_entries()
-            && let Some(row_idx) = hit_row_index(sub_rows, local_x, local_y)
+            && let Some(row_idx) = hit_row_index(sub_rect, sub_rows, local_x, local_y)
             && let Some(ContextMenuEntry::Item {
                 enabled: true,
                 action,
@@ -504,7 +584,8 @@ pub fn hit_test_context_menu(
         return ContextMenuHit::Outside;
     }
 
-    if let Some(row_idx) = hit_row_index(&layout.primary_rows, local_x, local_y)
+    if let Some(row_idx) =
+        hit_row_index(layout.primary_rect, &layout.primary_rows, local_x, local_y)
         && let Some(ContextMenuEntry::Item {
             enabled: true,
             action,
@@ -540,13 +621,14 @@ pub fn update_context_menu_hover(
         && rect_contains(sub_rect, local_x, local_y)
     {
         let next_sub = state.open_submenu_entries().and_then(|sub_entries| {
-            hit_row_index(sub_rows, local_x, local_y).filter(|&idx| {
+            hit_row_index(sub_rect, sub_rows, local_x, local_y).filter(|&idx| {
                 sub_entries
                     .get(idx)
                     .is_some_and(ContextMenuEntry::is_enabled_item)
             })
         });
         state.submenu_selected_row = next_sub;
+        state.submenu_safe_anchor = None;
         return prev
             != (
                 state.selected_row,
@@ -555,9 +637,20 @@ pub fn update_context_menu_hover(
             );
     }
 
+    let in_safe_triangle = layout.submenu.as_ref().is_some_and(|(sub_rect, _)| {
+        state
+            .submenu_safe_anchor
+            .is_some_and(|anchor| point_in_submenu_safe_zone(local_x, local_y, anchor, *sub_rect))
+    });
+
     if rect_contains(layout.primary_rect, local_x, local_y) {
-        let hit_idx = hit_row_index(&layout.primary_rows, local_x, local_y);
-        if let Some((
+        let hit_idx = hit_row_index(layout.primary_rect, &layout.primary_rows, local_x, local_y);
+        if in_safe_triangle
+            && state.open_submenu_parent.is_some()
+            && hit_idx != state.open_submenu_parent
+        {
+            state.selected_row = state.open_submenu_parent;
+        } else if let Some((
             idx,
             ContextMenuEntry::Item {
                 enabled: true,
@@ -570,19 +663,32 @@ pub fn update_context_menu_hover(
             if submenu.is_empty() {
                 state.open_submenu_parent = None;
                 state.submenu_selected_row = None;
+                state.submenu_safe_anchor = None;
             } else {
                 if state.open_submenu_parent != Some(idx) {
                     state.submenu_selected_row = None;
                 }
                 state.open_submenu_parent = Some(idx);
+                #[allow(clippy::cast_possible_truncation)]
+                {
+                    state.submenu_safe_anchor =
+                        Some((local_x.round() as i32, local_y.round() as i32));
+                }
             }
         } else {
             state.selected_row = None;
             state.submenu_selected_row = None;
+            if !in_safe_triangle {
+                state.open_submenu_parent = None;
+                state.submenu_safe_anchor = None;
+            }
         }
     } else {
         state.selected_row = None;
         state.submenu_selected_row = None;
+        if !in_safe_triangle {
+            state.submenu_safe_anchor = None;
+        }
     }
 
     prev != (
@@ -618,6 +724,58 @@ fn step_enabled_index(
         Some(i) => Some(enabled_indices[(i + enabled_indices.len() - 1) % enabled_indices.len()]),
         None => enabled_indices.first().copied(),
     }
+}
+
+fn type_ahead_index(
+    entries: &[ContextMenuEntry],
+    current: Option<usize>,
+    needle: char,
+) -> Option<usize> {
+    let target = needle.to_ascii_lowercase();
+    let len = entries.len();
+    if len == 0 {
+        return None;
+    }
+    let start = current.map_or(0, |i| (i + 1) % len);
+    for step in 0..len {
+        let idx = (start + step) % len;
+        if let Some(ContextMenuEntry::Item {
+            label,
+            enabled: true,
+            ..
+        }) = entries.get(idx)
+            && label
+                .chars()
+                .next()
+                .is_some_and(|first| first.to_ascii_lowercase() == target)
+        {
+            return Some(idx);
+        }
+    }
+    None
+}
+
+fn apply_context_menu_type_ahead(state: &mut ContextMenuState, ch: char) -> ContextMenuKeyOutcome {
+    if ch.is_control() || ch.is_whitespace() {
+        return ContextMenuKeyOutcome::None;
+    }
+    if state.open_submenu_parent.is_some()
+        && state.submenu_selected_row.is_some()
+        && let Some(sub_entries) = state.open_submenu_entries()
+    {
+        if let Some(next) = type_ahead_index(sub_entries, state.submenu_selected_row, ch) {
+            state.submenu_selected_row = Some(next);
+            return ContextMenuKeyOutcome::Redraw;
+        }
+        return ContextMenuKeyOutcome::None;
+    }
+    if let Some(next) = type_ahead_index(&state.entries, state.selected_row, ch) {
+        state.open_submenu_parent = None;
+        state.submenu_selected_row = None;
+        state.selected_row = Some(next);
+        return ContextMenuKeyOutcome::Redraw;
+    }
+    ContextMenuKeyOutcome::None
 }
 
 /// Processes keyboard navigation inside an active [`ContextMenuState`] (`RUSTYOS-064`).
@@ -656,19 +814,24 @@ pub fn handle_context_menu_key(state: &mut ContextMenuState, sym: Keysym) -> Con
             }
             ContextMenuKeyOutcome::None
         }
-        Keysym::Down | Keysym::Up => {
-            let forward = sym == Keysym::Down;
+        Keysym::Down | Keysym::Up | Keysym::Home | Keysym::End => {
+            let forward = matches!(sym, Keysym::Down | Keysym::Home);
+            let from_edge = matches!(sym, Keysym::Home | Keysym::End);
             if state.open_submenu_parent.is_some()
                 && state.submenu_selected_row.is_some()
                 && let Some(sub_entries) = state.open_submenu_entries()
             {
-                state.submenu_selected_row =
-                    step_enabled_index(sub_entries, state.submenu_selected_row, forward);
+                let cur = if from_edge {
+                    None
+                } else {
+                    state.submenu_selected_row
+                };
+                state.submenu_selected_row = step_enabled_index(sub_entries, cur, forward);
             } else {
                 state.open_submenu_parent = None;
                 state.submenu_selected_row = None;
-                state.selected_row =
-                    step_enabled_index(&state.entries, state.selected_row, forward);
+                let cur = if from_edge { None } else { state.selected_row };
+                state.selected_row = step_enabled_index(&state.entries, cur, forward);
             }
             ContextMenuKeyOutcome::Redraw
         }
@@ -700,7 +863,9 @@ pub fn handle_context_menu_key(state: &mut ContextMenuState, sym: Keysym) -> Con
             }
             ContextMenuKeyOutcome::None
         }
-        _ => ContextMenuKeyOutcome::None,
+        other => other.key_char().map_or(ContextMenuKeyOutcome::None, |ch| {
+            apply_context_menu_type_ahead(state, ch)
+        }),
     }
 }
 
@@ -719,10 +884,14 @@ fn render_panel_text(
     let mx = panel_rect.loc.x;
     let mw = panel_rect.size.w;
     for (idx, (entry, row_rect)) in entries.iter().zip(rows).enumerate() {
+        if !row_visible_in_panel(panel_rect, *row_rect) {
+            continue;
+        }
         let ContextMenuEntry::Item {
             label,
             icon,
             right_hint,
+            checked,
             enabled,
             danger,
             submenu,
@@ -761,12 +930,13 @@ fn render_panel_text(
             } else {
                 pal.popover_text_muted
             };
+            let right_pad = if *checked { 32 } else { 14 };
             if let Some(el) = text_cache.render_label(
                 renderer,
                 hint,
                 12.0,
                 hint_fg,
-                Point::from((mx + mw - 14 - hint_w, label_y + 1)),
+                Point::from((mx + mw - right_pad - hint_w, label_y + 1)),
             ) {
                 elements.push(el);
             }
@@ -886,6 +1056,9 @@ fn render_panel_shapes(
     out: &mut Vec<CompositorRenderElement>,
 ) {
     for (idx, (entry, row_rect)) in entries.iter().zip(rows).enumerate() {
+        if !row_visible_in_panel(panel_rect, *row_rect) {
+            continue;
+        }
         render_panel_row_shapes(
             shape_cache,
             renderer,

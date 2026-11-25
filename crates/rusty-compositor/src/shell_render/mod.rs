@@ -68,7 +68,7 @@ pub use context_menu::{
     ContextMenuAction, ContextMenuEntry, ContextMenuHit, ContextMenuKeyOutcome, ContextMenuLayout,
     ContextMenuState, ContextMenuSubmenuLayout, ContextMenuTarget, compute_context_menu_layout,
     generate_context_menu_elements, handle_context_menu_key, hit_test_context_menu,
-    update_context_menu_hover,
+    scroll_context_menu, update_context_menu_hover,
 };
 pub use desktop_canvas::{
     DesktopCanvasItem, DesktopDragState, DesktopInlineRename, DesktopRubberBand, cell_at_point,

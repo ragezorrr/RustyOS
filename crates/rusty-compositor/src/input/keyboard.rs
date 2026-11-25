@@ -602,8 +602,11 @@ pub(super) fn classify_keyboard_input(
     {
         return FilterResult::Intercept(intercept);
     }
-    if !state.active_popup_grabs.is_empty() && sym.raw() == Keysym::Escape.raw() {
-        return FilterResult::Intercept(KeyIntercept::DismissPopups);
+    if !state.active_popup_grabs.is_empty() {
+        if sym.raw() == Keysym::Escape.raw() {
+            return FilterResult::Intercept(KeyIntercept::DismissPopups);
+        }
+        return FilterResult::Forward;
     }
     if state.desktop_focused
         || (state.keyboard.current_focus().is_none() && !state.has_blocking_shell_overlay())

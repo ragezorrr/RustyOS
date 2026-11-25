@@ -112,6 +112,12 @@ impl<T: Clone> MenuItem<T> {
     }
 
     #[must_use]
+    pub fn with_enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+
+    #[must_use]
     pub fn with_danger(mut self, danger: bool) -> Self {
         self.danger = danger;
         self
@@ -493,6 +499,12 @@ pub fn paint_menu_with_painter<T: Clone>(
     compositor_glass: bool,
 ) {
     if !compositor_glass {
+        painter.draw_shadow(
+            layout.rect,
+            MENU_RADIUS,
+            crate::shadow::ShadowElevation::MenuOrTooltip,
+            pal.is_dark,
+        );
         let bg = if pal.is_dark {
             [0x2A, 0x2B, 0x2F, 242]
         } else {
@@ -505,6 +517,10 @@ pub fn paint_menu_with_painter<T: Clone>(
         };
         painter.rounded_rect_styled(layout.rect, MENU_RADIUS as f32, bg, 1.0, border, true);
     }
+
+    let has_icon_col = entries
+        .iter()
+        .any(|e| matches!(e, MenuEntry::Item(it) if it.icon_glyph.is_some()));
 
     for (row_layout, entry) in layout.rows.iter().zip(entries.iter()) {
         match entry {
@@ -522,59 +538,144 @@ pub fn paint_menu_with_painter<T: Clone>(
                 }
             }
             MenuEntry::Item(item) => {
-                let hovered = hovered_idx == Some(row_layout.index) && item.enabled;
-                if hovered {
-                    let pill = Rect::new(
-                        row_layout.rect.x,
-                        row_layout.rect.y + 1,
-                        row_layout.rect.width,
-                        row_layout.rect.height.saturating_sub(2),
-                    );
-                    let hover_col = if item.danger {
-                        [0xFF, 0x3B, 0x30, 232]
-                    } else if pal.is_dark {
-                        [pal.accent[0], pal.accent[1], pal.accent[2], 210]
-                    } else {
-                        [pal.accent[0], pal.accent[1], pal.accent[2], 230]
-                    };
-                    painter.fill_rounded_rect(pill, HOVER_PILL_RADIUS as f32, hover_col);
-                }
-
-                let text_col = if hovered {
-                    [255, 255, 255, 255]
-                } else if !item.enabled {
-                    pal.text_muted
-                } else if item.danger {
-                    [0xD7, 0x30, 0x3E, 255]
-                } else {
-                    pal.text_primary
-                };
-
-                let text_x =
-                    layout.rect.x as f32 + if layout.has_check_column { 28.0 } else { 14.0 };
-                let baseline = row_layout.rect.y as f32
-                    + f32::midpoint(row_layout.rect.height as f32, 13.0 * 0.72);
-
-                if item.checked {
-                    let cx = layout.rect.x as f32 + 14.0;
-                    let cy = row_layout.rect.y as f32 + row_layout.rect.height as f32 * 0.5;
-                    painter.draw_line(cx, cy, cx + 2.5, cy + 3.0, 1.5, text_col);
-                    painter.draw_line(cx + 2.5, cy + 3.0, cx + 7.0, cy - 3.0, 1.5, text_col);
-                }
-
-                painter.draw_text(item.text.clone(), text_x, baseline, 13.0, false, text_col);
-
-                if let Some(sc) = &item.shortcut {
-                    let sw = fonts.measure_width(sc, 12.0, false);
-                    let sx = layout.rect.right() as f32 - 14.0 - sw;
-                    let sc_col = if hovered {
-                        [255, 255, 255, 235]
-                    } else {
-                        pal.text_secondary
-                    };
-                    painter.draw_text(sc.clone(), sx, baseline, 12.0, false, sc_col);
-                }
+                paint_menu_item_row(
+                    painter,
+                    fonts,
+                    layout,
+                    row_layout,
+                    item,
+                    hovered_idx == Some(row_layout.index) && item.enabled,
+                    has_icon_col,
+                    pal,
+                );
             }
         }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_menu_item_row<T: Clone>(
+    painter: &mut crate::draw::UiPainter<'_>,
+    fonts: &mut crate::text::UiFontEngine,
+    layout: &MenuLayout,
+    row_layout: &MenuRowLayout,
+    item: &MenuItem<T>,
+    hovered: bool,
+    has_icon_col: bool,
+    pal: &ThemePalette,
+) {
+    let danger_rgb = if pal.is_dark {
+        crate::theme::ACCENT_DARK_PALETTE[1]
+    } else {
+        crate::theme::ACCENT_PALETTE[1]
+    };
+    if hovered {
+        let pill = Rect::new(
+            row_layout.rect.x,
+            row_layout.rect.y + 1,
+            row_layout.rect.width,
+            row_layout.rect.height.saturating_sub(2),
+        );
+        let hover_col = if item.danger {
+            [danger_rgb[0], danger_rgb[1], danger_rgb[2], 232]
+        } else if pal.is_dark {
+            [pal.accent[0], pal.accent[1], pal.accent[2], 210]
+        } else {
+            [pal.accent[0], pal.accent[1], pal.accent[2], 230]
+        };
+        painter.fill_rounded_rect(pill, HOVER_PILL_RADIUS as f32, hover_col);
+    }
+
+    let text_col = if hovered {
+        [255, 255, 255, 255]
+    } else if !item.enabled {
+        pal.text_muted
+    } else if item.danger {
+        danger_rgb
+    } else {
+        pal.text_primary
+    };
+
+    let text_x = layout.rect.x as f32
+        + if layout.has_check_column || has_icon_col {
+            30.0
+        } else {
+            14.0
+        };
+    let baseline =
+        row_layout.rect.y as f32 + f32::midpoint(row_layout.rect.height as f32, 13.0 * 0.72);
+
+    if item.checked {
+        let cx = layout.rect.x as f32 + 14.0;
+        let cy = row_layout.rect.y as f32 + row_layout.rect.height as f32 * 0.5;
+        painter.draw_line(cx, cy, cx + 2.5, cy + 3.0, 1.5, text_col);
+        painter.draw_line(cx + 2.5, cy + 3.0, cx + 7.0, cy - 3.0, 1.5, text_col);
+    } else if let Some(glyph) = item.icon_glyph {
+        painter.draw_text(
+            glyph.to_owned(),
+            layout.rect.x as f32 + 12.0,
+            baseline,
+            12.0,
+            false,
+            text_col,
+        );
+    }
+
+    painter.draw_text(item.text.clone(), text_x, baseline, 13.0, false, text_col);
+
+    if item.has_submenu {
+        let cx = layout.rect.right() as f32 - 16.0;
+        let cy = row_layout.rect.y as f32 + row_layout.rect.height as f32 * 0.5;
+        painter.draw_line(cx - 2.5, cy - 3.5, cx + 1.5, cy, 1.5, text_col);
+        painter.draw_line(cx + 1.5, cy, cx - 2.5, cy + 3.5, 1.5, text_col);
+    } else if let Some(sc) = &item.shortcut {
+        let sw = fonts.measure_width(sc, 12.0, false);
+        let sx = layout.rect.right() as f32 - 14.0 - sw;
+        let sc_col = if hovered {
+            [255, 255, 255, 235]
+        } else {
+            pal.text_secondary
+        };
+        painter.draw_text(sc.clone(), sx, baseline, 12.0, false, sc_col);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::draw::{UiDrawCmd, UiDrawList, UiPainter};
+
+    #[test]
+    fn menu_painter_renders_shadow_glyph_chevron_and_respects_with_enabled() {
+        let entries = vec![
+            MenuEntry::Item(
+                MenuItem::new("Disabled Item", 1)
+                    .with_enabled(false)
+                    .with_glyph("•"),
+            ),
+            MenuEntry::Item(MenuItem::new("Open With", 2).with_submenu(true)),
+        ];
+        let mut session = ContextMenuSession::new();
+        session.open_clamped(40, 40, 200, 800, 600, entries);
+        assert_eq!(session.move_hover(1), Some(1)); // skips disabled index 0
+
+        let mut dl = UiDrawList::new();
+        let mut painter = UiPainter::new(&mut dl);
+        let mut fonts = crate::text::UiFontEngine::new();
+        let pal = ThemePalette::new(true, 0);
+        session.paint(&mut painter, &mut fonts, &pal);
+
+        assert!(
+            dl.commands
+                .iter()
+                .any(|c| matches!(c, UiDrawCmd::Shadow { .. }))
+        );
+        assert!(
+            dl.commands
+                .iter()
+                .filter(|c| matches!(c, UiDrawCmd::Line { .. }))
+                .count()
+                >= 2
+        );
     }
 }

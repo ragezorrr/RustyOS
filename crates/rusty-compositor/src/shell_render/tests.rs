@@ -1495,6 +1495,81 @@ fn context_menu_keyboard_navigation_skips_separators_and_handles_submenus() {
 }
 
 #[test]
+fn context_menu_safe_triangle_scroll_and_type_ahead() {
+    use crate::surfaces::UiGlyphKind;
+    use rusty_wm::OutputId;
+    use smithay::input::keyboard::Keysym;
+
+    let screen = Size::from((800, 320));
+    let sub_entries = vec![
+        ContextMenuEntry::text_item("Alpha Sub", ContextMenuAction::DesktopDisplaySettings),
+        ContextMenuEntry::text_item("Beta Sub", ContextMenuAction::DesktopOpenTerminal),
+    ];
+    let mut entries = vec![
+        ContextMenuEntry::submenu_item("Wallpaper", UiGlyphKind::Folder, sub_entries),
+        ContextMenuEntry::text_item("Sort By", ContextMenuAction::DesktopDisplaySettings),
+        ContextMenuEntry::text_item("Terminal", ContextMenuAction::DesktopOpenTerminal),
+    ];
+    for i in 0..14 {
+        entries.push(ContextMenuEntry::text_item(
+            format!("Extra Action {i}"),
+            ContextMenuAction::DesktopDisplaySettings,
+        ));
+    }
+    let mut state = ContextMenuState::new(
+        OutputId(1),
+        Point::from((100, 60)),
+        ContextMenuTarget::Desktop,
+        entries,
+    );
+
+    // Home / End and type-ahead navigation
+    assert_eq!(
+        handle_context_menu_key(&mut state, Keysym::End),
+        ContextMenuKeyOutcome::Redraw
+    );
+    assert_eq!(state.selected_row, Some(16));
+    assert_eq!(
+        handle_context_menu_key(&mut state, Keysym::Home),
+        ContextMenuKeyOutcome::Redraw
+    );
+    assert_eq!(state.selected_row, Some(0));
+    assert_eq!(
+        handle_context_menu_key(&mut state, Keysym::t),
+        ContextMenuKeyOutcome::Redraw
+    );
+    assert_eq!(state.selected_row, Some(2));
+
+    // Scroll adjusts offset on overflowing menu
+    assert!(scroll_context_menu(screen, &mut state, true, 12.0));
+    assert!(state.scroll_offset > 0);
+    state.scroll_offset = 0;
+
+    // Hover parent row 0 opens submenu, and diagonal movement through row 1 toward submenu
+    // preserves `open_submenu_parent` via triangular safe-zone.
+    let layout = compute_context_menu_layout(screen, &state, true);
+    let r0 = layout.primary_rows[0];
+    assert!(update_context_menu_hover(
+        screen,
+        &mut state,
+        true,
+        f64::from(r0.loc.x + 20),
+        f64::from(r0.loc.y + 10),
+    ));
+    assert_eq!(state.open_submenu_parent, Some(0));
+
+    let r1 = layout.primary_rows[1];
+    let _ = update_context_menu_hover(
+        screen,
+        &mut state,
+        true,
+        f64::from(r1.loc.x + r1.size.w - 16),
+        f64::from(r1.loc.y + 8),
+    );
+    assert_eq!(state.open_submenu_parent, Some(0));
+}
+
+#[test]
 fn app_aware_topbar_classification_and_layout_hides_go_for_non_files() {
     assert_eq!(
         classify_top_bar_app(None, ""),

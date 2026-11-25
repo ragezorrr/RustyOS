@@ -409,10 +409,17 @@ impl RustyCompositorState {
         }
 
         let over_dock_dnd = self.update_external_dnd_dock_hover(pos);
+        let has_live_popup_grab = self
+            .active_popup_grabs
+            .iter()
+            .any(smithay::wayland::shell::xdg::PopupSurface::alive);
         let under = if over_dock_dnd {
             None
         } else {
             self.target_surface_under(pos)
+                .filter(|(_win, surface, _origin)| {
+                    !has_live_popup_grab || self.is_surface_in_active_popup_grab(surface)
+                })
                 .map(|(_win, surface, origin)| (surface, origin))
         };
         self.update_compositor_cursor_for_pointer(pos, under.is_some());
@@ -868,6 +875,34 @@ impl RustyCompositorState {
             let shell_chrome_visible = !self.has_foreground_layer_surfaces()
                 && !self.should_hide_shell_chrome_for_fullscreen();
 
+            // Enforce `xdg_popup` grab before shell chrome/window hit-testing (`RUSTYOS-034`).
+            if self
+                .active_popup_grabs
+                .iter()
+                .any(smithay::wayland::shell::xdg::PopupSurface::alive)
+            {
+                let target_hit = self.target_surface_under(self.pointer_location);
+                let inside_grab = target_hit
+                    .as_ref()
+                    .is_some_and(|(_, surf, _)| self.is_surface_in_active_popup_grab(surf));
+                if inside_grab {
+                    let pointer = self.pointer.clone();
+                    pointer.button(
+                        self,
+                        &ButtonEvent {
+                            button,
+                            state: button_state,
+                            serial,
+                            time: Event::time_msec(event),
+                        },
+                    );
+                    pointer.frame(self);
+                    return;
+                }
+                self.dismiss_active_popup_grabs();
+                return;
+            }
+
             // Check for TopBar click to open/execute menus, switch workspaces, toggle layout, or open Search / Control Center
             if shell_chrome_visible
                 && self.handle_top_bar_pointer_click(output_width, serial, button)
@@ -1007,20 +1042,8 @@ impl RustyCompositorState {
                 return;
             }
 
-            // Dismiss grabbed `xdg_popup` menus on outside clicks and route popup clicks directly (`RUSTYOS-034`).
+            // Route popup clicks directly without SSD interception (`RUSTYOS-034`).
             let target_hit = self.target_surface_under(self.pointer_location);
-            if self
-                .active_popup_grabs
-                .iter()
-                .any(smithay::wayland::shell::xdg::PopupSurface::alive)
-            {
-                let inside_grab = target_hit
-                    .as_ref()
-                    .is_some_and(|(_, surf, _)| self.is_surface_in_active_popup_grab(surf));
-                if !inside_grab {
-                    self.dismiss_active_popup_grabs();
-                }
-            }
             let hits_popup = target_hit
                 .as_ref()
                 .is_some_and(|(_, surf, _)| self.is_surface_in_popup(surf));
@@ -1340,8 +1363,27 @@ impl RustyCompositorState {
             || self.has_blocking_shell_overlay()
             || self.window_switcher.is_some()
             || self.screenshot_hud.is_some()
-            || self.context_menu.is_some()
             || self.active_top_bar_menu.is_some()
+        {
+            return;
+        }
+        let vertical_amount = event
+            .amount(Axis::Vertical)
+            .unwrap_or_else(|| event.amount_v120(Axis::Vertical).unwrap_or(0.0) * 15.0 / 120.0);
+        if self.context_menu.is_some() {
+            if vertical_amount.abs() > f64::EPSILON {
+                self.scroll_context_menu(vertical_amount);
+            }
+            return;
+        }
+        let has_live_popup_grab = self
+            .active_popup_grabs
+            .iter()
+            .any(smithay::wayland::shell::xdg::PopupSurface::alive);
+        if has_live_popup_grab
+            && !self
+                .target_surface_under(self.pointer_location)
+                .is_some_and(|(_, surf, _)| self.is_surface_in_active_popup_grab(&surf))
         {
             return;
         }
@@ -1349,9 +1391,6 @@ impl RustyCompositorState {
         let horizontal_amount = event
             .amount(Axis::Horizontal)
             .unwrap_or_else(|| event.amount_v120(Axis::Horizontal).unwrap_or(0.0) * 15.0 / 120.0);
-        let vertical_amount = event
-            .amount(Axis::Vertical)
-            .unwrap_or_else(|| event.amount_v120(Axis::Vertical).unwrap_or(0.0) * 15.0 / 120.0);
         let horizontal_discrete = event.amount_v120(Axis::Horizontal);
         let vertical_discrete = event.amount_v120(Axis::Vertical);
 
