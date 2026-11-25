@@ -5,14 +5,16 @@ use rusty_services::file_manager::{
     format_byte_size, format_unix_timestamp,
 };
 
-use crate::icons::{draw_chevron_aa, draw_entry_icon, draw_large_entry_artwork};
+use crate::icons::{
+    draw_chevron_aa, draw_entry_icon, draw_large_entry_artwork, draw_section_chevron_svg,
+};
 use crate::layout::{
     ColumnLayout, FilesLayout, GalleryLayout, IconCellLayout, IconsGridLayout, PreviewLayout, Rect,
 };
 use crate::render::canvas::Canvas;
 use crate::render::chrome::render_path_bar;
 use crate::render::{Palette, overlay_scrollbar_color, rgba};
-use crate::state::{CachedPreview, FilesAppState, ICON_CELL_H, LIST_ROW_HEIGHT, ROW_HEIGHT};
+use crate::state::{CachedPreview, FilesAppState, ROW_HEIGHT};
 
 pub(crate) fn render_miller_columns(
     c: &mut Canvas<'_>,
@@ -393,6 +395,9 @@ pub(crate) fn render_list_view(
     let cols_x = list_column_offsets(layout);
 
     c.with_clip(clip, |c| {
+        for (title, gr) in &layout.list_group_headers {
+            render_group_section_header(c, title, *gr, clip, pal);
+        }
         for &(row_idx, rect) in &layout.list_rows {
             if let Some(entry) = col.visible_entries.get(row_idx) {
                 let selected = col.is_selected(row_idx);
@@ -406,10 +411,26 @@ pub(crate) fn render_list_view(
                     };
                     c.fill_rounded_rect(rect, 6, hover_bg);
                 }
-                render_list_row(c, entry, rect, row_idx, selected, cols_x, clip, pal);
+                let depth = col.visible_depths.get(row_idx).copied().unwrap_or(0);
+                let expanded = entry.is_navigable_dir()
+                    && !state.is_trash_view()
+                    && state.expanded_list_dirs.contains(&entry.path);
+                render_list_row(
+                    c,
+                    entry,
+                    rect,
+                    row_idx,
+                    selected,
+                    depth,
+                    (!state.is_trash_view()).then_some(expanded),
+                    cols_x,
+                    clip,
+                    pal,
+                );
             }
         }
-        let total_h = i32::try_from(col.visible_entries.len()).unwrap_or(0) * LIST_ROW_HEIGHT + 8;
+        render_marquee_overlay(c, state, clip, pal);
+        let total_h = state.list_total_height();
         c.draw_scrollbar(
             clip,
             state.list_scroll_y,
@@ -417,6 +438,46 @@ pub(crate) fn render_list_view(
             overlay_scrollbar_color(pal.scrollbar, state.overlay_scrollbar_alpha),
         );
     });
+}
+
+fn render_group_section_header(
+    c: &mut Canvas<'_>,
+    title: &str,
+    rect: Rect,
+    clip: Rect,
+    pal: &Palette,
+) {
+    c.draw_text(
+        title,
+        rect.x + 6,
+        rect.y + 4,
+        11.5,
+        true,
+        pal.text_muted,
+        clip,
+    );
+    let label_w = Canvas::measure_text(title, 11.5, true);
+    let line_x = rect.x + 14 + label_w;
+    if line_x + 8 < rect.right() {
+        c.fill_rect(
+            Rect::new(line_x, rect.y + rect.h / 2, rect.right() - line_x, 1),
+            pal.divider,
+        );
+    }
+}
+
+fn render_marquee_overlay(c: &mut Canvas<'_>, state: &FilesAppState, clip: Rect, pal: &Palette) {
+    let Some(m) = &state.marquee else {
+        return;
+    };
+    let Some(mr) = m.rect() else {
+        return;
+    };
+    let _ = clip;
+    let fill = [pal.accent[0], pal.accent[1], pal.accent[2], 42];
+    let border = [pal.accent[0], pal.accent[1], pal.accent[2], 195];
+    c.fill_rounded_rect(mr, 4, fill);
+    c.stroke_rounded_rect(mr, 4, border);
 }
 
 pub(crate) fn list_column_offsets(layout: &FilesLayout) -> (i32, i32, i32) {
@@ -445,6 +506,8 @@ pub(crate) fn render_list_row(
     rect: Rect,
     row_idx: usize,
     selected: bool,
+    depth: u16,
+    dir_expanded: Option<bool>,
     cols_x: (i32, i32, i32),
     clip: Rect,
     pal: &Palette,
@@ -466,16 +529,33 @@ pub(crate) fn render_list_row(
         pal.text_secondary
     };
 
+    let indent = i32::from(depth) * 18;
+    let mut icon_cx = rect.x as f32 + 15.0 + indent as f32;
+    let mut name_x = rect.x + 30 + indent;
+    if let Some(expanded) = dir_expanded
+        && entry.is_navigable_dir()
+    {
+        draw_section_chevron_svg(
+            c,
+            rect.x as f32 + 12.0 + indent as f32,
+            rect.y as f32 + (rect.h as f32) * 0.5,
+            !expanded,
+            sub_fg,
+        );
+        icon_cx += 14.0;
+        name_x += 14;
+    }
+
     draw_entry_icon(
         c,
-        rect.x as f32 + 15.0,
+        icon_cx,
         rect.y as f32 + (rect.h as f32) * 0.5,
         entry,
         selected,
         pal,
     );
-    let name = Canvas::fit_text(&entry.name, (date_x - rect.x - 36).max(60), 13.0, selected);
-    c.draw_text(&name, rect.x + 30, rect.y + 7, 13.0, selected, fg, clip);
+    let name = Canvas::fit_text(&entry.name, (date_x - name_x - 8).max(60), 13.0, selected);
+    c.draw_text(&name, name_x, rect.y + 7, 13.0, selected, fg, clip);
 
     let date_str = entry
         .modified_unix_secs
@@ -701,6 +781,9 @@ pub(crate) fn render_icons_grid(
             );
             return;
         }
+        for (title, gr) in &grid.group_headers {
+            render_group_section_header(c, title, *gr, clip, pal);
+        }
         for cell in &grid.cells {
             let Some(entry) = col.visible_entries.get(cell.row_idx) else {
                 continue;
@@ -725,11 +808,11 @@ pub(crate) fn render_icons_grid(
             let tags = state.tags_for(&entry.path);
             render_single_icon_cell(c, state, cell, entry, tags, selected, pal);
         }
-        let rows = i32::try_from(col.visible_entries.len().div_ceil(grid.cols.max(1))).unwrap_or(0);
+        render_marquee_overlay(c, state, clip, pal);
         c.draw_scrollbar(
             clip,
             state.icons_scroll_y,
-            rows * ICON_CELL_H + 16,
+            state.icons_total_height(grid.cols),
             overlay_scrollbar_color(pal.scrollbar, state.overlay_scrollbar_alpha),
         );
     });

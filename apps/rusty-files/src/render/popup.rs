@@ -44,6 +44,7 @@ pub(crate) fn shortcut_for_command(cmd: &PopupCommand) -> Option<&'static str> {
         PopupCommand::CutSelected => Some("⌘X"),
         PopupCommand::PasteIntoActive => Some("⌘V"),
         PopupCommand::DuplicateSelected => Some("⌘D"),
+        PopupCommand::UndoLastAction => Some("⌘Z"),
         PopupCommand::MoveToTrash(_) => Some("⌘⌫"),
         PopupCommand::ZoomWindow => Some("^⌘F"),
         PopupCommand::MinimizeWindow => Some("⌘M"),
@@ -51,6 +52,7 @@ pub(crate) fn shortcut_for_command(cmd: &PopupCommand) -> Option<&'static str> {
         PopupCommand::ToggleShowHidden => Some("⇧⌘."),
         PopupCommand::SortBy(_)
         | PopupCommand::SetSortOrder(_)
+        | PopupCommand::SetGroupBy(_)
         | PopupCommand::ToggleTabBar
         | PopupCommand::TogglePathBar
         | PopupCommand::ShareCopyPath(_)

@@ -4,8 +4,8 @@ use rusty_services::file_manager::{TransferKind, format_byte_size, format_unix_t
 
 use crate::icons::{draw_chevron_aa, draw_close_x_glyph, draw_large_entry_artwork};
 use crate::layout::{
-    ConflictDialogLayout, FilesLayout, GetInfoLayout, GoToFolderLayout, QuickLookLayout, Rect,
-    TransferDialogLayout,
+    BatchRenameLayout, ConflictDialogLayout, FilesLayout, GetInfoLayout, GoToFolderLayout,
+    QuickLookLayout, Rect, TransferDialogLayout,
 };
 use crate::render::canvas::{
     Canvas, make_ui_canvas, to_ui_rect, ui_theme_palette, with_font_engine,
@@ -14,7 +14,7 @@ use crate::render::views::{
     draw_aspect_fitted_preview, draw_framed_thumbnail, render_text_preview_card,
 };
 use crate::render::{Palette, rgba};
-use crate::state::{CachedPreview, FilesAppState, InlineRenameState};
+use crate::state::{BatchRenameMode, CachedPreview, FilesAppState, InlineRenameState};
 
 /// Renders active Stage B overlays cleanly in back-to-front order.
 pub(crate) fn render_dialog_overlays(
@@ -25,6 +25,9 @@ pub(crate) fn render_dialog_overlays(
 ) {
     if let Some(rn) = &state.inline_rename {
         render_inline_rename_editor(c, state, rn, layout, pal);
+    }
+    if let Some(br) = &layout.overlays.batch_rename {
+        render_batch_rename_sheet(c, state, br, pal);
     }
     if let Some(ql) = &layout.overlays.quick_look {
         render_quick_look_overlay(c, state, ql, pal);
@@ -820,4 +823,156 @@ pub(crate) fn draw_modal_shadow_and_frame(
     );
     c.fill_rounded_rect(rect, radius, pal.popup_bg);
     c.stroke_rounded_rect(rect, radius, pal.popup_border);
+}
+
+#[allow(clippy::too_many_lines)]
+pub(crate) fn render_batch_rename_sheet(
+    c: &mut Canvas<'_>,
+    state: &FilesAppState,
+    br_layout: &BatchRenameLayout,
+    pal: &Palette,
+) {
+    let Some(br) = &state.batch_rename else {
+        return;
+    };
+    draw_modal_shadow_and_frame(c, br_layout.modal_rect, 12, pal);
+    let m = br_layout.modal_rect;
+    c.with_clip(m, |c| {
+        let title = format!("Rename {} Finder Items", br.targets.len());
+        c.draw_text(&title, m.x + 16, m.y + 12, 13.5, true, pal.text_primary, m);
+
+        for (mode, rect) in br_layout.mode_tabs {
+            let active = br.mode == mode;
+            c.fill_rounded_rect(rect, 6, if active { pal.accent } else { pal.pill_bg });
+            let tw = Canvas::measure_text(mode.label(), 11.5, active);
+            c.draw_text(
+                mode.label(),
+                rect.x + (rect.w - tw) / 2,
+                rect.y + 5,
+                11.5,
+                active,
+                if active {
+                    pal.accent_text
+                } else {
+                    pal.text_primary
+                },
+                rect,
+            );
+        }
+
+        let (label0, val0) = match br.mode {
+            BatchRenameMode::ReplaceText => ("Find:", br.find_text.as_str()),
+            BatchRenameMode::AddText => ("Add text:", br.add_text.as_str()),
+            BatchRenameMode::FormatIndex => ("Name format:", br.format_base.as_str()),
+        };
+        render_batch_rename_input(
+            c,
+            br_layout.field0_rect,
+            label0,
+            val0,
+            br.active_field == 0,
+            pal,
+        );
+
+        if let Some(f1) = br_layout.field1_rect {
+            let start_str = br.start_index.to_string();
+            let (label1, val1) = match br.mode {
+                BatchRenameMode::ReplaceText => ("Replace:", br.replace_text.as_str()),
+                BatchRenameMode::FormatIndex => ("Start at:", start_str.as_str()),
+                BatchRenameMode::AddText => ("", ""),
+            };
+            render_batch_rename_input(c, f1, label1, val1, br.active_field == 1, pal);
+        }
+
+        if let Some(pr) = br_layout.prefix_toggle_rect {
+            c.fill_rounded_rect(pr, 6, pal.pill_bg);
+            let pos_label = if br.add_as_prefix {
+                "Placement: Before Name"
+            } else {
+                "Placement: After Name"
+            };
+            c.draw_text(
+                pos_label,
+                pr.x + 8,
+                pr.y + 5,
+                11.5,
+                false,
+                pal.text_primary,
+                pr,
+            );
+        }
+
+        let sample_old = br
+            .targets
+            .first()
+            .and_then(|p| p.file_name())
+            .map_or_else(String::new, |s| s.to_string_lossy().into_owned());
+        let sample_new = br.compute_target_name(&sample_old, 0);
+        let msg = br
+            .error
+            .as_ref()
+            .map_or_else(|| format!("Example: \"{sample_new}\""), Clone::clone);
+        let msg_col = if br.error.is_some() {
+            rgba(230, 62, 56, 255)
+        } else {
+            pal.text_secondary
+        };
+        let fitted = Canvas::fit_text(&msg, m.w - 32, 11.5, false);
+        c.draw_text(&fitted, m.x + 16, m.y + 150, 11.5, false, msg_col, m);
+
+        let ui_pal = ui_theme_palette(pal, state.accent_index);
+        let mut dl = rusty_ui::UiDrawList::new();
+        let mut uc = make_ui_canvas(c.buf, c.w, c.h);
+        with_font_engine(|fe| {
+            let mut painter = rusty_ui::UiPainter::new(&mut dl);
+            painter.push_clip(to_ui_rect(m));
+            let cancel_btn = rusty_ui::PushButton::new(
+                to_ui_rect(br_layout.cancel_rect),
+                rusty_ui::ButtonStyle::Secondary,
+            )
+            .with_corner_radius(7.0);
+            cancel_btn.paint_labeled(&mut painter, fe, "Cancel", &ui_pal, false);
+            let ok_btn = rusty_ui::PushButton::new(
+                to_ui_rect(br_layout.confirm_rect),
+                rusty_ui::ButtonStyle::Primary,
+            )
+            .with_corner_radius(7.0);
+            ok_btn.paint_labeled(&mut painter, fe, "Rename", &ui_pal, true);
+            painter.pop_clip();
+            rusty_ui::render_draw_list_to_canvas(&dl, &mut uc, fe);
+        });
+    });
+}
+
+fn render_batch_rename_input(
+    c: &mut Canvas<'_>,
+    rect: Rect,
+    label: &str,
+    value: &str,
+    focused: bool,
+    pal: &Palette,
+) {
+    c.fill_rounded_rect(rect, 7, pal.pill_bg);
+    c.stroke_rounded_rect(rect, 7, if focused { pal.accent } else { pal.divider });
+    c.draw_text(
+        label,
+        rect.x + 8,
+        rect.y + 6,
+        11.5,
+        true,
+        pal.text_secondary,
+        rect,
+    );
+    let label_w = Canvas::measure_text(label, 11.5, true);
+    let val_x = rect.x + 16 + label_w;
+    let fitted = Canvas::fit_text(value, (rect.right() - val_x - 8).max(40), 12.0, false);
+    c.draw_text(
+        &fitted,
+        val_x,
+        rect.y + 6,
+        12.0,
+        false,
+        pal.text_primary,
+        rect,
+    );
 }

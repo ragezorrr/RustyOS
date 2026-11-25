@@ -140,6 +140,10 @@ pub(crate) struct ColumnPane {
     pub raw_entries: Vec<FileEntry>,
     /// Filtered & sorted entries currently visible.
     pub visible_entries: Vec<FileEntry>,
+    /// Optional tree nesting depth per visible row (`List` view folder expansion).
+    pub visible_depths: Vec<u16>,
+    /// Group header boundaries `(first_row_idx, section_title)` when `GroupByMode != None`.
+    pub group_sections: Vec<(usize, String)>,
     /// Currently selected primary/anchor row index in `visible_entries`.
     pub selected_index: Option<usize>,
     /// All selected row indices in `visible_entries` (`RUSTYOS-150` Multi-Select).
@@ -161,6 +165,8 @@ impl ColumnPane {
             title,
             raw_entries: Vec::new(),
             visible_entries: Vec::new(),
+            visible_depths: Vec::new(),
+            group_sections: Vec::new(),
             selected_index: None,
             selected_indices: BTreeSet::new(),
             scroll_y: 0,
@@ -288,9 +294,18 @@ impl ColumnPane {
             sort_field,
             sort_order,
         );
-        self.selected_index = selected_path
-            .as_ref()
-            .and_then(|p| self.visible_entries.iter().position(|e| &e.path == p));
+        self.visible_depths = vec![0; self.visible_entries.len()];
+        self.group_sections.clear();
+        self.reconcile_selection_paths(selected_path.as_ref(), &selected_paths);
+    }
+
+    pub(crate) fn reconcile_selection_paths(
+        &mut self,
+        selected_path: Option<&PathBuf>,
+        selected_paths: &BTreeSet<PathBuf>,
+    ) {
+        self.selected_index =
+            selected_path.and_then(|p| self.visible_entries.iter().position(|e| &e.path == p));
         self.selected_indices.clear();
         for (i, e) in self.visible_entries.iter().enumerate() {
             if selected_paths.contains(&e.path) {
@@ -433,6 +448,8 @@ pub(crate) struct FileDragState {
     pub active: bool,
     /// Optional hovered destination directory.
     pub target_dir: Option<PathBuf>,
+    /// True when hovered over `SidebarLocation::Trash`.
+    pub target_is_trash: bool,
     /// When `true`, copy instead of move.
     pub copy_mode: bool,
 }
@@ -447,6 +464,7 @@ impl FileDragState {
             current_pos: start_pos,
             active: false,
             target_dir: None,
+            target_is_trash: false,
             copy_mode: false,
         }
     }
@@ -473,6 +491,24 @@ impl FileDragState {
                 .iter()
                 .all(|src| src != dest && !dest.starts_with(src))
     }
+}
+
+/// Reversible Finder filesystem action stored on `FilesAppState::undo_stack`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum UndoAction {
+    /// Undoing a single inline rename restores `new_path` -> `old_path`.
+    Rename {
+        new_path: PathBuf,
+        old_path: PathBuf,
+    },
+    /// Undoing a batch rename restores every `(new_path, old_path)`.
+    BatchRename { pairs: Vec<(PathBuf, PathBuf)> },
+    /// Undoing `New Folder`, `Duplicate`, or `Copy` moves created items to Trash.
+    RemoveCreated { created_paths: Vec<PathBuf> },
+    /// Undoing `Move` transfers `(current_path, original_path)` back to original locations.
+    MoveBack { pairs: Vec<(PathBuf, PathBuf)> },
+    /// Undoing `Move to Trash` restores `trash_names` via `.trashinfo`.
+    RestoreTrashed { trash_names: Vec<String> },
 }
 
 /// Active `Quick Look` overlay state (`Space`).
@@ -587,6 +623,293 @@ pub(crate) enum ScrollTargetArea {
     Icons,
     GalleryStrip,
     Column(usize),
+}
+
+/// Grouping dimension applied across `Icons`, `List`, and `Columns` views.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum GroupByMode {
+    #[default]
+    None,
+    Kind,
+    DateModified,
+    Size,
+    Tags,
+}
+
+impl GroupByMode {
+    pub(crate) const ALL: [Self; 5] = [
+        Self::None,
+        Self::Kind,
+        Self::DateModified,
+        Self::Size,
+        Self::Tags,
+    ];
+
+    #[must_use]
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::None => "None",
+            Self::Kind => "Kind",
+            Self::DateModified => "Date Modified",
+            Self::Size => "Size",
+            Self::Tags => "Tags",
+        }
+    }
+}
+
+/// Active rubber-band drag-selection box in empty canvas regions of `Icons` or `List` views.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct MarqueeSelectionState {
+    pub start_pos: (f64, f64),
+    pub current_pos: (f64, f64),
+    pub active: bool,
+    pub additive: bool,
+    pub baseline_paths: BTreeSet<PathBuf>,
+}
+
+impl MarqueeSelectionState {
+    #[must_use]
+    pub(crate) fn start(
+        start_pos: (f64, f64),
+        additive: bool,
+        baseline_paths: BTreeSet<PathBuf>,
+    ) -> Self {
+        Self {
+            start_pos,
+            current_pos: start_pos,
+            active: false,
+            additive,
+            baseline_paths,
+        }
+    }
+
+    pub(crate) fn update_pos(&mut self, pos: (f64, f64)) -> bool {
+        self.current_pos = pos;
+        if !self.active {
+            let dx = pos.0 - self.start_pos.0;
+            let dy = pos.1 - self.start_pos.1;
+            if dx * dx + dy * dy >= 36.0 {
+                self.active = true;
+            }
+        }
+        self.active
+    }
+
+    #[must_use]
+    #[allow(clippy::cast_possible_truncation)]
+    pub(crate) fn rect(&self) -> Option<crate::layout::Rect> {
+        if !self.active {
+            return None;
+        }
+        let x0 = self.start_pos.0.min(self.current_pos.0).round() as i32;
+        let y0 = self.start_pos.1.min(self.current_pos.1).round() as i32;
+        let x1 = self.start_pos.0.max(self.current_pos.0).round() as i32;
+        let y1 = self.start_pos.1.max(self.current_pos.1).round() as i32;
+        Some(crate::layout::Rect::new(
+            x0,
+            y0,
+            (x1 - x0).max(2),
+            (y1 - y0).max(2),
+        ))
+    }
+}
+
+/// Strategy used by the multi-item `Batch Rename` sheet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum BatchRenameMode {
+    #[default]
+    ReplaceText,
+    AddText,
+    FormatIndex,
+}
+
+impl BatchRenameMode {
+    #[must_use]
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::ReplaceText => "Replace Text",
+            Self::AddText => "Add Text",
+            Self::FormatIndex => "Format",
+        }
+    }
+}
+
+/// Interactive multi-file Batch Rename modal state (`F2` when 2+ entries are selected).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BatchRenameState {
+    pub targets: Vec<PathBuf>,
+    pub mode: BatchRenameMode,
+    pub find_text: String,
+    pub replace_text: String,
+    pub add_text: String,
+    pub add_as_prefix: bool,
+    pub format_base: String,
+    pub start_index: usize,
+    pub active_field: usize,
+    pub error: Option<String>,
+}
+
+impl BatchRenameState {
+    #[must_use]
+    pub(crate) fn new(targets: Vec<PathBuf>) -> Self {
+        Self {
+            targets,
+            mode: BatchRenameMode::ReplaceText,
+            find_text: String::new(),
+            replace_text: String::new(),
+            add_text: String::new(),
+            add_as_prefix: true,
+            format_base: String::from("Item "),
+            start_index: 1,
+            active_field: 0,
+            error: None,
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn compute_target_name(&self, old_name: &str, idx: usize) -> String {
+        match self.mode {
+            BatchRenameMode::ReplaceText => {
+                if self.find_text.is_empty() {
+                    old_name.to_owned()
+                } else {
+                    old_name.replace(&self.find_text, &self.replace_text)
+                }
+            }
+            BatchRenameMode::AddText => {
+                if self.add_as_prefix {
+                    format!("{}{old_name}", self.add_text)
+                } else if let Some((stem, ext)) = old_name.rsplit_once('.') {
+                    if !stem.is_empty() {
+                        return format!("{stem}{}.{ext}", self.add_text);
+                    }
+                    format!("{old_name}{}", self.add_text)
+                } else {
+                    format!("{old_name}{}", self.add_text)
+                }
+            }
+            BatchRenameMode::FormatIndex => {
+                let num = self.start_index.saturating_add(idx);
+                if let Some((stem, ext)) = old_name.rsplit_once('.')
+                    && !stem.is_empty()
+                {
+                    return format!("{}{num}.{ext}", self.format_base);
+                }
+                format!("{}{num}", self.format_base)
+            }
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn preview_pairs(&self) -> Vec<(PathBuf, String)> {
+        self.targets
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                let old_name = p
+                    .file_name()
+                    .map_or_else(String::new, |s| s.to_string_lossy().into_owned());
+                let next = self.compute_target_name(&old_name, i);
+                (p.clone(), next)
+            })
+            .collect()
+    }
+}
+
+/// Section header height inserted above each group when `GroupByMode != None`.
+pub(crate) const GROUP_HEADER_HEIGHT: i32 = 24;
+
+/// Computes group ordering & `(first_row_idx, title)` section boundaries for a column's entries.
+#[must_use]
+pub(crate) fn apply_grouping_to_entries(
+    entries: Vec<FileEntry>,
+    depths: Vec<u16>,
+    mode: GroupByMode,
+    tags_config: &rusty_services::file_manager::FileTagsConfig,
+    now_secs: i64,
+) -> (Vec<FileEntry>, Vec<u16>, Vec<(usize, String)>) {
+    if mode == GroupByMode::None || entries.is_empty() {
+        return (entries, depths, Vec::new());
+    }
+    let mut pairs: Vec<(u8, String, usize, FileEntry, u16)> = entries
+        .into_iter()
+        .zip(depths.into_iter().chain(std::iter::repeat(0)))
+        .enumerate()
+        .map(|(orig_idx, (entry, depth))| {
+            let (rank, label) = group_bucket_for_entry(&entry, mode, tags_config, now_secs);
+            (rank, label, orig_idx, entry, depth)
+        })
+        .collect();
+    pairs.sort_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then_with(|| a.1.cmp(&b.1))
+            .then_with(|| a.2.cmp(&b.2))
+    });
+
+    let mut out_entries = Vec::with_capacity(pairs.len());
+    let mut out_depths = Vec::with_capacity(pairs.len());
+    let mut sections = Vec::new();
+    let mut prev_label: Option<String> = None;
+    for (row_idx, (_, label, _, entry, depth)) in pairs.into_iter().enumerate() {
+        if prev_label.as_deref() != Some(label.as_str()) {
+            sections.push((row_idx, label.clone()));
+            prev_label = Some(label);
+        }
+        out_entries.push(entry);
+        out_depths.push(depth);
+    }
+    (out_entries, out_depths, sections)
+}
+
+fn group_bucket_for_entry(
+    entry: &FileEntry,
+    mode: GroupByMode,
+    tags_config: &rusty_services::file_manager::FileTagsConfig,
+    now_secs: i64,
+) -> (u8, String) {
+    match mode {
+        GroupByMode::None => (0, String::new()),
+        GroupByMode::Kind => {
+            let rank = u8::from(!entry.is_navigable_dir());
+            (rank, entry.kind_label().to_owned())
+        }
+        GroupByMode::DateModified => {
+            let Some(mtime) = entry.modified_unix_secs else {
+                return (5, String::from("Earlier"));
+            };
+            let age = now_secs.saturating_sub(mtime);
+            if age < 86_400 {
+                (0, String::from("Today"))
+            } else if age < 172_800 {
+                (1, String::from("Yesterday"))
+            } else if age < 7 * 86_400 {
+                (2, String::from("Previous 7 Days"))
+            } else if age < 30 * 86_400 {
+                (3, String::from("Previous 30 Days"))
+            } else {
+                (4, String::from("Older"))
+            }
+        }
+        GroupByMode::Size => {
+            if entry.is_navigable_dir() {
+                (3, String::from("Folders"))
+            } else if entry.size_bytes >= 100 * 1024 * 1024 {
+                (0, String::from("Large (> 100 MB)"))
+            } else if entry.size_bytes >= 1024 * 1024 {
+                (1, String::from("Medium (1 - 100 MB)"))
+            } else {
+                (2, String::from("Small (< 1 MB)"))
+            }
+        }
+        GroupByMode::Tags => {
+            let tags = tags_config.tags_for(&entry.path);
+            if let Some(first) = tags.first() {
+                (0, first.label().to_owned())
+            } else {
+                (1, String::from("No Tags"))
+            }
+        }
+    }
 }
 
 /// Computes total pixel height consumed by visible sidebar items + section headers + bottom padding.

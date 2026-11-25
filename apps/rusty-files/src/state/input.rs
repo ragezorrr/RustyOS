@@ -58,7 +58,68 @@ impl FilesAppState {
             self.toggle_quick_look_selected();
             return;
         }
+        if !ctrl
+            && !self.search_active
+            && let Some(text) = utf8
+            && !text.is_empty()
+            && text.chars().all(|c| !c.is_control())
+            && text != " "
+            && self.handle_typeahead_input(text, Instant::now())
+        {
+            return;
+        }
         self.handle_navigation_key(key_name);
+    }
+
+    /// Prefix-jumps selection inside the active view when typing printable letters directly.
+    pub(crate) fn handle_typeahead_input(&mut self, text: &str, now: Instant) -> bool {
+        let Some(col) = self.columns.get(self.active_column) else {
+            return false;
+        };
+        if col.visible_entries.is_empty() {
+            return false;
+        }
+        let expired = self
+            .typeahead_last_at
+            .is_none_or(|prev| now.saturating_duration_since(prev) > Duration::from_millis(850));
+        if expired {
+            self.typeahead_query.clear();
+        }
+        self.typeahead_query.push_str(&text.to_lowercase());
+        self.typeahead_last_at = Some(now);
+
+        let len = col.visible_entries.len();
+        let start = if expired {
+            0
+        } else {
+            col.selected_index.unwrap_or(0)
+        };
+        let query = &self.typeahead_query;
+        let matched = (0..len)
+            .map(|offset| (start + offset) % len)
+            .find(|&idx| {
+                col.visible_entries[idx]
+                    .name
+                    .to_lowercase()
+                    .starts_with(query)
+            })
+            .or_else(|| {
+                let first_char = text.to_lowercase();
+                let next_start = (col.selected_index.map_or(0, |i| i + 1)) % len;
+                (0..len)
+                    .map(|offset| (next_start + offset) % len)
+                    .find(|&idx| {
+                        col.visible_entries[idx]
+                            .name
+                            .to_lowercase()
+                            .starts_with(&first_char)
+                    })
+            });
+        if let Some(idx) = matched {
+            self.select_entry(self.active_column, idx, false);
+            return true;
+        }
+        false
     }
 
     fn handle_modal_key_input(&mut self, key_name: &str, utf8: Option<&str>, ctrl: bool) -> bool {
@@ -73,6 +134,10 @@ impl FilesAppState {
         }
         if self.inline_rename.is_some() {
             self.handle_inline_rename_key(key_name, utf8, ctrl);
+            return true;
+        }
+        if self.batch_rename.is_some() {
+            self.handle_batch_rename_key(key_name, utf8, ctrl);
             return true;
         }
         if self.go_to_folder.is_some() {
@@ -169,6 +234,22 @@ impl FilesAppState {
             self.action_paste_into_active();
             return true;
         }
+        if key_name == "BackSpace" {
+            self.action_move_selected_to_trash();
+            return true;
+        }
+        let is_dot = key_name == "period"
+            || key_name == "greater"
+            || key_name == "KP_Decimal"
+            || utf8.is_some_and(|s| s == "." || s == ">");
+        if shift && is_dot {
+            self.toggle_show_hidden();
+            return true;
+        }
+        if !shift && key_matches_ascii(key_name, utf8, 'z') {
+            self.action_undo();
+            return true;
+        }
         if key_matches_ascii(key_name, utf8, 'd') {
             self.action_duplicate_selected();
             return true;
@@ -201,6 +282,72 @@ impl FilesAppState {
                     rn.draft.push_str(text);
                     rn.error = None;
                     self.reset_caret_blink();
+                    self.dirty = true;
+                }
+            }
+        }
+    }
+
+    fn handle_batch_rename_key(&mut self, key_name: &str, utf8: Option<&str>, ctrl: bool) {
+        match key_name {
+            "Escape" => {
+                self.batch_rename = None;
+                self.dirty = true;
+            }
+            "Return" | "KP_Enter" => self.commit_batch_rename(),
+            "Tab" => {
+                if let Some(br) = &mut self.batch_rename {
+                    let max_fields = match br.mode {
+                        BatchRenameMode::AddText => 1,
+                        BatchRenameMode::ReplaceText | BatchRenameMode::FormatIndex => 2,
+                    };
+                    br.active_field = (br.active_field + 1) % max_fields;
+                    self.dirty = true;
+                }
+            }
+            "BackSpace" => {
+                if let Some(br) = &mut self.batch_rename {
+                    br.error = None;
+                    match (br.mode, br.active_field) {
+                        (BatchRenameMode::ReplaceText, 0) => {
+                            br.find_text.pop();
+                        }
+                        (BatchRenameMode::ReplaceText, _) => {
+                            br.replace_text.pop();
+                        }
+                        (BatchRenameMode::AddText, _) => {
+                            br.add_text.pop();
+                        }
+                        (BatchRenameMode::FormatIndex, 0) => {
+                            br.format_base.pop();
+                        }
+                        (BatchRenameMode::FormatIndex, _) => {
+                            br.start_index /= 10;
+                        }
+                    }
+                    self.dirty = true;
+                }
+            }
+            _ => {
+                if let Some(text) = utf8
+                    && !ctrl
+                    && text.chars().all(|c| !c.is_control())
+                    && !text.is_empty()
+                    && let Some(br) = &mut self.batch_rename
+                {
+                    br.error = None;
+                    match (br.mode, br.active_field) {
+                        (BatchRenameMode::ReplaceText, 0) => br.find_text.push_str(text),
+                        (BatchRenameMode::ReplaceText, _) => br.replace_text.push_str(text),
+                        (BatchRenameMode::AddText, _) => br.add_text.push_str(text),
+                        (BatchRenameMode::FormatIndex, 0) => br.format_base.push_str(text),
+                        (BatchRenameMode::FormatIndex, _) => {
+                            if let Ok(digit) = text.trim().parse::<usize>() {
+                                br.start_index =
+                                    br.start_index.saturating_mul(10).saturating_add(digit);
+                            }
+                        }
+                    }
                     self.dirty = true;
                 }
             }
@@ -305,12 +452,42 @@ impl FilesAppState {
                 "Delete" => self.action_move_selected_to_trash(),
                 _ => {}
             },
-            FileViewMode::Columns | FileViewMode::List => match key_name {
+            FileViewMode::List => match key_name {
+                "Down" => self.move_selection_delta(1),
+                "Up" => self.move_selection_delta(-1),
+                "Right" => {
+                    if let Some(col) = self.columns.first()
+                        && let Some(row_idx) = col.selected_index
+                        && let Some(entry) = col.visible_entries.get(row_idx)
+                        && entry.is_navigable_dir()
+                        && !self.is_trash_view()
+                        && !self.expanded_list_dirs.contains(&entry.path)
+                    {
+                        self.toggle_list_row_expanded(row_idx);
+                    } else {
+                        self.activate_selected();
+                    }
+                }
+                "Return" | "KP_Enter" => self.activate_selected(),
+                "Left" => {
+                    if let Some(col) = self.columns.first()
+                        && let Some(row_idx) = col.selected_index
+                        && let Some(entry) = col.visible_entries.get(row_idx)
+                        && self.expanded_list_dirs.contains(&entry.path)
+                    {
+                        self.toggle_list_row_expanded(row_idx);
+                    }
+                }
+                "BackSpace" => self.go_back(),
+                "Delete" => self.action_move_selected_to_trash(),
+                _ => {}
+            },
+            FileViewMode::Columns => match key_name {
                 "Down" => self.move_selection_delta(1),
                 "Up" => self.move_selection_delta(-1),
                 "Right" | "Return" | "KP_Enter" => self.activate_selected(),
                 "Left" => {
-                    if self.view_mode == FileViewMode::Columns && self.active_column > 0 {
+                    if self.active_column > 0 {
                         self.active_column -= 1;
                         self.columns.truncate(self.active_column + 1);
                         self.follow_right_column = true;
@@ -371,11 +548,7 @@ impl FilesAppState {
                     .impulse(delta_px, max_scroll, smooth);
             }
             ScrollTargetArea::List => {
-                let count = self
-                    .columns
-                    .first()
-                    .map_or(0, |c| i32::try_from(c.visible_entries.len()).unwrap_or(0));
-                let content_h = count * LIST_ROW_HEIGHT;
+                let content_h = self.list_total_height();
                 let max_scroll = (content_h - viewport_extent + 8).max(0);
                 if self.list_scroll_anim.rounded() != self.list_scroll_y {
                     self.list_scroll_anim.set_immediate(self.list_scroll_y);
@@ -383,10 +556,8 @@ impl FilesAppState {
                 self.list_scroll_y = self.list_scroll_anim.impulse(delta_px, max_scroll, smooth);
             }
             ScrollTargetArea::Icons => {
-                let count = self.columns.first().map_or(0, |c| c.visible_entries.len());
                 let cols = self.last_icon_grid_cols.max(1);
-                let rows = i32::try_from(count.div_ceil(cols)).unwrap_or(0);
-                let content_h = rows * ICON_CELL_H + 16;
+                let content_h = self.icons_total_height(cols);
                 let max_scroll = (content_h - viewport_extent + 12).max(0);
                 if self.icons_scroll_anim.rounded() != self.icons_scroll_y {
                     self.icons_scroll_anim.set_immediate(self.icons_scroll_y);

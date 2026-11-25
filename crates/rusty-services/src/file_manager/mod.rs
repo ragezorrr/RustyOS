@@ -17,7 +17,8 @@ pub use trash::*;
 pub use types::*;
 
 pub use crate::image_decode::{
-    DecodedPreviewImage, load_raster_preview_bgra as load_image_preview_bgra,
+    DecodedPreviewImage, PreviewMediaKind, classify_preview_filename,
+    is_supported_preview_filename, load_raster_preview_bgra as load_image_preview_bgra,
 };
 
 #[cfg(test)]

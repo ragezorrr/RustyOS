@@ -153,8 +153,13 @@ impl FilesAppState {
 
     // --- Inline Rename ---
 
-    /// Begins inline rename (`F2`) for currently selected entry.
+    /// Begins inline rename (`F2`) for single selection, or Batch Rename dialog for multi-select.
     pub(crate) fn start_inline_rename_selected(&mut self) {
+        let selected = self.selected_entries();
+        if selected.len() > 1 && !self.is_trash_view() {
+            self.open_batch_rename_selected();
+            return;
+        }
         let Some(col) = self.columns.get(self.active_column) else {
             return;
         };
@@ -165,6 +170,102 @@ impl FilesAppState {
             return;
         };
         self.start_inline_rename_entry(self.active_column, row_idx, &entry);
+    }
+
+    /// Opens modal `Batch Rename` dialog for all currently selected entries.
+    pub(crate) fn open_batch_rename_selected(&mut self) {
+        self.popup = None;
+        self.inline_rename = None;
+        if self.is_trash_view() {
+            return;
+        }
+        let targets: Vec<std::path::PathBuf> = self
+            .selected_entries()
+            .into_iter()
+            .map(|e| e.path)
+            .collect();
+        if targets.is_empty() {
+            return;
+        }
+        self.batch_rename = Some(BatchRenameState::new(targets));
+        self.dirty = true;
+    }
+
+    /// Commits `Batch Rename` modal across selected targets cleanly (`Ctrl+Z` undoable).
+    pub(crate) fn commit_batch_rename(&mut self) {
+        let Some(br) = self.batch_rename.clone() else {
+            return;
+        };
+        let pairs = br.preview_pairs();
+        let mut seen_targets = std::collections::BTreeSet::new();
+        for (src, next_name) in &pairs {
+            if let Err(err) =
+                rusty_services::file_manager::validate_single_component_name(next_name)
+            {
+                if let Some(edit) = &mut self.batch_rename {
+                    edit.error = Some(err.to_owned());
+                }
+                self.dirty = true;
+                return;
+            }
+            if let Some(parent) = src.parent() {
+                let target_path = parent.join(next_name.trim());
+                if !seen_targets.insert(target_path) {
+                    if let Some(edit) = &mut self.batch_rename {
+                        edit.error = Some(String::from("Duplicate destination filename"));
+                    }
+                    self.dirty = true;
+                    return;
+                }
+            }
+        }
+        let mut undo_pairs = Vec::new();
+        let mut reload_dirs = Vec::new();
+        for (src, next_name) in pairs {
+            let old_name = src
+                .file_name()
+                .map_or_else(String::new, |s| s.to_string_lossy().into_owned());
+            if old_name == next_name.trim() {
+                continue;
+            }
+            match rename_entry(&src, &next_name) {
+                Ok(new_path) => {
+                    let existing_tags: Vec<FileTagColor> = self.tags_config.tags_for(&src).to_vec();
+                    if !existing_tags.is_empty() {
+                        self.tags_config.remove_tags_for(&src);
+                        for tag in existing_tags {
+                            self.tags_config.toggle_tag(&new_path, tag);
+                        }
+                    }
+                    if let Some(parent) = new_path.parent() {
+                        let pb = parent.to_path_buf();
+                        if !reload_dirs.contains(&pb) {
+                            reload_dirs.push(pb);
+                        }
+                    }
+                    undo_pairs.push((new_path, src));
+                }
+                Err(err) => {
+                    if let Some(edit) = &mut self.batch_rename {
+                        edit.error = Some(err.to_string());
+                    }
+                    self.dirty = true;
+                    return;
+                }
+            }
+        }
+        let count = undo_pairs.len();
+        if !undo_pairs.is_empty() {
+            self.push_undo(UndoAction::BatchRename { pairs: undo_pairs });
+            self.persist_preferences();
+        }
+        for dir in &reload_dirs {
+            self.reload_directory(dir);
+        }
+        self.reload_active_column();
+        self.batch_rename = None;
+        self.status_message = Some(format!("Batch renamed {count} items"));
+        self.dirty = true;
     }
 
     /// Begins inline rename for a specific entry.
@@ -218,6 +319,10 @@ impl FilesAppState {
                     }
                     self.persist_preferences();
                 }
+                self.push_undo(UndoAction::Rename {
+                    new_path: new_path.clone(),
+                    old_path: rn.target_path.clone(),
+                });
                 if let Some(parent) = new_path.parent() {
                     self.reload_directory(parent);
                 }

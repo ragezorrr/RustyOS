@@ -6,7 +6,10 @@
 
 use std::fs;
 use std::io::Read as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 const PNG_SIGNATURE: [u8; 8] = [137, 80, 78, 71, 13, 10, 26, 10];
 
@@ -467,17 +470,215 @@ pub fn read_png_dimensions_from_bytes(data: &[u8]) -> Option<(u32, u32)> {
     (width > 0 && height > 0).then_some((width, height))
 }
 
-/// Reads `(width, height)` from a `.png` or `.ppm` image header for `Get Info` / inspector views.
+/// Reads `(width, height)` from a supported image/SVG header for `Get Info` / inspector views.
 #[must_use]
 pub fn read_image_dimensions(path: &Path) -> Option<(u32, u32)> {
     let mut file = fs::File::open(path).ok()?;
-    let mut head = [0_u8; 256];
+    let mut head = [0_u8; 8192];
     let n = file.read(&mut head).ok()?;
     let slice = &head[..n];
-    read_png_dimensions_from_bytes(slice).or_else(|| read_ppm_dimensions_from_bytes(slice))
+    read_image_dimensions_from_bytes(slice)
 }
 
-/// Loads and decodes a `.png` or `.ppm` raster file into aspect-fit premultiplied `BGRA` pixels.
+/// Reads `(width, height)` from header bytes across PNG, PPM, JPEG, WebP, GIF, BMP, and SVG.
+#[must_use]
+pub fn read_image_dimensions_from_bytes(slice: &[u8]) -> Option<(u32, u32)> {
+    read_png_dimensions_from_bytes(slice)
+        .or_else(|| read_ppm_dimensions_from_bytes(slice))
+        .or_else(|| read_jpeg_dimensions_from_bytes(slice))
+        .or_else(|| read_webp_dimensions_from_bytes(slice))
+        .or_else(|| read_gif_dimensions_from_bytes(slice))
+        .or_else(|| read_bmp_dimensions_from_bytes(slice))
+        .or_else(|| read_svg_dimensions_from_bytes(slice))
+}
+
+/// Reads `(width, height)` from a JPEG byte slice by scanning SOF markers.
+#[must_use]
+pub fn read_jpeg_dimensions_from_bytes(data: &[u8]) -> Option<(u32, u32)> {
+    if data.len() < 4 || data[0] != 0xFF || data[1] != 0xD8 {
+        return None;
+    }
+    let mut i = 2_usize;
+    while i + 3 < data.len() {
+        while i < data.len() && data[i] == 0xFF {
+            i += 1;
+        }
+        if i >= data.len() {
+            break;
+        }
+        let marker = data[i];
+        i += 1;
+        if marker == 0x00 || marker == 0x01 || (0xD0..=0xD9).contains(&marker) {
+            continue;
+        }
+        if i + 1 >= data.len() {
+            break;
+        }
+        let seg_len = usize::from(u16::from_be_bytes([data[i], data[i + 1]]));
+        if seg_len < 2 || i + seg_len > data.len() {
+            break;
+        }
+        let is_sof = matches!(
+            marker,
+            0xC0..=0xC3 | 0xC5..=0xC7 | 0xC9..=0xCB | 0xCD..=0xCF
+        );
+        if is_sof && seg_len >= 7 {
+            let h = u32::from(u16::from_be_bytes([data[i + 3], data[i + 4]]));
+            let w = u32::from(u16::from_be_bytes([data[i + 5], data[i + 6]]));
+            return (w > 0 && h > 0).then_some((w, h));
+        }
+        i += seg_len;
+    }
+    None
+}
+
+/// Reads `(width, height)` from a `RIFF....WEBP` (`VP8 `, `VP8L`, or `VP8X`) header.
+#[must_use]
+pub fn read_webp_dimensions_from_bytes(data: &[u8]) -> Option<(u32, u32)> {
+    if data.len() < 30 || &data[0..4] != b"RIFF" || &data[8..12] != b"WEBP" {
+        return None;
+    }
+    match &data[12..16] {
+        b"VP8X" => {
+            let w = 1
+                + (u32::from(data[24]) | (u32::from(data[25]) << 8) | (u32::from(data[26]) << 16));
+            let h = 1
+                + (u32::from(data[27]) | (u32::from(data[28]) << 8) | (u32::from(data[29]) << 16));
+            (w > 0 && h > 0).then_some((w, h))
+        }
+        b"VP8L" if data[20] == 0x2F => {
+            let bits = u32::from_le_bytes([data[21], data[22], data[23], data[24]]);
+            let w = (bits & 0x3FFF) + 1;
+            let h = ((bits >> 14) & 0x3FFF) + 1;
+            (w > 0 && h > 0).then_some((w, h))
+        }
+        b"VP8 " if data[23..26] == [0x9D, 0x01, 0x2A] => {
+            let w = u32::from(u16::from_le_bytes([data[26], data[27]]) & 0x3FFF);
+            let h = u32::from(u16::from_le_bytes([data[28], data[29]]) & 0x3FFF);
+            (w > 0 && h > 0).then_some((w, h))
+        }
+        _ => None,
+    }
+}
+
+/// Reads `(width, height)` from a `GIF87a` or `GIF89a` header.
+#[must_use]
+pub fn read_gif_dimensions_from_bytes(data: &[u8]) -> Option<(u32, u32)> {
+    if data.len() < 10 || (&data[0..6] != b"GIF87a" && &data[0..6] != b"GIF89a") {
+        return None;
+    }
+    let w = u32::from(u16::from_le_bytes([data[6], data[7]]));
+    let h = u32::from(u16::from_le_bytes([data[8], data[9]]));
+    (w > 0 && h > 0).then_some((w, h))
+}
+
+/// Reads integer `(width, height)` from an SVG root tag (`width`/`height` or `viewBox`).
+#[must_use]
+pub fn read_svg_dimensions_from_bytes(data: &[u8]) -> Option<(u32, u32)> {
+    let text = std::str::from_utf8(data).ok()?;
+    let lower = text.to_ascii_lowercase();
+    let svg_start = lower.find("<svg")?;
+    let tag_end = lower[svg_start..].find('>')? + svg_start;
+    let tag = &text[svg_start..=tag_end];
+    let w = extract_xml_attr(tag, "width").and_then(|v| parse_svg_len_u32(&v));
+    let h = extract_xml_attr(tag, "height").and_then(|v| parse_svg_len_u32(&v));
+    if let (Some(w), Some(h)) = (w, h) {
+        return Some((w, h));
+    }
+    let vb = extract_xml_attr(tag, "viewBox")?;
+    let nums: Vec<f64> = vb
+        .split(|c: char| c.is_ascii_whitespace() || c == ',')
+        .filter(|s| !s.is_empty())
+        .filter_map(|s| s.parse::<f64>().ok())
+        .collect();
+    if nums.len() == 4 && nums[2] > 0.0 && nums[3] > 0.0 {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        return Some((nums[2].round() as u32, nums[3].round() as u32));
+    }
+    None
+}
+
+fn extract_xml_attr(tag: &str, attr_name: &str) -> Option<String> {
+    let lower = tag.to_ascii_lowercase();
+    let needle = format!("{}=", attr_name.to_ascii_lowercase());
+    let mut offset = 0_usize;
+    while let Some(pos) = lower[offset..].find(&needle) {
+        let abs = offset + pos;
+        let prev_ok = abs == 0
+            || tag.as_bytes()[abs - 1].is_ascii_whitespace()
+            || tag.as_bytes()[abs - 1] == b'<';
+        if prev_ok {
+            let after_eq = &tag[abs + needle.len()..];
+            let trimmed = after_eq.trim_start();
+            let quote = trimmed.chars().next()?;
+            if quote == '"' || quote == '\'' {
+                let inner = &trimmed[1..];
+                let end = inner.find(quote)?;
+                return Some(inner[..end].to_owned());
+            }
+        }
+        offset = abs + needle.len();
+    }
+    None
+}
+
+fn parse_svg_len_u32(raw: &str) -> Option<u32> {
+    let trimmed = raw.trim();
+    if trimmed.ends_with('%') {
+        return None;
+    }
+    let num_end = trimmed
+        .find(|c: char| !c.is_ascii_digit() && c != '.')
+        .unwrap_or(trimmed.len());
+    let val = trimmed[..num_end].parse::<f64>().ok()?;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let px = val.round() as u32;
+    (px > 0).then_some(px)
+}
+
+/// Classification of previewable image, vector, document, and video formats.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreviewMediaKind {
+    /// PNG raster (`image/png`).
+    Png,
+    /// Portable Pixmap (`image/x-portable-pixmap`).
+    Ppm,
+    /// Scalable Vector Graphics (`image/svg+xml`).
+    Svg,
+    /// Portable Document Format (`application/pdf`).
+    Pdf,
+    /// Video container (`video/*`).
+    Video,
+    /// Other raster images (`jpeg`, `webp`, `gif`, `bmp`, `tiff`, `avif`, `heic`, `ico`).
+    OtherRaster,
+}
+
+/// Returns the preview decoder kind for a filename, or `None` if it should fall back to text preview.
+#[must_use]
+pub fn classify_preview_filename(name: &str) -> Option<PreviewMediaKind> {
+    let (_, ext) = name.rsplit_once('.')?;
+    match ext.to_ascii_lowercase().as_str() {
+        "png" => Some(PreviewMediaKind::Png),
+        "ppm" => Some(PreviewMediaKind::Ppm),
+        "svg" | "svgz" => Some(PreviewMediaKind::Svg),
+        "pdf" => Some(PreviewMediaKind::Pdf),
+        "mp4" | "mkv" | "webm" | "mov" | "avi" | "m4v" | "ogv" => Some(PreviewMediaKind::Video),
+        "jpg" | "jpeg" | "webp" | "gif" | "bmp" | "tif" | "tiff" | "avif" | "heic" | "heif"
+        | "ico" => Some(PreviewMediaKind::OtherRaster),
+        _ => None,
+    }
+}
+
+/// Returns `true` when `name` has an extension supported by image/SVG/PDF/video previews.
+#[must_use]
+pub fn is_supported_preview_filename(name: &str) -> bool {
+    classify_preview_filename(name).is_some()
+}
+
+const PREVIEW_HELPER_TIMEOUT: Duration = Duration::from_secs(4);
+static THUMB_TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Loads and decodes an image, SVG, PDF first page, or video frame into aspect-fit premultiplied `BGRA`.
 #[must_use]
 pub fn load_raster_preview_bgra(
     path: &Path,
@@ -488,20 +689,102 @@ pub fn load_raster_preview_bgra(
         return None;
     }
     let meta = fs::metadata(path).ok()?;
-    if usize::try_from(meta.len()).unwrap_or(usize::MAX) > MAX_WALLPAPER_FILE_BYTES {
-        return None;
+    let header_kind = read_magic_kind(path);
+    let ext_kind = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .and_then(classify_preview_filename);
+    let kind = header_kind.or(ext_kind)?;
+
+    if matches!(
+        kind,
+        PreviewMediaKind::Png
+            | PreviewMediaKind::Ppm
+            | PreviewMediaKind::Svg
+            | PreviewMediaKind::OtherRaster
+    ) && usize::try_from(meta.len()).unwrap_or(usize::MAX) <= MAX_WALLPAPER_FILE_BYTES
+        && let Ok(bytes) = fs::read(path)
+    {
+        if bytes.starts_with(&PNG_SIGNATURE) {
+            return decode_inline_and_scale_png(&bytes, max_w, max_h);
+        }
+        if bytes.starts_with(b"P6") || bytes.starts_with(b"P3") {
+            return decode_inline_and_scale_ppm(&bytes, max_w, max_h);
+        }
+        if bytes.starts_with(b"BM")
+            && let Some((src_w, src_h, rgba)) = decode_bmp_rgba_limited(&bytes, MAX_WALLPAPER_DIM)
+        {
+            return scale_decoded_rgba(src_w, src_h, &rgba, max_w, max_h);
+        }
     }
-    let bytes = fs::read(path).ok()?;
-    let (src_w, src_h, rgba) = if bytes.starts_with(&PNG_SIGNATURE) {
-        decode_png_rgba_limited(&bytes, MAX_WALLPAPER_DIM, MAX_WALLPAPER_INFLATE_BYTES)?
-    } else if bytes.starts_with(b"P6") || bytes.starts_with(b"P3") {
-        decode_ppm_rgba_limited(&bytes, MAX_WALLPAPER_DIM)?
-    } else {
-        return None;
+
+    let orig_dims = read_image_dimensions(path);
+    let (src_w, src_h, rgba) = match kind {
+        PreviewMediaKind::Png | PreviewMediaKind::Ppm => return None,
+        PreviewMediaKind::Svg => decode_svg_rgba(path, max_w, max_h)?,
+        PreviewMediaKind::Pdf => decode_pdf_first_page_rgba(path, max_w.max(max_h))?,
+        PreviewMediaKind::Video => decode_video_frame_rgba(path, max_w.max(max_h))?,
+        PreviewMediaKind::OtherRaster => decode_other_raster_rgba(path)?,
     };
 
+    let (orig_width, orig_height) =
+        orig_dims.unwrap_or((u32::try_from(src_w).ok()?, u32::try_from(src_h).ok()?));
     let (dst_w, dst_h) = fit_aspect_dimensions(src_w, src_h, max_w, max_h)?;
     let bgra_premul = scale_rgba_rect_to_premul_bgra(src_w, src_h, &rgba, dst_w, dst_h)?;
+    Some(DecodedPreviewImage {
+        orig_width,
+        orig_height,
+        width: dst_w,
+        height: dst_h,
+        bgra_premul,
+    })
+}
+
+fn read_magic_kind(path: &Path) -> Option<PreviewMediaKind> {
+    let mut file = fs::File::open(path).ok()?;
+    let mut head = [0_u8; 64];
+    let n = file.read(&mut head).ok()?;
+    let slice = &head[..n];
+    if slice.starts_with(&PNG_SIGNATURE) {
+        return Some(PreviewMediaKind::Png);
+    }
+    if slice.starts_with(b"P6") || slice.starts_with(b"P3") {
+        return Some(PreviewMediaKind::Ppm);
+    }
+    if slice.starts_with(b"%PDF-") {
+        return Some(PreviewMediaKind::Pdf);
+    }
+    None
+}
+
+fn decode_inline_and_scale_png(
+    bytes: &[u8],
+    max_w: usize,
+    max_h: usize,
+) -> Option<DecodedPreviewImage> {
+    let (src_w, src_h, rgba) =
+        decode_png_rgba_limited(bytes, MAX_WALLPAPER_DIM, MAX_WALLPAPER_INFLATE_BYTES)?;
+    scale_decoded_rgba(src_w, src_h, &rgba, max_w, max_h)
+}
+
+fn decode_inline_and_scale_ppm(
+    bytes: &[u8],
+    max_w: usize,
+    max_h: usize,
+) -> Option<DecodedPreviewImage> {
+    let (src_w, src_h, rgba) = decode_ppm_rgba_limited(bytes, MAX_WALLPAPER_DIM)?;
+    scale_decoded_rgba(src_w, src_h, &rgba, max_w, max_h)
+}
+
+fn scale_decoded_rgba(
+    src_w: usize,
+    src_h: usize,
+    rgba: &[u8],
+    max_w: usize,
+    max_h: usize,
+) -> Option<DecodedPreviewImage> {
+    let (dst_w, dst_h) = fit_aspect_dimensions(src_w, src_h, max_w, max_h)?;
+    let bgra_premul = scale_rgba_rect_to_premul_bgra(src_w, src_h, rgba, dst_w, dst_h)?;
     Some(DecodedPreviewImage {
         orig_width: u32::try_from(src_w).ok()?,
         orig_height: u32::try_from(src_h).ok()?,
@@ -509,6 +792,135 @@ pub fn load_raster_preview_bgra(
         height: dst_h,
         bgra_premul,
     })
+}
+
+fn run_png_stdout_decoder(cmd: &mut Command) -> Option<(usize, usize, Vec<u8>)> {
+    let out = crate::run_command_bounded(cmd, PREVIEW_HELPER_TIMEOUT).ok()?;
+    if !out.status.success() || out.stdout.len() < PNG_SIGNATURE.len() {
+        return None;
+    }
+    decode_png_rgba_limited(&out.stdout, MAX_WALLPAPER_DIM, MAX_WALLPAPER_INFLATE_BYTES)
+}
+
+fn run_ppm_stdout_decoder(cmd: &mut Command) -> Option<(usize, usize, Vec<u8>)> {
+    let out = crate::run_command_bounded(cmd, PREVIEW_HELPER_TIMEOUT).ok()?;
+    if !out.status.success() || out.stdout.len() < 4 {
+        return None;
+    }
+    decode_ppm_rgba_limited(&out.stdout, MAX_WALLPAPER_DIM)
+}
+
+fn run_ffmpeg_png_frame(path: &Path, seek_secs: Option<&str>) -> Option<(usize, usize, Vec<u8>)> {
+    let mut cmd = Command::new("ffmpeg");
+    cmd.args(["-y", "-v", "error"]);
+    if let Some(ss) = seek_secs {
+        cmd.args(["-ss", ss]);
+    }
+    cmd.arg("-i").arg(path).args([
+        "-frames:v",
+        "1",
+        "-f",
+        "image2pipe",
+        "-vcodec",
+        "png",
+        "pipe:1",
+    ]);
+    run_png_stdout_decoder(&mut cmd)
+}
+
+fn decode_svg_rgba(path: &Path, max_w: usize, max_h: usize) -> Option<(usize, usize, Vec<u8>)> {
+    let mut cmd = Command::new("rsvg-convert");
+    cmd.args([
+        "-w",
+        &max_w.clamp(32, 2048).to_string(),
+        "-h",
+        &max_h.clamp(32, 2048).to_string(),
+        "--keep-aspect-ratio",
+        "-f",
+        "png",
+        "-o",
+        "-",
+    ])
+    .arg(path);
+    run_png_stdout_decoder(&mut cmd).or_else(|| run_ffmpeg_png_frame(path, None))
+}
+
+fn decode_pdf_first_page_rgba(path: &Path, target_dim: usize) -> Option<(usize, usize, Vec<u8>)> {
+    let seq = THUMB_TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let prefix = PathBuf::from(format!(
+        "/tmp/rustyos-pdf-thumb-{}-{seq}",
+        std::process::id()
+    ));
+    let png_path = PathBuf::from(format!("{}.png", prefix.display()));
+    let mut pdftoppm_cmd = Command::new("pdftoppm");
+    pdftoppm_cmd
+        .args([
+            "-png",
+            "-f",
+            "1",
+            "-l",
+            "1",
+            "-singlefile",
+            "-scale-to",
+            &target_dim.clamp(64, 2048).to_string(),
+        ])
+        .arg(path)
+        .arg(&prefix);
+    let pdftoppm_res = crate::run_command_bounded(&mut pdftoppm_cmd, PREVIEW_HELPER_TIMEOUT)
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|_| fs::read(&png_path).ok())
+        .and_then(|bytes| {
+            decode_png_rgba_limited(&bytes, MAX_WALLPAPER_DIM, MAX_WALLPAPER_INFLATE_BYTES)
+        });
+    let _ = fs::remove_file(&png_path);
+    if pdftoppm_res.is_some() {
+        return pdftoppm_res;
+    }
+
+    let mut mutool_cmd = Command::new("mutool");
+    mutool_cmd
+        .args(["draw", "-F", "png", "-o", "-", "-r", "144"])
+        .arg(path)
+        .arg("1");
+    run_png_stdout_decoder(&mut mutool_cmd)
+}
+
+fn decode_video_frame_rgba(path: &Path, target_dim: usize) -> Option<(usize, usize, Vec<u8>)> {
+    let mut tn_cmd = Command::new("ffmpegthumbnailer");
+    tn_cmd.arg("-i").arg(path).args([
+        "-o",
+        "-",
+        "-c",
+        "png",
+        "-s",
+        &target_dim.clamp(64, 1024).to_string(),
+        "-f",
+    ]);
+    run_png_stdout_decoder(&mut tn_cmd)
+        .or_else(|| run_ffmpeg_png_frame(path, Some("1")))
+        .or_else(|| run_ffmpeg_png_frame(path, None))
+}
+
+fn decode_other_raster_rgba(path: &Path) -> Option<(usize, usize, Vec<u8>)> {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase);
+    if matches!(ext.as_deref(), Some("jpg" | "jpeg")) {
+        let mut djpeg = Command::new("djpeg");
+        djpeg.arg("-rgb").arg(path);
+        if let Some(decoded) = run_ppm_stdout_decoder(&mut djpeg) {
+            return Some(decoded);
+        }
+    } else if ext.as_deref() == Some("webp") {
+        let mut dwebp = Command::new("dwebp");
+        dwebp.args(["-ppm"]).arg(path).args(["-o", "-"]);
+        if let Some(decoded) = run_ppm_stdout_decoder(&mut dwebp) {
+            return Some(decoded);
+        }
+    }
+    run_ffmpeg_png_frame(path, None)
 }
 
 /// Decodes a standard non-interlaced PNG byte buffer into `(width, height, straight_rgba)`.
@@ -1530,5 +1942,62 @@ mod tests {
         assert_eq!(rgba_gen, rgba);
 
         Ok(())
+    }
+
+    #[test]
+    fn expanded_header_dimension_readers_and_preview_classifier_work() {
+        // Minimal JPEG SOF0 header: SOI + SOF0 (length 11: 2 len + 1 prec + 2 h + 2 w + 1 comp + 3 bytes)
+        let jpeg = [
+            0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x0B, 0x08, 0x00, 0x78, 0x01, 0x40, 0x01, 0x01, 0x11,
+            0x00,
+        ];
+        assert_eq!(read_image_dimensions_from_bytes(&jpeg), Some((320, 120)));
+
+        // Minimal WebP VP8L lossless header (w=64, h=32 => stored as w-1=63, h-1=31)
+        let bits: u32 = 63 | (31 << 14);
+        let mut webp_l = vec![0_u8; 30];
+        webp_l[0..4].copy_from_slice(b"RIFF");
+        webp_l[8..12].copy_from_slice(b"WEBP");
+        webp_l[12..16].copy_from_slice(b"VP8L");
+        webp_l[20] = 0x2F;
+        webp_l[21..25].copy_from_slice(&bits.to_le_bytes());
+        assert_eq!(read_image_dimensions_from_bytes(&webp_l), Some((64, 32)));
+
+        // Minimal GIF89a header (w=128, h=96)
+        let mut gif = [0_u8; 10];
+        gif[0..6].copy_from_slice(b"GIF89a");
+        gif[6..8].copy_from_slice(&128_u16.to_le_bytes());
+        gif[8..10].copy_from_slice(&96_u16.to_le_bytes());
+        assert_eq!(read_image_dimensions_from_bytes(&gif), Some((128, 96)));
+
+        // SVG with width/height attributes and SVG with viewBox fallback
+        let svg_wh =
+            br#"<svg xmlns="http://www.w3.org/2000/svg" width="240px" height="180"></svg>"#;
+        assert_eq!(read_image_dimensions_from_bytes(svg_wh), Some((240, 180)));
+        let svg_vb = br#"<svg viewBox="0 0 512 256"></svg>"#;
+        assert_eq!(read_image_dimensions_from_bytes(svg_vb), Some((512, 256)));
+
+        assert_eq!(
+            classify_preview_filename("photo.JPG"),
+            Some(PreviewMediaKind::OtherRaster)
+        );
+        assert_eq!(
+            classify_preview_filename("hero.webp"),
+            Some(PreviewMediaKind::OtherRaster)
+        );
+        assert_eq!(
+            classify_preview_filename("icon.svg"),
+            Some(PreviewMediaKind::Svg)
+        );
+        assert_eq!(
+            classify_preview_filename("report.pdf"),
+            Some(PreviewMediaKind::Pdf)
+        );
+        assert_eq!(
+            classify_preview_filename("clip.mp4"),
+            Some(PreviewMediaKind::Video)
+        );
+        assert!(is_supported_preview_filename("demo.mkv"));
+        assert!(!is_supported_preview_filename("Cargo.toml"));
     }
 }

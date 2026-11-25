@@ -6,7 +6,8 @@ use rusty_services::file_manager::TransferConflictDecision;
 
 use crate::render::Canvas;
 use crate::state::{
-    FilesAppState, GALLERY_BOTTOM_H, GALLERY_INFO_WIDTH, ICON_CELL_H, ICON_CELL_W, TAB_BAR_HEIGHT,
+    BatchRenameMode, FilesAppState, GALLERY_BOTTOM_H, GALLERY_INFO_WIDTH, GROUP_HEADER_HEIGHT,
+    ICON_CELL_H, ICON_CELL_W, TAB_BAR_HEIGHT,
 };
 
 #[allow(clippy::wildcard_imports)]
@@ -53,6 +54,7 @@ pub(crate) struct IconCellLayout {
 pub(crate) struct IconsGridLayout {
     pub area_rect: Rect,
     pub cols: usize,
+    pub group_headers: Vec<(String, Rect)>,
     pub cells: Vec<IconCellLayout>,
 }
 
@@ -189,7 +191,7 @@ pub(crate) fn compute_path_breadcrumbs_layout(
     out
 }
 
-/// Computes `Icons` view grid cell positions inside `content_rect`.
+/// Computes `Icons` view grid cell positions inside `content_rect` (respecting `Group By` headers).
 #[must_use]
 pub(crate) fn compute_icons_grid_layout(
     state: &FilesAppState,
@@ -198,32 +200,71 @@ pub(crate) fn compute_icons_grid_layout(
     let cols = FilesAppState::icon_grid_columns_for_width(content_rect.w);
     let grid_w = i32::try_from(cols).unwrap_or(1) * ICON_CELL_W;
     let start_x = content_rect.x + ((content_rect.w - grid_w) / 2).max(10);
-    let entries_len = state.columns.first().map_or(0, |c| c.visible_entries.len());
+    let col_opt = state.columns.first();
+    let entries_len = col_opt.map_or(0, |c| c.visible_entries.len());
+    let group_sections = col_opt.map_or(&[][..], |c| c.group_sections.as_slice());
 
+    let mut group_headers = Vec::new();
     let mut cells = Vec::new();
-    for idx in 0..entries_len {
-        let col = idx % cols;
-        let row = idx / cols;
-        let cx = start_x + i32::try_from(col).unwrap_or(0) * ICON_CELL_W;
-        let cy = content_rect.y + 12 + i32::try_from(row).unwrap_or(0) * ICON_CELL_H
-            - state.icons_scroll_y;
-        let rect = Rect::new(cx + 4, cy, ICON_CELL_W - 8, ICON_CELL_H - 6);
-        if rect.bottom() < content_rect.y || rect.y > content_rect.bottom() {
-            continue;
+    let mut cur_y = content_rect.y + 12 - state.icons_scroll_y;
+    if group_sections.is_empty() {
+        for idx in 0..entries_len {
+            let col = idx % cols;
+            let row = idx / cols;
+            let cx = start_x + i32::try_from(col).unwrap_or(0) * ICON_CELL_W;
+            let cy = cur_y + i32::try_from(row).unwrap_or(0) * ICON_CELL_H;
+            let rect = Rect::new(cx + 4, cy, ICON_CELL_W - 8, ICON_CELL_H - 6);
+            if rect.bottom() >= content_rect.y && rect.y <= content_rect.bottom() {
+                let art_rect = Rect::new(rect.x + (rect.w - 72) / 2, rect.y + 4, 72, 66);
+                let label_rect = Rect::new(rect.x + 2, rect.y + 72, rect.w - 4, 34);
+                cells.push(IconCellLayout {
+                    row_idx: idx,
+                    rect,
+                    art_rect,
+                    label_rect,
+                });
+            }
         }
-        let art_rect = Rect::new(rect.x + (rect.w - 72) / 2, rect.y + 4, 72, 66);
-        let label_rect = Rect::new(rect.x + 2, rect.y + 72, rect.w - 4, 34);
-        cells.push(IconCellLayout {
-            row_idx: idx,
-            rect,
-            art_rect,
-            label_rect,
-        });
+    } else {
+        for (s_i, (start_idx, title)) in group_sections.iter().enumerate() {
+            let end_idx = group_sections.get(s_i + 1).map_or(entries_len, |n| n.0);
+            let hdr_rect = Rect::new(
+                content_rect.x + 12,
+                cur_y,
+                (content_rect.w - 28).max(120),
+                GROUP_HEADER_HEIGHT,
+            );
+            if hdr_rect.bottom() >= content_rect.y && hdr_rect.y <= content_rect.bottom() {
+                group_headers.push((title.clone(), hdr_rect));
+            }
+            cur_y += GROUP_HEADER_HEIGHT;
+            for (local_i, idx) in (*start_idx..end_idx).enumerate() {
+                let col = local_i % cols;
+                let row = local_i / cols;
+                let cx = start_x + i32::try_from(col).unwrap_or(0) * ICON_CELL_W;
+                let cy = cur_y + i32::try_from(row).unwrap_or(0) * ICON_CELL_H;
+                let rect = Rect::new(cx + 4, cy, ICON_CELL_W - 8, ICON_CELL_H - 6);
+                if rect.bottom() >= content_rect.y && rect.y <= content_rect.bottom() {
+                    let art_rect = Rect::new(rect.x + (rect.w - 72) / 2, rect.y + 4, 72, 66);
+                    let label_rect = Rect::new(rect.x + 2, rect.y + 72, rect.w - 4, 34);
+                    cells.push(IconCellLayout {
+                        row_idx: idx,
+                        rect,
+                        art_rect,
+                        label_rect,
+                    });
+                }
+            }
+            let group_rows =
+                i32::try_from(end_idx.saturating_sub(*start_idx).div_ceil(cols)).unwrap_or(0);
+            cur_y += group_rows * ICON_CELL_H;
+        }
     }
 
     IconsGridLayout {
         area_rect: content_rect,
         cols,
+        group_headers,
         cells,
     }
 }
@@ -448,12 +489,25 @@ pub(crate) struct ConflictDialogLayout {
     pub replace_rect: Rect,
 }
 
+/// Layout for multi-file `Batch Rename` modal sheet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BatchRenameLayout {
+    pub modal_rect: Rect,
+    pub mode_tabs: [(BatchRenameMode, Rect); 3],
+    pub field0_rect: Rect,
+    pub field1_rect: Option<Rect>,
+    pub prefix_toggle_rect: Option<Rect>,
+    pub cancel_rect: Rect,
+    pub confirm_rect: Rect,
+}
+
 /// Combined active overlay layouts for a frame.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub(crate) struct DialogOverlaysLayout {
     pub quick_look: Option<QuickLookLayout>,
     pub get_info: Option<GetInfoLayout>,
     pub go_to_folder: Option<GoToFolderLayout>,
+    pub batch_rename: Option<BatchRenameLayout>,
     pub transfer: Option<TransferDialogLayout>,
     pub conflict: Option<ConflictDialogLayout>,
     pub inline_rename_rect: Option<Rect>,
@@ -533,6 +587,10 @@ pub(crate) fn compute_dialog_overlays_layout(
         });
     }
 
+    if let Some(br) = &state.batch_rename {
+        out.batch_rename = Some(compute_batch_rename_layout(br, width, height));
+    }
+
     if let Some(tr) = &state.active_transfer {
         let cw = 360.min(width - 40);
         let cx = (width - cw) / 2;
@@ -598,6 +656,9 @@ pub(crate) fn hit_test_dialog_overlays(
                 .take_or_block(cf.modal_rect.contains_f64(px, py)),
         );
     }
+    if let Some(br) = &ov.batch_rename {
+        return Some(hit_test_batch_rename(br, px, py));
+    }
     if let Some(gt) = &ov.go_to_folder {
         if !gt.modal_rect.contains_f64(px, py) {
             return Some(FilesHit::GoToClose);
@@ -657,6 +718,81 @@ pub(crate) fn hit_test_dialog_overlays(
         return Some(FilesHit::InlineRenameBox);
     }
     None
+}
+
+fn compute_batch_rename_layout(
+    br: &crate::state::BatchRenameState,
+    width: i32,
+    height: i32,
+) -> BatchRenameLayout {
+    let mw = (width - 80).clamp(320, 440);
+    let mh = 228;
+    let mx = ((width - mw) / 2).max(16);
+    let my = ((height - mh) / 2).max(60);
+    let modal_rect = Rect::new(mx, my, mw, mh);
+    let tab_w = (mw - 32) / 3;
+    let tab_y = my + 40;
+    let mode_tabs = [
+        (
+            BatchRenameMode::ReplaceText,
+            Rect::new(mx + 16, tab_y, tab_w - 4, 24),
+        ),
+        (
+            BatchRenameMode::AddText,
+            Rect::new(mx + 16 + tab_w, tab_y, tab_w - 4, 24),
+        ),
+        (
+            BatchRenameMode::FormatIndex,
+            Rect::new(mx + 16 + tab_w * 2, tab_y, tab_w, 24),
+        ),
+    ];
+    let field0_rect = Rect::new(mx + 16, my + 78, mw - 32, 28);
+    let field1_rect =
+        (br.mode != BatchRenameMode::AddText).then(|| Rect::new(mx + 16, my + 114, mw - 32, 28));
+    let prefix_toggle_rect =
+        (br.mode == BatchRenameMode::AddText).then(|| Rect::new(mx + 16, my + 116, 176, 24));
+    let btn_y = modal_rect.bottom() - 38;
+    let confirm_rect = Rect::new(modal_rect.right() - 96, btn_y, 80, 26);
+    let cancel_rect = Rect::new(confirm_rect.x - 82, btn_y, 72, 26);
+    BatchRenameLayout {
+        modal_rect,
+        mode_tabs,
+        field0_rect,
+        field1_rect,
+        prefix_toggle_rect,
+        cancel_rect,
+        confirm_rect,
+    }
+}
+
+fn hit_test_batch_rename(br: &BatchRenameLayout, px: f64, py: f64) -> FilesHit {
+    if br.cancel_rect.contains_f64(px, py) {
+        return FilesHit::BatchRenameCancel;
+    }
+    if br.confirm_rect.contains_f64(px, py) {
+        return FilesHit::BatchRenameConfirm;
+    }
+    for (mode, rect) in br.mode_tabs {
+        if rect.contains_f64(px, py) {
+            return FilesHit::BatchRenameMode(mode);
+        }
+    }
+    if br.field0_rect.contains_f64(px, py) {
+        return FilesHit::BatchRenameField(0);
+    }
+    if br.field1_rect.is_some_and(|r| r.contains_f64(px, py)) {
+        return FilesHit::BatchRenameField(1);
+    }
+    if br
+        .prefix_toggle_rect
+        .is_some_and(|r| r.contains_f64(px, py))
+    {
+        return FilesHit::BatchRenamePrefixToggle;
+    }
+    if br.modal_rect.contains_f64(px, py) {
+        return FilesHit::BatchRenameModalBody;
+    }
+    FilesHit::BatchRenameCancel
 }
 
 trait ConflictHitExt {

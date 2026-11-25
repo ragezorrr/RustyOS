@@ -184,18 +184,21 @@ impl FilesAppState {
                 Ok(entries) => {
                     col.raw_entries = entries;
                     col.error = None;
-                    col.refresh_view(
-                        self.show_hidden,
-                        &self.search_query,
-                        self.sort_field,
-                        self.sort_order,
-                    );
                 }
                 Err(err) => {
                     col.raw_entries.clear();
                     col.visible_entries.clear();
+                    col.visible_depths.clear();
+                    col.group_sections.clear();
                     col.error = Some(err);
                 }
+            }
+            if self
+                .columns
+                .get(msg.col_idx)
+                .is_some_and(|c| c.error.is_none())
+            {
+                self.refresh_column_display(msg.col_idx);
             }
             changed = true;
         }
@@ -290,6 +293,25 @@ impl FilesAppState {
                 if kind == TransferKind::Move && !outcome.created_paths.is_empty() {
                     self.clipboard = None;
                 }
+                if self.pending_transfer_record_undo && !outcome.created_paths.is_empty() {
+                    let sources = std::mem::take(&mut self.pending_transfer_sources);
+                    match kind {
+                        TransferKind::Copy => {
+                            self.push_undo(UndoAction::RemoveCreated {
+                                created_paths: outcome.created_paths.clone(),
+                            });
+                        }
+                        TransferKind::Move => {
+                            let pairs: Vec<(PathBuf, PathBuf)> =
+                                outcome.created_paths.iter().cloned().zip(sources).collect();
+                            if !pairs.is_empty() {
+                                self.push_undo(UndoAction::MoveBack { pairs });
+                            }
+                        }
+                    }
+                } else {
+                    self.pending_transfer_sources.clear();
+                }
                 let verb = match kind {
                     TransferKind::Copy => "Copied",
                     TransferKind::Move => "Moved",
@@ -379,16 +401,13 @@ impl FilesAppState {
                     Ok(entries) => {
                         col.raw_entries = entries;
                         col.error = None;
-                        col.refresh_view(
-                            self.show_hidden,
-                            &self.search_query,
-                            self.sort_field,
-                            self.sort_order,
-                        );
                     }
                     Err(e) => {
                         col.error = Some(e.to_string());
                     }
+                }
+                if self.columns.get(idx).is_some_and(|c| c.error.is_none()) {
+                    self.refresh_column_display(idx);
                 }
             }
         }
@@ -696,6 +715,7 @@ impl FilesAppState {
             }
             self.tags_config.view_mode = mode;
             self.persist_preferences();
+            self.reapply_filters_all_columns();
             self.status_message = Some(format!("Switched to {} view", mode.label()));
             self.ensure_stage_b_assets_requested();
             self.dirty = true;
@@ -759,15 +779,187 @@ impl FilesAppState {
         self.dirty = true;
     }
 
-    /// Updates search filter query and refreshes visible entries (including Home scope).
-    pub(crate) fn reapply_filters_all_columns(&mut self) {
-        for col in &mut self.columns {
-            col.refresh_view(
+    /// Sets the active Finder grouping mode (`None`, `Kind`, `Date Modified`, `Size`, `Tags`).
+    pub(crate) fn set_group_by(&mut self, mode: GroupByMode) {
+        self.group_by = mode;
+        self.reapply_filters_all_columns();
+        self.popup = None;
+        self.status_message = Some(if mode == GroupByMode::None {
+            String::from("Grouping cleared")
+        } else {
+            format!("Grouped by {}", mode.label())
+        });
+        self.dirty = true;
+    }
+
+    /// Expands or collapses a folder subtree inline in `List` view (`> / v` chevron).
+    pub(crate) fn toggle_list_row_expanded(&mut self, row_idx: usize) {
+        if self.view_mode != FileViewMode::List || self.is_trash_view() {
+            return;
+        }
+        let Some(entry) = self
+            .columns
+            .first()
+            .and_then(|c| c.visible_entries.get(row_idx))
+            .filter(|e| e.is_navigable_dir())
+            .cloned()
+        else {
+            return;
+        };
+        if !self.expanded_list_dirs.remove(&entry.path) {
+            if !self.expanded_dir_cache.contains_key(&entry.path)
+                && let Ok(children) = list_entries_for_target(
+                    &ListingTarget::Directory(entry.path.clone()),
+                    &self.locations,
+                    &self.tags_config,
+                )
+            {
+                self.expanded_dir_cache.insert(entry.path.clone(), children);
+            }
+            self.expanded_list_dirs.insert(entry.path);
+        }
+        self.refresh_column_display(0);
+        self.dirty = true;
+    }
+
+    /// Updates multi-selection live while dragging a marquee box in `Icons` or `List` view.
+    pub(crate) fn apply_marquee_selection(
+        &mut self,
+        hit_rows: &[usize],
+        baseline_paths: &BTreeSet<PathBuf>,
+        additive: bool,
+    ) {
+        let Some(col) = self.columns.first_mut() else {
+            return;
+        };
+        col.selected_indices.clear();
+        if additive {
+            for (idx, entry) in col.visible_entries.iter().enumerate() {
+                if baseline_paths.contains(&entry.path) {
+                    col.selected_indices.insert(idx);
+                }
+            }
+        }
+        for &idx in hit_rows {
+            if idx < col.visible_entries.len() {
+                col.selected_indices.insert(idx);
+            }
+        }
+        col.selected_index = hit_rows
+            .last()
+            .copied()
+            .or_else(|| col.selected_indices.iter().next().copied());
+        self.dirty = true;
+    }
+
+    /// Refreshes visible entries, inline `List` tree expansion, and active `Group By` sections.
+    pub(crate) fn refresh_column_display(&mut self, col_idx: usize) {
+        let Some(col) = self.columns.get_mut(col_idx) else {
+            return;
+        };
+        let selected_path = col.selected_entry().map(|entry| entry.path.clone());
+        let selected_paths: BTreeSet<PathBuf> = col
+            .selected_entries()
+            .into_iter()
+            .map(|e| e.path.clone())
+            .collect();
+        col.refresh_view(
+            self.show_hidden,
+            &self.search_query,
+            self.sort_field,
+            self.sort_order,
+        );
+        if col_idx == 0
+            && self.view_mode == FileViewMode::List
+            && !self.expanded_list_dirs.is_empty()
+        {
+            let base = std::mem::take(&mut col.visible_entries);
+            let mut flat_entries = Vec::with_capacity(base.len());
+            let mut flat_depths = Vec::with_capacity(base.len());
+            let mut extra_budget = 400_usize;
+            for entry in base {
+                self.push_expanded_subtree_row(
+                    entry,
+                    0,
+                    &mut flat_entries,
+                    &mut flat_depths,
+                    &mut extra_budget,
+                );
+            }
+            if let Some(c) = self.columns.first_mut() {
+                c.visible_entries = flat_entries;
+                c.visible_depths = flat_depths;
+            }
+        }
+        if self.group_by != GroupByMode::None
+            && let Some(c) = self.columns.get_mut(col_idx)
+        {
+            let now_secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0_i64, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
+            let entries = std::mem::take(&mut c.visible_entries);
+            let depths = std::mem::take(&mut c.visible_depths);
+            let (grouped, grouped_depths, sections) = apply_grouping_to_entries(
+                entries,
+                depths,
+                self.group_by,
+                &self.tags_config,
+                now_secs,
+            );
+            c.visible_entries = grouped;
+            c.visible_depths = grouped_depths;
+            c.group_sections = sections;
+        }
+        if let Some(c) = self.columns.get_mut(col_idx) {
+            c.reconcile_selection_paths(selected_path.as_ref(), &selected_paths);
+        }
+    }
+
+    fn push_expanded_subtree_row(
+        &self,
+        entry: FileEntry,
+        depth: u16,
+        out_entries: &mut Vec<FileEntry>,
+        out_depths: &mut Vec<u16>,
+        extra_budget: &mut usize,
+    ) {
+        let is_expanded_dir = depth < 4
+            && *extra_budget > 0
+            && entry.is_navigable_dir()
+            && self.expanded_list_dirs.contains(&entry.path);
+        let dir_path = is_expanded_dir.then(|| entry.path.clone());
+        out_entries.push(entry);
+        out_depths.push(depth);
+        if let Some(path) = dir_path
+            && let Some(raw_children) = self.expanded_dir_cache.get(&path)
+        {
+            let sorted = rusty_services::file_manager::filter_and_sort_entries(
+                raw_children.clone(),
                 self.show_hidden,
                 &self.search_query,
                 self.sort_field,
                 self.sort_order,
             );
+            for child in sorted {
+                if *extra_budget == 0 {
+                    break;
+                }
+                *extra_budget -= 1;
+                self.push_expanded_subtree_row(
+                    child,
+                    depth + 1,
+                    out_entries,
+                    out_depths,
+                    extra_budget,
+                );
+            }
+        }
+    }
+
+    /// Updates search filter query and refreshes visible entries (including Home scope).
+    pub(crate) fn reapply_filters_all_columns(&mut self) {
+        for idx in 0..self.columns.len() {
+            self.refresh_column_display(idx);
         }
     }
 
@@ -853,6 +1045,39 @@ impl FilesAppState {
         }
         String::new()
     }
+
+    #[must_use]
+    pub(crate) fn list_total_height(&self) -> i32 {
+        let Some(col) = self.columns.first() else {
+            return 8;
+        };
+        let rows_h = i32::try_from(col.visible_entries.len()).unwrap_or(0) * LIST_ROW_HEIGHT;
+        let groups_h = i32::try_from(col.group_sections.len()).unwrap_or(0) * GROUP_HEADER_HEIGHT;
+        rows_h + groups_h + 8
+    }
+
+    #[must_use]
+    pub(crate) fn icons_total_height(&self, cols: usize) -> i32 {
+        let cols = cols.max(1);
+        let Some(col) = self.columns.first() else {
+            return 16;
+        };
+        if col.group_sections.is_empty() {
+            let rows = i32::try_from(col.visible_entries.len().div_ceil(cols)).unwrap_or(0);
+            return rows * ICON_CELL_H + 16;
+        }
+        let mut h = 16_i32;
+        for i in 0..col.group_sections.len() {
+            let start = col.group_sections[i].0;
+            let end = col
+                .group_sections
+                .get(i + 1)
+                .map_or(col.visible_entries.len(), |s| s.0);
+            let group_rows = i32::try_from(end.saturating_sub(start).div_ceil(cols)).unwrap_or(0);
+            h += GROUP_HEADER_HEIGHT + group_rows * ICON_CELL_H;
+        }
+        h
+    }
 }
 
 pub(crate) fn key_matches_ascii(key_name: &str, utf8: Option<&str>, ch: char) -> bool {
@@ -862,8 +1087,7 @@ pub(crate) fn key_matches_ascii(key_name: &str, utf8: Option<&str>, ch: char) ->
 }
 
 pub(crate) fn is_supported_raster_name(name: &str) -> bool {
-    name.rsplit_once('.')
-        .is_some_and(|(_, ext)| ext.eq_ignore_ascii_case("png") || ext.eq_ignore_ascii_case("ppm"))
+    rusty_services::file_manager::is_supported_preview_filename(name)
 }
 
 pub(crate) fn format_go_to_display(path: &Path, locations: &UserFileLocations) -> String {

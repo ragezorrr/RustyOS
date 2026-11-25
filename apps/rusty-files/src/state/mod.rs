@@ -51,8 +51,14 @@ pub(crate) struct FilesAppState {
     pub(crate) last_config_mtime: Option<SystemTime>,
     pub sort_field: FileSortField,
     pub sort_order: FileSortOrder,
+    pub group_by: GroupByMode,
     pub show_hidden: bool,
     pub show_path_bar: bool,
+    pub expanded_list_dirs: BTreeSet<PathBuf>,
+    pub(crate) expanded_dir_cache: std::collections::HashMap<PathBuf, Vec<FileEntry>>,
+    pub(crate) marquee: Option<MarqueeSelectionState>,
+    pub(crate) typeahead_query: String,
+    pub(crate) typeahead_last_at: Option<Instant>,
     pub search_active: bool,
     pub search_query: String,
     pub search_scope: SearchScope,
@@ -93,10 +99,14 @@ pub(crate) struct FilesAppState {
     pub gallery_more_info: bool,
     pub popup: Option<OpenPopupMenu>,
     pub clipboard: Option<ClipboardItemSet>,
+    pub(crate) pending_uri_clipboard: Option<ClipboardItemSet>,
+    pub(crate) pending_external_uri_paste_dir: Option<PathBuf>,
+    pub(crate) has_external_uri_clipboard: bool,
     pub quick_look: Option<QuickLookState>,
     pub get_info: Option<GetInfoState>,
     pub go_to_folder: Option<GoToFolderState>,
     pub inline_rename: Option<InlineRenameState>,
+    pub batch_rename: Option<BatchRenameState>,
     pub active_transfer: Option<ActiveTransferState>,
     pub status_message: Option<String>,
     pub active_dir_avail_bytes: Option<u64>,
@@ -127,6 +137,9 @@ pub(crate) struct FilesAppState {
     pub(crate) info_rx: mpsc::Receiver<InfoJobResult>,
     pub(crate) transfer_tx: mpsc::Sender<TransferWorkerMsg>,
     pub(crate) transfer_rx: mpsc::Receiver<TransferWorkerMsg>,
+    pub(crate) pending_transfer_sources: Vec<PathBuf>,
+    pub(crate) pending_transfer_record_undo: bool,
+    pub(crate) undo_stack: Vec<UndoAction>,
     pub(crate) archive_tx: mpsc::Sender<ArchiveJobResult>,
     pub(crate) archive_rx: mpsc::Receiver<ArchiveJobResult>,
     pub(crate) active_archive_jobs: usize,
@@ -157,8 +170,14 @@ impl FilesAppState {
         let mut app = Self {
             sort_field: tags_config.sort_field,
             sort_order: tags_config.sort_order,
+            group_by: GroupByMode::None,
             show_hidden: tags_config.show_hidden,
             show_path_bar: tags_config.show_path_bar,
+            expanded_list_dirs: BTreeSet::new(),
+            expanded_dir_cache: std::collections::HashMap::new(),
+            marquee: None,
+            typeahead_query: String::new(),
+            typeahead_last_at: None,
             view_mode: tags_config.view_mode,
             locations,
             tags_config,
@@ -211,10 +230,14 @@ impl FilesAppState {
             gallery_more_info: false,
             popup: None,
             clipboard: None,
+            pending_uri_clipboard: None,
+            pending_external_uri_paste_dir: None,
+            has_external_uri_clipboard: false,
             quick_look: None,
             get_info: None,
             go_to_folder: None,
             inline_rename: None,
+            batch_rename: None,
             active_transfer: None,
             removable_volumes,
             file_drag: None,
@@ -263,6 +286,9 @@ impl FilesAppState {
             info_rx,
             transfer_tx,
             transfer_rx,
+            pending_transfer_sources: Vec::new(),
+            pending_transfer_record_undo: true,
+            undo_stack: Vec::new(),
             archive_tx,
             archive_rx,
             active_archive_jobs: 0,
@@ -1717,5 +1743,122 @@ mod tests {
         state.cancel_file_picker();
         assert!(state.picker_cancelled);
         assert!(!state.picker_confirmed);
+    }
+
+    #[test]
+    fn stage6_shortcuts_typeahead_marquee_tree_group_and_undo_work()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let guard = TestHomeGuard::new("stage6-finder")?;
+        let docs = guard.root.join("Documents");
+        let sub = docs.join("SubFolder");
+        fs::create_dir_all(&sub)?;
+        fs::write(docs.join(".secret"), "hidden")?;
+        fs::write(docs.join("alpha.txt"), "hello")?;
+        fs::write(docs.join("beta.txt"), "world world")?;
+        fs::write(sub.join("nested.rs"), "fn main() {}")?;
+
+        let opts = StartupOptions {
+            initial_path: Some(docs.clone()),
+            ..StartupOptions::default()
+        };
+        let mut locs = UserFileLocations::detect();
+        locs.home = guard.root.clone();
+        locs.trash_dir = guard.root.join("Trash");
+        fs::create_dir_all(&locs.trash_dir)?;
+        let mut state = FilesAppState::new(locs, &opts);
+        state.complete_pending_loads_sync();
+        state.set_view_mode(FileViewMode::List);
+
+        // 1. Ctrl+Shift+. toggles hidden files (handles `period` & `greater` keysyms).
+        assert!(!state.show_hidden);
+        state.handle_key_input("greater", Some(">"), true, true);
+        assert!(state.show_hidden);
+        state.handle_key_input("period", None, true, true);
+        assert!(!state.show_hidden);
+
+        // 2. Type-ahead jump selects prefix match without activating search mode.
+        assert!(!state.search_active);
+        let t0 = Instant::now();
+        assert!(state.handle_typeahead_input("b", t0));
+        assert_eq!(
+            state.selected_entry().map(|e| e.name.as_str()),
+            Some("beta.txt")
+        );
+
+        // 3. List View tree disclosure expands & collapses folder children cleanly.
+        let sub_idx = state.columns[0]
+            .visible_entries
+            .iter()
+            .position(|e| e.name == "SubFolder")
+            .ok_or("missing SubFolder")?;
+        state.toggle_list_row_expanded(sub_idx);
+        assert!(
+            state.columns[0]
+                .visible_entries
+                .iter()
+                .any(|e| e.name == "nested.rs")
+        );
+        let nested_idx = state.columns[0]
+            .visible_entries
+            .iter()
+            .position(|e| e.name == "nested.rs")
+            .ok_or("missing nested.rs")?;
+        assert_eq!(state.columns[0].visible_depths[nested_idx], 1);
+        state.toggle_list_row_expanded(sub_idx);
+        assert!(
+            !state.columns[0]
+                .visible_entries
+                .iter()
+                .any(|e| e.name == "nested.rs")
+        );
+
+        // 4. Real Group By creates labeled sections and adjusts height accounting.
+        state.set_group_by(GroupByMode::Kind);
+        assert_ne!(state.columns[0].group_sections.len(), 0);
+        assert!(
+            state.list_total_height()
+                > i32::try_from(state.columns[0].visible_entries.len()).unwrap_or(0)
+                    * LIST_ROW_HEIGHT
+        );
+        state.set_group_by(GroupByMode::None);
+
+        // 5. Marquee selection updates selection set + Batch Rename + Ctrl+Z Undo restores names!
+        let a_idx = state.columns[0]
+            .visible_entries
+            .iter()
+            .position(|e| e.name == "alpha.txt")
+            .ok_or("missing alpha.txt")?;
+        let b_idx = state.columns[0]
+            .visible_entries
+            .iter()
+            .position(|e| e.name == "beta.txt")
+            .ok_or("missing beta.txt")?;
+        state.apply_marquee_selection(&[a_idx, b_idx], &BTreeSet::new(), false);
+        assert_eq!(state.selected_entries().len(), 2);
+
+        state.start_inline_rename_selected();
+        let br = state
+            .batch_rename
+            .as_mut()
+            .ok_or("expected BatchRename modal")?;
+        br.mode = BatchRenameMode::FormatIndex;
+        br.format_base = String::from("doc_");
+        br.start_index = 10;
+        state.commit_batch_rename();
+        assert!(state.batch_rename.is_none());
+        assert!(docs.join("doc_10.txt").exists());
+        assert!(docs.join("doc_11.txt").exists());
+
+        state.action_undo();
+        assert!(docs.join("alpha.txt").exists());
+        assert!(docs.join("beta.txt").exists());
+
+        // 6. Trash DnD helper + Ctrl+Z undo restores from Trash.
+        state.action_trash_paths(vec![docs.join("alpha.txt")]);
+        assert!(!docs.join("alpha.txt").exists());
+        state.action_undo();
+        assert!(docs.join("alpha.txt").exists());
+
+        Ok(())
     }
 }

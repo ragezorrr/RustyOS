@@ -174,6 +174,17 @@ struct ActiveWaylandDragSource {
     selected_action: DndAction,
 }
 
+struct ActiveUriClipboardSource {
+    source: wl_data_source::WlDataSource,
+    gnome_copied_files: Vec<u8>,
+    uri_list: Vec<u8>,
+    plain_text: Vec<u8>,
+}
+
+fn rects_intersect(a: crate::layout::Rect, b: crate::layout::Rect) -> bool {
+    a.x < b.right() && a.right() > b.x && a.y < b.bottom() && a.bottom() > b.y
+}
+
 pub(crate) fn encode_paths_uri_list(paths: &[std::path::PathBuf]) -> String {
     let mut out = String::new();
     for p in paths {
@@ -181,6 +192,35 @@ pub(crate) fn encode_paths_uri_list(paths: &[std::path::PathBuf]) -> String {
         out.push_str("\r\n");
     }
     out
+}
+
+pub(crate) fn encode_gnome_copied_files(
+    kind: rusty_services::file_manager::TransferKind,
+    paths: &[std::path::PathBuf],
+) -> String {
+    let verb = match kind {
+        rusty_services::file_manager::TransferKind::Copy => "copy",
+        rusty_services::file_manager::TransferKind::Move => "cut",
+    };
+    let mut out = String::from(verb);
+    for p in paths {
+        out.push('\n');
+        out.push_str(&rusty_services::path_to_file_uri(p));
+    }
+    out
+}
+
+pub(crate) fn parse_gnome_copied_files(raw: &str) -> Option<(bool, Vec<PathBuf>)> {
+    let mut lines = raw.lines();
+    let verb = lines.next()?.trim();
+    let copy_mode = match verb {
+        "copy" => true,
+        "cut" => false,
+        _ => return None,
+    };
+    let rest: String = lines.collect::<Vec<_>>().join("\n");
+    let paths = parse_uri_list_paths(&rest);
+    (!paths.is_empty()).then_some((copy_mode, paths))
 }
 
 #[allow(clippy::struct_excessive_bools)]
@@ -197,6 +237,7 @@ struct WaylandClientData {
     data_device: Option<DataDevice>,
     clipboard: rusty_ui::WaylandClipboardBridge,
     active_dnd_source: Option<ActiveWaylandDragSource>,
+    active_uri_clipboard_source: Option<ActiveUriClipboardSource>,
     incoming_dnd_pos: (f64, f64),
     incoming_dnd_tx: mpsc::Sender<(Vec<PathBuf>, PathBuf, bool)>,
     incoming_dnd_rx: mpsc::Receiver<(Vec<PathBuf>, PathBuf, bool)>,
@@ -569,6 +610,7 @@ impl WaylandClientData {
                 self.app.dirty = true;
             }
             FilesHit::ListHeaderSort(field) => self.app.set_sort(field),
+            FilesHit::ListRowChevron { row_idx } => self.app.toggle_list_row_expanded(row_idx),
             FilesHit::ListRow { row_idx } => {
                 self.app.select_entry_with_modifiers(
                     0,
@@ -695,8 +737,45 @@ impl WaylandClientData {
                 }
             }
             FilesHit::GoToSuggestion(idx) => self.app.pick_go_to_suggestion(idx),
+            FilesHit::BatchRenameMode(_)
+            | FilesHit::BatchRenameField(_)
+            | FilesHit::BatchRenamePrefixToggle
+            | FilesHit::BatchRenameCancel
+            | FilesHit::BatchRenameConfirm => self.handle_batch_rename_hit(&hit),
             FilesHit::TransferStop => self.app.cancel_active_transfer(),
             FilesHit::ConflictDecision(decision) => self.app.resolve_transfer_conflict(decision),
+            _ => {}
+        }
+    }
+
+    fn handle_batch_rename_hit(&mut self, hit: &FilesHit) {
+        match hit {
+            FilesHit::BatchRenameMode(mode) => {
+                if let Some(br) = &mut self.app.batch_rename {
+                    br.mode = *mode;
+                    br.active_field = 0;
+                    br.error = None;
+                    self.app.dirty = true;
+                }
+            }
+            FilesHit::BatchRenameField(field) => {
+                if let Some(br) = &mut self.app.batch_rename {
+                    br.active_field = *field;
+                    self.app.dirty = true;
+                }
+            }
+            FilesHit::BatchRenamePrefixToggle => {
+                if let Some(br) = &mut self.app.batch_rename {
+                    br.add_as_prefix = !br.add_as_prefix;
+                    br.error = None;
+                    self.app.dirty = true;
+                }
+            }
+            FilesHit::BatchRenameCancel => {
+                self.app.batch_rename = None;
+                self.app.dirty = true;
+            }
+            FilesHit::BatchRenameConfirm => self.app.commit_batch_rename(),
             _ => {}
         }
     }
@@ -757,6 +836,74 @@ impl WaylandClientData {
     }
 
     fn sync_clipboard_io(&mut self) {
+        if let Some(clip) = self.app.take_pending_uri_clipboard()
+            && let (Some(ddm), Some(dd)) = (&self.data_device_manager, &self.data_device)
+        {
+            let gnome_copied_files = encode_gnome_copied_files(clip.kind, &clip.paths).into_bytes();
+            let uri_list = encode_paths_uri_list(&clip.paths).into_bytes();
+            let plain_text = clip
+                .paths
+                .iter()
+                .map(|p| p.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+                .join("\n")
+                .into_bytes();
+            let source = ddm.create_copy_paste_source(
+                &self.qh,
+                [
+                    "x-special/gnome-copied-files",
+                    "text/uri-list",
+                    "text/plain;charset=utf-8",
+                    "text/plain",
+                ],
+            );
+            source.set_selection(dd, self.last_input_serial);
+            self.active_uri_clipboard_source = Some(ActiveUriClipboardSource {
+                source: source.inner().clone(),
+                gnome_copied_files,
+                uri_list,
+                plain_text,
+            });
+            let _ = self.conn.flush();
+        }
+        if let Some(dest_dir) = self.app.take_pending_external_uri_paste_dir()
+            && let Some(dd) = &self.data_device
+            && let Some(offer) = dd.data().selection_offer()
+        {
+            let mime = offer.with_mime_types(|mimes| {
+                if mimes.iter().any(|m| m == "x-special/gnome-copied-files") {
+                    Some(String::from("x-special/gnome-copied-files"))
+                } else if mimes.iter().any(|m| m == "text/uri-list") {
+                    Some(String::from("text/uri-list"))
+                } else {
+                    None
+                }
+            });
+            if let Some(mime) = mime
+                && let Ok(mut pipe) = offer.receive(mime.clone())
+            {
+                let _ = self.conn.flush();
+                let tx = self.incoming_dnd_tx.clone();
+                let ping = self.paste_ping.clone();
+                let _ = std::thread::Builder::new()
+                    .name(String::from("rusty-files-uri-paste"))
+                    .spawn(move || {
+                        let mut buf = Vec::new();
+                        let _ = pipe.by_ref().take(1024 * 1024).read_to_end(&mut buf);
+                        let text = String::from_utf8_lossy(&buf);
+                        let (copy_mode, paths) = if mime == "x-special/gnome-copied-files" {
+                            parse_gnome_copied_files(&text)
+                                .unwrap_or_else(|| (true, parse_uri_list_paths(&text)))
+                        } else {
+                            (true, parse_uri_list_paths(&text))
+                        };
+                        if !paths.is_empty() {
+                            let _ = tx.send((paths, dest_dir, copy_mode));
+                            ping.ping();
+                        }
+                    });
+            }
+        }
         if let Some(text) = self.clipboard.take_pending_copy()
             && let (Some(ddm), Some(dd)) = (&self.data_device_manager, &self.data_device)
         {
@@ -819,6 +966,7 @@ impl WaylandClientData {
             self.modifiers.ctrl,
             self.modifiers.shift,
         );
+        self.sync_clipboard_io();
     }
 
     fn update_active_text_drag(&mut self, px: f64) -> bool {
@@ -993,6 +1141,8 @@ impl WaylandClientData {
         match cmd {
             PopupCommand::SortBy(field) => self.app.set_sort(field),
             PopupCommand::SetSortOrder(order) => self.app.set_sort_order(order),
+            PopupCommand::SetGroupBy(mode) => self.app.set_group_by(mode),
+            PopupCommand::UndoLastAction => self.app.action_undo(),
             PopupCommand::NewFolder => self.app.action_new_folder(),
             PopupCommand::NewTab => self.app.new_tab(None),
             PopupCommand::NewTabIn(path) => self.app.new_tab(Some(ListingTarget::Directory(path))),
@@ -1058,6 +1208,7 @@ impl WaylandClientData {
                 self.app.request_quit();
             }
         }
+        self.sync_clipboard_io();
     }
 
     fn handle_axis_scroll(
@@ -1212,6 +1363,7 @@ pub(crate) fn run(options: &StartupOptions) -> Result<bool, WaylandAppError> {
         data_device: None,
         clipboard: rusty_ui::WaylandClipboardBridge::new(),
         active_dnd_source: None,
+        active_uri_clipboard_source: None,
         incoming_dnd_pos: (0.0, 0.0),
         incoming_dnd_tx,
         incoming_dnd_rx,
@@ -1859,17 +2011,56 @@ impl PointerHandler for WaylandClientData {
                         if drag_active {
                             let layout = compute_layout(&self.app, self.width, self.height);
                             let hit = hit_test(&layout, px, py);
-                            let resolved = resolve_drop_target_dir(&self.app, hit.as_ref());
+                            let resolved = resolve_drop_target(&self.app, hit.as_ref());
                             if let Some(drag) = self.app.file_drag.as_mut() {
-                                let valid_target = resolved.filter(|d| drag.can_drop_on(d));
-                                if drag.target_dir != valid_target {
-                                    drag.target_dir = valid_target;
+                                let (valid_dir, valid_trash) = match resolved {
+                                    Some(ResolvedDropTarget::Directory(d))
+                                        if drag.can_drop_on(&d) =>
+                                    {
+                                        (Some(d), false)
+                                    }
+                                    Some(ResolvedDropTarget::Trash) if !drag.sources.is_empty() => {
+                                        (None, true)
+                                    }
+                                    _ => (None, false),
+                                };
+                                if drag.target_dir != valid_dir
+                                    || drag.target_is_trash != valid_trash
+                                {
+                                    drag.target_dir = valid_dir;
+                                    drag.target_is_trash = valid_trash;
                                     self.app.dirty = true;
                                 }
                             }
                             self.app.set_hovered_hit(hit);
                             self.apply_cursor_shape(CursorShape::Grabbing);
                         }
+                    } else if self.pointer_pressed
+                        && let Some(m) = self.app.marquee.as_mut()
+                    {
+                        let active = m.update_pos((px, py));
+                        let additive = m.additive;
+                        let baseline = m.baseline_paths.clone();
+                        let m_rect = m.rect();
+                        if active && let Some(mr) = m_rect {
+                            let layout = compute_layout(&self.app, self.width, self.height);
+                            let mut hits = Vec::new();
+                            if let Some(grid) = &layout.icons_grid {
+                                for cell in &grid.cells {
+                                    if rects_intersect(mr, cell.rect) {
+                                        hits.push(cell.row_idx);
+                                    }
+                                }
+                            } else {
+                                for &(row_idx, row_rect) in &layout.list_rows {
+                                    if rects_intersect(mr, row_rect) {
+                                        hits.push(row_idx);
+                                    }
+                                }
+                            }
+                            self.app.apply_marquee_selection(&hits, &baseline, additive);
+                        }
+                        self.app.dirty = true;
                     } else {
                         let layout = compute_layout(&self.app, self.width, self.height);
                         let hit = hit_test(&layout, px, py);
@@ -1900,17 +2091,45 @@ impl PointerHandler for WaylandClientData {
                     let (px, py) = ev.position;
                     if button == BTN_LEFT {
                         self.pointer_pressed = true;
+                        let layout = self.layout();
+                        let press_hit = hit_test(&layout, px, py);
+                        let empty_canvas =
+                            matches!(press_hit, Some(FilesHit::IconsEmpty | FilesHit::ListEmpty));
+                        let baseline: std::collections::BTreeSet<PathBuf> =
+                            if self.modifiers.ctrl || self.modifiers.shift {
+                                self.app
+                                    .selected_entries()
+                                    .into_iter()
+                                    .map(|e| e.path)
+                                    .collect()
+                            } else {
+                                std::collections::BTreeSet::new()
+                            };
                         self.execute_left_click(px, py, serial);
-                        if self.app.popup.is_none() && self.app.quick_look.is_none() {
-                            let drag_paths: Vec<std::path::PathBuf> = self
-                                .app
-                                .selected_entries()
-                                .into_iter()
-                                .map(|e| e.path)
-                                .collect();
-                            if !drag_paths.is_empty() {
-                                self.app.file_drag =
-                                    Some(crate::state::FileDragState::start(drag_paths, (px, py)));
+                        if self.app.popup.is_none()
+                            && self.app.quick_look.is_none()
+                            && self.app.batch_rename.is_none()
+                        {
+                            if empty_canvas {
+                                self.app.marquee =
+                                    Some(crate::state::MarqueeSelectionState::start(
+                                        (px, py),
+                                        self.modifiers.ctrl || self.modifiers.shift,
+                                        baseline,
+                                    ));
+                            } else {
+                                let drag_paths: Vec<std::path::PathBuf> = self
+                                    .app
+                                    .selected_entries()
+                                    .into_iter()
+                                    .map(|e| e.path)
+                                    .collect();
+                                if !drag_paths.is_empty() {
+                                    self.app.file_drag = Some(crate::state::FileDragState::start(
+                                        drag_paths,
+                                        (px, py),
+                                    ));
+                                }
                             }
                         }
                     } else if button == BTN_RIGHT {
@@ -1921,16 +2140,23 @@ impl PointerHandler for WaylandClientData {
                     button: BTN_LEFT, ..
                 } => {
                     self.pointer_pressed = false;
+                    if self.app.marquee.take().is_some() {
+                        self.app.dirty = true;
+                    }
                     self.app.search_field.on_pointer_up();
                     self.app.rename_field.on_pointer_up();
                     self.app.goto_field.on_pointer_up();
                     if let Some(drag) = self.app.file_drag.take()
                         && drag.active
-                        && let Some(dest) = drag.target_dir.clone()
-                        && drag.can_drop_on(&dest)
                     {
-                        self.app
-                            .action_drop_paths(drag.sources, dest, drag.copy_mode);
+                        if drag.target_is_trash {
+                            self.app.action_trash_paths(drag.sources);
+                        } else if let Some(dest) = drag.target_dir.clone()
+                            && drag.can_drop_on(&dest)
+                        {
+                            self.app
+                                .action_drop_paths(drag.sources, dest, drag.copy_mode);
+                        }
                     }
                 }
                 PointerEventKind::Axis {
@@ -1971,7 +2197,11 @@ fn insert_files_sources(
                 }
             }
             while let Ok((sources, dest_dir, copy_mode)) = data.incoming_dnd_rx.try_recv() {
-                data.app.action_drop_paths(sources, dest_dir, copy_mode);
+                if dest_dir == std::path::Path::new(TRASH_DROP_SENTINEL) {
+                    data.app.action_trash_paths(sources);
+                } else {
+                    data.app.action_drop_paths(sources, dest_dir, copy_mode);
+                }
             }
         })
         .map_err(|e| WaylandAppError::EventLoop(format!("{e:?}")))?;
@@ -2068,6 +2298,21 @@ impl DataDeviceHandler for WaylandClientData {
         _: &QueueHandle<Self>,
         _: &wl_data_device::WlDataDevice,
     ) {
+        if self.active_uri_clipboard_source.is_some() {
+            return;
+        }
+        let has_uri_offer = self
+            .data_device
+            .as_ref()
+            .and_then(|dd| dd.data().selection_offer())
+            .is_some_and(|offer| {
+                offer.with_mime_types(|mimes| {
+                    mimes
+                        .iter()
+                        .any(|m| m == "x-special/gnome-copied-files" || m == "text/uri-list")
+                })
+            });
+        self.app.has_external_uri_clipboard = has_uri_offer;
     }
     fn drop_performed(
         &mut self,
@@ -2089,9 +2334,12 @@ impl DataDeviceHandler for WaylandClientData {
         }
         let layout = compute_layout(&self.app, self.width, self.height);
         let hit = hit_test(&layout, self.incoming_dnd_pos.0, self.incoming_dnd_pos.1);
-        let Some(dest_dir) = resolve_drop_target_dir(&self.app, hit.as_ref())
-            .or_else(|| self.app.active_writable_directory())
-        else {
+        let target = resolve_drop_target(&self.app, hit.as_ref()).or_else(|| {
+            self.app
+                .active_writable_directory()
+                .map(ResolvedDropTarget::Directory)
+        });
+        let Some(target) = target else {
             return;
         };
         let copy_mode = offer.selected_action != DndAction::Move;
@@ -2109,8 +2357,13 @@ impl DataDeviceHandler for WaylandClientData {
                 let text = String::from_utf8_lossy(&buf);
                 let paths = parse_uri_list_paths(&text);
                 if !paths.is_empty() {
-                    let _ = tx.send((paths, dest_dir, copy_mode));
-                    ping.ping();
+                    if let ResolvedDropTarget::Directory(dest_dir) = target {
+                        let _ = tx.send((paths, dest_dir, copy_mode));
+                        ping.ping();
+                    } else if let ResolvedDropTarget::Trash = target {
+                        let _ = tx.send((paths, PathBuf::from(TRASH_DROP_SENTINEL), false));
+                        ping.ping();
+                    }
                 }
             });
     }
@@ -2136,17 +2389,25 @@ impl WaylandClientData {
     }
 }
 
-pub(crate) fn resolve_drop_target_dir(
+const TRASH_DROP_SENTINEL: &str = "\0rustyos-trash-drop";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ResolvedDropTarget {
+    Directory(PathBuf),
+    Trash,
+}
+
+pub(crate) fn resolve_drop_target(
     app: &FilesAppState,
     hit: Option<&FilesHit>,
-) -> Option<PathBuf> {
+) -> Option<ResolvedDropTarget> {
     match hit? {
         FilesHit::ColumnRow { col_idx, row_idx } => app
             .columns
             .get(*col_idx)
             .and_then(|c| c.visible_entries.get(*row_idx))
             .filter(|e| e.is_navigable_dir())
-            .map(|e| e.path.clone()),
+            .map(|e| ResolvedDropTarget::Directory(e.path.clone())),
         FilesHit::ListRow { row_idx }
         | FilesHit::IconCell { idx: row_idx }
         | FilesHit::GalleryThumb { idx: row_idx } => app
@@ -2154,17 +2415,29 @@ pub(crate) fn resolve_drop_target_dir(
             .first()
             .and_then(|c| c.visible_entries.get(*row_idx))
             .filter(|e| e.is_navigable_dir())
-            .map(|e| e.path.clone()),
+            .map(|e| ResolvedDropTarget::Directory(e.path.clone())),
         FilesHit::SidebarItem(loc) => match app.locations.resolve_target(loc) {
-            ListingTarget::Directory(dir) => Some(dir),
+            ListingTarget::Directory(dir) => Some(ResolvedDropTarget::Directory(dir)),
+            ListingTarget::Trash if !app.is_trash_view() => Some(ResolvedDropTarget::Trash),
             _ => None,
         },
-        FilesHit::PathCrumb(dir) => Some(dir.clone()),
+        FilesHit::PathCrumb(dir) => Some(ResolvedDropTarget::Directory(dir.clone())),
         FilesHit::ColumnEmpty { col_idx } => match app.columns.get(*col_idx).map(|c| &c.target) {
-            Some(ListingTarget::Directory(dir)) => Some(dir.clone()),
+            Some(ListingTarget::Directory(dir)) => Some(ResolvedDropTarget::Directory(dir.clone())),
             _ => None,
         },
         _ => None,
+    }
+}
+
+#[allow(dead_code)]
+pub(crate) fn resolve_drop_target_dir(
+    app: &FilesAppState,
+    hit: Option<&FilesHit>,
+) -> Option<PathBuf> {
+    match resolve_drop_target(app, hit)? {
+        ResolvedDropTarget::Directory(dir) => Some(dir),
+        ResolvedDropTarget::Trash => None,
     }
 }
 
@@ -2266,6 +2539,24 @@ impl DataSourceHandler for WaylandClientData {
                 });
             return;
         }
+        if let Some(active) = self.active_uri_clipboard_source.as_ref()
+            && active.source == *source
+        {
+            let payload = if mime.eq_ignore_ascii_case("x-special/gnome-copied-files") {
+                active.gnome_copied_files.clone()
+            } else if mime.eq_ignore_ascii_case("text/uri-list") {
+                active.uri_list.clone()
+            } else {
+                active.plain_text.clone()
+            };
+            let _ = std::thread::Builder::new()
+                .name("rusty-files-uri-send".to_owned())
+                .spawn(move || {
+                    use std::io::Write;
+                    let _ = write_pipe.write_all(&payload);
+                });
+            return;
+        }
         self.clipboard
             .serve_send_request(source, &mime, OwnedFd::from(write_pipe));
     }
@@ -2281,6 +2572,14 @@ impl DataSourceHandler for WaylandClientData {
             .is_some_and(|active| active.source == *source)
         {
             self.active_dnd_source = None;
+            source.destroy();
+        }
+        if self
+            .active_uri_clipboard_source
+            .as_ref()
+            .is_some_and(|active| active.source == *source)
+        {
+            self.active_uri_clipboard_source = None;
             source.destroy();
         }
         self.clipboard.remove_source(source);
@@ -2361,6 +2660,9 @@ fn keysym_to_name_and_text(keysym: Keysym, utf8: Option<&str>) -> (&'static str,
         Keysym::Left => "Left",
         Keysym::Right => "Right",
         Keysym::Delete => "Delete",
+        Keysym::period => "period",
+        Keysym::greater => "greater",
+        Keysym::KP_Decimal => "KP_Decimal",
         _ => "",
     };
     let ch = utf8
@@ -2396,5 +2698,50 @@ mod tests {
                 PathBuf::from("/var/log/a b.log"),
             ]
         );
+    }
+
+    #[test]
+    fn encodes_and_parses_gnome_copied_files_copy_and_cut() {
+        let paths = vec![
+            PathBuf::from("/tmp/doc 1.txt"),
+            PathBuf::from("/tmp/img.png"),
+        ];
+        let copy_raw = super::encode_gnome_copied_files(
+            rusty_services::file_manager::TransferKind::Copy,
+            &paths,
+        );
+        assert_eq!(
+            super::parse_gnome_copied_files(&copy_raw),
+            Some((true, paths.clone()))
+        );
+
+        let cut_raw = super::encode_gnome_copied_files(
+            rusty_services::file_manager::TransferKind::Move,
+            &paths,
+        );
+        assert_eq!(
+            super::parse_gnome_copied_files(&cut_raw),
+            Some((false, paths))
+        );
+        assert_eq!(
+            super::parse_gnome_copied_files("invalid\nfile:///tmp/a"),
+            None
+        );
+    }
+
+    #[test]
+    fn resolves_sidebar_trash_drop_target_when_not_inside_trash() {
+        let opts = crate::state::StartupOptions::default();
+        let locs = rusty_services::file_manager::UserFileLocations::detect();
+        let mut app = crate::state::FilesAppState::new(locs, &opts);
+        let trash_hit = crate::layout::FilesHit::SidebarItem(
+            rusty_services::file_manager::SidebarLocation::Trash,
+        );
+        assert_eq!(
+            super::resolve_drop_target(&app, Some(&trash_hit)),
+            Some(super::ResolvedDropTarget::Trash)
+        );
+        app.navigate_sidebar(rusty_services::file_manager::SidebarLocation::Trash, false);
+        assert_eq!(super::resolve_drop_target(&app, Some(&trash_hit)), None);
     }
 }

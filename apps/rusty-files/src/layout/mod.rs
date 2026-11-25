@@ -21,8 +21,8 @@ use rusty_services::file_manager::{
 };
 
 use crate::state::{
-    FilesAppState, LIST_ROW_HEIGHT, MILLER_COLUMN_WIDTH, ROW_HEIGHT, SIDEBAR_ROW_HEIGHT,
-    SIDEBAR_SECTION_HEIGHT, SearchScope,
+    FilesAppState, GROUP_HEADER_HEIGHT, GroupByMode, LIST_ROW_HEIGHT, MILLER_COLUMN_WIDTH,
+    ROW_HEIGHT, SIDEBAR_ROW_HEIGHT, SIDEBAR_SECTION_HEIGHT, SearchScope,
 };
 
 /// Unified window corner radius (`14 px`, matching `rusty-settings` and compositor shadows).
@@ -127,6 +127,8 @@ pub(crate) struct PreviewLayout {
 pub(crate) enum PopupCommand {
     SortBy(FileSortField),
     SetSortOrder(FileSortOrder),
+    SetGroupBy(GroupByMode),
+    UndoLastAction,
     NewFolder,
     NewTab,
     NewTabIn(PathBuf),
@@ -231,6 +233,7 @@ pub(crate) enum FilesHit {
     ColumnRow { col_idx: usize, row_idx: usize },
     ColumnEmpty { col_idx: usize },
     ListHeaderSort(FileSortField),
+    ListRowChevron { row_idx: usize },
     ListRow { row_idx: usize },
     ListEmpty,
     IconCell { idx: usize },
@@ -260,6 +263,12 @@ pub(crate) enum FilesHit {
     GoToClear,
     GoToSuggestion(usize),
     GoToModalBody,
+    BatchRenameMode(crate::state::BatchRenameMode),
+    BatchRenameField(usize),
+    BatchRenamePrefixToggle,
+    BatchRenameCancel,
+    BatchRenameConfirm,
+    BatchRenameModalBody,
     TransferStop,
     ConflictDecision(TransferConflictDecision),
     InlineRenameBox,
@@ -307,6 +316,8 @@ pub(crate) struct FilesLayout {
     pub preview: Option<PreviewLayout>,
     pub list_headers: Vec<(FileSortField, Rect)>,
     pub list_rows: Vec<(usize, Rect)>,
+    pub list_row_chevrons: Vec<(usize, Rect)>,
+    pub list_group_headers: Vec<(String, Rect)>,
     pub status_bar_rect: Rect,
     pub picker_filename_rect: Option<Rect>,
     pub picker_cancel_rect: Option<Rect>,
@@ -342,6 +353,8 @@ struct ContentAreaLayout {
     preview: Option<PreviewLayout>,
     list_headers: Vec<(FileSortField, Rect)>,
     list_rows: Vec<(usize, Rect)>,
+    list_row_chevrons: Vec<(usize, Rect)>,
+    list_group_headers: Vec<(String, Rect)>,
     icons_grid: Option<IconsGridLayout>,
     gallery: Option<GalleryLayout>,
 }
@@ -349,6 +362,8 @@ struct ContentAreaLayout {
 struct ListAreaLayout {
     headers: Vec<(FileSortField, Rect)>,
     rows: Vec<(usize, Rect)>,
+    chevrons: Vec<(usize, Rect)>,
+    group_headers: Vec<(String, Rect)>,
 }
 
 /// Computes pixel-accurate layout for `state` at `(surface_w, surface_h)`.
@@ -464,6 +479,8 @@ pub(crate) fn compute_layout(state: &FilesAppState, surface_w: u32, surface_h: u
         preview: content.preview,
         list_headers: content.list_headers,
         list_rows: content.list_rows,
+        list_row_chevrons: content.list_row_chevrons,
+        list_group_headers: content.list_group_headers,
         status_bar_rect,
         picker_filename_rect,
         picker_cancel_rect,
@@ -701,6 +718,8 @@ fn layout_content_area(state: &FilesAppState, content_rect: Rect) -> ContentArea
             preview: None,
             list_headers: Vec::new(),
             list_rows: Vec::new(),
+            list_row_chevrons: Vec::new(),
+            list_group_headers: Vec::new(),
             icons_grid: Some(compute_icons_grid_layout(state, content_rect)),
             gallery: None,
         };
@@ -711,6 +730,8 @@ fn layout_content_area(state: &FilesAppState, content_rect: Rect) -> ContentArea
             preview: None,
             list_headers: Vec::new(),
             list_rows: Vec::new(),
+            list_row_chevrons: Vec::new(),
+            list_group_headers: Vec::new(),
             icons_grid: None,
             gallery: Some(compute_gallery_layout(state, content_rect)),
         };
@@ -722,6 +743,8 @@ fn layout_content_area(state: &FilesAppState, content_rect: Rect) -> ContentArea
             preview: None,
             list_headers: list.headers,
             list_rows: list.rows,
+            list_row_chevrons: list.chevrons,
+            list_group_headers: list.group_headers,
             icons_grid: None,
             gallery: None,
         };
@@ -774,6 +797,8 @@ fn layout_content_area(state: &FilesAppState, content_rect: Rect) -> ContentArea
         preview,
         list_headers: Vec::new(),
         list_rows: Vec::new(),
+        list_row_chevrons: Vec::new(),
+        list_group_headers: Vec::new(),
         icons_grid: None,
         gallery: None,
     }
@@ -844,16 +869,44 @@ fn layout_list_view(state: &FilesAppState, content_rect: Rect) -> ListAreaLayout
     ];
 
     let mut rows = Vec::new();
+    let mut chevrons = Vec::new();
+    let mut group_headers = Vec::new();
     if let Some(col) = state.columns.first() {
         let body_top = hdr_y + hdr_h + 2;
         let mut ry = body_top - state.list_scroll_y;
+        let mut sec_cursor = 0_usize;
         for row_idx in 0..col.visible_entries.len() {
+            if let Some((sec_idx, title)) = col.group_sections.get(sec_cursor)
+                && *sec_idx == row_idx
+            {
+                let gr = Rect::new(
+                    content_rect.x + 8,
+                    ry,
+                    content_rect.w - 22,
+                    GROUP_HEADER_HEIGHT,
+                );
+                if gr.bottom() > body_top && gr.y < content_rect.bottom() {
+                    group_headers.push((title.clone(), gr));
+                }
+                ry += GROUP_HEADER_HEIGHT;
+                sec_cursor += 1;
+            }
             let r = Rect::new(content_rect.x + 6, ry, content_rect.w - 18, LIST_ROW_HEIGHT);
             if r.bottom() > body_top && r.y < content_rect.bottom() {
+                if col.visible_entries[row_idx].is_navigable_dir() && !state.is_trash_view() {
+                    let depth = i32::from(col.visible_depths.get(row_idx).copied().unwrap_or(0));
+                    let chev = Rect::new(r.x + 4 + depth * 18, r.y + 4, 18, 20);
+                    chevrons.push((row_idx, chev));
+                }
                 rows.push((row_idx, r));
             }
             ry += LIST_ROW_HEIGHT;
         }
     }
-    ListAreaLayout { headers, rows }
+    ListAreaLayout {
+        headers,
+        rows,
+        chevrons,
+        group_headers,
+    }
 }

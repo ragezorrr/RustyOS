@@ -205,6 +205,11 @@ fn hit_test_body(layout: &FilesLayout, px: f64, py: f64) -> Option<FilesHit> {
                 return Some(FilesHit::ListHeaderSort(*field));
             }
         }
+        for (row_idx, rect) in &layout.list_row_chevrons {
+            if rect.contains_f64(px, py) {
+                return Some(FilesHit::ListRowChevron { row_idx: *row_idx });
+            }
+        }
         for (row_idx, rect) in &layout.list_rows {
             if rect.contains_f64(px, py) {
                 return Some(FilesHit::ListRow { row_idx: *row_idx });

@@ -190,6 +190,16 @@ fn sort_menu_rows(state: &FilesAppState) -> Vec<PopupRowSpec> {
         None,
         Some(PopupCommand::SetSortOrder(FileSortOrder::Descending)),
     ));
+    rows.push((String::new(), false, None, None));
+    rows.push((String::from("Group By"), false, None, None));
+    for mode in crate::state::GroupByMode::ALL {
+        rows.push((
+            format!("  {}", mode.label()),
+            state.group_by == mode,
+            None,
+            Some(PopupCommand::SetGroupBy(mode)),
+        ));
+    }
     rows
 }
 
@@ -227,7 +237,15 @@ fn actions_menu_rows(state: &FilesAppState) -> Vec<PopupRowSpec> {
         ),
     ];
     append_selection_action_rows(state, &mut rows);
-    if !state.is_trash_view() && state.clipboard.is_some() {
+    if !state.undo_stack.is_empty() {
+        rows.push((
+            String::from("Undo"),
+            false,
+            None,
+            Some(PopupCommand::UndoLastAction),
+        ));
+    }
+    if !state.is_trash_view() && (state.clipboard.is_some() || state.has_external_uri_clipboard) {
         rows.push((
             String::from("Paste Item"),
             false,
@@ -286,8 +304,14 @@ fn append_selection_action_rows(state: &FilesAppState, rows: &mut Vec<PopupRowSp
             Some(PopupCommand::RestoreEntry(entry.clone())),
         ));
     } else {
+        let sel_count = state.selected_entries().len();
+        let rename_label = if sel_count > 1 {
+            format!("Rename {sel_count} Items...")
+        } else {
+            String::from("Rename...")
+        };
         rows.push((
-            String::from("Rename..."),
+            rename_label,
             false,
             None,
             Some(PopupCommand::RenameSelected),
