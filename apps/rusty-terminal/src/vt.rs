@@ -289,7 +289,7 @@ pub(crate) struct TerminalEngine {
     utf8_expected: usize,
     active_hyperlink: u16,
     pub(crate) hyperlinks: Vec<String>,
-    kitty_keyboard_stack: Vec<u8>,
+    csi_u_keyboard_stack: Vec<u8>,
 }
 
 impl TerminalEngine {
@@ -310,7 +310,7 @@ impl TerminalEngine {
             utf8_expected: 0,
             active_hyperlink: 0,
             hyperlinks: Vec::new(),
-            kitty_keyboard_stack: Vec::new(),
+            csi_u_keyboard_stack: Vec::new(),
         }
     }
 
@@ -322,10 +322,10 @@ impl TerminalEngine {
             .map(String::as_str)
     }
 
-    /// Active Kitty keyboard protocol enhancement flags (top of stack, `0` when disabled).
+    /// Active `CSI u` enhanced keyboard protocol flags (top of stack, `0` when disabled).
     #[must_use]
-    pub(crate) fn kitty_keyboard_flags(&self) -> u8 {
-        self.kitty_keyboard_stack.last().copied().unwrap_or(0)
+    pub(crate) fn csi_u_keyboard_flags(&self) -> u8 {
+        self.csi_u_keyboard_stack.last().copied().unwrap_or(0)
     }
 
     #[must_use]
@@ -765,7 +765,7 @@ impl TerminalEngine {
         let body = if private.is_some() { &seq[1..] } else { seq };
         let params = parse_csi_params(body);
         if final_byte == b'u' && private.is_some() {
-            self.dispatch_kitty_keyboard(private, &params, replies);
+            self.dispatch_csi_u_keyboard(private, &params, replies);
             return;
         }
         if private == Some(b'?') {
@@ -976,7 +976,7 @@ impl TerminalEngine {
         }
     }
 
-    fn dispatch_kitty_keyboard(
+    fn dispatch_csi_u_keyboard(
         &mut self,
         prefix: Option<u8>,
         params: &[u16],
@@ -984,34 +984,34 @@ impl TerminalEngine {
     ) {
         match prefix {
             Some(b'?') => {
-                let flags = self.kitty_keyboard_flags();
+                let flags = self.csi_u_keyboard_flags();
                 replies.push(format!("\x1b[?{flags}u").into_bytes());
             }
             Some(b'>') => {
                 let flags = u8::try_from(params.first().copied().unwrap_or(0)).unwrap_or(0);
-                if self.kitty_keyboard_stack.len() >= 16 {
-                    self.kitty_keyboard_stack.remove(0);
+                if self.csi_u_keyboard_stack.len() >= 16 {
+                    self.csi_u_keyboard_stack.remove(0);
                 }
-                self.kitty_keyboard_stack.push(flags);
+                self.csi_u_keyboard_stack.push(flags);
             }
             Some(b'<') => {
                 let count = usize::from(params.first().copied().unwrap_or(1).max(1));
-                let new_len = self.kitty_keyboard_stack.len().saturating_sub(count);
-                self.kitty_keyboard_stack.truncate(new_len);
+                let new_len = self.csi_u_keyboard_stack.len().saturating_sub(count);
+                self.csi_u_keyboard_stack.truncate(new_len);
             }
             Some(b'=') => {
                 let flags = u8::try_from(params.first().copied().unwrap_or(0)).unwrap_or(0);
                 let mode = params.get(1).copied().unwrap_or(1);
-                let cur = self.kitty_keyboard_flags();
+                let cur = self.csi_u_keyboard_flags();
                 let next = match mode {
                     2 => cur | flags,
                     3 => cur & !flags,
                     _ => flags,
                 };
-                if let Some(top) = self.kitty_keyboard_stack.last_mut() {
+                if let Some(top) = self.csi_u_keyboard_stack.last_mut() {
                     *top = next;
                 } else {
-                    self.kitty_keyboard_stack.push(next);
+                    self.csi_u_keyboard_stack.push(next);
                 }
             }
             _ => {}

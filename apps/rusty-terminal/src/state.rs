@@ -1069,12 +1069,12 @@ impl TerminalAppState {
         if self.search.open && self.handle_search_key(keysym, utf8) {
             return;
         }
-        let (modes, kitty_flags) = self.active_tab().map_or_else(
+        let (modes, csi_u_flags) = self.active_tab().map_or_else(
             || (TerminalModes::default(), 0),
-            |t| (t.engine.modes, t.engine.kitty_keyboard_flags()),
+            |t| (t.engine.modes, t.engine.csi_u_keyboard_flags()),
         );
         if let Some(bytes) =
-            encode_key_to_vt_with_kitty(keysym, utf8, self.modifiers, modes, kitty_flags)
+            encode_key_to_vt_with_csi_u(keysym, utf8, self.modifiers, modes, csi_u_flags)
         {
             self.snap_scroll_to_bottom();
             self.cursor_blink_on = true;
@@ -1374,22 +1374,22 @@ pub(crate) fn encode_key_to_vt(
     mods: Modifiers,
     term_modes: TerminalModes,
 ) -> Option<Vec<u8>> {
-    encode_key_to_vt_with_kitty(keysym, utf8, mods, term_modes, 0)
+    encode_key_to_vt_with_csi_u(keysym, utf8, mods, term_modes, 0)
 }
 
-/// Encodes keyboard input with optional Kitty keyboard protocol (`CSI u`) disambiguation.
+/// Encodes keyboard input with optional `CSI u` enhanced keyboard disambiguation.
 #[must_use]
-pub(crate) fn encode_key_to_vt_with_kitty(
+pub(crate) fn encode_key_to_vt_with_csi_u(
     keysym: Keysym,
     utf8: Option<&str>,
     mods: Modifiers,
     term_modes: TerminalModes,
-    kitty_flags: u8,
+    csi_u_flags: u8,
 ) -> Option<Vec<u8>> {
     let mod_param = xterm_modifier_param(mods);
 
-    if (kitty_flags & 1) != 0
-        && let Some(seq) = encode_kitty_csi_u(keysym, mod_param, mods)
+    if (csi_u_flags & 1) != 0
+        && let Some(seq) = encode_csi_u_key(keysym, mod_param, mods)
     {
         return Some(seq);
     }
@@ -1419,7 +1419,7 @@ pub(crate) fn encode_key_to_vt_with_kitty(
     None
 }
 
-fn encode_kitty_csi_u(keysym: Keysym, mod_param: u8, mods: Modifiers) -> Option<Vec<u8>> {
+fn encode_csi_u_key(keysym: Keysym, mod_param: u8, mods: Modifiers) -> Option<Vec<u8>> {
     if mod_param == 0 {
         return None;
     }
@@ -1780,13 +1780,13 @@ mod tests {
     }
 
     #[test]
-    fn kitty_keyboard_disambiguates_shift_enter_and_ctrl_i() {
+    fn csi_u_keyboard_disambiguates_shift_enter_and_ctrl_i() {
         let mods = Modifiers {
             shift: true,
             ..Default::default()
         };
         assert_eq!(
-            super::encode_key_to_vt_with_kitty(
+            super::encode_key_to_vt_with_csi_u(
                 Keysym::Return,
                 None,
                 mods,
@@ -1801,7 +1801,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            super::encode_key_to_vt_with_kitty(
+            super::encode_key_to_vt_with_csi_u(
                 Keysym::i,
                 Some("i"),
                 ctrl,
